@@ -59,10 +59,10 @@ export interface KeyInspection {
  * answer for every non-send call. Anything else — an unknown, disabled or suspended key — is refused here, before
  * anything is stored. No send endpoint is ever touched to find out.
  */
-export async function inspectKey(context: ResendContext, key: string, accountId: string): Promise<KeyInspection> {
+export async function inspectKey(context: ResendContext, key: string): Promise<KeyInspection> {
   try {
     const page = await resendRequest<{ data?: { name?: unknown; status?: unknown }[] }>(
-      context.transportForKey(key, accountId),
+      context.transportForKey(key),
       'GET',
       '/domains',
     );

@@ -4,17 +4,26 @@ import { setTimeout as sleepFor } from 'node:timers/promises';
 import { CommsError, withFileLock, writeFileAtomic } from '@agentcomms/core';
 
 /**
- * How often this machine may ask Resend anything, per account — and when it must stop asking.
+ * How often this machine may ask Resend anything — and when it must stop asking.
  *
  * Resend allows 10 requests a second **per team, shared by every key**, with no burst. The team's own production
  * mail spends that budget too, so an agent paging through sent mail must never be the reason a password-reset email
  * is refused. Two rules:
  *
- * - **At most one request every 500 ms** (two a second), counted across every process on this machine — a CLI
- *   command and two MCP servers share one budget, because each reserves its slot in one file under a lock.
+ * - **At most one request every 500 ms** (two a second), counted across every process and **every account** on this
+ *   machine — a CLI command and six MCP servers share one budget, because each reserves its slot in one file under a
+ *   lock.
  * - **A 429 stops everything** until the time Resend gave (`retry-after`, else `ratelimit-reset`), and so does a
  *   response saying none are left (`ratelimit-remaining: 0`). Nothing is retried: the next call is refused with the
  *   time to wait, and whoever asked decides whether to ask again.
+ *
+ * **One budget for the machine, not one per account.** It used to be one file per account, which is right only if
+ * every account is a different team — and nothing here can tell. Resend's API names no team: a key cannot say which
+ * one it belongs to, so two accounts on one team look exactly like two accounts on two. Six keys of one team,
+ * connected under six names, were six budgets of two a second: twelve a second against a limit of ten, and a 429
+ * through one of them held back only that one. Sharing one budget is never wrong about a team; it is only slower
+ * when the accounts really are different teams, and slower is the side to be wrong on when the other side is the
+ * team's production mail being refused.
  */
 
 export const DEFAULT_INTERVAL_MS = 500;
@@ -39,9 +48,9 @@ export class Throttle {
   readonly #sleep: (ms: number) => Promise<void>;
   readonly #interval: number;
 
-  constructor(stateDir: string, accountId: string, options: ThrottleOptions = {}) {
-    if (!/^acc_[A-Z0-9]{16}$/.test(accountId)) throw new Error(`not an account id: ${accountId}`);
-    this.path = join(stateDir, 'resend', 'throttle', `${accountId}.json`);
+  /** Takes no account on purpose: see above. Every throttle on a state directory is the same one. */
+  constructor(stateDir: string, options: ThrottleOptions = {}) {
+    this.path = join(stateDir, 'resend', 'throttle.json');
     this.#now = options.now ?? Date.now;
     this.#sleep = options.sleep ?? ((ms) => sleepFor(ms).then(() => undefined));
     this.#interval = options.intervalMs ?? DEFAULT_INTERVAL_MS;
@@ -62,7 +71,7 @@ export class Throttle {
     }
   }
 
-  /** When Resend will next be asked anything by this account, or null when it is not holding off. */
+  /** When Resend will next be asked anything from this machine, or null when it is not holding off. */
   async blockedUntil(): Promise<string | null> {
     const state = await this.#read();
     return state.blockedUntil > this.#now() ? new Date(state.blockedUntil).toISOString() : null;
@@ -92,7 +101,10 @@ export class Throttle {
     if (wait > 0) await this.#sleep(wait);
   }
 
-  /** Reads what Resend said about the budget, and stops this account when it says to. Returns the stop, if any. */
+  /**
+   * Reads what Resend said about the budget, and stops every account on this machine when it says to — whichever
+   * account's request it answered. Returns the stop, if any.
+   */
   async after(status: number, headers: Headers): Promise<number | null> {
     const seconds = (name: string): number | null => {
       const value = headers.get(name);

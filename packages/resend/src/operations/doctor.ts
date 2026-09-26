@@ -55,7 +55,7 @@ async function checkAccount(context: ResendContext, named: NamedAccount, offline
   } catch (error) {
     checks.push({ name: 'key stored', ok: false, detail: toCommsError(error).message, fix: 'agentcomms doctor' });
   }
-  const blocked = await context.throttleFor(named.account.id).blockedUntil();
+  const blocked = await context.throttle().blockedUntil();
   checks.push(
     blocked
       ? {
@@ -63,7 +63,11 @@ async function checkAccount(context: ResendContext, named: NamedAccount, offline
           ok: true,
           detail: `Resend asked for no requests until ${blocked}; nothing is asked until then`,
         }
-      : { name: 'rate limit', ok: true, detail: 'not held off; at most 2 requests a second from this machine' },
+      : {
+          name: 'rate limit',
+          ok: true,
+          detail: 'not held off; at most 2 requests a second from this machine, across every account',
+        },
   );
   if (!offline && key && !blocked) {
     try {

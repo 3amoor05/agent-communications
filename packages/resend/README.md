@@ -32,8 +32,9 @@ a chat stays in the transcript.
 envelope with hidden text removed and counted, beside Resend's own SPF, DKIM and DMARC results. Attachments are
 listed, and downloaded only when asked, into the downloads folder.
 
-**It stays out of the way of the team's own mail.** Resend's rate limit is shared by every key of a team, so this
-package asks at most twice a second and stops on a 429 until Resend says it may ask again.
+**It stays out of the way of the team's own mail.** Resend's rate limit is shared by every key of a team, and
+Resend does not say which team a key belongs to, so this package asks at most twice a second from a computer in all,
+whichever account asks, and a 429 through any account stops every account until Resend says it may ask again.
 
 It never manages domains, API keys, webhooks, broadcasts, contacts or audiences, from any surface.
 

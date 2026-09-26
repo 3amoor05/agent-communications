@@ -9,7 +9,7 @@ import { FULL, type Harness, newHarness, tempDir } from './support/harness.ts';
 
 /**
  * The team's production mail shares Resend's 10 requests a second with this tool. So: at most two a second from this
- * machine, counted across processes; and a 429 stops everything until Resend says, with nothing retried.
+ * machine, counted across processes and accounts; and a 429 stops everything until Resend says, with nothing retried.
  */
 
 let harness: Harness | undefined;
@@ -18,15 +18,13 @@ afterEach(async () => {
   harness = undefined;
 });
 
-const ACCOUNT = 'acc_THROTTLE00000001';
-
 test('requests are spaced at least 500 ms apart, across every throttle sharing the state directory', async () => {
   const state = tempDir('agent-resend-throttle-');
   let now = 1_000_000;
   const waits: number[] = [];
   const clock = { now: () => now, sleep: async (ms: number) => void waits.push(ms) };
-  const one = new Throttle(state, ACCOUNT, clock);
-  const two = new Throttle(state, ACCOUNT, clock);
+  const one = new Throttle(state, clock);
+  const two = new Throttle(state, clock);
   await one.before();
   await two.before();
   await one.before();
@@ -76,10 +74,82 @@ test('a 429 stops every request until retry-after has passed, and nothing is ret
   assert.equal(harness.fake.requests.length, 2);
 });
 
+/**
+ * Resend's budget belongs to the team, and its API names no team: six keys of one team, connected under six account
+ * names, are six accounts here and one budget there. So there is one budget on this machine, whichever account asks.
+ */
+const TEAM = ['alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot'].map((org, index) => ({
+  name: `${org}/resend`,
+  key: `re_fake${org}_${index}0123456789abcdef`,
+}));
+
+async function sixAccounts(): Promise<Harness> {
+  const opened = await newHarness();
+  for (const { name, key } of TEAM) {
+    opened.fake.keys.set(key, { permission: 'full_access' });
+    await opened.addAccount({ name, key });
+  }
+  return opened;
+}
+
+test('six accounts asking at once share one budget: two requests a second from this machine, in all', async () => {
+  harness = await sixAccounts();
+  const now = 3_000_000;
+  const slots: number[] = [];
+  // One context per account, as six servers each pinned to one would be, all on this machine's state directory. The
+  // clock stands still, so each request's wait is exactly how far after the first its slot was reserved.
+  const contexts = TEAM.map(
+    () =>
+      new ResendContext({
+        core: harness?.core,
+        env: harness?.env,
+        fetch: harness?.fake.fetch,
+        throttle: { now: () => now, sleep: async (ms: number) => void slots.push(ms) },
+      }),
+  );
+  const results = await Promise.all(TEAM.map(({ name }, index) => listDomains(contexts[index] as ResendContext, name)));
+  assert.ok(results.every((result) => result.available));
+  assert.equal(harness.fake.requests.length, 6);
+  const reserved = [0, ...slots].sort((a, b) => a - b);
+  assert.deepEqual(reserved, [0, 500, 1000, 1500, 2000, 2500], 'one queue, 500 ms apart, whichever account asked');
+  for (const start of reserved) {
+    const inOneSecond = reserved.filter((slot) => slot >= start && slot < start + 1000).length;
+    assert.ok(inOneSecond <= 2, `${inOneSecond} requests in the second from ${start} ms`);
+  }
+});
+
+test('a 429 through one account holds every account until the time Resend gave', async () => {
+  harness = await sixAccounts();
+  let now = Date.now();
+  // One context per account again: the hold has to reach servers that never saw the 429.
+  const contextFor = () =>
+    new ResendContext({
+      core: harness?.core,
+      env: harness?.env,
+      fetch: harness?.fake.fetch,
+      throttle: { intervalMs: 0, now: () => now, sleep: async () => undefined },
+    });
+  const [first, ...others] = TEAM;
+  harness.fake.intercept = () => ({
+    status: 429,
+    body: { name: 'rate_limit_exceeded', message: 'Too many requests' },
+    headers: { 'retry-after': '7' },
+  });
+  await assert.rejects(listDomains(contextFor(), String(first?.name)), /rate-limiting/);
+  harness.fake.intercept = null;
+  for (const { name } of others) {
+    await assert.rejects(listSentEmails(contextFor(), name), /asked this machine to stop/, name);
+  }
+  assert.equal(harness.fake.requests.length, 1, 'no other account reached Resend while it was held');
+  now += 8000;
+  for (const { name } of others) assert.equal((await listDomains(contextFor(), name)).available, true);
+  assert.equal(harness.fake.requests.length, 6);
+});
+
 test('without retry-after, ratelimit-reset decides; and a reply saying none are left stops the next one', async () => {
   const state = tempDir('agent-resend-throttle-');
   let now = 5_000_000;
-  const throttle = new Throttle(state, ACCOUNT, { now: () => now, sleep: async () => undefined, intervalMs: 0 });
+  const throttle = new Throttle(state, { now: () => now, sleep: async () => undefined, intervalMs: 0 });
   assert.equal(await throttle.after(429, new Headers({ 'ratelimit-reset': '3' })), 3);
   await assert.rejects(throttle.before(), /stop for now/);
   now += 3500;

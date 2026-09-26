@@ -36,7 +36,7 @@ export class ResendContext {
   readonly surface: 'cli' | 'mcp';
   readonly accounts: AccountStore;
   readonly #fetch: FetchLike | undefined;
-  readonly #throttle: ThrottleOptions | undefined;
+  readonly #throttle: Throttle;
 
   constructor(options: ResendContextOptions = {}) {
     this.env = options.env ?? process.env;
@@ -45,7 +45,7 @@ export class ResendContext {
     this.surface = options.surface ?? 'cli';
     this.accounts = new AccountStore(() => this.core.config.load());
     this.#fetch = options.fetch;
-    this.#throttle = options.throttle;
+    this.#throttle = new Throttle(this.core.paths.stateDir, options.throttle);
   }
 
   config(): Promise<Config> {
@@ -62,16 +62,20 @@ export class ResendContext {
     return (await this.config()).defaults.sendPolicy;
   }
 
-  throttleFor(accountId: string): Throttle {
-    return new Throttle(this.core.paths.stateDir, accountId, this.#throttle);
+  /**
+   * The machine's one Resend throttle. Not one per account: Resend's budget is the team's, and nothing here can tell
+   * which accounts share a team, so every account — and a key being checked before it is stored — shares one.
+   */
+  throttle(): Throttle {
+    return this.#throttle;
   }
 
   /** A transport for a key that is not stored yet — `account add` checking what it was given. */
-  transportForKey(key: string, accountId: string): ResendTransport {
-    return { fetch: this.#fetch, key, throttle: this.throttleFor(accountId) };
+  transportForKey(key: string): ResendTransport {
+    return { fetch: this.#fetch, key, throttle: this.#throttle };
   }
 
-  /** A transport for a connected account: its key from the secret store, its throttle, and a permit if one is open. */
+  /** A transport for a connected account: its key from the secret store, the machine's throttle, and any open permit. */
   async transport(named: NamedAccount, permit?: WritePermit): Promise<ResendTransport> {
     const key = await (await this.secrets()).get(named.account.secretRef);
     if (key === null || key.trim() === '') {
@@ -79,6 +83,6 @@ export class ResendContext {
         hint: `A person removes the account and adds it again: \`agent-resend account add ${named.name}\`.`,
       });
     }
-    return { fetch: this.#fetch, key, throttle: this.throttleFor(named.account.id), permit };
+    return { fetch: this.#fetch, key, throttle: this.#throttle, permit };
   }
 }

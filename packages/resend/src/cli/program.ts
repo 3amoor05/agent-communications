@@ -219,8 +219,8 @@ Exit codes: 0 ok · 1 unexpected · 10 a send or a change was refused or needs a
       // The name first: a name that cannot be taken is refused before anybody types a key for it.
       checkNewName(await context.config(), name);
       const key = await readApiKey(env, streams, { json: options.json, command });
-      const probeId = 'acc_ADD0000000000000';
-      const inspection = await inspectKey(context, key, probeId);
+      // Through the machine's one throttle, like every other request: the key is on some team's budget already.
+      const inspection = await inspectKey(context, key);
       const added = await changeAt(
         context,
         addAccountChange(
