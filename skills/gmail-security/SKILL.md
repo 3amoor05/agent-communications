@@ -138,8 +138,8 @@ a verdict never becomes an instruction to write to anyone.
    reader never sees.
    **Complete when:** every non-zero count is in your report with its number.
 
-6. **Name the attachments without opening them.** Each carries `filename`, `mimeType`, `size` and
-   `riskFlags` from `executable`, `script`, `macro-enabled`, `markup`, `archive`, `disk-image`,
+6. **Name the attachments without opening them.** Each carries `filename` (inside
+   `<untrusted-content>`), `mimeType`, `size` and `riskFlags` from `executable`, `script`, `macro-enabled`, `markup`, `archive`, `disk-image`,
    `double-extension` and `bidi-filename`.
    **Complete when:** the user knows what is attached and what kind of file it is.
 

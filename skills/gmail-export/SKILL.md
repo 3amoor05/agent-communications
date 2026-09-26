@@ -188,13 +188,14 @@ If the `gmail_*` tools are not available, everything here works through the CLI:
 Every export goes under the **downloads root**, in a per-mailbox folder:
 
 ```text
-<downloads root>/<name>/exports/<subject-slug>.md      # the default
-<downloads root>/<name>/<out>/<subject-slug>.json      # with --out
+<downloads root>/<name>/exports/<date>_message-<id>.md      # the default
+<downloads root>/<name>/<out>/<date>_thread-<id>.json       # with --out and --thread
 ```
 
 The root defaults to `~/Downloads/agent-communications`. The directory is created private (owner
-only) and so is the file. Names come from the subject, slugified and shortened; a `.eml` is named
-from the id instead. Nothing is ever overwritten.
+only) and so is the file. Names come from the day and the id, never the subject — the path comes back
+as a plain field, and a subject is the sender's words; a `.eml` is named from the id alone. Nothing is
+ever overwritten.
 
 That one root is where everything from strangers lands — attachments and exports alike — and keeping
 it in one place is what makes it possible to say what arrived from mail and what did not. So it is a

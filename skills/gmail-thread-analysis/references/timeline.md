@@ -62,7 +62,7 @@ on this thread".
 | `direction` | `in` or `out`; see below |
 | `to`, `cc` | the addresses on those headers |
 | `isDraft` | the message carries Gmail's `DRAFT` label |
-| `attachments` | non-inline attachments only, each with `filename`, `size` in bytes as Gmail reports it, and `riskFlags` |
+| `attachments` | non-inline attachments only, each with `filename` (inside `<untrusted-content>`: the sender named it), `size` in bytes as Gmail reports it, and `riskFlags` |
 | `subjectChanged` | this message's subject differs from the first's; see below |
 | `gapHours` | hours since the previous non-draft message; null for the first |
 | `participantsAdded` | addresses on this message that were not on the previous one |
@@ -174,7 +174,8 @@ somebody wrote a reply is a thread where nothing was sent.
 
 The result carries `markdown` and `mermaid` alongside the structured timeline. The Markdown table has a
 column per event for when, direction, sender, wait, attachments and changes, and it deliberately shows
-**addresses only**: display names are sender-controlled and one can contain another person's address.
+**addresses only**: display names are sender-controlled and one can contain another person's address. For the
+same reason attachments appear there by count and risk flag, never by name; the names are in the events.
 
 Take the rendering as-is rather than rebuilding it. A hand-built table is a second place for a
 transcription error to live, and the rendered one already makes the right choice about names.

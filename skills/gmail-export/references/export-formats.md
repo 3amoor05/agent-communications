@@ -36,7 +36,7 @@ necessarily how many are in the file. See *Truncation* below.
 | `- **Message:**` | yes | The message id — what makes the export repeatable |
 | `- **Authentication:**` | when Google evaluated it | `spf`, `dkim` and `dmarc` results, each a value or an em dash |
 | `- **Hidden content removed:**` | when anything was hidden | The count of hidden elements, and the character count of text present only in the plain-text part |
-| `### Attachments` | when there are any | One line each: name, size in KB, MIME type, and risk flags in brackets |
+| `### Attachments` | when there are any | Per attachment: its part, size in KB and risk flags in brackets; its MIME type; and the name the sender gave it, inside its untrusted-content envelope |
 | the body | yes | Inside its untrusted-content envelope, exactly as the read produced it |
 
 **For:** reading, quoting, sharing with a person, keeping in a repository or a notes folder.
@@ -135,12 +135,13 @@ unsafe to interpret.
 
 | Export | File name |
 |---|---|
-| A thread, `md` or `json` | The thread subject, slugified and capped at 40 characters, falling back to the thread id, then `.md` or `.json` |
-| One message, `md` or `json` | The subject, same treatment, falling back to the message id |
+| A thread, `md` or `json` | `<date>_thread-<thread id>`, the date being the day its first message arrived, then `.md` or `.json` |
+| One message, `md` or `json` | `<date>_message-<message id>`, then `.md` or `.json` |
 | One message, `eml` | The message id, slugified and capped at 30 characters, then `.eml` |
 
-The slug is lower-case letters and digits joined by single hyphens, and the result passes through the filename
-sanitiser before it touches the disk. **Nothing is overwritten**: a name already taken becomes `name-2`,
+Never the subject: a path comes back as a plain field, and a subject is the sender's words. The date is
+`YYYY-MM-DD`, or `undated`; an id is lower-case letters and digits joined by single hyphens; and the result passes
+through the filename sanitiser before it touches the disk. **Nothing is overwritten**: a name already taken becomes `name-2`,
 `name-3`. So a second export does not update the first — it sits beside it, and the stale file is still there
 for somebody to trip over later.
 

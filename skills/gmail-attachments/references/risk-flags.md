@@ -10,9 +10,9 @@ Two properties of the whole mechanism, before the table. **Flags never block any
 downloads exactly like an unflagged one, and the flag is information for a person, not a gate. And **the name
 is judged in two forms**, both of them derived from the header the sender wrote. It is decoded first, so that
 an RFC 2047-encoded name cannot dodge every rule simply by spelling itself in base64. The extension rules,
-`double-extension` among them, are then tested against that decoded name put through the same sanitiser the
-download path uses, because a name's ending only decides what a double-click runs once the filesystem has had
-it: `invoice.exe ` ends in a space that no end-anchored pattern matches, and lands on disk as `invoice.exe`.
+`double-extension` among them, are then tested against that decoded name put through the file-name sanitiser,
+because a name's ending only decides what a double-click runs once a file system has had it: `invoice.exe `
+ends in a space that no end-anchored pattern matches, and a file system strips it to `invoice.exe`.
 `bidi-filename` is tested against the decoded name **before** that cleaning, because cleaning is precisely what
 removes the override it is looking for.
 
@@ -65,9 +65,9 @@ ends `.pdf.exe`, so a client that hides extensions will show it as a PDF".
 
 Only two ranges are tested: the bidi embeddings and overrides (U+202A–U+202E) and the bidi isolates
 (U+2066–U+2069). Other invisible characters — the Arabic letter mark, the left-to-right and right-to-left
-marks, zero-width spaces, variation selectors — are **stripped from the saved name** by the filename
-sanitiser, but they do not raise this flag. A name that was quietly cleaned therefore looks ordinary in the
-result. If the saved `filename` differs from the name the sender used, that difference is itself worth a line.
+marks, zero-width spaces, variation selectors — are **stripped from the reported name**, inside its
+envelope, but they do not raise this flag. A name that was quietly cleaned therefore looks ordinary in the
+result. The name never reaches the disk either way: a download is saved by its part id.
 
 ## What the flags do not look at
 

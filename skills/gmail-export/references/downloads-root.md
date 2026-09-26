@@ -33,10 +33,11 @@ starts with `~`; then check the mailbox and `out` segments in the layout below.
 ## The layout
 
 ```text
-<root>/<organisation>/<platform>/exports/<subject-slug>.md          an export, by default
-<root>/<organisation>/<platform>/<out>/<subject-slug>.json          an export with out
-<root>/<organisation>/<platform>/<out>/manifest.json                one per download call
-<root>/<organisation>/<platform>/<out>/<date>_<sender>_<subject>/   one folder per downloaded message
+<root>/<organisation>/<platform>/exports/<date>_message-<id>.md     an export, by default
+<root>/<organisation>/<platform>/<out>/<date>_thread-<id>.json      an export with out, of a thread
+<root>/<organisation>/<platform>/<out>/manifest.json               one per download call
+<root>/<organisation>/<platform>/<out>/<date>_<message id>/        one folder per downloaded message
+<root>/<organisation>/<platform>/<out>/<date>_<message id>/part-1.pdf   one attachment, by its part id
 ```
 
 Points worth knowing:
@@ -45,9 +46,10 @@ Points worth knowing:
   becomes `acme/gmail/…` — and they are added for you. `out` never replaces them, so
   files from two mailboxes never mix.
 - **Exports default to an `exports` subfolder**; downloads default to the mailbox's folder itself.
-- **A download makes one folder per message**, named from facts about that message: the date, a slug of the
-  sender's address, and a slug of the subject. Slugs are lower-case letters and digits joined by hyphens, and
-  fall back to `undated`, `unknown` and `no-subject`.
+- **A download makes one folder per message**, named from Gmail's facts about it: the day it arrived and its
+  id — `undated` when there is no day. Each file in it is `part-<part id>`, with an extension only for a common
+  document or image type. Nothing in a path is the sender's: not the address, not the subject, not the name
+  they gave the file, which comes back beside the path, inside `<untrusted-content>`.
 - **`manifest.json` sits at the call's directory**, not in the per-message folders. It records the time, the
   inbox, every file with its hash and source message, everything skipped, and the total bytes. A second
   download into the same `out` **rewrites** it, so use a different subfolder when the record matters.
