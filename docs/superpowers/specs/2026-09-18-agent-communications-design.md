@@ -429,9 +429,10 @@ and must label them as inferred and cite `[mN]` message indices; computed facts 
   image, double extension). `has:drive` links are reported separately as not downloadable (no Drive scope).
 - **Download** one (`messageId` + `partId`, resolving a fresh `attachmentId` because IDs are reported to
   change between fetches **[C]**) or many (by query, with a cap, default 50 files / 500 MB). Output under the
-  downloads root: `<inbox alias>/<YYYY-MM-DD>_<sender>_<subject-slug>/<safe-filename>`. Safe filenames: strip path
-  separators and control chars, NFC-normalise, avoid Windows reserved names, ≤ 255 bytes, `-2` suffix on
-  collision; dedupe by sha256; `manifest.json` per batch. Opened with `O_NOFOLLOW` semantics and a realpath
+  downloads root: `<inbox alias>/<YYYY-MM-DD>_<message id>/part-<part id>[.ext]` — nothing in a path is the
+  sender's (§9): the extension is kept only from a short list of document and image types, and the sender's name
+  for the file comes back beside the path, wrapped. `-2` suffix on collision; dedupe by sha256; `manifest.json`
+  per batch. Exports are named `<YYYY-MM-DD>_message-<id>` or `_thread-<id>`, never from the subject. Opened with `O_NOFOLLOW` semantics and a realpath
   re-check against the jail. **Nothing is ever opened or executed.**
 - **Add** — drafts accept `attachments: [{path}]`, which must pass the attach jail: under `attachRoots` (default
   `~`) and under none of the deny entries — built in: **every dot-entry directly under home** (`~/.*`: SSH, cloud,
