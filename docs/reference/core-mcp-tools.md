@@ -22,9 +22,9 @@ applies a change it did not plan itself.
 | [`comms_audit_tail`](#comms_audit_tail) | The most recent audit records, newest last: every send, change and approval step, with the surface it came from. |
 | [`comms_approvals_list`](#comms_approvals_list) | Every approval on this machine — for sends, posts and configuration changes — with its state and when it expires. |
 | [`comms_approval_revoke`](#comms_approval_revoke) | Cancel an approval so it can never be used: a send, a post, or a configuration change the person said no to. |
-| [`comms_channels_available`](#comms_channels_available) | Which channel servers exist (core, Gmail, Slack), which are on this machine and at which version, and which MCP clients start each — with the version an entry pins and whether a file it starts has gone. |
-| [`comms_change_policy`](#comms_change_policy) | Report or set the change policy — how a loosening is approved: `chat`, a yes in this conversation, or `confirm`, a code the person types at their own terminal — for the defaults, one mailbox, or one workspace. |
-| [`comms_server_install`](#comms_server_install) | Register a channel’s MCP server — `gmail`, `slack`, or `core` (this one) — with an MCP client, and prove it starts. |
+| [`comms_channels_available`](#comms_channels_available) | Which channel servers exist (core, Gmail, Resend, Slack), which are on this machine and at which version, and which MCP clients start each — with the version an entry pins and whether a file it starts has gone. |
+| [`comms_change_policy`](#comms_change_policy) | Report or set the change policy — how a loosening is approved: `chat`, a yes in this conversation, or `confirm`, a code the person types at their own terminal — for the defaults, one mailbox, or one account or workspace. |
+| [`comms_server_install`](#comms_server_install) | Register a channel’s MCP server — `gmail`, `resend`, `slack`, or `core` (this one) — with an MCP client, and prove it starts. |
 | [`comms_server_prune`](#comms_server_prune) | Remove a channel’s managed runtimes that no client config names, no printed entry names and no process runs — what upgrades leave behind. |
 | [`comms_update`](#comms_update) | Bring this machine to the latest published release. |
 | [`comms_names_migrate`](#comms_names_migrate) | Rename every mailbox and workspace to `organisation/platform`. |
@@ -81,7 +81,7 @@ Cancel an approval so it can never be used: a send, a post, or a configuration c
 
 ### `comms_channels_available`
 
-Which channel servers exist (core, Gmail, Slack), which are on this machine and at which version, and which MCP clients start each — with the version an entry pins and whether a file it starts has gone. Reads files only.
+Which channel servers exist (core, Gmail, Resend, Slack), which are on this machine and at which version, and which MCP clients start each — with the version an entry pins and whether a file it starts has gone. Reads files only.
 
 *read-only*
 
@@ -89,26 +89,26 @@ Takes no arguments.
 
 ### `comms_change_policy`
 
-Report or set the change policy — how a loosening is approved: `chat`, a yes in this conversation, or `confirm`, a code the person types at their own terminal — for the defaults, one mailbox, or one workspace. Without `set` it only reports. Tightening to `confirm` applies at once. Loosening to `chat` is itself a change, approved under the policy in force, `confirm`: the person runs `agentcomms approve <approvalId>` before you call again with the id. A mailbox or workspace that sets `chat` itself keeps it when the default is tightened: the result then carries `warning` and `looser`, each with the call that tightens it — show the warning to the person.
+Report or set the change policy — how a loosening is approved: `chat`, a yes in this conversation, or `confirm`, a code the person types at their own terminal — for the defaults, one mailbox, or one account or workspace. Without `set` it only reports. Tightening to `confirm` applies at once. Loosening to `chat` is itself a change, approved under the policy in force, `confirm`: the person runs `agentcomms approve <approvalId>` before you call again with the id. A mailbox or account or workspace that sets `chat` itself keeps it when the default is tightened: the result then carries `warning` and `looser`, each with the call that tightens it — show the warning to the person.
 
 *writes*
 
 | Argument | Type | Required | What it is |
 |---|---|---|---|
 | `inbox` | string | no | one mailbox, as `organisation/gmail` |
-| `account` | string | no | one workspace, as `organisation/slack` |
+| `account` | string | no | one account or workspace, as `organisation/resend` or `organisation/slack` |
 | `set` | `chat` \\| `confirm` | no | the policy to set; leave out to report |
 | `approvalId` | string | no | leave out the first time. The approval this tool returned, once the person has agreed to its preview — in the chat under `chat`, with `agentcomms approve` under `confirm` |
 
 ### `comms_server_install`
 
-Register a channel’s MCP server — `gmail`, `slack`, or `core` (this one) — with an MCP client, and prove it starts. A change: the first call returns the preview and an approvalId; call again with it once the person agrees. `print` only returns the entry to paste, and asks nobody. The new server appears after the client is restarted — tell the person.
+Register a channel’s MCP server — `gmail`, `resend`, `slack`, or `core` (this one) — with an MCP client, and prove it starts. A change: the first call returns the preview and an approvalId; call again with it once the person agrees. `print` only returns the entry to paste, and asks nobody. The new server appears after the client is restarted — tell the person.
 
 *writes*
 
 | Argument | Type | Required | What it is |
 |---|---|---|---|
-| `channel` | `core` \\| `gmail` \\| `slack` | **yes** | which server |
+| `channel` | `core` \\| `gmail` \\| `resend` \\| `slack` | **yes** | which server |
 | `client` | `claude-code` \\| `claude-desktop` \\| `codex` \\| `cursor` \\| `gemini` \\| `vscode` \\| `json` | **yes** | which MCP client to register it with |
 | `name` | string | no | the name the client shows; the channel’s own when left out. 1–64 of A–Z a–z 0–9 . _ - |
 | `account` | string | no | any channel but the core: serve this one account, named `organisation/<channel>` — the same as `inbox` for Gmail and `workspace` for Slack |
@@ -129,14 +129,14 @@ Remove a channel’s managed runtimes that no client config names, no printed en
 
 | Argument | Type | Required | What it is |
 |---|---|---|---|
-| `channel` | `core` \\| `gmail` \\| `slack` | **yes** | whose runtimes |
+| `channel` | `core` \\| `gmail` \\| `resend` \\| `slack` | **yes** | whose runtimes |
 | `dryRun` | boolean | no | only say what would be removed |
 | `includePrinted` | boolean | no | also remove runtimes kept only because an entry for them was printed, once those entries are gone |
 | `approvalId` | string | no | leave out the first time. The approval this tool returned, once the person has agreed to its preview — in the chat under `chat`, with `agentcomms approve` under `confirm` |
 
 ### `comms_update`
 
-Bring this machine to the latest published release. `check: true` reads the npm registry and this machine and returns what is behind — `{ latest, behind, upToDate, unpinned, unreadable }` — asking nobody. Without it, a change: the first call returns a preview listing every step and an approvalId — each client registration of core, Gmail or Slack registered again at the latest version with exactly its name, client, scope, launcher and pins; each managed runtime that needs installing; each global @agentcomms package updated — and the call again with the approvalId, once the person agrees, applies it and reports each step. Nothing behind: it says so and prepares nothing. The new servers load only after each client is restarted: tell the person, then prune the old runtimes with comms_server_prune.
+Bring this machine to the latest published release. `check: true` reads the npm registry and this machine and returns what is behind — `{ latest, behind, upToDate, unpinned, unreadable }` — asking nobody. Without it, a change: the first call returns a preview listing every step and an approvalId — each client registration of core, Gmail, Resend or Slack registered again at the latest version with exactly its name, client, scope, launcher and pins; each managed runtime that needs installing; each global @agentcomms package updated — and the call again with the approvalId, once the person agrees, applies it and reports each step. Nothing behind: it says so and prepares nothing. The new servers load only after each client is restarted: tell the person, then prune the old runtimes with comms_server_prune.
 
 *writes*
 

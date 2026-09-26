@@ -1,19 +1,19 @@
 # What is where
 
-Two platforms, Gmail and Slack, each shipping the same four things, independent of each other. You can take one
-and ignore the rest.
+Three platforms, Gmail, Slack and Resend, each shipping the same things, independent of each other. You can take
+one and ignore the rest.
 
 ```
-                       ┌──────────────────────────────────┬───────────────────────────────────┐
-  people, scripts ───► │  agent-gmail        (the CLI)    │  agent-slack        (the CLI)     │
-                       ├──────────────────────────────────┼───────────────────────────────────┤
-  agents ────────────► │  MCP server         (44 tools)   │  MCP server         (27 tools)    │
-                       ├──────────────────────────────────┼───────────────────────────────────┤
-                       │  @agentcomms/gmail  (library)    │  @agentcomms/slack  (library)     │
-                       ├──────────────────────────────────┴───────────────────────────────────┤
-                       │  @agentcomms/core   (shared)                                         │
-                       └──────────────────────────────────────────────────────────────────────┘
-  agents ────────────►    skills/  — gmail-*, slack-* and comms-*, instructions, not code
+                       ┌────────────────────────────┬────────────────────────────┬────────────────────────────┐
+  people, scripts ───► │  agent-gmail    (the CLI)  │  agent-slack    (the CLI)  │  agent-resend   (the CLI)  │
+                       ├────────────────────────────┼────────────────────────────┼────────────────────────────┤
+  agents ────────────► │  MCP server    (44 tools)  │  MCP server    (27 tools)  │  MCP server    (18 tools)  │
+                       ├────────────────────────────┼────────────────────────────┼────────────────────────────┤
+                       │  @agentcomms/gmail         │  @agentcomms/slack         │  @agentcomms/resend        │
+                       ├────────────────────────────┴────────────────────────────┴────────────────────────────┤
+                       │  @agentcomms/core   (shared)                                                         │
+                       └──────────────────────────────────────────────────────────────────────────────────────┘
+  agents ────────────►    skills/  — gmail-*, slack-*, resend-* and comms-*, instructions, not code
 ```
 
 | | What it is | Install | Needs |
@@ -23,6 +23,8 @@ and ignore the rest.
 | **Library** | The TypeScript API both surfaces are built on. | `@agentcomms/gmail` | nothing else |
 | **`agent-slack`** | The Slack CLI: connect a workspace, read it, draft, and post with a person's approval. | `@agentcomms/slack` | nothing else |
 | **Slack MCP server** | The same operations over stdio. Posts only through the approval gate; no tool approves. | `@agentcomms/slack` (`agent-slack mcp`) | nothing else |
+| **`agent-resend`** | The Resend CLI: a key a person types at a terminal, then a team's domains, sent and received mail, metrics and suppressions, and sending with a person's approval. | `@agentcomms/resend` | nothing else |
+| **Resend MCP server** | The same operations over stdio, but adding a key. Sends only through the approval gate; no tool approves. | `@agentcomms/resend` (`agent-resend mcp`) | nothing else |
 | **Core MCP server** | Installs and manages the others from a chat — registers and prunes servers, reports what is installed, migrates names and secrets, sets the change policy. Every change is a preview a person approves. | `@agentcomms/core` (`agentcomms mcp`) | nothing else |
 | **Skills** | Markdown instructions telling an agent how to use the above, and where to stop. | `npx skills add` | neither package |
 
@@ -52,14 +54,14 @@ They are separate things that are easy to confuse because both are "for agents".
 them, and when they are not they fall back to the CLI. You can install skills with no server, a server with no
 skills, or both.
 
-There are seventeen, one per job. Twelve for Gmail — searching, triage, composing, sending, organising, attachments,
-contacts, thread analysis, follow-ups, export, security, setup — three for Slack: setup, reading and posting — and
-two through the core server: `comms-onboarding`, which sets both up, and `comms-update`, which brings them to the
-latest release. Each is a `SKILL.md` plus reference pages, including the contract its platform's skills share; the
+There are nineteen, one per job. Twelve for Gmail — searching, triage, composing, sending, organising, attachments,
+contacts, thread analysis, follow-ups, export, security, setup — three for Slack: setup, reading and posting — two
+for Resend: reading and sending — and two through the core server: `comms-onboarding`, which sets them up, and
+`comms-update`, which brings them to the latest release. Each is a `SKILL.md` plus reference pages, including the contract its platform's skills share; the
 two `comms-` skills share their own, for the core's tools.
 See [the skills index](skills.md).
 
-The platform skills are named `gmail-*` and `slack-*` because a skill states one platform's truth and has no other
+The platform skills are named `gmail-*`, `slack-*` and `resend-*` because a skill states one platform's truth and has no other
 branch to fall into. `comms-onboarding` is the one that spans both, and only to install and connect them: once an
 account works, it hands over to `gmail-setup` and `slack-setup`. Slack ships its own pack, and its own contract,
 rather than the Gmail skills becoming platform-neutral, and the reason is that the guarantees genuinely differ: on
@@ -72,13 +74,14 @@ including what adding an IMAP pack later would take.
 
 Config, the secret store, the approval engine, the sanitiser, the untrusted-content envelope, path jails, the audit
 log, and the `agentcomms` command and its MCP server for the parts that are not about any one provider — including
-installing the Gmail and Slack servers themselves, which is why `agentcomms mcp install --client <client>` is the one
+installing every channel's server itself, which is why `agentcomms mcp install --client <client>` is the one
 registration a person runs at a terminal before everything else can be done from chat.
 
-It is separate because the approval gate and the sanitiser are not mail-specific. The Slack package uses the same
-core, the same approval records and the same audit log.
+It is separate because the approval gate and the sanitiser are not mail-specific. The Slack and Resend packages use
+the same core, the same approval records, the same audit log — and, for Slack's workspaces and Resend's accounts,
+the same generic account record in the one configuration file.
 
-`@agentcomms/gmail` and `@agentcomms/slack` depend on it, so it arrives with either. You run it directly for its
+Every channel package depends on it, so it arrives with any of them. You run it directly for its
 command and its MCP server — `npx -y @agentcomms/core mcp install --client <client>` is the first step of the
 install from a chat.
 
@@ -109,3 +112,16 @@ reaction) is behind the one permit, and the approval covers how many people the 
 after the preview voids it. Both surfaces post through that one gate: `slack_post_prepare` returns the preview, and
 `slack_post_send` (or `agent-slack post send`) posts it once the approval allows — a yes in the conversation under
 `chat`, `agent-slack approve` at the person's own terminal under `confirm`, which no tool can run.
+
+## How a Resend email is gated
+
+Resend has no read-only key, so unlike Slack's `read` mode, a Resend account's `read` mode is this software's rule and
+not the key's: a full-access key could send, and only agent-resend's own code refuses to while the account is in
+`read`. A sending-only key is the one Resend itself bounds — to sending, with no reads at all. In `send` mode the gate
+is Gmail's shape for an API with no drafts: `resend_send_prepare` stores the email and returns a preview of every
+recipient, BCC included, the reach and the From domain; `resend_send_execute` (or `agent-resend send execute`) is
+the one function that may call Resend's send endpoint, claims the approval once, and sends with the approval id as
+the `Idempotency-Key`. More than ten recipients, or an address first seen in mail read here, needs a person at a
+terminal whatever the policy. A send whose outcome is unknown is recorded as unknown and checked with
+`resend_send_status`, never repeated. The key is typed by a person at a terminal (`agent-resend account add`), and no
+tool accepts one.

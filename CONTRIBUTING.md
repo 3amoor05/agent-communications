@@ -9,7 +9,8 @@ Thanks for helping make email safe to hand to an agent.
   `example.com`, `example.org` or `*.test` addresses. `scripts/verify-skills.mjs` scans the whole tree for likely
   secrets and machine-specific paths, and `pnpm verify` fails on either.
 - **Sending is gated in one place.** Only `send.execute` in `packages/gmail` may call Gmail's `drafts.send` or
-  `messages.send`, and a test enforces it. A change that adds another path, or weakens the approval checks, needs a
+  `messages.send`, and only `executeSend` in `packages/resend` may call Resend's send endpoint; a test enforces
+  each. A change that adds another path, or weakens the approval checks, needs a
   design discussion in an issue first.
 - **Email content is untrusted.** Anything a sender controls reaches the model only inside the untrusted-content
   envelope, after the HTML sanitiser. Keep it that way.
@@ -22,6 +23,7 @@ packages/core         @agentcomms/core         provider-neutral core (config, se
 packages/gmail        @agentcomms/gmail        Gmail channel: CLI (agent-gmail) and MCP server factory
 packages/gmail-mcp    @agentcomms/gmail-mcp    the Gmail MCP server as its own package (agent-gmail-mcp)
 packages/slack        @agentcomms/slack        Slack channel: CLI (agent-slack) and MCP server
+packages/resend       @agentcomms/resend       Resend channel: CLI (agent-resend) and MCP server
 skills/<name>/        Agent Skills (SKILL.md + references/)
 docs/                 user and design documentation
 scripts/              repository checks

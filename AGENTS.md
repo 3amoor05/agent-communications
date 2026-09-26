@@ -11,8 +11,10 @@
   repository's tests talks to Gmail.
 - **Never post to Slack while developing.** Tests give the Slack client an injected `fetch`, or the loopback fake in
   `packages/slack/test/support/fake-slack.ts`; none of them should talk to Slack.
+- **Never send through Resend while developing, and never use a real key.** Tests go through the loopback fake in
+  `packages/resend/test/support/fake-resend.ts`, with fake keys; none of them should talk to Resend.
 - **Never commit real mail, addresses, tokens or client secrets**, and never print a token or secret while debugging.
-- Only `send.execute` may call Gmail's send endpoints. Do not add another path.
+- Only `send.execute` may call Gmail's send endpoints, and only `executeSend` Resend's. Do not add another path.
 - Anything a sender controls must pass through the HTML sanitiser and the untrusted-content envelope before it
   reaches a result.
 - Keep CLI and MCP in parity: both call the same function in `packages/*/src/operations`, and every command and
