@@ -1160,6 +1160,8 @@ test('comms_channels_available says what is installed and where each server is r
         },
         // Somebody else's: not ours, not listed, and its token is never repeated.
         slack: { command: 'npx', args: ['-y', 'some-other-slack'], env: { SLACK_BOT_TOKEN: 'fake-token-2' } },
+        // Resend, through npx, pinned with the generic `--account`.
+        resend: { command: 'npx', args: ['-y', '@agentcomms/resend@0.0.8', 'mcp', '--account', 'acme/resend'] },
       },
     }),
   );
@@ -1167,7 +1169,12 @@ test('comms_channels_available says what is installed and where each server is r
   try {
     const report = await ok('comms_channels_available');
     assert.equal(report.core, VERSION);
-    const [core, gmail, slack] = report.channels as Record<string, unknown>[];
+    const channels = report.channels as Record<string, unknown>[];
+    assert.deepEqual(
+      channels.map((channel) => channel.channel),
+      ['core', 'gmail', 'resend', 'slack'],
+    );
+    const [core, gmail, resend, slack] = channels;
     assert.equal(core?.channel, 'core');
     assert.equal(core?.installed, true, 'the core is answering');
     assert.equal(gmail?.installed, true);
@@ -1193,6 +1200,19 @@ test('comms_channels_available says what is installed and where each server is r
       assert.equal(slack?.installed, true);
     }
     assert.deepEqual(slack?.registered, [], 'somebody else’s "slack" is not ours');
+    assert.deepEqual(resend?.registered, [
+      {
+        client: 'claude-code',
+        name: 'resend',
+        scope: 'user',
+        path: join(m.home, '.claude.json'),
+        launcher: 'npx',
+        version: '0.0.8',
+        narrowing: ['--account', 'acme/resend'],
+        missing: null,
+        behindCore: true,
+      },
+    ]);
     assert.ok(!JSON.stringify(report).includes('fake-token-2'));
     assert.ok(!JSON.stringify(report).includes('AGENT_COMMS_CONFIG_DIR'), 'no entry’s env is returned');
 

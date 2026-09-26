@@ -754,9 +754,10 @@ test('the preflight proves nothing for a package already out from this commit, s
   try {
     const result = await runScript(CI, ['preflight', VERSION, COMMIT], { env: partial.env });
     assert.equal(result.status, 1);
+    // Everything but the two already out, in publish order.
     assert.deepEqual(
       partial.exchanges.map((exchange) => exchange.name),
-      ['@agentcomms/gmail-mcp', '@agentcomms/slack'],
+      PACKAGES.filter((name) => !['core', 'gmail'].includes(name)).map((name) => `@agentcomms/${name}`),
     );
     assert.match(result.stderr, /@agentcomms\/slack has no trusted publisher for this workflow/);
   } finally {
@@ -829,7 +830,7 @@ test('pending prints what this commit still has to publish, in order, for the pu
   try {
     const result = await runScript(CI, ['pending', VERSION, COMMIT], { env: fake.env });
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stdout, 'gmail-mcp slack\n');
+    assert.equal(result.stdout, `${PACKAGES.filter((name) => !['core', 'gmail'].includes(name)).join(' ')}\n`);
     assert.match(result.stderr, /@agentcomms\/core@1\.2\.3 is already out from this commit/);
     assert.deepEqual(
       fake.reads,

@@ -50,6 +50,7 @@ const PACKAGES = {
   core: '@agentcomms/core',
   gmail: '@agentcomms/gmail',
   gmailMcp: '@agentcomms/gmail-mcp',
+  resend: '@agentcomms/resend',
   slack: '@agentcomms/slack',
 } as const;
 
@@ -225,6 +226,7 @@ const EVERYTHING_LATEST = {
   [PACKAGES.core]: LATEST,
   [PACKAGES.gmail]: LATEST,
   [PACKAGES.gmailMcp]: LATEST,
+  [PACKAGES.resend]: LATEST,
   [PACKAGES.slack]: LATEST,
 };
 
@@ -414,9 +416,10 @@ test('update --check: what is behind, what is up to date, what pins nothing, and
     assert.deepEqual(report.latest, {
       [PACKAGES.core]: LATEST,
       [PACKAGES.gmail]: LATEST,
+      [PACKAGES.resend]: LATEST,
       [PACKAGES.slack]: LATEST,
     });
-    assert.deepEqual([...deps.asked].sort(), [PACKAGES.core, PACKAGES.gmail, PACKAGES.slack]);
+    assert.deepEqual([...deps.asked].sort(), [PACKAGES.core, PACKAGES.gmail, PACKAGES.resend, PACKAGES.slack]);
 
     const behind = report.behind as Item[];
     assert.deepEqual(of(behind, 'registration'), [
@@ -688,6 +691,64 @@ test('a registration is started through its new entry, with its pins, and must a
     assert.equal(registration?.verification, 'passed', String(registration?.detail));
     assert.equal(registration?.name, 'gmail-work', 'the name it had');
     assert.deepEqual(startedWith(m, PACKAGES.gmail, LATEST), [['mcp', '--inbox', 'acme/gmail']]);
+  } finally {
+    await close();
+  }
+});
+
+test('a Resend registration pinned with the generic --account is registered again with exactly its pin', async () => {
+  const resend = account({
+    id: 'acc_RRRRRRRRRRRRRRRR',
+    platform: 'resend',
+    workspace: 'key_0a1b2c3d',
+    userId: 'key_0a1b2c3d',
+    grantedScopes: ['full_access'],
+    secretRef: 'resend:key:acc_RRRRRRRRRRRRRRRR',
+  });
+  const m = machine({ ...ACCOUNTS, accounts: { ...ACCOUNTS.accounts, 'acme/resend': resend } });
+  makeRuntime(m, PACKAGES.resend, OLD);
+  cursor(m, { resend: managed(m, PACKAGES.resend, OLD, ['--account', 'acme/resend']) });
+  const deps = fakes(m, { serverRuntimes: true });
+  const { ok, close } = await connect(m, { update: deps });
+  try {
+    const check = await ok('comms_update', { check: true });
+    assert.deepEqual(
+      of(check.behind, 'registration').map((item) => [item.channel, item.narrowing, item.updatable]),
+      [['resend', ['--account', 'acme/resend'], true]],
+    );
+    const first = await ok('comms_update');
+    assert.match(
+      String(first.preview),
+      /registers the Resend MCP server .* pinned to the account acme\/resend, as now/,
+    );
+    const done = await ok('comms_update', { approvalId: first.approvalId });
+    const registration = (done.result as { steps: Item[] }).steps.find((step) => step.kind === 'registration');
+    assert.equal(registration?.outcome, 'registered', String(registration?.detail));
+    assert.deepEqual(registration?.narrowing, ['--account', 'acme/resend']);
+    assert.deepEqual(cursorEntries(m).resend?.args, [
+      managedRuntimeEntry(m.dataDir, PACKAGES.resend, LATEST),
+      'mcp',
+      '--account',
+      'acme/resend',
+    ]);
+    assert.deepEqual(startedWith(m, PACKAGES.resend, LATEST), [['mcp', '--account', 'acme/resend']]);
+  } finally {
+    await close();
+  }
+});
+
+test('a Resend registration pinned to an account this machine no longer has is left for a person', async () => {
+  const m = machine();
+  makeRuntime(m, PACKAGES.resend, OLD);
+  cursor(m, { resend: managed(m, PACKAGES.resend, OLD, ['--account', 'gone/resend']) });
+  const deps = fakes(m, {});
+  const { ok, close } = await connect(m, { update: deps });
+  try {
+    const check = await ok('comms_update', { check: true });
+    const [item] = of(check.behind, 'registration');
+    assert.equal(item?.updatable, false);
+    assert.match(String(item?.reason), /pinned to an account this machine does not have/);
+    assert.match(String(item?.reason), /no account called "gone\/resend"/);
   } finally {
     await close();
   }

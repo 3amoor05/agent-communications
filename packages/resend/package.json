@@ -1,7 +1,6 @@
 {
   "name": "@agentcomms/resend",
   "version": "0.6.0",
-  "private": true,
   "description": "Resend for coding agents: read domains, sent and received mail, metrics and suppressions, and send mail that nothing sends without a person's approval of exactly what goes out.",
   "type": "module",
   "license": "MIT",
@@ -28,20 +27,32 @@
   "files": [
     "dist",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "THIRD_PARTY_LICENSES"
   ],
   "scripts": {
     "build": "tsdown",
     "typecheck": "tsc -p tsconfig.json",
     "test": "node --experimental-strip-types --test --test-timeout=60000 \"test/**/*.test.ts\""
   },
+  "optionalDependencies": {
+    "@napi-rs/keyring": "2.1.0"
+  },
+  "devDependencies": {
+    "@agentcomms/core": "workspace:*",
+    "@modelcontextprotocol/client": "2.0.0",
+    "@modelcontextprotocol/server": "^2.0.0",
+    "commander": "^15.0.0",
+    "zod": "catalog:"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "agentcomms": {
     "contract": 1,
-    "core": "0.7.x",
     "channel": "resend",
     "label": "Resend",
     "binary": "agent-resend",
-    "bins": [],
     "server": {
       "defaultName": "resend",
       "npxPackage": "@agentcomms/resend",
@@ -57,9 +68,9 @@
         "send"
       ],
       "guarantee": {
-        "ceiling": "grant",
+        "ceiling": "code",
         "floor": "code",
-        "why": "Resend has no read-only key. A full-access key can read and send, so read mode is enforced by agent-resend's own code; a sending-access key can only send, and Resend enforces that."
+        "why": "Resend has no read-only key, and a full-access key can also manage domains and keys: read mode, and send mode's limit to sending, are enforced by agent-resend's own code. A sending-access key can only send, and Resend enforces that."
       }
     },
     "narrowing": [
@@ -70,7 +81,8 @@
       }
     ],
     "rivals": {
-      "word": "resend"
+      "word": "resend",
+      "can": "send mail through Resend"
     },
     "hosts": [
       "api.resend.com",
@@ -78,17 +90,8 @@
     ],
     "approve": "agent-resend approve",
     "skills": {
-      "prefix": "resend-"
+      "prefix": "resend-",
+      "contract": "skills/_shared/contract-resend.md"
     }
-  },
-  "optionalDependencies": {
-    "@napi-rs/keyring": "2.1.0"
-  },
-  "devDependencies": {
-    "@agentcomms/core": "workspace:*",
-    "@modelcontextprotocol/client": "2.0.0",
-    "@modelcontextprotocol/server": "^2.0.0",
-    "commander": "^15.0.0",
-    "zod": "catalog:"
   }
 }

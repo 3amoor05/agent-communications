@@ -32,8 +32,15 @@ import * as golden from './fixtures/channel-servers-0.6.0.ts';
 const CHANNEL_NAMES = ['core', 'gmail', 'slack'] as const;
 
 test('the channels, their labels and their static facts are exactly the hand-written table’s', () => {
-  assert.deepEqual([...CHANNELS], [...golden.GOLDEN_CHANNELS]);
-  assert.deepEqual({ ...CHANNEL_LABELS }, { ...golden.GOLDEN_CHANNEL_LABELS });
+  // Every channel 0.6.0 had, in the order it had them; a channel added since sits among them and changes none of it.
+  const golden060 = new Set<string>(golden.GOLDEN_CHANNELS);
+  assert.deepEqual(
+    CHANNELS.filter((channel) => golden060.has(channel)),
+    [...golden.GOLDEN_CHANNELS],
+  );
+  assert.deepEqual(Object.fromEntries(Object.entries(CHANNEL_LABELS).filter(([channel]) => golden060.has(channel))), {
+    ...golden.GOLDEN_CHANNEL_LABELS,
+  });
   for (const channel of CHANNEL_NAMES) {
     const { serverArgs: _a, narrowingOf: _n, warnAbout: derivedWarn, ...derived } = CHANNEL_SERVERS[channel];
     const {

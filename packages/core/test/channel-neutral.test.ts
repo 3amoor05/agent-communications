@@ -106,7 +106,7 @@ async function effectsOf(m: Machine, request: Omit<ServerInstallRequest, 'client
 // ── A channel is a word, checked against the manifests ─────────────────────────────────────────────────────────
 
 test('a channel is any word the manifests declare, and nothing else', () => {
-  assert.deepEqual([...CHANNELS], ['core', 'gmail', 'slack']);
+  assert.deepEqual([...CHANNELS], ['core', 'gmail', 'resend', 'slack']);
   for (const channel of CHANNELS) {
     assert.equal(isChannel(channel), true);
     assert.equal(channelServer(channel).binary, requireChannelManifest(channel).binary);
@@ -127,11 +127,13 @@ test('what the core says about a channel is read from its manifest', () => {
   assert.equal(hasNarrowing('gmail', 'readOnly'), true);
   assert.equal(hasNarrowing('slack', 'readOnly'), false);
   assert.equal(narrowingOwner('workspace')?.channel, 'slack');
-  assert.equal(narrowingOwner('account'), undefined, 'no channel of this release is pinned by `account` yet');
+  assert.equal(narrowingOwner('account')?.channel, 'resend', 'Resend is the first channel pinned by `account`');
+  assert.equal(pinOption('resend'), 'account');
+  assert.equal(accountNoun('resend'), 'account');
   assert.equal(accountNoun('gmail'), 'mailbox');
   assert.equal(accountNoun('slack'), 'workspace');
   assert.equal(accountNoun('discord'), 'account');
-  assert.equal(channelApproveCommands(), '`agent-gmail approve` or `agent-slack approve`');
+  assert.equal(channelApproveCommands(), '`agent-gmail approve`, `agent-resend approve` or `agent-slack approve`');
   assert.equal(connectMailboxCommand(), 'agent-gmail inbox add');
   assert.equal(listed([], 'or'), '');
   assert.equal(listed(['a'], 'or'), 'a');

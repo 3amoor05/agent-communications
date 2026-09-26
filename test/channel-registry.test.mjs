@@ -97,15 +97,19 @@ const run = async (root, script, args = []) => {
 test('a channel package dropped into the tree is discovered by every consumer of the registry', async () => {
   const { root, version } = await treeWithNewcomer();
 
+  // Every channel this checkout ships, and the newcomer among them in its place.
+  const shipped = REGISTRY.channels.map((channel) => channel.directory);
+  const every = ['core', ...[...shipped.filter((channel) => channel !== 'core'), 'newcomer'].sort()];
+  const others = shipped.filter((channel) => channel !== 'core');
+
   // The registry itself, and the two scripts a shell reads it through.
-  assert.equal((await run(root, 'channels.mjs')).trim(), 'core gmail newcomer slack');
+  assert.equal((await run(root, 'channels.mjs')).trim(), every.join(' '));
   const published = (await run(root, 'packages.mjs')).trim().split(' ');
   assert.ok(published.includes('newcomer'), 'published');
   assert.ok(published.indexOf('newcomer') > published.indexOf('core'), 'after the core it depends on');
 
   // The parity check's surfaces and drivers, read by the scripts in that tree.
   const registries = await import(pathToFileURL(join(root, 'scripts', 'registries.mjs')).href);
-  const every = ['core', 'gmail', 'newcomer', 'slack'];
   assert.deepEqual(
     registries.SURFACES.map((surface) => surface.package),
     every,
@@ -156,7 +160,7 @@ test('a channel package dropped into the tree is discovered by every consumer of
   // Its skills may not borrow another channel's words, and no other channel's skills may borrow its.
   assert.match(words('newcomer'), /gmail_/);
   assert.match(words('newcomer'), /agent-slack/);
-  for (const other of ['gmail', 'slack']) {
+  for (const other of others) {
     assert.match(words(other), /newcomer_\[a-z_\]\+/);
     assert.match(words(other), /agent-newcomer/);
     assert.match(words(other), /@agentcomms\\\/newcomer/);
@@ -304,11 +308,11 @@ test('every consumer reads the registry, and none keeps a list of channels of it
   }
 });
 
-test('this checkout’s registry is the three channels and four packages it ships', () => {
+test('this checkout’s registry is the four channels and five packages it ships', () => {
   assert.deepEqual(
     REGISTRY.channels.map((channel) => channel.directory),
-    ['core', 'gmail', 'slack'],
+    ['core', 'gmail', 'resend', 'slack'],
   );
-  assert.deepEqual(REGISTRY.packages, ['core', 'gmail', 'gmail-mcp', 'slack']);
-  assert.deepEqual(REGISTRY.platforms, ['gmail', 'slack']);
+  assert.deepEqual(REGISTRY.packages, ['core', 'gmail', 'gmail-mcp', 'resend', 'slack']);
+  assert.deepEqual(REGISTRY.platforms, ['gmail', 'resend', 'slack']);
 });

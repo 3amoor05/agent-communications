@@ -27,6 +27,10 @@ import { tempDir } from './helpers/temp.ts';
  * Machine-specific parts are replaced before comparing: the temporary home, this checkout, Node's path and the
  * release version.
  *
+ * A handful of sentences name every channel there is — a refusal's list of channels, the approve commands a hint
+ * offers, the core server's instructions and three tool descriptions — and so gain a word when a channel is added:
+ * Resend's arrival rewrote exactly those ten. None of them is inside an approval digest.
+ *
  *   AGENTCOMMS_WRITE_WORDING=1 node --experimental-strip-types --test test/wording-identity.test.ts
  *
  * rewrites the fixture — which is exactly the change this test exists to make visible in review.
@@ -421,7 +425,7 @@ test('every sentence the core builds about a channel is byte for byte what it wa
     'deletes the unused Gmail runtime',
     'registers the Slack MCP server with cursor as "slack" again',
     'it will be able to send, not only read',
-    '`agent-gmail approve` or `agent-slack approve`',
+    '`agent-gmail approve`, `agent-resend approve` or `agent-slack approve`',
     'add one with `agent-gmail inbox add`',
     'is not a Slack workspace',
     'is an option of the Gmail server; the Slack server has no such option',

@@ -5,7 +5,7 @@
 import type { ChannelEntry } from './channel-manifest.ts';
 
 /** The channels built into this release, by their word: a channel is a string, and these are the known ones. */
-export type BuiltInChannel = 'core' | 'gmail' | 'slack';
+export type BuiltInChannel = 'core' | 'gmail' | 'resend' | 'slack';
 
 /** Every first-party channel, the core first: what core knows about each without installing it. */
 export const CHANNEL_SNAPSHOT: readonly ChannelEntry[] = [
@@ -82,6 +82,47 @@ export const CHANNEL_SNAPSHOT: readonly ChannelEntry[] = [
       skills: {
         prefix: 'gmail-',
         contract: 'skills/_shared/contract-gmail.md',
+      },
+    },
+  },
+  {
+    packageName: '@agentcomms/resend',
+    manifest: {
+      contract: 1,
+      channel: 'resend',
+      label: 'Resend',
+      binary: 'agent-resend',
+      server: {
+        defaultName: 'resend',
+        npxPackage: '@agentcomms/resend',
+        npxArgs: ['mcp'],
+      },
+      accounts: {
+        map: 'accounts',
+        noun: 'account',
+        modes: ['read', 'send'],
+        guarantee: {
+          ceiling: 'code',
+          floor: 'code',
+          why: "Resend has no read-only key, and a full-access key can also manage domains and keys: read mode, and send mode's limit to sending, are enforced by agent-resend's own code. A sending-access key can only send, and Resend enforces that.",
+        },
+      },
+      narrowing: [
+        {
+          option: 'account',
+          flag: '--account',
+          kind: 'pin',
+        },
+      ],
+      rivals: {
+        word: 'resend',
+        can: 'send mail through Resend',
+      },
+      hosts: ['api.resend.com', 'inbound-cdn.resend.com'],
+      approve: 'agent-resend approve',
+      skills: {
+        prefix: 'resend-',
+        contract: 'skills/_shared/contract-resend.md',
       },
     },
   },
