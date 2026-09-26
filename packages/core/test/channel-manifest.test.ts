@@ -6,6 +6,7 @@ import {
   CHANNEL_SERVERS,
   CHANNELS,
   channelManifest,
+  channelServer,
   narrowingArgs,
   narrowingFromArgs,
 } from '../src/channel-servers.ts';
@@ -110,11 +111,43 @@ test('narrowingOf: what an entry’s arguments carry reads back as before, and r
       ['--inbox', '--read-only'],
       ['--workspace', '', '--read-only'],
       ['-y', '@agentcomms/slack@0.6.0', 'mcp', '--workspace', 'acme/slack'],
-      ['--read-only=true', '--inbox=x/gmail'],
     ]) {
       assert.deepEqual(derived.narrowingOf(args), expected.narrowingOf(args), `${channel} ${JSON.stringify(args)}`);
     }
   }
+});
+
+test('narrowingOf reads a pin written as one argument, `--flag=value`, for every channel’s pin', () => {
+  /*
+   * Every server reads `--account=acme/resend` as `--account acme/resend` — Commander does, and so does
+   * `agent-gmail-mcp` — but the pin was read back only in the two-argument form. So an entry pinned that way, by hand,
+   * lost its pin on `mcp install --force` and on `comms_update`, whose preview said "not pinned … as now". 0.6.0 read
+   * `--inbox=` and `--workspace=` the same way; this is the one place narrowingOf departs from it, on purpose.
+   */
+  let pinned = 0;
+  for (const channel of CHANNELS) {
+    const facts = channelServer(channel);
+    const manifest = channelManifest(channel);
+    for (const { option, flag, kind } of manifest?.narrowing ?? []) {
+      if (kind !== 'pin') continue;
+      pinned += 1;
+      const value = `acme/${channel}`;
+      assert.deepEqual(facts.narrowingOf([`${flag}=${value}`]), { [option]: value }, `${channel} ${flag}=`);
+      assert.deepEqual(facts.narrowingOf(['mcp', `${flag}=${value}`, '--other']), { [option]: value });
+      // Written back in the form every entry this installer writes has.
+      assert.deepEqual(facts.serverArgs({ client: 'json', ...facts.narrowingOf([`${flag}=${value}`]) }), [flag, value]);
+      // An empty value pins nothing, in either form; and the first pin given is the one read, in either form.
+      assert.deepEqual(facts.narrowingOf([`${flag}=`]), {});
+      assert.deepEqual(facts.narrowingOf([`${flag}=a/${channel}`, flag, `b/${channel}`]), { [option]: `a/${channel}` });
+      assert.deepEqual(facts.narrowingOf([flag, `a/${channel}`, `${flag}=b/${channel}`]), { [option]: `a/${channel}` });
+      // A longer flag that begins with this one is not it.
+      assert.deepEqual(facts.narrowingOf([`${flag}s=${value}`]), {});
+    }
+  }
+  assert.equal(pinned, CHANNELS.length - 1, 'every channel but the core has a pin');
+  // `--read-only` takes no value: Commander refuses `--read-only=true` and `agent-gmail-mcp` ignores it, so no server
+  // runs read-only from it, and it is not read as the switch.
+  assert.deepEqual(CHANNEL_SERVERS.gmail.narrowingOf(['--read-only=true', '--inbox=x/gmail']), { inbox: 'x/gmail' });
 });
 
 /** A registered entry, as a client scan reports one. */

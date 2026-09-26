@@ -756,6 +756,62 @@ test('a Resend registration pinned to an account this machine no longer has is l
   }
 });
 
+test('comms_update keeps a pin written as one argument, `--flag=value`, for every channel’s pin', async () => {
+  /*
+   * Every server honours `--account=acme/resend` as a pin, and the update read it as none: its preview said "not
+   * pinned: it reaches every account on this machine, as now", and it registered the new release unpinned.
+   */
+  const other = (platform: string, id: string) =>
+    account({
+      id,
+      platform,
+      workspace: `${platform}-ws`,
+      userId: `${platform}-user`,
+      secretRef: `${platform}:key:${id}`,
+    });
+  const m = machine({
+    inboxes: { 'acme/gmail': inbox() },
+    accounts: {
+      'acme/slack': account(),
+      'acme/resend': other('resend', 'acc_RRRRRRRRRRRRRRRR'),
+      'acme/whatsapp': other('whatsapp', 'acc_WWWWWWWWWWWWWWWW'),
+    },
+  });
+  const pins = { gmail: '--inbox', resend: '--account', slack: '--workspace', whatsapp: '--account' } as const;
+  const servers: Record<string, Entry> = {};
+  for (const [channel, flag] of Object.entries(pins)) {
+    const packageName = CHANNEL_SERVERS[channel as keyof typeof pins].packageName;
+    makeRuntime(m, packageName, OLD);
+    servers[channel] = managed(m, packageName, OLD, [`${flag}=acme/${channel}`]);
+  }
+  cursor(m, servers);
+  const { ok, close } = await connect(m, { update: fakes(m) });
+  try {
+    const check = await ok('comms_update', { check: true });
+    assert.deepEqual(
+      Object.fromEntries(
+        of(check.behind, 'registration').map((item) => [item.channel, [item.narrowing, item.updatable]]),
+      ),
+      Object.fromEntries(Object.entries(pins).map(([channel, flag]) => [channel, [[flag, `acme/${channel}`], true]])),
+    );
+    const first = await ok('comms_update', { noVerify: true });
+    for (const channel of Object.keys(pins)) {
+      assert.match(
+        String(first.preview),
+        new RegExp(`as "${channel}" again .* pinned to the \\w+ acme/${channel}, as now`),
+      );
+    }
+    assert.doesNotMatch(String(first.preview), /not pinned/);
+    const second = await ok('comms_update', { noVerify: true, approvalId: first.approvalId });
+    assert.equal(second.applied, true);
+    for (const [channel, flag] of Object.entries(pins)) {
+      assert.deepEqual(cursorEntries(m)[channel]?.args.slice(-3), ['mcp', flag, `acme/${channel}`], channel);
+    }
+  } finally {
+    await close();
+  }
+});
+
 test('a runtime that cannot be installed leaves its registrations as they were, and the rest goes on', async () => {
   const m = machine();
   makeRuntime(m, PACKAGES.gmail, OLD);

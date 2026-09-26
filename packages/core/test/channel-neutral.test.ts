@@ -205,6 +205,54 @@ test('an approval asked for with `account` is claimed with the channel’s own p
   assert.deepEqual(entry.args.slice(-2), ['--workspace', 'acme/slack'], 'Slack’s server reads --workspace');
 });
 
+test('`--force` keeps a pin written as one argument, `--flag=value`, for every channel’s pin', async () => {
+  /*
+   * An entry pinned by hand as `--account=acme/resend` is pinned — every server reads that form — and replacing it
+   * with `--force` and no pin has to keep the pin, as it does for `--account acme/resend`. It registered the
+   * replacement unpinned, reaching every account.
+   */
+  const m = machine();
+  const config = await m.core.config.load();
+  let checked = 0;
+  for (const channel of CHANNELS) {
+    const own = pinOption(channel);
+    if (own === undefined || own === 'readOnly') continue;
+    checked += 1;
+    const facts = channelServer(channel);
+    const flag = facts.serverArgs({ client: 'json', [own]: 'x' })[0] as string;
+    const value = `acme/${channel}`;
+    const entry = {
+      command: 'npx',
+      args: ['-y', `${facts.npxPackage}@0.0.1`, ...(facts.npxArgs ?? []), `${flag}=${value}`],
+    };
+    mkdirSync(join(m.home, '.cursor'), { recursive: true });
+    writeFileSync(
+      join(m.home, '.cursor', 'mcp.json'),
+      JSON.stringify({ mcpServers: { [facts.defaultServerName]: entry } }),
+    );
+    const request = { client: 'cursor', channel, launcher: 'npx', force: true, noVerify: true } as const;
+    const effects = (await serverInstallChange(m.core, m.env, request).plan(config)).effects ?? [];
+    assert.ok(
+      effects.some((effect) =>
+        effect.includes(
+          `pinned to the ${accountNoun(channel)} ${value}, replacing its own earlier entry of that name and keeping ${flag} ${value} from it`,
+        ),
+      ),
+      `${channel}: ${effects.join(' | ')}`,
+    );
+    assert.ok(!effects.some((effect) => effect.startsWith('not pinned')), `${channel}: ${effects.join(' | ')}`);
+    const asked = await gatedChange(m.core, serverInstallChange(m.core, m.env, request), { surface: 'mcp' });
+    const approvalId = asked.status === 'approval-required' ? asked.prepared.approvalId : '';
+    const done = await gatedChange(m.core, serverInstallChange(m.core, m.env, request), { surface: 'mcp', approvalId });
+    assert.equal(done.status, 'applied', channel);
+    const written = JSON.parse(readFileSync(join(m.home, '.cursor', 'mcp.json'), 'utf8')).mcpServers[
+      facts.defaultServerName
+    ];
+    assert.deepEqual(written.args.slice(-2), [flag, value], `${channel}: the pin kept, in the form this writes`);
+  }
+  assert.equal(checked, CHANNELS.length - 1, 'every channel but the core');
+});
+
 test('`account` is refused where it cannot mean one thing', async () => {
   const m = machine();
   const plan = (request: Omit<ServerInstallRequest, 'client'>) => async () =>

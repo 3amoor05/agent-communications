@@ -40,8 +40,21 @@ export const CHANNELS: readonly Channel[] = Object.freeze(CHANNEL_SNAPSHOT.map((
 /** Everything about a server except the version being installed and where its code lives. */
 export type ServerFacts = Omit<McpProduct, 'version' | 'moduleUrl'>;
 
-const flagValue = (args: readonly string[], flag: string): string | undefined =>
-  args.includes(flag) ? args[args.indexOf(flag) + 1] : undefined;
+/**
+ * The value a pin's flag carries in an entry's arguments: `--account acme/resend`, or `--account=acme/resend` — the
+ * first given, in either form.
+ *
+ * Every server reads both — Commander does, and so does `agent-gmail-mcp` — so an entry pinned by hand in the one-word
+ * form is pinned. Reading back only the two-word form made such an entry look unpinned, and `--force` and the update
+ * then registered its replacement reaching every account, under a preview that said nothing had changed.
+ */
+function flagValue(args: readonly string[], flag: string): string | undefined {
+  for (const [index, argument] of args.entries()) {
+    if (argument === flag) return args[index + 1];
+    if (argument.startsWith(`${flag}=`)) return argument.slice(flag.length + 1);
+  }
+  return undefined;
+}
 
 /**
  * The flags a server is started with, from the options `mcp install` was given: each of the manifest's `narrowing`
