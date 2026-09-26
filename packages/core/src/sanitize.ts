@@ -1060,7 +1060,12 @@ export function sanitizeHtmlToText(
   // Counted after pruning, because the element walk adds to it too: anything hidden through a custom property this
   // cannot resolve is kept in the output and reported here rather than passed off as visible.
   report.unreadableHidingRules = rules.unreadable;
-  const cleanedHtml = render(document, { decodeEntities: false });
+  // Re-escaped on the way out. The document was parsed with its entities decoded, so a text that read `&lt;!-- x --&gt;`
+  // now holds `<!-- x -->`; written back unescaped, the converter below parsed it again as a comment — or `&lt;x&gt;`
+  // as a tag — and the text a mail client shows literally vanished. For a reader that dropped what the sender wrote;
+  // for the outbound check it meant the recipient could see text the comparison never read. `utf8` escapes only
+  // `& < >` and no-break spaces, so nothing else about the text changes.
+  const cleanedHtml = render(document, { encodeEntities: 'utf8' });
 
   const text = convert(cleanedHtml, {
     wordwrap: options.wordwrap ?? false,
