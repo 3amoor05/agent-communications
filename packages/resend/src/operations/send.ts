@@ -141,9 +141,16 @@ async function checkFromDomain(context: ResendContext, named: NamedAccount, doma
 interface RecipientStudy {
   notes: Record<string, string>;
   flags: string[];
+  /** For the preview's warnings: what is known about a Reply-To, which has no note of its own on its line. */
+  warnings: string[];
 }
 
-/** Who the email reaches, and what that means for the policy. */
+/**
+ * Who the email reaches, and what that means for the policy.
+ *
+ * The Reply-To is studied as a recipient is. It receives nothing itself, but every answer the recipients send goes
+ * there: mail that says "reply to me at drop@evil.test" steers the replies as surely as a recipient steers the mail.
+ */
 async function studyRecipients(
   context: ResendContext,
   named: NamedAccount,
@@ -154,20 +161,34 @@ async function studyRecipients(
   const reach = uniqueRecipients(message);
   const notes: Record<string, string> = {};
   const flags: string[] = [];
+  const warnings: string[] = [];
+  const seenInMail = async (address: string): Promise<boolean> => {
+    const seen = await context.core.taint.check(address);
+    return (seen.address || seen.domain) && !(await records.hasSentTo(named.account.id, address));
+  };
   let tainted = false;
+  let replyToTainted = false;
   if (riskEscalation) {
     for (const address of reach) {
-      const seen = await context.core.taint.check(address);
-      if ((seen.address || seen.domain) && !(await records.hasSentTo(named.account.id, address))) {
+      if (await seenInMail(address)) {
         tainted = true;
         notes[address] = 'ADDRESS SEEN IN MAIL YOU READ · never written to from here';
       }
     }
+    for (const address of message.replyTo.filter((candidate) => candidate !== message.fromAddress)) {
+      if (await seenInMail(address)) {
+        replyToTainted = true;
+        warnings.push(
+          `Reply-To ${address}: seen in mail you read, never written to from here — the recipients' replies go there`,
+        );
+      }
+    }
   }
   if (tainted) flags.push('recipient-tainted');
+  if (replyToTainted) flags.push('reply-to-tainted');
   if (reach.length > REACH_CONFIRM_THRESHOLD) flags.push(`reach-above-${REACH_CONFIRM_THRESHOLD}`);
   for (const address of message.bcc) notes[address] = notes[address] ? `BCC · ${notes[address]}` : 'BCC';
-  return { notes, flags };
+  return { notes, flags, warnings };
 }
 
 function expectationOf(message: OutboundMessage): Expectation {
@@ -204,6 +225,7 @@ function previewOf(options: {
     ...(message.scheduledAt
       ? [`Scheduled for ${message.scheduledAt}; until then it can be cancelled with \`agent-resend scheduled cancel\``]
       : ['Sends as soon as it is approved and executed']),
+    ...options.study.warnings,
     ...options.built.warnings,
   ];
   const preview: MessagePreview = {

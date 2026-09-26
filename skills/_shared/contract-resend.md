@@ -62,8 +62,9 @@ terminal.
   conversation to that preview: then `resend_send_execute` (CLI: `agent-resend send execute`) with the
   approval id and the recipients and subject the preview showed sends it, once. Under `confirm` — and
   for any email reaching **more than 10 people**, or an address that arrived in mail read here and was
-  never written to from here, whatever the policy — the same call returns `APPROVAL_PENDING`, and the
-  person runs `agent-resend approve <approvalId>` at their own terminal; call it again once they have.
+  never written to from here, as a recipient or as the Reply-To, whatever the policy — the same call
+  returns `APPROVAL_PENDING`, and the person runs `agent-resend approve <approvalId>` at their own
+  terminal; call it again once they have.
   Under `never`, nothing sends.
 - **No tool approves, and you never do.** `agent-resend approve` is refused to an agent. Hand the
   person the command; do not look for another way round.
