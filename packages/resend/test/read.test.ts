@@ -556,6 +556,39 @@ test('a scheduled email from this machine is cancelled at once; one scheduled el
   assert.equal(audit.length, 2, 'both cancels are audited');
 });
 
+for (const [label, reply, outcome] of [
+  ['a dropped connection', { status: 0, drop: true }, /outcome unknown/],
+  ['a 502', { status: 502, body: { name: 'application_error', message: 'upstream' } }, /outcome unknown/],
+  ['a 422', { status: 422, body: { name: 'validation_error', message: 'not scheduled' } }, /not cancelled/],
+] as const) {
+  test(`a cancel that fails is audited too: ${label}`, async () => {
+    harness = await newHarness();
+    await harness.addAccount({ name: 'acme/resend', mode: 'send' });
+    const context = harness.context('mcp');
+    const prepared = await prepareSend(context, 'acme/resend', {
+      from: 'hello@acme.test',
+      to: ['sam@partner.test'],
+      subject: 'Later',
+      text: 'Later',
+      scheduledAt: new Date(Date.now() + 3600 * 1000).toISOString(),
+    });
+    const sent = await executeSend(context, 'acme/resend', {
+      approvalId: prepared.approvalId,
+      expect: prepared.expect,
+    });
+    harness.fake.intercept = (request) => (request.path.endsWith('/cancel') ? reply : undefined);
+    await assert.rejects(
+      gatedChange(context.core, cancelScheduledChange(context, 'acme/resend', sent.resendId), { surface: 'mcp' }),
+    );
+    assert.equal(harness.fake.requests.filter((request) => request.path.endsWith('/cancel')).length, 1);
+    const lines = (await harness.audit()).filter((line) => line.operation === 'resend.scheduled.cancel');
+    assert.equal(lines.length, 1, 'one line for the attempt');
+    assert.equal(lines[0]?.outcome, 'failed');
+    assert.match(String(lines[0]?.reason), outcome);
+    assert.deepEqual(lines[0]?.ids, { emailIds: [sent.resendId] });
+  });
+}
+
 test('cancelling an email scheduled elsewhere is approved under the account’s own change policy', async () => {
   harness = await newHarness();
   await harness.addAccount({ name: 'acme/resend', mode: 'send', changePolicy: 'confirm' });

@@ -1,4 +1,4 @@
-import { CommsError, type GatedChange } from '@agentcomms/core';
+import { CommsError, type GatedChange, toCommsError } from '@agentcomms/core';
 import { keyPermissionOf } from '../accounts.ts';
 import { resendRequest } from '../api/client.ts';
 import { closedPermit, spendOn } from '../api/guard.ts';
@@ -78,9 +78,29 @@ export function cancelScheduledChange(context: ResendContext, name: string, id: 
       const { named, count, ours } = await look();
       const permit = closedPermit();
       const transport = await context.transport(named, permit);
-      await spendOn(permit, emailId, 'emails.cancel', () =>
-        resendRequest(transport, 'POST', `/emails/${emailId}/cancel`),
-      );
+      const reason = ours ? 'scheduled from this machine' : 'scheduled elsewhere; approved as a change';
+      try {
+        await spendOn(permit, emailId, 'emails.cancel', () =>
+          resendRequest(transport, 'POST', `/emails/${emailId}/cancel`),
+        );
+      } catch (error) {
+        // Audited whatever happened: a cancel whose outcome is unknown may have taken effect, and one Resend refused
+        // is still an attempt somebody approved. The cancel's own error is what the caller hears, even if this fails.
+        const failure = toCommsError(error);
+        const unknown = failure.details?.outcome !== 'not-sent';
+        await context.core.audit
+          .append({
+            inboxId: named.account.id,
+            alias: name,
+            operation: 'resend.scheduled.cancel',
+            outcome: 'failed',
+            surface: context.surface,
+            ids: { emailIds: [emailId] },
+            reason: `${unknown ? 'outcome unknown' : 'not cancelled'}: ${failure.message.slice(0, 200)} (${reason})`,
+          })
+          .catch(() => undefined);
+        throw error;
+      }
       if (ours) {
         await new SendRecords(context.core.paths.stateDir, context.now).record(named.account.id, {
           approvalId: ours.approvalId,
@@ -95,7 +115,7 @@ export function cancelScheduledChange(context: ResendContext, name: string, id: 
         outcome: 'ok',
         surface: context.surface,
         ids: { emailIds: [emailId] },
-        reason: ours ? 'scheduled from this machine' : 'scheduled elsewhere; approved as a change',
+        reason,
       });
       return { account: name, id: emailId, cancelled: true, fromThisMachine: ours !== null, recipients: count };
     },
