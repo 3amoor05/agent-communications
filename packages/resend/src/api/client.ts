@@ -172,7 +172,10 @@ export async function resendRequest<T>(
   } catch {
     // An empty or non-JSON error body: the status says enough.
   }
-  const name = typeof body.name === 'string' ? body.name.slice(0, 64) : `http_${response.status}`;
+  // Both of Resend's texts are redacted: `name` is meant to be a code, but it is Resend's to fill, and it reaches
+  // `details.resendError`, which every surface prints.
+  const name =
+    typeof body.name === 'string' ? redact(body.name, transport.key).slice(0, 64) : `http_${response.status}`;
   const said = typeof body.message === 'string' ? redact(body.message, transport.key).slice(0, 300) : '';
   const known = codeFor(response.status, name);
   const hint =

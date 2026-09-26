@@ -189,3 +189,27 @@ test('a key is taken out of anything that could be printed', () => {
   assert.ok(!clean.includes('abcdefgh12345678'));
   assert.match(clean, /\[redacted key\]/);
 });
+
+test('a key Resend echoes in an error’s `name` is taken out too, not only in its `message`', async () => {
+  harness = await newHarness();
+  await harness.addAccount({ name: 'acme/resend' });
+  harness.fake.intercept = (request) =>
+    request.path === '/domains'
+      ? { status: 400, body: { name: `bad_${FULL}`, message: `the key ${FULL} is odd` } }
+      : undefined;
+  const failure = await listDomains(harness.context(), 'acme/resend').then(
+    () => assert.fail('it should have failed'),
+    (error: unknown) => error,
+  );
+  assert.ok(failure instanceof CommsError);
+  const printed = JSON.stringify({ message: failure.message, hint: failure.hint, details: failure.details });
+  assert.ok(!printed.includes(FULL.slice(3)), printed);
+  const { call, close } = await harness.mcp();
+  try {
+    const tool = await call('resend_domains', { account: 'acme/resend' });
+    assert.equal(tool.isError, true);
+    assert.ok(!JSON.stringify(tool).includes(FULL.slice(3)), 'nor over MCP');
+  } finally {
+    await close();
+  }
+});
