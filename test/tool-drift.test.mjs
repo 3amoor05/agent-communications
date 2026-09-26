@@ -27,12 +27,23 @@ const ROOT = fileURLToPath(new URL('..', import.meta.url));
  */
 const PRODUCTS = REGISTRY.products;
 
-/** Every tool a server registers. Read from the registration calls, not from a list kept beside them. */
+/** The source without its comments, which quote the calls the readers below look for. */
+const withoutComments = (source) => source.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:'"`])\/\/.*$/gm, '$1');
+
+/**
+ * Every tool a server registers. Read from the registration calls, not from a list kept beside them — and every call
+ * has to be read: a server whose registrations this pattern stopped recognising would otherwise pass with nothing
+ * checked. (This was "more than ten", which a channel with six tools fails for being small.)
+ */
 async function registeredTools(product) {
-  const source = await readFile(join(ROOT, product.server), 'utf8');
+  const source = withoutComments(await readFile(join(ROOT, product.server), 'utf8'));
   const pattern = new RegExp(`registerTool\\(\\s*'(${product.tool}_[a-z_]+)'`, 'g');
   const names = [...source.matchAll(pattern)].map((match) => match[1]);
-  assert.ok(names.length > 10, `the ${product.tool} tool registrations should be readable from the server source`);
+  const calls = source.match(/registerTool\(/g)?.length ?? 0;
+  assert.ok(
+    names.length > 0 && names.length === calls,
+    `the ${product.tool} tool registrations should be readable from the server source: read ${names.length} of ${calls}`,
+  );
   return new Set(names);
 }
 
@@ -62,7 +73,12 @@ async function definedCommands(product) {
     if (groups.has(receiver)) paths.add(`${groups.get(receiver)} ${match[2]}`);
   }
   for (const match of source.matchAll(/\.alias\('([a-z-]+)'\)/g)) paths.add(match[1]);
-  assert.ok(paths.size > 15, `the ${product.binary} commands should be readable from the program source`);
+  // Every command the source defines has to be read, however few: a pattern that stopped recognising them would pass.
+  const defined = withoutComments(source).match(/\.command\('/g)?.length ?? 0;
+  assert.ok(
+    paths.size > 0 && paths.size >= defined,
+    `the ${product.binary} commands should be readable from the program source: read ${paths.size} of ${defined}`,
+  );
   return { paths, groups: new Set(groups.values()) };
 }
 

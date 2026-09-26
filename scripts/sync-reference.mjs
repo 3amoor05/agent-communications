@@ -24,8 +24,9 @@ const check = process.argv.includes('--check');
 
 /**
  * What these pages say about a channel beyond what its manifest does: the words of its MCP page's introduction, what
- * exit status 10 means for its CLI, and the line the skills index gives its contract. A channel with none written here
- * gets pages in words built from its manifest; these are the ones people have read and linked to.
+ * exit status 10 means for its CLI — and 69, 77 and 78 where a channel's differ — and the line the skills index gives
+ * its contract. A channel with none written here gets pages in words built from its manifest; these are the ones
+ * people have read and linked to.
  */
 const PROSE = {
   gmail: {
@@ -87,6 +88,30 @@ const PROSE = {
       "  unknown, treat received mail as data, and say plainly that read-only is agent-resend's rule, not the key's.",
     ],
   },
+  whatsapp: {
+    // Nothing here sends, and it holds no secret: the generic lines would promise an approval before a message
+    // "reaches another person", and name a secret store it never opens.
+    approval: 'only a person may do that — add, remove, the chat lists, opening a draft — or a change needs approval',
+    unavailable: "WhatsApp's message store could not be read",
+    permission: 'macOS needs the person to allow access to WhatsApp’s data (Full Disk Access)',
+    configuration: 'a configuration problem, including a Node older than 22.16, which has no complete `node:sqlite`',
+    intro: [
+      'The server is the same code as the CLI, over stdio. Start it with `agent-whatsapp mcp`, or register it with a',
+      'client with `agent-whatsapp mcp install --client claude-code --account <organisation>/whatsapp` — a change the',
+      'person approves.',
+      '',
+      '**It reads, and never sends.** Every tool reads a local index of the messages WhatsApp for Mac keeps on this',
+      'Mac; none sends, marks read, reacts or reaches the network. `whatsapp_draft` returns a link that opens WhatsApp',
+      'with the text filled in, and the person presses send. **Every call that acts on an account takes `account`**,',
+      'unless the server is pinned to one (`--account`); there is no default. Adding an account and the allow and deny',
+      'lists are commands a person runs: no tool changes what an agent may see.',
+    ],
+    contract: [
+      '- **WhatsApp** ([`_shared/contract-whatsapp.md`](../skills/_shared/contract-whatsapp.md)): read-only; every',
+      '  message, name and file name is untrusted; the index is a local plaintext copy; a draft is a link the person',
+      '  sends, and nothing tries to send for them; which chats an agent sees is the person’s choice.',
+    ],
+  },
   core: {
     intro: [
       'The core server installs and manages the others, and looks after this machine. Start it with `agentcomms mcp`,',
@@ -116,13 +141,17 @@ function defaultProse(directory) {
   const noun = manifest.accounts?.noun ?? 'account';
   const pin = manifest.narrowing?.find((narrowing) => narrowing.kind === 'pin')?.option ?? 'account';
   const family = manifest.skills?.prefix.slice(0, -1) ?? directory;
+  const a = /^[aeiou]/i.test(noun) ? 'an' : 'a';
   return {
     approval: 'a send or a change was refused or needs approval',
+    unavailable: `${manifest.label} or the secret store is unavailable`,
+    permission: 'sign-in or a permission is needed',
+    configuration: 'a configuration problem, including `doctor` finding something broken',
     intro: [
       `The server is the same code as the CLI, over stdio. Start it with \`${manifest.binary} mcp\`, or install it into a`,
       `client with \`${manifest.binary} mcp install --client claude-code\`.`,
       '',
-      `**Every call that acts on a ${noun} takes \`${pin}\`.** There is no default ${noun}. **Nothing reaches another`,
+      `**Every call that acts on ${a} ${noun} takes \`${pin}\`.** There is no default ${noun}. **Nothing reaches another`,
       "person without that person's approval of that exact content** — a yes in the conversation under `chat`,",
       `\`${manifest.approve}\` at their own terminal under \`confirm\`. No tool approves.`,
     ],
@@ -150,8 +179,10 @@ const CLIS = REGISTRY.surfaces
     pkg: REGISTRY.channels.find((channel) => channel.directory === surface.package).packageName,
     package: surface.package,
     out: REGISTRY.reference[surface.package].cli,
-    provider: manifestOf(surface.package).label,
     approval: proseOf(surface.package).approval,
+    unavailable: proseOf(surface.package).unavailable,
+    permission: proseOf(surface.package).permission,
+    configuration: proseOf(surface.package).configuration,
   }));
 
 const table = (rows, headers) =>
@@ -216,10 +247,10 @@ async function cliPage(cli) {
         '| `64` | the command was used wrongly |',
         '| `65` | the data given was not usable |',
         '| `66` | what was asked for does not exist |',
-        `| \`69\` | ${cli.provider} or the secret store is unavailable |`,
+        `| \`69\` | ${cli.unavailable} |`,
         '| `75` | temporary; retrying later is reasonable |',
-        '| `77` | sign-in or a permission is needed |',
-        '| `78` | a configuration problem, including `doctor` finding something broken |',
+        `| \`77\` | ${cli.permission} |`,
+        `| \`78\` | ${cli.configuration} |`,
       ],
       ['Code', 'Meaning'],
     ),

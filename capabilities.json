@@ -1073,6 +1073,134 @@
       "mcp": null,
       "status": "exception",
       "reason": "Needs an app configuration token, which must never pass through chat. From chat, slack_manifest returns the manifest to create the app from on api.slack.com (design §4, §6.4)."
+    },
+    {
+      "id": "whatsapp.status",
+      "package": "whatsapp",
+      "cli": "status",
+      "mcp": "whatsapp_status",
+      "status": "both",
+      "operation": "whatsappStatus"
+    },
+    {
+      "id": "whatsapp.sync",
+      "package": "whatsapp",
+      "cli": "sync",
+      "mcp": "whatsapp_sync",
+      "status": "both",
+      "operation": "syncAccount"
+    },
+    {
+      "id": "whatsapp.chats",
+      "package": "whatsapp",
+      "cli": "chats",
+      "mcp": "whatsapp_chats",
+      "status": "both",
+      "operation": "listChats"
+    },
+    {
+      "id": "whatsapp.read",
+      "package": "whatsapp",
+      "cli": "read",
+      "mcp": "whatsapp_read",
+      "status": "both",
+      "operation": "readChat"
+    },
+    {
+      "id": "whatsapp.search",
+      "package": "whatsapp",
+      "cli": "search",
+      "mcp": "whatsapp_search",
+      "status": "both",
+      "operation": "searchMessages"
+    },
+    {
+      "id": "whatsapp.draft",
+      "package": "whatsapp",
+      "cli": "draft",
+      "mcp": "whatsapp_draft",
+      "status": "both",
+      "operation": "draftMessage",
+      "reason": "The command can also open the link with `--open`, for a person only; the tool never opens anything and returns the link for the person to click."
+    },
+    {
+      "id": "whatsapp.add",
+      "package": "whatsapp",
+      "cli": "add",
+      "mcp": null,
+      "status": "exception",
+      "reason": "Choosing which file on this Mac an agent may read is the person's decision, and the first read of WhatsApp's folder is the moment macOS asks that person for permission, which a server cannot answer. Refused to an agent at the command line too."
+    },
+    {
+      "id": "whatsapp.remove",
+      "package": "whatsapp",
+      "cli": "remove",
+      "mcp": null,
+      "status": "exception",
+      "reason": "The other half of `add`: it forgets the account, the person's chat lists for it and its index. The person's step, refused to an agent at the command line too."
+    },
+    {
+      "id": "whatsapp.allow",
+      "package": "whatsapp",
+      "cli": "allow",
+      "mcp": null,
+      "status": "exception",
+      "reason": "Which chats an agent may see is the person's choice, in both directions: a tool would let an agent widen what it sees. Kept outside `config.json`, where no loosening of it could be judged, and refused to an agent at the command line too."
+    },
+    {
+      "id": "whatsapp.deny",
+      "package": "whatsapp",
+      "cli": "deny",
+      "mcp": null,
+      "status": "exception",
+      "reason": "The other side of `allow`: an agent neither widens nor narrows what later sessions see. The person's list, refused to an agent at the command line too."
+    },
+    {
+      "id": "whatsapp.clear",
+      "package": "whatsapp",
+      "cli": "clear",
+      "mcp": null,
+      "status": "exception",
+      "reason": "It undoes `allow` and `deny`, which are the person's; emptying an allow list shows every chat again, which an agent must not be able to do."
+    },
+    {
+      "id": "whatsapp.approve",
+      "package": "whatsapp",
+      "cli": "approve",
+      "mcp": null,
+      "status": "exception",
+      "reason": "Approving a change under the `confirm` change policy — registering or pruning this server — means a person at a terminal typing the code shown; a tool that approved would make `confirm` mean nothing. There is no send to approve: this package never sends."
+    },
+    {
+      "id": "whatsapp.mcp.serve",
+      "package": "whatsapp",
+      "cli": "mcp",
+      "mcp": null,
+      "status": "exception",
+      "reason": "It runs the MCP server. A tool is a call into a server that is already running, so no tool can be the one that starts it."
+    },
+    {
+      "id": "whatsapp.mcp.install",
+      "package": "whatsapp",
+      "cli": "mcp install",
+      "mcp": "comms_server_install",
+      "status": "both",
+      "operation": "serverInstallChange",
+      "argv": ["--client", "claude-code"],
+      "args": { "channel": "whatsapp", "client": "claude-code" },
+      "expect": { "request.channel": "whatsapp" },
+      "reason": "From chat this is the core server's comms_server_install, which registers any channel's server: `channel: \"whatsapp\"` with `account` is this command with `--account` — the same change, `serverInstallChange`, so an approval either one prepared is claimed by the other (design §5)."
+    },
+    {
+      "id": "whatsapp.mcp.prune",
+      "package": "whatsapp",
+      "cli": "mcp prune",
+      "mcp": "comms_server_prune",
+      "status": "both",
+      "operation": "serverPruneChange",
+      "args": { "channel": "whatsapp" },
+      "expect": { "request.channel": "whatsapp" },
+      "reason": "From chat this is the core server's comms_server_prune, which prunes any channel's runtimes: `channel: \"whatsapp\"` is this command — the same change, `serverPruneChange`, so an approval either one prepared is claimed by the other (design §5)."
     }
   ]
 }

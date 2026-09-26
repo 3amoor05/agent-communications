@@ -308,11 +308,11 @@ test('every consumer reads the registry, and none keeps a list of channels of it
   }
 });
 
-test('this checkout’s registry is the four channels and five packages it ships', () => {
+test('this checkout’s registry is the five channels and six packages it ships', () => {
   assert.deepEqual(
     REGISTRY.channels.map((channel) => channel.directory),
-    ['core', 'gmail', 'resend', 'slack'],
+    ['core', 'gmail', 'resend', 'slack', 'whatsapp'],
   );
-  assert.deepEqual(REGISTRY.packages, ['core', 'gmail', 'gmail-mcp', 'resend', 'slack']);
-  assert.deepEqual(REGISTRY.platforms, ['gmail', 'resend', 'slack']);
+  assert.deepEqual(REGISTRY.packages, ['core', 'gmail', 'gmail-mcp', 'resend', 'slack', 'whatsapp']);
+  assert.deepEqual(REGISTRY.platforms, ['gmail', 'resend', 'slack', 'whatsapp']);
 });
