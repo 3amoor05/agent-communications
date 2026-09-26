@@ -256,12 +256,17 @@ export async function buildMessage(
     if (report.hidden.length > 0) problems.push(`${report.hidden.length} part(s) a reader would not see`);
     if (report.forms + report.formFields > 0) problems.push('it has form elements');
     if (report.scripts > 0) problems.push('it has scripts');
+    // Markup that makes the recipient read other text, or the same text in another order, than the text compared:
+    // a stylesheet's `content`, `<bdo>`, a bidi override and the rest, as core's analyser names them.
+    const alterations = [...new Set(report.alterations.map((entry) => entry.reason))];
+    for (const reason of alterations.slice(0, 3)) problems.push(`it has ${reason}`);
+    if (alterations.length > 3) problems.push(`and ${alterations.length - 3} more thing(s) that change what it shows`);
     if (text !== '' && collapseWhitespace(report.comparableText) !== collapseWhitespace(text)) {
       problems.push('what it shows is not the text part');
     }
     if (problems.length > 0) {
       throw new CommsError('UNSENDABLE_HTML', `this HTML cannot be sent by an agent: ${problems.join('; ')}`, {
-        hint: 'Send plain text, or HTML whose visible text is exactly the text part, with no images, hidden parts, forms or scripts.',
+        hint: 'Send plain text, or simple HTML whose visible text is exactly the text part, in the same order: no images, styles beyond simple formatting, hidden parts, forms or scripts.',
       });
     }
     html = input.html;
