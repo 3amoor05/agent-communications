@@ -5,17 +5,25 @@ import {
   CommsError,
   canPrompt,
   colorEnabled,
+  EXIT_CODES,
   type GatedChange,
   gatedChangeAtTerminal,
+  installExitStatus,
   type OutputOptions,
   paint,
+  renderInstall,
+  renderPrune,
   runCommand,
   type Streams,
+  type SupportedClient,
+  serverInstallChange,
+  serverPruneChange,
   writeResult,
 } from '@agentcomms/core';
 import { Command, CommanderError, Option } from 'commander';
 import { checkNewName } from '../accounts.ts';
 import { ResendContext, type ResendContextOptions } from '../context.ts';
+import { RESEND_MCP } from '../mcp/install.ts';
 import {
   addAccountChange,
   inspectKey,
@@ -136,6 +144,7 @@ Getting started:
   agent-resend doctor                              what works, and who enforces what
   agent-resend domains --account acme/resend
   agent-resend received list --account acme/resend
+  agent-resend mcp install --client claude-code   register the server with an agent, once a person approves it
 
 Exit codes: 0 ok · 1 unexpected · 10 a send or a change was refused or needs approval · 64 usage ·
 65 bad data · 66 not found · 69 provider or secret store unavailable · 75 temporary (retry later) ·
@@ -560,7 +569,7 @@ Exit codes: 0 ok · 1 unexpected · 10 a send or a change was refused or needs a
       }),
     );
 
-  program
+  const mcp = program
     .command('mcp')
     .description('run the MCP server on stdio, for a coding agent to connect to')
     .option('--account <name>', 'pin the server to one account; every tool then acts on it and no other')
@@ -569,6 +578,118 @@ Exit codes: 0 ok · 1 unexpected · 10 a send or a change was refused or needs a
       const { startResendStdioServer } = await import('../mcp/stdio-entry.ts');
       await startResendStdioServer({ ...deps, env, ...(flags.account ? { account: String(flags.account) } : {}) });
     });
+
+  mcp
+    .command('install')
+    .description('register this server with an MCP client, and prove it starts')
+    .addOption(
+      new Option('--client <client>', 'which client to register with').choices([
+        'claude-code',
+        'claude-desktop',
+        'codex',
+        'cursor',
+        'gemini',
+        'vscode',
+        'json',
+      ]),
+    )
+    .option(
+      '--name <name>',
+      'the name the client will show: 1 to 64 letters, digits, dots, underscores or hyphens',
+      'resend',
+    )
+    .option('--account <name>', 'pin the server to one account')
+    .addOption(new Option('--launcher <launcher>', 'how the server is started').choices(['managed', 'npx', 'local']))
+    .option('--no-verify', 'do not start the server to check the entry works')
+    .option('--force', "replace this server's own earlier entry — this is how you upgrade", false)
+    .option('--print', 'only print what would be written', false)
+    .option('--approval <approvalId>', 'register the server this approval was given for')
+    .action(
+      act(async (context, options, flags: Options) => {
+        // Named, never assumed: writing into a client's configuration nobody named is the thing to ask about.
+        if (!flags.client) {
+          throw new CommsError('USAGE', 'name the client with --client', {
+            hint: 'For example: `agent-resend mcp install --client claude-code`.',
+          });
+        }
+        // `mcp` and `mcp install` both take `--account`, and Commander gives a repeated name to the parent.
+        const pinned = (flags.account ?? mcp.opts().account) as string | undefined;
+        const launcher = flags.launcher as 'managed' | 'npx' | 'local' | undefined;
+        const name = flags.name as string | undefined;
+        /*
+         * The change `comms_server_install` makes, with this package's own product for its version and its code: an
+         * approval from the tool is claimed here with `--approval`, and one from here by the tool. The command to run
+         * again is word for word, nothing quoted: every word is fixed, a choice Commander checked, a server name the
+         * change refuses unless it is plain, or an account it refuses unless it is connected.
+         */
+        const again = [
+          'agent-resend',
+          'mcp',
+          'install',
+          '--client',
+          String(flags.client),
+          ...(name !== undefined && name !== 'resend' ? ['--name', name] : []),
+          ...(pinned !== undefined ? ['--account', pinned] : []),
+          ...(launcher !== undefined ? ['--launcher', launcher] : []),
+          ...(flags.verify === false ? ['--no-verify'] : []),
+          ...(flags.force === true ? ['--force'] : []),
+        ].join(' ');
+        const result = await changeAt(
+          context,
+          serverInstallChange(
+            context.core,
+            env,
+            {
+              channel: 'resend',
+              client: flags.client as SupportedClient,
+              name,
+              account: pinned,
+              launcher,
+              noVerify: flags.verify === false,
+              print: flags.print === true,
+              force: flags.force === true,
+            },
+            RESEND_MCP,
+          ),
+          flags,
+          again,
+        );
+        // Asked to register and did not, or registered an entry that did not start: the exit status says so.
+        const status = installExitStatus(result);
+        if (status !== EXIT_CODES.OK) softExit = status;
+        writeResult(result, output(), () => renderInstall(result, options.color), streams);
+      }),
+    );
+
+  mcp
+    .command('prune')
+    .description(
+      'remove managed runtimes that no client config it can read names, no printed entry names, and no process runs',
+    )
+    .option('--dry-run', 'only say what would be removed', false)
+    .option(
+      '--include-printed',
+      'also remove runtimes kept only because an entry for them was printed (--client json, --print), once those entries are gone',
+      false,
+    )
+    .option('--approval <approvalId>', 'remove the runtimes this approval was given for')
+    .action(
+      act(async (context, options, flags: Options) => {
+        // The change `comms_server_prune` makes: a dry run is free; removing is approved as the list it shows.
+        const result = await changeAt(
+          context,
+          serverPruneChange(
+            context.core,
+            env,
+            { channel: 'resend', dryRun: flags.dryRun === true, includePrinted: flags.includePrinted === true },
+            RESEND_MCP,
+          ),
+          flags,
+          `agent-resend mcp prune${flags.includePrinted === true ? ' --include-printed' : ''}`,
+        );
+        writeResult(result, output(), () => renderPrune(result, options.color), streams);
+      }),
+    );
 
   try {
     await program.parseAsync([...argv], { from: 'user' });
