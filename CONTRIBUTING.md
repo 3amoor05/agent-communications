@@ -17,9 +17,11 @@ Thanks for helping make email safe to hand to an agent.
 ## Layout
 
 ```text
-packages/core   @agentcomms/core   provider-neutral core (config, secrets, approvals, envelopes)
-packages/gmail        @agentcomms/gmail        Gmail provider, CLI (agent-gmail) and MCP server factory
-packages/gmail-mcp    @agentcomms/gmail-mcp    the MCP server as its own package (agent-gmail-mcp)
+packages/core         @agentcomms/core         provider-neutral core (config, secrets, approvals, envelopes), the
+                                               agentcomms CLI and the core MCP server
+packages/gmail        @agentcomms/gmail        Gmail channel: CLI (agent-gmail) and MCP server factory
+packages/gmail-mcp    @agentcomms/gmail-mcp    the Gmail MCP server as its own package (agent-gmail-mcp)
+packages/slack        @agentcomms/slack        Slack channel: CLI (agent-slack) and MCP server
 skills/<name>/        Agent Skills (SKILL.md + references/)
 docs/                 user and design documentation
 scripts/              repository checks
@@ -118,6 +120,35 @@ does, and the test tells them apart from the CLI itself. One command can be seve
 between operations (`agent-gmail inbox add` starts a sign-in, and with `--finish` completes one), and one tool can
 back several commands (`comms_server_install` is `mcp install` in every package); `reason` on such a row says how the
 two meet.
+
+## Adding a channel
+
+A channel is a package that says what it is; nothing in the core or the tooling is edited to add one
+([design](docs/superpowers/specs/2026-09-26-channel-plugins-design.md)). Channels are first-party only: they live in
+this repository and are released with the core, because a channel's process can read every channel's credentials in
+the shared keychain namespace, so it is trusted exactly as far as it is reviewed here.
+
+1. **The package**, `packages/<channel>`, named `@agentcomms/<channel>` and at the same version as the rest, with
+   `@agentcomms/core` as a `workspace:*` dev dependency. Its CLI at `src/cli.ts` with a Commander program at
+   `src/cli/program.ts` exporting `run`, its MCP server at `src/mcp/server.ts` exporting `create<Label>McpServer`, and a
+   README.
+2. **Its manifest**, the `"agentcomms"` field of that `package.json`: `contract: 1`, `channel` (the directory's name;
+   also the platform word in account names and the tool prefix), `label`, `binary`, `server`, `accounts` (`map:
+   "accounts"`, `noun`, `modes` from `read` and `send`, and an honest `guarantee`), `narrowing` (the pin is
+   `{ "option": "account", "flag": "--account", "kind": "pin" }`), `rivals`, `hosts`, `approve` and `skills`. The
+   schema is `channelManifestSchema` in `packages/core/src/channel-manifest.ts`.
+3. `pnpm sync:channels`, which validates every manifest and writes the core's snapshot of them. From it the core knows
+   the channel: the installer, `comms_server_install`'s `channel`, the update, and the words of every preview.
+4. **Its accounts** in the config's `accounts` map: `platform` is the channel word, `mode` is `read` or `send` and
+   nothing else, and credentials go through the core's secret store under `<channel>:` references. It adds no safety
+   setting of its own: only `sendPolicy`, `changePolicy` and `mode` are judged when a change loosens something.
+5. **Its capabilities**, a row per command and tool in `capabilities.json` (above), and **its skills**,
+   `skills/<prefix>*/` with `skills/_shared/contract-<family>.md`.
+6. `pnpm sync:skills`, `pnpm sync:reference` and `pnpm licenses`, then `pnpm verify`.
+
+Everything else reads the channel registry (`scripts/channels.mjs`), so the release, the version sync, the parity
+check, the reference pages and the skill and name tests pick the channel up from its manifest.
+`test/channel-registry.test.mjs` fails if one of them stops doing so.
 
 ## Pull requests
 
