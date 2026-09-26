@@ -178,6 +178,27 @@ export async function analyseDraft(options: {
     if (report.scripts > 0) {
       refusals.push({ reason: 'it contains a script', detail: `${report.scripts} element(s)` });
     }
+    // Images of every kind in the body, not only remote ones: the preview is the text part and the list of
+    // attachments, and neither shows a picture drawn in the text — a `data:` image, or a `cid:` one whose part is
+    // listed only as a file. Remote ones already have their own refusal above. The verified signature is not in
+    // `body`, so a logo in it is still shown in the preview as a remote image rather than refused.
+    const images = report.images.filter((image) => !report.remoteResources.includes(image.url));
+    if (images.length > 0) {
+      refusals.push({
+        reason: 'it shows an image, which the preview cannot show',
+        detail: images
+          .slice(0, 5)
+          .map((image) => `${image.where} ${image.url.length > 60 ? `${image.url.slice(0, 60)}…` : image.url}`.trim())
+          .join(', '),
+      });
+    }
+    // Markup that shows the recipient other text than the text part, or the same text in another order.
+    if (report.alterations.length > 0) {
+      refusals.push({
+        reason: 'it changes what its text shows, or the order it is read in',
+        detail: [...new Set(report.alterations.map((entry) => entry.reason))].slice(0, 5).join('; '),
+      });
+    }
     // The text part is what the preview shows and the HTML is what most people read: if they say different things,
     // approving one is not approving the other.
     //
