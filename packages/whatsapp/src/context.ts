@@ -148,8 +148,30 @@ export class WhatsAppContext {
     return { ...this.#source, env: this.env, isDefault };
   }
 
-  /** The account's own directory under core's state directory: its index, its sync lock, its brief snapshots. */
+  /** The account's own directory under core's state directory: its index and its brief snapshots. */
   accountDir(account: WhatsAppAccount): string {
     return accountStateDir(this.core.paths.stateDir, account.id);
+  }
+
+  /**
+   * The lock a sync and a remove of this account both hold, so neither runs while the other does. Beside the
+   * account's directory rather than in it, because a remove deletes the directory while it holds the lock.
+   */
+  syncLock(account: WhatsAppAccount): string {
+    return `${this.accountDir(account)}.sync.lock`;
+  }
+
+  /**
+   * The account with this id as it is now, under whatever name it has now, with its lists as they are now — or null
+   * when it is gone. For a sync to look again, under its lock, at what it started with.
+   */
+  async accountById(id: string): Promise<ResolvedAccount | null> {
+    const config = await this.config();
+    const found = Object.entries(config.accounts).find(
+      ([, account]) => account.id === id && account.platform === PLATFORM,
+    );
+    if (!found) return null;
+    const [name, account] = found;
+    return { name, account: account as WhatsAppAccount, lists: await this.lists.of(id) };
   }
 }

@@ -1,5 +1,5 @@
 import { rm } from 'node:fs/promises';
-import { agentMarker, CommsError, lookupName, nameAvailable, nameShapeProblem } from '@agentcomms/core';
+import { agentMarker, CommsError, lookupName, nameAvailable, nameShapeProblem, withFileLock } from '@agentcomms/core';
 import {
   newWhatsAppAccount,
   PLATFORM,
@@ -103,20 +103,34 @@ export interface RemovedAccount {
   listsForgotten: true;
 }
 
+/**
+ * How long a remove waits for a sync of the same account to finish. A sync copies the whole store, which on a large
+ * one takes a while; after this the person is told to try again, and nothing is removed.
+ */
+const REMOVE_WAIT_MS = 60_000;
+
 export async function removeAccount(context: WhatsAppContext, request: { name: string }): Promise<RemovedAccount> {
   refuseAnAgent(context, `remove ${request.name}`, 'removes a WhatsApp account');
   const { account } = requireAccount(await context.config(), request.name);
-  await context.core.config.update((config) => {
-    if (lookupName(config, 'account', request.name)?.id !== account.id) {
-      throw new CommsError('TRANSIENT', `"${request.name}" changed while it was being removed`, {
-        hint: 'Nothing was removed. Run it again.',
+  // The sync's lock: a sync running now finishes first, and its index is deleted with the rest; one that starts
+  // after finds the account gone.
+  await withFileLock(
+    context.syncLock(account),
+    async () => {
+      await context.core.config.update((config) => {
+        if (lookupName(config, 'account', request.name)?.id !== account.id) {
+          throw new CommsError('TRANSIENT', `"${request.name}" changed while it was being removed`, {
+            hint: 'Nothing was removed. Run it again.',
+          });
+        }
+        const { [request.name]: _removed, ...rest } = config.accounts;
+        return { ...config, accounts: rest };
       });
-    }
-    const { [request.name]: _removed, ...rest } = config.accounts;
-    return { ...config, accounts: rest };
-  });
-  // The account is gone before its index and lists, so nothing can read the index without the lists in between.
-  await rm(context.accountDir(account), { recursive: true, force: true });
-  await context.lists.forget(account.id);
+      // The account is gone before its index and lists, so nothing can read the index without the lists in between.
+      await rm(context.accountDir(account), { recursive: true, force: true });
+      await context.lists.forget(account.id);
+    },
+    { timeoutMs: REMOVE_WAIT_MS },
+  );
   return { account: request.name, removed: true, indexDeleted: true, listsForgotten: true };
 }

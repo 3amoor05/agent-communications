@@ -170,7 +170,8 @@ number does not match; and a group on the allow list would lose everyone who is 
 agents, deny the group.
 
 The lists apply at once to every read on both surfaces, and `sync` applies them too, leaving what they hide out of
-the index. `status` reports how many chats each list holds, never which.
+the index — as they are when it finishes: a list changed while a sync runs is read again just before the new index
+replaces the old, and the index is built again if it changed. `status` reports how many chats each list holds, never which.
 
 The lists are kept in `whatsapp-chats.json` beside `config.json`, by account id — not in `config.json`. Everything in
 that file is kept through every write, but only a few settings are *judged* when a write loosens something, and a
@@ -210,7 +211,9 @@ unencrypted on disk, and holds it open in SQLite's WAL mode while it runs: recen
 4. **Check the layout before reading.** A missing required table or column refuses the whole sync by name (exit `65`),
    and the previous index is kept as it was. A missing optional part turns off one named feature and is reported.
 5. **Index, then delete the copy.** The index is rebuilt in a new file and renamed into place, owner-only. The copy is
-   deleted whatever happens; one a crash left behind is removed by the next sync.
+   deleted whatever happens; one a crash left behind is removed by the next sync. `remove` holds the same lock as
+   `sync`: it waits for a sync that is running (up to a minute), then deletes the index that sync wrote with the rest,
+   and a sync that was waiting behind it finds the account gone and writes nothing.
 
 WhatsApp can change this layout without notice. The reader refuses rather than guess when a required part is gone;
 the risk it cannot catch is a column that keeps its name and changes its meaning, so check a handful of chats by eye

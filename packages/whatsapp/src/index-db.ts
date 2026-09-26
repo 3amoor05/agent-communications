@@ -110,6 +110,10 @@ const SCHEMA = `
  *
  * Streams messages rather than loading them, so a store of a few hundred thousand messages costs one row at a time.
  * A chat or message the account's lists hide is not written at all.
+ *
+ * `stillCurrent` is asked once the new index is complete and just before it replaces the old: false — the lists it
+ * was built with have changed since — deletes it, replaces nothing, and returns null; a throw does the same, and
+ * throws.
  */
 export async function rebuildIndex(
   directory: string,
@@ -117,7 +121,8 @@ export async function rebuildIndex(
   report: SchemaReport,
   info: { indexedAt: string; copied: readonly string[] },
   visibility: Visibility,
-): Promise<IndexStats> {
+  stillCurrent: () => Promise<boolean> = async () => true,
+): Promise<IndexStats | null> {
   await ensurePrivateDir(directory);
   const target = join(directory, INDEX_FILE);
   const building = join(directory, `${INDEX_FILE}.building-${randomBytes(4).toString('hex')}`);
@@ -234,6 +239,15 @@ export async function rebuildIndex(
     throw error;
   }
   db.close();
+  try {
+    if (!(await stillCurrent())) {
+      await rm(building, { force: true });
+      return null;
+    }
+  } catch (error) {
+    await rm(building, { force: true });
+    throw error;
+  }
   if (process.platform !== 'win32') await chmod(building, FILE_MODE);
   await rename(building, target);
   return stats;
