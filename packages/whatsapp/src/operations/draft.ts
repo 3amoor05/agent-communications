@@ -1,6 +1,5 @@
 import { CommsError, escapeForDisplay, isDangerous } from '@agentcomms/core';
 import { chatRefOf, noSuchChat } from '../chat-ref.ts';
-import { requireAccount } from '../config.ts';
 import type { WhatsAppContext } from '../context.ts';
 import type { ChatKind } from '../source/types.ts';
 import { Visibility } from '../visibility.ts';
@@ -116,23 +115,21 @@ export function composeDraft(request: { to: string; text: string }): DraftResult
  * The draft as both surfaces offer it: `draft` and `whatsapp_draft` call this.
  *
  * `account` names the account the chat belongs to, and its allow and deny lists decide whether an agent may draft to
- * it. Without one, every account's lists must allow it — the draft could be meant for any of them. A chat the lists
- * hide is refused exactly as `read` refuses a chat that does not exist.
+ * it; a pinned server's account is named whether the call names it or not. Without one, every account's lists must
+ * allow it — the draft could be meant for any of them. A chat the lists hide is refused exactly as `read` refuses a
+ * chat that does not exist.
  */
 export async function draftMessage(
   context: WhatsAppContext,
   request: { account?: string | undefined; to: string; text: string },
 ): Promise<DraftResult> {
-  const config = await context.config.load();
-  const accounts =
-    request.account !== undefined
-      ? [requireAccount(config, request.account)]
-      : Object.keys(config.accounts)
-          .sort()
-          .map((name) => requireAccount(config, name));
+  // One account when it is named, or when the server is pinned to one; otherwise every WhatsApp account's lists.
+  const names =
+    request.account !== undefined || context.pinned !== undefined ? [request.account] : await context.accountNames();
   const chat = chatRefOf(request.to);
-  for (const { name, account } of accounts) {
-    if (!new Visibility(account.chats).seesChat(chat.id)) throw noSuchChat(chat.id, name);
+  for (const named of names) {
+    const { name, lists } = await context.account(named);
+    if (!new Visibility(lists).seesChat(chat.id)) throw noSuchChat(chat.id, name);
   }
   return composeDraft({ to: request.to, text: request.text });
 }

@@ -4,7 +4,6 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
-import { SPIKE_CONFIG_FILE } from '../src/config.ts';
 import { createWhatsAppMcpServer } from '../src/mcp/server.ts';
 import { allowChat, clearChats, denyChat } from '../src/operations/chat-lists.ts';
 import { ALICE, BOB, ERIN_STATUS, GROUP, HIDDEN } from './support/fixture.ts';
@@ -254,8 +253,9 @@ test('a list applies at once, and the next sync leaves what it hides out of the 
 test('allow, deny and clear are a person’s: refused to an agent, unchanged by one, and offered by no tool', async () => {
   const harness = await newHarness({ env: { CLAUDECODE: '1' } });
   await harness.ready(ACCOUNT);
-  const configPath = join(harness.env.AGENT_COMMS_CONFIG_DIR as string, SPIKE_CONFIG_FILE);
+  const configPath = join(harness.configDir, 'config.json');
   const config = readFileSync(configPath);
+  assert.equal(harness.listsFile(), null);
   for (const argv of [['allow', ALICE], ['deny', ALICE], ['clear'], ['clear', ALICE]]) {
     const result = await harness.cli([...argv, '--account', ACCOUNT, '--json']);
     assert.equal(result.code, 10, `${argv.join(' ')}: only a person may`);
@@ -264,6 +264,7 @@ test('allow, deny and clear are a person’s: refused to an agent, unchanged by 
     assert.match(String(result.json().error?.hint), new RegExp(`agent-whatsapp ${argv[0]}`));
   }
   assert.deepEqual(readFileSync(configPath), config, 'nothing was written');
+  assert.equal(harness.listsFile(), null, 'no list was written either');
 
   // Nor from anywhere but the command line, marker or no marker: the operations refuse a server's context.
   const plain = await newHarness();

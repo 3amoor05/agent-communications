@@ -1,5 +1,5 @@
 /**
- * The library entry of `@agentcomms/whatsapp` — a spike, private and unpublished.
+ * The library entry of `@agentcomms/whatsapp`.
  *
  * Small on purpose, as the Slack package's is: the server, the draft composer and the version. Everything else is
  * reached through the `agent-whatsapp` command.

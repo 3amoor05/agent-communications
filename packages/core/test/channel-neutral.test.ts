@@ -106,7 +106,7 @@ async function effectsOf(m: Machine, request: Omit<ServerInstallRequest, 'client
 // ── A channel is a word, checked against the manifests ─────────────────────────────────────────────────────────
 
 test('a channel is any word the manifests declare, and nothing else', () => {
-  assert.deepEqual([...CHANNELS], ['core', 'gmail', 'resend', 'slack']);
+  assert.deepEqual([...CHANNELS], ['core', 'gmail', 'resend', 'slack', 'whatsapp']);
   for (const channel of CHANNELS) {
     assert.equal(isChannel(channel), true);
     assert.equal(channelServer(channel).binary, requireChannelManifest(channel).binary);
@@ -130,11 +130,16 @@ test('what the core says about a channel is read from its manifest', () => {
   assert.equal(narrowingOwner('account')?.channel, 'resend', 'Resend is the first channel pinned by `account`');
   assert.equal(pinOption('resend'), 'account');
   assert.equal(accountNoun('resend'), 'account');
+  assert.equal(pinOption('whatsapp'), 'account', 'every channel after Gmail and Slack is pinned by `account`');
   assert.equal(accountNoun('gmail'), 'mailbox');
   assert.equal(accountNoun('slack'), 'workspace');
+  assert.equal(accountNoun('whatsapp'), 'account');
   assert.equal(accountNoun('discord'), 'account');
-  assert.equal(channelApproveCommands(), '`agent-gmail approve`, `agent-resend approve` or `agent-slack approve`');
-  // Only the channels whose accounts can send name their command where the approval in hand is a send.
+  // Every channel's approve command approves a change; only those whose accounts can send approve a send.
+  assert.equal(
+    channelApproveCommands(),
+    '`agent-gmail approve`, `agent-resend approve`, `agent-slack approve` or `agent-whatsapp approve`',
+  );
   assert.equal(
     channelApproveCommands({ sending: true }),
     '`agent-gmail approve`, `agent-resend approve` or `agent-slack approve`',

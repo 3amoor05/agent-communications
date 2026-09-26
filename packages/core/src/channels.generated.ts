@@ -5,7 +5,7 @@
 import type { ChannelEntry } from './channel-manifest.ts';
 
 /** The channels built into this release, by their word: a channel is a string, and these are the known ones. */
-export type BuiltInChannel = 'core' | 'gmail' | 'resend' | 'slack';
+export type BuiltInChannel = 'core' | 'gmail' | 'resend' | 'slack' | 'whatsapp';
 
 /** Every first-party channel, the core first: what core knows about each without installing it. */
 export const CHANNEL_SNAPSHOT: readonly ChannelEntry[] = [
@@ -164,6 +164,47 @@ export const CHANNEL_SNAPSHOT: readonly ChannelEntry[] = [
       skills: {
         prefix: 'slack-',
         contract: 'skills/_shared/contract-slack.md',
+      },
+    },
+  },
+  {
+    packageName: '@agentcomms/whatsapp',
+    manifest: {
+      contract: 1,
+      channel: 'whatsapp',
+      label: 'WhatsApp',
+      binary: 'agent-whatsapp',
+      server: {
+        defaultName: 'whatsapp',
+        npxPackage: '@agentcomms/whatsapp',
+        npxArgs: ['mcp'],
+      },
+      accounts: {
+        map: 'accounts',
+        noun: 'account',
+        modes: ['read'],
+        guarantee: {
+          ceiling: 'code',
+          floor: 'code',
+          why: 'It reads only local files — a private copy of the store WhatsApp for Mac keeps on this Mac — and has no network client and no WhatsApp session, so it never sends: a draft is a link that opens WhatsApp with the text filled in, and the person presses send.',
+        },
+      },
+      narrowing: [
+        {
+          option: 'account',
+          flag: '--account',
+          kind: 'pin',
+        },
+      ],
+      rivals: {
+        word: 'whatsapp',
+        can: 'send WhatsApp messages as you',
+      },
+      hosts: [],
+      approve: 'agent-whatsapp approve',
+      skills: {
+        prefix: 'whatsapp-',
+        contract: 'skills/_shared/contract-whatsapp.md',
       },
     },
   },

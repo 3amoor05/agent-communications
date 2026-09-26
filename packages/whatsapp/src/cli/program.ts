@@ -1,15 +1,28 @@
 import {
   agentMarker,
+  approvalKind,
+  approveChangeAtTerminal,
   CommsError,
+  canPrompt,
   colorEnabled,
+  EXIT_CODES,
+  type GatedChange,
+  gatedChangeAtTerminal,
+  installExitStatus,
   type OutputOptions,
   paint,
+  renderInstall,
+  renderPrune,
   runCommand,
   type Streams,
+  type SupportedClient,
+  serverInstallChange,
+  serverPruneChange,
   writeResult,
 } from '@agentcomms/core';
 import { Command, CommanderError, Option } from 'commander';
 import { WhatsAppContext, type WhatsAppContextOptions } from '../context.ts';
+import { WHATSAPP_MCP } from '../mcp/install.ts';
 import { addAccount, removeAccount } from '../operations/accounts.ts';
 import { allowChat, clearChats, denyChat } from '../operations/chat-lists.ts';
 import { draftMessage } from '../operations/draft.ts';
@@ -31,12 +44,15 @@ import {
 } from './render.ts';
 
 /**
- * The `agent-whatsapp` command — a spike, unpublished.
+ * The `agent-whatsapp` command.
  *
  * Reads WhatsApp for Mac's own message store on this Mac, through a private copy, into a local index; lists, reads and
  * searches that index; and drafts messages as links the person opens and sends. It has no network client, no session
  * and no way to send. Every command prints a readable summary, or the whole result under `--json`, with the exit codes
  * the other agent-communications CLIs use.
+ *
+ * The accounts are core's (`config.json`); registering the server with an MCP client is core's change too, so
+ * `mcp install` here and `comms_server_install` from a chat are one change and one approval.
  */
 
 export interface CliDeps extends WhatsAppContextOptions {
@@ -58,7 +74,7 @@ export async function run(argv: readonly string[], deps: CliDeps = {}): Promise<
   program
     .name('agent-whatsapp')
     .description(
-      'WhatsApp for coding agents — a spike: read, list and search the chats WhatsApp for Mac keeps on this Mac, and draft replies the person sends. No network, no sending.',
+      'WhatsApp for coding agents, read-only: read, list and search the chats WhatsApp for Mac keeps on this Mac, and draft replies the person sends. No network, no sending.',
     )
     .version(VERSION, '-v, --version')
     .option('--json', 'print the result as {"ok":true,"schemaVersion":1,"data":…}', false)
@@ -77,12 +93,13 @@ Getting started (a person, in a terminal):
   agent-whatsapp search "invoice" --account personal/whatsapp
   agent-whatsapp draft +15555550101 "On my way"   a link; you press send in WhatsApp
   agent-whatsapp deny +15555550102 --account personal/whatsapp   agents never see that chat
+  agent-whatsapp mcp install --client claude-code --account personal/whatsapp
 
 Nothing here connects to WhatsApp or any other server, and nothing here can send.
 
-Exit codes: 0 ok · 1 unexpected · 10 only a person may do that · 64 usage · 65 bad data (a store
-whose layout changed) · 66 not found · 69 unavailable · 75 temporary (retry; a macOS dialog may
-be waiting) · 77 permission needed (macOS privacy) · 78 configuration problem.`,
+Exit codes: 0 ok · 1 unexpected · 10 only a person may do that, or a change needs approval · 64 usage
+· 65 bad data (a store whose layout changed) · 66 not found · 69 unavailable · 75 temporary (retry;
+a macOS dialog may be waiting) · 77 permission needed (macOS privacy) · 78 configuration problem.`,
     )
     .exitOverride();
 
@@ -94,12 +111,31 @@ be waiting) · 77 permission needed (macOS privacy) · 78 configuration problem.
     };
   };
 
+  /**
+   * A command that succeeded but wants a non-zero exit code — `mcp install` that registered an entry which did not
+   * start — where the result *is* the output and `--json` must still print one envelope.
+   */
+  let softExit: number | null = null;
+
   const act =
     <A extends unknown[]>(body: (context: WhatsAppContext, options: OutputOptions, ...args: A) => Promise<void>) =>
     async (...args: A): Promise<void> => {
       ran = true;
-      const context = new WhatsAppContext({ ...deps, env, surface: 'cli' });
-      exitCode = await runCommand(output(), () => body(context, output(), ...args), streams);
+      softExit = null;
+      exitCode = await runCommand(
+        output(),
+        async () => {
+          const context = new WhatsAppContext({
+            ...deps,
+            env,
+            surface: 'cli',
+            log: deps.log ?? ((line) => streams.stderr.write(`${line}\n`)),
+          });
+          await body(context, output(), ...args);
+        },
+        streams,
+      );
+      if (exitCode === 0 && softExit !== null) exitCode = softExit;
     };
 
   const accountOption = (command: Command): Command =>
@@ -124,7 +160,9 @@ be waiting) · 77 permission needed (macOS privacy) · 78 configuration problem.
 
   program
     .command('remove <name>')
-    .description("forget an account and delete its local index; WhatsApp's own store is not touched")
+    .description(
+      "forget an account, its chat lists and its local index — a person does this; WhatsApp's own store is not touched",
+    )
     .action(
       act(async (context, options, name: string) => {
         const result = await removeAccount(context, { name });
@@ -283,13 +321,208 @@ be waiting) · 77 permission needed (macOS privacy) · 78 configuration problem.
     );
 
   program
+    .command('approve <approvalId>')
+    .description(
+      'approve a change at this terminal — registering or pruning this server — by reading it and typing the code back; WhatsApp never sends, so there is no message to approve',
+    )
+    .action(
+      act(async (context, options, approvalId: string) => {
+        /*
+         * The one command an agent may not run for the person, checked before the id is even looked up. A shell
+         * agent can get past it — `script -q /dev/null` makes any command see a terminal — so it is a speed bump
+         * against the ordinary case, as it is for every approve command here, not a boundary.
+         *
+         * It approves only a change. `mcp install` and `mcp prune` are changes a person approves (core's), and under
+         * the `confirm` change policy that is a code typed at a terminal; `agentcomms` may not be installed beside
+         * this package, so its own command does it, through core's terminal approval. A send it cannot have
+         * prepared — there is no send in this package — is refused and sent back to the command that did.
+         */
+        const marker = agentMarker(env);
+        if (marker) {
+          throw new CommsError('APPROVAL_REQUIRED', 'only a person can approve a change, not an agent', {
+            hint: `Ask the person to run \`agent-whatsapp approve ${approvalId}\` in their own terminal.`,
+            details: { marker },
+          });
+        }
+        if (!canPrompt(env, streams, { json: options.json })) {
+          throw new CommsError('APPROVAL_REQUIRED', 'approving a change needs an interactive terminal', {
+            hint: `Run \`agent-whatsapp approve ${approvalId}\` directly in a terminal.`,
+          });
+        }
+        const pending = await context.core.approvals.get(approvalId);
+        if (!pending) {
+          throw new CommsError('NOT_FOUND', `no approval ${approvalId}`, {
+            hint: 'It may have expired, been used, or been cancelled. Prepare the change again.',
+          });
+        }
+        if (approvalKind(pending) !== 'change') {
+          throw new CommsError('USAGE', `approval ${approvalId} is for a send, and WhatsApp never sends`, {
+            hint: 'Approve it with the command that prepared it — the Gmail or Slack command, not this one.',
+          });
+        }
+        const outcome = await approveChangeAtTerminal(
+          context.core,
+          approvalId,
+          env,
+          { json: options.json, color: options.color },
+          streams,
+        );
+        streams.stdout.write(
+          outcome.state === 'approved'
+            ? 'Approved. This command approves; the change is applied by the command that prepared it.\n'
+            : 'Cancelled. Nothing was changed.\n',
+        );
+      }),
+    );
+
+  const changeAt = <T>(context: WhatsAppContext, change: GatedChange<T>, flags: Options, command: string): Promise<T> =>
+    gatedChangeAtTerminal(context.core, change, {
+      approvalId: flags.approval === undefined ? undefined : String(flags.approval),
+      env,
+      output: output(),
+      command,
+      approveCommand: 'agent-whatsapp approve',
+      streams,
+    });
+
+  const mcp = program
     .command('mcp')
     .description('run the MCP server on stdio, for a coding agent to connect to')
-    .action(async () => {
+    .option('--account <name>', 'pin the server to one account; every tool then acts on it and no other')
+    .action(async (flags: Options) => {
       ran = true;
-      const { startWhatsAppStdioServer } = await import('../mcp/stdio-entry.ts');
-      await startWhatsAppStdioServer({ env });
+      // A server that cannot start — a pin naming no account — says why on stderr and exits with the status that
+      // means it, rather than a stack trace in a client's log. Once it is serving, it returns.
+      exitCode = await runCommand(
+        output(),
+        async () => {
+          const { startWhatsAppStdioServer } = await import('../mcp/stdio-entry.ts');
+          await startWhatsAppStdioServer({
+            env,
+            ...(flags.account ? { account: String(flags.account) } : {}),
+          });
+        },
+        streams,
+      );
     });
+
+  mcp
+    .command('install')
+    .description('register this server with an MCP client, and prove it starts — a change the person approves')
+    .addOption(
+      new Option('--client <client>', 'which client to register with').choices([
+        'claude-code',
+        'claude-desktop',
+        'codex',
+        'cursor',
+        'gemini',
+        'vscode',
+        'json',
+      ]),
+    )
+    .option(
+      '--name <name>',
+      'the name the client will show: 1 to 64 letters, digits, dots, underscores or hyphens',
+      'whatsapp',
+    )
+    .option('--account <name>', 'pin the server to one account')
+    .addOption(new Option('--launcher <launcher>', 'how the server is started').choices(['managed', 'npx', 'local']))
+    .option('--no-verify', 'do not start the server to check the entry works')
+    .option('--force', "replace this server's own earlier entry — this is how you upgrade", false)
+    .option('--print', 'only print what would be written', false)
+    .option('--approval <approvalId>', 'register the server this approval was given for')
+    .action(
+      act(async (context, options, flags: Options) => {
+        // Named, never assumed: writing into a client's configuration nobody named is the thing to ask about.
+        if (!flags.client) {
+          throw new CommsError('USAGE', 'name the client with --client', {
+            hint: 'For example: `agent-whatsapp mcp install --client claude-code --account personal/whatsapp`.',
+          });
+        }
+        /*
+         * The parent's value counts too: `mcp` and `mcp install` both take `--account`, and Commander gives a repeated
+         * name to the parent, so the subcommand's own is undefined and the pin would be silently dropped — the bug
+         * the Gmail package shipped once.
+         */
+        const pinned = (flags.account ?? mcp.opts().account) as string | undefined;
+        const launcher = flags.launcher as 'managed' | 'npx' | 'local' | undefined;
+        const name = flags.name as string | undefined;
+        /*
+         * Registering a server is a change a person approves, and this is the change `comms_server_install` makes
+         * with `channel: "whatsapp"`: one change, so an approval prepared by either is claimed by the other. Every word
+         * of the command below is fixed, a choice Commander checked, a server name the change refuses unless it is
+         * plain, or an account it refuses unless it is connected — so none of it needs quoting.
+         */
+        // The pin is checked against `config.json` by core, so the spike's accounts have to be there first.
+        await context.migration();
+        const again = [
+          'agent-whatsapp',
+          'mcp',
+          'install',
+          '--client',
+          String(flags.client),
+          ...(name !== undefined && name !== 'whatsapp' ? ['--name', name] : []),
+          ...(pinned !== undefined ? ['--account', pinned] : []),
+          ...(launcher !== undefined ? ['--launcher', launcher] : []),
+          ...(flags.verify === false ? ['--no-verify'] : []),
+          ...(flags.force === true ? ['--force'] : []),
+        ].join(' ');
+        const result = await changeAt(
+          context,
+          serverInstallChange(
+            context.core,
+            env,
+            {
+              channel: 'whatsapp',
+              client: flags.client as SupportedClient,
+              name,
+              account: pinned,
+              launcher,
+              noVerify: flags.verify === false,
+              print: flags.print === true,
+              force: flags.force === true,
+            },
+            WHATSAPP_MCP,
+          ),
+          flags,
+          again,
+        );
+        // Asked to register and did not, or registered an entry that did not start: the exit status says so.
+        const status = installExitStatus(result);
+        if (status !== EXIT_CODES.OK) softExit = status;
+        writeResult(result, output(), () => renderInstall(result, options.color), streams);
+      }),
+    );
+
+  mcp
+    .command('prune')
+    .description(
+      'remove managed runtimes that no client config it can read names, no printed entry names, and no process runs',
+    )
+    .option('--dry-run', 'only say what would be removed', false)
+    .option(
+      '--include-printed',
+      'also remove runtimes kept only because an entry for them was printed (--client json, --print), once those entries are gone',
+      false,
+    )
+    .option('--approval <approvalId>', 'remove the runtimes this approval was given for')
+    .action(
+      act(async (context, options, flags: Options) => {
+        // The change `comms_server_prune` makes: a dry run is free; removing is approved as the list it shows.
+        const result = await changeAt(
+          context,
+          serverPruneChange(
+            context.core,
+            env,
+            { channel: 'whatsapp', dryRun: flags.dryRun === true, includePrinted: flags.includePrinted === true },
+            WHATSAPP_MCP,
+          ),
+          flags,
+          `agent-whatsapp mcp prune${flags.includePrinted === true ? ' --include-printed' : ''}`,
+        );
+        writeResult(result, output(), () => renderPrune(result, options.color), streams);
+      }),
+    );
 
   try {
     await program.parseAsync([...argv], { from: 'user' });

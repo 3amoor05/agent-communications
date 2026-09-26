@@ -1172,7 +1172,7 @@ test('comms_channels_available says what is installed and where each server is r
     const channels = report.channels as Record<string, unknown>[];
     assert.deepEqual(
       channels.map((channel) => channel.channel),
-      ['core', 'gmail', 'resend', 'slack'],
+      ['core', 'gmail', 'resend', 'slack', 'whatsapp'],
     );
     const [core, gmail, resend, slack] = channels;
     assert.equal(core?.channel, 'core');
@@ -1226,6 +1226,71 @@ test('comms_channels_available says what is installed and where each server is r
     for (const channel of [...data.channels, ...(report.channels as Record<string, unknown>[])])
       delete channel.installed;
     assert.deepEqual(data, report);
+  } finally {
+    await close();
+  }
+});
+
+test('WhatsApp from chat: comms_server_install pins it by `account`, and comms_channels_available lists it', async () => {
+  /*
+   * The first channel after Gmail and Slack, pinned by the generic `--account` (design 2026-09-26 §6). Its account is
+   * core's generic record — here as `agent-whatsapp add` writes one — and nothing about registering it is WhatsApp's
+   * code: the words, the flag and the refusals all come from its manifest.
+   */
+  const whatsapp = {
+    id: 'acc_WHATSAPP00000000',
+    platform: 'whatsapp',
+    workspace: 'group.net.whatsapp.WhatsApp.shared',
+    workspaceName: 'WhatsApp for Mac',
+    userId: 'store-owner',
+    tier: 'read',
+    mode: 'read',
+    grantedScopes: ['local-store:read'],
+    secretRef: 'whatsapp:none:acc_WHATSAPP00000000',
+    createdAt: CREATED,
+  };
+  const m = machine({ inboxes: { 'acme/gmail': inbox() }, accounts: { 'personal/whatsapp': whatsapp } });
+  const { ok, call, close } = await connect(m);
+  try {
+    const args = {
+      channel: 'whatsapp',
+      client: 'cursor',
+      account: 'personal/whatsapp',
+      launcher: 'npx',
+      noVerify: true,
+    };
+    const asked = await ok('comms_server_install', args);
+    assert.equal(asked.approvalRequired, true);
+    assert.match(
+      String(asked.preview),
+      /registers the WhatsApp MCP server with cursor as "whatsapp", pinned to the account personal\/whatsapp/,
+    );
+    const done = await ok('comms_server_install', { ...args, approvalId: asked.approvalId });
+    assert.equal(done.applied, true);
+    const entry = JSON.parse(readFileSync(join(m.home, '.cursor', 'mcp.json'), 'utf8')).mcpServers.whatsapp;
+    assert.deepEqual(entry.args, ['-y', `@agentcomms/whatsapp@${VERSION}`, 'mcp', '--account', 'personal/whatsapp']);
+
+    // Unpinned, the preview says it reaches every account; another platform's name, or its own pin's name, is refused.
+    const open = await ok('comms_server_install', { ...args, account: undefined, name: 'whatsapp-all' });
+    assert.match(String(open.preview), /not pinned: it reaches every account on this machine/);
+    const slackPin = await call('comms_server_install', { ...args, account: 'acme/gmail' });
+    assert.equal(slackPin.isError, true);
+    const workspace = await call('comms_server_install', { ...args, account: undefined, workspace: 'acme/slack' });
+    assert.equal(workspace.isError, true);
+    assert.match(
+      JSON.stringify(workspace.structuredContent),
+      /option of the Slack server; the WhatsApp server has no such option/,
+    );
+
+    const report = await ok('comms_channels_available');
+    const listed = (report.channels as { channel: string; registered: { narrowing: string[] }[] }[]).find(
+      (channel) => channel.channel === 'whatsapp',
+    );
+    assert.ok(listed, 'WhatsApp is a channel the core knows');
+    assert.deepEqual(
+      listed.registered.map((entry) => entry.narrowing),
+      [['--account', 'personal/whatsapp']],
+    );
   } finally {
     await close();
   }

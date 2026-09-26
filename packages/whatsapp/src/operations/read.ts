@@ -1,6 +1,5 @@
 import { CommsError, wholeNumber } from '@agentcomms/core';
 import { chatRefOf, noSuchChat } from '../chat-ref.ts';
-import { requireAccount } from '../config.ts';
 import type { WhatsAppContext } from '../context.ts';
 import { WhatsAppIndex } from '../index-db.ts';
 import { type ChatView, type MessageView, Presenter } from '../present.ts';
@@ -40,8 +39,8 @@ function kindsOf(kind: string | undefined): readonly ChatKind[] {
 
 /** The account's index, seen through its allow and deny lists. Every read here opens it this way. */
 async function openIndex(context: WhatsAppContext, accountName: string | undefined) {
-  const { name, account } = requireAccount(await context.config.load(), accountName);
-  const index = await WhatsAppIndex.open(context.accountDir(account), name, new Visibility(account.chats));
+  const { name, account, lists } = await context.account(accountName);
+  const index = await WhatsAppIndex.open(context.accountDir(account), name, new Visibility(lists));
   return { name, index };
 }
 

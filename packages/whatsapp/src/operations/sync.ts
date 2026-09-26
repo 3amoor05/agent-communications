@@ -1,6 +1,5 @@
 import { join } from 'node:path';
 import { CommsError, ensurePrivateDir, withFileLock } from '@agentcomms/core';
-import { requireAccount } from '../config.ts';
 import type { WhatsAppContext } from '../context.ts';
 import { type IndexStats, rebuildIndex } from '../index-db.ts';
 import { inspectSchema } from '../source/schema.ts';
@@ -25,7 +24,7 @@ export async function syncAccount(
   context: WhatsAppContext,
   request: { account?: string | undefined },
 ): Promise<SyncResult> {
-  const { name, account } = requireAccount(await context.config.load(), request.account);
+  const { name, account, lists } = await context.account(request.account);
   const store = context.storeOf(account);
   const directory = context.accountDir(account);
   await ensurePrivateDir(directory);
@@ -53,7 +52,7 @@ export async function syncAccount(
             db,
             report,
             { indexedAt: context.now().toISOString(), copied: snapshot.copied },
-            new Visibility(account.chats),
+            new Visibility(lists),
           );
           return {
             account: name,

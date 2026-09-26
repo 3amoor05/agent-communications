@@ -29,7 +29,9 @@ import { tempDir } from './helpers/temp.ts';
  *
  * A handful of sentences name every channel there is — a refusal's list of channels, the approve commands a hint
  * offers, the core server's instructions and three tool descriptions — and so gain a word when a channel is added:
- * Resend's arrival rewrote exactly those ten. None of them is inside an approval digest.
+ * Resend's arrival rewrote exactly those ten. WhatsApp's rewrote seven of them: it never sends, so the hints about a
+ * send approval, which name only the channels that can send, did not change. None of them is inside an approval
+ * digest.
  *
  *   AGENTCOMMS_WRITE_WORDING=1 node --experimental-strip-types --test test/wording-identity.test.ts
  *

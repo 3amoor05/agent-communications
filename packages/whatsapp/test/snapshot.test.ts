@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { test } from 'node:test';
 import { isCommsError } from '@agentcomms/core';
@@ -202,7 +202,7 @@ test('macOS refusing access says exactly what to allow, and to which app — and
   assert.match(error.hint, /Terminal/);
   assert.equal(error.details.reason, 'MACOS_PRIVACY');
   assert.equal(error.details.grant, 'Full Disk Access');
-  assert.ok(!existsSync(join(harness.env.AGENT_COMMS_CONFIG_DIR as string, 'whatsapp-spike.json')), 'nothing added');
+  assert.deepEqual(harness.coreConfig().accounts ?? {}, {}, 'nothing added');
 
   // status reports the same, as a state, rather than failing.
   const status = await harness.cli(['status', '--json'], { sourceIo: denied, platform: 'darwin' });
@@ -238,9 +238,7 @@ test('a permission dialog nobody answers fails in seconds with what to look for,
 test('the copy is deleted after every sync, and one a crash left behind is removed by the next', async () => {
   const harness = await newHarness();
   await harness.ready();
-  const config = JSON.parse(
-    readFileSync(join(harness.env.AGENT_COMMS_CONFIG_DIR as string, 'whatsapp-spike.json'), 'utf8'),
-  ) as { accounts: Record<string, { id: string }> };
+  const config = harness.coreConfig();
   const id = Object.values(config.accounts)[0]?.id as string;
   const dir = join(harness.env.AGENT_COMMS_STATE_DIR as string, 'whatsapp', id);
   assert.deepEqual(

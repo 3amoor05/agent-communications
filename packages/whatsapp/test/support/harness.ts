@@ -1,9 +1,10 @@
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Writable } from 'node:stream';
 import { type CliDeps, run } from '../../src/cli/program.ts';
 import { WhatsAppContext, type WhatsAppContextOptions } from '../../src/context.ts';
+import { LISTS_FILE } from '../../src/lists.ts';
 import { WHATSAPP_GROUP_CONTAINER } from '../../src/source/location.ts';
 import { buildFixtureStore, type Fixture, type FixtureOptions } from './fixture.ts';
 
@@ -15,6 +16,17 @@ import { buildFixtureStore, type Fixture, type FixtureOptions } from './fixture.
  * written with the file secret store pinned, though this package never opens a secret store: a harness that could
  * reach the login keychain is one refactor away from writing to it.
  */
+
+/** Core's agent markers: a harness made with one set is an agent's, and `ready` sets up as the person would. */
+const AGENT_MARKERS = [
+  'CLAUDECODE',
+  'CLAUDE_CODE_ENTRYPOINT',
+  'CODEX_SANDBOX',
+  'CODEX_HOME',
+  'CURSOR_AGENT',
+  'GEMINI_CLI',
+  'AGENT_COMMS_AGENT',
+];
 
 export function tempDir(prefix = 'agent-whatsapp-'): string {
   return realpathSync(mkdtempSync(join(tmpdir(), prefix)));
@@ -40,8 +52,18 @@ export interface Harness {
   fixture: Fixture | null;
   context(options?: WhatsAppContextOptions): WhatsAppContext;
   cli(argv: readonly string[], deps?: CliDeps): Promise<CliRun>;
-  /** `add` then `sync`, as a person would start. */
+  /** `add` then `sync`, as a person would start — at their own terminal, whatever marker the harness carries. */
   ready(name?: string): Promise<void>;
+  /** The environment without any agent marker: the person's. */
+  personEnv: NodeJS.ProcessEnv;
+  configDir: string;
+  /** Core's `config.json`, as written. */
+  coreConfig(): { version: number; accounts: Record<string, { id: string } & Record<string, unknown>> } & Record<
+    string,
+    unknown
+  >;
+  /** The person's lists file, or null when there is none. */
+  listsFile(): { version: 1; accounts: Record<string, { allow: string[]; deny: string[] }> } | null;
 }
 
 class Capture extends Writable {
@@ -69,6 +91,7 @@ export async function newHarness(
     NO_COLOR: '1',
     ...options.env,
   };
+  const personEnv = Object.fromEntries(Object.entries(env).filter(([name]) => !AGENT_MARKERS.includes(name)));
   const container = join(home, 'Library', 'Group Containers', WHATSAPP_GROUP_CONTAINER);
   const fixture = options.store === false ? null : await buildFixtureStore(container, options.store ?? {});
 
@@ -96,10 +119,17 @@ export async function newHarness(
       };
     },
     async ready(name = 'acme/whatsapp') {
-      const added = await harness.cli(['add', name, '--json']);
+      const added = await harness.cli(['add', name, '--json'], { env: personEnv });
       if (added.code !== 0) throw new Error(`add failed: ${added.stdout}${added.stderr}`);
-      const synced = await harness.cli(['sync', '--account', name, '--json']);
+      const synced = await harness.cli(['sync', '--account', name, '--json'], { env: personEnv });
       if (synced.code !== 0) throw new Error(`sync failed: ${synced.stdout}${synced.stderr}`);
+    },
+    personEnv,
+    configDir,
+    coreConfig: () => JSON.parse(readFileSync(join(configDir, 'config.json'), 'utf8')),
+    listsFile: () => {
+      const path = join(configDir, LISTS_FILE);
+      return existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : null;
     },
   };
   return harness;

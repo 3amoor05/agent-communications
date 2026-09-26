@@ -52,6 +52,7 @@ const PACKAGES = {
   gmailMcp: '@agentcomms/gmail-mcp',
   resend: '@agentcomms/resend',
   slack: '@agentcomms/slack',
+  whatsapp: '@agentcomms/whatsapp',
 } as const;
 
 function account(over: Partial<AccountConfig> = {}): AccountConfig {
@@ -228,6 +229,7 @@ const EVERYTHING_LATEST = {
   [PACKAGES.gmailMcp]: LATEST,
   [PACKAGES.resend]: LATEST,
   [PACKAGES.slack]: LATEST,
+  [PACKAGES.whatsapp]: LATEST,
 };
 
 interface Fakes extends UpdateDeps {
@@ -1135,6 +1137,40 @@ test('comms_channels_available flags an entry pinned older than this core, and r
       ['slack-next', newer, false],
     ]);
     assert.deepEqual(deps.asked, [], 'no registry was asked');
+  } finally {
+    await close();
+  }
+});
+
+test('a WhatsApp registration pinned by `--account` is updated with its pin, as every channel’s is', async () => {
+  // The first channel pinned by the generic flag: the update reads the pin off its manifest and carries it over.
+  const whatsapp = account({
+    id: 'acc_WHATSAPP00000000',
+    platform: 'whatsapp',
+    workspace: 'group.net.whatsapp.WhatsApp.shared',
+    userId: 'store-owner',
+    grantedScopes: ['local-store:read'],
+    secretRef: 'whatsapp:none:acc_WHATSAPP00000000',
+  });
+  const m = machine({ accounts: { 'personal/whatsapp': whatsapp } });
+  const packageName = PACKAGES.whatsapp;
+  makeRuntime(m, packageName, OLD);
+  cursor(m, { whatsapp: managed(m, packageName, OLD, ['--account', 'personal/whatsapp']) });
+  const deps = fakes(m);
+  const { ok, close } = await connect(m, { update: deps });
+  try {
+    const first = await ok('comms_update', { noVerify: true });
+    assert.equal(first.approvalRequired, true);
+    assert.ok(
+      String(first.preview).includes(
+        `registers the WhatsApp MCP server with cursor as "whatsapp" again (user scope, managed launcher), at ${LATEST} in place of ${OLD} — pinned to the account personal/whatsapp, as now`,
+      ),
+      String(first.preview),
+    );
+    const second = await ok('comms_update', { noVerify: true, approvalId: first.approvalId });
+    assert.equal(second.applied, true);
+    assert.deepEqual(cursorEntries(m).whatsapp?.args.slice(-3), ['mcp', '--account', 'personal/whatsapp']);
+    assert.ok(String(cursorEntries(m).whatsapp?.args[0]).includes(LATEST), 'at the latest release');
   } finally {
     await close();
   }

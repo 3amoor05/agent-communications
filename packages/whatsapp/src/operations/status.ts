@@ -1,8 +1,8 @@
 import { isCommsError, toCommsError } from '@agentcomms/core';
-import { requireAccount, type SpikeConfig } from '../config.ts';
 import type { WhatsAppContext } from '../context.ts';
 import { WhatsAppIndex } from '../index-db.ts';
 import { probeStore } from '../source/snapshot.ts';
+import { describeMigration } from '../spike-migration.ts';
 import { Visibility } from '../visibility.ts';
 
 /**
@@ -51,6 +51,11 @@ export interface StatusResult {
   sends: string;
   /** What to run first, when nothing is set up. */
   setup?: string | undefined;
+  /**
+   * What happened to the spike's accounts, when this process found its file: moved into `config.json`, or why not.
+   * Never which chats its lists hide.
+   */
+  spike?: string | undefined;
 }
 
 function stateOf(reason: unknown): AccessState {
@@ -67,13 +72,8 @@ function stateOf(reason: unknown): AccessState {
   }
 }
 
-async function statusOf(
-  context: WhatsAppContext,
-  name: string,
-  config: SpikeConfig,
-  check: boolean,
-): Promise<AccountStatus> {
-  const { account } = requireAccount(config, name);
+async function statusOf(context: WhatsAppContext, named: string, check: boolean): Promise<AccountStatus> {
+  const { name, account, lists } = await context.account(named);
   const store = context.storeOf(account);
   let access: AccountStatus['access'] = { state: 'not-checked' };
   if (check) {
@@ -94,7 +94,7 @@ async function statusOf(
   }
   let index: AccountStatus['index'] = { synced: false };
   try {
-    const opened = await WhatsAppIndex.open(context.accountDir(account), name, new Visibility(account.chats));
+    const opened = await WhatsAppIndex.open(context.accountDir(account), name, new Visibility(lists));
     try {
       const stats = opened.stats();
       index = {
@@ -116,7 +116,7 @@ async function statusOf(
     account: name,
     id: account.id,
     store: { path: store.path, default: store.isDefault },
-    chatLists: { allow: account.chats?.allow.length ?? 0, deny: account.chats?.deny.length ?? 0 },
+    chatLists: { allow: lists.allow.length, deny: lists.deny.length },
     access,
     index,
   };
@@ -126,10 +126,10 @@ export async function whatsappStatus(
   context: WhatsAppContext,
   request: { account?: string | undefined; check?: boolean | undefined },
 ): Promise<StatusResult> {
-  const config = await context.config.load();
-  const names = request.account === undefined ? Object.keys(config.accounts).sort() : [request.account];
+  const names = request.account === undefined ? await context.accountNames() : [request.account];
   const accounts: AccountStatus[] = [];
-  for (const name of names) accounts.push(await statusOf(context, name, config, request.check !== false));
+  for (const name of names) accounts.push(await statusOf(context, name, request.check !== false));
+  const spike = await context.migration();
   return {
     accounts,
     reads: READS,
@@ -137,5 +137,6 @@ export async function whatsappStatus(
     ...(accounts.length === 0
       ? { setup: 'agent-whatsapp add <organisation>/whatsapp — run by a person, in a terminal' }
       : {}),
+    ...(spike ? { spike: describeMigration(spike) } : {}),
   };
 }

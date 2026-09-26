@@ -20,8 +20,11 @@ export const STORE_FILE = 'ChatStorage.sqlite';
  */
 export const SIDE_FILES: readonly string[] = Object.freeze([`${STORE_FILE}-wal`, `${STORE_FILE}-journal`]);
 
-/** WhatsApp for Mac's shared group container. WhatsApp Business uses `group.net.whatsapp.WhatsAppSMB.shared`. */
+/** WhatsApp for Mac's shared group container. */
 export const WHATSAPP_GROUP_CONTAINER = 'group.net.whatsapp.WhatsApp.shared';
+
+/** WhatsApp Business's, which keeps its own store: passed with `--source`. */
+export const WHATSAPP_BUSINESS_CONTAINER = 'group.net.whatsapp.WhatsAppSMB.shared';
 
 /**
  * The default store, from the home directory the environment names.

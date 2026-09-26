@@ -1,10 +1,9 @@
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { isDangerous } from '@agentcomms/core';
-import { SPIKE_CONFIG_FILE } from '../src/config.ts';
 import { defaultStorePath, responsibleApp } from '../src/source/location.ts';
 import { ALICE } from './support/fixture.ts';
 import { newHarness } from './support/harness.ts';
@@ -24,26 +23,79 @@ test('the default store is found from the HOME the environment names, never from
   assert.ok(!path.startsWith(homedir()));
 });
 
-test('add records a name and nothing else in the spike’s own file — core’s config.json is not written', async () => {
+test('add records the account in core’s config.json, as the generic record every channel after Gmail uses', async () => {
   const harness = await newHarness();
-  const configDir = harness.env.AGENT_COMMS_CONFIG_DIR as string;
-  const core = readFileSync(join(configDir, 'config.json'), 'utf8');
   const added = await harness.cli(['add', ACCOUNT, '--json']);
   assert.equal(added.code, 0, added.stdout);
-  const data = added.data() as { store: { default: boolean; path: string }; next: string };
+  const data = added.data() as { id: string; store: { default: boolean; path: string; id: string }; next: string };
   assert.equal(data.store.default, true);
+  assert.equal(data.store.id, 'group.net.whatsapp.WhatsApp.shared');
   assert.equal(data.next, `agent-whatsapp sync --account ${ACCOUNT}`);
-  assert.equal(readFileSync(join(configDir, 'config.json'), 'utf8'), core, 'core’s shared config is untouched');
-  const spike = JSON.parse(readFileSync(join(configDir, SPIKE_CONFIG_FILE), 'utf8'));
-  assert.deepEqual(Object.keys(spike.accounts), [ACCOUNT]);
-  assert.equal(spike.accounts[ACCOUNT].source, undefined, 'the default location is resolved at run time, not stored');
-  assert.match(spike.accounts[ACCOUNT].id, /^acc_[A-Z0-9]{16}$/);
+  const config = harness.coreConfig();
+  assert.equal(config.version, 2);
+  assert.deepEqual(Object.keys(config.accounts), [ACCOUNT]);
+  const record = config.accounts[ACCOUNT] as Record<string, unknown>;
+  assert.match(String(record.id), /^acc_[A-Z0-9]{16}$/);
+  assert.equal(record.id, data.id);
+  assert.deepEqual(
+    { ...record, id: 'ID', secretRef: String(record.secretRef).replace(String(record.id), 'ID'), createdAt: 'T' },
+    {
+      id: 'ID',
+      platform: 'whatsapp',
+      workspace: 'group.net.whatsapp.WhatsApp.shared',
+      workspaceName: 'WhatsApp for Mac',
+      userId: 'store-owner',
+      tier: 'read',
+      mode: 'read',
+      grantedScopes: ['local-store:read'],
+      secretRef: 'whatsapp:none:ID',
+      createdAt: 'T',
+    },
+    'no source: the default location is resolved at run time, not stored; no list, no policy, no secret',
+  );
+  assert.equal(harness.listsFile(), null, 'no lists until the person makes some');
+  assert.ok(!existsSync(join(harness.configDir, 'whatsapp-spike.json')), 'the spike’s file is not written');
 
   const again = await harness.cli(['add', ACCOUNT, '--json']);
   assert.equal(again.code, 64);
+  assert.match(String(again.json().error?.message), /already added/);
   const twice = await harness.cli(['add', 'other/whatsapp', '--json']);
   assert.equal(twice.code, 64, 'one name per store');
   assert.match(String(twice.json().error?.message), /already added, as "acme\/whatsapp"/);
+  const wrong = await harness.cli(['add', 'acme/slack', '--json']);
+  assert.equal(wrong.code, 64);
+  assert.match(String(wrong.json().error?.message), /ends in \/slack, but this is a whatsapp account/);
+});
+
+test('add and remove are a person’s: refused to an agent, before anything is read or written', async () => {
+  const harness = await newHarness({ env: { CLAUDECODE: '1' } });
+  const before = readFileSync(join(harness.configDir, 'config.json'), 'utf8');
+  const add = await harness.cli(['add', ACCOUNT, '--json']);
+  assert.equal(add.code, 10);
+  assert.equal(add.json().error?.code, 'LOOSENING_REFUSED');
+  assert.match(String(add.json().error?.message), /only a person chooses which WhatsApp store an agent may read/);
+  assert.match(String(add.json().error?.hint), /agent-whatsapp add acme\/whatsapp/);
+  assert.equal(readFileSync(join(harness.configDir, 'config.json'), 'utf8'), before, 'nothing was written');
+
+  await harness.ready(ACCOUNT);
+  const remove = await harness.cli(['remove', ACCOUNT, '--json']);
+  assert.equal(remove.code, 10);
+  assert.match(String(remove.json().error?.message), /only a person removes a WhatsApp account/);
+  assert.deepEqual(Object.keys(harness.coreConfig().accounts), [ACCOUNT], 'still there');
+});
+
+test('a version-1 configuration gets no WhatsApp account until its names are migrated', async () => {
+  const harness = await newHarness();
+  writeFileSync(
+    join(harness.configDir, 'config.json'),
+    `${JSON.stringify({ version: 1, secrets: { store: 'file' } })}\n`,
+  );
+  const added = await harness.cli(['add', ACCOUNT, '--json']);
+  assert.equal(added.code, 78);
+  assert.match(String(added.json().error?.hint), /agentcomms names migrate/);
+  const status = await harness.cli(['status', '--json']);
+  assert.equal(status.code, 0, 'status still answers: nothing is set up');
+  assert.deepEqual(status.data().accounts, []);
 });
 
 test('status says what is set up, whether the store can be read, what the index holds, and that nothing is sent', async () => {
@@ -111,16 +163,18 @@ test('remove forgets the account and deletes its index, and never touches WhatsA
   const harness = await newHarness();
   await harness.ready(ACCOUNT);
   const store = readFileSync(harness.fixture?.path as string);
-  const configPath = join(harness.env.AGENT_COMMS_CONFIG_DIR as string, SPIKE_CONFIG_FILE);
-  const id = JSON.parse(readFileSync(configPath, 'utf8')).accounts[ACCOUNT].id as string;
+  const id = String(harness.coreConfig().accounts[ACCOUNT]?.id);
   const accountDir = join(harness.env.AGENT_COMMS_STATE_DIR as string, 'whatsapp', id);
   assert.ok(existsSync(join(accountDir, 'index.sqlite')));
+  assert.equal((await harness.cli(['deny', ALICE, '--account', ACCOUNT])).code, 0);
+  assert.deepEqual(Object.keys(harness.listsFile()?.accounts ?? {}), [id], 'the lists are kept by the account’s id');
   const removed = await harness.cli(['remove', ACCOUNT, '--json']);
   assert.equal(removed.code, 0);
   assert.equal(removed.data().indexDeleted, true);
   assert.deepEqual(readFileSync(harness.fixture?.path as string), store);
   assert.ok(!existsSync(accountDir), 'the index and everything else kept for the account is gone');
-  assert.deepEqual(JSON.parse(readFileSync(configPath, 'utf8')).accounts, {});
+  assert.deepEqual(harness.coreConfig().accounts, {});
+  assert.equal(harness.listsFile(), null, 'and its lists: a new account under the name starts with none');
   assert.equal((await harness.cli(['chats', '--account', ACCOUNT, '--json'])).code, 66);
 });
 

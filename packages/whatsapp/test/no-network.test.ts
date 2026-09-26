@@ -98,13 +98,22 @@ test("the package's own code imports no network module and calls no fetch, WebSo
   assert.deepEqual(offenders, []);
 
   const manifest = JSON.parse(readFileSync(join(PACKAGE, 'package.json'), 'utf8')) as Record<string, unknown>;
-  assert.equal(manifest.private, true, 'a spike is never published');
   assert.equal(
     manifest.dependencies,
     undefined,
     'nothing installed at run time: no WhatsApp client library, no driver',
   );
-  assert.equal(manifest.optionalDependencies, undefined);
+  assert.equal(manifest.optionalDependencies, undefined, 'not even the keychain module: this package holds no secret');
+  // What the manifest promises, as core and every tool read it: no host, only `read`, and nothing about sending.
+  const channel = manifest.agentcomms as {
+    hosts: string[];
+    accounts: { modes: string[]; guarantee: { why: string } };
+  };
+  assert.deepEqual(channel.hosts, [], 'it declares no host, because it talks to none');
+  assert.deepEqual(channel.accounts.modes, ['read']);
+  assert.match(channel.accounts.guarantee.why, /reads only local files/);
+  assert.match(channel.accounts.guarantee.why, /no network client/);
+  assert.match(channel.accounts.guarantee.why, /never sends/);
 });
 
 test('only the link opener starts a process', () => {
@@ -206,6 +215,7 @@ test('every command and every tool runs with the network cut off, and attempts n
       ['deny', GROUP, '--account', account],
       ['allow', ALICE, '--account', account],
       ['clear', '--account', account],
+      ['mcp', 'install', '--client', 'json', '--print', '--no-verify', '--account', account],
     ];
     for (const argv of commands) {
       for (const json of [true, false]) {
@@ -258,6 +268,7 @@ test('there is nothing to send with: the commands are the read surface, the draf
   assert.deepEqual(commands.sort(), [
     'add',
     'allow',
+    'approve',
     'chats',
     'clear',
     'deny',

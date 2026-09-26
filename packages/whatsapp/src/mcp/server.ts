@@ -9,15 +9,20 @@ import { syncAccount } from '../operations/sync.ts';
 import { VERSION } from '../version.ts';
 
 /**
- * The WhatsApp MCP server — a spike, unpublished.
+ * The WhatsApp MCP server.
  *
  * Six tools, each the operation its command runs: `whatsapp_status`, `whatsapp_sync`, `whatsapp_chats`,
  * `whatsapp_read`, `whatsapp_search` and `whatsapp_draft`. What is left out, and asserted absent by the tests:
  * anything that sends, marks read, reacts, sets presence or types — there is no client in this package that could —
- * and adding or removing an account, because choosing which file on the Mac an agent reads is a person's decision,
- * made at their terminal, where macOS can also ask them for permission.
+ * adding or removing an account, and the person's allow and deny lists, because choosing which file on the Mac an
+ * agent reads, and which chats in it, is a person's decision, made at their terminal, where macOS can also ask them
+ * for permission. Registering this server is the core server's `comms_server_install` (`channel: "whatsapp"`).
  *
  * The draft tool never opens anything: it returns the link, and the person clicks it and presses send.
+ *
+ * **Pinned** (`agent-whatsapp mcp --account acme/whatsapp`, which `mcp install --account` writes): every call acts on
+ * that account, `account` may be left out, any other is refused, and nothing about another account is said — not in
+ * the greeting, not in `whatsapp_status`. The pin is held by the account's id, so a rename follows it.
  */
 
 export interface WhatsAppMcpOptions extends WhatsAppContextOptions {}
@@ -30,12 +35,13 @@ export interface WhatsAppMcpServer {
 async function buildInstructions(context: WhatsAppContext): Promise<string> {
   let names: string[] = [];
   try {
-    names = Object.keys((await context.config.load()).accounts).sort();
+    names = await context.accountNames();
   } catch {
     // A config that cannot be read is for the tools to report, not a reason to refuse to start.
   }
+  const pinned = context.pinned !== undefined ? names[0] : undefined;
   return [
-    'WhatsApp, read from WhatsApp for Mac’s own store on this Mac (a spike). Read-only: no tool sends, and nothing',
+    'WhatsApp, read from WhatsApp for Mac’s own store on this Mac. Read-only: no tool sends, and nothing',
     'here connects to WhatsApp or anywhere else.',
     '',
     UNTRUSTED_NOTICE,
@@ -52,16 +58,24 @@ async function buildInstructions(context: WhatsAppContext): Promise<string> {
     'Status updates are left out of chats and search unless `kind` is `status`. The person may hide chats from you;',
     'a hidden chat is not found, as if it did not exist.',
     '',
-    'Pass `account` on every call except whatsapp_status — there is no default. On whatsapp_draft it applies that',
-    'account’s lists; without it, every account’s do.',
-    names.length > 0
-      ? `Known accounts: ${names.slice(0, 8).join(', ')}${names.length > 8 ? `, and ${names.length - 8} more` : ''}.`
-      : 'No account is set up yet: a person runs `agent-whatsapp add <organisation>/whatsapp` in a terminal.',
+    ...(pinned !== undefined
+      ? [
+          `This server is pinned to ${pinned}: every call acts on it, \`account\` may be left out, and any other is refused.`,
+        ]
+      : [
+          'Pass `account` on every call except whatsapp_status — there is no default. On whatsapp_draft it applies that',
+          'account’s lists; without it, every account’s do.',
+          names.length > 0
+            ? `Known accounts: ${names.slice(0, 8).join(', ')}${names.length > 8 ? `, and ${names.length - 8} more` : ''}.`
+            : 'No account is set up yet: a person runs `agent-whatsapp add <organisation>/whatsapp` in a terminal.',
+        ]),
   ].join('\n');
 }
 
 export async function createWhatsAppMcpServer(options: WhatsAppMcpOptions = {}): Promise<WhatsAppMcpServer> {
   const context = new WhatsAppContext({ ...options, surface: 'mcp' });
+  // A pin naming no WhatsApp account is refused here, so the server does not start serving nothing.
+  await context.checkPin();
   const server = new McpServer(
     { name: 'agent-whatsapp', version: VERSION },
     { instructions: await buildInstructions(context) },
@@ -94,7 +108,9 @@ export async function createWhatsAppMcpServer(options: WhatsAppMcpOptions = {}):
   // Nothing here reaches a network. The index tools read this Mac only; sync reads WhatsApp's store and writes the
   // package's own index — local, and safe to repeat.
   const readsLocal = { readOnlyHint: true, openWorldHint: false } as const;
-  const account = z.string().describe('which WhatsApp account, as `organisation/whatsapp`');
+  // Required unless the server is pinned, when the pin is the account and `account` may be left out.
+  const named = z.string().describe('which WhatsApp account, as `organisation/whatsapp`');
+  const account = context.pinned === undefined ? named : named.optional();
 
   server.registerTool(
     'whatsapp_status',
@@ -102,7 +118,7 @@ export async function createWhatsAppMcpServer(options: WhatsAppMcpOptions = {}):
       title: 'Status',
       description:
         'What is set up, whether each WhatsApp store can be read (and, when macOS blocks it, exactly what the person must allow), and what the local index holds. `check: false` skips opening the store.',
-      inputSchema: { account: account.optional(), check: z.boolean().optional() },
+      inputSchema: { account: named.optional(), check: z.boolean().optional() },
       annotations: readsLocal,
     },
     async (args) => {
@@ -227,7 +243,7 @@ export async function createWhatsAppMcpServer(options: WhatsAppMcpOptions = {}):
       description:
         'Composes a message and returns a link that opens WhatsApp with the text filled in. It sends nothing and opens nothing: give the person the link; they check the message and press send themselves. `to` is a phone number or any chat id whatsapp_chats or whatsapp_read shows. A group, a chat with a hidden number, a broadcast list or a channel gets the text to paste instead; a status update cannot be drafted to.',
       inputSchema: {
-        account: account.optional().describe('the account the chat belongs to, as `organisation/whatsapp`'),
+        account: named.optional().describe('the account the chat belongs to, as `organisation/whatsapp`'),
         to: z.string().describe('a phone number with its country code, or a chat id from whatsapp_chats'),
         text: z.string().describe('the message'),
       },

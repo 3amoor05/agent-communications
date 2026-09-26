@@ -9,9 +9,10 @@ import { type Harness, newHarness } from './support/harness.ts';
 /**
  * The agent-facing surface, and its parity with the command line.
  *
- * The spike is deliberately not in the repository's `capabilities.json` (it is not a released channel), so its parity
- * table is here: every command either has a tool that runs the same operation and returns the same result, or a
- * stated reason it does not.
+ * The repository's parity check (`capabilities.json`, `pnpm verify:parity`) proves each command and its tool reach the
+ * same operation. This goes one step further for this package: they return the same result, byte for byte once the
+ * envelope's random boundary and the sync time are set aside. Every command either has such a tool or a stated reason
+ * it does not — the same reasons its rows in `capabilities.json` give.
  */
 
 const ACCOUNT = 'acme/whatsapp';
@@ -73,7 +74,8 @@ const PARITY = [
 const EXCEPTIONS = {
   add: 'choosing which file on this Mac an agent reads is a person’s decision, and the first read is when macOS asks them',
   remove: 'the other half of add: a person’s lifecycle step',
-  mcp: 'it starts the server a tool would need already running',
+  mcp: 'it starts the server a tool would need already running; its install and prune are the core’s tools',
+  approve: 'approving under `confirm` is a person at a terminal typing the code shown',
   allow: 'which chats an agent may see is the person’s choice, made at their terminal; no agent sets it',
   deny: 'the other side of allow: an agent neither widens nor narrows what it sees',
   clear: 'undoes allow and deny, which are the person’s',

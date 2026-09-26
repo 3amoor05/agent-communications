@@ -1,17 +1,19 @@
-import { agentMarker, CommsError } from '@agentcomms/core';
 import { chatRefOf } from '../chat-ref.ts';
-import { accountNamed, requireAccount, type WhatsAppAccount } from '../config.ts';
 import type { WhatsAppContext } from '../context.ts';
 import { type ChatLists, listKey } from '../visibility.ts';
+import { refuseAnAgent } from './accounts.ts';
 
 /**
  * The person's allow and deny lists of chats: `allow`, `deny` and `clear`.
  *
  * Commands only, with no tool, and refused to an agent at the command line too. The lists decide what an agent sees,
  * so an agent does not set them — not to see more, and not to see less either, since `allow` on an empty list and
- * `clear` both change what every later session sees, and neither is the agent's call. The refusal is the one
- * `draft --open` makes: core's agent marker, a speed bump rather than a boundary; the boundary is that no tool offers
- * these at all.
+ * `clear` both change what every later session sees, and neither is the agent's call. The refusal is the one `add`
+ * and `draft --open` make: core's agent marker, a speed bump rather than a boundary; the boundary is that no tool
+ * offers these at all.
+ *
+ * They live in this package's own file, keyed by the account's id (`lists.ts`), not in `config.json`: see there for
+ * why a list the person keeps is not a setting core's classifier could judge.
  */
 
 export interface ChatListsResult {
@@ -24,16 +26,6 @@ export interface ChatListsResult {
   effect: string;
   /** What the index holds was decided at the last sync: chats it left out come back only with the next one. */
   next: string;
-}
-
-function refuseAnAgent(context: WhatsAppContext, command: string): void {
-  const marker = agentMarker(context.env);
-  if (marker !== null || context.surface !== 'cli') {
-    throw new CommsError('LOOSENING_REFUSED', 'only a person changes which chats an agent may see', {
-      hint: `Ask the person to run \`agent-whatsapp ${command}\` in their own terminal.`,
-      ...(marker === null ? {} : { details: { marker } }),
-    });
-  }
 }
 
 function without(list: readonly string[], chatId: string): string[] {
@@ -60,23 +52,10 @@ async function change(
   request: { account?: string | undefined; chat?: string | undefined },
   next: (lists: ChatLists, chatId: string | undefined) => ChatLists,
 ): Promise<ChatListsResult> {
-  refuseAnAgent(context, command);
+  refuseAnAgent(context, command, 'changes which chats an agent may see');
   const chatId = request.chat === undefined ? undefined : chatRefOf(request.chat).id;
-  const { name } = requireAccount(await context.config.load(), request.account);
-  let before: ChatLists = { allow: [], deny: [] };
-  let after: ChatLists = before;
-  await context.config.update((config) => {
-    const account = accountNamed(config, name);
-    if (!account) throw new CommsError('NOT_FOUND', `no WhatsApp account called "${name}"`);
-    before = { allow: [...(account.chats?.allow ?? [])], deny: [...(account.chats?.deny ?? [])] };
-    after = next(before, chatId);
-    const { chats: _previous, ...rest } = account;
-    const updated: WhatsAppAccount =
-      after.allow.length === 0 && after.deny.length === 0
-        ? rest
-        : { ...rest, chats: { allow: [...after.allow], deny: [...after.deny] } };
-    return { ...config, accounts: { ...config.accounts, [name]: updated } };
-  });
+  const { name, account } = await context.account(request.account);
+  const { before, after } = await context.lists.update(account.id, (lists) => next(lists, chatId));
   return {
     account: name,
     allow: [...after.allow],

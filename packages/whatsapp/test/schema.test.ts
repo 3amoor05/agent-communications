@@ -62,9 +62,7 @@ test('an optional part that is missing costs one named feature, and is reported 
 test('a drifted store indexes nothing and leaves the previous index as it was', async () => {
   const harness = await newHarness();
   await harness.ready();
-  const config = JSON.parse(
-    readFileSync(join(harness.env.AGENT_COMMS_CONFIG_DIR as string, 'whatsapp-spike.json'), 'utf8'),
-  ) as { accounts: Record<string, { id: string }> };
+  const config = harness.coreConfig();
   const id = Object.values(config.accounts)[0]?.id as string;
   const index = join(harness.env.AGENT_COMMS_STATE_DIR as string, 'whatsapp', id, 'index.sqlite');
   const before = readFileSync(index);
@@ -106,9 +104,7 @@ test('a store without the optional tables still syncs, and says what it is doing
 test('an index an earlier reader built, under older rules, is refused until the next sync', async () => {
   const harness = await newHarness();
   await harness.ready();
-  const config = JSON.parse(
-    readFileSync(join(harness.env.AGENT_COMMS_CONFIG_DIR as string, 'whatsapp-spike.json'), 'utf8'),
-  ) as { accounts: Record<string, { id: string }> };
+  const config = harness.coreConfig();
   const id = Object.values(config.accounts)[0]?.id as string;
   const index = await openDatabase(join(harness.env.AGENT_COMMS_STATE_DIR as string, 'whatsapp', id, 'index.sqlite'));
   index.exec("UPDATE meta SET value = '1' WHERE key = 'format'");

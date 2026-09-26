@@ -405,8 +405,8 @@ test('a manifest is refused for what would make a server, a pin or a skill mean 
 });
 
 test('a channel that reaches no host says so with an empty list, and must still say it', () => {
-  // A channel that reads only files on this machine has `[]` as its honest answer — the strictest a later transport
-  // could hold it to — and saying nothing is still refused (above).
+  // WhatsApp reads a file on this Mac: `[]` is its honest answer, and the strictest a later transport could hold.
+  assert.deepEqual(channelManifest('whatsapp')?.hosts, []);
   assert.equal(
     problemsAfter((e) => {
       at(e, 'slack').hosts = [];

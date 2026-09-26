@@ -401,6 +401,51 @@ test('a clean migration moves everything and leaves nothing behind', async () =>
   assert.equal(migrations[0]?.ids?.migration, migrations[1]?.ids?.migration);
 });
 
+test('a channel that holds no credential: its `none` reference moves nothing, is left nowhere, and blocks nothing', async () => {
+  /*
+   * WhatsApp stores no secret, and core's `secretRef` stays required (design 2026-09-26 §5), so its accounts carry a
+   * reference that names none: `whatsapp:none:<id>`. The migration must neither choke on it nor report it left
+   * behind — there is nothing under it in either backend — and must still move everything else.
+   */
+  const { migrateSecrets } = await import('../src/operations/secrets-migrate.ts');
+  const { committedSecretsStore } = await import('../src/config.ts');
+  const { core, source } = await coreWithTwoSlackTokens();
+  await core.config.update((config) => ({
+    ...config,
+    accounts: {
+      ...config.accounts,
+      'personal/whatsapp': {
+        id: 'acc_WHATSAPP00000000',
+        platform: 'whatsapp',
+        workspace: 'group.net.whatsapp.WhatsApp.shared',
+        workspaceName: 'WhatsApp for Mac',
+        userId: 'store-owner',
+        tier: 'read',
+        mode: 'read',
+        grantedScopes: ['local-store:read'],
+        secretRef: 'whatsapp:none:acc_WHATSAPP00000000',
+        createdAt: '2026-09-26T12:00:00.000Z',
+      },
+    },
+  }));
+  const target = memoryStore('keychain');
+  const result = await migrateSecrets(core, 'keychain', { source, target: target.store });
+  assert.equal(result.moved, 2, 'the Slack tokens moved; the reference that names nothing was not counted');
+  assert.deepEqual(result.leftovers, []);
+  assert.equal(target.values.has('whatsapp:none:acc_WHATSAPP00000000'), false, 'nothing was written under it');
+  assert.equal((await core.config.load()).secrets?.store, 'keychain');
+  // Alone, it still counts as a stored secret when a store is first chosen — which errs towards asking.
+  const alone = await core.config.load();
+  assert.equal(
+    committedSecretsStore({
+      ...alone,
+      secrets: undefined,
+      accounts: { 'personal/whatsapp': alone.accounts['personal/whatsapp'] as never },
+    }),
+    'keychain',
+  );
+});
+
 test('a migration that cannot record itself does not switch, and a retry records it', async () => {
   /*
    * The record used to be written after the switch. When the append failed, the command reported failure over a
