@@ -1,0 +1,40 @@
+{
+  "name": "@agentcomms/whatsapp",
+  "version": "0.6.0",
+  "private": true,
+  "description": "SPIKE, unpublished: read-only WhatsApp for agents, from WhatsApp for Mac's local message store. It never talks to WhatsApp; the person sends.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Criss Moldovan",
+  "engines": {
+    "node": ">=22.16.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/crissmoldovan/agent-communications.git",
+    "directory": "packages/whatsapp"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs"
+    }
+  },
+  "main": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
+  "bin": {
+    "agent-whatsapp": "./dist/cli.mjs"
+  },
+  "scripts": {
+    "build": "tsdown",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --experimental-strip-types --disable-warning=ExperimentalWarning --test --test-timeout=60000 \"test/**/*.test.ts\""
+  },
+  "devDependencies": {
+    "@agentcomms/core": "workspace:*",
+    "@modelcontextprotocol/client": "2.0.0",
+    "@modelcontextprotocol/server": "^2.0.0",
+    "commander": "^15.0.0",
+    "zod": "catalog:"
+  }
+}

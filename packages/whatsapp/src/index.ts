@@ -1,0 +1,13 @@
+/**
+ * The library entry of `@agentcomms/whatsapp` — a spike, private and unpublished.
+ *
+ * Small on purpose, as the Slack package's is: the server, the draft composer and the version. Everything else is
+ * reached through the `agent-whatsapp` command.
+ */
+import { VERSION } from './version.ts';
+
+export { VERSION };
+export const PACKAGE_NAME = '@agentcomms/whatsapp';
+
+export { createWhatsAppMcpServer, type WhatsAppMcpOptions, type WhatsAppMcpServer } from './mcp/server.ts';
+export { composeDraft, type DraftResult } from './operations/draft.ts';
