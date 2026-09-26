@@ -244,6 +244,9 @@ test('a scheduled email from this machine is cancelled at once; one scheduled el
     { surface: 'mcp' },
   );
   assert.equal(theirs.status, 'approval-required');
+  if (theirs.status === 'approval-required') {
+    assert.equal(theirs.prepared.policy, 'chat', 'the machine’s change policy, the account setting none');
+  }
   const cancels = () => harness.fake.requests.filter((request) => request.path.endsWith('/cancel'));
   assert.equal(cancels().length, 1, 'only ours was cancelled so far');
   if (theirs.status !== 'approval-required') return;
@@ -256,4 +259,40 @@ test('a scheduled email from this machine is cancelled at once; one scheduled el
   assert.equal(cancels().length, 2);
   const audit = (await harness.audit()).filter((line) => line.operation === 'resend.scheduled.cancel');
   assert.equal(audit.length, 2, 'both cancels are audited');
+});
+
+test('cancelling an email scheduled elsewhere is approved under the account’s own change policy', async () => {
+  harness = await newHarness();
+  await harness.addAccount({ name: 'acme/resend', mode: 'send', changePolicy: 'confirm' });
+  const context = harness.context('mcp');
+  const at = new Date(Date.now() + 3600 * 1000).toISOString();
+  const prepared = await prepareSend(context, 'acme/resend', {
+    from: 'hello@acme.test',
+    to: ['sam@partner.test'],
+    subject: 'Later',
+    text: 'Later',
+    scheduledAt: at,
+  });
+  await executeSend(context, 'acme/resend', { approvalId: prepared.approvalId, expect: prepared.expect });
+  harness.fake.sent.unshift({
+    ...(harness.fake.sent[0] as NonNullable<(typeof harness.fake.sent)[0]>),
+    id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+    tags: [],
+  });
+  const theirs = await gatedChange(
+    context.core,
+    cancelScheduledChange(context, 'acme/resend', 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'),
+    { surface: 'mcp' },
+  );
+  assert.equal(theirs.status, 'approval-required');
+  if (theirs.status !== 'approval-required') return;
+  assert.equal(theirs.prepared.policy, 'confirm');
+  await assert.rejects(
+    gatedChange(context.core, cancelScheduledChange(context, 'acme/resend', 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'), {
+      surface: 'mcp',
+      approvalId: theirs.prepared.approvalId,
+    }),
+    /approv/i,
+  );
+  assert.equal(harness.fake.requests.filter((request) => request.path.endsWith('/cancel')).length, 0);
 });

@@ -60,8 +60,10 @@ export function cancelScheduledChange(context: ResendContext, name: string, id: 
   };
   return {
     plan: async (config) => {
-      const { count, ours } = await look();
+      const { named, count, ours } = await look();
       return {
+        // About this account, so its own change policy — when it sets one — decides how the cancel is approved.
+        account: named.name,
         summary: `Cancel the scheduled email ${emailId} from ${name}`,
         before: config,
         after: config,
