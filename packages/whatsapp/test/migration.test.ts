@@ -23,13 +23,10 @@ const SPIKE_ID = 'acc_SPKE00000000000A';
 /** File operations that fail loudly: the migration, and the reads after it, must never reach WhatsApp's store. */
 const untouchable: SourceIo = {
   lstat: async () => {
+    throw new Error('the store was looked at');
+  },
+  open: async () => {
     throw new Error('the store was opened');
-  },
-  copyFile: async () => {
-    throw new Error('the store was copied');
-  },
-  readHeader: async () => {
-    throw new Error('the store was read');
   },
 };
 

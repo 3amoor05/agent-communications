@@ -1,6 +1,20 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  constants,
+  linkSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { basename, join } from 'node:path';
 import { test } from 'node:test';
 import { isCommsError } from '@agentcomms/core';
@@ -32,23 +46,44 @@ function snapshotOf(dir: string): Record<string, { sha: string; size: number; mt
 }
 
 /** Records every path each operation was asked for, and passes through to the real file system. */
-function spyIo(): { io: SourceIo; touched: string[] } {
+function spyIo(): { io: SourceIo; touched: string[]; opened: string[] } {
   const touched: string[] = [];
+  const opened: string[] = [];
   return {
     touched,
+    opened,
     io: {
       lstat: (path) => {
         touched.push(path);
         return nodeSourceIo.lstat(path);
       },
-      copyFile: (from, to) => {
-        touched.push(from);
-        return nodeSourceIo.copyFile(from, to);
-      },
-      readHeader: (path, bytes) => {
+      open: (path) => {
         touched.push(path);
-        return nodeSourceIo.readHeader(path, bytes);
+        opened.push(basename(path));
+        return nodeSourceIo.open(path);
       },
+    },
+  };
+}
+
+/** The real file system, with `after` run once the first read of each file opened has returned. */
+function readingIo(after: (path: string) => void): SourceIo {
+  return {
+    ...nodeSourceIo,
+    async open(path) {
+      const handle = await nodeSourceIo.open(path);
+      let first = true;
+      return {
+        ...handle,
+        async read(buffer, position) {
+          const bytes = await handle.read(buffer, position);
+          if (first) {
+            first = false;
+            after(path);
+          }
+          return bytes;
+        },
+      };
     },
   };
 }
@@ -102,6 +137,11 @@ test('only ChatStorage.sqlite and its log are read: the key store beside it is n
     const context = harness.context({ sourceIo: spy.io });
     const work = tempDir();
     const snapshot = await snapshotStore(harness.fixture?.path as string, work, context.sourceOptions(true));
+    if (process.platform !== 'win32') {
+      for (const name of readdirSync(snapshot.directory)) {
+        assert.equal(statSync(join(snapshot.directory, name)).mode & 0o777, 0o600, `${name} is owner-only`);
+      }
+    }
     await snapshot.dispose();
     const names = new Set(spy.touched.map((path) => basename(path)));
     assert.deepEqual(
@@ -110,6 +150,11 @@ test('only ChatStorage.sqlite and its log are read: the key store beside it is n
       'the journal is only looked for; nothing else is',
     );
     assert.ok(!spy.touched.includes(decoy));
+    assert.deepEqual(
+      spy.opened,
+      [STORE_FILE, `${STORE_FILE}-wal`, `${STORE_FILE}-journal`],
+      'each is opened once, and the copy reads from that open file, never through its name again',
+    );
 
     // Named directly, the key store is refused on its name, before a single byte is read.
     const again = spyIo();
@@ -133,14 +178,186 @@ test('a link in place of the store is refused, not followed', { skip: process.pl
   const linked = join(dir, 'linked');
   mkdirSync(linked);
   symlinkSync(real.path, join(linked, STORE_FILE));
+  // Refused when it is opened, before a byte is read — not found out afterwards.
+  let reads = 0;
+  const io = readingIo(() => {
+    reads += 1;
+  });
   await assert.rejects(
-    probeStore(join(linked, STORE_FILE)),
+    probeStore(join(linked, STORE_FILE), { io }),
     (error: unknown) => isCommsError(error) && /not a regular file/.test(error.message),
   );
   await assert.rejects(
-    snapshotStore(join(linked, STORE_FILE), tempDir()),
+    snapshotStore(join(linked, STORE_FILE), tempDir(), { io }),
     (error: unknown) => isCommsError(error) && /not a regular file/.test(error.message),
   );
+
+  // Nor in place of its log, pointing at the key store.
+  const store = await buildFixtureStore(join(dir, 'logged'));
+  symlinkSync(writeDecoy(join(dir, 'logged')), `${store.path}-wal`);
+  const work = tempDir();
+  await assert.rejects(
+    snapshotStore(store.path, work, { io }),
+    (error: unknown) => isCommsError(error) && /-wal is not a regular file/.test(error.message),
+  );
+  assert.deepEqual(readdirSync(work), []);
+  assert.equal(reads, 0, 'nothing was read through a link');
+});
+
+test('a log that appears, or a store replaced by another file, while it is copied means the copy is taken again', async () => {
+  const dir = tempDir();
+  const fixture = await buildFixtureStore(join(dir, 'container'));
+  const journal = `${fixture.path}-journal`;
+  let appeared = false;
+  const appearing = readingIo(() => {
+    if (appeared) return;
+    appeared = true;
+    writeFileSync(journal, 'a rollback journal, begun mid-copy');
+  });
+  const first = await snapshotStore(fixture.path, tempDir(), { io: appearing, sleep: async () => undefined });
+  assert.equal(first.attempts, 2, 'the journal that appeared was not in the first copy');
+  assert.deepEqual(first.copied, [STORE_FILE, `${STORE_FILE}-journal`]);
+  await first.dispose();
+  rmSync(journal);
+
+  // Replaced under its name: the file opened is unchanged, but the name no longer names it.
+  const other = await buildFixtureStore(join(dir, 'other'));
+  let replaced = false;
+  const replacing = readingIo((path) => {
+    if (replaced || basename(path) !== STORE_FILE) return;
+    replaced = true;
+    renameSync(fixture.path, join(dir, 'moved-aside.sqlite'));
+    renameSync(other.path, fixture.path);
+  });
+  const second = await snapshotStore(fixture.path, tempDir(), { io: replacing, sleep: async () => undefined });
+  assert.equal(second.attempts, 2, 'the store that took its name is copied, in a second attempt');
+  await second.dispose();
+
+  // Gone by the second look, as a log WhatsApp removes is — by its name, where a platform keeps an open file's links.
+  const logged = await buildFixtureStore(join(dir, 'logged'), { wal: true });
+  try {
+    let gone = false;
+    const vanishing: SourceIo = {
+      ...nodeSourceIo,
+      async lstat(path) {
+        if (!gone && basename(path) === `${STORE_FILE}-wal`) {
+          gone = true;
+          throw Object.assign(new Error('ENOENT: no such file or directory'), { code: 'ENOENT' });
+        }
+        return nodeSourceIo.lstat(path);
+      },
+    };
+    const third = await snapshotStore(logged.path, tempDir(), { io: vanishing, sleep: async () => undefined });
+    assert.equal(third.attempts, 2, 'a log gone from its name is copied again');
+    await third.dispose();
+  } finally {
+    logged.close();
+  }
+});
+
+/**
+ * The race a check-then-copy loses: the store's name handed to a link to the key store between the look and the copy,
+ * and handed back before the second look, so the two looks agree. The hook fires just after the first time the store
+ * is examined — opened, or `lstat`ed by a design that looks before it copies — and puts the store back just before the
+ * second.
+ */
+function racingIo(store: string, key: string, options: { restore: boolean }) {
+  const aside = `${store}.aside`;
+  let looks = 0;
+  const swap = () => {
+    renameSync(store, aside);
+    symlinkSync(key, store);
+  };
+  const restore = () => {
+    rmSync(store);
+    renameSync(aside, store);
+  };
+  const look = async <T>(path: string, real: () => Promise<T>): Promise<T> => {
+    if (basename(path) !== STORE_FILE) return real();
+    looks += 1;
+    if (looks === 2 && options.restore) restore();
+    const result = await real();
+    if (looks === 1) swap();
+    return result;
+  };
+  const io = {
+    ...nodeSourceIo,
+    lstat: (path: string) => look(path, () => nodeSourceIo.lstat(path)),
+    open: (path: string) => look(path, () => nodeSourceIo.open(path)),
+  } as SourceIo;
+  return { io, swapped: () => looks > 0 };
+}
+
+test('a store swapped for a link to the key store mid-copy is never read through it: the copy is of the original, or refused', {
+  skip: process.platform === 'win32',
+}, async () => {
+  for (const restore of [true, false]) {
+    const dir = tempDir();
+    const fixture = await buildFixtureStore(join(dir, 'container'));
+    const key = writeDecoy(join(dir, 'container'));
+    const original = readFileSync(fixture.path);
+    const race = racingIo(fixture.path, key, { restore });
+    const work = tempDir();
+    let copied: Buffer | null = null;
+    let refused: unknown = null;
+    try {
+      // One attempt: a link found in the store's place after the copy is refused there and then, not retried.
+      const snapshot = await snapshotStore(fixture.path, work, { io: race.io, attempts: 1 });
+      copied = readFileSync(snapshot.database);
+      await snapshot.dispose();
+    } catch (error) {
+      refused = error;
+    }
+    assert.ok(race.swapped(), 'the race ran');
+    if (copied) {
+      assert.ok(!copied.includes(Buffer.from('decoy: never read')), 'the key store was not copied');
+      assert.ok(copied.equals(original), 'what was copied is the store as it was opened');
+    } else {
+      assert.ok(isCommsError(refused) && /not a regular file/.test(refused.message), String(refused));
+    }
+    if (!restore) assert.ok(refused, 'a link still in the store’s place is refused');
+    assert.deepEqual(readdirSync(work), [], 'nothing is left behind');
+  }
+});
+
+test('a store with a second name — a hard link, which could be the key store’s — is refused, and so is a pipe', {
+  skip: process.platform === 'win32',
+}, async () => {
+  const dir = tempDir();
+  const fixture = await buildFixtureStore(join(dir, 'container'));
+  linkSync(fixture.path, join(dir, 'another-name.sqlite'));
+  for (const attempt of [() => snapshotStore(fixture.path, tempDir()), () => probeStore(fixture.path)]) {
+    await assert.rejects(
+      attempt,
+      (error: unknown) => isCommsError(error) && error.code === 'USAGE' && /more than one name/.test(error.message),
+    );
+  }
+
+  // A pipe in the store's place would hold a read open forever; it is refused at once, as not a file.
+  const piped = join(tempDir(), 'container');
+  mkdirSync(piped);
+  const pipe = join(piped, STORE_FILE);
+  execFileSync('mkfifo', [pipe]);
+  try {
+    const started = Date.now();
+    for (const attempt of [
+      () => snapshotStore(pipe, tempDir(), { timeoutMs: 3000 }),
+      () => probeStore(pipe, { timeoutMs: 3000 }),
+    ]) {
+      await assert.rejects(
+        attempt,
+        (error: unknown) => isCommsError(error) && error.code === 'USAGE' && /not a regular file/.test(error.message),
+      );
+    }
+    assert.ok(Date.now() - started < 2000, 'without waiting on it');
+  } finally {
+    // Frees a reader a broken build left blocked, so the test process can end.
+    try {
+      closeSync(openSync(pipe, constants.O_WRONLY | constants.O_NONBLOCK));
+    } catch {
+      // No reader was waiting.
+    }
+  }
 });
 
 test('a store that keeps changing while it is copied is copied again, then refused rather than read half-written', async () => {
@@ -148,15 +365,11 @@ test('a store that keeps changing while it is copied is copied again, then refus
   const fixture = await buildFixtureStore(dir, { wal: true });
   try {
     let copies = 0;
-    const racing: SourceIo = {
-      ...nodeSourceIo,
-      async copyFile(from, to) {
-        await nodeSourceIo.copyFile(from, to);
-        copies += 1;
-        // WhatsApp writes between the fingerprint and the second look, every time.
-        fixture.write(`UPDATE ZWACHATSESSION SET ZUNREADCOUNT = ${copies} WHERE Z_PK = 1`);
-      },
-    };
+    // WhatsApp writes between the fingerprint and the second look, every time.
+    const racing = readingIo(() => {
+      copies += 1;
+      fixture.write(`UPDATE ZWACHATSESSION SET ZUNREADCOUNT = ${copies} WHERE Z_PK = 1`);
+    });
     const work = tempDir();
     await assert.rejects(
       snapshotStore(fixture.path, work, { io: racing, attempts: 3, sleep: async () => undefined }),
@@ -166,14 +379,10 @@ test('a store that keeps changing while it is copied is copied again, then refus
 
     // Once it settles, the next attempt succeeds.
     let calls = 0;
-    const settling: SourceIo = {
-      ...nodeSourceIo,
-      async copyFile(from, to) {
-        await nodeSourceIo.copyFile(from, to);
-        calls += 1;
-        if (calls === 1) fixture.write('UPDATE ZWACHATSESSION SET ZUNREADCOUNT = 99 WHERE Z_PK = 1');
-      },
-    };
+    const settling = readingIo(() => {
+      calls += 1;
+      if (calls === 1) fixture.write('UPDATE ZWACHATSESSION SET ZUNREADCOUNT = 99 WHERE Z_PK = 1');
+    });
     const snapshot = await snapshotStore(fixture.path, work, { io: settling, sleep: async () => undefined });
     assert.equal(snapshot.attempts, 2);
     await snapshot.dispose();
@@ -185,11 +394,10 @@ test('a store that keeps changing while it is copied is copied again, then refus
 test('macOS refusing access says exactly what to allow, and to which app — and writes nothing', async () => {
   const harness = await newHarness({ env: { __CFBundleIdentifier: 'com.apple.Terminal' } });
   const denied: SourceIo = {
-    ...nodeSourceIo,
     lstat: async () => {
       throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' });
     },
-    readHeader: async () => {
+    open: async () => {
       throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' });
     },
   };
@@ -223,7 +431,7 @@ test('a permission dialog nobody answers fails in seconds with what to look for,
   const harness = await newHarness();
   const hanging: SourceIo = {
     ...nodeSourceIo,
-    lstat: () => new Promise(() => undefined),
+    open: () => new Promise(() => undefined),
   };
   const started = Date.now();
   const result = await harness.cli(['add', 'acme/whatsapp', '--json'], { sourceIo: hanging, sourceTimeoutMs: 50 });

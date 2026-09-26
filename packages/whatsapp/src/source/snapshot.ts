@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
-import { copyFile, lstat, open, readdir, rm } from 'node:fs/promises';
+import { type FileHandle, lstat, open, readdir, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { CommsError, ensurePrivateDir } from '@agentcomms/core';
 import { checkStorePath, responsibleApp, SIDE_FILES, STORE_FILE } from './location.ts';
@@ -18,44 +18,67 @@ import { checkStorePath, responsibleApp, SIDE_FILES, STORE_FILE } from './locati
  *   the same store read `immutable` returns none of the rows a live writer holds in the log.
  *
  * So the store and its log are copied, byte for byte, into a private directory under this package's state, and
- * everything else reads the copy. The source files are only ever `lstat`ed and read — `copyFile` opens them read-only
- * (on APFS it clones them, which is instant and takes no extra space). Nothing here opens the source with SQLite,
- * takes a lock on it, or touches its `-shm`.
+ * everything else reads the copy. Nothing here opens the source with SQLite, takes a lock on it, or touches its
+ * `-shm`.
  *
- * **Why the copy is consistent.** Each source file is fingerprinted — inode, size and nanosecond mtime — before and
- * after the copy. If WhatsApp wrote anything in between, the copy is thrown away and taken again, a few times, and
- * then refused rather than read half-written. The caller then asks SQLite to check the copy (`quick_check`).
+ * **Why a link can never be read through.** Each source file is opened once — read-only, refusing a link
+ * (`O_NOFOLLOW`), and without waiting on a pipe (`O_NONBLOCK`) — and every byte copied comes from that one open
+ * file. Its path is never opened again, so a name swapped for a link to the key store beside it, after the check and
+ * before the copy, changes nothing: the copy is of the file that was opened. What is opened must be a regular file
+ * with exactly one name — a hard link would give the key store a second name, which `O_NOFOLLOW` does not see — and,
+ * after the copy, its name must still be the one it was opened by. The cost is APFS's clone: `copyFile`, which clones,
+ * takes a path and would open it again, so the bytes are copied instead — the store's size, briefly, in this
+ * package's state.
+ *
+ * **Why the copy is consistent.** Every file is open before any is copied, and each is fingerprinted from its open
+ * handle — device, inode, links, size and nanosecond mtime — before and after the copy; after it, each name is looked
+ * at again (`lstat`, which opens nothing) for a file that appeared, went, or was replaced. If WhatsApp wrote anything
+ * in between, the copy is thrown away and taken again, a few times, and then refused rather than read half-written.
+ * The caller then asks SQLite to check the copy (`quick_check`).
  */
 
 export interface SourceStat {
+  dev: bigint;
   ino: bigint;
+  nlink: bigint;
   size: bigint;
   mtimeNs: bigint;
   isFile(): boolean;
   isSymbolicLink(): boolean;
 }
 
-/** The only three things this package does to the source files. Injected so a test can deny, hang or race them. */
-export interface SourceIo {
-  lstat(path: string): Promise<SourceStat>;
-  copyFile(from: string, to: string): Promise<void>;
-  /** The first `bytes` bytes, read-only, never following a link. */
-  readHeader(path: string, bytes: number): Promise<Buffer>;
+/** A source file, open. Everything read from a source is read through one of these, never through its path. */
+export interface SourceHandle {
+  /** `fstat`: the open file, whatever its name now names. */
+  stat(): Promise<SourceStat>;
+  /** Up to `buffer.length` bytes from `position`; 0 at the end. */
+  read(buffer: Buffer, position: number): Promise<number>;
+  close(): Promise<void>;
 }
+
+/** The only two things this package does to the source files. Injected so a test can deny, hang or race them. */
+export interface SourceIo {
+  /** Looks at a name without opening it. */
+  lstat(path: string): Promise<SourceStat>;
+  /** Opens a file read-only, refusing a link and never waiting on a pipe. */
+  open(path: string): Promise<SourceHandle>;
+}
+
+/*
+ * Windows has no O_NOFOLLOW or O_NONBLOCK; there, a link needs a privilege an ordinary process lacks, and the store
+ * this reads is WhatsApp for Mac's.
+ */
+const SOURCE_FLAGS = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
 
 export const nodeSourceIo: SourceIo = {
   lstat: (path) => lstat(path, { bigint: true }),
-  // EXCL: the destination is a fresh private directory, so an existing file there is a bug, not something to replace.
-  copyFile: (from, to) => copyFile(from, to, constants.COPYFILE_FICLONE | constants.COPYFILE_EXCL),
-  async readHeader(path, bytes) {
-    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-    try {
-      const buffer = Buffer.alloc(bytes);
-      const { bytesRead } = await handle.read(buffer, 0, bytes, 0);
-      return buffer.subarray(0, bytesRead);
-    } finally {
-      await handle.close();
-    }
+  async open(path) {
+    const handle: FileHandle = await open(path, SOURCE_FLAGS);
+    return {
+      stat: () => handle.stat({ bigint: true }),
+      read: async (buffer, position) => (await handle.read(buffer, 0, buffer.length, position)).bytesRead,
+      close: () => handle.close(),
+    };
   },
 };
 
@@ -70,9 +93,8 @@ export const nodeSourceIo: SourceIo = {
 export const SOURCE_TIMEOUT_MS = 12_000;
 
 /**
- * How long copying one file may take. Longer than the rest: on APFS the copy is a clone and instant, but elsewhere it
- * is a real copy of what can be a large database — and a permission dialog would already have stopped the `lstat`
- * that comes first, under the short limit.
+ * How long copying one file may take. Longer than the rest: it is a real copy of what can be a large database — and a
+ * permission dialog would already have stopped the `open` that comes first, under the short limit.
  */
 export const COPY_TIMEOUT_MS = 120_000;
 
@@ -173,40 +195,125 @@ export function sourceError(error: unknown, path: string, options: SourceOptions
   });
 }
 
-interface Fingerprint {
-  /** Only files that exist, by name, with what identifies their content. */
-  files: Map<string, string>;
+function notRegular(path: string): CommsError {
+  // A link could point anywhere — at the key store beside it, say. Refused, not followed.
+  return new CommsError('USAGE', `${path} is not a regular file, so it is not read`, {
+    hint: 'Point --source at the real ChatStorage.sqlite, not a link to it.',
+    details: { path },
+  });
 }
 
-async function fingerprint(sourceDir: string, options: SourceOptions): Promise<Fingerprint> {
+/**
+ * What an open source file must be before a byte of it is read: a regular file with exactly one name.
+ *
+ * A second name is how a hard link would hand this package the key store under the store's name — `O_NOFOLLOW` sees
+ * only symbolic links — and a real store has one. None (0) is a file deleted since it was opened: a log WhatsApp
+ * removed, which the fingerprint then reports as a change.
+ */
+function checkOpened(info: SourceStat, path: string): void {
+  if (!info.isFile()) throw notRegular(path);
+  if (info.nlink > 1n) {
+    throw new CommsError('USAGE', `${path} has more than one name (a hard link), so it is not read`, {
+      hint: 'A link could give another file — the key store beside it — this name. Point --source at a ChatStorage.sqlite with no other name.',
+      details: { path, links: Number(info.nlink) },
+    });
+  }
+}
+
+/** What identifies a file's content and place: which file, how many names, how long, when last written. */
+function fingerprintOf(info: SourceStat): string {
+  return `${info.dev}:${info.ino}:${info.nlink}:${info.size}:${info.mtimeNs}`;
+}
+
+interface OpenSource {
+  readonly name: string;
+  readonly path: string;
+  readonly handle: SourceHandle;
+  before: string;
+  info: SourceStat;
+}
+
+/** Opens the store and whichever side files exist, each once, and fingerprints each from its handle. */
+async function openSources(sourceDir: string, storePath: string, options: SourceOptions): Promise<OpenSource[]> {
   const io = options.io ?? nodeSourceIo;
-  const files = new Map<string, string>();
+  const opened: OpenSource[] = [];
+  try {
+    for (const name of [STORE_FILE, ...SIDE_FILES]) {
+      const path = join(sourceDir, name);
+      let handle: SourceHandle;
+      try {
+        handle = await bounded(options, () => io.open(path));
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (name !== STORE_FILE && code === 'ENOENT') continue;
+        // What O_NOFOLLOW answers for a link: ELOOP (macOS, Linux), EMLINK (the BSDs).
+        if (code === 'ELOOP' || code === 'EMLINK') throw notRegular(path);
+        throw sourceError(error, storePath, options);
+      }
+      const info = await bounded(options, () => handle.stat()).catch(async (error: unknown) => {
+        await handle.close().catch(() => undefined);
+        throw sourceError(error, storePath, options);
+      });
+      opened.push({ name, path, handle, before: fingerprintOf(info), info });
+      checkOpened(info, path);
+    }
+    return opened;
+  } catch (error) {
+    await closeSources(opened);
+    throw error;
+  }
+}
+
+async function closeSources(sources: readonly OpenSource[]): Promise<void> {
+  for (const source of sources) await source.handle.close().catch(() => undefined);
+}
+
+const CHUNK_BYTES = 1024 * 1024;
+
+/** Every byte of an open source file, into a file created for it — exclusively, owner-only. */
+async function copyOpened(source: SourceHandle, to: string): Promise<void> {
+  // EXCL: the destination is a fresh private directory, so an existing file there is a bug, not something to replace.
+  const out = await open(to, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
+  try {
+    const buffer = Buffer.allocUnsafe(CHUNK_BYTES);
+    for (let position = 0; ; ) {
+      const bytes = await source.read(buffer, position);
+      if (bytes === 0) break;
+      for (let written = 0; written < bytes; ) {
+        written += (await out.write(buffer, written, bytes - written, position + written)).bytesWritten;
+      }
+      position += bytes;
+    }
+  } finally {
+    await out.close();
+  }
+}
+
+/**
+ * Whether the sources are as they were when opened: each open file unchanged, each name still naming the file opened
+ * by it, and no side file come or gone. A name now held by a link is refused outright.
+ */
+async function unchanged(sources: readonly OpenSource[], sourceDir: string, options: SourceOptions): Promise<boolean> {
+  const io = options.io ?? nodeSourceIo;
+  let same = true;
+  for (const source of sources) {
+    if (fingerprintOf(await bounded(options, () => source.handle.stat())) !== source.before) same = false;
+  }
   for (const name of [STORE_FILE, ...SIDE_FILES]) {
     const path = join(sourceDir, name);
+    const source = sources.find((entry) => entry.name === name);
     let info: SourceStat;
     try {
       info = await bounded(options, () => io.lstat(path));
     } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (name !== STORE_FILE && code === 'ENOENT') continue;
-      throw sourceError(error, join(sourceDir, STORE_FILE), options);
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      if (source) same = false;
+      continue;
     }
-    if (info.isSymbolicLink() || !info.isFile()) {
-      // A link could point anywhere — at the key store beside it, say. Refused, not followed.
-      throw new CommsError('USAGE', `${path} is not a regular file, so it is not read`, {
-        hint: 'Point --source at the real ChatStorage.sqlite, not a link to it.',
-        details: { path },
-      });
-    }
-    files.set(name, `${info.ino}:${info.size}:${info.mtimeNs}`);
+    if (info.isSymbolicLink() || !info.isFile()) throw notRegular(path);
+    if (!source || info.dev !== source.info.dev || info.ino !== source.info.ino) same = false;
   }
-  return { files };
-}
-
-function same(a: Fingerprint, b: Fingerprint): boolean {
-  if (a.files.size !== b.files.size) return false;
-  for (const [name, value] of a.files) if (b.files.get(name) !== value) return false;
-  return true;
+  return same;
 }
 
 export interface StoreSnapshot {
@@ -243,37 +350,39 @@ export async function snapshotStore(
   options: SourceOptions = {},
 ): Promise<StoreSnapshot> {
   checkStorePath(storePath);
-  const io = options.io ?? nodeSourceIo;
   const attempts = options.attempts ?? 5;
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const sourceDir = dirname(storePath);
   await ensurePrivateDir(workDir);
 
   for (let attempt = 1; attempt <= attempts; attempt++) {
-    const before = await fingerprint(sourceDir, options);
+    const sources = await openSources(sourceDir, storePath, options);
     const directory = join(workDir, `snapshot-${randomBytes(6).toString('hex')}`);
-    await ensurePrivateDir(directory);
+    let consistent: boolean;
     try {
-      for (const name of before.files.keys()) {
+      await ensurePrivateDir(directory);
+      for (const source of sources) {
         await bounded(
           options,
-          () => io.copyFile(join(sourceDir, name), join(directory, name)),
+          () => copyOpened(source.handle, join(directory, source.name)),
           options.timeoutMs ?? COPY_TIMEOUT_MS,
         );
       }
-      const after = await fingerprint(sourceDir, options);
-      if (same(before, after)) {
-        return {
-          directory,
-          database: join(directory, STORE_FILE),
-          copied: [...before.files.keys()],
-          attempts: attempt,
-          dispose: () => rm(directory, { recursive: true, force: true }),
-        };
-      }
+      consistent = await unchanged(sources, sourceDir, options);
     } catch (error) {
+      await closeSources(sources);
       await rm(directory, { recursive: true, force: true });
       throw sourceError(error, storePath, options);
+    }
+    await closeSources(sources);
+    if (consistent) {
+      return {
+        directory,
+        database: join(directory, STORE_FILE),
+        copied: sources.map((source) => source.name),
+        attempts: attempt,
+        dispose: () => rm(directory, { recursive: true, force: true }),
+      };
     }
     await rm(directory, { recursive: true, force: true });
     if (attempt < attempts) await sleep(50 * attempt);
@@ -301,13 +410,17 @@ export async function probeStore(storePath: string, options: SourceOptions = {})
   const io = options.io ?? nodeSourceIo;
   let header: Buffer;
   try {
-    const info = await bounded(options, () => io.lstat(storePath));
-    if (info.isSymbolicLink() || !info.isFile()) {
-      throw new CommsError('USAGE', `${storePath} is not a regular file, so it is not read`, {
-        hint: 'Point --source at the real ChatStorage.sqlite, not a link to it.',
-      });
+    const handle = await bounded(options, () => io.open(storePath)).catch((error: unknown) => {
+      const code = (error as NodeJS.ErrnoException).code;
+      throw code === 'ELOOP' || code === 'EMLINK' ? notRegular(storePath) : error;
+    });
+    try {
+      checkOpened(await bounded(options, () => handle.stat()), storePath);
+      const buffer = Buffer.alloc(SQLITE_HEADER.length);
+      header = buffer.subarray(0, await bounded(options, () => handle.read(buffer, 0)));
+    } finally {
+      await handle.close().catch(() => undefined);
     }
-    header = await bounded(options, () => io.readHeader(storePath, SQLITE_HEADER.length));
   } catch (error) {
     throw sourceError(error, storePath, options);
   }

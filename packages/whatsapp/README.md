@@ -181,17 +181,23 @@ WhatsApp for Mac keeps the store at `~/Library/Group Containers/group.net.whatsa
 unencrypted on disk, and holds it open in SQLite's WAL mode while it runs: recent messages sit in
 `ChatStorage.sqlite-wal` until the app folds them into the main file.
 
-1. **Copy, don't open.** The store and its log are copied (on APFS, cloned — instant, no extra space) into a private
-   folder under agentcomms' state directory. The source files are only `lstat`ed and read. Nothing opens them with
-   SQLite, takes a lock on them, or touches the app's `-shm` file. SQLite's `mode=ro` was rejected because a read-only
-   connection still takes locks and writes read-marks into the app's `-shm` file; `immutable=1` because it ignores
-   the log, missing the newest messages, and can read torn pages while the app writes.
-2. **Consistent, or not at all.** Each source file is fingerprinted (inode, size, nanosecond mtime) before and after
-   the copy; if WhatsApp wrote in between, the copy is discarded and taken again, up to five times, then refused.
-   SQLite then checks the copy (`quick_check`).
-3. **Check the layout before reading.** A missing required table or column refuses the whole sync by name (exit `65`),
+1. **Copy, don't open.** The store and its log are copied, byte for byte, into a private folder under agentcomms'
+   state directory, owner-only. Nothing opens them with SQLite, takes a lock on them, or touches the app's `-shm`
+   file. SQLite's `mode=ro` was rejected because a read-only connection still takes locks and writes read-marks into
+   the app's `-shm` file; `immutable=1` because it ignores the log, missing the newest messages, and can read torn
+   pages while the app writes.
+2. **Open once, never through a link.** Each file is opened once, read-only, refusing a symbolic link, and every byte
+   is copied from that open file — its name is never opened again, so a name swapped for a link to the key store
+   between a check and the copy changes nothing. A file with a second name (a hard link, which could be the key
+   store's) or that is not a regular file is refused. The cost: Node's copy, which clones on APFS, takes a name and
+   would open it again, so the bytes are copied instead — the store's size on disk until the sync deletes it.
+3. **Consistent, or not at all.** Each open file is fingerprinted (device, inode, links, size, nanosecond mtime)
+   before and after the copy, and each name is looked at again for a file that came, went or was replaced; if
+   WhatsApp wrote in between, the copy is discarded and taken again, up to five times, then refused. SQLite then
+   checks the copy (`quick_check`).
+4. **Check the layout before reading.** A missing required table or column refuses the whole sync by name (exit `65`),
    and the previous index is kept as it was. A missing optional part turns off one named feature and is reported.
-4. **Index, then delete the copy.** The index is rebuilt in a new file and renamed into place, owner-only. The copy is
+5. **Index, then delete the copy.** The index is rebuilt in a new file and renamed into place, owner-only. The copy is
    deleted whatever happens; one a crash left behind is removed by the next sync.
 
 WhatsApp can change this layout without notice. The reader refuses rather than guess when a required part is gone;

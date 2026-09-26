@@ -214,8 +214,9 @@ test('a tool that fails because macOS needs permission hands the person’s step
     lstat: async () => {
       throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
     },
-    copyFile: async () => undefined,
-    readHeader: async () => Buffer.alloc(0),
+    open: async () => {
+      throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
+    },
   };
   const { server } = await createWhatsAppMcpServer({ env: harness.env, sourceIo: denied, platform: 'darwin' });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
