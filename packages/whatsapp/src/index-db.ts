@@ -6,7 +6,7 @@ import { CommsError, DIR_MODE, ensurePrivateDir, FILE_MODE, isGroupOrWorldAccess
 import { CHAT_ID } from './chat-ref.ts';
 import { readChats, readMessages, readPushNames } from './source/read-source.ts';
 import type { SchemaReport } from './source/schema.ts';
-import type { ChatKind } from './source/types.ts';
+import { type ChatKind, chatKindOf } from './source/types.ts';
 import { openDatabase } from './sqlite.ts';
 import type { Visibility } from './visibility.ts';
 
@@ -311,6 +311,12 @@ export class WhatsAppIndex {
     }
     // The lists, as SQL can ask them: every query below filters with these, so none can forget to.
     db.function('agent_sees_chat', { deterministic: true }, (id) => (visibility.seesChat(String(id)) ? 1 : 0));
+    /*
+     * A chat's kind, from its id, every time — never the one stored beside it. The id is WhatsApp's and fixed; the
+     * stored kind is whatever the version that wrote the index thought, and the spike, under this same format,
+     * thought a contact's `<number>@status` posts were `unknown`: listed and searched as conversations.
+     */
+    db.function('agent_kind', { deterministic: true }, (id) => chatKindOf(String(id)));
     const row = (chatId: unknown, kind: unknown, sender: unknown, fromMe: unknown) =>
       [String(chatId), String(kind), typeof sender === 'string' ? sender : null, Number(fromMe) === 1] as const;
     db.function('agent_sees_message', { deterministic: true }, (chatId, kind, sender, fromMe) =>
@@ -336,8 +342,8 @@ export class WhatsAppIndex {
     const count = (sql: string): number => Number((this.#db.prepare(sql).get() as { n: number | bigint }).n);
     return {
       indexedAt: meta.get('indexedAt') ?? '',
-      chats: count("SELECT COUNT(*) AS n FROM chats WHERE kind <> 'status' AND agent_sees_chat(id)"),
-      statusChats: count("SELECT COUNT(*) AS n FROM chats WHERE kind = 'status' AND agent_sees_chat(id)"),
+      chats: count("SELECT COUNT(*) AS n FROM chats WHERE agent_kind(id) <> 'status' AND agent_sees_chat(id)"),
+      statusChats: count("SELECT COUNT(*) AS n FROM chats WHERE agent_kind(id) = 'status' AND agent_sees_chat(id)"),
       messages: count(`SELECT COUNT(*) AS n ${MESSAGES_SEEN}`),
       media: count(`SELECT COUNT(*) AS n ${MESSAGES_SEEN} AND m.has_media = 1`),
       unattributedStatus:
@@ -361,7 +367,7 @@ export class WhatsAppIndex {
     if (kinds.length === 0) return [];
     const rows = this.#db
       .prepare(
-        `${CHAT_SELECT} WHERE agent_sees_chat(c.id) AND c.kind IN (${kinds.map(() => '?').join(', ')})
+        `${CHAT_SELECT} WHERE agent_sees_chat(c.id) AND ${KIND} IN (${kinds.map(() => '?').join(', ')})
          ORDER BY c.last_message_at IS NULL, c.last_message_at DESC, c.id LIMIT ?`,
       )
       .all(...kinds, options.limit) as Record<string, unknown>[];
@@ -423,7 +429,7 @@ export class WhatsAppIndex {
          JOIN messages_fts f ON f.rowid = m.id
          WHERE messages_fts MATCH ? AND ${SEES_MESSAGE}
          ${options.chatId ? 'AND m.chat_id = ?' : ''}
-         ${kinds ? `AND c.kind IN (${kinds.map(() => '?').join(', ')})` : ''}
+         ${kinds ? `AND ${KIND} IN (${kinds.map(() => '?').join(', ')})` : ''}
          ${options.sender ? "AND m.sender_name LIKE ? ESCAPE '\\'" : ''}
          ORDER BY bm25(messages_fts), COALESCE(m.at_seconds, 0) DESC LIMIT ?`,
       )
@@ -438,11 +444,14 @@ export class WhatsAppIndex {
   }
 }
 
+/** Chat `c`'s kind, from its id (see `agent_kind`). */
+const KIND = 'agent_kind(c.id)';
+
 /** Whether the account's lists let an agent see `m`, in chat `c`. */
-const SEES_MESSAGE = 'agent_sees_message(m.chat_id, c.kind, m.sender_jid, m.from_me)';
+const SEES_MESSAGE = `agent_sees_message(m.chat_id, ${KIND}, m.sender_jid, m.from_me)`;
 
 /** Whether `m` is a status post by someone else whose author is unknown. */
-const UNATTRIBUTED = 'agent_unattributed(m.chat_id, c.kind, m.sender_jid, m.from_me)';
+const UNATTRIBUTED = `agent_unattributed(m.chat_id, ${KIND}, m.sender_jid, m.from_me)`;
 
 /** Every message the lists let an agent see, for counting. */
 const MESSAGES_SEEN = `FROM messages m JOIN chats c ON c.id = m.chat_id WHERE ${SEES_MESSAGE}`;
@@ -452,8 +461,8 @@ const MESSAGES_SEEN = `FROM messages m JOIN chats c ON c.id = m.chat_id WHERE ${
  * the lists can hide one by one, by author — and taken from the sync's count for the rest.
  */
 const CHAT_SELECT = `
-  SELECT c.id, c.kind, c.name, c.last_message_at,
-         CASE WHEN c.kind = 'status'
+  SELECT c.id, ${KIND} AS kind, c.name, c.last_message_at,
+         CASE WHEN ${KIND} = 'status'
               THEN (SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id AND ${SEES_MESSAGE})
               ELSE c.message_count END AS message_count
   FROM chats c`;
@@ -469,7 +478,7 @@ function chatOf(row: Record<string, unknown>): IndexedChat {
 }
 
 const MESSAGE_SELECT = `
-  SELECT m.id, m.chat_id, c.kind AS chat_kind, c.name AS chat_name, m.stanza_id, m.from_me, m.sender_jid,
+  SELECT m.id, m.chat_id, ${KIND} AS chat_kind, c.name AS chat_name, m.stanza_id, m.from_me, m.sender_jid,
          m.sender_name, m.at, m.kind, m.type_code, m.view_once, m.group_event, m.body, m.has_media, m.media_mime,
          m.media_size, m.media_title, m.media_name
   FROM messages m JOIN chats c ON c.id = m.chat_id`;

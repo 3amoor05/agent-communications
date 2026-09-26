@@ -183,7 +183,9 @@ they stay the person's.
 
 If you ran the unpublished spike, its accounts are in `whatsapp-spike.json`. The first command or server start of this
 release moves them into `config.json`, once: the same account id, so the index the spike built is read as it is with no
-new sync; the chat lists moved before the account appears; a name that is already taken left unmoved and said so; the
+new sync (each chat's kind taken from its id, so the spike's `unknown` status sessions read as status updates); the
+chat lists moved before the account appears; a name that is already taken left unmoved and said so, with where its
+index — a plaintext copy of its messages that nothing reads now — was left for you to delete; the
 old file kept as `whatsapp-spike.json.migrated-<time>`; one line in the audit log (`agentcomms audit tail`) and one on
 stderr. It reads neither WhatsApp's store nor the spike's index to do it. A configuration still on the old flat names
 waits until `agentcomms names migrate` has run.

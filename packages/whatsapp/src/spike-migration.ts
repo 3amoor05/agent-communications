@@ -1,4 +1,4 @@
-import { chmod, readFile, rename } from 'node:fs/promises';
+import { chmod, readFile, rename, stat } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import {
   ACCOUNT_ID_PATTERN,
@@ -11,6 +11,7 @@ import {
 import { z } from 'zod';
 import { CHAT_ID } from './chat-ref.ts';
 import { newWhatsAppAccount, PLATFORM } from './config.ts';
+import { accountStateDir } from './index-db.ts';
 import type { ChatListStore } from './lists.ts';
 import { checkStorePath, defaultStorePath } from './source/location.ts';
 
@@ -58,8 +59,11 @@ export interface SpikeMigration {
   migrated: string[];
   /** Already there, by id, from an earlier run that stopped before it could put the file aside. */
   alreadyThere: string[];
-  /** Left in the old file, with why. */
-  skipped: { name: string; reason: string }[];
+  /**
+   * Left in the old file, with why — and, when the spike built one for it, where its index still is: a plaintext copy
+   * of its messages that no account reads now and no command deletes.
+   */
+  skipped: { name: string; reason: string; index?: string | undefined }[];
   /** Where the old file went, or null when it stayed because nothing could be moved yet (`deferred`). */
   keptAs: string | null;
   /** Why nothing moved at all, when nothing could. */
@@ -184,6 +188,21 @@ export async function migrateSpikeAccounts(context: MigrationContext): Promise<S
     for (const { name } of moving) {
       if (!result.migrated.includes(name)) result.skipped.push({ name, reason: 'the name was taken while it moved' });
     }
+    // Where a skipped account's index was left: said, not deleted — deleting is the person's call.
+    const idOf = new Map(records.map(([name, record]) => [name, spikeAccountSchema.safeParse(record).data?.id]));
+    for (const entry of result.skipped) {
+      const id = idOf.get(entry.name);
+      if (id === undefined) continue;
+      const folder = accountStateDir(context.core.paths.stateDir, id);
+      if (
+        await stat(folder).then(
+          (info) => info.isDirectory(),
+          () => false,
+        )
+      ) {
+        entry.index = folder;
+      }
+    }
 
     // Put aside, so this happens once: what did not move is still in the renamed file, and the log says why.
     const keptAs = `${path}.migrated-${stamp(context.now())}`;
@@ -214,7 +233,14 @@ export function describeMigration(result: SpikeMigration): string {
     );
   }
   if (result.alreadyThere.length > 0) parts.push(`${result.alreadyThere.join(', ')} had already moved.`);
-  for (const { name, reason } of result.skipped) parts.push(`${name} was not moved: ${reason}.`);
+  for (const { name, reason, index } of result.skipped) {
+    parts.push(`${name} was not moved: ${reason}.`);
+    if (index) {
+      parts.push(
+        `Its index, a plaintext copy of its messages, is still at ${index}; no account reads it now, so delete that folder unless you move the account by hand.`,
+      );
+    }
+  }
   if (result.keptAs) parts.push(`The old file is kept as ${result.keptAs}.`);
   return parts.join(' ');
 }

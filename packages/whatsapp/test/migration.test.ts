@@ -7,7 +7,8 @@ import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { createWhatsAppMcpServer } from '../src/mcp/server.ts';
 import type { SourceIo } from '../src/source/snapshot.ts';
 import { SPIKE_CONFIG_FILE } from '../src/spike-migration.ts';
-import { ALICE, BOB } from './support/fixture.ts';
+import { openDatabase } from '../src/sqlite.ts';
+import { ALICE, BOB, ERIN_STATUS } from './support/fixture.ts';
 import { type Harness, newHarness } from './support/harness.ts';
 
 /**
@@ -171,4 +172,57 @@ test('on a configuration that still has the old flat names, nothing moves until 
   assert.match(status.stderr, /not moved: the configuration still has the old flat names/);
   assert.ok(existsSync(join(harness.configDir, SPIKE_CONFIG_FILE)), 'left where it is for the next run');
   assert.equal(JSON.parse(readFileSync(join(harness.configDir, 'config.json'), 'utf8')).accounts, undefined);
+});
+
+test('a spike account that is not moved has its index named, where it was left, and what to do with it', async () => {
+  const { harness, index } = await spikeMachine();
+  // The spike's name is taken before the migration runs, by an account of its own.
+  const configPath = join(harness.configDir, 'config.json');
+  const config = JSON.parse(readFileSync(configPath, 'utf8'));
+  config.accounts[ACCOUNT] = {
+    id: 'acc_TAKEN00000000000',
+    platform: 'whatsapp',
+    workspace: 'group.net.whatsapp.WhatsApp.shared',
+    workspaceName: 'WhatsApp for Mac',
+    userId: 'store-owner',
+    tier: 'read',
+    mode: 'read',
+    grantedScopes: ['local-store:read'],
+    secretRef: 'whatsapp:none:acc_TAKEN00000000000',
+    createdAt: '2026-09-26T08:00:00.000Z',
+  };
+  writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+  const status = await harness.cli(['status', '--no-check', '--json']);
+  assert.equal(status.code, 0);
+  const folder = join(index, '..');
+  assert.ok(existsSync(index), 'left as it was: nothing is deleted without the person');
+  for (const said of [status.stderr, String(status.data().spike)]) {
+    assert.match(said, /personal\/whatsapp was not moved/);
+    assert.ok(said.includes(folder), `the folder is named: ${said}`);
+    assert.match(said, /plaintext copy of its messages/);
+    assert.match(said, /delete/);
+  }
+});
+
+test('an index the spike wrote before status sessions were a kind of their own is read with each chat’s kind from its id', async () => {
+  const { harness, index } = await spikeMachine();
+  // The spike classified `<number>@status` sessions as unknown, under the same index format.
+  const db = await openDatabase(index);
+  db.exec(`UPDATE chats SET kind = 'unknown' WHERE id LIKE '%@status'`);
+  db.close();
+  const chats = async (...argv: string[]) =>
+    (
+      (await harness.cli(['chats', '--account', ACCOUNT, ...argv, '--json'], { sourceIo: untouchable })).data()
+        .chats as { id: string; kind: string }[]
+    ).map((chat) => `${chat.id} ${chat.kind}`);
+  assert.ok(!(await chats()).some((chat) => chat.startsWith(ERIN_STATUS)), 'not listed among conversations');
+  assert.ok((await chats('--kind', 'status')).includes(`${ERIN_STATUS} status`));
+  assert.deepEqual(await chats('--kind', 'unknown'), []);
+  const search = await harness.cli(['search', 'beach', '--account', ACCOUNT, '--json'], { sourceIo: untouchable });
+  assert.deepEqual(search.data().results, [], 'nor searched by default');
+  const asked = await harness.cli(['search', 'beach', '--account', ACCOUNT, '--kind', 'status', '--json']);
+  assert.equal((asked.data().results as { chat: { kind: string } }[])[0]?.chat.kind, 'status');
+  const status = await harness.cli(['status', '--no-check', '--json'], { sourceIo: untouchable });
+  const counted = (status.data().accounts as { index: { chats: number; statusChats: number } }[])[0]?.index;
+  assert.deepEqual([counted?.chats, counted?.statusChats], [5, 2], 'nor counted as one');
 });
