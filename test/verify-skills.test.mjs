@@ -351,6 +351,15 @@ test('verifier rejects a flat account name in every position a reader would copy
     // A version-1 alias is `[a-z0-9][a-z0-9-]{0,31}`: digits lead, and an English word is a legal name.
     ['an alias beginning with a digit', 'Run `agent-gmail search x --inbox 2024-archive`.'],
     ['an alias that is an English word', 'Run `agent-gmail search x --inbox and`.'],
+    // The channels after Gmail and Slack name an account with `--account`, and manage it with `account add` (Resend)
+    // or straight after the binary (WhatsApp). None of these was read, so `--account acme` passed.
+    ['an account flag', 'Run `agent-resend domains --account acme`.'],
+    ['an account flag with an equals sign', 'Run `agent-whatsapp chats --account=personal`.'],
+    ['an account subcommand', '```sh\nagent-resend account add acme\n```'],
+    ['an account shown by a flat name', '```sh\nagent-resend account policy acme --send-policy confirm\n```'],
+    ['an account added straight after the binary', '```sh\nagent-whatsapp add personal\n```'],
+    ['an account field', '```json\n{ "account": "acme" }\n```'],
+    ['an account output row', '```text\nSEND PREVIEW · account acme · to jo@example.test\n```'],
   ];
   for (const [label, body] of cases) {
     const root = await fixture();
@@ -379,6 +388,13 @@ test('verifier passes organisation/platform names, and the prose that imitates a
     ['triple backticks quoted in prose', 'Write it as ``` ```sh ``` at the top.'],
     ['a span that would only match across a blank line', 'A stray ` here.\n\nAnd inbox add and reauth ` there.'],
     ['a spec, which records what was true then', '```sh\nagent-gmail inbox add work\n```'],
+    ['a qualified account', 'Run `agent-resend domains --account acme/resend`.'],
+    [
+      'a qualified account added',
+      '```sh\nagent-whatsapp add personal/whatsapp\nagent-resend account add acme/resend\n```',
+    ],
+    ['an account placeholder', 'Run `agent-resend account add <organisation>/resend`.'],
+    ['prose about accounts', 'When account add fails, and account remove too, read what it printed.'],
   ];
   for (const [label, body] of cases) {
     const root = await fixture();
@@ -388,6 +404,84 @@ test('verifier passes organisation/platform names, and the prose that imitates a
         : path.join(root, 'skills', 'valid-skill', 'references', 'names.md');
     await mkdir(path.dirname(file), { recursive: true });
     await writeFile(file, `${body}\n`);
+    const result = await verify(root);
+    assert.equal(result.status, 0, `${label}: ${result.stderr}`);
+  }
+});
+
+/**
+ * A channel's skills name that channel's accounts. `--account acme/gmail` in a Resend skill is a command that cannot
+ * work — Resend refuses an account of another platform — and a reader copies it before finding out. Every channel's
+ * skill family is checked against its own platform word, from the registry; the core's `comms-` skills manage every
+ * channel, so they may name any.
+ */
+async function familySkill(root, name, body) {
+  const skill = path.join(root, 'skills', name);
+  await mkdir(path.join(skill, 'references'), { recursive: true });
+  await writeFile(path.join(skill, 'SKILL.md'), `---\nname: ${name}\ndescription: Fixture\n---\n\n${body}\n`);
+  await writeFile(
+    path.join(skill, 'references', 'fit.json'),
+    `${JSON.stringify({ version: 1, kind: 'general', useWhen: 'a fixture' }, null, 2)}\n`,
+  );
+}
+
+test('verifier rejects an account of another platform in a channel skill', async () => {
+  const cases = [
+    ['a Gmail account in a Resend skill', 'resend-fixture', '```bash\nagent-resend domains --account acme/gmail\n```'],
+    ['a suffixed one', 'resend-fixture', 'Run `agent-resend account add acme/gmail-tech`.'],
+    [
+      'a placeholder of another platform',
+      'resend-fixture',
+      'Run `agent-resend domains --account <organisation>/gmail`.',
+    ],
+    ['a JSON field', 'resend-fixture', '```json\n{ "account": "acme/slack" }\n```'],
+    [
+      'a Resend account in a WhatsApp skill',
+      'whatsapp-fixture',
+      '```bash\nagent-whatsapp chats --account personal/resend\n```',
+    ],
+    ['a WhatsApp add of another platform', 'whatsapp-fixture', '```bash\nagent-whatsapp add personal/resend\n```'],
+    ['a Slack workspace in a Gmail skill', 'gmail-fixture', 'Run `agent-gmail search x --workspace acme/slack`.'],
+    ['a word that is no platform at all', 'resend-fixture', 'Run `agent-resend domains --account acme/mail`.'],
+  ];
+  for (const [label, skill, body] of cases) {
+    const root = await fixture();
+    await familySkill(root, skill, body);
+    const result = await verify(root);
+    assert.equal(result.status, 1, `${label}: expected a failure\n${result.stdout}`);
+    assert.match(
+      result.stderr,
+      new RegExp(`skills/${skill}/SKILL\\.md: ".+" is not a ${skill.split('-')[0]} account`),
+      label,
+    );
+  }
+  // The contract every skill of a family carries is the family's too.
+  const root = await fixture();
+  await mkdir(path.join(root, 'skills', '_shared'), { recursive: true });
+  await writeFile(
+    path.join(root, 'skills', '_shared', 'contract-resend.md'),
+    '# Contract\n\nRun `agent-resend domains --account acme/whatsapp`.\n',
+  );
+  const result = await verify(root);
+  assert.equal(result.status, 1, result.stdout);
+  assert.match(result.stderr, /skills\/_shared\/contract-resend\.md: "acme\/whatsapp" is not a resend account/);
+});
+
+test('verifier passes a channel skill’s own accounts, and any platform in the core’s skills', async () => {
+  const cases = [
+    ['its own account', 'resend-fixture', 'Run `agent-resend domains --account acme/resend`.'],
+    ['its own, suffixed', 'resend-fixture', 'Run `agent-resend account add acme/resend-marketing`.'],
+    ['its own placeholder', 'resend-fixture', 'Run `agent-resend account add <organisation>/resend`.'],
+    ['a WhatsApp add', 'whatsapp-fixture', '```bash\nagent-whatsapp add personal/whatsapp\n```'],
+    [
+      'the core names every channel',
+      'comms-fixture',
+      'Pin one with `--account acme/gmail` or `--account acme/resend`.',
+    ],
+  ];
+  for (const [label, skill, body] of cases) {
+    const root = await fixture();
+    await familySkill(root, skill, body);
     const result = await verify(root);
     assert.equal(result.status, 0, `${label}: ${result.stderr}`);
   }

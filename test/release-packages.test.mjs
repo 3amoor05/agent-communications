@@ -101,7 +101,12 @@ test('running the list prints it, which is how the workflow reads it', async () 
  * asserted is the property that failed twice — a literal list of package names — together with the line that proves
  * the file reads the shared one instead.
  */
-const LITERAL_LIST = /['"]core['"]\s*,\s*['"]gmail['"]|\bcore\s+gmail\b/;
+// Any two of the published packages side by side, quoted or as shell words. The names come from the shared list
+// itself: a pattern that knew only `core` and `gmail` let `'core', 'resend'` through.
+const PACKAGE_WORD = `(?:${[...PACKAGES].sort((a, b) => b.length - a.length).join('|')})`;
+const LITERAL_LIST = new RegExp(
+  String.raw`['"]${PACKAGE_WORD}['"]\s*,\s*['"]${PACKAGE_WORD}['"]|\b${PACKAGE_WORD}[ \t]+${PACKAGE_WORD}\b`,
+);
 
 test('the release workflow reads the shared list in every loop', async () => {
   const workflow = await readFile(join(ROOT, '.github', 'workflows', 'release.yml'), 'utf8');
@@ -142,6 +147,17 @@ test('the local release script, sync-versions, the package verifier and the lice
     const source = await readFile(join(ROOT, 'scripts', script), 'utf8');
     assert.match(source, /from '\.\/packages\.mjs'/, `scripts/${script} does not read scripts/packages.mjs`);
     assert.doesNotMatch(source, LITERAL_LIST, `scripts/${script} carries its own package list`);
+  }
+  // The shapes the copies took, with the last package published as well as the first two. Built from the list, since
+  // this file is itself held to not writing one out (`test/channel-registry.test.mjs`).
+  const [first, second] = PACKAGES;
+  const last = PACKAGES.at(-1);
+  for (const copy of [
+    `const PACKAGES = ['${first}', '${second}'];`,
+    `['${first}', '${last}']`,
+    `for p in ${first} ${last}; do`,
+  ]) {
+    assert.match(copy, LITERAL_LIST, copy);
   }
   const root = JSON.parse(await readFile(join(ROOT, 'package.json'), 'utf8'));
   assert.equal(root.scripts['verify:packages'], 'node scripts/verify-package.mjs --all');

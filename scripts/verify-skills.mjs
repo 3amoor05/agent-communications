@@ -319,9 +319,20 @@ for (const file of walk(root)) {
  * and the changelog what the old names were.
  */
 const ALIAS = String.raw`[a-z0-9][a-z0-9-]{0,31}`;
+/*
+ * The positions an account's name is written in. Gmail names one with `--inbox`, Slack with `--workspace`, and every
+ * channel after them with `--account` — which the channel contract made the pin for all of them — so `account` is a
+ * position everywhere `inbox` and `workspace` are. Resend manages its accounts with `account add` and the like;
+ * WhatsApp's `add` and `remove` take the name straight after the binary, so the binaries come from the registry.
+ */
+const HOLDERS = '(?:inbox|workspace|account)';
+const MANAGE = '(?:add|remove|reauth|finish|show|policy)';
+const BINARIES = REGISTRY.channels
+  .map(({ manifest }) => manifest.binary.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+  .join('|');
 const ANYWHERE = [
-  new RegExp(String.raw`--(?:inbox|workspace)[ =](${ALIAS})(?![\w/-])`, 'g'),
-  new RegExp(String.raw`["']?\b(?:inbox|workspace)["']?: ?["'](${ALIAS})["']`, 'g'),
+  new RegExp(String.raw`--${HOLDERS}[ =](${ALIAS})(?![\w/-])`, 'g'),
+  new RegExp(String.raw`["']?\b${HOLDERS}["']?: ?["'](${ALIAS})["']`, 'g'),
   new RegExp(String.raw`\binbox-(${ALIAS})\.md`, 'g'),
   // A correct download path has two segments — `…/acme/gmail/exports/…` — so a first segment followed by a
   // platform is the organisation, not a flat name.
@@ -329,10 +340,25 @@ const ANYWHERE = [
   new RegExp(String.raw`agent-communications/(${ALIAS})/(?!(?:${REGISTRY.platforms.join('|')})(?:-[a-z0-9-]+)?/)`, 'g'),
 ];
 const IN_CODE = [
-  new RegExp(String.raw`\b(?:inbox|workspace) (?:add|remove|reauth|finish) (${ALIAS})(?![\w/-])`, 'g'),
-  new RegExp(String.raw`\b(?:inbox|workspace) (${ALIAS}) ·`, 'g'),
+  new RegExp(String.raw`\b${HOLDERS} ${MANAGE} (${ALIAS})(?![\w/-])`, 'g'),
+  new RegExp(String.raw`\b(?:${BINARIES}) (?:add|remove) (${ALIAS})(?![\w/-])`, 'g'),
+  new RegExp(String.raw`\b${HOLDERS} (${ALIAS}) ·`, 'g'),
   new RegExp(String.raw`\bin ["“](${ALIAS})["”]`, 'g'),
   // A trailing `· something` is not a position: in these documents it is as often a message id as a name.
+];
+
+/*
+ * The same positions holding a qualified name, `organisation/platform` — or a placeholder for the organisation — so
+ * that a channel's skills can be held to naming that channel's accounts.
+ */
+const QUALIFIED = String.raw`((?:<[^>\s]+>|[a-z0-9][a-z0-9._-]*)/([a-z0-9][a-z0-9-]*))(?![\w/-])`;
+const QUALIFIED_ANYWHERE = [
+  new RegExp(`--${HOLDERS}[ =]${QUALIFIED}`, 'g'),
+  new RegExp(String.raw`["']?\b${HOLDERS}["']?: ?["']${QUALIFIED}["']`, 'g'),
+];
+const QUALIFIED_IN_CODE = [
+  new RegExp(String.raw`\b${HOLDERS} ${MANAGE} ${QUALIFIED}`, 'g'),
+  new RegExp(String.raw`\b(?:${BINARIES}) (?:add|remove) ${QUALIFIED}`, 'g'),
 ];
 /**
  * The parts of a document a reader copies rather than reads.
@@ -413,6 +439,45 @@ for (const file of walk(root)) {
   }
   for (const name of flat) {
     fail(`${relativeFile}: "${name}" is a flat account name; every account is organisation/platform`);
+  }
+}
+
+/*
+ * A channel's skills name that channel's accounts.
+ *
+ * `agent-resend domains --account acme/gmail` is a command Resend refuses, and nothing read it: the check above only
+ * asks whether a name is qualified. So every file of a channel's skill family — each `skills/<prefix>*` directory and
+ * the family's contract in `skills/_shared/` — is held to that channel's platform word, from the registry, optionally
+ * with a suffix (`acme/gmail-tech`). The core's `comms-` skills manage every channel and may name any of them.
+ */
+for (const family of REGISTRY.skillFamilies) {
+  if (!REGISTRY.platforms.includes(family.channel)) continue;
+  const files = [resolve(root, family.contract)];
+  for (const entry of existsSync(skillsRoot) ? readdirSync(skillsRoot, { withFileTypes: true }) : []) {
+    if (!entry.isDirectory() || !entry.name.startsWith(family.prefix)) continue;
+    files.push(...walk(resolve(skillsRoot, entry.name)));
+  }
+  for (const file of files) {
+    if (!file.endsWith('.md') || !existsSync(file)) continue;
+    const source = readFileSync(file, 'utf8');
+    const searched = [
+      [source, QUALIFIED_ANYWHERE],
+      [codeOf(source), QUALIFIED_IN_CODE],
+    ];
+    const foreign = new Set();
+    for (const [text, patterns] of searched) {
+      for (const pattern of patterns) {
+        for (const [, name, platform] of text.matchAll(pattern)) {
+          if (platform !== family.channel && !platform.startsWith(`${family.channel}-`)) foreign.add(name);
+        }
+      }
+    }
+    for (const name of foreign) {
+      fail(
+        `${show(file)}: "${name}" is not a ${family.channel} account; a ${family.family} skill names ` +
+          `<organisation>/${family.channel}`,
+      );
+    }
   }
 }
 

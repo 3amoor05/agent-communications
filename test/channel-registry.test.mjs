@@ -291,7 +291,7 @@ const CONSUMERS = {
     /REGISTRY\.skillFamilies/,
   ],
   'scripts/sync-skills.mjs': [/skillFamilyOf\(REGISTRY, name\)/],
-  'scripts/verify-skills.mjs': [/REGISTRY\.platforms/],
+  'scripts/verify-skills.mjs': [/REGISTRY\.platforms/, /REGISTRY\.skillFamilies/, /REGISTRY\.channels\s*\.map/],
   'scripts/sync-channels.mjs': [/readChannels\(root\)/],
   'test/tool-drift.test.mjs': [/const PRODUCTS = REGISTRY\.products/],
   'test/skill-commands.test.mjs': [/const CLIS = REGISTRY\.surfaces/, /REGISTRY\.skillFamilies/],
@@ -311,18 +311,31 @@ const FIXTURE_FILES = new Set(['test/parity.test.mjs']);
 /**
  * Channel words written out as a list, in the shapes the old copies took: an array of names, an alternation, an
  * object keyed by channel holding a list or a computed value, and a product entry naming one.
+ *
+ * The words are the registry's: every channel and every package it publishes. This pattern once named the three
+ * words there were when it was written, so a list of the channels added since — `['core', 'resend', 'whatsapp']` —
+ * passed it, and so would every channel after them. Read from the registry, a new channel's word is caught the day
+ * its package declares itself.
  */
-const LITERAL_LIST = new RegExp(
-  [
-    String.raw`['"](?:core|gmail|slack)['"]\s*,\s*['"](?:core|gmail|gmail-mcp|slack)['"]`,
-    String.raw`\b(?:gmail|slack|core)\|(?:gmail|slack|core)\b`,
-    // Two keys at least: one channel's own extra rule (`{ slack: [/mailbox/] }`) is not a list of channels.
-    String.raw`\b(?:gmail|slack|core):\s*(?:\[|await\b)[\s\S]{0,400}?\b(?:gmail|slack|core):\s*(?:\[|await\b)`,
-    String.raw`\b(?:tool|package|channel):\s*['"](?:gmail|slack|core)['"]`,
-    // A conditional choosing between channel words: `pkg === 'slack' ? 'slack' : 'gmail'`.
-    String.raw`\?\s*['"](?:gmail|slack|core)['"]\s*:[^;\n]*?['"](?:gmail|slack|core)['"]`,
-  ].join('|'),
-);
+export function literalList(registry) {
+  const words = [...new Set([...registry.channels.map((channel) => channel.directory), ...registry.packages])]
+    // Longest first, so `gmail-mcp` is one word rather than `gmail` and a remainder.
+    .sort((a, b) => b.length - a.length || (a < b ? -1 : 1))
+    .map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const word = `(?:${words.join('|')})`;
+  return new RegExp(
+    [
+      String.raw`['"]${word}['"]\s*,\s*['"]${word}['"]`,
+      String.raw`\b${word}\|${word}\b`,
+      // Two keys at least: one channel's own extra rule (`{ slack: [/mailbox/] }`) is not a list of channels.
+      String.raw`\b${word}:\s*(?:\[|await\b)[\s\S]{0,400}?\b${word}:\s*(?:\[|await\b)`,
+      String.raw`\b(?:tool|package|channel):\s*['"]${word}['"]`,
+      // A conditional choosing between channel words: `pkg === 'slack' ? 'slack' : 'gmail'`.
+      String.raw`\?\s*['"]${word}['"]\s*:[^;\n]*?['"]${word}['"]`,
+    ].join('|'),
+  );
+}
+const LITERAL_LIST = literalList(REGISTRY);
 
 test('every consumer reads the registry, and none keeps a list of channels of its own', async () => {
   const problems = [];
@@ -350,6 +363,32 @@ test('every consumer reads the registry, and none keeps a list of channels of it
   ]) {
     assert.match(old, LITERAL_LIST, old);
   }
+  // The channels added since the lists above were written, in each shape: the pattern knew only the old three words,
+  // so every one of these passed it.
+  for (const since of [
+    "const CHANNELS = ['core', 'resend', 'whatsapp'];",
+    "const PACKAGES = ['gmail-mcp', 'resend'];",
+    '/(agent-resend|agent-whatsapp|@agentcomms\\/(?:resend|whatsapp)) mcp install/g',
+    "const known = { resend: await installFlags('resend'), whatsapp: await installFlags('whatsapp') };",
+    "const PRODUCTS = [{ tool: 'whatsapp', binary: 'agent-whatsapp' }];",
+    "const channel = pkg === 'whatsapp' ? 'whatsapp' : 'resend';",
+  ]) {
+    assert.match(since, LITERAL_LIST, since);
+  }
+});
+
+test('the hand-written-list guard reads its words from the registry, so a channel added later is covered too', async () => {
+  const { root } = await treeWithNewcomer();
+  const guard = literalList(loadRegistry(root));
+  assert.match("const CHANNELS = ['core', 'newcomer'];", guard);
+  assert.match(
+    "const known = { gmail: await installFlags('gmail'), newcomer: await installFlags('newcomer') };",
+    guard,
+  );
+  assert.match("const PRODUCTS = [{ tool: 'newcomer', binary: 'agent-newcomer' }];", guard);
+  assert.doesNotMatch("const CHANNELS = ['core', 'newcomer'];", LITERAL_LIST, 'this checkout has no newcomer');
+  // One channel's own rule is still not a list.
+  assert.doesNotMatch('const ALSO_FOREIGN = { newcomer: [/\\bmailbox(es)?\\b/i] };', guard);
 });
 
 test('this checkout’s registry is the five channels and six packages it ships', () => {

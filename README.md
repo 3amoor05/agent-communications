@@ -287,7 +287,7 @@ reaches an already-registered client only when you re-register it:
 npx -y @agentcomms/gmail@latest mcp install --client claude-code --force
 npx -y @agentcomms/slack@latest mcp install --client claude-code --force
 npx -y @agentcomms/resend@latest mcp install --client claude-code --force
-npx -y @agentcomms/whatsapp@latest mcp install --client claude-code --force   # keeps its --account pin
+npx -y @agentcomms/whatsapp@latest mcp install --client claude-code --force   # keeps the account it is pinned to
 npx -y @agentcomms/core@latest mcp install --client claude-code --force   # the core server, if you use it
 ```
 
