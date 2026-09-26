@@ -146,7 +146,12 @@ reference is `whatsapp:none:<id>`, which names nothing, and `agentcomms secrets 
 it is core's record, a renamed account's old name is answered with its new one, and `comms_server_install` checks a
 pin against it.
 
-Each account can carry two lists, by chat id or phone number:
+Each account can carry two lists, by chat id or phone number. A number on a list needs its country code, written with
+`+` or `00` (`+1 555 555 0102`, `00 1 555 555 0102`): without one, `(555) 555-0102` could be a number in any country,
+and an entry that matched no chat would hide nothing while saying it did, so it is refused. Each entry is looked up in
+the index and the chat it names is shown; one that names no chat there is kept — you may hide a number before it
+writes — and said to match none. (Anywhere a number is taken, `00` means `+`, and a number starting with a single `0`
+is refused as national.)
 
 - **deny** — chats an agent must never see. Not listed, searched, read, drafted to or counted; asking for one by id
   gets the same `NOT_FOUND`, word for word, as a chat that does not exist.

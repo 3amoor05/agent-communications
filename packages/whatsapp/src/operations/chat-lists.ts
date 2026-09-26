@@ -1,6 +1,10 @@
+import { isCommsError } from '@agentcomms/core';
 import { chatRefOf } from '../chat-ref.ts';
+import type { WhatsAppAccount } from '../config.ts';
 import type { WhatsAppContext } from '../context.ts';
-import { type ChatLists, listKey } from '../visibility.ts';
+import { WhatsAppIndex } from '../index-db.ts';
+import { type ChatView, Presenter } from '../present.ts';
+import { type ChatLists, listKey, Visibility } from '../visibility.ts';
 import { refuseAnAgent } from './accounts.ts';
 
 /**
@@ -26,6 +30,12 @@ export interface ChatListsResult {
   effect: string;
   /** What the index holds was decided at the last sync: chats it left out come back only with the next one. */
   next: string;
+  /**
+   * The chat the entry names, as the index knows it, so the person can see it is the one they meant — or null when the
+   * index has none by that id, and `warning` says so. Absent when the whole list was cleared.
+   */
+  chat?: ChatView | null;
+  warning?: string | undefined;
 }
 
 function without(list: readonly string[], chatId: string): string[] {
@@ -45,6 +55,38 @@ function effectOf(lists: ChatLists): string {
   return `An agent sees every chat${denied}; status updates only when it asks for them.`;
 }
 
+/**
+ * The chat an entry names, looked up in the index as the person sees it — every chat the last sync kept, whatever the
+ * lists say now — so a mistyped number is noticed rather than trusted.
+ */
+async function named(
+  context: WhatsAppContext,
+  name: string,
+  account: WhatsAppAccount,
+  chatId: string,
+): Promise<Pick<ChatListsResult, 'chat' | 'warning'>> {
+  let index: WhatsAppIndex;
+  try {
+    index = await WhatsAppIndex.open(context.accountDir(account), name, new Visibility(undefined));
+  } catch (error) {
+    if (!isCommsError(error) || error.details?.reason !== 'NOT_SYNCED') throw error;
+    return {
+      chat: null,
+      warning: `"${name}" has not been synced, so whether a chat is ${chatId} could not be checked. The entry is kept.`,
+    };
+  }
+  try {
+    const chat = index.chat(chatId);
+    if (chat) return { chat: new Presenter(name).chat(chat) };
+    return {
+      chat: null,
+      warning: `There is no chat ${chatId} in the index as of the last sync — check the number. The entry is kept, and applies to that chat if one appears; one the lists hid at the last sync is not in the index either.`,
+    };
+  } finally {
+    index.close();
+  }
+}
+
 /** The one path every list change takes: the person check first, before any input is read. */
 async function change(
   context: WhatsAppContext,
@@ -53,7 +95,7 @@ async function change(
   next: (lists: ChatLists, chatId: string | undefined) => ChatLists,
 ): Promise<ChatListsResult> {
   refuseAnAgent(context, command, 'changes which chats an agent may see');
-  const chatId = request.chat === undefined ? undefined : chatRefOf(request.chat).id;
+  const chatId = request.chat === undefined ? undefined : chatRefOf(request.chat, { international: true }).id;
   const { name, account } = await context.account(request.account);
   const { before, after } = await context.lists.update(account.id, (lists) => next(lists, chatId));
   return {
@@ -63,6 +105,7 @@ async function change(
     changed: JSON.stringify(before) !== JSON.stringify(after),
     effect: effectOf(after),
     next: `agent-whatsapp sync --account ${name}`,
+    ...(chatId === undefined ? {} : await named(context, name, account, chatId)),
   };
 }
 

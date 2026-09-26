@@ -195,7 +195,7 @@ test('deny beats allow, a number and its id are one entry, a number covers its s
   try {
     await person(harness, 'allow', ALICE);
     await person(harness, 'allow', GROUP);
-    const byNumber = await person(harness, 'deny', '15555550101');
+    const byNumber = await person(harness, 'deny', '+15555550101');
     const byId = await person(harness, 'deny', ALICE);
     assert.deepEqual([byNumber.deny, byId.deny], [[ALICE], [ALICE]], 'a number and its id are one entry');
     assert.deepEqual(await on.chats(), [GROUP], 'denied and allowed: denied wins');
@@ -298,7 +298,7 @@ test('a status post WhatsApp recorded no author for is hidden while the lists hi
     assert.deepEqual((await on.read('status@broadcast')).ids, ['33', '31', '30', '16']);
 
     // Alice denied, after the sync: a post with no author could be hers, so it is not shown.
-    await person(harness, 'deny', '15555550101');
+    await person(harness, 'deny', '+15555550101');
     assert.deepEqual(await on.search('sunrise', '--kind', 'status'), ['31', '32']);
     assert.deepEqual((await on.read('status@broadcast')).ids, ['31'], 'hers, and those with no author, are hidden');
     assert.deepEqual((await on.read(ERIN_STATUS)).ids, ['32', '22'], 'Erin’s session is Erin’s');
@@ -350,7 +350,7 @@ test('a group is a chat: a denied person’s messages in a group the agent may s
   const { call, close } = await connect(harness);
   const on = surfaces(harness, call);
   try {
-    await person(harness, 'deny', '15555550101');
+    await person(harness, 'deny', '+15555550101');
     assert.deepEqual(await on.search('harbour'), ['34', '35'], 'the group may be seen, so all of it may');
     assert.deepEqual(((await on.read(GROUP)).ids ?? []).slice(0, 2), ['35', '34']);
     await harness.cli(['sync', '--account', ACCOUNT]);
@@ -450,6 +450,74 @@ test('a number denied on any account is not drafted to through another — a dra
       assert.ok(!pinned.isError, 'nothing about another account reaches a pinned server');
     } finally {
       await Promise.all([client.close(), server.close()]);
+    }
+  } finally {
+    await close();
+  }
+});
+
+test('a number on a list needs its country code: one without is refused, not kept to match nothing, and the chat an entry names is named', async () => {
+  const harness = await newHarness();
+  await harness.ready(ACCOUNT);
+  const { call, close } = await connect(harness);
+  const on = surfaces(harness, call);
+  try {
+    // As a person writes a number at home: without the country code, it could be anyone's in any country.
+    for (const national of ['(555) 555-0102', '5555550102', '15555550102']) {
+      for (const command of ['deny', 'allow', 'clear']) {
+        const refused = await harness.cli([command, national, '--account', ACCOUNT, '--json']);
+        assert.equal(refused.code, 64, `${command} ${national}: ${refused.stdout}`);
+        assert.match(String(refused.json().error?.message), /country code/);
+        assert.match(String(refused.json().error?.hint), /\+1 555 555 0102|00/);
+      }
+    }
+    assert.equal(harness.listsFile(), null, 'nothing was written');
+    assert.equal((await on.read(BOB)).code, 0);
+
+    // With it — as + or as 00 — the entry is the chat, and the chat is named, from the index.
+    for (const number of ['+1 (555) 555-0102', '00 1 555 555 0102']) {
+      const denied = await harness.cli(['deny', number, '--account', ACCOUNT, '--json']);
+      assert.equal(denied.code, 0, denied.stdout);
+      const data = denied.data() as { deny: string[]; chat: { id: string; kind: string } | null; warning?: string };
+      assert.deepEqual(data.deny, [BOB]);
+      assert.deepEqual(data.chat && { id: data.chat.id, kind: data.chat.kind }, { id: BOB, kind: 'direct' });
+      assert.equal(data.warning, undefined);
+      assert.match((await harness.cli(['deny', number, '--account', ACCOUNT])).stdout, /Bobby Test/);
+      assert.equal((await on.read(BOB)).code, 66, 'and it hides what it names');
+      await person(harness, 'clear');
+    }
+
+    // A number with no chat is kept — a person may hide one before it writes — and said to match none yet.
+    const ahead = await harness.cli(['deny', '+44 7700 900123', '--account', ACCOUNT, '--json']);
+    assert.equal(ahead.code, 0, ahead.stdout);
+    assert.deepEqual((ahead.data() as { deny: string[] }).deny, ['447700900123@s.whatsapp.net']);
+    assert.equal((ahead.data() as { chat: unknown }).chat, null);
+    assert.match(String((ahead.data() as { warning?: string }).warning), /no chat .* in the index/);
+    assert.match((await harness.cli(['deny', '+44 7700 900123', '--account', ACCOUNT])).stdout, /no chat/);
+  } finally {
+    await close();
+  }
+});
+
+test('a number with a leading 00 is the international number, and one with a single leading 0 is refused as national', async () => {
+  const harness = await newHarness();
+  await harness.ready(ACCOUNT);
+  const { call, close } = await connect(harness);
+  const on = surfaces(harness, call);
+  try {
+    assert.deepEqual((await on.read('00 1 555 555 0101')).ids, (await on.read(ALICE)).ids);
+    await person(harness, 'deny', '+15555550102');
+    assert.equal((await on.read('0015555550102')).code, 66, 'the denied number, written with 00, is the same entry');
+    assert.equal((await on.draft('00 1 555 555 0102')).code, 66, 'and not drafted to');
+    const alice = await on.draft('00 1 555 555 0101');
+    assert.deepEqual(alice.links, {
+      app: 'whatsapp://send?phone=15555550101&text=hello',
+      web: 'https://wa.me/15555550101?text=hello',
+    });
+    for (const national of ['07700 900123', '0 555 555 0102']) {
+      const read = await on.read(national);
+      assert.deepEqual([read.code, read.error?.code], [64, 'USAGE'], national);
+      assert.match(String(read.error?.hint), /country code/);
     }
   } finally {
     await close();

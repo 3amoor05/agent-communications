@@ -96,8 +96,15 @@ function unattributed(count: number): string {
 
 export function renderChatLists(result: ChatListsResult, color: boolean): string {
   const list = (entries: string[]) => (entries.length === 0 ? paint(color, 'dim', '(none)') : entries.join(', '));
+  const chat = result.chat
+    ? [
+        `  chat   ${name(result.chat.name, result.chat.phone ? `+${result.chat.phone}` : result.chat.id, 60)} · ${result.chat.kind} · ${escapeForDisplay(result.chat.id)}`,
+      ]
+    : [];
   return [
     `${paint(color, 'green', result.changed ? 'Updated' : 'Unchanged')} ${result.account}. ${result.effect}`,
+    ...chat,
+    ...(result.warning ? [paint(color, 'yellow', result.warning)] : []),
     `  allow  ${list(result.allow)}`,
     `  deny   ${list(result.deny)}`,
     paint(
