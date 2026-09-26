@@ -1,0 +1,5 @@
+{
+  "kind": "requestOnly",
+  "group": "communications",
+  "useWhen": "Read WhatsApp on this Mac, read-only: sync, list chats, read, search, and draft a reply as a link the person sends."
+}

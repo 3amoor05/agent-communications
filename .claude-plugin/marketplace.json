@@ -1,6 +1,6 @@
 {
   "name": "agent-communications",
-  "description": "Communication tools for coding agents: Gmail, Slack and Resend. Search, read, analyse, draft and organise mail across several mailboxes, read and post to Slack workspaces, and read and send through a Resend team \u2014 nothing is sent or posted without your approval.",
+  "description": "Communication tools for coding agents: Gmail, Slack, Resend and WhatsApp. Search, read, analyse, draft and organise mail across several mailboxes, read and post to Slack workspaces, read and send through a Resend team, and read WhatsApp on a Mac \u2014 nothing is sent or posted without your approval, and nothing sends on WhatsApp at all.",
   "owner": {
     "name": "crissmoldovan",
     "url": "https://github.com/crissmoldovan/agent-communications"
@@ -9,14 +9,14 @@
     {
       "name": "gmail",
       "source": "./",
-      "description": "Gmail and Slack for coding agents. The Gmail server is included: search, read, analyse, draft and organise mail, with sending behind your approval. The Slack skills read a workspace and post only what a person approves; connect their server with `npx -y @agentcomms/slack mcp install --client claude-code` (or `--client` codex, cursor, gemini, claude-desktop or vscode), a registration you approve. The Resend skills read a team's domains and mail and send only what a person approves; connect an account at your terminal with `npx -y @agentcomms/resend account add acme/resend`, and its server with `npx -y @agentcomms/resend mcp install --client claude-code`. The onboarding skill works through the core server, which the plugin does not start either: `npx -y @agentcomms/core mcp install --client claude-code`.",
+      "description": "Gmail and Slack for coding agents. The Gmail server is included: search, read, analyse, draft and organise mail, with sending behind your approval. The Slack skills read a workspace and post only what a person approves; connect their server with `npx -y @agentcomms/slack mcp install --client claude-code` (or `--client` codex, cursor, gemini, claude-desktop or vscode), a registration you approve. The Resend skills read a team's domains and mail and send only what a person approves; connect an account at your terminal with `npx -y @agentcomms/resend account add acme/resend`, and its server with `npx -y @agentcomms/resend mcp install --client claude-code`. The WhatsApp skill reads the chats WhatsApp for Mac keeps on this Mac and drafts replies as links you send \u2014 it never sends; add the account at your terminal with `npx -y @agentcomms/whatsapp add personal/whatsapp`, and its server with `npx -y @agentcomms/whatsapp mcp install --client claude-code --account personal/whatsapp`. The onboarding skill works through the core server, which the plugin does not start either: `npx -y @agentcomms/core mcp install --client claude-code`.",
       "version": "0.6.0",
       "author": {
         "name": "crissmoldovan"
       },
       "homepage": "https://github.com/crissmoldovan/agent-communications",
       "license": "MIT",
-      "keywords": ["gmail", "email", "slack", "resend", "mcp", "communications"],
+      "keywords": ["gmail", "email", "slack", "resend", "whatsapp", "mcp", "communications"],
       "strict": false,
       "skills": [
         "./skills/comms-onboarding",
@@ -37,7 +37,8 @@
         "./skills/resend-sending",
         "./skills/slack-setup",
         "./skills/slack-reading",
-        "./skills/slack-posting"
+        "./skills/slack-posting",
+        "./skills/whatsapp-reading"
       ],
       "mcpServers": {
         "gmail": {
