@@ -225,6 +225,24 @@ For a Slack workspace connected on another computer, use the same app: on that c
 `agent-slack workspace show <organisation>/slack --json` gives its Client ID (`oauthClientId`), and
 `agent-slack manifest --workspace <organisation>/slack --json` its port (`port`).
 
+## WhatsApp, and the spike before it
+
+WhatsApp reads a file on the Mac it runs on, so an account is added on each Mac, at its own terminal — macOS asks
+there for permission to read WhatsApp's data:
+
+```bash
+npx -y @agentcomms/whatsapp@$V add <organisation>/whatsapp
+npx -y @agentcomms/whatsapp@$V sync --account <organisation>/whatsapp
+npx -y @agentcomms/whatsapp@$V mcp install --client claude-code --account <organisation>/whatsapp
+```
+
+A Mac that ran the unpublished spike has its accounts in `whatsapp-spike.json`. The first `agent-whatsapp` command, or
+the first start of its server, moves them into `config.json` once — same account ids, so the index is read as it is
+with no new sync, and the chat lists come too — and keeps the old file as `whatsapp-spike.json.migrated-<time>`. It
+opens neither WhatsApp's store nor the spike's index to do it. A server the spike's checkout registered by hand is not
+one this release updates: register the published one with `mcp install` as above, and remove the old entry from the
+client.
+
 ## Example: one person's mapping
 
 For illustration only — these are one owner's accounts, not names to copy. Six mailboxes and two Slack workspaces,

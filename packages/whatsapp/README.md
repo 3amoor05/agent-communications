@@ -1,60 +1,191 @@
-# @agentcomms/whatsapp — a spike, not a release
+# @agentcomms/whatsapp
 
-> **Experimental and unpublished.** `"private": true`. It is not in `scripts/packages.mjs`, the release workflow,
-> core's channel table, `capabilities.json` or the plugin manifests, and no skill mentions it. It exists to answer one
-> question before anyone decides anything: can an agent read someone's WhatsApp, safely, without WhatsApp ever
-> seeing a thing?
+WhatsApp for coding agents, **read-only**. An agent can list, read and search the chats WhatsApp for Mac already
+keeps on your Mac, and draft a reply — which comes back as a link that opens WhatsApp with the text filled in.
+**You press send.** The package has no network client, no WhatsApp session and no way to send anything.
 
-`agent-whatsapp` reads the messages **WhatsApp for Mac already keeps on the Mac**, through a private copy, into a
-local index. An agent can list chats, read one, and search — and draft a reply, which comes back as a link that opens
-WhatsApp with the text filled in. **The person presses send.** The package has no network client, no WhatsApp
-session and no way to send anything.
+```sh
+npm install -g @agentcomms/whatsapp    # or run it with npx -y @agentcomms/whatsapp <command>
+```
 
-## What it never does
+It needs **macOS with WhatsApp for Mac** installed and signed in, and **Node 22.16 or newer** (it reads with Node's
+own SQLite, which is complete from 22.16; an older Node is refused with what to install).
 
-- **Connect to WhatsApp, or to anything.** No socket, no HTTP, no DNS. A test builds the bundle — this package with
-  core, commander, zod and the MCP SDK inlined — and checks that no network module is anywhere in its module graph;
-  another runs every command and every tool with sockets, DNS, TLS, `fetch` and `WebSocket` cut off.
-- **Send, mark as read, react, show you as online or typing.** There is no code that could. `draft` returns a link.
-- **Write to WhatsApp's files.** It copies two of them and reads the copy (below). A test checks the WhatsApp folder
-  is byte-for-byte and mtime-for-mtime unchanged after a sync.
-- **Read anything but the message store.** WhatsApp's folder also holds `Axolotl.sqlite` — the encryption keys that
-  make the Mac a linked device — and contacts, settings and media. Only `ChatStorage.sqlite` and its write-ahead log
-  are ever opened, by exact name; `--source` refuses any other file name before reading a byte.
-- **Download or open media.** Photos, voice notes and documents are listed by type, size and file name only.
+## What it does, and what it never does, in plain words
 
-## WhatsApp's terms, in plain words
+- **It reads only local files.** Nothing here connects to WhatsApp, or to anything: no socket, no HTTP, no DNS. Its
+  manifest declares no host (`"hosts": []`). A test builds the published bundle and checks that no network module
+  is anywhere in it; another runs every command and every tool with the network cut off.
+- **It never sends, marks as read, reacts, or shows you as online or typing.** There is no code that could. A draft
+  is a `whatsapp://send` or `https://wa.me/` link; WhatsApp fills in the message and waits for you.
+- **It never writes to WhatsApp's files.** It copies the message store and its write-ahead log, reads the copy, and
+  deletes it. A test checks WhatsApp's folder is byte-for-byte and mtime-for-mtime unchanged after a sync.
+- **It reads one file.** Only `ChatStorage.sqlite` and its log are opened, by exact name. The same folder holds the
+  encryption keys that make the Mac a linked device (`Axolotl.sqlite`), contacts and media; none is ever read.
+- **Media is described, never opened**: type, size and file name.
 
-WhatsApp's Terms of Service forbid using its service through unofficial clients and automated means, and WhatsApp
-bans numbers it catches doing so — including low-volume, reply-only use. The obvious way to build this — a library
-such as Baileys that logs in as a linked device — is exactly that kind of client, and a malicious copy of Baileys
-(`lotusbail`, 56,000 downloads, December 2025) stole the sessions of the people who installed it. So this spike does
-not do it. It never talks to WhatsApp: it reads a file the official app has already written to the Mac, and nothing
-it does reaches WhatsApp's servers. That is a design choice, not legal advice.
+**WhatsApp's terms.** WhatsApp forbids unofficial clients and automation, and bans numbers it catches — including
+low-volume, reply-only use. The usual way to build this, a library that logs in as a linked device, is exactly that
+kind of client (and a malicious copy of one, `lotusbail`, stole the sessions of 56,000 installs in December 2025). So
+this does not do it: it reads a file the official app has already written to your Mac, and nothing it does reaches
+WhatsApp's servers. That is a design choice, not legal advice. **Do not pair it with anything that sends** — another
+WhatsApp MCP server, a script that types into WhatsApp — or the protection is gone; `mcp install` warns about any
+other WhatsApp server it finds registered.
 
-## How the real store is opened
+**What you give up, stated plainly.**
+
+- **Your messages are copied into a local index**, in plain text, so an agent can search them. It is owner-only
+  (0600 in a 0700 folder, put back if anything loosens it), holds only the chats your lists let agents see, and
+  `remove` deletes it. It is **not encrypted**, and it does not have the protection WhatsApp's own folder has:
+  macOS asks before an app reads WhatsApp's folder, and it does not ask before one reads this index. Anything that
+  runs as you can read it. (Why not encrypted: Node's SQLite cannot open an encrypted database or load one from
+  memory, so the index would have to be decrypted to disk for every read — a plaintext copy anyway — and the key
+  would sit in a store every program running as you can read.)
+- **macOS will ask for permission to read WhatsApp's data**, for the app this runs in — below. If you grant **Full
+  Disk Access** instead, you grant it to your whole terminal or MCP client, which is far broader than WhatsApp.
+- **An agent reads other people's messages to you.** Hide chats with `deny`, or allow only some with `allow`.
+  Groups are visible unless you hide them, and a person you have denied is still visible in a group you have not.
+- **Messages are untrusted.** Anyone with your number can send text meant for the agent. Every message, name and
+  file name reaches it inside the untrusted-content envelope, with invisible and bidirectional characters removed
+  and counted; the residual risk is a model following an instruction anyway — which is why sending stays with you.
+
+## Getting started
+
+In a terminal — these are yours to run, and each refuses an agent:
+
+```sh
+agent-whatsapp add personal/whatsapp             # names WhatsApp for Mac's store; macOS may ask: choose Allow
+agent-whatsapp sync --account personal/whatsapp  # copy, check, index, delete the copy
+agent-whatsapp status
+agent-whatsapp deny +15555550102 --account personal/whatsapp   # optional: a chat agents never see
+agent-whatsapp mcp install --client claude-code --account personal/whatsapp
+```
+
+`mcp install` registers the server with your client, pinned to that account, as a change you approve: at a terminal
+you type `yes` to what it shows; run by an agent it exits `10` with a preview and an approval id, and the same command
+with `--approval <id>` registers it after your yes. Under the `confirm` change policy you approve with
+`agent-whatsapp approve <id>` and a code instead. Restart the client afterwards. From a chat, the core server's
+`comms_server_install` with `channel: "whatsapp"` and `account` is the same change.
+
+For WhatsApp Business, add its store with
+`--source ~/Library/Group\ Containers/group.net.whatsapp.WhatsAppSMB.shared/ChatStorage.sqlite`.
+
+## macOS permission
+
+macOS protects other apps' data. On recent versions (reported for group containers from macOS 15.2), the first time a
+process reads WhatsApp's folder macOS asks **"<app> would like to access data from other apps"** — where `<app>` is the
+one responsible for the process: the terminal you run the command in, or the MCP client that started the server —
+never Node itself. Until someone answers, the read waits. Older versions may not ask at all, and either allow the read or
+refuse it.
+
+- **Allow** fixes it for that app's session. A background MCP server cannot click it, and the answer does not always
+  persist for background processes — so run `add` and the first `sync` in a terminal.
+- **Full Disk Access** makes it stick: System Settings → Privacy & Security → Full Disk Access, add the terminal (or the
+  MCP client), then quit and reopen it. It is much broader than WhatsApp; revoke it when you no longer need it.
+
+The package says which: a refusal comes back as exit `77` / `AUTH_REQUIRED` with the steps and, when the environment
+says which app it is, its name; a dialog nobody answers fails after 12 seconds as exit `75` with "look for the dialog"
+instead of hanging; a missing store says WhatsApp for Mac may not be installed.
+
+Only `add` and `sync` (and `status`, unless `--no-check`) touch WhatsApp's folder. `chats`, `read` and `search` open
+only the index — so they cannot raise a dialog, and they keep working, on what was last synced, if WhatsApp is closed,
+updating or gone.
+
+## Commands and tools
+
+| Command | MCP tool | What it does |
+|---|---|---|
+| `add <org/whatsapp> [--source]` | — | a person names the store; the first read, when macOS asks |
+| `remove <org/whatsapp>` | — | forget it, its chat lists and its index; WhatsApp's own store is not touched |
+| `allow <chat> --account` | — | let agents see this chat; once any is allowed, only allowed chats are visible |
+| `deny <chat> --account` | — | hide this chat from agents entirely |
+| `clear [chat] --account` | — | take a chat off both lists, or with no chat empty them |
+| `status [--account] [--no-check]` | `whatsapp_status` | what is set up, whether it can be read, what the index holds |
+| `sync --account` | `whatsapp_sync` | copy, check, index, delete the copy |
+| `chats --account [--kind] [--limit]` | `whatsapp_chats` | chats, newest first; status updates only with `--kind status` |
+| `read <chat> --account [--before] [--limit]` | `whatsapp_read` | one chat, newest first |
+| `search <words> --account [--chat] [--sender] [--kind] [--limit]` | `whatsapp_search` | full-text: text, captions, file names, sender and chat names |
+| `draft <to> <text> [--account] [--open]` | `whatsapp_draft` | a `whatsapp://send` and a `https://wa.me/` link; the person sends |
+| `approve <id>` | — | approve a change — registering or pruning this server — at a terminal |
+| `mcp [--account]` | — | the MCP server on stdio, pinned to one account when `--account` is given |
+| `mcp install`, `mcp prune` | `comms_server_install`, `comms_server_prune` (core) | register the server with a client; remove old runtimes |
+
+Each command and its tool run the same operation, and `capabilities.json` holds them to it. The commands with no
+tool are the person's on purpose: which file on the Mac an agent reads, and which chats in it, are not an agent's to
+decide, in either direction — `add`, `remove`, `allow`, `deny` and `clear` also refuse an agent at the command line.
+`draft --open` is refused to an agent too: a filled-in message box landing on the screen of someone typing elsewhere
+is one Enter away from sent.
+
+`draft` takes a phone number or any id `chats` and `read` print. A group has no number, so its draft comes back as text
+to paste, with the reason; so does a chat with someone who hides their number (`@lid`), a broadcast list and a channel.
+A status update is not a chat anyone writes to, and is refused.
+
+**A pinned server** (`agent-whatsapp mcp --account personal/whatsapp`, which `mcp install --account` writes) acts on
+that account whether or not a call names it, refuses any other, and names no other account — not in its greeting,
+not in `whatsapp_status`. The pin follows the account through a rename.
+
+**Kinds of chat.** From its id: `direct` (`…@s.whatsapp.net`), `hidden-number` (`…@lid`), `group` (`…@g.us`),
+`channel` (`…@newsletter`), `broadcast` (`…@broadcast`) and `status` (WhatsApp's status feed, and one session per
+contact's posts). Status updates are indexed, but `chats` and `search` leave them out unless asked for with
+`--kind status`; one named by its id is read like any other chat. An id none of these match is `unknown`.
+
+## Accounts, and the chats agents may see
+
+An account is a record in agentcomms' own `config.json`, beside Gmail's mailboxes and Slack's workspaces, named
+`organisation/whatsapp`. It is read-only by construction (`mode: "read"`, the only mode this channel has), names the
+store by a stable id (`group.net.whatsapp.WhatsApp.shared` for WhatsApp for Mac), and holds no secret: its secret
+reference is `whatsapp:none:<id>`, which names nothing, and `agentcomms secrets migrate` moves nothing for it. Because
+it is core's record, a renamed account's old name is answered with its new one, and `comms_server_install` checks a
+pin against it.
+
+Each account can carry two lists, by chat id or phone number:
+
+- **deny** — chats an agent must never see. Not listed, searched, read, drafted to or counted; asking for one by id
+  gets the same `NOT_FOUND`, word for word, as a chat that does not exist.
+- **allow** — once anything is on it, the only chats an agent sees. Denied wins over allowed.
+
+A phone number names a person rather than one chat: their one-to-one chat, their own status posts and, in the status
+feed, the posts they wrote. A group is a chat — denying someone does not take what they wrote out of a group an agent
+may see. The lists apply at once to every read on both surfaces, and `sync` applies them too, leaving what they hide
+out of the index. `status` reports how many chats each list holds, never which.
+
+The lists are kept in `whatsapp-chats.json` beside `config.json`, by account id — not in `config.json`. Everything in
+that file is kept through every write, but only a few settings are *judged* when a write loosens something, and a
+deny list there could be emptied by any program that writes it with nobody asked. In a file of its own, written only
+by the person's three commands, and read so that a file that cannot be read shows no chat rather than every chat,
+they stay the person's.
+
+## Moving from the spike
+
+If you ran the unpublished spike, its accounts are in `whatsapp-spike.json`. The first command or server start of this
+release moves them into `config.json`, once: the same account id, so the index the spike built is read as it is with no
+new sync; the chat lists moved before the account appears; a name that is already taken left unmoved and said so; the
+old file kept as `whatsapp-spike.json.migrated-<time>`; one line in the audit log (`agentcomms audit tail`) and one on
+stderr. It reads neither WhatsApp's store nor the spike's index to do it. A configuration still on the old flat names
+waits until `agentcomms names migrate` has run.
+
+## How the store is read
 
 WhatsApp for Mac keeps the store at `~/Library/Group Containers/group.net.whatsapp.WhatsApp.shared/ChatStorage.sqlite`,
 unencrypted on disk, and holds it open in SQLite's WAL mode while it runs: recent messages sit in
 `ChatStorage.sqlite-wal` until the app folds them into the main file.
 
 1. **Copy, don't open.** The store and its log are copied (on APFS, cloned — instant, no extra space) into a private
-   folder under core's state directory. The source files are only `lstat`ed and read. Nothing opens them with
-   SQLite, takes a lock on them, or touches the app's `-shm` file.
-   - SQLite's `mode=ro` was rejected: a read-only connection still takes locks and writes read-marks into the app's
-     `-shm` file.
-   - `immutable=1` was rejected: it ignores the log, so it misses the newest messages (a test shows it returning none
-     of the rows a live writer holds), and it can read torn pages while the app writes.
+   folder under agentcomms' state directory. The source files are only `lstat`ed and read. Nothing opens them with
+   SQLite, takes a lock on them, or touches the app's `-shm` file. SQLite's `mode=ro` was rejected because a read-only
+   connection still takes locks and writes read-marks into the app's `-shm` file; `immutable=1` because it ignores
+   the log, missing the newest messages, and can read torn pages while the app writes.
 2. **Consistent, or not at all.** Each source file is fingerprinted (inode, size, nanosecond mtime) before and after
    the copy; if WhatsApp wrote in between, the copy is discarded and taken again, up to five times, then refused.
    SQLite then checks the copy (`quick_check`).
-3. **Check the layout before reading.** A missing required table or column refuses the whole sync by name, and the
-   previous index is kept as it was. A missing optional part turns off one named feature and is reported.
-4. **Index, then delete the copy.** The index is rebuilt in a new file and renamed into place, owner-only (0600 in a
-   0700 folder). The copy is deleted whatever happens; one a crash left behind is removed by the next sync.
+3. **Check the layout before reading.** A missing required table or column refuses the whole sync by name (exit `65`),
+   and the previous index is kept as it was. A missing optional part turns off one named feature and is reported.
+4. **Index, then delete the copy.** The index is rebuilt in a new file and renamed into place, owner-only. The copy is
+   deleted whatever happens; one a crash left behind is removed by the next sync.
 
-`chats`, `read` and `search` open only the index, never WhatsApp's files — so they cannot trigger a macOS dialog,
-and they keep working, on what was last synced, if WhatsApp is closed, updating or gone.
+WhatsApp can change this layout without notice. The reader refuses rather than guess when a required part is gone;
+the risk it cannot catch is a column that keeps its name and changes its meaning, so check a handful of chats by eye
+after a WhatsApp update if anything looks wrong.
 
 ## Where the schema comes from
 
@@ -84,132 +215,7 @@ iLEAPP use). Anything else — text, a call, a location — shows no media line 
 shown as a call, without a duration: both KnugiHK and iLEAPP read call durations from `CallHistory.sqlite`, a separate
 file this reader never opens.
 
-## macOS permission
 
-macOS protects other apps' data. On recent versions (reported for group containers from macOS 15.2), the first
-time a process reads WhatsApp's folder macOS asks **"<app> would like to access data from other apps"** — where
-`<app>` is the one responsible for the process: the terminal you run `agent-whatsapp` in, or the MCP client that
-started the server, not `node`. Until someone answers, the read waits. Older versions may not ask at all, and either
-allow the read or refuse it outright; the command reports whichever happened.
+## Licence
 
-- **Allow** fixes it for that app's session. A background MCP server cannot click it, and the answer does not always
-  persist for background processes.
-- **Full Disk Access** makes it stick: System Settings → Privacy & Security → Full Disk Access, add the terminal (or
-  the MCP client), then quit and reopen it.
-
-The package says which: a refusal (`EPERM`) comes back as exit 77 / `AUTH_REQUIRED` with the steps and, when the
-environment says which app it is, its name; a dialog nobody answers fails after 12 seconds as exit 75 with "look for
-the dialog" instead of hanging; a missing store says WhatsApp for Mac may not be installed.
-
-## Trying it for real
-
-On the Mac with WhatsApp for Mac installed and signed in, from a checkout of this branch:
-
-```bash
-pnpm install && pnpm build                                      # builds core, then this package
-node packages/whatsapp/dist/cli.mjs add personal/whatsapp      # macOS may ask: choose Allow
-node packages/whatsapp/dist/cli.mjs sync --account personal/whatsapp
-node packages/whatsapp/dist/cli.mjs status
-node packages/whatsapp/dist/cli.mjs chats --account personal/whatsapp
-node packages/whatsapp/dist/cli.mjs search "dinner" --account personal/whatsapp
-```
-
-If `add` or `sync` exits 77, grant **Full Disk Access to the terminal app** as above and run it again. If `sync`
-exits 65, WhatsApp's layout has drifted from what the public readers describe: nothing was indexed, and the message
-names what is missing — that is the reader working, and it needs updating before it can be trusted. For WhatsApp
-Business, pass `--source ~/Library/Group\ Containers/group.net.whatsapp.WhatsAppSMB.shared/ChatStorage.sqlite`.
-`remove personal/whatsapp` deletes the index; WhatsApp's own files are never touched.
-
-## Commands and tools
-
-| Command | MCP tool | What it does |
-|---|---|---|
-| `add <org/whatsapp> [--source]` | — | a person names the store; the first read, when macOS asks |
-| `remove <org/whatsapp>` | — | forget it and delete its index |
-| `allow <chat> --account` | — | let agents see this chat; once any is allowed, only allowed chats are visible |
-| `deny <chat> --account` | — | hide this chat from agents entirely |
-| `clear [chat] --account` | — | take a chat off both lists, or with no chat empty them |
-| `status [--account] [--no-check]` | `whatsapp_status` | what is set up, whether it can be read, what the index holds |
-| `sync --account` | `whatsapp_sync` | copy, check, index, delete the copy |
-| `chats --account [--kind] [--limit]` | `whatsapp_chats` | chats, newest first; status updates only with `--kind status` |
-| `read <chat> --account [--before] [--limit]` | `whatsapp_read` | one chat, newest first |
-| `search <words> --account [--chat] [--sender] [--kind] [--limit]` | `whatsapp_search` | full-text: text, captions, file names, sender and chat names |
-| `draft <to> <text> [--account] [--open]` | `whatsapp_draft` | a `whatsapp://send` and a `https://wa.me/` link; the person sends |
-| `mcp` | — | the MCP server on stdio |
-
-**Kinds of chat.** A chat's kind comes from its id, which WhatsApp assigns: `direct` (`…@s.whatsapp.net`),
-`hidden-number` (`…@lid`), `group` (`…@g.us`) — the three msgvault imports as conversations — `channel`
-(`…@newsletter`, as iLEAPP names them), `broadcast` (a broadcast list, `…@broadcast`) and `status`. Status updates are
-WhatsApp's status feed (`status@broadcast`) and, in a real store, one session per contact (`<number>@status`): posts,
-not conversations, and numerous enough to bury the chats. They are indexed, but `chats` and `search` leave them out
-and `status` and `sync` do not count them as chats (`statusChats` says how many there are) unless asked for with
-`--kind status` (`kind: "status"`); one named by its id — in `read`, or `search --chat` — is read like any other chat.
-An id none of these match is `unknown`, never guessed at.
-
-Each command and its tool call the same function in `src/operations/`; `test/mcp.test.ts` runs both and compares the
-results. `add` and `remove` have no tool on purpose: which file an agent may read is a person's choice, and the first
-read is when macOS asks that person; nor do `allow`, `deny` and `clear` (below). `draft --open` is refused to an agent — a filled-in message box landing on the
-screen of someone typing elsewhere is one Enter away from sent — so an agent hands over the link. `draft` takes a
-phone number or any id `chats` and `read` print: an `…@s.whatsapp.net` id is its number. A group has no number, so its
-draft comes back as text to paste, with the reason; so does a chat with someone who hides their number (`@lid`), a
-broadcast list and a channel. A status update is not a chat anyone writes to, and is refused — for `<number>@status`,
-naming the number to write to instead.
-
-## Hiding chats from agents
-
-Each account can carry two lists of chats, by chat id or phone number, kept in the spike's own config file:
-
-- **deny** — chats an agent must never see. A denied chat is not listed, searched, read, drafted to or counted, and
-  asking for it by id gets the same `NOT_FOUND`, word for word, as a chat that does not exist.
-- **allow** — once anything is on it, the only chats an agent sees. Denied wins over allowed.
-
-With neither list every chat is visible, except that status updates are left out of listings and searches unless
-asked for. A phone number names a person rather than one chat: their one-to-one chat, their own status posts
-(`<number>@status`) and, in the status feed, the posts they wrote. A group is a chat — denying someone does not take
-what they wrote out of a group an agent may see. `status` reports how many chats each list holds, never which.
-
-The lists apply at once, to every read on both surfaces: `WhatsAppIndex` cannot be opened without them, and every
-query filters through them. `sync` applies them too, leaving what they hide out of the index, so a hidden chat's
-messages are not kept in a second copy on disk; a chat the last sync left out comes back only at the next one. A draft
-names its account with `--account` and is checked against that account's lists; without one, against every account's.
-
-`allow`, `deny` and `clear` are a person's, like `add`: there is no tool for them, and at the command line they are
-refused when core's agent marker is set (exit 10), as `draft --open` is. Not even `deny` is left to an agent — which
-chats an agent may see is not the agent's to decide, in either direction.
-
-Every message body, caption, sender name, group name and file name comes back inside core's untrusted-content
-envelope; bidi and zero-width characters are removed and counted (`hidden: { characters, bidi }`); links are
-reported by domain with core's flags. Accounts are named `organisation/whatsapp`, checked by core's name grammar.
-
-## What core would need to host a third channel
-
-The spike keeps its accounts in its own file, `whatsapp-spike.json` beside core's `config.json`, because core
-hard-codes the two channels it has:
-
-- **`AccountConfig` is Slack-shaped.** `workspace`, `userId`, `tier` and `grantedScopes` are required; none means
-  anything for a local store. A channel-neutral record (id, platform, created, plus a per-platform block) is needed,
-  in a new config version, with the readers-first rollout the name migration used.
-- **`Channel = 'core' | 'gmail' | 'slack'`** and `CHANNEL_SERVERS` in `channel-servers.ts`; the server install and
-  pin checks in `operations/servers.ts` (`request.workspace` must be a `slack` account); the core MCP server's tool
-  descriptions name Gmail and Slack; `scripts/packages.mjs`, `third-party-licenses.mjs` (its own list of four) and
-  `capabilities.json` would each need the package.
-- **Name lookups** — `resolveName`, `nameAvailable` and former-name tombstones — work only on core's `Config`, so the
-  spike cannot use them for its own file and has no rename or tombstone story.
-- **`secrets migrate` and `uninstall --purge`** walk only the references in `config.json`. This spike stores no
-  secret, so nothing is stranded — but a channel that did, outside `config.json`, would be left behind by both.
-- **Core has no "local store" notion**: state directories are per-inbox JSON; a per-account data directory with an
-  index, a sync lock and brief snapshots is new, and `doctor` knows nothing of it.
-- `core.secrets()` and the approval engine were not needed at all — worth keeping possible: a channel with no
-  credentials and no send path should not have to carry them.
-
-## Risks to accept before pointing it at a real store
-
-| Risk | What would lower it |
-|---|---|
-| WhatsApp changes the layout; the reader refuses (safe) or, if a column keeps its name and changes its meaning, misreads (unsafe). | Run against the real store once, read-only, and compare a handful of chats by eye; pin the WhatsApp version it was checked against; keep refusing on unknown `ZMESSAGETYPE` values. |
-| The index is a second plaintext copy of every message, owner-only on disk. | Encrypt it at rest with a key in core's secret store; let `remove` also shred. Chats the lists hide are already left out of it. |
-| Full Disk Access is far broader than WhatsApp's folder, and it is granted to the whole terminal or MCP client. | Grant "Allow" per session instead where possible; run the MCP server from a dedicated signed binary and grant only that; revoke when done. |
-| An agent sees everything in every chat, including other people's messages sent to the owner. | Done: allow and deny lists per account, and status updates left out by default. Still open: groups are visible by default, and a denied person's messages in a visible group are shown. |
-| Message content is untrusted and reaches a model. | Already enveloped and defused; the residual risk is a model following instructions anyway — keep the send step with a person, as `draft` does. |
-| A draft link could be made to a number the person did not intend. | The person sees the number and text in WhatsApp before sending; `--open` is refused to agents. |
-| `node:sqlite` is marked experimental in Node 22 (the warning is filtered). | Pin Node; revisit when it is stable. |
+[MIT](LICENSE). The bundled dependencies' notices are in `THIRD_PARTY_LICENSES`.

@@ -1,19 +1,19 @@
 # What is where
 
-Three platforms, Gmail, Slack and Resend, each shipping the same things, independent of each other. You can take
-one and ignore the rest.
+Four platforms, Gmail, Slack, Resend and WhatsApp, each shipping the same things, independent of each other. You
+can take one and ignore the rest. Each platform's column is its CLI, the MCP server that CLI starts, and its package.
 
 ```
-                       ┌────────────────────────────┬────────────────────────────┬────────────────────────────┐
-  people, scripts ───► │  agent-gmail    (the CLI)  │  agent-slack    (the CLI)  │  agent-resend   (the CLI)  │
-                       ├────────────────────────────┼────────────────────────────┼────────────────────────────┤
-  agents ────────────► │  MCP server    (44 tools)  │  MCP server    (27 tools)  │  MCP server    (18 tools)  │
-                       ├────────────────────────────┼────────────────────────────┼────────────────────────────┤
-                       │  @agentcomms/gmail         │  @agentcomms/slack         │  @agentcomms/resend        │
-                       ├────────────────────────────┴────────────────────────────┴────────────────────────────┤
-                       │  @agentcomms/core   (shared)                                                         │
-                       └──────────────────────────────────────────────────────────────────────────────────────┘
-  agents ────────────►    skills/  — gmail-*, slack-*, resend-* and comms-*, instructions, not code
+                       ┌───────────────────────┬───────────────────────┬───────────────────────┬───────────────────────┐
+  people, scripts ───► │ agent-gmail           │ agent-slack           │ agent-resend          │ agent-whatsapp        │
+                       ├───────────────────────┼───────────────────────┼───────────────────────┼───────────────────────┤
+  agents ────────────► │ MCP server (44 tools) │ MCP server (27 tools) │ MCP server (18 tools) │ MCP server (6 tools)  │
+                       ├───────────────────────┼───────────────────────┼───────────────────────┼───────────────────────┤
+                       │ @agentcomms/gmail     │ @agentcomms/slack     │ @agentcomms/resend    │ @agentcomms/whatsapp  │
+                       ├───────────────────────┴───────────────────────┴───────────────────────┴───────────────────────┤
+                       │ @agentcomms/core   (shared; its own CLI and MCP server, 12 tools)                             │
+                       └───────────────────────────────────────────────────────────────────────────────────────────────┘
+  agents ────────────►    skills/  — gmail-*, slack-*, resend-*, whatsapp-* and comms-*, instructions, not code
 ```
 
 | | What it is | Install | Needs |
@@ -25,6 +25,8 @@ one and ignore the rest.
 | **Slack MCP server** | The same operations over stdio. Posts only through the approval gate; no tool approves. | `@agentcomms/slack` (`agent-slack mcp`) | nothing else |
 | **`agent-resend`** | The Resend CLI: a key a person types at a terminal, then a team's domains, sent and received mail, metrics and suppressions, and sending with a person's approval. | `@agentcomms/resend` | nothing else |
 | **Resend MCP server** | The same operations over stdio, but adding a key. Sends only through the approval gate; no tool approves. | `@agentcomms/resend` (`agent-resend mcp`) | nothing else |
+| **`agent-whatsapp`** | The WhatsApp CLI, read-only, on macOS: sync a local index of WhatsApp for Mac's own store, list, read and search it, and draft replies as links a person sends. | `@agentcomms/whatsapp` | WhatsApp for Mac, Node 22.16 |
+| **WhatsApp MCP server** | The same reads over stdio. No tool sends, adds an account or changes which chats an agent sees. | `@agentcomms/whatsapp` (`agent-whatsapp mcp`) | the same |
 | **Core MCP server** | Installs and manages the others from a chat — registers and prunes servers, reports what is installed, migrates names and secrets, sets the change policy. Every change is a preview a person approves. | `@agentcomms/core` (`agentcomms mcp`) | nothing else |
 | **Skills** | Markdown instructions telling an agent how to use the above, and where to stop. | `npx skills add` | neither package |
 
@@ -54,14 +56,14 @@ They are separate things that are easy to confuse because both are "for agents".
 them, and when they are not they fall back to the CLI. You can install skills with no server, a server with no
 skills, or both.
 
-There are nineteen, one per job. Twelve for Gmail — searching, triage, composing, sending, organising, attachments,
+There are twenty, one per job. Twelve for Gmail — searching, triage, composing, sending, organising, attachments,
 contacts, thread analysis, follow-ups, export, security, setup — three for Slack: setup, reading and posting — two
-for Resend: reading and sending — and two through the core server: `comms-onboarding`, which sets them up, and
-`comms-update`, which brings them to the latest release. Each is a `SKILL.md` plus reference pages, including the contract its platform's skills share; the
-two `comms-` skills share their own, for the core's tools.
-See [the skills index](skills.md).
+for Resend: reading and sending — one for WhatsApp, reading — and two through the core server: `comms-onboarding`,
+which sets them up, and `comms-update`, which brings them to the latest release. Each is a `SKILL.md` plus reference
+pages, including the contract its platform's skills share; the two `comms-` skills share their own, for the core's
+tools. See [the skills index](skills.md).
 
-The platform skills are named `gmail-*`, `slack-*` and `resend-*` because a skill states one platform's truth and has no other
+The platform skills are named `gmail-*`, `slack-*`, `resend-*` and `whatsapp-*` because a skill states one platform's truth and has no other
 branch to fall into. `comms-onboarding` is the one that spans both, and only to install and connect them: once an
 account works, it hands over to `gmail-setup` and `slack-setup`. Slack ships its own pack, and its own contract,
 rather than the Gmail skills becoming platform-neutral, and the reason is that the guarantees genuinely differ: on
@@ -79,7 +81,9 @@ registration a person runs at a terminal before everything else can be done from
 
 It is separate because the approval gate and the sanitiser are not mail-specific. The Slack and Resend packages use
 the same core, the same approval records, the same audit log — and, for Slack's workspaces and Resend's accounts,
-the same generic account record in the one configuration file.
+the same generic account record in the one configuration file. So does WhatsApp's, for its accounts, with its
+untrusted-content envelope, its name lookups and its change flow for registering the server — and, having no
+credential, never its secret store.
 
 Every channel package depends on it, so it arrives with any of them. You run it directly for its
 command and its MCP server — `npx -y @agentcomms/core mcp install --client <client>` is the first step of the
@@ -125,3 +129,17 @@ the `Idempotency-Key`. More than ten recipients, or an address first seen in mai
 terminal whatever the policy. A send whose outcome is unknown is recorded as unknown and checked with
 `resend_send_status`, never repeated. The key is typed by a person at a terminal (`agent-resend account add`), and no
 tool accepts one.
+
+## How WhatsApp is kept read-only
+
+There is nothing to gate, because there is nothing that sends. `@agentcomms/whatsapp` reads a copy of the message store
+WhatsApp for Mac keeps on the Mac into a local index, and every tool reads that index. It has no network client — its
+manifest declares no host, a test checks the published bundle imports no network module, and another runs every
+command and tool with the network cut off — no WhatsApp session, and no send path. A draft is a link that opens
+WhatsApp with the text filled in; the person presses send. That is also why it never logs in as a linked device:
+WhatsApp bans numbers it catches using unofficial clients.
+
+Its accounts are core's generic record (`mode: "read"`, the only mode it has), so a registration is pinned, renamed
+and checked like any other channel's. Which store is read, and which chats an agent may see, are the person's: the
+commands that set them have no tool and refuse an agent. The index is a plaintext copy, owner-only — the cost of
+full-text search over a store no API offers — and [the package](../packages/whatsapp/README.md) says what that means.
