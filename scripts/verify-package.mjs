@@ -113,7 +113,10 @@ try {
   const tarball = await packPackage(packageDir, 'candidate');
 
   const entries = readTarball(await readFile(tarball));
-  for (const required of ['package/package.json', 'package/LICENSE', 'package/README.md']) {
+  // THIRD_PARTY_LICENSES is the notice every bundled dependency's licence requires to travel with its code; a package
+  // whose "files" dropped it would ship those dependencies in breach, and `verify:licenses` checks only the source.
+  const mustShip = ['package/package.json', 'package/LICENSE', 'package/README.md', 'package/THIRD_PARTY_LICENSES'];
+  for (const required of mustShip) {
     if (!entries.has(required)) throw new Error(`tarball is missing ${required}`);
   }
   if ([...entries.keys()].some((path) => /^package\/(src|test)\//.test(path))) {

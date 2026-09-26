@@ -1,100 +1,278 @@
 #!/usr/bin/env node
 /**
- * Writes `THIRD_PARTY_LICENSES` for each published package.
+ * Writes `THIRD_PARTY_LICENSES` for each published package, from what its bundle actually contains.
  *
  * These packages are bundled: the dependency code is inlined into the published files rather than installed
  * alongside them, so the licence notices that would normally travel in `node_modules` do not travel at all. Every
  * one of those licences requires the notice to be preserved, which means this file is a licence obligation, not
  * paperwork — and a bundle shipped without it is a bundle shipped in breach.
  *
- * `--check` verifies without writing, which is what CI runs.
+ * **Read from the bundler, not from package.json.** This used to walk each package's declared dependencies, skipping
+ * `@agentcomms/*` — yet every channel bundle inlines core, and with it everything core inlines and everything core
+ * depends on (`noExternal` matches every module); and the walk lost any dependency pnpm had not hoisted. Resend's notice missed
+ * 13 of the packages its bundle carried, Gmail's 58. So each package is now built again in memory, with its own
+ * `tsdown.config.ts`, and the bundler's module graph says which files went into which output — the declaration
+ * files `dts: { resolve: true }` inlines included. A module is then one of:
+ *
+ * - this package's own source, or core's: this repository's code, under its own LICENSE;
+ * - a file of another workspace package's `dist`, which is followed into that package's own graph, so what core
+ *   inlined is found in every bundle that inlines core;
+ * - a file under a `node_modules/<name>`: that installed package, by the version actually on disk;
+ * - the bundler's runtime glue, which it generates for the build rather than copying from a package;
+ * - anything else, which fails — a module nobody can name the licence of is a module that ships without one.
+ *
+ * `--check` verifies without writing, which is what CI runs. It fails, naming the package and the version, for every
+ * package a bundle inlines that its `THIRD_PARTY_LICENSES` has no notice for — as well as when the file is merely out
+ * of date. It needs the workspace built (`pnpm build`), because a channel's bundle inlines core's `dist`.
  */
+import { realpathSync } from 'node:fs';
 import { readdir, readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 // The one list of packages, read rather than copied: this script kept a copy of its own, which nothing checked.
 import { PACKAGES } from './packages.mjs';
 
-const ROOT = fileURLToPath(new URL('..', import.meta.url));
-const check = process.argv.includes('--check');
+const ROOT = realpathSync(fileURLToPath(new URL('..', import.meta.url)));
+
+/** Licence files, most likely first; a package that ships none of these is looked at more loosely below. */
 const LICENCE_FILES = ['LICENSE', 'LICENSE.md', 'LICENCE', 'LICENCE.md', 'LICENSE.txt', 'license'];
-const problems = [];
+const LOOSE_LICENCE_FILE = /^(?:licen[cs]e|copying)(?:[-.][\w.-]+)?$/i;
 
-/** The packages a bundle actually inlines: its own runtime and build dependencies, and theirs, transitively. */
-async function bundledInto(name) {
-  const manifest = JSON.parse(await readFile(join(ROOT, 'packages', name, 'package.json'), 'utf8'));
-  const direct = Object.keys({ ...manifest.dependencies, ...manifest.devDependencies })
-    // Type packages and our own workspace packages carry no code into the bundle.
-    .filter((dependency) => !dependency.startsWith('@types/') && !dependency.startsWith('@agentcomms/'))
-    // The toolchain builds the bundle; it is not in it.
-    .filter((dependency) => !['tsdown', 'typescript', '@biomejs/biome'].includes(dependency));
-  const seen = new Set();
-  const queue = [...direct];
-  while (queue.length > 0) {
-    const dependency = queue.shift();
-    if (!dependency || seen.has(dependency)) continue;
-    const manifestPath = await resolveManifest(dependency);
-    if (!manifestPath) continue;
-    seen.add(dependency);
-    const theirs = JSON.parse(await readFile(manifestPath, 'utf8'));
-    for (const next of Object.keys(theirs.dependencies ?? {})) queue.push(next);
+/**
+ * Modules the bundler writes itself: rolldown's helpers for interop and lazy initialisation, generated into the
+ * build rather than taken from an installed package. Named one by one, so an unfamiliar virtual module still fails.
+ */
+const BUNDLER_MODULES = new Set(['\0rolldown/runtime.js']);
+
+/** Forward slashes everywhere, and on Windows one case, so a module id and a directory compare as paths. */
+const comparable = (path) => {
+  const forward = path.replaceAll('\\', '/');
+  return process.platform === 'win32' ? forward.toLowerCase() : forward;
+};
+
+/**
+ * Where one module of a bundle comes from.
+ *
+ * `root` is the repository, `self` the package whose bundle it is. Returns `{ kind: 'bundler' }`, `{ kind: 'own' }`,
+ * `{ kind: 'workspace', name, file }`, `{ kind: 'third-party', directory }` or `{ kind: 'unknown' }`.
+ */
+export function ownerOf(id, { root, self }) {
+  if (BUNDLER_MODULES.has(id)) return { kind: 'bundler' };
+  // A query (`?commonjs-proxy` and the like) names a view of a file, not another file.
+  const file = id.startsWith('\0') ? null : id.replace(/[?#].*$/, '');
+  if (file === null) return { kind: 'unknown' };
+  const forward = file.replaceAll('\\', '/');
+  const marker = '/node_modules/';
+  const at = forward.lastIndexOf(marker);
+  if (at !== -1) {
+    const segments = forward.slice(at + marker.length).split('/');
+    const name = segments[0].startsWith('@') ? segments.slice(0, 2).join('/') : segments[0];
+    if (!name || (name.startsWith('@') && !name.includes('/'))) return { kind: 'unknown' };
+    return { kind: 'third-party', directory: forward.slice(0, at + marker.length) + name };
   }
-  return [...seen].sort();
+  const packages = `${comparable(root).replace(/\/$/, '')}/packages/`;
+  const candidate = comparable(file);
+  if (candidate.startsWith(packages)) {
+    const name = forward.slice(packages.length).split('/')[0];
+    return name === self ? { kind: 'own' } : { kind: 'workspace', name, file: forward };
+  }
+  return { kind: 'unknown' };
 }
 
-/** pnpm's store nests by version, so the manifest is found by walking up from the resolved entry point. */
-async function resolveManifest(dependency) {
-  const direct = join(ROOT, 'node_modules', dependency, 'package.json');
-  if (
-    await readFile(direct, 'utf8').then(
-      () => true,
-      () => false,
-    )
-  )
-    return direct;
-  // Hoisted differently, or only present under a workspace package.
-  for (const name of PACKAGES) {
-    const nested = join(ROOT, 'packages', name, 'node_modules', dependency, 'package.json');
-    if (
-      await readFile(nested, 'utf8').then(
-        () => true,
-        () => false,
-      )
-    )
-      return nested;
-  }
-  return null;
+/** The `name@version` of every notice a THIRD_PARTY_LICENSES text carries, read from the header line of each. */
+export function noticedIn(text) {
+  return new Set(
+    [...String(text ?? '').matchAll(/^((?:@[^/\s]+\/)?[^@\s/]+)@(\S+) — /gm)].map((m) => `${m[1]}@${m[2]}`),
+  );
 }
 
-async function noticeFor(dependency) {
-  const manifestPath = await resolveManifest(dependency);
-  if (!manifestPath) return null;
-  const directory = join(manifestPath, '..');
-  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
-  const licence = typeof manifest.license === 'string' ? manifest.license : (manifest.license?.type ?? 'see below');
+/** What a bundle inlines that `text` has no notice for, as `name@version`, sorted. */
+export function missingNotices(inlined, text) {
+  const noticed = noticedIn(text);
+  return [...inlined].filter((key) => !noticed.has(key)).sort(byPackage);
+}
 
-  let text = null;
+/** By name, then by version as numbers, so `entities@4.5.0` comes before `entities@10.0.0`. */
+function byPackage(a, b) {
+  const split = (key) => {
+    const at = key.lastIndexOf('@');
+    return at > 0 ? [key.slice(0, at), key.slice(at + 1)] : [key, ''];
+  };
+  const [nameA, versionA] = split(a);
+  const [nameB, versionB] = split(b);
+  if (nameA !== nameB) return nameA < nameB ? -1 : 1;
+  return versionA.localeCompare(versionB, 'en', { numeric: true });
+}
+
+/**
+ * One package's bundle, as the bundler builds it: every output file, by absolute path, and the modules in it.
+ *
+ * Built in memory with the package's own config — `write: false`, and `clean: false` so its `dist` is not emptied —
+ * so what is read is what `pnpm build` makes, without touching what `pnpm build` made.
+ */
+async function buildGraph(name) {
+  const { build } = await import('tsdown');
+  const handle = await build({ cwd: join(ROOT, 'packages', name), write: false, clean: false, logLevel: 'silent' });
+  const outputs = new Map();
+  for (const bundle of handle.bundles) {
+    for (const chunk of bundle.chunks) {
+      if (chunk.type !== 'chunk') continue;
+      outputs.set(comparable(join(chunk.outDir, chunk.fileName)), chunk.moduleIds);
+    }
+  }
+  return outputs;
+}
+
+const graphs = new Map();
+function graphOf(name) {
+  if (!graphs.has(name)) graphs.set(name, buildGraph(name));
+  return graphs.get(name);
+}
+
+/**
+ * Every installed package inlined into one package's bundle: `name@version` → `{ name, version, directory, in }`,
+ * where `in` lists the published files that carry it. Problems — a module no package owns, a workspace `dist` that
+ * a fresh build would not produce — are pushed onto `problems`.
+ */
+async function inlinedInto(name, problems) {
+  const found = new Map();
+  const where = (file) => relative(ROOT, file).replaceAll('\\', '/');
+
+  async function visit(owner, output, ids, via, seen) {
+    for (const id of ids) {
+      const from = ownerOf(id, { root: ROOT, self: owner });
+      if (from.kind === 'bundler' || from.kind === 'own') continue;
+      if (from.kind === 'unknown') {
+        problems.push(
+          `packages/${name}: ${where(output)} inlines ${JSON.stringify(id)}, which is neither this repository's code ` +
+            'nor an installed package, so there is no licence to name for it',
+        );
+        continue;
+      }
+      if (from.kind === 'workspace') {
+        const key = comparable(from.file);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const theirs = (await graphOf(from.name)).get(key);
+        if (!theirs) {
+          problems.push(
+            `packages/${name}: its bundle inlines ${where(from.file)}, which a fresh build of packages/${from.name} ` +
+              'does not produce — that dist is out of date, so what it inlines cannot be read. Run `pnpm build`.',
+          );
+          continue;
+        }
+        await visit(from.name, from.file, theirs, via, seen);
+        continue;
+      }
+      const manifest = JSON.parse(await readFile(join(from.directory, 'package.json'), 'utf8'));
+      const key = `${manifest.name}@${manifest.version}`;
+      if (!found.has(key)) found.set(key, { directory: from.directory, manifest, in: new Set() });
+      found.get(key).in.add(via);
+    }
+  }
+
+  for (const [output, ids] of await graphOf(name)) {
+    await visit(name, output, ids, where(output), new Set());
+  }
+  return found;
+}
+
+/** The licence a manifest declares: an SPDX expression, the old `{ type }` form, or the older `licenses` array. */
+function declaredLicence(manifest) {
+  if (typeof manifest.license === 'string') return manifest.license;
+  if (typeof manifest.license?.type === 'string') return manifest.license.type;
+  if (Array.isArray(manifest.licenses)) {
+    const types = manifest.licenses.map((entry) => entry?.type).filter((type) => typeof type === 'string');
+    if (types.length > 0) return types.join(' OR ');
+  }
+  return 'see below';
+}
+
+/** The licence text a package ships, or null. */
+async function shippedText(directory) {
   const entries = await readdir(directory).catch(() => []);
   for (const candidate of LICENCE_FILES) {
     const found = entries.find((entry) => entry.toLowerCase() === candidate.toLowerCase());
     if (!found) continue;
-    text = await readFile(join(directory, found), 'utf8').catch(() => null);
-    if (text) break;
+    const text = await readFile(join(directory, found), 'utf8').catch(() => null);
+    if (text?.trim()) return text;
   }
+  // `LICENSE-MIT`, `COPYING` and the like; a dual-licensed package can ship two, and both are reproduced.
+  const loose = entries.filter((entry) => LOOSE_LICENCE_FILE.test(entry)).sort();
+  const texts = [];
+  for (const entry of loose) {
+    const text = await readFile(join(directory, entry), 'utf8').catch(() => null);
+    if (text?.trim()) texts.push(text.trim());
+  }
+  if (texts.length > 0) return texts.join('\n\n');
+  return readmeLicence(directory, entries);
+}
+
+/**
+ * The licence a package reproduces in its README instead of a file of its own — `data-uri-to-buffer` does — taken
+ * only when that section is the licence's text, with its grant, and not a one-line "MIT © somebody".
+ */
+async function readmeLicence(directory, entries) {
+  const readme = entries.find((entry) => /^readme(?:\.md|\.markdown|\.txt)?$/i.test(entry));
+  if (!readme) return null;
+  const lines = (await readFile(join(directory, readme), 'utf8').catch(() => '')).split(/\r?\n/);
+  const heading = (index) => {
+    const line = lines[index] ?? '';
+    if (/^#{1,6}\s/.test(line)) return line.replace(/^#+\s*/, '');
+    return /^(?:-{3,}|={3,})\s*$/.test(lines[index + 1] ?? '') && line.trim() !== '' ? line : null;
+  };
+  const start = lines.findIndex((_, index) => /^licen[cs]e\b/i.test(heading(index)?.trim() ?? ''));
+  if (start === -1) return null;
+  const body = [];
+  for (let index = start + (/^#/.test(lines[start]) ? 1 : 2); index < lines.length; index += 1) {
+    if (heading(index) !== null) break;
+    // Link definitions at the foot of a README belong to the document, not to the licence.
+    if (/^\s*\[[^\]]+\]:\s*\S+/.test(lines[index])) continue;
+    body.push(lines[index]);
+  }
+  const text = body
+    .join('\n')
+    .replaceAll('&lt;', '<')
+    .replaceAll('&gt;', '>')
+    .replaceAll('&quot;', '"')
+    .replaceAll('&amp;', '&')
+    .trim();
+  const granted = /Permission is hereby granted|Redistribution and use|Permission to use, copy, modify/;
+  return granted.test(text) ? text : null;
+}
+
+/**
+ * The text of a licence whose package ships no copy, borrowed from another package inlined here that declares the
+ * same licence and does ship one.
+ *
+ * Some packages declare a licence and ship no copy of it — `@googleapis/*` among them. The obligation to reproduce it
+ * does not go away. Only Apache-2.0 is borrowed: its text carries no per-package copyright line, so it is the same
+ * everywhere, while an MIT or BSD text names its holder and cannot be taken from someone else's. The donor is chosen
+ * by name, so the output does not depend on the order the bundler happened to list modules in.
+ */
+async function canonicalText(spdx, everything) {
+  if (spdx !== 'Apache-2.0') return null;
+  const donors = [...everything.values()]
+    .filter((entry) => declaredLicence(entry.manifest) === spdx)
+    .sort((a, b) => byPackage(`${a.manifest.name}@${a.manifest.version}`, `${b.manifest.name}@${b.manifest.version}`));
+  for (const donor of donors) {
+    const text = await shippedText(donor.directory);
+    if (text && /Apache License/.test(text) && /Version 2\.0/.test(text)) return text;
+  }
+  return null;
+}
+
+async function noticeFor(key, entry, everything, problems) {
+  const licence = declaredLicence(entry.manifest);
+  const text = (await shippedText(entry.directory)) ?? (await canonicalText(licence, everything));
   if (!text) {
-    // Some packages declare a licence and ship no copy of it — `@googleapis/*` among them. The obligation to
-    // reproduce it does not go away, so the canonical text for that SPDX id is used, taken from a package in this
-    // same tree that does ship one. An id nothing here carries is reported rather than skipped.
-    text = await canonicalText(licence);
-    if (!text) {
-      problems.push(`${dependency}: declares ${licence} and ships no copy of it, and no canonical text was found`);
-      return null;
-    }
+    problems.push(`${key}: declares ${licence} and ships no copy of it, and no canonical text was found`);
+    return null;
   }
   return [
     '-'.repeat(100),
-    `${dependency}@${manifest.version} — ${licence}`,
-    manifest.homepage ? `  ${manifest.homepage}` : '',
+    `${key} — ${licence}`,
+    entry.manifest.homepage ? `  ${entry.manifest.homepage}` : '',
     '-'.repeat(100),
     '',
     text.trim(),
@@ -105,75 +283,90 @@ async function noticeFor(dependency) {
     .join('\n');
 }
 
-/**
- * The text of a licence, borrowed from a package in this tree that ships one.
- *
- * Preferred over a copy pasted into this script: the text then comes from the same versions being bundled, and
- * there is no second place for it to go stale. A licence with a per-package copyright line is not borrowed — the
- * two that matter here, Apache-2.0 and MIT-with-no-holder, are identical everywhere.
- */
-const canonicalCache = new Map();
-async function canonicalText(spdx) {
-  if (spdx !== 'Apache-2.0') return null;
-  if (canonicalCache.has(spdx)) return canonicalCache.get(spdx);
-  for (const donor of ['google-auth-library', 'googleapis-common', 'google-logging-utils']) {
-    const manifestPath = await resolveManifest(donor);
-    if (!manifestPath) continue;
-    const text = await readFile(join(manifestPath, '..', 'LICENSE'), 'utf8').catch(() => null);
-    if (text) {
-      canonicalCache.set(spdx, text);
-      return text;
-    }
-  }
-  return null;
-}
-
-for (const name of PACKAGES) {
-  const dependencies = await bundledInto(name);
+/** The file for one package, from the packages its bundle inlines. */
+async function licencesFile(name, inlined, everything, problems) {
+  const keys = [...inlined.keys()].sort(byPackage);
   const notices = [];
-  for (const dependency of dependencies) {
-    const notice = await noticeFor(dependency);
+  for (const key of keys) {
+    const notice = await noticeFor(key, inlined.get(key), everything, problems);
     if (notice) notices.push(notice);
   }
-
-  // A package that bundles nothing says so, rather than leaving a header with nothing under it — which reads like
-  // a file that was cut off.
-  const content =
-    notices.length === 0
-      ? [
-          `Third-party licences for @agentcomms/${name}`,
-          '',
-          'This package inlines no third-party code: it depends on @agentcomms/gmail at runtime, which carries its',
-          'own THIRD_PARTY_LICENSES for what it bundles. There is nothing to reproduce here.',
-          '',
-          'Generated by scripts/third-party-licenses.mjs.',
-          '',
-        ].join('\n')
-      : [
-          `Third-party licences bundled into @agentcomms/${name}`,
-          '',
-          'This package is published as a bundle: the code below is compiled into its published files rather than',
-          'installed beside them, so these notices travel here instead of in node_modules. They are reproduced in',
-          'full, as each licence requires.',
-          '',
-          `Generated by scripts/third-party-licenses.mjs from ${dependencies.length} packages.`,
-          '',
-          '',
-          ...notices,
-        ].join('\n');
-
-  const path = join(ROOT, 'packages', name, 'THIRD_PARTY_LICENSES');
-  const current = await readFile(path, 'utf8').catch(() => null);
-  if (current === content) continue;
-  if (check) {
-    problems.push(`packages/${name}/THIRD_PARTY_LICENSES is out of date — run \`pnpm licenses\``);
-    continue;
+  if (keys.length === 0) {
+    // A package that bundles nothing says so, rather than leaving a header with nothing under it — which reads like
+    // a file that was cut off.
+    const manifest = JSON.parse(await readFile(join(ROOT, 'packages', name, 'package.json'), 'utf8'));
+    const ours = Object.keys(manifest.dependencies ?? {}).filter((dependency) => dependency.startsWith('@agentcomms/'));
+    const because =
+      ours.length > 0
+        ? `: it depends on ${ours.join(' and ')} at runtime, which ${ours.length === 1 ? 'carries its' : 'carry their'}\nown THIRD_PARTY_LICENSES for what ${ours.length === 1 ? 'it bundles' : 'they bundle'}.`
+        : '.';
+    return [
+      `Third-party licences for @agentcomms/${name}`,
+      '',
+      `This package inlines no third-party code${because} There is nothing to reproduce here.`,
+      '',
+      'Generated by scripts/third-party-licenses.mjs.',
+      '',
+    ].join('\n');
   }
-  await writeFile(path, content);
+  return [
+    `Third-party licences bundled into @agentcomms/${name}`,
+    '',
+    'This package is published as a bundle: the code below is compiled into its published files rather than',
+    'installed beside them, so these notices travel here instead of in node_modules. They are reproduced in',
+    'full, as each licence requires.',
+    '',
+    `Generated by scripts/third-party-licenses.mjs from the ${keys.length} packages the bundler put into it.`,
+    '',
+    '',
+    ...notices,
+  ].join('\n');
 }
 
-if (problems.length > 0) {
-  for (const problem of problems) console.error(`- ${problem}`);
-  process.exit(1);
+async function main() {
+  const check = process.argv.includes('--check');
+  const problems = [];
+  const contents = new Map();
+  const everything = new Map();
+  for (const name of PACKAGES) {
+    const inlined = await inlinedInto(name, problems);
+    contents.set(name, inlined);
+    for (const [key, entry] of inlined) if (!everything.has(key)) everything.set(key, entry);
+  }
+
+  const counts = [];
+  for (const name of PACKAGES) {
+    const inlined = contents.get(name);
+    counts.push(`${name} ${inlined.size}`);
+    // Some licence files are written with CRLF. The repository stores every text file with LF (`.gitattributes`), so
+    // a CRLF kept here would be normalised on commit and then differ from every fresh generation, on every platform.
+    const content = (await licencesFile(name, inlined, everything, problems)).replace(/\r\n?/g, '\n');
+    const path = join(ROOT, 'packages', name, 'THIRD_PARTY_LICENSES');
+    const current = await readFile(path, 'utf8').catch(() => null);
+    if (current === content) continue;
+    if (!check) {
+      await writeFile(path, content);
+      continue;
+    }
+    for (const key of missingNotices(inlined.keys(), current)) {
+      const carriers = [...inlined.get(key).in].sort().join(', ');
+      problems.push(
+        `packages/${name}: its bundle inlines ${key} (${carriers}), and THIRD_PARTY_LICENSES has no notice for it`,
+      );
+    }
+    problems.push(`packages/${name}/THIRD_PARTY_LICENSES is out of date — run \`pnpm licenses\``);
+  }
+
+  if (problems.length > 0) {
+    for (const problem of problems) console.error(`- ${problem}`);
+    process.exit(1);
+  }
+  console.log(
+    `third-party licences ${check ? 'match' : 'written for'} what ${PACKAGES.length} bundles inline (${counts.join(', ')}).`,
+  );
 }
-console.log(`third-party licences written for ${PACKAGES.length} packages.`);
+
+// Run directly, generate or check. Imported — by its test — it only lends its readers. Compared through realpath,
+// as `packages.mjs` does, because a temp directory can be a symlink.
+const invoked = process.argv[1] ? realpathSync(process.argv[1]) : '';
+if (invoked === realpathSync(fileURLToPath(import.meta.url))) await main();
