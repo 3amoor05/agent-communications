@@ -1080,6 +1080,31 @@ export interface Loosening {
 }
 
 /**
+ * The modes an account may be in, narrow to wide: `read`, which cannot reach another person, and `send`, which can
+ * once a person approves. Closed: a channel may not add a word, because a word the classifier does not know is a
+ * widening it cannot judge (see `classifyChange`).
+ */
+export const ACCOUNT_MODES: readonly ['read', 'send'] = Object.freeze(['read', 'send'] as const);
+export type AccountMode = (typeof ACCOUNT_MODES)[number];
+
+/**
+ * The platforms whose accounts live in `accounts` and whose modes this release can judge, with the modes each has.
+ *
+ * On any other platform a mode is only a word: `read` means what Slack's token guarantees on Slack, and nothing this
+ * release can vouch for anywhere else.
+ */
+const ACCOUNT_PLATFORM_MODES: Readonly<Record<string, readonly AccountMode[]>> = Object.freeze({
+  slack: ACCOUNT_MODES,
+});
+
+/** Where `mode` sits on `platform`, narrow to wide — or `Infinity` for a word or a platform this release does not know. */
+function modeRank(platform: string, mode: string): number {
+  const modes = Object.hasOwn(ACCOUNT_PLATFORM_MODES, platform) ? ACCOUNT_PLATFORM_MODES[platform] : undefined;
+  const rank = modes ? (modes as readonly string[]).indexOf(mode) : -1;
+  return rank === -1 ? Number.POSITIVE_INFINITY : rank;
+}
+
+/**
  * Which paths of a config change loosen a safety setting, and what each moved between. A safety setting may only be
  * loosened with a person's consent (see LooseningConsent); tightening never needs it.
  */
@@ -1180,9 +1205,20 @@ export function classifyChange(before: Config, after: Config): { loosened: strin
      * it as free left `workspace remove` then `workspace add --mode send` as a way to a posting token with nobody's
      * consent. Measured against nothing, a new account's floor is `read`.
      */
+    /*
+     * **The vocabulary is closed** (`ACCOUNT_MODES`). This once flagged exactly one move, `read` → `send`, and let
+     * every other word through: a channel that stored `post` or `full`, or an account on a platform this release
+     * cannot describe, widened with nobody's consent because nothing recognised the word as a widening. So a word
+     * this release does not know is judged as the widest thing it could mean on the side it arrives on, and as the
+     * narrowest on the side it leaves — an unknown word can cost a person a question, never skip one. An account
+     * left exactly as it was moved nothing, whatever its word.
+     */
     const wasMode = previous ? (previous.mode ?? previous.tier) : 'read';
     const nowMode = account.mode ?? account.tier;
-    if (wasMode === 'read' && nowMode === 'send') {
+    const unchanged = previous !== undefined && previous.platform === account.platform && wasMode === nowMode;
+    const wasRank = previous ? modeRank(previous.platform, wasMode) : 0;
+    const nowRank = modeRank(account.platform, nowMode);
+    if (!unchanged && nowRank > (Number.isFinite(wasRank) ? wasRank : 0)) {
       loosen(`accounts.${alias}.mode`, wasMode, nowMode, previous?.id);
     }
   }

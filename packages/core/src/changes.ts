@@ -513,7 +513,11 @@ function meaning(field: string, after: SettingValue, scope: 'inboxes' | 'account
     case 'defaults.changePolicy':
       return 'a yes in the chat will be enough to loosen settings for the whole configuration, and for every mailbox or account without a change policy of its own';
     case 'mode':
-      return 'it will be able to send, not only read';
+      // Any other word is one this release could not judge (`classifyChange`), and the person is told so rather
+      // than told it means sending.
+      return after === 'send'
+        ? 'it will be able to send, not only read'
+        : 'this release cannot tell what that mode allows here, so it counts as the widest there is';
     case 'internalDomains':
       return 'mail to these domains will count as internal, and will not be flagged';
     case 'defaults.riskEscalation':
