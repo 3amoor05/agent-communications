@@ -123,7 +123,7 @@ test('arguments are held to the schema: an unknown key or a wrong type is refuse
           to: ['sam@partner.test'],
           subject: 'Hi',
           text: 'Hi',
-          apiKey: 're_fake_should_not_be_accepted',
+          apiKey: 'fake-should-not-be-accepted',
         }),
       ).code,
       'USAGE',
