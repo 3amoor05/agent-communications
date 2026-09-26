@@ -376,3 +376,37 @@ test('the rate caps are counted across processes from the local record', async (
   );
   assert.equal(harness.fake.sends().length, 1);
 });
+
+test('a policy or mode tightened after the preview applies to that send', async () => {
+  harness = await newHarness();
+  await sendMode();
+  const context = harness.context();
+  const confirm = await prepareSend(context, 'acme/resend', message());
+  assert.equal(confirm.effectivePolicy, 'chat');
+  const tighten = await harness.cli(['--json', 'account', 'policy', 'acme/resend', '--send', 'confirm'], {
+    env: { CLAUDECODE: '1' },
+  });
+  assert.equal(tighten.code, 0, tighten.stdout);
+  await assert.rejects(
+    executeSend(context, 'acme/resend', { approvalId: confirm.approvalId, expect: confirm.expect }),
+    refusal('APPROVAL_PENDING'),
+  );
+  await harness.cli(['--json', 'account', 'policy', 'acme/resend', '--send', 'never'], { env: { CLAUDECODE: '1' } });
+  await assert.rejects(
+    executeSend(context, 'acme/resend', { approvalId: confirm.approvalId, expect: confirm.expect }),
+    refusal('POLICY_NEVER'),
+  );
+  // Back to chat takes a person's approval — but a fresh prepare, then read mode, refuses before any claim.
+  await harness.addAccount({ name: 'zeta/resend', mode: 'send' });
+  const read = await prepareSend(context, 'zeta/resend', message());
+  const narrow = await harness.cli(['--json', 'account', 'policy', 'zeta/resend', '--mode', 'read'], {
+    env: { CLAUDECODE: '1' },
+  });
+  assert.equal(narrow.code, 0, narrow.stdout);
+  await assert.rejects(
+    executeSend(context, 'zeta/resend', { approvalId: read.approvalId, expect: read.expect }),
+    refusal('SCOPE_MISSING'),
+  );
+  assert.equal((await harness.core.approvals.get(read.approvalId))?.state, 'pending', 'refused before the claim');
+  assert.equal(harness.fake.sends().length, 0);
+});

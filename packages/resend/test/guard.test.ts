@@ -71,6 +71,15 @@ test('only the two Resend origins are reachable — not a look-alike, another sc
     );
   }
   assert.equal(calls.length, 0);
+  // Refused at the first layer, by origin — not left to the route table, which pins origins too.
+  await assert.rejects(
+    fetch('https://api.resend.com.attacker.test/domains'),
+    refusedWith(/only calls https:\/\/api\.resend\.com/),
+  );
+  await assert.rejects(
+    fetch('https://attacker.test/emails'),
+    refusedWith(/that request went to https:\/\/attacker\.test/),
+  );
 });
 
 test('no route outside the table is reachable, and the tempting ones say why', async () => {

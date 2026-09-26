@@ -170,15 +170,6 @@ export async function createResendMcpServer(options: ResendMcpOptions = {}): Pro
     return named;
   };
 
-  /** On a pinned server, an approval id of another account is refused before it is touched. */
-  const ownApproval = async (approvalId: string | undefined): Promise<void> => {
-    if (pinnedId === undefined || approvalId === undefined) return;
-    const record = await context.core.approvals.get(approvalId);
-    if (record && record.inboxId !== '' && record.inboxId !== pinnedId) {
-      throw new CommsError('NOT_FOUND', `no approval "${approvalId}" for this account`);
-    }
-  };
-
   const runChange = async <T>(change: GatedChange<T>, approvalId: string | undefined) =>
     changeToolResult(
       await gatedChange(context.core, change, { surface: 'mcp', approvalId, approveCommand: 'agent-resend approve' }),
@@ -509,8 +500,8 @@ export async function createResendMcpServer(options: ResendMcpOptions = {}): Pro
         approvalId: string;
         expect: { to: string[]; cc: string[]; bcc: string[]; subject: string };
       }) => {
+        // Another account's approval is refused by `executeSend` itself, before the record is touched.
         const name = await resolve(args.account);
-        await ownApproval(args.approvalId);
         return executeSend(context, name, { approvalId: args.approvalId, expect: args.expect });
       },
     ),
@@ -527,7 +518,6 @@ export async function createResendMcpServer(options: ResendMcpOptions = {}): Pro
     },
     wrapped(async (args: { account?: string | undefined; approvalId: string }) => {
       const name = await resolve(args.account);
-      await ownApproval(args.approvalId);
       return sendStatus(context, name, args.approvalId);
     }),
   );
