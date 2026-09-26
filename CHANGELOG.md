@@ -3,6 +3,90 @@
 All notable changes to this project are recorded here, newest first. Every package in this repository is released
 together under one version.
 
+## 0.7.0
+
+**Two new channels: Resend and WhatsApp.** Channels are now separate packages that declare themselves to core, so a
+new one needs no edits to core.
+
+**Resend (`@agentcomms/resend`).** Covers the email your companies send from their own domains through Resend.
+- **Reading:** an agent can read which domains are verified, whether an email was delivered, bounced or complained
+  about, the replies Resend received, metrics and suppressions.
+- **Sending:** it prepares an email and shows you the whole preview, with every recipient including BCC. It sends
+  only after your approval, exactly once. The approval id goes to Resend as its idempotency key, and a send whose
+  outcome is unknown is never retried.
+- **When a code is required:** a send to more than 10 people, or to an address first seen in received mail, needs
+  the code typed at your terminal, like `@channel` in Slack.
+- **Your API key** is typed only at a terminal (`agent-resend account add <org/resend>`, from a hidden prompt or
+  `RESEND_API_KEY`), is kept in the keychain, and has no chat tool.
+- **Not in this release:** broadcasts, contacts and automations.
+
+Why: Resend's own MCP server sends the moment a model calls it. This one puts your approval between the model and
+the send, as the Gmail and Slack channels do.
+
+What it means for you:
+- **Read mode is enforced by our code, not by the key.** Resend has no read-only key, so this is weaker than
+  Slack's, and `agent-resend doctor` says so.
+- **Sending-only keys:** a key limited to sending can be locked to one domain, and that lock is enforced on the From
+  address.
+- **Setup:** `npx -y @agentcomms/resend mcp install --client claude-code`, then `account add` at a terminal.
+
+**WhatsApp (`@agentcomms/whatsapp`), read-only.** Reads, lists and searches the chats WhatsApp for Mac keeps on this
+Mac, and drafts a reply as a link that opens WhatsApp with the text filled in, for you to send.
+- It has no network client at all and never talks to WhatsApp's servers.
+- It never sends a message, marks one read or shows you online.
+
+Why: WhatsApp has no official way to act as a personal account, and it bans numbers that use unofficial clients.
+Reading the Mac app's own store is the one way to reach your history with no risk to the number.
+
+What it means for you:
+- **Plaintext copy:** the index is a second copy of your messages on this Mac, readable only by your user.
+  `agent-whatsapp remove` deletes it.
+- **What the agent sees:** it sees every chat unless you use `agent-whatsapp allow` / `deny`, which only you can set,
+  at a terminal.
+- **Permissions:** macOS may ask to allow access to another app's data, or need Full Disk Access for your terminal.
+- **Lists:** a number on the allow or deny list is written with its country code (`+` or `00`); each entry shows the
+  chat it matches, or warns that it matches none. A group is shown or hidden as a whole. A draft to a hidden chat is
+  answered exactly as a draft to one that does not exist.
+- **Node:** it needs Node 22.16 or newer.
+- **If you ran the spike:** your `personal/whatsapp` from it is moved into the configuration the first time
+  `agent-whatsapp` runs.
+
+**For contributors: channels are now packages.** A channel declares itself with an `"agentcomms"` field in its
+`package.json`. Core, `mcp install`, `update`, the release list, the licences and every parity and docs check find
+it there, so a new channel needs no edits elsewhere. New channels keep their accounts in core's `accounts` map in
+one general format.
+
+The design, and what a channel must provide, is in
+`docs/superpowers/specs/2026-09-26-channel-plugins-design.md` and CONTRIBUTING's "Adding a channel". For now,
+channels are first-party only: every channel runs with access to every other channel's credentials on the machine.
+
+**Fixes**
+- **Gmail could not send a reply it had composed.** The quoted attribution line (`On … <sam@example.com> wrote:`) vanished
+  from the HTML side of the check that compares what a recipient sees with the preview, so `send prepare` refused
+  every such reply. It is fixed at the cause: markup written as entities now stays text when HTML is read.
+- **HTML that shows the recipient something other than the preview is refused**, in Gmail drafts and Resend sends:
+  style blocks and styles that add or reorder text, right-to-left overrides, SVG and embedded content, and images of
+  any kind (Gmail keeps the verified signature). A remote load is anything but `data:`, `cid:` and the like —
+  `file://` and `\\host` shares included.
+- **What a sender wrote stays inside the untrusted-content envelope.** Downloaded attachments are saved under neutral
+  names; their original names, types and the sender's address come back marked as untrusted — in Gmail too.
+- **An account mode outside `read` and `send` now needs your approval.** Before, a mode word the classifier didn't
+  know, or a mode on a platform it didn't know, widened an account without asking. Nothing shipped wrote one, but
+  any new channel could have.
+- **`agentcomms update` asks npm only about what this machine uses.** Before, it asked about every channel core
+  knows, so one not yet on npm would have stopped the update everywhere.
+
+What it means for you: a minor release, which in 0.x is where breaking changes go. Slack behaves as before. Gmail
+changes in three ways a script may notice:
+- Downloaded attachments are saved as `<date>_<message id>/part-<part id>[.ext]`, and the sender's file name comes
+  back as a separate, wrapped `filename`.
+- Exports are named by date and id, not by subject.
+- An HTML body is refused if it contains an image (other than the verified signature) or a style that adds or
+  reorders text.
+
+Gmail's and Slack's approval previews are word for word as in 0.6.0; the only new sentences are refusal reasons. To
+get 0.7.0, run `agentcomms update` (or say "update my comms" in chat), then restart your client.
+
 ## 0.6.0
 
 **`agentcomms update` and `comms_update` bring a computer up to the latest release, from a terminal or from a chat.**
