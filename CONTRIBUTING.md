@@ -22,8 +22,9 @@ packages/core         @agentcomms/core         provider-neutral core (config, se
                                                agentcomms CLI and the core MCP server
 packages/gmail        @agentcomms/gmail        Gmail channel: CLI (agent-gmail) and MCP server factory
 packages/gmail-mcp    @agentcomms/gmail-mcp    the Gmail MCP server as its own package (agent-gmail-mcp)
-packages/slack        @agentcomms/slack        Slack channel: CLI (agent-slack) and MCP server
 packages/resend       @agentcomms/resend       Resend channel: CLI (agent-resend) and MCP server
+packages/slack        @agentcomms/slack        Slack channel: CLI (agent-slack) and MCP server
+packages/whatsapp     @agentcomms/whatsapp     WhatsApp channel, read-only: CLI (agent-whatsapp) and MCP server
 skills/<name>/        Agent Skills (SKILL.md + references/)
 docs/                 user and design documentation
 scripts/              repository checks

@@ -48,7 +48,7 @@ Ask in one message, and wait:
      reply is a draft link they send themselves in WhatsApp.
 4. **How sends and changes are approved:** by a yes in chat (`chat`, the default) or at a terminal
    with a typed code (`confirm`). A send policy can also be `never`: nothing is sent or posted from
-   here, and they do it in Gmail or Slack themselves.
+   here, and they do it in Gmail, Slack or Resend themselves.
 
 `comms_channels_available` says what is already installed, at which version, and registered where;
 start from that rather than from nothing.
@@ -59,8 +59,8 @@ start from that rather than from nothing.
 `comms_channels_available` already shows registered with that client. It is a change: show the
 preview, get their yes, call again with `approvalId`.
 
-Then ask them to restart the client **now**, once, after every server is registered: the Gmail and
-Slack tools below exist only in the next session. Claude Code resumes this conversation with
+Then ask them to restart the client **now**, once, after every server is registered: the channels'
+tools below (`gmail_…`, `slack_…`, `resend_…`, `whatsapp_…`) exist only in the next session. Claude Code resumes this conversation with
 `claude --continue`. If you can run commands, you may instead carry on in this session with the
 commands in "Without the MCP tools", and leave the restart to the end.
 
@@ -80,20 +80,29 @@ commands in "Without the MCP tools", and leave the restart to the end.
   asks for approval before the sign-in starts. Give them the link; `slack_workspace_finish` when they
   are back.
 
+- **Resend:** the person's step, at a terminal: `agent-resend account add <organisation>/resend`
+  (`--mode send` to send) asks for the API key in a hidden prompt. Never ask for the key in chat.
+  `resend_accounts_list` shows it once added.
+- **WhatsApp:** the person's step, at the Mac's own terminal — macOS asks there for permission to
+  read WhatsApp's data: `agent-whatsapp add <organisation>/whatsapp`, then
+  `agent-whatsapp sync --account <organisation>/whatsapp`. `whatsapp_status` shows it; `whatsapp_sync`
+  refreshes it later.
+
 A Slack workspace connected on another computer has an app already: reuse it, and do not create a
 second one. On that computer, its Client ID is `oauthClientId` in `slack_workspace_show`, and its port
 is `port` in `slack_manifest` with `workspace` (CLI: `agent-slack manifest --workspace <name> --json`).
 
 ## 4. Set the policies
 
-`gmail_inbox_policy` and `slack_workspace_policy` set how sends are approved; `comms_change_policy`
-sets how changes are. Tightening applies at once; loosening is a change like any other. A mailbox or
+`gmail_inbox_policy`, `slack_workspace_policy` and `resend_account_policy` set how sends are
+approved; `comms_change_policy` sets how changes are. WhatsApp never sends, so it has none. Tightening applies at once; loosening is a change like any other. A mailbox or
 workspace set to `chat` itself stays `chat` when the default goes to `confirm`: show the person the
 result's `warning`, and tighten each one it lists if that is what they meant.
 
 ## 5. Check, and hand over
 
-- `comms_doctor`, `gmail_doctor`, `slack_doctor`: report anything not `ok` with its fix.
+- `comms_doctor`, `gmail_doctor`, `slack_doctor`, `resend_doctor` and `whatsapp_status`, for the
+  channels set up: report anything not `ok` with its fix.
 - No further restart, unless a server was registered after step 2 or you went on with the commands
   instead of restarting there. Then tell them to restart once, now, and what they will be able to ask
   for.
@@ -104,18 +113,20 @@ result's `warning`, and tighten each one it lists if that is what they meant.
 ## Without the MCP tools
 
 Every step has a command, for a person at a terminal or an agent that can run commands. Each takes
-`--json`. Where one is not installed, use `npx -y @agentcomms/core`, `npx -y @agentcomms/gmail` or
-`npx -y @agentcomms/slack` in its place.
+`--json`. Where one is not installed, use `npx -y @agentcomms/<package>` in its place — `core`,
+`gmail`, `slack`, `resend` or `whatsapp`.
 
 | Step | Command |
 |---|---|
 | What is there | `agentcomms channels` |
-| Register a server | `agent-gmail mcp install --client <client>`, `agent-slack mcp install --client <client>` |
+| Register a server | `agent-gmail mcp install --client <client>`, and the same with `agent-slack`, `agent-resend` or `agent-whatsapp` |
 | Gmail, in one command | `agent-gmail setup` — the Google Cloud screens, the client, a mailbox and the registration. With `--json` it acts only on the flags it is given (`--client-json <path>`, `--inbox <name>`, `--email <address>`, `--mcp-client <client>`) and names the one it needs next |
 | Gmail, step by step | `agent-gmail client add <path>`, then `agent-gmail inbox add <name> --tier <tier> --start`, then `agent-gmail inbox add --finish <flowId>` |
 | Slack | `agent-slack manifest --mode <mode> --port <port>`, then `agent-slack workspace add <name> --client-id <id> --port <port> --mode <mode> --start`, then `agent-slack workspace add --finish <flowId>` |
-| Policies | `agent-gmail inbox policy <name> --send <policy> --change <policy>`, `agent-slack workspace policy <name> --send <policy> --change <policy>`, `agentcomms policy confirm` |
-| Check | `agentcomms doctor`, `agent-gmail doctor`, `agent-slack doctor` |
+| Resend | `agent-resend account add <name> --mode <mode>`, the key typed by the person |
+| WhatsApp | `agent-whatsapp add <name>`, then `agent-whatsapp sync --account <name>`, at the Mac's terminal |
+| Policies | `agent-gmail inbox policy <name> --send <policy> --change <policy>`, `agent-slack workspace policy <name> --send <policy> --change <policy>`, `agent-resend account policy <name> --send <policy> --change <policy>`, `agentcomms policy confirm` |
+| Check | `agentcomms doctor`, `agent-gmail doctor`, `agent-slack doctor`, `agent-resend doctor`, `agent-whatsapp status` |
 
 A change stops with exit `10`, its preview and an approval id, and changes nothing. Show the preview;
 after their yes, run the command its hint gives, which carries the approval id. Under `confirm` they

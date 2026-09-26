@@ -6,8 +6,8 @@
  * `@agentcomms/slack` sat on disk, and after that was fixed `scripts/release.mjs` still named three — so the local
  * fallback would have repeated the same omission and reported success. A list written down in four places is four
  * lists. Everything that walks the packages now reads this one: the release workflow (by running this file, which
- * prints the names), `scripts/release.mjs`, `scripts/sync-versions.mjs`, `scripts/verify-package.mjs --all` and the
- * OIDC preflight. `test/release-packages.test.mjs` fails if a publishable package is missing from it, if the order
+ * prints the names), `scripts/release.mjs`, `scripts/sync-versions.mjs`, `scripts/verify-package.mjs --all`, the
+ * OIDC preflight and `scripts/third-party-licenses.mjs`. `test/release-packages.test.mjs` fails if a publishable package is missing from it, if the order
  * breaks a dependency, or if any of those consumers stops reading it.
  *
  * **The order is load-bearing.** A consumer installing `gmail` must find the exact `core` it pins already on the
@@ -18,7 +18,7 @@
  * by being a package with the field — there is no list here to add it to, and the test above still fails when a
  * publishable package is not in the result.
  *
- *   node scripts/packages.mjs      # prints: core gmail gmail-mcp slack
+ *   node scripts/packages.mjs      # prints the list, e.g. core gmail gmail-mcp resend slack whatsapp
  */
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';

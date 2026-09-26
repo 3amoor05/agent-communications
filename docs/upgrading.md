@@ -4,7 +4,8 @@ One person's accounts are usually spread over more than one computer, and each c
 configuration, its own tokens and its own MCP registrations. Nothing is shared between them, so each one is
 brought up to date on its own, with the sequence below. It works from any earlier release: a computer still on
 0.1.x with the old flat names (`work`, `personal`) ends on the current release with organisation/platform names
-(`acme/gmail`, `acme/slack`) and its MCP servers — Gmail, Slack and, from 0.5.0, the core server — registered.
+(`acme/gmail`, `acme/slack`) and its MCP servers — Gmail, Slack and, from 0.5.0, the core server; from 0.7.0 Resend
+and WhatsApp too, where this computer uses them — registered.
 
 Why the order matters:
 
@@ -27,8 +28,9 @@ npx -y @agentcomms/core@latest update           # one change for every step, app
 ```
 
 `--check` (`check: true` from a chat) reads the npm registry and this computer and asks nobody. It lists every client
-registration of the core, Gmail and Slack servers pinned to an older release, the managed runtimes those will need,
-and the `@agentcomms` packages installed globally, each with the version it has and the latest.
+registration of the core's and every channel's server — Gmail, Slack, Resend and WhatsApp — pinned to an older
+release, the managed runtimes those will need, and the `@agentcomms` packages installed globally, each with the
+version it has and the latest. It asks the registry only about the packages this computer uses.
 
 Without `--check` it prepares one change and shows every step of it: each registration registered again at the latest
 release under the name, client, scope, launcher and pins it has now; each runtime it installs; each
@@ -48,8 +50,9 @@ Everything below is the long way round — and the only way across the rename, w
 
 ## Before you start
 
-- **Node 22.12 or newer**, first on `PATH` in the terminal you use: `node --version`. The registration records the
-  absolute path of this Node, so it is the one your agents will run.
+- **Node 22.12 or newer — 22.16 or newer for WhatsApp**, first on `PATH` in the terminal you use: `node --version`.
+  The registration records the absolute path of this Node, so it is the one your agents will run. WhatsApp refuses
+  an older one, naming the version it needs: it reads WhatsApp's store with Node's own SQLite.
 - **The client's own CLI on `PATH`** — `claude` for Claude Code, `codex` for Codex. `mcp install` registers through
   it; without it the install prints the entry for you to add by hand instead of registering it.
 - **The release to install.** Every command below uses the same one, so a release published halfway through does
@@ -137,7 +140,9 @@ Then register the servers:
 ```bash
 npx -y @agentcomms/gmail@$V mcp install --client claude-code --force
 npx -y @agentcomms/slack@$V mcp install --client claude-code --force
-npx -y @agentcomms/core@$V mcp install --client claude-code --force   # the core server, if you use it
+npx -y @agentcomms/resend@$V mcp install --client claude-code --force     # from 0.7.0, if you use it
+npx -y @agentcomms/whatsapp@$V mcp install --client claude-code --force   # from 0.7.0, if you use it
+npx -y @agentcomms/core@$V mcp install --client claude-code --force       # the core server, if you use it
 ```
 
 Each registration is a change a person approves, as the rename is: at a terminal it shows what it will register —
@@ -177,6 +182,7 @@ Only if you installed them globally before (`npm ls -g --depth=0 | grep @agentco
 
 ```bash
 npm install -g @agentcomms/gmail@$V @agentcomms/slack@$V @agentcomms/core@$V   # only the ones listed
+npm install -g @agentcomms/resend@$V @agentcomms/whatsapp@$V                   # likewise, from 0.7.0
 ```
 
 ## 6. Check it
@@ -188,12 +194,15 @@ npx -y @agentcomms/gmail@$V whoami --inbox <organisation>/gmail        # once fo
 npx -y @agentcomms/gmail@$V whoami --inbox <an old name>              # refused, with its new name
 npx -y @agentcomms/slack@$V workspace list
 npx -y @agentcomms/slack@$V doctor --offline
+npx -y @agentcomms/resend@$V doctor                                    # from 0.7.0, where you use them
+npx -y @agentcomms/resend@$V account list
+npx -y @agentcomms/whatsapp@$V status
 ```
 
 ## 7. Reopen the clients
 
-Reopen them, and check that the Gmail and Slack tools are there. Then remove the old servers' runtimes, which stay
-on disk otherwise. `prune` keeps a runtime named in any client config it reads, one it printed an entry for, and one
+Reopen them, and check that the tools of every server you registered are there — Gmail's and Slack's, and Resend's
+and WhatsApp's where you use them. Then remove the old servers' runtimes, which stay on disk otherwise. `prune` keeps a runtime named in any client config it reads, one it printed an entry for, and one
 a running process uses, and it removes nothing if one of those configs cannot be read. The configs it reads include
 every one `mcp install` recorded registering into, so a Claude Code account under another `CLAUDE_CONFIG_DIR`, or
 codex under another `CODEX_HOME`, counts even when this shell does not set it; a recorded config that has since been
@@ -206,6 +215,8 @@ account before running `prune`, or run it from a shell with that variable set. I
 ```bash
 npx -y @agentcomms/gmail@$V mcp prune
 npx -y @agentcomms/slack@$V mcp prune
+npx -y @agentcomms/resend@$V mcp prune     # from 0.7.0, if you use it
+npx -y @agentcomms/whatsapp@$V mcp prune   # from 0.7.0, if you use it
 npx -y @agentcomms/core@$V mcp prune
 ```
 
@@ -219,11 +230,18 @@ Nothing copies an account between computers: a sign-in is per computer, and it n
 ```bash
 npx -y @agentcomms/gmail@$V inbox add <organisation>/gmail
 npx -y @agentcomms/slack@$V workspace add <organisation>/slack --client-id <the app's Client ID> --port <its port>
+npx -y @agentcomms/resend@$V account add <organisation>/resend   # type the API key when asked
 ```
 
 For a Slack workspace connected on another computer, use the same app: on that computer,
 `agent-slack workspace show <organisation>/slack --json` gives its Client ID (`oauthClientId`), and
 `agent-slack manifest --workspace <organisation>/slack --json` its port (`port`).
+
+A Resend key is typed by a person at this computer's terminal (or given as `RESEND_API_KEY`), never read from a
+chat. Use the same key, or create one for this computer in Resend's dashboard, and pass the same `--mode` and
+`--send` the account has elsewhere. Register its server with
+`npx -y @agentcomms/resend@$V mcp install --client claude-code`, adding `--account <organisation>/resend` to pin it.
+A WhatsApp account is per Mac: see the next section.
 
 ## WhatsApp, and the spike before it
 

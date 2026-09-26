@@ -294,7 +294,7 @@ npx -y @agentcomms/core@latest mcp install --client claude-code --force   # the 
 Each is a change you approve: at a terminal, type `yes` to what it shows; run by an agent, it exits 10 with the
 preview and an approval id, and the same command with `--approval <id>` registers it once you have agreed. From a
 chat, `comms_server_install` with `force` registers the version of the core server that is running, so it cannot
-upgrade anything past that core. Upgrade the core first at a terminal (the third command above), restart the
+upgrade anything past that core. Upgrade the core first at a terminal (the last command above), restart the
 client, and then it can bring every channel to the same release. An approval from either surface is good on the
 other for the same registration.
 

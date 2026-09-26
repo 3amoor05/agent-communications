@@ -14,7 +14,7 @@
  * zod schema and against each other, by `scripts/sync-channels.mjs`, which `pnpm verify` runs; and core's snapshot of
  * them is written there too.
  *
- *   node scripts/channels.mjs      # prints: core gmail slack
+ *   node scripts/channels.mjs      # prints the channel words, e.g. core gmail resend slack whatsapp
  */
 import { readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
