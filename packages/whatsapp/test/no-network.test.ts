@@ -202,6 +202,7 @@ test('every command and every tool runs with the network cut off, and attempts n
       ['search', 'invoice', '--account', account],
       ['draft', '+15555550101', 'On my way'],
       ['draft', GROUP, 'hello all'],
+      ['draft', ALICE, 'On my way', '--account', account],
     ];
     for (const argv of commands) {
       for (const json of [true, false]) {
@@ -222,6 +223,7 @@ test('every command and every tool runs with the network cut off, and attempts n
         ['whatsapp_read', { account, chat: ALICE }],
         ['whatsapp_search', { account, query: 'report' }],
         ['whatsapp_draft', { to: '+15555550101', text: 'hi' }],
+        ['whatsapp_draft', { account, to: GROUP, text: 'hi' }],
       ];
       for (const [name, args] of calls) {
         const result = (await client.callTool({ name, arguments: args })) as { isError?: boolean };

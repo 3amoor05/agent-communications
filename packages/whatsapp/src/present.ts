@@ -1,6 +1,6 @@
 import { analyseLink, isDangerous, type LinkFlag, neutralise, newBoundary, wrapUntrusted } from '@agentcomms/core';
 import type { IndexedChat, IndexedMessage } from './index-db.ts';
-import type { ChatKind } from './source/types.ts';
+import { type ChatKind, phoneOf } from './source/types.ts';
 
 /**
  * The one door every string a WhatsApp contact controls leaves through.
@@ -167,12 +167,6 @@ export class Presenter {
         (content?.tokensNeutralised ?? 0) + (senderName?.tokensNeutralised ?? 0) + (mediaName?.tokensNeutralised ?? 0),
     };
   }
-}
-
-/** The digits of a one-to-one chat's number, from its JID. Null for anything that is not a phone number. */
-export function phoneOf(jid: string): string | null {
-  const match = /^(\d{7,15})@s\.whatsapp\.net$/.exec(jid);
-  return match?.[1] ?? null;
 }
 
 /** The text inside an envelope, for a person's terminal: the first and last lines are the tags. */

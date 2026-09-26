@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { chatKindOf } from '../src/source/types.ts';
+import { chatKindOf, phoneOf } from '../src/source/types.ts';
 
 /**
  * What a chat is, from its JID. The sources name three kinds of conversation — `@s.whatsapp.net`, `@lid` and `@g.us`
@@ -26,4 +26,12 @@ test('every kind of JID the sources and a real store show is classified — stat
     ['no-server-at-all', 'unknown'],
   ];
   for (const [jid, kind] of cases) assert.equal(chatKindOf(jid), kind, jid);
+});
+
+test('a one-to-one chat’s number is read from its id, whatever its case; nothing else has one', () => {
+  assert.equal(phoneOf('15555550101@s.whatsapp.net'), '15555550101');
+  assert.equal(phoneOf('15555550101@S.WhatsApp.Net'), '15555550101', 'the kind says direct, so the number is there');
+  for (const jid of ['100000000000001@lid', '120363000000000001@g.us', '15555550105@status', '1690000000@broadcast']) {
+    assert.equal(phoneOf(jid), null, jid);
+  }
 });

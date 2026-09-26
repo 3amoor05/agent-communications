@@ -1,6 +1,8 @@
 import { CommsError, escapeForDisplay, isDangerous } from '@agentcomms/core';
-import { phoneOf } from '../present.ts';
-import { type ChatKind, chatKindOf } from '../source/types.ts';
+import { chatRefOf } from '../chat-ref.ts';
+import { requireAccount } from '../config.ts';
+import type { WhatsAppContext } from '../context.ts';
+import type { ChatKind } from '../source/types.ts';
 
 /**
  * A draft: the text, and a link that opens WhatsApp with it filled in. **The person presses send.**
@@ -10,8 +12,9 @@ import { type ChatKind, chatKindOf } from '../source/types.ts';
  * the only thing the code can do. The link is WhatsApp's own click-to-chat: `https://wa.me/<number>?text=…` in a
  * browser, `whatsapp://send?phone=<number>&text=…` straight into the app. Either one fills the message box and stops.
  *
- * A group has no number, so no link can open it with text filled in; the draft then comes back as text to paste. So
- * does a chat with someone who hides their number (`@lid`).
+ * The recipient is a phone number or any chat id `chats` prints. A group has no number, so no link can open it with
+ * text filled in; the draft then comes back as text to paste. So does a chat with someone who hides their number
+ * (`@lid`), a broadcast list and a channel. A status update is refused: it is a post, not a chat anyone writes to.
  */
 
 /** Long enough for any real message; short enough that the link stays a link. */
@@ -32,20 +35,33 @@ export interface DraftResult {
 const NOTE = 'Nothing was sent. Open the link: WhatsApp shows the message with the text filled in, and you press send.';
 
 function recipientOf(to: string): DraftResult['to'] {
-  const trimmed = to.trim();
-  if (trimmed.includes('@')) {
-    if (!/^[A-Za-z0-9._:-]{1,128}@[a-z.]{1,32}$/.test(trimmed)) {
-      throw new CommsError('USAGE', 'that is not a chat id', { hint: 'Use an id `chats` shows, or a phone number.' });
-    }
-    return { chat: trimmed, phone: phoneOf(trimmed), kind: chatKindOf(trimmed) };
-  }
-  const digits = trimmed.replace(/[\s()+.-]/g, '');
-  if (!/^\d{7,15}$/.test(digits)) {
-    throw new CommsError('USAGE', `"${escapeForDisplay(trimmed)}" is not a phone number`, {
-      hint: 'The full international number, with the country code: +1 555 555 0101.',
+  const chat = chatRefOf(to);
+  if (chat.kind === 'status') {
+    // `<number>@status` is that person's own posts: their chat is the one to write to.
+    const author = /^(\d{7,15})@status$/i.exec(chat.id)?.[1];
+    throw new CommsError('USAGE', 'a status update is not a chat anyone writes to, so there is nothing to draft to', {
+      hint: author
+        ? `To write to the person who posted it, draft to their number: +${author}.`
+        : 'Draft to the person’s own chat instead.',
     });
   }
-  return { chat: `${digits}@s.whatsapp.net`, phone: digits, kind: 'phone' };
+  return { chat: chat.id, phone: chat.phone, kind: chat.byPhone ? 'phone' : chat.kind };
+}
+
+/** Why no link can open this chat with the text filled in — said in the result, so the person knows to paste. */
+function pasteReason(kind: DraftResult['to']['kind']): string {
+  switch (kind) {
+    case 'group':
+      return 'A group has no number, so no link can open it with the text filled in. Copy the text into the group.';
+    case 'broadcast':
+      return 'A broadcast list has no number, so no link can open it with the text filled in. Copy the text into the list.';
+    case 'channel':
+      return 'A channel has no number, so no link can open it with the text filled in. Copy the text into the channel.';
+    case 'hidden-number':
+      return 'This person hides their number, so this chat has no phone number a link can use. Copy the text into the chat.';
+    default:
+      return 'This chat has no phone number a link can use. Copy the text into the chat.';
+  }
 }
 
 export function composeDraft(request: { to: string; text: string }): DraftResult {
@@ -76,10 +92,7 @@ export function composeDraft(request: { to: string; text: string }): DraftResult
       text,
       links: null,
       pasteInstead: true,
-      reason:
-        to.kind === 'group'
-          ? 'A group has no number, so no link can open it with the text filled in. Copy the text into the group.'
-          : 'This chat has no phone number a link can use. Copy the text into the chat.',
+      reason: pasteReason(to.kind),
       sent: false,
       note: 'Nothing was sent. Paste the text into the chat in WhatsApp and press send yourself.',
     };
@@ -96,4 +109,16 @@ export function composeDraft(request: { to: string; text: string }): DraftResult
     sent: false,
     note: NOTE,
   };
+}
+
+/**
+ * The draft as both surfaces offer it: `draft` and `whatsapp_draft` call this. `account`, when given, names the
+ * account the chat belongs to, and must exist.
+ */
+export async function draftMessage(
+  context: WhatsAppContext,
+  request: { account?: string | undefined; to: string; text: string },
+): Promise<DraftResult> {
+  if (request.account !== undefined) requireAccount(await context.config.load(), request.account);
+  return composeDraft({ to: request.to, text: request.text });
 }

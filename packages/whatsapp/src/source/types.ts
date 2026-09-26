@@ -92,6 +92,12 @@ export function chatKindOf(jid: string): ChatKind {
   return 'unknown';
 }
 
+/** The digits of a one-to-one chat's number, from its JID. Null for anything that is not a phone number. */
+export function phoneOf(jid: string): string | null {
+  const match = /^(\d{7,15})@s\.whatsapp\.net$/i.exec(jid.trim());
+  return match?.[1] ?? null;
+}
+
 /** Core Data counts seconds from 2001-01-01T00:00:00Z. [K][M] */
 export const CORE_DATA_EPOCH_SECONDS = 978_307_200;
 

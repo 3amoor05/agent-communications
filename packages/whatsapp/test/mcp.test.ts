@@ -63,6 +63,11 @@ const PARITY = [
     tool: 'whatsapp_draft',
     args: { to: '+15555550101', text: 'hi there' },
   },
+  {
+    cli: ['draft', ALICE, 'hi there', '--account', ACCOUNT],
+    tool: 'whatsapp_draft',
+    args: { account: ACCOUNT, to: ALICE, text: 'hi there' },
+  },
 ] as const;
 
 const EXCEPTIONS = {

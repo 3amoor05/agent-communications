@@ -1,4 +1,5 @@
 import { CommsError, wholeNumber } from '@agentcomms/core';
+import { chatRefOf } from '../chat-ref.ts';
 import { requireAccount } from '../config.ts';
 import type { WhatsAppContext } from '../context.ts';
 import { WhatsAppIndex } from '../index-db.ts';
@@ -40,17 +41,6 @@ async function openIndex(context: WhatsAppContext, accountName: string | undefin
   const { name, account } = requireAccount(await context.config.load(), accountName);
   const index = await WhatsAppIndex.open(context.accountDir(account), name);
   return { name, index };
-}
-
-/** A chat by the id `chats` shows (`15555550101@s.whatsapp.net`, `…@g.us`), or by a phone number. */
-export function chatIdOf(input: string): string {
-  const trimmed = input.trim();
-  if (/^[A-Za-z0-9._:-]{1,128}@[a-z.]{1,32}$/.test(trimmed)) return trimmed;
-  const digits = trimmed.replace(/[\s()+.-]/g, '');
-  if (/^\d{7,15}$/.test(digits)) return `${digits}@s.whatsapp.net`;
-  throw new CommsError('USAGE', 'name a chat by the id `chats` shows, or by a phone number', {
-    hint: 'For example 15555550101@s.whatsapp.net, 120363000000000001@g.us, or +1 555 555 0101.',
-  });
 }
 
 export interface ChatsResult {
@@ -98,7 +88,7 @@ export async function readChat(
   request: { account?: string | undefined; chat: string; limit?: unknown; before?: string | undefined },
 ): Promise<ReadResult> {
   const limit = wholeNumber(request.limit ?? 50, { name: 'limit', min: 1, max: 200 }) as number;
-  const chatId = chatIdOf(request.chat);
+  const chatId = chatRefOf(request.chat).id;
   const { name, index } = await openIndex(context, request.account);
   try {
     const chat = index.chat(chatId);
@@ -174,7 +164,7 @@ export async function searchMessages(
       hint: 'Words match the text, a caption or file name, the sender’s name and the chat’s name.',
     });
   }
-  const chatId = request.chat === undefined ? undefined : chatIdOf(request.chat);
+  const chatId = request.chat === undefined ? undefined : chatRefOf(request.chat).id;
   // Naming a chat is asking for it, whatever its kind; otherwise the default kinds, or the one asked for.
   const kinds = chatId !== undefined && request.kind === undefined ? undefined : kindsOf(request.kind);
   const { name, index } = await openIndex(context, request.account);

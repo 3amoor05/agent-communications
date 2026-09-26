@@ -4,7 +4,7 @@ import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { createWhatsAppMcpServer } from '../src/mcp/server.ts';
 import { composeDraft } from '../src/operations/draft.ts';
-import { GROUP, HIDDEN } from './support/fixture.ts';
+import { ALICE, BOB, BROADCAST_LIST, ERIN_STATUS, GROUP, HIDDEN, HOSTILE_GROUP } from './support/fixture.ts';
 import { newHarness } from './support/harness.ts';
 
 /**
@@ -108,6 +108,77 @@ test('the MCP draft tool returns the link and never opens anything', async () =>
     assert.equal((result.structuredContent.links as { web: string }).web, 'https://wa.me/15555550101?text=hi');
     const tool = (await client.listTools()).tools.find((entry) => entry.name === 'whatsapp_draft');
     assert.match(tool?.description ?? '', /sends nothing and opens nothing/);
+  } finally {
+    await Promise.all([client.close(), server.close()]);
+  }
+});
+
+test('draft takes the chat ids chats prints, with --account, on both surfaces — a number’s id becomes a link, the rest text to paste', async () => {
+  const account = 'acme/whatsapp';
+  const harness = await newHarness();
+  await harness.ready(account);
+  // The ids exactly as a person sees them: the line under each chat in `chats`.
+  const human = (await harness.cli(['chats', '--account', account])).stdout;
+  const printed = [...human.matchAll(/^ {2}(\S+@\S+)$/gm)].map((match) => match[1] as string);
+  assert.deepEqual(printed.sort(), [ALICE, BOB, GROUP, HIDDEN, BROADCAST_LIST, HOSTILE_GROUP].sort());
+  const { server } = await createWhatsAppMcpServer({ env: harness.env });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'test', version: '0' });
+  await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+  try {
+    const reasons: Record<string, RegExp> = {
+      [GROUP]: /A group has no number/,
+      [HOSTILE_GROUP]: /A group has no number/,
+      [HIDDEN]: /no phone number/,
+      [BROADCAST_LIST]: /A broadcast list has no number/,
+    };
+    for (const id of printed) {
+      const cli = await harness.cli(['draft', id, 'On my way', '--account', account, '--json']);
+      assert.equal(cli.code, 0, `${id}: ${cli.stdout}`);
+      const tool = (await client.callTool({
+        name: 'whatsapp_draft',
+        arguments: { account, to: id, text: 'On my way' },
+      })) as { isError?: boolean; structuredContent: Record<string, unknown> };
+      assert.ok(!tool.isError, `${id}: ${JSON.stringify(tool.structuredContent)}`);
+      assert.deepEqual(tool.structuredContent, cli.data(), `${id}: the command and the tool agree`);
+      const draft = cli.data() as { to: { chat: string; phone: string | null }; links: unknown; reason?: string };
+      assert.equal(draft.to.chat, id);
+      const phone = /^(\d+)@s\.whatsapp\.net$/.exec(id)?.[1] ?? null;
+      assert.equal(draft.to.phone, phone, id);
+      if (phone) {
+        assert.deepEqual(draft.links, {
+          app: `whatsapp://send?phone=${phone}&text=On%20my%20way`,
+          web: `https://wa.me/${phone}?text=On%20my%20way`,
+        });
+      } else {
+        assert.equal(draft.links, null, id);
+        assert.match(draft.reason ?? '', reasons[id] as RegExp, id);
+      }
+    }
+
+    // A status update is not a chat anyone writes to: refused, by name, on both surfaces.
+    for (const id of [ERIN_STATUS, 'status@broadcast']) {
+      const cli = await harness.cli(['draft', id, 'nice', '--account', account, '--json']);
+      assert.equal(cli.code, 64, `${id}: ${cli.stdout}`);
+      assert.match(String(cli.json().error?.message), /status update/);
+      const tool = (await client.callTool({ name: 'whatsapp_draft', arguments: { to: id, text: 'nice' } })) as {
+        isError?: boolean;
+        structuredContent: { error: { code: string; hint: string } };
+      };
+      assert.equal(tool.isError, true);
+      assert.equal(tool.structuredContent.error.code, 'USAGE');
+    }
+    const erin = await harness.cli(['draft', ERIN_STATUS, 'nice', '--json']);
+    assert.match(String(erin.json().error?.hint), /\+15555550105/, 'the author’s own chat is named instead');
+
+    const unknown = await harness.cli(['draft', ALICE, 'hi', '--account', 'other/whatsapp', '--json']);
+    assert.equal(unknown.code, 66, 'an account that does not exist is not quietly ignored');
+    const unknownTool = (await client.callTool({
+      name: 'whatsapp_draft',
+      arguments: { account: 'other/whatsapp', to: ALICE, text: 'hi' },
+    })) as { isError?: boolean; structuredContent: { error: { code: string } } };
+    assert.equal(unknownTool.isError, true);
+    assert.equal(unknownTool.structuredContent.error.code, 'NOT_FOUND', 'nor by the tool');
   } finally {
     await Promise.all([client.close(), server.close()]);
   }

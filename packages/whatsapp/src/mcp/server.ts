@@ -2,7 +2,7 @@ import { type CommsError, strictToolArguments, toCommsError, UNTRUSTED_NOTICE } 
 import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { WhatsAppContext, type WhatsAppContextOptions } from '../context.ts';
-import { composeDraft } from '../operations/draft.ts';
+import { draftMessage } from '../operations/draft.ts';
 import { CHAT_KINDS, listChats, readChat, searchMessages } from '../operations/read.ts';
 import { whatsappStatus } from '../operations/status.ts';
 import { syncAccount } from '../operations/sync.ts';
@@ -221,8 +221,9 @@ export async function createWhatsAppMcpServer(options: WhatsAppMcpOptions = {}):
     {
       title: 'Draft a reply (the person sends it)',
       description:
-        'Composes a message and returns a link that opens WhatsApp with the text filled in. It sends nothing and opens nothing: give the person the link; they check the message and press send themselves. A group, or a chat with a hidden number, gets the text to paste instead.',
+        'Composes a message and returns a link that opens WhatsApp with the text filled in. It sends nothing and opens nothing: give the person the link; they check the message and press send themselves. `to` is a phone number or any chat id whatsapp_chats or whatsapp_read shows. A group, a chat with a hidden number, a broadcast list or a channel gets the text to paste instead; a status update cannot be drafted to.',
       inputSchema: {
+        account: account.optional().describe('the account the chat belongs to, as `organisation/whatsapp`'),
         to: z.string().describe('a phone number with its country code, or a chat id from whatsapp_chats'),
         text: z.string().describe('the message'),
       },
@@ -230,7 +231,10 @@ export async function createWhatsAppMcpServer(options: WhatsAppMcpOptions = {}):
     },
     async (args) => {
       try {
-        return reply({ ...composeDraft({ to: args.to, text: args.text }), opened: false });
+        return reply({
+          ...(await draftMessage(context, { account: args.account, to: args.to, text: args.text })),
+          opened: false,
+        });
       } catch (error) {
         return fail(error);
       }

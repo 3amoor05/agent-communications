@@ -11,7 +11,7 @@ import {
 import { Command, CommanderError, Option } from 'commander';
 import { WhatsAppContext, type WhatsAppContextOptions } from '../context.ts';
 import { addAccount, removeAccount } from '../operations/accounts.ts';
-import { composeDraft } from '../operations/draft.ts';
+import { draftMessage } from '../operations/draft.ts';
 import { CHAT_KINDS, listChats, readChat, searchMessages } from '../operations/read.ts';
 import { whatsappStatus } from '../operations/status.ts';
 import { syncAccount } from '../operations/sync.ts';
@@ -210,11 +210,18 @@ be waiting) · 77 permission needed (macOS privacy) · 78 configuration problem.
 
   program
     .command('draft <to> <text>')
-    .description('a message as a link that opens WhatsApp with it filled in — you press send; nothing is sent here')
+    .description(
+      'a message as a link that opens WhatsApp with it filled in — you press send; nothing is sent here. <to> is a phone number or an id `chats` shows',
+    )
+    .option('--account <name>', 'the account the chat belongs to, as `organisation/whatsapp`')
     .option('--open', 'open the link in WhatsApp now (a person only; an agent gives the link to the person)', false)
     .action(
-      act(async (_context, options, to: string, text: string, flags: Options) => {
-        const result = composeDraft({ to, text });
+      act(async (context, options, to: string, text: string, flags: Options) => {
+        const result = await draftMessage(context, {
+          account: flags.account === undefined ? undefined : String(flags.account),
+          to,
+          text,
+        });
         let opened = false;
         if (flags.open === true) {
           /*

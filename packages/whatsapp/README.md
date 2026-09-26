@@ -131,7 +131,7 @@ Business, pass `--source ~/Library/Group\ Containers/group.net.whatsapp.WhatsApp
 | `chats --account [--kind] [--limit]` | `whatsapp_chats` | chats, newest first; status updates only with `--kind status` |
 | `read <chat> --account [--before] [--limit]` | `whatsapp_read` | one chat, newest first |
 | `search <words> --account [--chat] [--sender] [--kind] [--limit]` | `whatsapp_search` | full-text: text, captions, file names, sender and chat names |
-| `draft <to> <text> [--open]` | `whatsapp_draft` | a `whatsapp://send` and a `https://wa.me/` link; the person sends |
+| `draft <to> <text> [--account] [--open]` | `whatsapp_draft` | a `whatsapp://send` and a `https://wa.me/` link; the person sends |
 | `mcp` | — | the MCP server on stdio |
 
 **Kinds of chat.** A chat's kind comes from its id, which WhatsApp assigns: `direct` (`…@s.whatsapp.net`),
@@ -146,8 +146,11 @@ An id none of these match is `unknown`, never guessed at.
 Each command and its tool call the same function in `src/operations/`; `test/mcp.test.ts` runs both and compares the
 results. `add` and `remove` have no tool on purpose: which file an agent may read is a person's choice, and the first
 read is when macOS asks that person. `draft --open` is refused to an agent — a filled-in message box landing on the
-screen of someone typing elsewhere is one Enter away from sent — so an agent hands over the link. A group has no
-number, so its draft comes back as text to paste; so does a chat with someone who hides their number (`@lid`).
+screen of someone typing elsewhere is one Enter away from sent — so an agent hands over the link. `draft` takes a
+phone number or any id `chats` and `read` print: an `…@s.whatsapp.net` id is its number. A group has no number, so its
+draft comes back as text to paste, with the reason; so does a chat with someone who hides their number (`@lid`), a
+broadcast list and a channel. A status update is not a chat anyone writes to, and is refused — for `<number>@status`,
+naming the number to write to instead.
 
 Every message body, caption, sender name, group name and file name comes back inside core's untrusted-content
 envelope; bidi and zero-width characters are removed and counted (`hidden: { characters, bidi }`); links are
