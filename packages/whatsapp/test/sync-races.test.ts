@@ -88,7 +88,10 @@ test('a sync that waited behind a remove finds its account gone, and writes noth
   const lock = `${dir}.sync.lock`;
   // Another process holds the account's sync lock, as a remove does while it removes.
   mkdirSync(join(dir, '..'), { recursive: true });
-  writeFileSync(lock, JSON.stringify({ pid: process.pid, at: new Date().toISOString(), token: 'held-by-a-remove' }));
+  writeFileSync(
+    lock,
+    JSON.stringify({ pid: process.pid, at: new Date().toISOString(), token: 'fake-lock-held-by-a-remove' }),
+  );
   const syncing = harness.cli(['sync', '--account', ACCOUNT, '--json'], { env: harness.personEnv });
   await delay(200);
   // What that remove does: the account out of config.json, its folder deleted; then it lets go.
