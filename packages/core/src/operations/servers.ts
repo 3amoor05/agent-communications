@@ -32,8 +32,10 @@ import {
   managedRuntimeVersion,
   mcpInstall,
   missingEntryFile,
+  type PlannedInstall,
   type PruneResult,
   pinnedVersion,
+  plannedInstall,
   preflightInstall,
   pruneManagedRuntimes,
   reusableRuntime,
@@ -339,13 +341,21 @@ export function serverInstallChange(
   const name = request.name ?? facts.defaultServerName;
   const launcher = request.launcher ?? 'managed';
   const productNow = async (): Promise<McpProduct> => own ?? (await channelProduct(request.channel, request.launcher));
+  /*
+   * What the plan found, for the apply to hold the install to. The install looks at the machine again when it runs,
+   * and what it finds then has to be what the plan found — whether it writes or prints, where, what it replaces, and
+   * what the server is pinned to — or the person agreed to one thing and got another. See `PlannedInstall`.
+   */
+  let planned: { product: McpProduct; install: PlannedInstall } | undefined;
   return {
     plan: async (config) => {
       checkPin(config, request);
       const product = await productNow();
       const { version } = product;
       // Refuses here what the install would refuse, before anybody is asked; and says what a replacement keeps.
-      const { target, previous, effective, kept } = await preflightInstall(context, product, installOptions(request));
+      const preflight = await preflightInstall(context, product, installOptions(request));
+      const { target, previous, effective, kept } = preflight;
+      planned = { product, install: plannedInstall(preflight) };
       const effects: string[] = [];
       if (target.writes) {
         // The pin and the switch the server is started with, in the channel's words: "pinned to the mailbox …".
@@ -400,7 +410,9 @@ export function serverInstallChange(
       };
     },
     apply: async () => {
-      const result = await mcpInstall(context, await productNow(), installOptions(request));
+      if (planned === undefined)
+        throw new CommsError('UNEXPECTED', 'the registration was applied before it was planned');
+      const result = await mcpInstall(context, planned.product, installOptions(request), planned.install);
       return {
         ...result,
         restart: result.applied

@@ -883,18 +883,149 @@ export async function preflightInstall(
 }
 
 /**
+ * What a preflight found an install would do — everything that decides it — carried from the plan a person was shown
+ * into the install itself.
+ *
+ * A registration is planned, agreed to (or found to need nobody's agreement), and applied a moment later, and the
+ * machine can move in between: a client's CLI turns up on PATH, and an install planned to print — which asks nobody —
+ * would register; an entry the plan replaced, keeping its pin, is removed by somebody else, and the install would
+ * register the server unpinned under an approval that said it was pinned. So the install is handed what was planned,
+ * checks that its own preflight arrives at exactly that, and refuses when it does not: see `mcpInstall`.
+ */
+export interface PlannedInstall {
+  /** Whether it registers the server, or only prints the entry. */
+  readonly writes: boolean;
+  /** Where it goes: the client's CLI it registers through, by path, and the client's own file. */
+  readonly cliName: 'claude' | 'codex' | null;
+  readonly binary: string | null;
+  readonly configPath: string | null;
+  readonly own: string | null;
+  /** This product's own entries under the name that it replaces, each whole. Empty when it adds. */
+  readonly replaces: readonly string[];
+  /** The pin and `--read-only` the server is started with: the caller's, and what it keeps from what it replaces. */
+  readonly narrowing: Required<Pick<Narrowing, 'readOnly'>> & Record<'account' | 'inbox' | 'workspace', string | null>;
+}
+
+/** The plan a preflight arrived at, in the form `mcpInstall` compares: see `PlannedInstall`. */
+export function plannedInstall(preflight: InstallPreflight): PlannedInstall {
+  const { target, previous, effective } = preflight;
+  return {
+    writes: target.writes,
+    cliName: target.cliName,
+    binary: target.binary,
+    configPath: target.configPath ?? null,
+    own: target.own ?? null,
+    // Whole, env included: an entry swapped for another of ours under the same name is another entry to replace.
+    replaces: previous
+      .map((server) =>
+        JSON.stringify([
+          server.client,
+          server.path,
+          server.scope ?? 'user',
+          server.name,
+          server.command,
+          server.args,
+          server.url ?? null,
+          server.env ?? null,
+        ]),
+      )
+      .sort(),
+    narrowing: {
+      account: effective.account ?? null,
+      inbox: effective.inbox ?? null,
+      workspace: effective.workspace ?? null,
+      readOnly: effective.readOnly === true,
+    },
+  };
+}
+
+/**
+ * How what an install would do now differs from what was planned, one clause each; empty when it does not.
+ *
+ * Never an entry's arguments or env, which can hold somebody's token: only which part of the plan moved.
+ */
+function planDrift(
+  product: McpProduct,
+  client: SupportedClient,
+  name: string,
+  planned: PlannedInstall,
+  now: PlannedInstall,
+): string[] {
+  const drift: string[] = [];
+  const cli = now.cliName ?? planned.cliName;
+  if (planned.writes !== now.writes) {
+    if (cli !== null) {
+      drift.push(
+        now.writes
+          ? `${cli} was not on PATH when this was planned, and is now, so it would register the server rather than print its entry`
+          : `${cli} was on PATH when this was planned, and is not now, so it would only print the entry`,
+      );
+    } else {
+      drift.push(now.writes ? 'it would write the entry rather than print it' : 'it would only print the entry');
+    }
+  } else if (planned.binary !== now.binary) {
+    drift.push(`it would register through another ${cli ?? 'client CLI'} than the one planned: ${now.binary}`);
+  }
+  if (planned.configPath !== now.configPath || planned.own !== now.own) {
+    drift.push(
+      `${client}'s config is now ${now.own ?? now.configPath ?? 'nowhere'}, not ${planned.own ?? planned.configPath ?? 'nowhere'}`,
+    );
+  }
+  if (JSON.stringify(planned.replaces) !== JSON.stringify(now.replaces)) {
+    drift.push(`what is registered as "${name}" is not what it was planned to replace`);
+  }
+  if (JSON.stringify(planned.narrowing) !== JSON.stringify(now.narrowing)) {
+    const flags = (narrowing: PlannedInstall['narrowing']) =>
+      product.serverArgs({ client, ...pinsOf(narrowing) }).join(' ') || 'no pin';
+    drift.push(`the server would start with ${flags(now.narrowing)}, not ${flags(planned.narrowing)}`);
+  }
+  return drift;
+}
+
+/** The planned pin and `--read-only`, as the options that start the server: each one given, none left to be found. */
+function pinsOf(narrowing: PlannedInstall['narrowing']): Narrowing {
+  return {
+    account: narrowing.account ?? undefined,
+    inbox: narrowing.inbox ?? undefined,
+    workspace: narrowing.workspace ?? undefined,
+    readOnly: narrowing.readOnly,
+  };
+}
+
+/**
  * Writes (or prints) the entry for one client, then starts the server through exactly that entry and completes an
  * `initialize` and `tools/list`. An entry that looks right but does not start is the failure people actually hit.
+ *
+ * `planned` is what a plan shown to a person — or one that asked nobody — said this install does: see
+ * `PlannedInstall`. When it is given, the install's own preflight has to arrive at exactly that, or it is refused with
+ * nothing written; and the server is started with the pins the plan named, given outright, as `agentcomms update`
+ * gives them.
  */
 export async function mcpInstall(
   context: InstallContext,
   product: McpProduct,
   options: InstallOptions,
+  planned?: PlannedInstall,
 ): Promise<InstallResult> {
   const name = options.name ?? product.defaultServerName;
   const apply = options.apply ?? true;
 
-  const { scan, target, previous, effective, kept } = await preflightInstall(context, product, options);
+  const preflight = await preflightInstall(context, product, options);
+  if (planned !== undefined) {
+    const drift = planDrift(product, options.client, name, planned, plannedInstall(preflight));
+    if (drift.length > 0) {
+      throw new CommsError(
+        'CONFIG',
+        `this registration changed between being planned and being applied: ${drift.join('; ')}. So nothing was written`,
+        {
+          hint: 'Run the same install again: it is planned afresh from what is there now, and asks again for anything that needs agreeing to.',
+        },
+      );
+    }
+  }
+  const { scan, target, previous, kept } = preflight;
+  const effective =
+    planned === undefined ? preflight.effective : { ...preflight.effective, ...pinsOf(planned.narrowing) };
   const existing = scan.servers;
   const { cliName, binary, own, configPath, writes } = target;
   // The client being installed, only. Every other client's findings were being reported here too, with removal
