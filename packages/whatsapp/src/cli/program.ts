@@ -2,8 +2,10 @@ import {
   agentMarker,
   approvalKind,
   approveChangeAtTerminal,
+  CHANNELS,
   CommsError,
   canPrompt,
+  channelManifest,
   colorEnabled,
   EXIT_CODES,
   type GatedChange,
@@ -20,6 +22,19 @@ import {
   serverPruneChange,
   writeResult,
 } from '@agentcomms/core';
+
+/**
+ * Every channel's approve command that can have prepared a send, from the manifests: the channels whose accounts can
+ * be in `send`. WhatsApp's is not among them — it never sends — and a channel added later is, without an edit here.
+ */
+function sendApproveCommands(): string {
+  const commands = CHANNELS.flatMap((channel) => {
+    const manifest = channelManifest(channel);
+    return manifest?.approve && manifest.accounts?.modes.includes('send') ? [`\`${manifest.approve}\``] : [];
+  });
+  return commands.length <= 1 ? commands.join('') : `${commands.slice(0, -1).join(', ')} or ${commands.at(-1)}`;
+}
+
 import { Command, CommanderError, Option } from 'commander';
 import { WhatsAppContext, type WhatsAppContextOptions } from '../context.ts';
 import { WHATSAPP_MCP } from '../mcp/install.ts';
@@ -360,7 +375,7 @@ a macOS dialog may be waiting) · 77 permission needed (macOS privacy) · 78 con
         }
         if (approvalKind(pending) !== 'change') {
           throw new CommsError('USAGE', `approval ${approvalId} is for a send, and WhatsApp never sends`, {
-            hint: 'Approve it with the command that prepared it — the Gmail or Slack command, not this one.',
+            hint: `Approve it with the command that prepared it — ${sendApproveCommands()} — not this one.`,
           });
         }
         const outcome = await approveChangeAtTerminal(

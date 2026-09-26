@@ -13,9 +13,12 @@ own SQLite, which is complete from 22.16; an older Node is refused with what to 
 
 ## What it does, and what it never does, in plain words
 
-- **It reads only local files.** Nothing here connects to WhatsApp, or to anything: no socket, no HTTP, no DNS. Its
-  manifest declares no host (`"hosts": []`). A test builds the published bundle and checks that no network module
-  is anywhere in it; another runs every command and every tool with the network cut off.
+- **It reads only local files.** Nothing it does to read, search, draft or keep its lists connects to WhatsApp, or
+  to anything: no socket, no HTTP, no DNS. Its manifest declares no host (`"hosts": []`). A test builds the published
+  bundle and checks that no network module is anywhere in it; another runs those commands and every tool with the
+  network cut off, and `mcp install` only with `--print`. Installing is the exception, and it reaches npm, never
+  WhatsApp: `npm install`, and `mcp install`, which by default installs this package from npm into agentcomms' own
+  runtime (with `--launcher npx`, the client fetches it from npm each time it starts the server).
 - **It never sends, marks as read, reacts, or shows you as online or typing.** There is no code that could. A draft
   is a `whatsapp://send` or `https://wa.me/` link; WhatsApp fills in the message and waits for you.
 - **It never writes to WhatsApp's files.** It copies the message store and its write-ahead log, reads the copy, and

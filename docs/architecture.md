@@ -134,8 +134,9 @@ tool accepts one.
 
 There is nothing to gate, because there is nothing that sends. `@agentcomms/whatsapp` reads a copy of the message store
 WhatsApp for Mac keeps on the Mac into a local index, and every tool reads that index. It has no network client — its
-manifest declares no host, a test checks the published bundle imports no network module, and another runs every
-command and tool with the network cut off — no WhatsApp session, and no send path. A draft is a link that opens
+manifest declares no host, a test checks the published bundle imports no network module, and another runs its read,
+draft and list commands and every tool with the network cut off (installing the server, which fetches the package from
+npm, is the one step that reaches a network) — no WhatsApp session, and no send path. A draft is a link that opens
 WhatsApp with the text filled in; the person presses send. That is also why it never logs in as a linked device:
 WhatsApp bans numbers it catches using unofficial clients.
 

@@ -331,3 +331,39 @@ test('a pin follows its account through a rename, and a former name is answered 
   assert.notEqual(reuse.code, 0, 'a former name is never reused');
   assert.match(String(reuse.json().error?.message), /was the name of another account and cannot be used again/);
 });
+
+test('a send’s approval is not approved here, and the refusal names every command that can have prepared a send', async () => {
+  const harness = await newHarness({ store: false });
+  const core = openCore({ env: harness.personEnv });
+  // A send approval as a sending channel's prepare writes one.
+  const record = await core.approvals.create({
+    inboxId: 'acc_RRRRRRRRRRRRRRRR',
+    inboxSub: 'key_12345678',
+    draftId: 'rsd_x',
+    draftMessageId: 'd',
+    digest: 'd',
+    policy: 'confirm',
+    requiredPolicy: 'confirm',
+    riskFlags: [],
+    expect: { to: ['a@b.test'], cc: [], bcc: [], subject: 'x' },
+  } as never);
+  const stdin = Object.assign(new PassThrough(), { isTTY: true });
+  const stdout = Object.assign(new PassThrough(), { isTTY: true });
+  const stderr = new PassThrough();
+  let said = '';
+  for (const stream of [stdout, stderr]) {
+    stream.on('data', (chunk) => {
+      said += String(chunk);
+    });
+  }
+  const refused = await harness.cli(['approve', record.approvalId], {
+    env: harness.personEnv,
+    streams: { stdin, stdout, stderr } as never,
+  });
+  assert.equal(refused.code, 64, said);
+  assert.match(said, /is for a send, and WhatsApp never sends/);
+  for (const command of ['agent-gmail approve', 'agent-slack approve', 'agent-resend approve']) {
+    assert.ok(said.includes(`\`${command}\``), `${command} is named: ${said}`);
+  }
+  assert.ok(!said.includes('agent-whatsapp approve`'), 'not this one, which never prepared a send');
+});
