@@ -782,10 +782,11 @@ test('an operation is a name or a list of distinct names; argv is words, args an
 });
 
 test('only a "both" row carries what its two sides run', () => {
-  for (const key of ['operation', 'via', 'argv', 'args', 'expect', 'unchecked']) {
+  for (const key of ['operation', 'via', 'after', 'argv', 'args', 'expect', 'unchecked']) {
     assertNamed(
       breaking(({ row }) => {
-        row('gmail.approve')[key] = key === 'argv' ? ['x'] : key === 'args' || key === 'expect' ? {} : 'x';
+        row('gmail.approve')[key] =
+          key === 'argv' ? ['x'] : key === 'args' || key === 'expect' || key === 'after' ? {} : 'x';
       }),
       `row "gmail.approve" is "exception" but carries "${key}"`,
     );
@@ -810,13 +811,24 @@ const FIXTURE_OPERATIONS = {
     setupState: ['operations/setup.ts'],
     doctor: ['operations/doctor.ts'],
     twice: ['operations/a.ts', 'operations/b.ts'],
+    // A preparatory step two sides share, and what each goes on to do after it.
+    sharedPrep: ['operations/prep.ts'],
+    cliSend: ['operations/send.ts'],
+    mcpRead: ['operations/read.ts'],
   },
   slack: {},
 };
 
 /** What a correct drive of the fixture saw: each side reaching its row's operation, on the way it really goes. */
 function drivenFixture() {
-  const side = (calls, extra = {}) => ({ calls, stopped: calls.at(-1), timedOut: false, refusal: null, ...extra });
+  const side = (calls, extra = {}) => ({
+    calls,
+    stopped: null,
+    limited: false,
+    timedOut: false,
+    refusal: null,
+    ...extra,
+  });
   return {
     operations: structuredClone(FIXTURE_OPERATIONS),
     reports: {
@@ -947,6 +959,123 @@ test('an operation is looked up in the row’s package, then the core’s — ne
   assert.equal(resolveOperation(FIXTURE_OPERATIONS, 'gmail', 'serverInstallChange').id, 'core:serverInstallChange');
   assert.equal(resolveOperation(FIXTURE_OPERATIONS, 'core', 'doctor').id, 'core:doctor');
   assert.match(resolveOperation(FIXTURE_OPERATIONS, 'core', 'search').problem, /packages\/core\/src\/operations/);
+});
+
+test('a pair that shares a preparatory operation and runs different ones after it fails, naming what each side reaches', () => {
+  /*
+   * The drive used to stop the moment a side reached its row's operation. A command that runs `sharedPrep` then
+   * `cliSend`, paired with a tool that runs `sharedPrep` then `mcpRead`, passed under a row naming `sharedPrep`: neither
+   * later operation was ever seen. Each side is now traced to its end, and from the row's operation on it reaches
+   * nothing the row does not name.
+   */
+  const hiding = ({ row, driven }) => {
+    row('gmail.search').operation = 'sharedPrep';
+    driven.reports['gmail.search'].cli.calls = ['gmail:sharedPrep', 'gmail:cliSend'];
+    driven.reports['gmail.search'].mcp.calls = ['gmail:sharedPrep', 'gmail:mcpRead'];
+  };
+  assertNamed(
+    reaching(hiding),
+    'row "gmail.search": `agent-gmail search x` goes on from sharedPrep to reach cliSend, which the row does not name',
+    'row "gmail.search": gmail_search {"query":"x"} goes on from sharedPrep to reach mcpRead, which the row does not name',
+  );
+  // Another row's operation after this one's is no better than before it.
+  assertNamed(
+    reaching(({ driven }) => {
+      driven.reports['gmail.search'].cli.calls = ['gmail:search', 'gmail:startSignIn'];
+    }),
+    'row "gmail.search": `agent-gmail search x` goes on from search to reach startSignIn, which the row does not name',
+  );
+  // Its own operation again is its own; and a helper on the way to it is still allowed, as the baseline shows.
+  assert.deepEqual(
+    reaching(({ driven }) => {
+      driven.reports['gmail.search'].cli.calls = ['gmail:checkedPort', 'gmail:search', 'gmail:search'];
+    }),
+    [],
+  );
+  // A side the drive had to stop cannot be vouched for: what it would have reached next is not known.
+  assertNamed(
+    reaching(({ driven }) => {
+      driven.reports['gmail.search'].mcp.limited = true;
+    }),
+    'row "gmail.search": gmail_search {"query":"x"} was stopped after 1 operation, so what it reaches after that is not known',
+  );
+});
+
+test('"after" lets a side go on to another operation after its own, saying why, and only that', () => {
+  const goesOn = ({ driven }) => {
+    driven.reports['gmail.search'].cli.calls = ['gmail:search', 'gmail:readMessage'];
+  };
+  assertNamed(reaching(goesOn), 'goes on from search to reach readMessage, which the row does not name');
+  assert.deepEqual(
+    reaching((f) => {
+      goesOn(f);
+      f.row('gmail.search').after = { readMessage: 'shows the first message it found' };
+    }),
+    [],
+  );
+  assertNamed(
+    reaching(({ row }) => {
+      row('gmail.search').after = { nothing: 'why' };
+    }),
+    'row "gmail.search" lists "nothing" under "after", but no module in packages/gmail/src/operations or the core\'s exports a function called "nothing"',
+  );
+  assertNamed(
+    reaching(({ row }) => {
+      row('gmail.search').after = { search: 'why' };
+    }),
+    'row "gmail.search" lists "search" under "after", but it is the row\'s own operation; take it out',
+  );
+  // An "after" neither side reaches after the operation is a promise nobody keeps.
+  assertNamed(
+    reaching(({ row }) => {
+      row('gmail.search').after = { readMessage: 'shows the first message it found' };
+    }),
+    'row "gmail.search" lists "readMessage" under "after", but neither side reaches it after search; take it out',
+  );
+  assert.deepEqual(
+    breaking(({ row }) => {
+      row('gmail.search').after = { readMessage: 'shows the first message it found' };
+    }),
+    [],
+    'an "after" with its reason is a field the table knows',
+  );
+  for (const after of [['readMessage'], { readMessage: '' }, { readMessage: 3 }, {}, 'readMessage']) {
+    assertNamed(
+      breaking(({ row }) => {
+        row('gmail.search').after = after;
+      }),
+      'row "gmail.search": "after" must be an object of operation names, each with why a side reaches it after the row\'s operation',
+    );
+  }
+  assertNamed(
+    breaking(({ row }) => {
+      delete row('gmail.inbox.add').operation;
+      row('gmail.inbox.add').unchecked = 'why';
+      row('gmail.inbox.add').after = { readMessage: 'why' };
+    }),
+    'row "gmail.inbox.add" has "after" but no "operation"',
+  );
+});
+
+test('the drive traces a side to its end: a command and a tool that share a step and part after it are caught', async () => {
+  /*
+   * Real surfaces, mispaired behind a step they share: `agent-slack read` and `slack_thread` both open the workspace
+   * (`openWorkspace`) and then read — the channel, and a thread. A row naming the shared step as its operation passed
+   * while the drive stopped there. Driven to the end, each side is seen reaching its own read after it.
+   */
+  const hidden = {
+    capabilities: [
+      { id: 'hidden', package: 'slack', cli: 'read', mcp: 'slack_thread', status: 'both', operation: 'openWorkspace' },
+    ],
+  };
+  const traced = await driveOperations(hidden, { dir: await tempDir('agentcomms-parity-hidden-') });
+  assert.ok(traced.reports.hidden.cli.calls.includes('slack:readChannel'), JSON.stringify(traced.reports.hidden.cli));
+  assert.ok(traced.reports.hidden.mcp.calls.includes('slack:readThread'), JSON.stringify(traced.reports.hidden.mcp));
+  assertNamed(
+    checkOperations(hidden, registries, traced),
+    'row "hidden": `agent-slack read parity --workspace parity --json` goes on from openWorkspace to reach readChannel, which the row does not name',
+    'row "hidden": slack_thread {"channel":"parity","ts":"parity","workspace":"parity/slack"} goes on from openWorkspace to reach readThread, which the row does not name',
+  );
 });
 
 test('a composite command reaches every operation it names', () => {

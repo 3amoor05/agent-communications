@@ -76,13 +76,15 @@ Then `pnpm sync:reference` and `pnpm test`. `test/parity.test.mjs` reads every c
 every tool from a running server, and fails — naming what is missing — when either is in no row, when a row names
 something that does not exist, or when a row's status and its sides disagree.
 
-It also runs both sides of every `both` row, and fails unless each reaches the row's `operation` before any operation
-another row names, with the arguments the row's `expect` gives. Nothing real happens: in a process of its own
+It also runs both sides of every `both` row to their end, and fails unless each reaches the row's `operation` before
+any operation another row names, reaches nothing after it that the row does not name, and passes it the arguments the
+row's `expect` gives. Nothing real happens: in a process of its own
 (`scripts/operations.mjs`), with a temporary home, the file secret store and no network, keychain, child processes or
 worker threads, every function a command or a server imports from an `operations/` module is a stand-in that records
 the call and what it was given, and does nothing. So a row whose command and tool run
 different operations fails, and so does a row that names a helper everything calls; the message says what each side
-reached instead. A row may add:
+reached instead. A command and a tool that share a step on their way and part after it fail too, each naming what it
+went on to: naming the shared step as the row's operation hides nothing. A row may add:
 
 - a list for `operation`, when the command is several operations; each side has to reach all of them. A name is
   looked up in the row's own package, then in the core's — a channel's `mcp install` runs the core's
@@ -93,6 +95,9 @@ reached instead. A row may add:
   `["--client", "claude-code"]` for `mcp install`.
 - `via`, naming another row's operation that a side passes through on its way, when the command really does that:
   `setup` reads the state (`setupState`) before it starts a sign-in.
+- `after`, naming each operation a side goes on to after the row's own, with why — `{ "showWorkspace": "reads back
+  what it changed, to say so" }` — when the command really does that. The check fails an `after` that neither side
+  reaches after the operation.
 - `expect`, when another row runs the same operation through another command and another tool: the four Slack mode
   rows all run `planModeSet`, and reaching it cannot tell them apart. `expect` says what the operation receives from
   both sides, by the name of its parameter or a path into one — `{ "wanted": "read" }`,

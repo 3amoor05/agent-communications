@@ -51,6 +51,8 @@ export const PHASES = Object.freeze(['P2', 'P3', 'P4', 'P5', 'P6']);
  * - `via`: operations other rows name that a side passes through before this row's — `setup` reads the state
  *   (`setupState`, row `gmail.setup`) before it starts a sign-in. Without it, reaching another row's operation first
  *   fails the row.
+ * - `after`: operations a side goes on to after this row's, each with why — `{ "showWorkspace": "reads back what it
+ *   changed, to say so" }`. From the row's operation on, a side reaches nothing else.
  * - `argv`, `args`: what the check runs the command and the tool with, when the smallest call they accept does not
  *   reach the operation — `--finish <flowId>` for the half of `inbox add` that finishes a sign-in.
  * - `expect`: argument values the operation must receive from both sides, by the name of its parameter, or a path into
@@ -68,6 +70,7 @@ const FIELDS = new Set([
   'reason',
   'operation',
   'via',
+  'after',
   'argv',
   'args',
   'expect',
@@ -75,7 +78,7 @@ const FIELDS = new Set([
 ]);
 
 /** The fields that describe what a row's two sides run, which only a row with two sides can have. */
-const OPERATION_FIELDS = Object.freeze(['operation', 'via', 'argv', 'args', 'expect', 'unchecked']);
+const OPERATION_FIELDS = Object.freeze(['operation', 'via', 'after', 'argv', 'args', 'expect', 'unchecked']);
 
 /** An `expect` key: a parameter's name, or a path of keys into it. */
 const EXPECT_KEY = /^[A-Za-z_$][\w$]*(\.[\w$]+)*$/;
@@ -210,6 +213,11 @@ export function checkParity(table, registries, { strict = false } = {}) {
         );
       }
     }
+    if (row.after !== undefined && !isAfter(row.after)) {
+      problems.push(
+        `${at}: "after" must be an object of operation names, each with why a side reaches it after the row's operation`,
+      );
+    }
     if (row.unchecked !== undefined && (typeof row.unchecked !== 'string' || !row.unchecked.trim())) {
       problems.push(
         `${at} has an empty "unchecked"; a row that is not checked has to say why, where a reviewer reads it`,
@@ -258,6 +266,9 @@ export function checkParity(table, registries, { strict = false } = {}) {
       }
       if (row.via !== undefined && row.operation === undefined) {
         problems.push(`${at} has "via" but no "operation"; "via" is what a side passes through on its way to it`);
+      }
+      if (row.after !== undefined && row.operation === undefined) {
+        problems.push(`${at} has "after" but no "operation"; "after" is what a side goes on to after it`);
       }
       if (row.expect !== undefined && row.operation === undefined) {
         problems.push(`${at} has "expect" but no "operation"; "expect" is what that operation receives`);
@@ -321,15 +332,18 @@ export function checkParity(table, registries, { strict = false } = {}) {
  * Every way a row's command and tool fail to run the operation it names, from what `driveOperations()` saw them call.
  *
  * Each side of a `both` row was run — the command in-process, the tool through an MCP client — with every operation
- * replaced by a stand-in that records the call, and what the row's own operation received, and does nothing. A side
- * passes when it reaches every operation the row names before it reaches any operation another row names, and that
+ * replaced by a stand-in that records the call, and what the row's own operation received, and does nothing — each
+ * side to its end. A side passes when it reaches every operation the row names before it reaches any operation another
+ * row names, from the first of them on reaches nothing but the row's operations and what its `after` lists, and that
  * operation received what the row's `expect` says. So:
  *
  * - a row whose command and tool are different operations fails on the side that runs the other one — the reviewer's
  *   swap of `gmail.search` and `gmail.trash` fails on both rows, each naming the tool that reached the other's;
  * - a row naming the wrong operation fails on both sides, saying what each one reached instead;
  * - naming a helper that every command calls on its way (`requireWorkspace`) makes it another row's operation, so
- *   every row that reaches it first fails — a table cannot pass by naming what everything calls.
+ *   every row that reaches it first fails — a table cannot pass by naming what everything calls;
+ * - naming a step a command and a tool share on their way (`sharedPrep`) fails both sides of a pair that part after
+ *   it, each naming the operation it went on to: what a side does after its row's operation is the row's too.
  *
  * Reaching the operation cannot tell apart rows that share one. Four Slack rows run `planModeSet`, one per mode, and
  * swapping the tools of `slack.mode.report` and `slack.mode.narrow` passed everything above. So when two rows run one
@@ -392,6 +406,16 @@ export function checkOperations(table, registries, driven) {
         problems.push(`${at} lists "${name}" under "via", but no other row names it; take it out`);
       } else via.add(entry.id);
     }
+    // What the row says a side goes on to after its operation: each a real operation, and not the row's own.
+    const after = new Set();
+    for (const name of isAfter(row.after) ? Object.keys(row.after) : []) {
+      const entry = resolveOperation(operations, row.package, name);
+      if (!entry.id) problems.push(`${at} lists "${name}" under "after", but ${entry.problem}`);
+      else if (wanted.has(entry.id)) {
+        problems.push(`${at} lists "${name}" under "after", but it is the row's own operation; take it out`);
+      } else after.add(entry.id);
+    }
+    const afterReached = new Set();
     // What the operation has to receive, by the names its own source gives its parameters. A name it does not have
     // would expect nothing of anything, so it is refused rather than compared.
     const expected = [];
@@ -423,6 +447,25 @@ export function checkOperations(table, registries, driven) {
         continue;
       }
       const calls = outcome.calls ?? [];
+      // Stopped at the call limit: the sequence has no end to judge, and the side cannot pass on part of it.
+      if (outcome.limited) {
+        problems.push(
+          `${at}: ${surface} was stopped after ${calls.length} operation${calls.length === 1 ? '' : 's'}, so what it reaches after that is not known`,
+        );
+        continue;
+      }
+      // From the first of the row's operations on, nothing the row does not name: see `after`.
+      const from = calls.findIndex((id) => wanted.has(id));
+      if (from !== -1) {
+        const onward = [...new Set(calls.slice(from + 1).filter((id) => !wanted.has(id)))];
+        for (const id of onward.filter((id) => after.has(id))) afterReached.add(id);
+        const unnamed = onward.filter((id) => !after.has(id));
+        if (unnamed.length > 0) {
+          problems.push(
+            `${at}: ${surface} goes on from ${nameOf(calls[from])} to reach ${unnamed.map(nameOf).join(', ')}, which the row does not name — a side reaches nothing after its operation but what "after" lists, with why`,
+          );
+        }
+      }
       const foreign = calls.findIndex((id) => named.has(id) && !wanted.has(id) && !via.has(id));
       const before = foreign === -1 ? calls : calls.slice(0, foreign);
       const missing = resolved.filter((entry) => !before.includes(entry.id));
@@ -450,6 +493,14 @@ export function checkOperations(table, registries, driven) {
       const reached = seen.length > 0 ? `it reaches ${seen.join(', ')}` : 'it reaches no operation at all';
       const ended = outcome.timedOut ? ', and did not finish' : outcome.refusal ? `, and ends: ${outcome.refusal}` : '';
       problems.push(`${at}: ${surface} never reaches ${want}; ${reached}${ended}`);
+    }
+    // An "after" neither side goes on to is a promise nobody keeps, and a way out left open for the next change.
+    for (const id of after) {
+      if (!afterReached.has(id)) {
+        problems.push(
+          `${at} lists "${nameOf(id)}" under "after", but neither side reaches it after ${resolved.map((entry) => entry.name).join(', ')}; take it out`,
+        );
+      }
     }
   });
 
@@ -479,6 +530,17 @@ export function checkOperations(table, registries, driven) {
     }
   }
   return problems;
+}
+
+/** Whether `after` is well formed: an object of operation names, each with a reason. */
+function isAfter(after) {
+  return (
+    after !== null &&
+    typeof after === 'object' &&
+    !Array.isArray(after) &&
+    Object.keys(after).length > 0 &&
+    Object.entries(after).every(([name, why]) => name && typeof why === 'string' && why.trim() !== '')
+  );
 }
 
 /** Whether `expect` is a well-formed object of entries — the only kind `checkOperations` compares. */

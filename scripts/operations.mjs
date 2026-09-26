@@ -17,11 +17,15 @@
  *   happens: no mail is read, nothing is posted, no configuration is written, no sign-in starts. What runs is the
  *   surface itself — argument parsing, the schema a client's call is checked against, the guards before the call —
  *   which is exactly the part that decides which operation is reached.
- * - **A drive stops at the row's operation**, or at the first operation *another* row names, whichever comes first.
- *   The second is what makes a wrong row hard to pass: a command reaching `trash` before `search` has reached another
- *   row's operation, and naming a helper every command calls (`requireWorkspace`) as a row's operation makes every
- *   other row that reaches it first fail too. A command that really does pass through another row's operation on its
- *   way — `setup` reads the state (`gmail.setup`'s `setupState`) before it starts a sign-in — says so in `via`.
+ * - **A drive runs each side to its end**, and records every operation it reaches, in order — before the row's
+ *   operation and after it, each stand-in handing back an inert value so the surface goes on. It used to stop at the
+ *   row's operation, and a command and a tool that shared a preparatory step and parted after it — `sharedPrep` then
+ *   `send`, `sharedPrep` then `read` — passed under a row naming the step, because nothing after it was ever seen.
+ *   `checkOperations` in `parity.mjs` judges the whole sequence: the row's operation before any other row's, and from
+ *   it on nothing the row does not name. A command that really does pass through another row's operation on its way —
+ *   `setup` reads the state (`gmail.setup`'s `setupState`) before it starts a sign-in — says so in `via`; one that goes
+ *   on to another after its own says so, and why, in `after`. Only a runaway side is stopped, at `CALL_LIMIT`, and the
+ *   check fails it: what it would have reached next is not known.
  * - **What the row's operation receives is recorded**, by the names of its own parameters: `planModeSet`'s `wanted`,
  *   `serverInstallChange`'s `request.channel`. Several rows can share one operation — four Slack rows run
  *   `planModeSet`, one per mode — and reaching it cannot tell them apart; only what it was asked can. Swapping the
@@ -65,7 +69,10 @@ const placeholderPlatform = (pkg) => (REGISTRY.platforms.includes(pkg) ? pkg : (
 /** Where a package's operations live. */
 export const operationsDir = (pkg) => join(ROOT, 'packages', pkg, 'src', 'operations');
 
-/** How many operations one drive may call before it is stopped: a loop over an inert value never ends by itself. */
+/**
+ * How many operations one drive may call before it is stopped: a loop over an inert value never ends by itself. The
+ * longest side in the table reaches four; one stopped here fails the check, since the rest of its sequence is unknown.
+ */
 const CALL_LIMIT = 200;
 /** How long one command or tool may take to reach its operation. Nothing real runs, so this is generous. */
 const DRIVE_TIMEOUT_MS = 15_000;
@@ -192,7 +199,7 @@ export function recordArguments(args, names) {
   return recorded;
 }
 
-/** Every operation some row of `rows` names, resolved: what a drive stops at when it is not the row's own. */
+/** Every operation some row of `rows` names, resolved: what a side may not reach on its way to its own row's. */
 export function namedOperations(rows, operations) {
   const named = new Map();
   for (const row of rows) {
@@ -214,9 +221,10 @@ export function namedOperations(rows, operations) {
  * a row that names none yet — to the end, so the check can say what its two sides share.
  *
  * Returns `{ operations, parameters, reports, fatal }`: every operation by package; the parameter names of each one a
- * row names; and per row `{ cli, mcp }` — what each side was run with, every operation it called in order, what the
- * row's own operation received (`received`, by operation, as `recordArguments` keeps it), and how it ended. `fatal` is
- * set when a drive hung, after which nothing else is driven.
+ * row names; and per row `{ cli, mcp }` — what each side was run with, every operation it called in order to its end,
+ * what the row's own operation received (`received`, by operation, as `recordArguments` keeps it), and how it ended —
+ * `limited` when it was stopped at `CALL_LIMIT`. `fatal` is set when a drive hung, after which nothing else is
+ * driven.
  */
 export async function driveOperations(table, { dir }) {
   const home = join(dir, 'home');
@@ -272,7 +280,7 @@ export async function driveOperations(table, { dir }) {
 
 // ── The child: seal, hook, drive ─────────────────────────────────────────────────────────────────────────────────
 
-/** What a stand-in throws once a drive has what it came for. Surfaces catch it like any other error. */
+/** What a stand-in throws once a drive has been stopped at `CALL_LIMIT`. Surfaces catch it like any other error. */
 class Reached extends Error {
   constructor(id) {
     super(`parity: the drive stopped at ${id}`);
@@ -514,11 +522,8 @@ function standIn(pkg, name, fn) {
       names ??= parameterNames(fn);
       drive.received[id] = recordArguments(args, names);
     }
-    const stop =
-      drive.foreign.has(id) ||
-      (drive.wanted.has(id) && drive.wanted.size === new Set(drive.calls.filter((c) => drive.wanted.has(c))).size) ||
-      drive.calls.length >= CALL_LIMIT;
-    if (stop) {
+    // Nothing stops a drive but a runaway: what a side reaches after its row's operation is judged too.
+    if (drive.calls.length >= CALL_LIMIT) {
       drive.stopped = id;
       throw new Reached(id);
     }
@@ -550,9 +555,9 @@ function refusalOf(text) {
   return first ? first.slice(0, 300) : null;
 }
 
-/** Runs `body` as one drive toward `wanted`, stopping at anything in `foreign`. */
-async function traced({ wanted, foreign }, body) {
-  const drive = { wanted, foreign, calls: [], received: {}, stopped: null };
+/** Runs `body` as one drive, to its end, recording what `wanted` receives. */
+async function traced({ wanted }, body) {
+  const drive = { wanted, calls: [], received: {}, stopped: null };
   current = drive;
   let timer;
   let text = '';
@@ -579,6 +584,7 @@ async function traced({ wanted, foreign }, body) {
     calls: drive.calls,
     received: drive.received,
     stopped: drive.stopped,
+    limited: drive.stopped !== null,
     timedOut: failure?.startsWith('did not finish') ?? false,
     refusal: failure ?? (drive.stopped ? null : refusalOf(text)),
   };
@@ -732,12 +738,6 @@ async function drive(inputPath, outputPath) {
     // A name that means nothing has nothing to drive toward; the check says so without running anything.
     if (resolved.some((entry) => !entry.id)) continue;
     const wanted = new Set(resolved.map((entry) => entry.id));
-    // What the row says a side passes through on its way — `setup` reads the state first — is not a stop.
-    const via = new Set(
-      operationNames(row, 'via').map((name) => resolveOperation(operations, row.package, name).id ?? ''),
-    );
-    // A row that names no operation yet stops nowhere, so the check can report everything its two sides call.
-    const foreign = new Set(wanted.size === 0 ? [] : [...named.keys()].filter((id) => !wanted.has(id) && !via.has(id)));
     const report = {};
 
     // The command: its path, the row's own arguments, and whatever Commander says is still required.
@@ -748,7 +748,7 @@ async function drive(inputPath, outputPath) {
       let outcome;
       for (let attempt = 0; attempt < 8; attempt += 1) {
         const argv = [...path, ...positionals, ...(row.argv ?? []), ...options, '--json'];
-        outcome = { argv, ...(await traced({ wanted, foreign }, () => runCli(row.package, argv))) };
+        outcome = { argv, ...(await traced({ wanted }, () => runCli(row.package, argv))) };
         if (outcome.calls.length > 0 || !outcome.refusal) break;
         const argument = /missing required argument '([^']+)'/.exec(outcome.refusal);
         const option = /required option '(-[^' ]+)(?: <([^>]+)>)?' not specified/.exec(outcome.refusal);
@@ -765,7 +765,7 @@ async function drive(inputPath, outputPath) {
       const args = toolArguments(served.tool, served.pkg, row);
       report.mcp = {
         args,
-        ...(await traced({ wanted, foreign }, async () =>
+        ...(await traced({ wanted }, async () =>
           JSON.stringify(await served.client.callTool({ name: row.mcp, arguments: args })),
         )),
       };
