@@ -99,7 +99,7 @@ terminal), `approve` (under `confirm`, a person at a terminal) and `mcp` (it sta
 | `agent-resend scheduled cancel <id>` | `resend_scheduled_cancel` |
 | `agent-resend approve <approvalId>` | — a person at a terminal |
 | `agent-resend mcp` | — it starts the server |
-| `agent-resend mcp install` | `comms_server_install` (core) |
+| `agent-resend mcp install --client <client>` | `comms_server_install` (core) |
 | `agent-resend mcp prune` | `comms_server_prune` (core) |
 
 Every command takes `--json` for the whole result, with stable exit codes: `0` ok, `10` a send or a change was

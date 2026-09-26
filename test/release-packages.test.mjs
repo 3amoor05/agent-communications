@@ -747,17 +747,15 @@ test('the preflight proves nothing for a package already out from this commit, s
   }
 
   // Part way: what is out from this commit is skipped, what is not is still proven, and a refusal still stops it.
-  const partial = await fakeOidc({
-    untrusted: ['@agentcomms/slack'],
-    published: { '@agentcomms/core': { [VERSION]: COMMIT }, '@agentcomms/gmail': { [VERSION]: COMMIT } },
-  });
+  const outAlready = { '@agentcomms/core': { [VERSION]: COMMIT }, '@agentcomms/gmail': { [VERSION]: COMMIT } };
+  const partial = await fakeOidc({ untrusted: ['@agentcomms/slack'], published: outAlready });
   try {
     const result = await runScript(CI, ['preflight', VERSION, COMMIT], { env: partial.env });
     assert.equal(result.status, 1);
     // Everything but the two already out, in publish order.
     assert.deepEqual(
       partial.exchanges.map((exchange) => exchange.name),
-      PACKAGES.filter((name) => !['core', 'gmail'].includes(name)).map((name) => `@agentcomms/${name}`),
+      PACKAGES.map((name) => `@agentcomms/${name}`).filter((name) => !Object.hasOwn(outAlready, name)),
     );
     assert.match(result.stderr, /@agentcomms\/slack has no trusted publisher for this workflow/);
   } finally {
@@ -819,18 +817,19 @@ test('a package already at the version from another commit stops the release bef
 });
 
 test('pending prints what this commit still has to publish, in order, for the publish loop', async () => {
-  const fake = await fakeOidc({
-    published: {
-      '@agentcomms/core': { [VERSION]: COMMIT },
-      '@agentcomms/gmail': { '0.4.0': OTHER, [VERSION]: COMMIT },
-      // Another version, from anywhere, is not this one.
-      '@agentcomms/slack': { '0.4.0': OTHER },
-    },
-  });
+  const published = {
+    '@agentcomms/core': { [VERSION]: COMMIT },
+    '@agentcomms/gmail': { '0.4.0': OTHER, [VERSION]: COMMIT },
+    // Another version, from anywhere, is not this one.
+    '@agentcomms/slack': { '0.4.0': OTHER },
+  };
+  const fake = await fakeOidc({ published });
   try {
     const result = await runScript(CI, ['pending', VERSION, COMMIT], { env: fake.env });
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stdout, `${PACKAGES.filter((name) => !['core', 'gmail'].includes(name)).join(' ')}\n`);
+    // Every package but the two out from this commit — slack's other version does not count — in publish order.
+    const fromThisCommit = (name) => published[`@agentcomms/${name}`]?.[VERSION] === COMMIT;
+    assert.equal(result.stdout, `${PACKAGES.filter((name) => !fromThisCommit(name)).join(' ')}\n`);
     assert.match(result.stderr, /@agentcomms\/core@1\.2\.3 is already out from this commit/);
     assert.deepEqual(
       fake.reads,
