@@ -999,7 +999,8 @@ test('a channel this machine does not use is never asked about, so its absence f
   // machine's update would have stopped at the registry's 404 for a package nobody there uses.
   const m = machine();
   cursor(m, { gmail: npx('gmail', OLD, ['--inbox', 'acme/gmail']) });
-  const { resend: _resend, ...published } = EVERYTHING_LATEST;
+  // By its package name, the registry's key: `resend` alone named nothing, and the registry still answered for it.
+  const { [PACKAGES.resend]: _resend, ...published } = EVERYTHING_LATEST;
   const deps = fakes(m, { latest: published });
   const { ok, close } = await connect(m, { update: deps });
   try {
