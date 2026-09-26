@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { chmod, rename, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
-import { CommsError, ensurePrivateDir, FILE_MODE } from '@agentcomms/core';
+import { CommsError, DIR_MODE, ensurePrivateDir, FILE_MODE, isGroupOrWorldAccessible } from '@agentcomms/core';
 import { readChats, readMessages, readPushNames } from './source/read-source.ts';
 import type { SchemaReport } from './source/schema.ts';
 import type { ChatKind } from './source/types.ts';
@@ -21,8 +21,18 @@ import type { Visibility } from './visibility.ts';
  * ranked), paging a chat by time without reading the whole file, and an all-or-nothing rebuild. The rebuild writes a
  * new file and renames it over the old, so a sync that fails half-way leaves the previous index exactly as it was.
  *
- * It holds message text in the clear, as WhatsApp's own store does, owner-only (0600 in a 0700 directory) under
- * core's state directory. Encrypting it at rest is on the list of things to do before this is more than a spike.
+ * **It holds message text in the clear**, as WhatsApp's own store does, owner-only (0600 in a 0700 directory) under
+ * core's state directory — and re-tightened every time it is opened, so a copy a backup tool or a `chmod` loosened
+ * does not stay loose. It is not encrypted, and that is a decision rather than an omission:
+ *
+ * - Node's SQLite cannot open an encrypted database (no SQLCipher), and cannot load one from memory (no
+ *   `deserialize`). Encrypting the file would mean decrypting it to disk for every read — a plaintext copy anyway,
+ *   only a fresher one — or encrypting each column, which leaves nothing for full-text search to search.
+ * - The key would sit in core's secret store, which every process of this suite, and anything else that runs `node`
+ *   as this user, can read (design 2026-09-26 §8). It would stop a stray file copy, not a program running as you.
+ * - What the index does lose is the protection WhatsApp's own folder has: macOS asks before an app reads another app's
+ *   container, and it does not ask about this file. So the index keeps only what agents may see (the person's lists
+ *   leave the rest out), `remove` deletes it, and the README says plainly where it is and what it holds.
  *
  * The person's allow and deny lists (`visibility.ts`) apply twice: a sync leaves what they hide out of the file, and
  * every query applies them again — so a list changed since the last sync takes effect at once.
@@ -214,6 +224,16 @@ export async function rebuildIndex(
   return stats;
 }
 
+/**
+ * The index and its folder back to owner-only when anything loosened them: a plaintext copy of messages is nobody
+ * else's to read. POSIX permissions only; on Windows the folder under the user's profile is what keeps it private.
+ */
+async function keepOwnerOnly(directory: string, path: string): Promise<void> {
+  if (process.platform === 'win32') return;
+  if (await isGroupOrWorldAccessible(directory)) await chmod(directory, DIR_MODE);
+  if (await isGroupOrWorldAccessible(path)) await chmod(path, FILE_MODE);
+}
+
 /** An open index, or a refusal that says to sync first. */
 export class WhatsAppIndex {
   readonly #db: DatabaseSync;
@@ -233,13 +253,14 @@ export class WhatsAppIndex {
         details: { reason: 'NOT_SYNCED' },
       });
     }
+    await keepOwnerOnly(directory, path);
     // Read-only: a read command never changes the index, and cannot by accident.
     const db = await openDatabase(path, { readOnly: true });
     const format = (db.prepare("SELECT value FROM meta WHERE key = 'format'").get() as { value?: string } | undefined)
       ?.value;
     if (format !== String(INDEX_FORMAT)) {
       db.close();
-      throw new CommsError('CONFIG', `the index for "${accountName}" was written by another version of this spike`, {
+      throw new CommsError('CONFIG', `the index for "${accountName}" was written by another version of this package`, {
         hint: `Run \`agent-whatsapp sync --account ${accountName}\` to rebuild it.`,
       });
     }

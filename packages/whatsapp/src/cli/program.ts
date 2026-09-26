@@ -29,6 +29,7 @@ import { draftMessage } from '../operations/draft.ts';
 import { CHAT_KINDS, listChats, readChat, searchMessages } from '../operations/read.ts';
 import { whatsappStatus } from '../operations/status.ts';
 import { syncAccount } from '../operations/sync.ts';
+import { requireSupportedNode } from '../sqlite.ts';
 import { VERSION } from '../version.ts';
 import { type Opener, openLink } from './opener.ts';
 import {
@@ -95,7 +96,7 @@ Getting started (a person, in a terminal):
   agent-whatsapp deny +15555550102 --account personal/whatsapp   agents never see that chat
   agent-whatsapp mcp install --client claude-code --account personal/whatsapp
 
-Nothing here connects to WhatsApp or any other server, and nothing here can send.
+Nothing here connects to WhatsApp or any other server, and nothing here can send. Needs Node 22.16 or newer.
 
 Exit codes: 0 ok · 1 unexpected · 10 only a person may do that, or a change needs approval · 64 usage
 · 65 bad data (a store whose layout changed) · 66 not found · 69 unavailable · 75 temporary (retry;
@@ -125,6 +126,8 @@ a macOS dialog may be waiting) · 77 permission needed (macOS privacy) · 78 con
       exitCode = await runCommand(
         output(),
         async () => {
+          // Before anything else: a Node too old for node:sqlite is said here, not half way through a sync.
+          requireSupportedNode();
           const context = new WhatsAppContext({
             ...deps,
             env,
@@ -391,11 +394,12 @@ a macOS dialog may be waiting) · 77 permission needed (macOS privacy) · 78 con
     .option('--account <name>', 'pin the server to one account; every tool then acts on it and no other')
     .action(async (flags: Options) => {
       ran = true;
-      // A server that cannot start — a pin naming no account — says why on stderr and exits with the status that
-      // means it, rather than a stack trace in a client's log. Once it is serving, it returns.
+      // A server that cannot start — a Node too old, a pin naming no account — says why on stderr and exits with the
+      // status that means it, rather than a stack trace in a client's log. Once it is serving, it returns.
       exitCode = await runCommand(
         output(),
         async () => {
+          requireSupportedNode();
           const { startWhatsAppStdioServer } = await import('../mcp/stdio-entry.ts');
           await startWhatsAppStdioServer({
             env,
