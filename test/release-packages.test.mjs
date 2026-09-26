@@ -603,8 +603,8 @@ test('the release documents say what moving a tag does to a run still going', as
  * for every package except those in `untrusted`, and records which ID token each exchange carried.
  *
  * The registry also serves each package's packument. `published` maps a package to the versions it has, each to the
- * commit recorded as its `gitHead` (null for none); a package it does not name is a 404, as on npm, and
- * `packumentStatus` makes every packument answer with that status instead.
+ * commit recorded as its `gitHead` (null for none); a package it does not name is a 404, as on npm for a package that
+ * has never been published, and `packumentStatus` makes every packument answer with that status instead.
  */
 async function fakeOidc({ untrusted = [], emptyToken = [], published = {}, packumentStatus = 200 } = {}) {
   let issued = 0;
@@ -672,8 +672,18 @@ async function fakeOidc({ untrusted = [], emptyToken = [], published = {}, packu
 
 const CI = join(ROOT, 'scripts', 'release-ci.mjs');
 
+/**
+ * Every package on the registry at an earlier version, from another commit, merged with `extra`: each exists, so
+ * whether it trusts this workflow is the question. A package the registry has never seen is another question, below.
+ */
+function allExist(extra = {}) {
+  const published = Object.fromEntries(PACKAGES.map((name) => [`@agentcomms/${name}`, { '1.2.2': OTHER }]));
+  for (const [name, versions] of Object.entries(extra)) published[name] = { ...published[name], ...versions };
+  return published;
+}
+
 test('the preflight passes only when every package exchanges, and never prints a token', async () => {
-  const fake = await fakeOidc();
+  const fake = await fakeOidc({ published: allExist() });
   try {
     const result = await runScript(CI, ['preflight', VERSION, COMMIT], { env: fake.env });
     assert.equal(result.status, 0, result.stderr);
@@ -697,7 +707,7 @@ test('the preflight passes only when every package exchanges, and never prints a
 });
 
 test('the preflight fails, naming the package, when one has no trusted publisher', async () => {
-  const fake = await fakeOidc({ untrusted: ['@agentcomms/slack'] });
+  const fake = await fakeOidc({ untrusted: ['@agentcomms/slack'], published: allExist() });
   try {
     const result = await runScript(CI, ['preflight', VERSION, COMMIT], { env: fake.env });
     assert.equal(result.status, 1, 'a package npm refuses must stop the release before any publish');
@@ -711,13 +721,78 @@ test('the preflight fails, naming the package, when one has no trusted publisher
 });
 
 test('the preflight does not count a 200 without a token as trust', async () => {
-  const fake = await fakeOidc({ emptyToken: ['@agentcomms/gmail'] });
+  const fake = await fakeOidc({ emptyToken: ['@agentcomms/gmail'], published: allExist() });
   try {
     const result = await runScript(CI, ['preflight', VERSION, COMMIT], { env: fake.env });
     assert.equal(result.status, 1);
     assert.match(result.stdout, /✗ @agentcomms\/gmail: npm answered 200 without a token/);
   } finally {
     await fake.close();
+  }
+});
+
+test('the preflight names a package npm has never seen, prints its first publish from this commit, and sends nothing', async () => {
+  // npm keeps trusted publishers per package and will not hold one for a package that does not exist, so a new
+  // package's first version cannot come from this workflow. The preflight used to tell the owner to add a trusted
+  // publisher for it, which npm refuses; now it says the package was never published and how to send it once by hand.
+  const unborn = ['@agentcomms/resend', '@agentcomms/whatsapp'];
+  const published = allExist();
+  for (const name of unborn) delete published[name];
+  const fake = await fakeOidc({ published });
+  try {
+    const result = await runScript(CI, ['preflight', VERSION, COMMIT], { env: fake.env });
+    assert.equal(result.status, 1, 'a package this workflow cannot publish must stop the release before any publish');
+    // Not asked about: an exchange for a package that does not exist cannot succeed. The rest still are, so one run
+    // reports everything that stands in the way.
+    assert.deepEqual(
+      fake.exchanges.map((exchange) => exchange.name),
+      PACKAGES.map((name) => `@agentcomms/${name}`).filter((name) => !unborn.includes(name)),
+    );
+    for (const name of unborn) {
+      assert.match(result.stdout, new RegExp(`✗ ${name}: never published — npm has no such package`));
+      // The same publish the workflow runs, through the hook that records this commit, so the re-run skips it.
+      assert.ok(
+        result.stdout.includes(
+          `  pnpm --config.pnpmfile=scripts/record-git-head.cjs --filter ${name} publish --access public --no-git-checks --tag latest\n`,
+        ),
+        result.stdout,
+      );
+    }
+    assert.match(result.stdout, new RegExp(`First publish, by hand, from this commit \\(${COMMIT}\\)`));
+    assert.match(
+      result.stderr,
+      /Nothing was published\. @agentcomms\/resend, @agentcomms\/whatsapp have never been published, and npm cannot hold a trusted publisher for a package that does not exist/,
+    );
+    assert.match(
+      result.stderr,
+      new RegExp(`the commands above, which record ${COMMIT} as its gitHead so this job skips it`),
+    );
+    assert.match(
+      result.stderr,
+      /add each one’s trusted publisher on npmjs\.com → the package → Settings → Trusted publishing/,
+    );
+    assert.match(result.stderr, /then re-run this job\./);
+    assert.doesNotMatch(result.stderr, /has no trusted publisher/, 'a package that exists and trusts it is not blamed');
+    assert.doesNotMatch(result.stdout + result.stderr, /minted-publish-token/);
+  } finally {
+    await fake.close();
+  }
+
+  // One never published and one without a trusted publisher: both named, in one run. A prerelease's first publish
+  // goes under `next`, as the workflow's own publish of it would.
+  const mixed = allExist();
+  delete mixed['@agentcomms/whatsapp'];
+  const both = await fakeOidc({ published: mixed, untrusted: ['@agentcomms/slack'] });
+  try {
+    const result = await runScript(CI, ['preflight', '1.2.3-rc.1', COMMIT], { env: both.env });
+    assert.equal(result.status, 1);
+    assert.match(result.stdout, /--filter @agentcomms\/whatsapp publish --access public --no-git-checks --tag next\n/);
+    assert.match(result.stderr, /@agentcomms\/whatsapp has never been published/);
+    assert.match(result.stderr, /Publish it once by hand from this commit with the command above/);
+    assert.match(result.stderr, /add its trusted publisher on npmjs\.com/);
+    assert.match(result.stderr, /@agentcomms\/slack has no trusted publisher for this workflow; nothing was published/);
+  } finally {
+    await both.close();
   }
 });
 
@@ -748,7 +823,7 @@ test('the preflight proves nothing for a package already out from this commit, s
 
   // Part way: what is out from this commit is skipped, what is not is still proven, and a refusal still stops it.
   const outAlready = { '@agentcomms/core': { [VERSION]: COMMIT }, '@agentcomms/gmail': { [VERSION]: COMMIT } };
-  const partial = await fakeOidc({ untrusted: ['@agentcomms/slack'], published: outAlready });
+  const partial = await fakeOidc({ untrusted: ['@agentcomms/slack'], published: allExist(outAlready) });
   try {
     const result = await runScript(CI, ['preflight', VERSION, COMMIT], { env: partial.env });
     assert.equal(result.status, 1);

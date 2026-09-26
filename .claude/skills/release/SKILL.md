@@ -6,8 +6,10 @@ description: Use when publishing this repository's packages to npm, cutting a ve
 # Releasing agent-communications
 
 Every package in `scripts/packages.mjs` goes to npm together, in that order — today `@agentcomms/core`,
-`@agentcomms/gmail`, `@agentcomms/gmail-mcp` and `@agentcomms/slack`. That file is the one list: the workflow, the
-local script, `sync-versions` and `verify:packages` all read it, and a test fails if a publishable package is missing.
+`@agentcomms/gmail`, `@agentcomms/gmail-mcp`, `@agentcomms/resend`, `@agentcomms/slack` and `@agentcomms/whatsapp`
+(`node scripts/packages.mjs` prints the list). That file is the one list, derived from the channels' manifests: the
+workflow, the local script, `sync-versions`, `verify:packages` and the licence notices all read it, and a test fails if
+a publishable package is missing.
 **Pushing a `v*` tag publishes them.** That push is the irreversible act; there is no confirmation after it.
 
 ## The one thing to understand first
@@ -37,6 +39,11 @@ workflow could have done the first publish. From 0.1.1 CI is the publisher for c
 owner can add (npmjs.com → the package → Settings → Trusted publishing: this repository, `release.yml`, environment
 `release`). An agent cannot check or add it; the workflow's preflight is what finds out.
 
+**A package's first version is always published by hand**, because npm cannot hold a trusted publisher for a package
+that does not exist. `@agentcomms/resend` and `@agentcomms/whatsapp` are new in 0.7.0, so 0.7.0 needs it for both.
+The preflight catches it: it says the package was never published, prints the exact command, and publishes nothing
+(step 6).
+
 ## Procedure
 
 1. **Check nothing is already published at this version.** `scripts/release.mjs` does it, but knowing early is
@@ -45,8 +52,9 @@ owner can add (npmjs.com → the package → Settings → Trusted publishing: th
    `scripts/packages.mjs`.
 
 2. **Get the version right everywhere.** Edit the root `package.json`, then `pnpm sync:versions` — it writes every
-   package manifest, two plugin files, the launcher and every skill's `compatibility:` line, Gmail and Slack alike. `pnpm run licenses` regenerates the third-party notices
-   that ship inside the bundles.
+   package manifest, two plugin files, the launcher and every skill's `compatibility:` line, every channel alike.
+   `pnpm build && pnpm run licenses` regenerates the third-party notices that ship inside the bundles; they are read
+   from what each bundle contains, so they need the build.
    **Complete when:** `pnpm verify:versions` and `pnpm verify:licenses` both pass.
 
 3. **Write the changelog entry yourself.** `## Unreleased` becomes `## X.Y.Z`. This is the one artefact a person
@@ -73,6 +81,17 @@ owner can add (npmjs.com → the package → Settings → Trusted publishing: th
    **If the preflight names a package**, nothing was published. Tell the owner which package needs a trusted
    publisher; once they have added it, re-run the failed job. Do not bump the version: nothing was spent.
 
+   **If it says a package was never published**, nothing was published either, and no trusted publisher can be added
+   yet: npm refuses one for a package that does not exist. The preflight printed the first publish for it, with the
+   tagged commit. The owner runs that, in a terminal (npm asks for a one-time password to create a package), in a
+   checkout of the tagged commit after `pnpm install --frozen-lockfile && pnpm build`:
+   `pnpm --config.pnpmfile=scripts/record-git-head.cjs --filter @agentcomms/<name> publish --access public --no-git-checks --tag latest`
+   (`next` for a prerelease). Then they add its trusted publisher and re-run the failed job, which finds that version
+   already out from this commit and skips it. Not `npm publish` in the package's directory: it records no `gitHead`
+   from a git worktree, and a version with no commit recorded is one the release can never finish. Not before the
+   tag either: the preflight runs after every verify leg has passed, so a hand publish then cannot be stranded by a
+   Windows failure. An agent cannot do this step — see `docs/RELEASING.md`, "A new package's first version".
+
    **If a publish fails part way, the tag must not move.** When the cause was outside the repository (an npm or
    network error, a trusted publisher added since), re-run the failed job: a re-run keeps the tagged commit, and the
    publish skips every package the registry records as published from that commit, so it finishes the release
@@ -94,8 +113,9 @@ owner can add (npmjs.com → the package → Settings → Trusted publishing: th
    that can lag minutes behind a successful publish. Run `npm dist-tag ls @agentcomms/<name>`, which goes to the
    authenticated path. If that reports the version, the publish landed.
 
-7. **Prove it from outside.** `npx -y @agentcomms/gmail@X.Y.Z --version`, then `doctor`, in a directory that is not
-   this repository. Then `npx skills add crissmoldovan/agent-communications --skill '*'` in a scratch directory and
+7. **Prove it from outside.** `npx -y @agentcomms/<name>@X.Y.Z --version` for `core`, `gmail`, `slack`, `resend` and
+   `whatsapp`, then `doctor` (`status` for WhatsApp, which needs Node 22.16), in a directory that is not this
+   repository. Then `npx skills add crissmoldovan/agent-communications --skill '*'` in a scratch directory and
    check a skill brought its `references/` with it.
    **Complete when:** the published artefact has been run by something that did not build it.
 
@@ -158,7 +178,8 @@ The packages that went out are **on the registry for good**.
   commit, bump. Never move the tag once a package is out — the packages already published came from the commit it
   names, and a run on any other commit refuses the version.
 - **Reading a preflight failure as a failed release.** Nothing was published; the fix is the owner adding a trusted
-  publisher, then a re-run.
+  publisher — or, for a package never published, publishing its first version by hand from the tagged commit and then
+  adding one — then a re-run.
 - **Trusting the publish command's exit code.** Ask the registry, and give it time to answer.
 - **Adding an npm token so CI "just publishes".** It already publishes, through OIDC, with nothing stored. A token
   would add a standing credential to a public repository — one that publishes from anywhere, not only from this

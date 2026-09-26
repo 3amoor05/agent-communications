@@ -207,18 +207,28 @@ A new channel is its package, plus the rows and skills that describe it. Nothing
 1. **The package**, `packages/<channel>`: `@agentcomms/<channel>`, the same version as the rest, `@agentcomms/core` as a
    `workspace:*` dev dependency (bundled, as Gmail's and Slack's are), and the `"agentcomms"` field (§2) with `channel`
    equal to the directory name. Its CLI at `src/cli.ts` / `src/cli/program.ts` (`run`), its server at
-   `src/mcp/server.ts` (`create<Label>McpServer`), a README, and the layout in §4.
+   `src/mcp/server.ts` (`create<Label>McpServer`), a README, the layout in §4, and `test/consumer-check.mjs` — the
+   check `pnpm verify:packages` runs inside a throwaway project that installed the packed tarball, and the only test
+   of what is actually published.
 2. **Its accounts** in `accounts`, `platform` its word, `mode` `read` or `send` and nothing else, secrets through the
    core's store with `<channel>:` references. Its `mcp install` passes `account` to the core's `serverInstallChange`.
 3. `pnpm sync:channels` — the core's snapshot now has it, and `CHANNELS`, the core server's `channel` enum, the
    installer, the update and every sentence know it.
 4. **Its rows** in `capabilities.json`, one per command and tool (see "Adding a capability" in `CONTRIBUTING.md`).
 5. **Its skills**: `skills/<prefix>*/` and `skills/_shared/contract-<family>.md`; then `pnpm sync:skills`.
-6. `pnpm sync:reference` (its reference pages), `pnpm licenses` (its `THIRD_PARTY_LICENSES`), and `pnpm verify`.
+6. `pnpm sync:reference` (its reference pages), `pnpm build && pnpm licenses` (its `THIRD_PARTY_LICENSES`, read from
+   the bundler's module graph, so it lists what the bundle contains — core and what core inlines included), and
+   `pnpm verify`.
+7. **Its first publish, by hand.** npm keeps trusted publishers per package and cannot hold one for a package that
+   does not exist, so no workflow can send a new package's first version. The release's OIDC preflight finds such a
+   package by the registry's 404, publishes nothing, and prints the command to run from the tagged commit —
+   `pnpm --config.pnpmfile=scripts/record-git-head.cjs --filter @agentcomms/<channel> publish --access public
+   --no-git-checks --tag latest`, which records the commit as the version's `gitHead`. The owner runs it, adds the
+   package's trusted publisher, and re-runs the job, which skips that version as already out from its commit
+   (`docs/RELEASING.md`, "A new package's first version").
 
 The release publishes it, the version sync bumps it, the parity check drives it, the tool-drift and skill tests check
-its names, and every other channel's skills are checked for its words — all from the manifest. The first publish of a
-new package is by hand, before its trusted publisher can be added (`docs/RELEASING.md`).
+its names, and every other channel's skills are checked for its words — all from the manifest.
 
 ## 10. Not in this release
 

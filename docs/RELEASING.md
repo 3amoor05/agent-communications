@@ -37,6 +37,8 @@ The first release of each package happened from a maintainer's laptop, because n
 publisher for a package that does not exist — so no CI workflow could have performed a first publish. For core,
 gmail and gmail-mcp that was 0.1.0, and from 0.1.1 CI is the publisher. `@agentcomms/slack` was first published by
 hand at 0.4.0, so it needs its own trusted publisher added once, by the package owner, before CI can publish it.
+`@agentcomms/resend` and `@agentcomms/whatsapp` are new in 0.7.0 and are in the same position: see
+[a new package's first version](#a-new-packages-first-version).
 
 **Whether a package trusts this workflow cannot be read from outside.** npm's trust settings need an authenticated
 owner (`npm trust list @agentcomms/<name>`, npm 11.15 or later, or npmjs.com → the package → Settings → Trusted
@@ -53,15 +55,58 @@ published, so anything released from a laptop carries no attestation, and 0.1.0 
 |---|---|
 | The repository is public | npm refuses a provenance attestation for a private source repository, with a 422 that arrives only after the tarball is uploaded |
 | A GitHub-hosted runner | a self-hosted one cannot issue an OIDC token npm accepts |
-| Each package names this workflow | npmjs.com → the package → Settings → Trusted publishing: repository, workflow file (`release.yml`), environment (`release`). npm does not validate those strings when you save them — the preflight is what reads them back |
+| Each package exists and names this workflow | npmjs.com → the package → Settings → Trusted publishing: repository, workflow file (`release.yml`), environment (`release`). npm does not validate those strings when you save them — the preflight is what reads them back. A package with no version yet cannot have one: [its first version is published by hand](#a-new-packages-first-version) |
 | `id-token: write` on the publish job | without it there is no OIDC token to exchange |
+
+### A new package's first version
+
+npm keeps trusted publishers per package and will not configure one for a package that does not exist, so no
+workflow can send a package's first version: a person does, once. The release finds out for you. When the registry
+answers 404 for a package it is about to send, the OIDC preflight does not ask for an exchange that cannot work: it
+prints `✗ @agentcomms/<name>: never published`, prints the command below for each such package with this run's commit,
+and fails with nothing published. It still asks about every other package, so one run names everything in the way.
+
+Let the tag's run get there. The preflight runs after all six verify legs have passed, so by then the commit is one
+every platform accepted. Then:
+
+1. **Publish the first version by hand, from the tagged commit.** In a checkout of exactly that commit, from the
+   repository root, in a terminal — npm asks for a one-time password to create a package:
+
+   ```bash
+   git checkout vX.Y.Z
+   pnpm install --frozen-lockfile && pnpm build
+   pnpm --config.pnpmfile=scripts/record-git-head.cjs --filter @agentcomms/<name> publish --access public --no-git-checks --tag latest
+   ```
+
+   `--tag next` for a prerelease; the preflight's own line already says which. This version carries no provenance,
+   because npm attests only what CI published. That is the cost of the first version, and of nothing after it.
+2. **Add its trusted publisher**: npmjs.com → the package → Settings → Trusted publishing — this repository,
+   `release.yml`, environment `release`.
+3. **Re-run the failed job.** The hand-published version records the tagged commit as its `gitHead`, so the run skips
+   it, proves and publishes the rest, confirms them all and makes the release page.
+
+**Use that command, not `npm publish`.** It is the publish the workflow and `scripts/release.mjs` run, for one
+package: pnpm rewrites the `workspace:` and `catalog:` specifiers, and the hook records the commit. `npm publish` in
+`packages/<name>` leaves those specifiers in the published manifest, and records `gitHead` only where `.git` is a
+directory, so from a git worktree it records nothing. The release refuses a version with no commit recorded, and a
+version cannot be sent twice, so that one mistake would end the release at that version.
+
+**Why not before the tag.** Published by hand first, the package is out before the Windows and Linux legs have run.
+If one of them then fails, the fix is a new commit, the package is already out at that version from the old one, and
+every package moves to the next version. After the preflight, nothing can fail the commit any more.
+
+A channel bundles core and depends at runtime on nothing else of this suite, so its first version can go out before
+the rest of the release. A package that did depend on another one of them at runtime (as `gmail-mcp` does on `gmail`)
+would not install until the re-run had published that one, so re-run straight away.
 
 ## The packages
 
-**One list, in `scripts/packages.mjs`:** `core`, `gmail`, `gmail-mcp`, `slack`, in that order. The workflow's publish
-and confirm loops, `scripts/release.mjs`, `scripts/sync-versions.mjs` and `pnpm verify:packages` all read it, and
-`test/release-packages.test.mjs` fails if a publishable package is missing from it, if the order puts a package
-before one it depends on, or if any of those stops reading it. There used to be a copy in each; 0.4.0 shipped
+**One list, in `scripts/packages.mjs`:** `core`, `gmail`, `gmail-mcp`, `resend`, `slack`, `whatsapp`, in that
+order. It is derived from the channels' manifests (`scripts/channels.mjs`), in an order computed from their
+dependencies, so a new channel is on it by being a package that declares itself. The workflow's publish and confirm
+loops, `scripts/release.mjs`, `scripts/sync-versions.mjs`, `pnpm verify:packages` and the licence notices all read
+it, and `test/release-packages.test.mjs` fails if a publishable package is missing from it, if the order puts a
+package before one it depends on, or if any of those stops reading it. There used to be a copy in each; 0.4.0 shipped
 without Slack because one of them said three.
 
 ## The order, and why it is that order
@@ -69,7 +114,7 @@ without Slack because one of them said three.
 ```bash
 # 1. The version, everywhere it is written down.
 pnpm sync:versions          # every package manifest, two plugin files, the launcher, every skill's compatibility line
-pnpm run licenses               # third-party notices that ship inside the bundles
+pnpm build && pnpm run licenses # third-party notices, read from what each bundle actually contains
 
 # 2. The changelog entry, written by a person. `## Unreleased` becomes `## X.Y.Z`. The tag gate refuses a version
 #    with no section, and the GitHub release is made from it.
@@ -131,9 +176,15 @@ proves nothing. When every package is — a re-run after the last one landed, or
 fallback gets used: while a package has no trusted publisher yet, exchanging for it anyway failed the tag run and
 skipped the GitHub release, for a version that was already on npm.
 
+A package the registry has never heard of is not asked about either: npm cannot trust a workflow for it, so the
+preflight says it was never published, prints its first publish, and fails — see
+[a new package's first version](#a-new-packages-first-version).
+
 Without it, a package with no trusted publisher fails late and quietly: pnpm prints only "Skipped OIDC", falls back
 to a registry token this workflow does not have, and that one publish is refused — after the packages before it in
-the list have gone out. Slack is last in the list, so that is exactly how a first CI release of it would have gone.
+the list have gone out. Slack was last in the list at 0.4.0, so that is exactly how a first CI release of it would
+have gone; at 0.7.0 `resend`, first published in that release, comes after three packages that would already have
+been sent.
 
 **`pnpm verify` runs build before typecheck, deliberately.** The `gmail` package typechecks against `core`'s
 emitted declarations. For a long time this ran the other way round, which passed on every machine that already had a
@@ -187,9 +238,10 @@ they import from `src/`.
 
 ## After publishing
 
-- `npm view @agentcomms/gmail version` — confirm what actually went out.
-- `npx -y @agentcomms/gmail@X.Y.Z --version`, `npx -y @agentcomms/slack@X.Y.Z --version` and
-  `npx -y @agentcomms/core@X.Y.Z --version`, then each one's `doctor`, somewhere that is not this repository.
+- `npm view @agentcomms/<name> version` for each package in `scripts/packages.mjs` — confirm what actually went out.
+- `npx -y @agentcomms/<name>@X.Y.Z --version` for `core`, `gmail`, `slack`, `resend` and `whatsapp`, then `doctor`
+  for each but WhatsApp, and `status` for it, somewhere that is not this repository. `whatsapp` needs Node 22.16 or
+  newer.
 - `npx skills add crissmoldovan/agent-communications --skill '*'` in a scratch directory; check a skill brought its
   `references/` with it.
 - The GitHub release is made by the workflow's `github-release` job, from the changelog section, once the registry

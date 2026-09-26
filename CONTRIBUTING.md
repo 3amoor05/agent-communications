@@ -137,8 +137,11 @@ the shared keychain namespace, so it is trusted exactly as far as it is reviewed
 
 1. **The package**, `packages/<channel>`, named `@agentcomms/<channel>` and at the same version as the rest, with
    `@agentcomms/core` as a `workspace:*` dev dependency. Its CLI at `src/cli.ts` with a Commander program at
-   `src/cli/program.ts` exporting `run`, its MCP server at `src/mcp/server.ts` exporting `create<Label>McpServer`, and a
-   README.
+   `src/cli/program.ts` exporting `run`, its MCP server at `src/mcp/server.ts` exporting `create<Label>McpServer`, a
+   README, and `THIRD_PARTY_LICENSES` in its `"files"`. And **`test/consumer-check.mjs`**: `pnpm verify:packages`
+   packs the package, installs the tarball into a throwaway project and runs that file there, so it is the only test
+   of what is actually published — the bin starting, the exports resolving, nothing missing from `"files"`. A package
+   without one fails the verify.
 2. **Its manifest**, the `"agentcomms"` field of that `package.json`: `contract: 1`, `channel` (the directory's name;
    also the platform word in account names and the tool prefix), `label`, `binary` (`agent-<something>`), `server`,
    `accounts` (`map: "accounts"`, `noun`, `modes` from `read` and `send`, and an honest `guarantee`), `narrowing`
@@ -152,7 +155,12 @@ the shared keychain namespace, so it is trusted exactly as far as it is reviewed
    setting of its own: only `sendPolicy`, `changePolicy` and `mode` are judged when a change loosens something.
 5. **Its capabilities**, a row per command and tool in `capabilities.json` (above), and **its skills**,
    `skills/<prefix>*/` with `skills/_shared/contract-<family>.md`.
-6. `pnpm sync:skills`, `pnpm sync:reference` and `pnpm licenses`, then `pnpm verify`.
+6. `pnpm sync:skills`, `pnpm sync:reference`, and `pnpm build && pnpm licenses` — the notices are read from what the
+   bundle actually contains, core and everything core inlines included — then `pnpm verify`.
+7. **Its first release.** npm cannot hold a trusted publisher for a package that does not exist, so a new channel's
+   first version is published by hand, once, from the tagged commit; the release's preflight stops the run with
+   nothing sent and prints the exact command. See
+   [a new package's first version](docs/RELEASING.md#a-new-packages-first-version).
 
 Everything else reads the channel registry (`scripts/channels.mjs`), so the release, the version sync, the parity
 check, the reference pages and the skill and name tests pick the channel up from its manifest.

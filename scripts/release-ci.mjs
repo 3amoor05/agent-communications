@@ -50,9 +50,13 @@ async function unpublished(subcommand, version, commit) {
   const todo = [];
   const done = [];
   const foreign = [];
+  // Packages the registry has never heard of: their first version cannot come from this workflow (see `preflight`).
+  const absent = new Set();
   for (const name of PACKAGES) {
     const full = `${SCOPE}/${name}`;
-    const manifest = await registryManifest(full, version);
+    const packument = await registryPackument(full);
+    if (packument === null) absent.add(name);
+    const manifest = packument?.versions?.[version] ?? null;
     if (manifest === null) todo.push(name);
     else if (manifest.gitHead === commit) done.push(full);
     else if (typeof manifest.gitHead === 'string')
@@ -67,23 +71,24 @@ async function unpublished(subcommand, version, commit) {
         'new version for one that needs a commit.',
     );
   }
-  return { todo, done };
+  return { todo, done, absent };
 }
 
 /**
- * The registry's manifest for one version of a package, or null when it has none.
+ * The registry's document for a package — every version it has, each with the commit it records — or null when
+ * the registry has no such package at all (a 404: it has never been published).
  *
  * An answer it cannot read fails the run rather than being taken for "not published": that would let a package out
  * from another commit through without the check above, to be refused by npm only after the packages before it went.
  */
-async function registryManifest(full, version) {
+async function registryPackument(full) {
   const url = new URL(`/${full.replaceAll('/', '%2f')}`, registryUrl());
   let last = 'no answer';
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
       const response = await fetch(url, { headers: { Accept: 'application/json' } });
       if (response.status === 404) return null;
-      if (response.ok) return (await response.json())?.versions?.[version] ?? null;
+      if (response.ok) return (await response.json()) ?? {};
       last = `HTTP ${response.status}`;
       if (response.status < 500) break;
     } catch (error) {
@@ -120,6 +125,14 @@ async function pending(version, commit) {
  * trust proves nothing and is not asked for. That is what lets the tag after a local `pnpm release:publish` finish:
  * the local fallback is most likely to be used while a package has no trusted publisher, and exchanging for it
  * anyway failed the run and skipped the GitHub release for a version that was already on npm.
+ *
+ * **A package npm has never seen cannot be published from here at all.** npm keeps trusted publishers per package
+ * and will not hold one for a package that does not exist, so a new package's first version has to be sent by a
+ * person. When the registry answers 404 for a package, the preflight does not ask for an exchange that cannot work:
+ * it says the package has never been published and prints the exact command for the hand publish from this commit
+ * — through `scripts/record-git-head.cjs`, so the version records this commit as its `gitHead` and this job then
+ * skips it — and fails with nothing sent. Telling the owner to add a trusted publisher first, as it used to, asked
+ * for something npm refuses.
  */
 async function preflight(version, commit) {
   if (!version || !commit) fail('usage: release-ci.mjs preflight <version> <commit>');
@@ -134,7 +147,7 @@ async function preflight(version, commit) {
   const registry = registryUrl();
   const audience = `npm:${registry.hostname}`;
 
-  const { todo, done } = await unpublished('preflight', version, commit);
+  const { todo, done, absent } = await unpublished('preflight', version, commit);
   for (const full of done) console.log(`  – ${full}@${version} is already out from this commit; nothing to prove`);
   if (todo.length === 0) {
     console.log(`Every package is already at ${version} from this commit: nothing to publish, so nothing to prove.`);
@@ -142,8 +155,14 @@ async function preflight(version, commit) {
   }
 
   const refused = [];
+  const unborn = [];
   for (const name of todo) {
     const full = `${SCOPE}/${name}`;
+    if (absent.has(name)) {
+      console.log(`  ✗ ${full}: never published — npm has no such package, so it cannot trust this workflow yet`);
+      unborn.push(full);
+      continue;
+    }
     const verdict = await exchange({ requestUrl, requestToken, audience, registry, full });
     if (verdict === true) {
       console.log(`  ✓ ${full} trusts this workflow`);
@@ -152,13 +171,39 @@ async function preflight(version, commit) {
       refused.push(full);
     }
   }
-  if (refused.length > 0) {
-    fail(
-      `${refused.join(', ')} ${refused.length === 1 ? 'has' : 'have'} no trusted publisher for this workflow; ` +
-        'nothing was published. The package owner adds one on npmjs.com → the package → Settings → Trusted ' +
-        'publishing (this repository, `release.yml`, environment `release`), then re-runs this job.',
+  const trustedPublisher =
+    'npmjs.com → the package → Settings → Trusted publishing (this repository, `release.yml`, environment `release`)';
+  const problems = [];
+  if (unborn.length > 0) {
+    // The same publish the workflow and `scripts/release.mjs` run, for one package, so the version records this
+    // commit as its `gitHead`. Not `npm publish` in the package's directory: npm records no gitHead from a git
+    // worktree, and a version with no commit recorded is one this job can never finish.
+    const tag = version.includes('-') ? 'next' : 'latest';
+    console.log(
+      `\nFirst publish, by hand, from this commit (${commit}): in a checkout of it, from the repository root, after ` +
+        '`pnpm install --frozen-lockfile && pnpm build`, run',
+    );
+    for (const full of unborn) {
+      console.log(
+        `  pnpm --config.pnpmfile=scripts/record-git-head.cjs --filter ${full} publish --access public --no-git-checks --tag ${tag}`,
+      );
+    }
+    problems.push(
+      `${unborn.join(', ')} ${unborn.length === 1 ? 'has' : 'have'} never been published, and npm cannot hold a ` +
+        'trusted publisher for a package that does not exist, so a first version cannot come from this workflow. ' +
+        `Publish ${unborn.length === 1 ? 'it' : 'each'} once by hand from this commit with the ` +
+        `${unborn.length === 1 ? 'command' : 'commands'} above, which record ${commit} as its gitHead so this job ` +
+        `skips it; add ${unborn.length === 1 ? 'its' : 'each one’s'} trusted publisher on ${trustedPublisher}; ` +
+        'then re-run this job.',
     );
   }
+  if (refused.length > 0) {
+    problems.push(
+      `${refused.join(', ')} ${refused.length === 1 ? 'has' : 'have'} no trusted publisher for this workflow; ` +
+        `nothing was published. The package owner adds one on ${trustedPublisher}, then re-runs this job.`,
+    );
+  }
+  if (problems.length > 0) fail(`Nothing was published. ${problems.join(' ')}`);
   console.log(`All ${todo.length} package(s) still to publish accept this workflow's identity.`);
 }
 
