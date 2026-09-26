@@ -12,7 +12,7 @@ import {
   sha256Hex,
   stricterPolicy,
 } from '@agentcomms/core';
-import type { NamedAccount } from '../accounts.ts';
+import { keyPermissionOf, type NamedAccount } from '../accounts.ts';
 import { resendRequest, type WriteOutcome } from '../api/client.ts';
 import { APPROVAL_TAG, closedPermit, spendOn } from '../api/guard.ts';
 import {
@@ -105,7 +105,7 @@ function requireSendMode(named: NamedAccount): void {
  * verification could not be checked here — Resend refuses an unverified domain itself.
  */
 async function checkFromDomain(context: ResendContext, named: NamedAccount, domain: string): Promise<string> {
-  if (named.account.tier === 'sending_access') {
+  if (keyPermissionOf(named.account) === 'sending_access') {
     if (named.account.domainLock && named.account.domainLock !== domain) {
       throw new CommsError('BAD_DATA', `this key was declared to send only from ${named.account.domainLock}`, {
         hint: `Send from an address at ${named.account.domainLock}.`,
@@ -597,7 +597,7 @@ export async function sendStatus(context: ResendContext, name: string, approvalI
         : 'nothing is known about this approval',
     };
   }
-  const readable = named.account.tier === 'full_access';
+  const readable = keyPermissionOf(named.account) === 'full_access';
   const lookUp = async (id: string) => {
     const email = await resendRequest<{
       id?: unknown;

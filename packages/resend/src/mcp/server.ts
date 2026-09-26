@@ -8,12 +8,13 @@ import {
 } from '@agentcomms/core';
 import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
-import { MODES, SEND_POLICIES } from '../accounts.ts';
+import { CHANGE_POLICIES, MODES, SEND_POLICIES } from '../accounts.ts';
 import { ResendContext, type ResendContextOptions } from '../context.ts';
 import {
   listAccounts,
   policyChange,
   policyReport,
+  policySetsNothing,
   policyWanted,
   removeAccountChange,
   showAccount,
@@ -166,7 +167,7 @@ export async function createResendMcpServer(options: ResendMcpOptions = {}): Pro
         hint: 'Pass `account`, as `organisation/resend`.',
       });
     }
-    await context.accounts.require(named);
+    // Looked up by the operation itself, through core's `resolveName`, as the command's is: one refusal, one wording.
     return named;
   };
 
@@ -246,11 +247,12 @@ export async function createResendMcpServer(options: ResendMcpOptions = {}): Pro
     {
       title: 'Account policy',
       description:
-        'Report how an account’s sends are approved, or set `sendPolicy` (chat, confirm, never) and `mode` (read, send). Tightening applies at once; loosening returns `approvalRequired` and a preview to show the person — you cannot approve it yourself under `confirm`.',
+        'Report how an account’s sends and changes are approved, or set `sendPolicy` (chat, confirm, never), `mode` (read, send) and `changePolicy` (chat, confirm). Tightening applies at once; loosening returns `approvalRequired` and a preview to show the person — you cannot approve it yourself under `confirm`.',
       inputSchema: {
         ...accountArg,
         sendPolicy: words(SEND_POLICIES).optional().describe('chat, confirm or never'),
         mode: words(MODES).optional().describe('read or send'),
+        changePolicy: words(CHANGE_POLICIES).optional().describe('chat or confirm: how a loosening of it is approved'),
         ...approvalArg,
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
@@ -260,11 +262,12 @@ export async function createResendMcpServer(options: ResendMcpOptions = {}): Pro
         account?: string | undefined;
         sendPolicy?: string | undefined;
         mode?: string | undefined;
+        changePolicy?: string | undefined;
         approvalId?: string | undefined;
       }) => {
         const name = await resolve(args.account);
-        const wanted = policyWanted({ send: args.sendPolicy, mode: args.mode });
-        if (wanted.send === undefined && wanted.mode === undefined) return policyReport(context, name);
+        const wanted = policyWanted({ send: args.sendPolicy, mode: args.mode, change: args.changePolicy });
+        if (policySetsNothing(wanted)) return policyReport(context, name);
         return runChange(policyChange(context, name, wanted), args.approvalId);
       },
     ),

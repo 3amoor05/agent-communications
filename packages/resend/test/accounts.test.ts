@@ -51,7 +51,7 @@ test('a sending-only key is detected by Resend’s restricted_api_key, needs a p
   assert.equal(first.code, 10, first.stdout);
   const pending = first.json().error;
   assert.equal(pending?.code, 'APPROVAL_PENDING');
-  assert.match(String(pending?.details?.preview), /mode: not set → send/);
+  assert.match(String(pending?.details?.preview), /acme\/resend-send mode \(connected by this change\): read → send/);
   assert.equal(await harness.context().accounts.find('acme/resend-send'), null, 'nothing stored before the approval');
   const approvalId = String(pending?.details?.approvalId);
   const second = await harness.cli(
@@ -165,7 +165,7 @@ test('tightening a send policy applies at once; loosening it, or read → send, 
     env: { CLAUDECODE: '1' },
   });
   assert.equal(loosen.code, 10);
-  assert.match(String(loosen.json().error?.details?.preview), /sendPolicy: confirm → chat/);
+  assert.match(String(loosen.json().error?.details?.preview), /acme\/resend send policy: confirm → chat/);
   assert.equal((await harness.context().accounts.require('acme/resend')).account.sendPolicy, 'confirm');
   const widen = await harness.cli(['--json', 'account', 'policy', 'acme/resend', '--mode', 'send'], {
     env: { CLAUDECODE: '1' },
@@ -174,38 +174,67 @@ test('tightening a send policy applies at once; loosening it, or read → send, 
   assert.equal((await harness.context().accounts.require('acme/resend')).account.mode, 'read');
 });
 
-test('the account store itself refuses a loosening that carries no consent, whoever writes it', async () => {
+test('core’s configuration refuses a loosening of a Resend account that carries no consent, whoever writes it', async () => {
   harness = await newHarness();
   await harness.addAccount({ name: 'acme/resend', mode: 'read', sendPolicy: 'confirm' });
-  const store = harness.context().accounts;
-  for (const change of [{ mode: 'send' as const }, { sendPolicy: 'chat' as const }]) {
+  const set = (change: Record<string, unknown>) =>
+    harness.core.config.update((config) => {
+      const held = config.accounts['acme/resend'];
+      assert.ok(held);
+      return { ...config, accounts: { ...config.accounts, 'acme/resend': { ...held, ...change } } };
+    });
+  // Wider mode, looser send policy, looser change policy: each is core's classifier's to judge, and each is refused.
+  for (const change of [{ mode: 'send', tier: 'send' }, { sendPolicy: 'chat' }, { mode: 'post', tier: 'post' }]) {
     await assert.rejects(
-      store.update(
-        (file) => {
-          const named = file.accounts['acme/resend'];
-          assert.ok(named);
-          return { ...file, accounts: { ...file.accounts, 'acme/resend': { ...named, ...change } } };
-        },
-        { defaultSendPolicy: 'chat' },
-      ),
+      set(change),
       (error: unknown) => error instanceof CommsError && error.code === 'LOOSENING_REFUSED',
+      JSON.stringify(change),
     );
   }
-  // An unknown mode word is not narrower than send: it is refused outright.
+  await set({ changePolicy: 'confirm' });
   await assert.rejects(
-    store.update(
-      (file) => {
-        const named = file.accounts['acme/resend'];
-        assert.ok(named);
-        return { ...file, accounts: { ...file.accounts, 'acme/resend': { ...named, mode: 'post' as never } } };
-      },
-      { defaultSendPolicy: 'chat' },
-    ),
-    (error: unknown) => error instanceof CommsError && error.code === 'CONFIG',
+    set({ changePolicy: 'chat' }),
+    (error: unknown) => error instanceof CommsError && error.code === 'LOOSENING_REFUSED',
   );
-  const account = (await store.require('acme/resend')).account;
+  const account = (await harness.context().accounts.require('acme/resend')).account;
   assert.equal(account.mode, 'read');
   assert.equal(account.sendPolicy, 'confirm');
+  assert.equal(account.changePolicy, 'confirm');
+});
+
+test('a record with a mode outside read and send is refused, never read as something narrower', async () => {
+  harness = await newHarness();
+  await harness.addAccount({ name: 'acme/resend', mode: 'read' });
+  // Written as a person would have to, with consent: core reads any word, so one odd account cannot make the file
+  // unreadable. Acting on it is this package's to refuse.
+  await harness.core.config.update(
+    (config) => {
+      const held = config.accounts['acme/resend'];
+      assert.ok(held);
+      return { ...config, accounts: { ...config.accounts, 'acme/resend': { ...held, mode: 'post', tier: 'post' } } };
+    },
+    { consent: { kind: 'loosening-consent', paths: ['accounts.acme/resend.mode'] } },
+  );
+  const shown = await harness.cli(['--json', 'account', 'show', 'acme/resend']);
+  assert.equal(shown.code, 78, shown.stdout);
+  assert.match(String(shown.json().error?.message), /its mode is "post"/);
+  const prepared = await harness.cli([
+    '--json',
+    'send',
+    'prepare',
+    '--account',
+    'acme/resend',
+    '--from',
+    'hello@acme.test',
+    '--to',
+    'sam@partner.test',
+    '--subject',
+    'Hi',
+    '--text',
+    'Hi',
+  ]);
+  assert.equal(prepared.code, 78, prepared.stdout);
+  assert.equal(harness.fake.sends().length, 0);
 });
 
 test('show and doctor say plainly that read-only is this package’s promise, not the key’s', async () => {

@@ -43,7 +43,7 @@ export class ResendContext {
     this.core = options.core ?? openCore({ env: this.env });
     this.now = options.now ?? (() => new Date());
     this.surface = options.surface ?? 'cli';
-    this.accounts = new AccountStore(this.core.paths.configDir);
+    this.accounts = new AccountStore(() => this.core.config.load());
     this.#fetch = options.fetch;
     this.#throttle = options.throttle;
   }
@@ -60,11 +60,6 @@ export class ResendContext {
   /** The machine's default send policy, which an account without one of its own inherits. */
   async defaultSendPolicy(): Promise<SendPolicy> {
     return (await this.config()).defaults.sendPolicy;
-  }
-
-  /** The send policy in force for an account: its own, else the machine's default. */
-  async sendPolicyOf(named: NamedAccount): Promise<SendPolicy> {
-    return named.account.sendPolicy ?? (await this.defaultSendPolicy());
   }
 
   throttleFor(accountId: string): Throttle {

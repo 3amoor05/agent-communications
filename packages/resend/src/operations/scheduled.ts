@@ -1,4 +1,5 @@
 import { CommsError, type GatedChange } from '@agentcomms/core';
+import { keyPermissionOf } from '../accounts.ts';
 import { resendRequest } from '../api/client.ts';
 import { closedPermit, spendOn } from '../api/guard.ts';
 import { SendRecords } from '../compose/store.ts';
@@ -33,7 +34,7 @@ export function cancelScheduledChange(context: ResendContext, name: string, id: 
         hint: 'Cancelling needs an account in send mode.',
       });
     }
-    if (named.account.tier !== 'full_access') {
+    if (keyPermissionOf(named.account) !== 'full_access') {
       throw new CommsError('SCOPE_MISSING', 'a sending-only key cannot look up or cancel a scheduled email', {
         hint: 'Cancel it in the Resend dashboard, or use a full-access account.',
       });

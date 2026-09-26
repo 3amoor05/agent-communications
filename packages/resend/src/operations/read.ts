@@ -18,7 +18,7 @@ import {
   UNTRUSTED_NOTICE,
   wholeNumber,
 } from '@agentcomms/core';
-import type { NamedAccount } from '../accounts.ts';
+import { keyPermissionOf, type NamedAccount } from '../accounts.ts';
 import { type ResendTransport, resendDownload, resendRequest } from '../api/client.ts';
 import { addressesOf, attachmentRisks, type Envelope, personOf, readBody, wrapField } from '../compose/inbound.ts';
 import { SendRecords } from '../compose/store.ts';
@@ -55,7 +55,8 @@ async function whenReadable<T extends object>(
   read: (named: NamedAccount, transport: ResendTransport) => Promise<T>,
 ): Promise<Readable<T>> {
   const named = await context.accounts.require(name);
-  if (named.account.tier === 'sending_access') return { account: name, available: false, reason: SENDING_ONLY };
+  if (keyPermissionOf(named.account) === 'sending_access')
+    return { account: name, available: false, reason: SENDING_ONLY };
   const transport = await context.transport(named);
   try {
     return { account: name, available: true, ...(await read(named, transport)) };

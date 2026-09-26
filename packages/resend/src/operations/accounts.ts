@@ -1,28 +1,35 @@
 import { createHash } from 'node:crypto';
 import {
-  type ChangeRequest,
+  type ChangePolicy,
   CommsError,
   type Config,
+  classifyChange,
   type GatedChange,
-  type Loosening,
-  type LooseningConsent,
-  nameShapeProblem,
   type SendPolicy,
   secretsStoreFor,
+  secretsStoreOf,
+  withCredentialsLock,
 } from '@agentcomms/core';
 import {
-  type AccountsFile,
-  classifyAccountChange,
+  accountById,
+  CHANGE_POLICIES,
+  changePolicyIn,
+  checkNewName,
   type KeyPermission,
+  keyPermissionOf,
   MODES,
   type Mode,
   type NamedAccount,
   newResendAccountId,
   PLATFORM,
   type ResendAccount,
-  refuseOwnChangePolicy,
+  requireAccount,
+  resendAccounts,
   SEND_POLICIES,
   secretRefFor,
+  sendPolicyIn,
+  withAccount,
+  withoutAccount,
 } from '../accounts.ts';
 import { resendRequest } from '../api/client.ts';
 import { REACH_CONFIRM_THRESHOLD } from '../compose/message.ts';
@@ -31,10 +38,12 @@ import type { ResendContext } from '../context.ts';
 /**
  * Connecting, inspecting, re-policing and removing Resend accounts.
  *
- * An account is one Resend API key for one team, named `org/resend`. The key is typed into a terminal by a person
- * (`account add`, CLI only — a key typed into a chat stays in the transcript) and goes straight into core's secret
- * store. Everything else here is reachable from both surfaces, and everything that loosens or cannot be taken back is
- * a change approval through core's change flow.
+ * An account is one Resend API key for one team, named `org/resend`, kept in core's configuration (see
+ * `accounts.ts`). The key is typed into a terminal by a person (`account add`, CLI only — a key typed into a chat
+ * stays in the transcript) and goes straight into core's secret store. Everything else here is reachable from both
+ * surfaces. Each change is a `GatedChange` over the configuration as it stands, so core's flow decides who has to
+ * agree: `classifyChange` says what loosens, and the account's own change policy — or the machine's — says how it is
+ * approved. A change that cannot be taken back, removing an account, asks too.
  */
 
 export interface KeyInspection {
@@ -86,6 +95,9 @@ export interface AccountView {
   mode: Mode;
   sendPolicy: SendPolicy;
   sendPolicyFrom: 'account' | 'default';
+  /** How a change that loosens this account is approved: in the chat, or by a code typed at a terminal. */
+  changePolicy: ChangePolicy;
+  changePolicyFrom: 'account' | 'default';
   domainLock?: string | undefined;
   canRead: boolean;
   canSend: boolean;
@@ -96,7 +108,7 @@ export interface AccountView {
 
 /** The plain statement `account show` and `doctor` make about who enforces what. */
 export function guaranteeOf(account: ResendAccount): string {
-  if (account.tier === 'sending_access') {
+  if (keyPermissionOf(account) === 'sending_access') {
     const lock = account.domainLock
       ? ` It was declared restricted to ${account.domainLock} when it was added; that is not something agent-resend can check without sending, so Resend enforces it, not this package.`
       : '';
@@ -107,30 +119,34 @@ export function guaranteeOf(account: ResendAccount): string {
     : 'This full-access key can do anything at Resend. agent-resend sends only after a person approves each email, and never manages domains, keys or webhooks — but the key itself would not stop anything else that held it.';
 }
 
-export function viewOf(named: NamedAccount, defaultPolicy: SendPolicy): AccountView {
+export function viewOf(named: NamedAccount, config: Config): AccountView {
   const { account } = named;
+  const sendPolicy = sendPolicyIn(config, account);
   return {
     name: named.name,
     id: account.id,
-    key: account.tier,
+    key: keyPermissionOf(account),
     mode: account.mode,
-    sendPolicy: account.sendPolicy ?? defaultPolicy,
+    sendPolicy,
     sendPolicyFrom: account.sendPolicy === undefined ? 'default' : 'account',
+    changePolicy: changePolicyIn(config, account),
+    changePolicyFrom: account.changePolicy === undefined ? 'default' : 'account',
     ...(account.domainLock ? { domainLock: account.domainLock } : {}),
-    canRead: account.tier === 'full_access',
-    canSend: account.mode === 'send' && (account.sendPolicy ?? defaultPolicy) !== 'never',
+    canRead: keyPermissionOf(account) === 'full_access',
+    canSend: account.mode === 'send' && sendPolicy !== 'never',
     createdAt: account.createdAt,
     guarantee: guaranteeOf(account),
   };
 }
 
 export async function listAccounts(context: ResendContext): Promise<{ accounts: AccountView[] }> {
-  const policy = await context.defaultSendPolicy();
-  return { accounts: (await context.accounts.list()).map((named) => viewOf(named, policy)) };
+  const config = await context.config();
+  return { accounts: resendAccounts(config).map((named) => viewOf(named, config)) };
 }
 
 export async function showAccount(context: ResendContext, name: string): Promise<AccountView> {
-  return viewOf(await context.accounts.require(name), await context.defaultSendPolicy());
+  const config = await context.config();
+  return viewOf(requireAccount(config, name), config);
 }
 
 /** A mode word checked by the operation, so both surfaces refuse it in the same words. */
@@ -146,29 +162,20 @@ export function sendPolicyOf(raw: unknown): SendPolicy | undefined {
   throw new CommsError('USAGE', `"${String(raw)}" is not a send policy: use chat, confirm or never`);
 }
 
-/** What a loosening means, in the words a preview uses. Bound into the approval, so it is deterministic. */
-function describe(name: string, id: string | undefined, loosening: Loosening): string {
-  const field = loosening.path.slice(`accounts.${name}.`.length);
-  const who = id === undefined ? `${name} (connected by this change)` : `${name} (${id})`;
-  const was = loosening.before ?? 'not set';
-  const words =
-    field === 'mode'
-      ? 'it will be able to send mail, each email still previewed and approved'
-      : field === 'sendPolicy'
-        ? loosening.after === 'chat'
-          ? 'a yes in the chat will be enough to send'
-          : 'sending will be possible, with a code typed at a terminal'
-        : 'a yes in the chat will be enough to loosen it';
-  return `${who} ${field}: ${String(was)} → ${String(loosening.after)} — ${words}`;
+export function changePolicyOf(raw: unknown): ChangePolicy | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw === 'string' && (CHANGE_POLICIES as readonly string[]).includes(raw)) return raw as ChangePolicy;
+  throw new CommsError('USAGE', `"${String(raw)}" is not a change policy: use chat or confirm`);
 }
 
-/** The consent `AccountStore.update` asks for, for exactly these loosenings. Built only after a claim. */
-function consentFor(loosened: readonly Loosening[]): LooseningConsent {
-  return { kind: 'loosening-consent', paths: loosened.map((loosening) => loosening.path), changes: [...loosened] };
-}
-
-function unchanged(config: Config): Pick<ChangeRequest, 'before' | 'after'> {
-  return { before: config, after: config };
+/** Refuses a key that is already connected, under any name: one key, one account. */
+function refuseConnectedKey(config: Config, fingerprint: string): void {
+  const same = resendAccounts(config).find((named) => named.account.workspace === fingerprint);
+  if (same) {
+    throw new CommsError('USAGE', `this key is already connected as "${same.name}"`, {
+      hint: 'One key, one account. Change that one with `agent-resend account policy`.',
+    });
+  }
 }
 
 // ── account add (CLI only) ───────────────────────────────────────────────────────────────────────────────────────
@@ -188,9 +195,9 @@ export interface AddedAccount extends AccountView {
 }
 
 /**
- * Connects an account, once the key has been inspected — a `GatedChange`, so connecting one in `send` mode is a
- * change a person approves, as connecting a Slack workspace in `send` is. In `read` mode it loosens nothing and is
- * applied at once.
+ * Connects an account, once the key has been inspected — a `GatedChange`, so connecting one in `send` mode, or with
+ * a send policy looser than the machine's, is a change a person approves, as connecting a Slack workspace in `send`
+ * is. In `read` mode it loosens nothing and is applied at once.
  *
  * `inspection` is passed in rather than made here, because it is a network call and `plan` runs twice.
  */
@@ -199,8 +206,6 @@ export function addAccountChange(
   request: AddRequest,
   inspection: KeyInspection,
 ): GatedChange<AddedAccount> {
-  const problem = nameShapeProblem(request.name, PLATFORM);
-  if (problem) throw new CommsError('USAGE', problem);
   const mode: Mode = request.mode ?? (inspection.permission === 'sending_access' ? 'send' : 'read');
   if (inspection.permission === 'sending_access' && mode === 'read') {
     throw new CommsError('USAGE', 'this key can only send, so an account with it cannot be in read mode', {
@@ -221,64 +226,53 @@ export function addAccountChange(
   }
   const fingerprint = keyFingerprint(request.key);
   const id = newResendAccountId();
-
-  const build = (): ResendAccount => ({
+  // Built once: `plan` runs on both calls of an approved change, and the account approved is the one written.
+  const account: ResendAccount = {
     id,
-    platform: 'resend',
+    platform: PLATFORM,
     workspace: fingerprint,
     userId: fingerprint,
-    tier: inspection.permission,
+    tier: mode,
     mode,
-    grantedScopes: [domainLock ? `${inspection.permission}:${domainLock}` : inspection.permission],
+    grantedScopes: [inspection.permission],
     secretRef: secretRefFor(id),
     ...(request.sendPolicy === undefined ? {} : { sendPolicy: request.sendPolicy }),
     createdAt: context.now().toISOString(),
     ...(domainLock ? { domainLock } : {}),
-  });
-
-  const loosenedBy = async (file: AccountsFile, policy: SendPolicy): Promise<Loosening[]> => {
-    return classifyAccountChange(file, { ...file, accounts: { ...file.accounts, [request.name]: build() } }, policy);
+  };
+  const connect = (config: Config): Config => {
+    checkNewName(config, request.name);
+    refuseConnectedKey(config, fingerprint);
+    return withAccount(config, request.name, account);
   };
 
   return {
-    plan: async (config) => {
-      const file = await context.accounts.load();
-      if (Object.hasOwn(file.accounts, request.name)) {
-        throw new CommsError('USAGE', `there is already a Resend account called "${request.name}"`, {
-          hint: `Remove it first with \`agent-resend account remove ${request.name}\`, or choose another name.`,
-        });
-      }
-      const same = Object.entries(file.accounts).find(([, account]) => account.workspace === fingerprint);
-      if (same) {
-        throw new CommsError('USAGE', `this key is already connected as "${same[0]}"`, {
-          hint: 'One key, one account. Change that one with `agent-resend account policy`.',
-        });
-      }
-      const loosened = await loosenedBy(file, config.defaults.sendPolicy);
+    plan: (config) => {
+      const after = connect(config);
+      const loosens = classifyChange(config, after).loosened.length > 0;
       return {
+        account: request.name,
+        before: config,
+        after,
         summary: `Connect ${request.name} to Resend with a ${inspection.permission === 'full_access' ? 'full-access' : 'sending-only'} key in ${mode} mode`,
-        ...unchanged(config),
-        effects: [
-          ...loosened.map((loosening) => describe(request.name, undefined, loosening)),
-          ...(loosened.length > 0 ? [`stores the key for ${request.name} in this machine's secret store`] : []),
-        ],
+        // The key is stored either way; said when a person is asked, so what they agree to is the whole of it.
+        effects: loosens ? [`stores the key for ${request.name} in this machine's secret store`] : [],
       };
     },
-    apply: async () => {
+    apply: async (consent) => {
       const config = await context.config();
       const { store, choosing } = secretsStoreFor(config, undefined);
       const secrets = await context.core.secrets(store);
-      const account = build();
       await secrets.set(account.secretRef, request.key.trim());
-      if (choosing) await context.core.config.update((current) => ({ ...current, secrets: { store } }));
+      let written: Config;
       try {
-        const loosened = await loosenedBy(await context.accounts.load(), config.defaults.sendPolicy);
-        await context.accounts.update(
-          (file) => ({ ...file, accounts: { ...file.accounts, [request.name]: account } }),
-          {
-            defaultSendPolicy: config.defaults.sendPolicy,
-            consent: consentFor(loosened),
+        written = await context.core.config.update(
+          (current) => {
+            const next = connect(current);
+            // The first secret this configuration stores chooses its store, in the same write.
+            return choosing && current.secrets === undefined ? { ...next, secrets: { store } } : next;
           },
+          consent ? { consent } : {},
         );
       } catch (error) {
         // Nothing half-connected: a key with no account pointing at it is a key nothing can remove.
@@ -291,12 +285,9 @@ export function addAccountChange(
         operation: 'resend.account.add',
         outcome: 'ok',
         surface: context.surface,
-        reason: `${account.tier} key, ${account.mode} mode`,
+        reason: `${inspection.permission} key, ${account.mode} mode`,
       });
-      return {
-        ...viewOf({ name: request.name, account }, config.defaults.sendPolicy),
-        domains: inspection.domains,
-      };
+      return { ...viewOf({ name: request.name, account }, written), domains: inspection.domains };
     },
   };
 }
@@ -311,49 +302,69 @@ export interface RemovedAccount {
   approvalsVoided: string[];
 }
 
-/** Removing an account: a change approval, because a deleted key cannot be taken back. */
+/**
+ * Removing an account: a change approval, because a deleted key cannot be taken back — and bound to the account that
+ * was shown, so a remove and an add in between, under the same name, removes nothing.
+ */
 export function removeAccountChange(context: ResendContext, name: string): GatedChange<RemovedAccount> {
   return {
-    plan: async (config) => {
-      const named = await context.accounts.require(name);
-      refuseOwnChangePolicy(named);
+    plan: (config) => {
+      const found = requireAccount(config, name);
       return {
-        summary: `Remove the Resend account ${name}`,
-        ...unchanged(config),
+        account: found.name,
+        before: config,
+        after: withoutAccount(config, found.name),
+        summary: `Remove the Resend account ${found.name}`,
         effects: [
-          `deletes the key for ${name} (${named.account.id}) from this machine's secret store, and forgets the account; adding it back needs the key again`,
+          `deletes the key for ${found.name} (${found.account.id}) from this machine's secret store, and forgets the account; adding it back needs the key again`,
         ],
       };
     },
-    apply: async () => {
-      const named = await context.accounts.require(name);
-      const policy = await context.defaultSendPolicy();
-      await context.accounts.update(
-        (file) => {
-          const accounts = { ...file.accounts };
-          delete accounts[name];
-          return { ...file, accounts };
-        },
-        { defaultSendPolicy: policy },
-      );
-      await (await context.secrets()).delete(named.account.secretRef).catch(() => false);
+    apply: async (_consent, request) => {
+      const approved = requireAccount(request.before, name).account;
+      /*
+       * Under the credentials lock, from reading the configuration to the last write, as Slack's removal is: a
+       * `secrets migrate` running in between would copy a key this is deleting into a store nothing then names.
+       */
+      const removed = await withCredentialsLock(context.core.paths.configDir, async () => {
+        const found = requireAccount(await context.config(), name);
+        if (found.account.id !== approved.id) {
+          throw new CommsError('CONFIG', `"${name}" changed after its removal was approved, so nothing was removed`, {
+            hint: `Look at it with \`agent-resend account show ${name}\`, and remove it again if you still want it gone.`,
+          });
+        }
+        // The key first: an entry whose key is gone is reported by `doctor`; a key nothing names is never found.
+        const secrets = await context.secrets();
+        await secrets.delete(found.account.secretRef).catch(() => false);
+        await context.core.config.update((current) => {
+          if (secretsStoreOf(current) !== secrets.kind) {
+            throw new CommsError('TRANSIENT', `the secret store changed while "${name}" was being removed`, {
+              hint: `Run \`agent-resend account remove ${name}\` again.`,
+            });
+          }
+          const held = accountById(current, found.account.id);
+          if (!held) return current;
+          return withoutAccount(current, held.name);
+        });
+        return found;
+      });
       const voided: string[] = [];
       for (const record of await context.core.approvals.list({
-        inboxId: named.account.id,
+        inboxId: removed.account.id,
         states: ['pending', 'approved'],
       })) {
         await context.core.approvals.revoke(record.approvalId, 'the account was removed');
         voided.push(record.approvalId);
       }
       await context.core.audit.append({
-        inboxId: named.account.id,
-        alias: name,
+        inboxId: removed.account.id,
+        alias: removed.name,
         operation: 'resend.account.remove',
         outcome: 'ok',
         surface: context.surface,
         ...(voided.length > 0 ? { ids: { approvalIds: voided } } : {}),
       });
-      return { name, id: named.account.id, removed: true, approvalsVoided: voided };
+      return { name: removed.name, id: removed.account.id, removed: true, approvalsVoided: voided };
     },
   };
 }
@@ -363,10 +374,16 @@ export function removeAccountChange(context: ResendContext, name: string): Gated
 export interface PolicyWanted {
   send?: SendPolicy | undefined;
   mode?: Mode | undefined;
+  change?: ChangePolicy | undefined;
 }
 
-export function policyWanted(raw: { send?: unknown; mode?: unknown }): PolicyWanted {
-  return { send: sendPolicyOf(raw.send), mode: modeOf(raw.mode) };
+export function policyWanted(raw: { send?: unknown; mode?: unknown; change?: unknown }): PolicyWanted {
+  return { send: sendPolicyOf(raw.send), mode: modeOf(raw.mode), change: changePolicyOf(raw.change) };
+}
+
+/** Whether a request sets anything, or only asks for the report. */
+export function policySetsNothing(wanted: PolicyWanted): boolean {
+  return wanted.send === undefined && wanted.mode === undefined && wanted.change === undefined;
 }
 
 export interface PolicyReport {
@@ -374,78 +391,98 @@ export interface PolicyReport {
   mode: Mode;
   sendPolicy: SendPolicy;
   sendPolicyFrom: 'account' | 'default';
-  /** The change policy that decides how a loosening of this account is approved: the machine's. */
-  changePolicy: 'chat' | 'confirm';
+  /** The change policy that decides how a loosening of this account is approved: its own, or the machine's. */
+  changePolicy: ChangePolicy;
+  changePolicyFrom: 'account' | 'default';
   /** Reach above which a send needs a person at a terminal whatever the send policy says. */
   confirmAboveRecipients: number;
 }
 
-export async function policyReport(context: ResendContext, name: string): Promise<PolicyReport> {
-  const named = await context.accounts.require(name);
-  const config = await context.config();
+function reportOf(named: NamedAccount, config: Config): PolicyReport {
+  const { account } = named;
   return {
-    name,
-    mode: named.account.mode,
-    sendPolicy: named.account.sendPolicy ?? config.defaults.sendPolicy,
-    sendPolicyFrom: named.account.sendPolicy === undefined ? 'default' : 'account',
-    changePolicy: config.defaults.changePolicy ?? 'chat',
+    name: named.name,
+    mode: account.mode,
+    sendPolicy: sendPolicyIn(config, account),
+    sendPolicyFrom: account.sendPolicy === undefined ? 'default' : 'account',
+    changePolicy: changePolicyIn(config, account),
+    changePolicyFrom: account.changePolicy === undefined ? 'default' : 'account',
     confirmAboveRecipients: REACH_CONFIRM_THRESHOLD,
   };
 }
 
+export async function policyReport(context: ResendContext, name: string): Promise<PolicyReport> {
+  const config = await context.config();
+  return reportOf(requireAccount(config, name), config);
+}
+
 /**
- * Setting an account's send policy or mode. Tightening applies at once; loosening — a send policy towards `chat`,
- * `read → send` — is a change approval, bound to the exact values.
+ * Setting an account's send policy, mode or change policy. Tightening applies at once; loosening — a send policy
+ * towards `chat`, `read → send`, a change policy `confirm → chat` — is a change approval, bound to the exact values
+ * and decided by the change policy in force before it, so a policy cannot be used to approve its own relaxation.
  */
 export function policyChange(context: ResendContext, name: string, wanted: PolicyWanted): GatedChange<PolicyReport> {
   const next = (account: ResendAccount): ResendAccount => ({
     ...account,
     ...(wanted.send === undefined ? {} : { sendPolicy: wanted.send }),
-    ...(wanted.mode === undefined ? {} : { mode: wanted.mode }),
+    ...(wanted.mode === undefined ? {} : { mode: wanted.mode, tier: wanted.mode }),
+    ...(wanted.change === undefined ? {} : { changePolicy: wanted.change }),
   });
-  const measure = async (policy: SendPolicy) => {
-    const file = await context.accounts.load();
-    const named = await context.accounts.require(name);
-    refuseOwnChangePolicy(named);
-    if (wanted.mode === 'read' && named.account.tier === 'sending_access') {
+  const checked = (named: NamedAccount): NamedAccount => {
+    if (wanted.mode === 'read' && keyPermissionOf(named.account) === 'sending_access') {
       throw new CommsError('USAGE', 'this account’s key can only send, so it cannot be put in read mode', {
         hint: 'To stop it sending, set --send never.',
       });
     }
-    const after = { ...file, accounts: { ...file.accounts, [name]: next(named.account) } };
-    return { named, loosened: classifyAccountChange(file, after, policy) };
+    return named;
   };
+  const said = [
+    wanted.send === undefined ? '' : `send policy ${wanted.send}`,
+    wanted.mode === undefined ? '' : `${wanted.mode} mode`,
+    wanted.change === undefined ? '' : `change policy ${wanted.change}`,
+  ]
+    .filter(Boolean)
+    .join(', ');
   return {
-    plan: async (config) => {
-      const { named, loosened } = await measure(config.defaults.sendPolicy);
-      const parts = [
-        wanted.send === undefined ? '' : `send policy ${wanted.send}`,
-        wanted.mode === undefined ? '' : `${wanted.mode} mode`,
-      ].filter(Boolean);
+    plan: (config) => {
+      const found = checked(requireAccount(config, name));
       return {
-        summary: `Set ${name} to ${parts.join(' and ')}`,
-        ...unchanged(config),
-        effects: loosened.map((loosening) => describe(name, named.account.id, loosening)),
+        account: found.name,
+        before: config,
+        after: withAccount(config, found.name, next(found.account)),
+        summary: `Set ${found.name} to ${said}`,
       };
     },
-    apply: async () => {
-      const policy = await context.defaultSendPolicy();
-      const { named, loosened } = await measure(policy);
-      await context.accounts.update(
-        (file) => ({ ...file, accounts: { ...file.accounts, [name]: next(named.account) } }),
-        { defaultSendPolicy: policy, consent: consentFor(loosened) },
+    apply: async (consent, request) => {
+      const approved = requireAccount(request.before, name).account;
+      let written: NamedAccount | undefined;
+      /*
+       * By id, under whatever name it has at the write: a rename in between must not set the policy on an account
+       * that took the old name, and an account that is gone is refused rather than recreated from the snapshot.
+       */
+      const config = await context.core.config.update(
+        (current) => {
+          const held = accountById(current, approved.id);
+          if (!held) {
+            throw new CommsError('CONFIG', `"${name}" changed while its policy was being set, so nothing was set`, {
+              hint: 'Check it with `agent-resend account list`, then set the policy again.',
+            });
+          }
+          written = { name: held.name, account: next(checked(held).account) };
+          return withAccount(current, held.name, written.account);
+        },
+        consent ? { consent } : {},
       );
+      const now = written ?? { name, account: next(approved) };
       await context.core.audit.append({
-        inboxId: named.account.id,
-        alias: name,
+        inboxId: approved.id,
+        alias: now.name,
         operation: 'resend.account.policy',
         outcome: 'ok',
         surface: context.surface,
-        reason: [wanted.send ? `send ${wanted.send}` : '', wanted.mode ? `mode ${wanted.mode}` : '']
-          .filter(Boolean)
-          .join(', '),
+        reason: said,
       });
-      return policyReport(context, name);
+      return reportOf(now, config);
     },
   };
 }

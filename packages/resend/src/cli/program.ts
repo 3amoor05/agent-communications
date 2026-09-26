@@ -14,6 +14,7 @@ import {
   writeResult,
 } from '@agentcomms/core';
 import { Command, CommanderError, Option } from 'commander';
+import { checkNewName } from '../accounts.ts';
 import { ResendContext, type ResendContextOptions } from '../context.ts';
 import {
   addAccountChange,
@@ -22,6 +23,7 @@ import {
   modeOf,
   policyChange,
   policyReport,
+  policySetsNothing,
   policyWanted,
   removeAccountChange,
   sendPolicyOf,
@@ -206,6 +208,8 @@ Exit codes: 0 ok · 1 unexpected · 10 a send or a change was refused or needs a
       const command = `agent-resend account add ${name}${mode ? ` --mode ${mode}` : ''}${
         flags.send ? ` --send ${String(flags.send)}` : ''
       }${flags.domain ? ` --domain ${String(flags.domain)}` : ''}`;
+      // The name first: a name that cannot be taken is refused before anybody types a key for it.
+      checkNewName(await context.config(), name);
       const key = await readApiKey(env, streams, { json: options.json, command });
       const probeId = 'acc_ADD0000000000000';
       const inspection = await inspectKey(context, key, probeId);
@@ -266,23 +270,25 @@ Exit codes: 0 ok · 1 unexpected · 10 a send or a change was refused or needs a
   approvalOption(
     account
       .command('policy <name>')
-      .description('report how its sends are approved, or set --send and --mode; loosening is approved by a person')
+      .description(
+        'report how its sends and changes are approved, or set --send, --mode and --change; loosening is approved by a person',
+      )
       .option('--send <policy>', 'chat, confirm or never')
-      .option('--mode <mode>', 'read or send'),
+      .option('--mode <mode>', 'read or send')
+      .option('--change <policy>', 'how a loosening of this account is approved: chat or confirm'),
   ).action(
     act(async (context, _options, name: string, flags: Options) => {
-      const wanted = policyWanted({ send: flags.send, mode: flags.mode });
-      const result =
-        wanted.send === undefined && wanted.mode === undefined
-          ? await policyReport(context, name)
-          : await changeAt(
-              context,
-              policyChange(context, name, wanted),
-              flags,
-              `agent-resend account policy ${name}${wanted.send ? ` --send ${wanted.send}` : ''}${
-                wanted.mode ? ` --mode ${wanted.mode}` : ''
-              }`,
-            );
+      const wanted = policyWanted({ send: flags.send, mode: flags.mode, change: flags.change });
+      const result = policySetsNothing(wanted)
+        ? await policyReport(context, name)
+        : await changeAt(
+            context,
+            policyChange(context, name, wanted),
+            flags,
+            `agent-resend account policy ${name}${wanted.send ? ` --send ${wanted.send}` : ''}${
+              wanted.mode ? ` --mode ${wanted.mode}` : ''
+            }${wanted.change ? ` --change ${wanted.change}` : ''}`,
+          );
       writeResult(result, output(), renderPolicy, streams);
     }),
   );

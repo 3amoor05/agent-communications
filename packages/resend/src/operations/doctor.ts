@@ -1,5 +1,5 @@
 import { CommsError, secretsStoreOf, toCommsError } from '@agentcomms/core';
-import type { NamedAccount } from '../accounts.ts';
+import { keyPermissionOf, type NamedAccount } from '../accounts.ts';
 import { resendRequest } from '../api/client.ts';
 import type { ResendContext } from '../context.ts';
 import { guaranteeOf } from './accounts.ts';
@@ -74,7 +74,7 @@ async function checkAccount(context: ResendContext, named: NamedAccount, offline
       );
       const domains = page.data ?? [];
       const verified = domains.filter((domain) => domain.status === 'verified').length;
-      if (named.account.tier === 'sending_access') {
+      if (keyPermissionOf(named.account) === 'sending_access') {
         checks.push({
           name: 'key permission',
           ok: false,
@@ -88,7 +88,7 @@ async function checkAccount(context: ResendContext, named: NamedAccount, offline
       const comms = toCommsError(error);
       if (comms.details?.resendError === 'restricted_api_key' && comms.code === 'SCOPE_MISSING') {
         checks.push(
-          named.account.tier === 'sending_access'
+          keyPermissionOf(named.account) === 'sending_access'
             ? { name: 'key works', ok: true, detail: 'a sending-only key: reads are unavailable by design' }
             : {
                 name: 'key permission',
@@ -109,7 +109,7 @@ async function checkAccount(context: ResendContext, named: NamedAccount, offline
   }
   return {
     name: named.name,
-    key: named.account.tier,
+    key: keyPermissionOf(named.account),
     mode: named.account.mode,
     guarantee: guaranteeOf(named.account),
     checks,

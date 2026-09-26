@@ -1,112 +1,19 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
-import { PassThrough } from 'node:stream';
 import { afterEach, test } from 'node:test';
-import { run } from '../src/cli/program.ts';
 import { type Harness, newHarness, ok, refused, type ToolResult } from './support/harness.ts';
 
 /**
- * Every command has a tool and every tool a command, each pair running one operation — or a row here says why not.
+ * Both surfaces of every paired command and tool, run against the same fake Resend, return the same thing.
  *
- * The table is what `capabilities.json` will carry once the release list names this package; until then this test
- * holds the package to it on its own. It reads the command tree from the CLI's own help and the tool list from a
- * running server, checks both against the table in both directions, checks that both surfaces import the row's
- * operation, and then runs both sides of every row against the same fake Resend and compares what they return.
+ * Which command pairs with which tool, and that both reach the one operation, is `capabilities.json`'s: the
+ * repository's parity check (`scripts/parity.mjs`, and `test/parity.test.mjs`) reads the command tree from this CLI's
+ * help and the tools from a running server, and drives both sides of every row to its operation. What it cannot see is
+ * that they then give the same answer — the same data, the same preview, the same refusal — which is what this adds.
  */
-
-export interface Row {
-  cli: string;
-  mcp: string;
-  operation: string | string[];
-}
-
-export const TABLE: readonly Row[] = [
-  { cli: 'account list', mcp: 'resend_accounts_list', operation: 'listAccounts' },
-  { cli: 'account show', mcp: 'resend_account_show', operation: 'showAccount' },
-  { cli: 'account remove', mcp: 'resend_account_remove', operation: 'removeAccountChange' },
-  { cli: 'account policy', mcp: 'resend_account_policy', operation: ['policyReport', 'policyChange'] },
-  { cli: 'doctor', mcp: 'resend_doctor', operation: 'runDoctor' },
-  { cli: 'domains', mcp: 'resend_domains', operation: 'listDomains' },
-  { cli: 'emails list', mcp: 'resend_emails_list', operation: 'listSentEmails' },
-  { cli: 'emails show', mcp: 'resend_email_show', operation: 'showSentEmail' },
-  { cli: 'received list', mcp: 'resend_received_list', operation: 'listReceived' },
-  { cli: 'received show', mcp: 'resend_received_show', operation: 'showReceived' },
-  { cli: 'received download', mcp: 'resend_received_download', operation: 'downloadReceived' },
-  { cli: 'metrics', mcp: 'resend_metrics', operation: 'getMetrics' },
-  { cli: 'suppressions', mcp: 'resend_suppressions', operation: 'listSuppressions' },
-  { cli: 'send prepare', mcp: 'resend_send_prepare', operation: 'prepareSend' },
-  { cli: 'send execute', mcp: 'resend_send_execute', operation: 'executeSend' },
-  { cli: 'send status', mcp: 'resend_send_status', operation: 'sendStatus' },
-  { cli: 'scheduled list', mcp: 'resend_scheduled_list', operation: 'listScheduled' },
-  { cli: 'scheduled cancel', mcp: 'resend_scheduled_cancel', operation: 'cancelScheduledChange' },
-];
-
-export const EXCEPTIONS: readonly { cli: string; reason: string }[] = [
-  {
-    cli: 'account add',
-    reason: 'A Resend API key is typed by a person at a terminal: a key typed into a chat stays in the transcript.',
-  },
-  { cli: 'approve', reason: 'Under confirm, approving is what a person at a terminal means; a tool would void it.' },
-  { cli: 'mcp', reason: 'It starts the server a tool would need to be running already.' },
-];
 
 let harness: Harness;
 afterEach(async () => {
   await harness?.close();
-});
-
-async function help(argv: string[]): Promise<string> {
-  let text = '';
-  const out = new PassThrough();
-  out.on('data', (chunk) => {
-    text += String(chunk);
-  });
-  await run([...argv, '--help'], {
-    streams: { stdout: out, stderr: out, stdin: new PassThrough() },
-    env: { NO_COLOR: '1' },
-  });
-  return text;
-}
-
-function commandsIn(text: string): string[] {
-  const section = text.split(/^Commands:\s*$/m)[1]?.split(/^\S/m)[0] ?? '';
-  return [...section.matchAll(/^ {2}([a-z][a-z-]*)/gm)]
-    .map((match) => match[1] ?? '')
-    .filter((name) => name !== 'help');
-}
-
-/** Every command path, read from the CLI's help: a name whose help lists commands only groups them. */
-async function commandTree(): Promise<string[]> {
-  const found: string[] = [];
-  for (const name of commandsIn(await help([]))) {
-    const children = commandsIn(await help([name]));
-    if (children.length === 0) found.push(name);
-    else for (const child of children) found.push(`${name} ${child}`);
-  }
-  return found.sort();
-}
-
-test('the table names every command and every tool, and only ones that exist', async () => {
-  harness = await newHarness();
-  const commands = await commandTree();
-  const { client, close } = await harness.mcp();
-  const tools = (await client.listTools()).tools.map((tool) => tool.name).sort();
-  await close();
-  assert.deepEqual(commands, [...TABLE.map((row) => row.cli), ...EXCEPTIONS.map((row) => row.cli)].sort());
-  assert.deepEqual(tools, TABLE.map((row) => row.mcp).sort());
-  assert.equal(new Set(TABLE.map((row) => row.mcp)).size, TABLE.length, 'a tool in two rows');
-});
-
-test('both surfaces import every row’s operation', async () => {
-  const program = await readFile(new URL('../src/cli/program.ts', import.meta.url), 'utf8');
-  const server = await readFile(new URL('../src/mcp/server.ts', import.meta.url), 'utf8');
-  for (const row of TABLE) {
-    for (const operation of [row.operation].flat()) {
-      const called = new RegExp(`\\b${operation}\\(`);
-      assert.match(program, called, `agent-resend ${row.cli} does not call ${operation}`);
-      assert.match(server, called, `${row.mcp} does not call ${operation}`);
-    }
-  }
 });
 
 // ── Both sides, compared ─────────────────────────────────────────────────────────────────────────────────────────

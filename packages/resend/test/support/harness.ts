@@ -12,6 +12,7 @@ import {
   newResendAccountId,
   type ResendAccount,
   secretRefFor,
+  withAccount,
 } from '../../src/accounts.ts';
 import { run } from '../../src/cli/program.ts';
 import { ResendContext } from '../../src/context.ts';
@@ -62,6 +63,7 @@ export interface Harness {
     tier?: KeyPermission;
     mode?: Mode;
     sendPolicy?: 'chat' | 'confirm' | 'never';
+    changePolicy?: 'chat' | 'confirm';
     domainLock?: string;
   }): Promise<ResendAccount>;
   cli(argv: string[], options?: { env?: NodeJS.ProcessEnv; tty?: boolean; input?: string[] }): Promise<Captured>;
@@ -115,16 +117,18 @@ export async function newHarness(): Promise<Harness> {
     async addAccount(options) {
       const id = newResendAccountId();
       const tier = options.tier ?? 'full_access';
+      const mode = options.mode ?? (tier === 'sending_access' ? 'send' : 'read');
       const account: ResendAccount = {
         id,
         platform: 'resend',
         workspace: `key_${id.slice(-8).toLowerCase()}`,
         userId: `key_${id.slice(-8).toLowerCase()}`,
-        tier,
-        mode: options.mode ?? (tier === 'sending_access' ? 'send' : 'read'),
+        tier: mode,
+        mode,
         grantedScopes: [tier],
         secretRef: secretRefFor(id),
         ...(options.sendPolicy ? { sendPolicy: options.sendPolicy } : {}),
+        ...(options.changePolicy ? { changePolicy: options.changePolicy } : {}),
         createdAt: '2026-09-26T10:00:00.000Z',
         ...(options.domainLock ? { domainLock: options.domainLock } : {}),
       };
@@ -132,15 +136,12 @@ export async function newHarness(): Promise<Harness> {
         account.secretRef,
         options.key ?? (tier === 'full_access' ? FULL : SENDING),
       );
-      // Planted as a person connected and approved it, so it carries that consent.
+      // Planted in core's configuration as a person connected and approved it, so it carries that consent.
       const consent: LooseningConsent = {
         kind: 'loosening-consent',
-        paths: [`accounts.${options.name}.mode`, `accounts.${options.name}.sendPolicy`],
+        paths: ['mode', 'sendPolicy', 'changePolicy'].map((field) => `accounts.${options.name}.${field}`),
       };
-      await context().accounts.update(
-        (file) => ({ ...file, accounts: { ...file.accounts, [options.name]: account } }),
-        { defaultSendPolicy: 'chat', consent },
-      );
+      await core.config.update((config) => withAccount(config, options.name, account), { consent });
       return account;
     },
     async cli(argv, options = {}) {
