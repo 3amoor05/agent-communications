@@ -290,7 +290,7 @@ export class AccountStore {
 export function refuseOwnChangePolicy(named: NamedAccount): void {
   if (named.account.changePolicy !== undefined) {
     throw new CommsError('CONFIG', `"${named.name}" sets its own change policy, which this release cannot honour yet`, {
-      hint: `Remove changePolicy from "${named.name}" in ${ACCOUNTS_FILE}, and set the machine's with \`agentcomms policy --change confirm\` if that is what you want.`,
+      hint: `Remove changePolicy from "${named.name}" in ${ACCOUNTS_FILE}, and set the machine's with \`agentcomms policy confirm\` if that is what you want.`,
     });
   }
 }

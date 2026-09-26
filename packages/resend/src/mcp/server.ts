@@ -80,8 +80,8 @@ export async function buildInstructions(context: ResendContext, pinned: string |
     // A file that cannot be read is something for the tools to report, not a reason to refuse to start.
   }
   if (pinned) accounts = accounts.filter((account) => account.name === pinned);
-  const names = accounts.map((account) => account.name);
-  const canSend = accounts.filter((account) => account.canSend).map((account) => account.name);
+  // One list, each name marked: two lists of the same forty names pushed the greeting past the limit.
+  const names = accounts.map((account) => `${account.name} (${account.canSend ? 'can send' : 'cannot send'})`);
   return [
     'Resend email, across one or more accounts named organisation/resend.',
     '',
@@ -97,11 +97,12 @@ export async function buildInstructions(context: ResendContext, pinned: string |
     'Read-only is enforced by agent-resend, not by the key: Resend has no read-only key.',
     'A key is added only by a person at a terminal (`agent-resend account add`). Never ask for one in chat.',
     '',
-    canSend.length > 0 ? `Accounts that could send if a person approves: ${listOf(canSend)}.` : 'No account can send.',
     pinned
       ? `This server is pinned to "${pinned}"; the account argument may be omitted.`
       : 'Pass `account` on every call — there is no default.',
-    names.length > 0 ? `Known accounts: ${listOf(names)}.` : 'No account is connected yet.',
+    names.length > 0
+      ? `Known accounts — "can send" means only after a person approves: ${listOf(names)}.`
+      : 'No account is connected yet.',
     '',
     'Changing an account (send mode, a looser policy, removing it) or cancelling an email scheduled elsewhere returns',
     '`approvalRequired` and a preview: show it and ask. Under the `chat` change policy call again with `approvalId`',
