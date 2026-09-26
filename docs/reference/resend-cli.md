@@ -208,7 +208,7 @@ agent-resend received show [options] <id>
 
 ### `agent-resend received download`
 
-save a received email’s attachments under the downloads folder; nothing is opened
+save a received email’s attachments under the downloads folder, each under its attachment id; nothing is opened
 
 ```
 agent-resend received download [options] <id>

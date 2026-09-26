@@ -383,7 +383,9 @@ Exit codes: 0 ok · 1 unexpected · 10 a send or a change was refused or needs a
     );
 
   accountOption(received.command('download <id>'))
-    .description('save a received email’s attachments under the downloads folder; nothing is opened')
+    .description(
+      'save a received email’s attachments under the downloads folder, each under its attachment id; nothing is opened',
+    )
     .option('--attachment <attachmentId>', 'only this attachment')
     .option('--out <subpath>', 'a folder inside the account’s downloads folder')
     .action(

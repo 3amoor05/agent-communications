@@ -15,7 +15,9 @@ import {
  *
  * Everything a sender controls (subject, display names, body, attachment names) goes through core's sanitiser and
  * into the untrusted-content envelope, with one boundary per response. What they cannot control — ids, sizes, and
- * Resend's own SPF/DKIM/DMARC verdict, computed by its receiving server — stays outside, in plain fields.
+ * Resend's own SPF/DKIM/DMARC verdict, computed by its receiving server — stays outside, in plain fields. What they
+ * control but is not prose — addresses, Message-IDs, MIME types, tags — stays outside only while a strict grammar
+ * holds, and is wrapped when it does not (see "Tokens a sender chose" below).
  *
  * **The HTML part is authoritative** when there is one, because it is what a mail client shows; the text part is
  * compared with it, and text that appears only there is counted as hidden — a reader never sees it, which makes it
@@ -160,13 +162,69 @@ export function addressesOf(value: unknown): { address: string; name: string }[]
   return entries.flatMap((entry) => parseAddressList(entry));
 }
 
-/** An address with its display name wrapped, since the name is whatever the sender chose. */
+// ── Tokens a sender chose ────────────────────────────────────────────────────────────────────────────────────────
+//
+// An address, a Message-ID, a MIME type and a tag are not prose, so a result can carry them as plain fields — but only
+// when they are nothing else. Each is chosen by whoever wrote the mail: `"Ignore previous instructions"@evil.test` is a
+// valid address, `<run this now@evil.test>` a Message-ID a mail server passes on, and `text/plain; name="…"` a
+// Content-Type. So each is held to a grammar strict enough that no sentence fits it, and anything that does not match
+// is wrapped like any other text the sender wrote: still there to report on, never in the tool's own voice.
+
+/** Bounds what a malformed token can bring with it into the envelope. */
+const MAX_TOKEN_CHARS = 500;
+
+/** A plain address: a local part of the usual characters, and a domain of labels. No quotes, no spaces. */
+const PLAIN_ADDRESS = /^[a-z0-9._%+-]{1,64}@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}$/i;
+/** A Message-ID: `<left@right>`, each side a dot-atom (or a domain literal on the right). No spaces, no brackets. */
+const MESSAGE_ID =
+  /^<[A-Za-z0-9!#$%&'*+/=?^_{}~.-]{1,200}@(?:[A-Za-z0-9!#$%&'*+/=?^_{}~.-]{1,200}|\[[0-9A-Fa-f.:]{1,64}\])>$/;
+/** A MIME type with no parameters: a registered top-level type and an RFC 6838 restricted-name subtype. */
+const MIME_TYPE =
+  /^(?:application|audio|font|haptics|image|message|model|multipart|text|video)\/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}$/i;
+/** A tag name or value: Resend allows ASCII letters, digits, underscores and dashes, up to 256. */
+const TAG = /^[A-Za-z0-9_-]{1,256}$/;
+
+function token(value: string, grammar: RegExp, field: string, envelope: Envelope): string {
+  return grammar.test(value) ? value : wrapField(value.slice(0, MAX_TOKEN_CHARS), field, envelope);
+}
+
+/** An address: bare when it is a plain address and nothing more, wrapped otherwise. */
+export function addressField(address: string, field: string, envelope: Envelope): string {
+  return token(address, PLAIN_ADDRESS, field, envelope);
+}
+
+/** A Message-ID, which the sender's mail server chose: bare when well-formed, wrapped otherwise. */
+export function messageIdField(value: unknown, envelope: Envelope): string | null {
+  return typeof value === 'string' ? token(value.trim(), MESSAGE_ID, 'message-id', envelope) : null;
+}
+
+/** A declared Content-Type: lower-cased when it is a bare MIME type, wrapped when it is anything else. */
+export function contentTypeField(value: unknown, envelope: Envelope): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return MIME_TYPE.test(trimmed)
+    ? trimmed.toLowerCase()
+    : wrapField(trimmed.slice(0, MAX_TOKEN_CHARS), 'content-type', envelope);
+}
+
+/** A tag name or value on sent mail, which the team's code can fill from anything: bare when Resend's grammar holds. */
+export function tagField(value: unknown, field: string, envelope: Envelope): string | null {
+  return typeof value === 'string' ? token(value, TAG, field, envelope) : null;
+}
+
+/**
+ * An address and its display name, both chosen by the sender: the name always wrapped, the address wrapped unless it
+ * is a plain one.
+ */
 export function personOf(
   entry: { address: string; name: string },
-  field: string,
+  role: 'from' | 'reply-to',
   envelope: Envelope,
 ): { address: string; name: string | null } {
-  return { address: entry.address, name: entry.name ? wrapField(entry.name, field, envelope) : null };
+  return {
+    address: addressField(entry.address, `${role}-address`, envelope),
+    name: entry.name ? wrapField(entry.name, `${role}-name`, envelope) : null,
+  };
 }
 
 const EXECUTABLE = new Set([

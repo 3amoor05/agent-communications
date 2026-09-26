@@ -147,16 +147,23 @@ test('downloads: both save the same bytes, inside the same jail', async () => {
   await seed();
   const { call, close } = await harness.mcp();
   try {
-    const cli = (await cliData(['received', 'download', RECEIVED, '--account', 'acme/resend'])).data as {
-      files: { sha256: string; size: number; path: string }[];
-    };
-    const tool = ok<{ files: { sha256: string; size: number; path: string }[] }>(
-      await call('resend_received_download', { account: 'acme/resend', id: RECEIVED }),
-    );
+    type Downloaded = { files: { sha256: string; size: number; path: string; filename: string }[]; notice: string };
+    const cli = (await cliData(['received', 'download', RECEIVED, '--account', 'acme/resend'])).data as Downloaded;
+    const tool = ok<Downloaded>(await call('resend_received_download', { account: 'acme/resend', id: RECEIVED }));
     assert.equal(cli.files[0]?.sha256, tool.files[0]?.sha256);
     assert.equal(cli.files[0]?.size, tool.files[0]?.size);
     assert.ok(cli.files[0]?.path.startsWith(harness.core.paths.downloadsDir));
     assert.ok(tool.files[0]?.path.startsWith(harness.core.paths.downloadsDir));
+    // Both save it under its id, not the sender's name, and give that name back wrapped, with the same notice.
+    assert.match(String(cli.files[0]?.path), new RegExp(`[/\\\\]${ATTACHMENT}\\.txt$`));
+    assert.match(
+      String(tool.files[0]?.path),
+      new RegExp(`[/\\\\]${ATTACHMENT}-2\\.txt$`),
+      'the second of the same file',
+    );
+    assert.equal(normalise(cli.files[0]?.filename), normalise(tool.files[0]?.filename));
+    assert.match(String(tool.files[0]?.filename), /^<untrusted-content [^>]*field="filename"[^>]*>\nplan\.txt\n/);
+    assert.equal(cli.notice, tool.notice);
   } finally {
     await close();
   }
