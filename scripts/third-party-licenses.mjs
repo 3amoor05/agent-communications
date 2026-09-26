@@ -105,22 +105,36 @@ function byPackage(a, b) {
 }
 
 /**
- * One package's bundle, as the bundler builds it: every output file, by absolute path, and the modules in it.
+ * One package's bundle, as the bundler builds it: every output file, by absolute path, and the modules in it
+ * (`outputs`), and every bare specifier it leaves for Node to resolve at run time (`externals`).
  *
  * Built in memory with the package's own config — `write: false`, and `clean: false` so its `dist` is not emptied —
  * so what is read is what `pnpm build` makes, without touching what `pnpm build` made.
  */
 async function buildGraph(name) {
   const { build } = await import('tsdown');
-  const handle = await build({ cwd: join(ROOT, 'packages', name), write: false, clean: false, logLevel: 'silent' });
+  let handle;
+  try {
+    handle = await build({ cwd: join(ROOT, 'packages', name), write: false, clean: false, logLevel: 'silent' });
+  } catch (error) {
+    // Most often core's `dist` is missing or stale: a channel's bundle is made from it, so nothing can be read.
+    throw new Error(
+      `packages/${name}: its bundle could not be built to read what it inlines (${error?.message ?? error}). ` +
+        'Run `pnpm build` first.',
+    );
+  }
   const outputs = new Map();
+  const externals = new Set();
   for (const bundle of handle.bundles) {
     for (const chunk of bundle.chunks) {
       if (chunk.type !== 'chunk') continue;
       outputs.set(comparable(join(chunk.outDir, chunk.fileName)), chunk.moduleIds);
+      for (const specifier of [...chunk.imports, ...chunk.dynamicImports]) {
+        if (!/^(?:\.|\/|[A-Za-z]:|node:)/.test(specifier)) externals.add(specifier);
+      }
     }
   }
-  return outputs;
+  return { outputs, externals };
 }
 
 const graphs = new Map();
@@ -153,7 +167,7 @@ async function inlinedInto(name, problems) {
         const key = comparable(from.file);
         if (seen.has(key)) continue;
         seen.add(key);
-        const theirs = (await graphOf(from.name)).get(key);
+        const theirs = (await graphOf(from.name)).outputs.get(key);
         if (!theirs) {
           problems.push(
             `packages/${name}: its bundle inlines ${where(from.file)}, which a fresh build of packages/${from.name} ` +
@@ -171,7 +185,25 @@ async function inlinedInto(name, problems) {
     }
   }
 
-  for (const [output, ids] of await graphOf(name)) {
+  const { outputs, externals } = await graphOf(name);
+  // A workspace package the bundle leaves outside it, though this package does not install it, is one the bundler
+  // could not find — core's `dist` not built, most often. What it would have inlined is then invisible here, and the
+  // notices would come out short rather than wrong-looking, so it is said plainly.
+  const manifest = JSON.parse(await readFile(join(ROOT, 'packages', name, 'package.json'), 'utf8'));
+  const installed = new Set(
+    Object.keys({ ...manifest.dependencies, ...manifest.optionalDependencies, ...manifest.peerDependencies }),
+  );
+  for (const specifier of externals) {
+    const [scope, bare] = specifier.split('/');
+    const packageName = specifier.startsWith('@') ? `${scope}/${bare}` : scope;
+    if (packageName.startsWith('@agentcomms/') && !installed.has(packageName)) {
+      problems.push(
+        `packages/${name}: its bundle leaves ${specifier} outside it, and the package does not install it — that ` +
+          "workspace package's dist is missing, so what it would inline cannot be read. Run `pnpm build`.",
+      );
+    }
+  }
+  for (const [output, ids] of outputs) {
     await visit(name, output, ids, where(output), new Set());
   }
   return found;
