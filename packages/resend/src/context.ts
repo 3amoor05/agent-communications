@@ -29,6 +29,8 @@ export interface ResendContextOptions {
   throttle?: ThrottleOptions | undefined;
 }
 
+const TEAM_DOMAINS_TTL_MS = 5 * 60 * 1000;
+
 export class ResendContext {
   readonly core: Core;
   readonly env: NodeJS.ProcessEnv;
@@ -37,6 +39,7 @@ export class ResendContext {
   readonly accounts: AccountStore;
   readonly #fetch: FetchLike | undefined;
   readonly #throttle: Throttle;
+  readonly #teamDomains = new Map<string, { at: number; domains: readonly string[] }>();
 
   constructor(options: ResendContextOptions = {}) {
     this.env = options.env ?? process.env;
@@ -68,6 +71,20 @@ export class ResendContext {
    */
   throttle(): Throttle {
     return this.#throttle;
+  }
+
+  /**
+   * The team's verified domains for an account, from `load` at most every five minutes in this process: received mail
+   * is read a page at a time, and asking Resend for the same list before every page would spend the team's budget on
+   * an answer that changes when a person adds a domain.
+   */
+  async teamDomains(accountId: string, load: () => Promise<readonly string[]>): Promise<readonly string[]> {
+    const cached = this.#teamDomains.get(accountId);
+    const now = this.now().getTime();
+    if (cached && now - cached.at < TEAM_DOMAINS_TTL_MS) return cached.domains;
+    const domains = await load();
+    this.#teamDomains.set(accountId, { at: now, domains });
+    return domains;
   }
 
   /** A transport for a key that is not stored yet — `account add` checking what it was given. */

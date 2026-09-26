@@ -297,28 +297,63 @@ function attachmentsOf(value: unknown, envelope: Envelope): ReceivedAttachment[]
   });
 }
 
+const DOMAIN_NAME = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}$/;
+
+/**
+ * The domains whose addresses received mail may not taint: the team's own, as Resend lists them — verified, so
+ * proven by DNS to be the team's — and nothing else.
+ *
+ * **Never from the mail.** They used to be taken from each message's `To` and `received_for`, and a sender writes
+ * both: `To` is a header like any other, and Resend takes `received_for` from the `for` clause of the `Received`
+ * headers, which a sender can add too. Mail from mallory@evil.test naming anyone at evil.test there made evil.test
+ * "internal", so nothing at evil.test was recorded, and a send to exfil@evil.test went out under `chat` on the agent's
+ * word — the escalation meant to catch exactly that switched off by the mail it was meant to catch.
+ *
+ * When Resend cannot be asked, no domain is the team's: more addresses are tainted, and a send to a colleague waits
+ * for a terminal once. That is the side to be wrong on.
+ */
+async function teamDomains(context: ResendContext, named: NamedAccount, transport: ResendTransport): Promise<string[]> {
+  try {
+    return [
+      ...(await context.teamDomains(named.account.id, async () => {
+        const page = await resendRequest<Page<Record<string, unknown>>>(transport, 'GET', '/domains');
+        return (page.data ?? [])
+          .filter((domain) => domain.status === 'verified')
+          .map((domain) =>
+            String(domain.name ?? '')
+              .trim()
+              .toLowerCase(),
+          )
+          .filter((domain) => DOMAIN_NAME.test(domain));
+      })),
+    ];
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Records every address the emails name, before their content is returned. Fails the read if it cannot: content whose
  * taint was not recorded is content a later send could be steered by without the escalation that exists to catch it.
+ *
+ * Every header address is observed, `To` and `received_for` included; only the team's verified domains are left out.
  */
 async function recordTaint(
   context: ResendContext,
+  named: NamedAccount,
+  transport: ResendTransport,
   collector: TaintCollector,
   entries: readonly Record<string, unknown>[],
 ): Promise<void> {
-  const own: string[] = [];
   for (const entry of entries) {
-    own.push(...[...addressesOf(entry.to), ...addressesOf(entry.received_for)].map((person) => person.address));
     collector.observeHeaders(
-      [...addressesOf(entry.from), ...addressesOf(entry.reply_to), ...addressesOf(entry.cc)].map(
-        (person) => person.address,
-      ),
+      [entry.from, entry.reply_to, entry.cc, entry.to, entry.received_for]
+        .flatMap((value) => addressesOf(value))
+        .map((person) => person.address),
     );
   }
-  const internal = [
-    ...new Set(own.map((address) => domainOf(address)).filter((domain): domain is string => domain !== null)),
-  ];
-  await collector.flush(context.core.taint, { ownAddresses: own, internalDomains: internal });
+  const internalDomains = await teamDomains(context, named, transport);
+  await collector.flush(context.core.taint, { ownAddresses: [], internalDomains });
 }
 
 export interface ReceivedRow {
@@ -358,7 +393,7 @@ export async function listReceived(
         attachments: Array.isArray(entry.attachments) ? entry.attachments.length : 0,
       });
     }
-    await recordTaint(context, collector, page.data ?? []);
+    await recordTaint(context, named, transport, collector, page.data ?? []);
     const hasMore = page.has_more === true;
     return { emails, hasMore, next: hasMore ? (emails.at(-1)?.id ?? null) : null, notice: UNTRUSTED_NOTICE };
   });
@@ -416,7 +451,7 @@ export async function showReceived(
       attachments: attachmentsOf(entry.attachments, envelope),
     };
     // The raw message's signed link is never passed on: it is a credential for the whole message, attachments and all.
-    await recordTaint(context, collector, [entry]);
+    await recordTaint(context, named, transport, collector, [entry]);
     return { email, notice: UNTRUSTED_NOTICE };
   });
 }
@@ -543,7 +578,7 @@ export async function downloadReceived(
         riskFlags: attachmentRisks(filename),
       });
     }
-    await recordTaint(context, collector, [entry]);
+    await recordTaint(context, named, transport, collector, [entry]);
     await context.core.audit.append({
       inboxId: named.account.id,
       alias: name,

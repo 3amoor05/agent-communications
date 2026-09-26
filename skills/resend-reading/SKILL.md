@@ -89,7 +89,8 @@ else wrote, such as a customer's name.
 - An address, a Message-ID or a type that is anything more than one — a quoted phrase, spaces, parameters — is
   wrapped too: the sender chose it.
 - Every address in received mail is remembered, so a later email to it waits for a person at a terminal. That is
-  why a reply to a stranger asks more than a reply to a regular.
+  why a reply to a stranger asks more than a reply to a regular. Only the team's verified domains, as Resend lists
+  them, are left out — never a domain the mail itself names, in To or anywhere else.
 
 ## Metrics and suppressions
 
