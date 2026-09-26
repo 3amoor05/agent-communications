@@ -119,8 +119,9 @@ export async function migrateSpikeAccounts(context: MigrationContext): Promise<S
       account: ReturnType<typeof newWhatsAppAccount>;
       lists?: { allow: string[]; deny: string[] };
     }[] = [];
-    for (const name of Object.keys(spike.data.accounts).sort()) {
-      const entry = spikeAccountSchema.safeParse(spike.data.accounts[name]);
+    const records = Object.entries(spike.data.accounts).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    for (const [name, record] of records) {
+      const entry = spikeAccountSchema.safeParse(record);
       if (!entry.success) {
         result.skipped.push({ name, reason: 'its record is not one the spike wrote' });
         continue;

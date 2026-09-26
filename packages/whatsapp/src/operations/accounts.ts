@@ -1,5 +1,5 @@
 import { rm } from 'node:fs/promises';
-import { agentMarker, CommsError, nameAvailable, nameShapeProblem } from '@agentcomms/core';
+import { agentMarker, CommsError, lookupName, nameAvailable, nameShapeProblem } from '@agentcomms/core';
 import {
   newWhatsAppAccount,
   PLATFORM,
@@ -62,8 +62,7 @@ export async function addAccount(
     requireNamedConfig(config);
     const free = nameAvailable(config, 'account', request.name, PLATFORM);
     if (!free.ok) {
-      const held = Object.hasOwn(config.accounts, request.name);
-      throw held && config.accounts[request.name]?.platform === PLATFORM
+      throw lookupName(config, 'account', request.name)?.platform === PLATFORM
         ? new CommsError('USAGE', `"${request.name}" is already added`, {
             hint: `Remove it first with \`agent-whatsapp remove ${request.name}\` to point it at another store.`,
           })
@@ -108,8 +107,7 @@ export async function removeAccount(context: WhatsAppContext, request: { name: s
   refuseAnAgent(context, `remove ${request.name}`, 'removes a WhatsApp account');
   const { account } = requireAccount(await context.config(), request.name);
   await context.core.config.update((config) => {
-    const held = Object.hasOwn(config.accounts, request.name) ? config.accounts[request.name] : undefined;
-    if (!held || held.id !== account.id) {
+    if (lookupName(config, 'account', request.name)?.id !== account.id) {
       throw new CommsError('TRANSIENT', `"${request.name}" changed while it was being removed`, {
         hint: 'Nothing was removed. Run it again.',
       });

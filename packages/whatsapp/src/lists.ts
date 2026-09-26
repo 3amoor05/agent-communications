@@ -52,6 +52,11 @@ const listsSchema = z.strictObject({
 
 const EMPTY: ChatLists = Object.freeze({ allow: Object.freeze([]), deny: Object.freeze([]) });
 
+/** One account's entry, as an own property only: an id is data, and `constructor` is a function on every object. */
+function entryOf(file: ListsFile, accountId: string): ChatLists {
+  return new Map(Object.entries(file.accounts)).get(accountId) ?? EMPTY;
+}
+
 export class ChatListStore {
   readonly path: string;
   readonly #lockPath: string;
@@ -91,8 +96,7 @@ export class ChatListStore {
 
   /** One account's lists; none when the account has no entry. */
   async of(accountId: string): Promise<ChatLists> {
-    const file = await this.#load();
-    return Object.hasOwn(file.accounts, accountId) ? (file.accounts[accountId] as ChatLists) : EMPTY;
+    return entryOf(await this.#load(), accountId);
   }
 
   /** Changes one account's lists under the file's lock; an account left with neither list has no entry. */
@@ -102,7 +106,7 @@ export class ChatListStore {
   ): Promise<{ before: ChatLists; after: ChatLists }> {
     return withFileLock(this.#lockPath, async () => {
       const file = await this.#load();
-      const before = Object.hasOwn(file.accounts, accountId) ? (file.accounts[accountId] as ChatLists) : EMPTY;
+      const before = entryOf(file, accountId);
       const after = change({ allow: [...before.allow], deny: [...before.deny] });
       const accounts = Object.fromEntries(Object.entries(file.accounts).filter(([id]) => id !== accountId));
       if (after.allow.length > 0 || after.deny.length > 0) {
