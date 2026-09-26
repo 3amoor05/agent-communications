@@ -44,7 +44,7 @@ strict, so an unknown key is an error rather than something quietly ignored.
 | `accounts.guarantee` | What holds each end: `floor` (what stops `read` from reaching anyone) and `ceiling`, each `grant` (the platform's credential enforces it) or `code` (only this suite does), and `why` in a sentence | Resend has no read-only key, so its floor is `code` and its `doctor` says so |
 | `narrowing` | The flags that narrow its server: `{ option, flag, kind }`, in the order they are written | Exactly one `pin`; `readOnly` is the one `switch` |
 | `rivals` | Other servers for the same service, which a registration warns about: `packages` (by name; `unscoped` also matches the bare name), or `word` with `can` (what such a server can do unapproved) | Optional; `word` and `can` come together |
-| `hosts` | The hosts its code talks to | Declared, not yet enforced (§9) |
+| `hosts` | The hosts its code talks to | Declared, not yet enforced (§9). `[]` for a channel that talks to none — WhatsApp reads a file on the Mac — which must still say so |
 | `approve` | The command that approves under `confirm`: `agent-gmail approve` | The channel's own binary |
 | `skills` | `prefix` (`gmail-`) and `contract` (`skills/_shared/contract-gmail.md`) | The contract is chosen by the prefix |
 
@@ -236,5 +236,11 @@ new package is by hand, before its trusted publisher can be added (`docs/RELEASI
   package can be `unscoped`: both are what the existing warnings say, which a derivation has to reproduce exactly.
 - A channel's word is its directory's name and its package is `@agentcomms/<word>`, so the registry and the manifests
   cannot disagree about which is which.
+- `hosts` may be empty (added with WhatsApp, the first channel with no network client). It stays required of every
+  channel, so "reaches no host" is said rather than left out; a list with a host in it would have been a promise the
+  code does not make.
+- A send approval's hints name only the approve commands of channels whose accounts can `send`
+  (`channelApproveCommands({ sending: true })`). WhatsApp's `approve` approves the changes its `mcp install` and
+  `mcp prune` make, never a send, so naming it beside a send approval would send a person to the wrong command.
 - The command that connects a mailbox, which one hint names, is derived (`<binary> inbox add`) rather than declared:
   only Gmail's accounts are mailboxes, and a manifest field for one sentence was not worth a contract change.

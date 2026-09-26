@@ -134,6 +134,11 @@ test('what the core says about a channel is read from its manifest', () => {
   assert.equal(accountNoun('slack'), 'workspace');
   assert.equal(accountNoun('discord'), 'account');
   assert.equal(channelApproveCommands(), '`agent-gmail approve`, `agent-resend approve` or `agent-slack approve`');
+  // Only the channels whose accounts can send name their command where the approval in hand is a send.
+  assert.equal(
+    channelApproveCommands({ sending: true }),
+    '`agent-gmail approve`, `agent-resend approve` or `agent-slack approve`',
+  );
   assert.equal(connectMailboxCommand(), 'agent-gmail inbox add');
   assert.equal(listed([], 'or'), '');
   assert.equal(listed(['a'], 'or'), 'a');

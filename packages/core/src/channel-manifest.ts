@@ -97,7 +97,13 @@ export interface ChannelManifest {
         readonly packages?: readonly ChannelRivalPackage[] | undefined;
       }
     | undefined;
-  /** The hosts its code talks to. Declared, not yet enforced. */
+  /**
+   * The hosts its code talks to. Declared, not yet enforced.
+   *
+   * Every channel says it, and `[]` is an answer: a channel that reaches no host at all — WhatsApp, which reads a file
+   * on this Mac — says so rather than naming one it never talks to. What a list names is a promise a later transport
+   * can hold it to; an empty list is the strictest such promise.
+   */
   readonly hosts?: readonly string[] | undefined;
   /** The command a person runs at a terminal to approve under `confirm`: `agent-gmail approve`. */
   readonly approve?: string | undefined;
@@ -163,7 +169,8 @@ const manifestSchema = z
           .optional(),
       })
       .optional(),
-    hosts: z.array(host).min(1).optional(),
+    // Required of a channel (below), and may be empty: `[]` says it reaches no host.
+    hosts: z.array(host).optional(),
     approve: line.optional(),
     skills: z
       .strictObject({ prefix: z.string().regex(/^[a-z][a-z0-9]*-$/, 'a word and a hyphen: `gmail-`'), contract: line })

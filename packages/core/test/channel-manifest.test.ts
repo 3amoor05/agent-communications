@@ -315,6 +315,20 @@ test('a manifest is refused for what would make a server, a pin or a skill mean 
       /accounts: every channel says this/,
     ],
     [
+      'a channel that does not say which hosts it reaches',
+      (e) => {
+        delete at(e, 'slack').hosts;
+      },
+      /hosts: every channel says this/,
+    ],
+    [
+      'a host that is not a host name',
+      (e) => {
+        at(e, 'slack').hosts = ['https://slack.com/api'];
+      },
+      /hosts\.0: a host name/,
+    ],
+    [
       'a core with accounts',
       (e) => {
         at(e, 'core').accounts = at(e, 'slack').accounts ?? {};
@@ -388,4 +402,16 @@ test('a manifest is refused for what would make a server, a pin or a skill mean 
     ],
   ];
   for (const [what, edit, expected] of cases) assert.match(problemsAfter(edit), expected, what);
+});
+
+test('a channel that reaches no host says so with an empty list, and must still say it', () => {
+  // A channel that reads only files on this machine has `[]` as its honest answer — the strictest a later transport
+  // could hold it to — and saying nothing is still refused (above).
+  assert.equal(
+    problemsAfter((e) => {
+      at(e, 'slack').hosts = [];
+    }),
+    '',
+    'an empty list is a valid answer',
+  );
 });

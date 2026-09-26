@@ -300,7 +300,7 @@ async function changeRecord(core: Core, approvalId: string): Promise<ApprovalRec
   }
   if (approvalKind(record) !== 'change') {
     throw new CommsError('USAGE', `approval ${approvalId} is for a send, not a configuration change`, {
-      hint: `Approve it with the command that prepared it: ${channelApproveCommands()}.`,
+      hint: `Approve it with the command that prepared it: ${channelApproveCommands({ sending: true })}.`,
     });
   }
   /*

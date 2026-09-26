@@ -36,10 +36,18 @@ export function listed(words: readonly string[], conjunction: string, options: {
   return `${rest.join(', ')}${options.oxford && rest.length > 1 ? ',' : ''} ${conjunction} ${last}`;
 }
 
-/** Every channel's own approve command, quoted: "`agent-gmail approve` or `agent-slack approve`". */
-export function channelApproveCommands(): string {
+/**
+ * Every channel's own approve command, quoted: "`agent-gmail approve` or `agent-slack approve`".
+ *
+ * `sending` keeps only the channels whose accounts can be in `send`: the commands that can have prepared a send. A
+ * channel that never sends — WhatsApp — has an approve command for the changes its `mcp install` and `mcp prune`
+ * make, and naming it where the approval in hand is a send would send a person to a command that never prepared one.
+ */
+export function channelApproveCommands(options: { sending?: boolean } = {}): string {
   return listed(
-    accountChannels().flatMap((manifest) => (manifest.approve ? [`\`${manifest.approve}\``] : [])),
+    accountChannels()
+      .filter((manifest) => options.sending !== true || manifest.accounts?.modes.includes('send') === true)
+      .flatMap((manifest) => (manifest.approve ? [`\`${manifest.approve}\``] : [])),
     'or',
   );
 }

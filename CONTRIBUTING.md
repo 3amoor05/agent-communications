@@ -137,8 +137,8 @@ the shared keychain namespace, so it is trusted exactly as far as it is reviewed
 2. **Its manifest**, the `"agentcomms"` field of that `package.json`: `contract: 1`, `channel` (the directory's name;
    also the platform word in account names and the tool prefix), `label`, `binary`, `server`, `accounts` (`map:
    "accounts"`, `noun`, `modes` from `read` and `send`, and an honest `guarantee`), `narrowing` (the pin is
-   `{ "option": "account", "flag": "--account", "kind": "pin" }`), `rivals`, `hosts`, `approve` and `skills`. The
-   schema is `channelManifestSchema` in `packages/core/src/channel-manifest.ts`.
+   `{ "option": "account", "flag": "--account", "kind": "pin" }`), `rivals`, `hosts` (`[]` when it talks to no host),
+   `approve` and `skills`. The schema is `channelManifestSchema` in `packages/core/src/channel-manifest.ts`.
 3. `pnpm sync:channels`, which validates every manifest and writes the core's snapshot of them. From it the core knows
    the channel: the installer, `comms_server_install`'s `channel`, the update, and the words of every preview.
 4. **Its accounts** in the config's `accounts` map: `platform` is the channel word, `mode` is `read` or `send` and

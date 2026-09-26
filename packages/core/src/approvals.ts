@@ -394,7 +394,7 @@ export class ApprovalStore {
           'USAGE',
           `approval ${id} is for a send, not a configuration change`,
           record,
-          `It is approved with the command that prepared it — ${channelApproveCommands()} — and permits only that send.`,
+          `It is approved with the command that prepared it — ${channelApproveCommands({ sending: true })} — and permits only that send.`,
         );
   }
 
