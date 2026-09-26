@@ -9,6 +9,8 @@ import {
   writeFileAtomic,
 } from '@agentcomms/core';
 import { z } from 'zod';
+import { CHAT_ID } from './chat-ref.ts';
+import type { ChatLists } from './visibility.ts';
 
 /**
  * The spike's own configuration, in its own file beside core's `config.json`.
@@ -33,17 +35,30 @@ export interface WhatsAppAccount {
    */
   source?: string | undefined;
   createdAt: string;
+  /**
+   * Which chats an agent may see: the person's allow and deny lists (see `visibility.ts`), set with `allow`, `deny`
+   * and `clear` at their terminal. Absent means neither list: every chat is visible.
+   */
+  chats?: ChatLists | undefined;
 }
+
+/** Long enough for any real list, short enough that a hand-edited file cannot make every read slow. */
+export const CHAT_LIST_LIMIT = 1000;
 
 export interface SpikeConfig {
   version: 1;
   accounts: Record<string, WhatsAppAccount>;
 }
 
+const chatList = z
+  .array(z.string().regex(CHAT_ID, 'a chat list holds chat ids, such as 15555550101@s.whatsapp.net'))
+  .max(CHAT_LIST_LIMIT);
+
 const accountSchema = z.strictObject({
   id: z.string().regex(ACCOUNT_ID_PATTERN, 'account ids look like acc_ followed by 16 characters'),
   source: z.string().min(1).optional(),
   createdAt: z.string().min(1),
+  chats: z.strictObject({ allow: chatList, deny: chatList }).optional(),
 });
 
 const configSchema = z

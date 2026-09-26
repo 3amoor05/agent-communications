@@ -11,6 +11,7 @@ import {
 import { Command, CommanderError, Option } from 'commander';
 import { WhatsAppContext, type WhatsAppContextOptions } from '../context.ts';
 import { addAccount, removeAccount } from '../operations/accounts.ts';
+import { allowChat, clearChats, denyChat } from '../operations/chat-lists.ts';
 import { draftMessage } from '../operations/draft.ts';
 import { CHAT_KINDS, listChats, readChat, searchMessages } from '../operations/read.ts';
 import { whatsappStatus } from '../operations/status.ts';
@@ -19,6 +20,7 @@ import { VERSION } from '../version.ts';
 import { type Opener, openLink } from './opener.ts';
 import {
   renderAdded,
+  renderChatLists,
   renderChats,
   renderDraft,
   renderHistory,
@@ -74,6 +76,7 @@ Getting started (a person, in a terminal):
   agent-whatsapp chats --account personal/whatsapp
   agent-whatsapp search "invoice" --account personal/whatsapp
   agent-whatsapp draft +15555550101 "On my way"   a link; you press send in WhatsApp
+  agent-whatsapp deny +15555550102 --account personal/whatsapp   agents never see that chat
 
 Nothing here connects to WhatsApp or any other server, and nothing here can send.
 
@@ -126,6 +129,35 @@ be waiting) · 77 permission needed (macOS privacy) · 78 configuration problem.
       act(async (context, options, name: string) => {
         const result = await removeAccount(context, { name });
         writeResult(result, options, () => renderRemoved(result, options.color), streams);
+      }),
+    );
+
+  accountOption(program.command('allow <chat>'))
+    .description(
+      'let agents see this chat; once any chat is allowed, agents see only allowed chats — a person does this',
+    )
+    .action(
+      act(async (context, options, chat: string, flags: Options) => {
+        const result = await allowChat(context, { account: String(flags.account), chat });
+        writeResult(result, options, () => renderChatLists(result, options.color), streams);
+      }),
+    );
+
+  accountOption(program.command('deny <chat>'))
+    .description('hide this chat from agents entirely: not listed, searched, read or drafted to — a person does this')
+    .action(
+      act(async (context, options, chat: string, flags: Options) => {
+        const result = await denyChat(context, { account: String(flags.account), chat });
+        writeResult(result, options, () => renderChatLists(result, options.color), streams);
+      }),
+    );
+
+  accountOption(program.command('clear [chat]'))
+    .description('take a chat off both lists, or with no chat, empty them — a person does this')
+    .action(
+      act(async (context, options, chat: string | undefined, flags: Options) => {
+        const result = await clearChats(context, { account: String(flags.account), chat });
+        writeResult(result, options, () => renderChatLists(result, options.color), streams);
       }),
     );
 
@@ -213,7 +245,10 @@ be waiting) · 77 permission needed (macOS privacy) · 78 configuration problem.
     .description(
       'a message as a link that opens WhatsApp with it filled in — you press send; nothing is sent here. <to> is a phone number or an id `chats` shows',
     )
-    .option('--account <name>', 'the account the chat belongs to, as `organisation/whatsapp`')
+    .option(
+      '--account <name>',
+      'the account the chat belongs to, as `organisation/whatsapp`; its allow and deny lists apply (without it, every account’s do)',
+    )
     .option('--open', 'open the link in WhatsApp now (a person only; an agent gives the link to the person)', false)
     .action(
       act(async (context, options, to: string, text: string, flags: Options) => {

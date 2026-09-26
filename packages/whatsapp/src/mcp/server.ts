@@ -49,7 +49,11 @@ async function buildInstructions(context: WhatsAppContext): Promise<string> {
     'To reply, whatsapp_draft returns a link that opens WhatsApp with the text filled in. Give the person the link;',
     'they check it and press send. For a group it returns the text to paste. Never claim a message was sent.',
     '',
-    'Pass `account` on every call except whatsapp_status and whatsapp_draft — there is no default.',
+    'Status updates are left out of chats and search unless `kind` is `status`. The person may hide chats from you;',
+    'a hidden chat is not found, as if it did not exist.',
+    '',
+    'Pass `account` on every call except whatsapp_status — there is no default. On whatsapp_draft it applies that',
+    'account’s lists; without it, every account’s do.',
     names.length > 0
       ? `Known accounts: ${names.slice(0, 8).join(', ')}${names.length > 8 ? `, and ${names.length - 8} more` : ''}.`
       : 'No account is set up yet: a person runs `agent-whatsapp add <organisation>/whatsapp` in a terminal.',

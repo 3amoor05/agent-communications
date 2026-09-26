@@ -17,7 +17,8 @@ export interface ChatRef {
   readonly byPhone: boolean;
 }
 
-const CHAT_ID = /^[A-Za-z0-9._:-]{1,128}@[a-z.]{1,32}$/;
+/** The shape of a chat id: WhatsApp's own, never input a person could make into anything else. */
+export const CHAT_ID: RegExp = /^[A-Za-z0-9._:-]{1,128}@[a-z.]{1,32}$/;
 
 export function chatRefOf(input: string): ChatRef {
   const trimmed = input.trim();
@@ -36,4 +37,14 @@ export function chatRefOf(input: string): ChatRef {
     });
   }
   return { id: `${digits}@s.whatsapp.net`, kind: 'direct', phone: digits, byPhone: true };
+}
+
+/**
+ * The answer for a chat that is not there — and for one the person has hidden from agents, word for word, so that
+ * asking cannot tell the two apart.
+ */
+export function noSuchChat(chatId: string, account: string): CommsError {
+  return new CommsError('NOT_FOUND', `no chat ${chatId} in "${account}"`, {
+    hint: 'List them with `chats`. A chat that started after the last sync appears after the next one.',
+  });
 }

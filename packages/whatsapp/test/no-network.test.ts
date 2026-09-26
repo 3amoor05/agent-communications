@@ -203,6 +203,9 @@ test('every command and every tool runs with the network cut off, and attempts n
       ['draft', '+15555550101', 'On my way'],
       ['draft', GROUP, 'hello all'],
       ['draft', ALICE, 'On my way', '--account', account],
+      ['deny', GROUP, '--account', account],
+      ['allow', ALICE, '--account', account],
+      ['clear', '--account', account],
     ];
     for (const argv of commands) {
       for (const json of [true, false]) {
@@ -254,7 +257,10 @@ test('there is nothing to send with: the commands are the read surface, the draf
   const commands = [...section.matchAll(/^ {2}([a-z][a-z-]*)(?: |$)/gm)].map((match) => match[1]);
   assert.deepEqual(commands.sort(), [
     'add',
+    'allow',
     'chats',
+    'clear',
+    'deny',
     'draft',
     'help',
     'mcp',

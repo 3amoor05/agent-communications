@@ -6,6 +6,7 @@ import { type IndexStats, rebuildIndex } from '../index-db.ts';
 import { inspectSchema } from '../source/schema.ts';
 import { removeStaleSnapshots, snapshotStore } from '../source/snapshot.ts';
 import { openDatabase } from '../sqlite.ts';
+import { Visibility } from '../visibility.ts';
 
 /**
  * The one operation that reads WhatsApp's files: copy the store, check the copy, rebuild the index, delete the copy.
@@ -46,10 +47,14 @@ export async function syncAccount(
             });
           }
           const report = inspectSchema(db);
-          const stats = await rebuildIndex(directory, db, report, {
-            indexedAt: context.now().toISOString(),
-            copied: snapshot.copied,
-          });
+          // What the person's lists hide is never written to the index.
+          const stats = await rebuildIndex(
+            directory,
+            db,
+            report,
+            { indexedAt: context.now().toISOString(), copied: snapshot.copied },
+            new Visibility(account.chats),
+          );
           return {
             account: name,
             store: { path: store.path, default: store.isDefault },

@@ -1,5 +1,6 @@
 import { escapeForDisplay, paint, truncateDisplay } from '@agentcomms/core';
 import type { AddedAccount, RemovedAccount } from '../operations/accounts.ts';
+import type { ChatListsResult } from '../operations/chat-lists.ts';
 import type { DraftResult } from '../operations/draft.ts';
 import type { ChatsResult, ReadResult, SearchResult } from '../operations/read.ts';
 import type { StatusResult } from '../operations/status.ts';
@@ -47,10 +48,13 @@ export function renderStatus(result: StatusResult, color: boolean): string {
         ? paint(color, 'green', 'readable')
         : paint(color, account.access.state === 'not-checked' ? 'dim' : 'yellow', account.access.state);
     lines.push(`  access  ${access}${account.access.message ? ` — ${account.access.message}` : ''}`);
+    if (account.chatLists.allow > 0 || account.chatLists.deny > 0) {
+      lines.push(`  lists   ${account.chatLists.allow} allowed, ${account.chatLists.deny} denied`);
+    }
     if (account.access.hint) lines.push(`          ${account.access.hint}`);
     if (account.index.synced) {
       lines.push(
-        `  index   ${account.index.chats} chats, ${account.index.messages} messages, ${account.index.media} with media, ${account.index.statusChats} status · synced ${account.index.indexedAt}`,
+        `  index   ${account.index.chats} chats, ${account.index.messages} messages, ${account.index.media} with media, ${account.index.statusChats} status-update chat(s) · synced ${account.index.indexedAt}`,
       );
       for (const entry of account.index.degraded) {
         lines.push(paint(color, 'dim', `          without ${entry.part}: ${entry.costs}`));
@@ -79,6 +83,20 @@ export function renderSync(result: SyncResult, color: boolean): string {
   ];
   for (const entry of result.degraded) lines.push(paint(color, 'yellow', `Without ${entry.part}: ${entry.costs}.`));
   return lines.join('\n');
+}
+
+export function renderChatLists(result: ChatListsResult, color: boolean): string {
+  const list = (entries: string[]) => (entries.length === 0 ? paint(color, 'dim', '(none)') : entries.join(', '));
+  return [
+    `${paint(color, 'green', result.changed ? 'Updated' : 'Unchanged')} ${result.account}. ${result.effect}`,
+    `  allow  ${list(result.allow)}`,
+    `  deny   ${list(result.deny)}`,
+    paint(
+      color,
+      'dim',
+      `Every read and draft applies this now. What is hidden leaves the index, and what the last sync left out comes back, at the next sync: ${result.next}`,
+    ),
+  ].join('\n');
 }
 
 export function renderChats(result: ChatsResult, color: boolean): string {

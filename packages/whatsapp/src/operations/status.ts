@@ -3,6 +3,7 @@ import { requireAccount, type SpikeConfig } from '../config.ts';
 import type { WhatsAppContext } from '../context.ts';
 import { WhatsAppIndex } from '../index-db.ts';
 import { probeStore } from '../source/snapshot.ts';
+import { Visibility } from '../visibility.ts';
 
 /**
  * What is set up, whether each store can be read, and what the index holds — and, in plain words, the two promises
@@ -19,6 +20,11 @@ export interface AccountStatus {
   account: string;
   id: string;
   store: { path: string; default: boolean };
+  /**
+   * How many chats are on the person's allow and deny lists — counts only: which chats are hidden is not something
+   * status tells an agent.
+   */
+  chatLists: { allow: number; deny: number };
   access: {
     state: AccessState;
     message?: string | undefined;
@@ -88,7 +94,7 @@ async function statusOf(
   }
   let index: AccountStatus['index'] = { synced: false };
   try {
-    const opened = await WhatsAppIndex.open(context.accountDir(account), name);
+    const opened = await WhatsAppIndex.open(context.accountDir(account), name, new Visibility(account.chats));
     try {
       const stats = opened.stats();
       index = {
@@ -106,7 +112,14 @@ async function statusOf(
   } catch (error) {
     if (!isCommsError(error) || error.details?.reason !== 'NOT_SYNCED') throw error;
   }
-  return { account: name, id: account.id, store: { path: store.path, default: store.isDefault }, access, index };
+  return {
+    account: name,
+    id: account.id,
+    store: { path: store.path, default: store.isDefault },
+    chatLists: { allow: account.chats?.allow.length ?? 0, deny: account.chats?.deny.length ?? 0 },
+    access,
+    index,
+  };
 }
 
 export async function whatsappStatus(

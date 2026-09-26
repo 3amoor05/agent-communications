@@ -1,10 +1,11 @@
 import { CommsError, wholeNumber } from '@agentcomms/core';
-import { chatRefOf } from '../chat-ref.ts';
+import { chatRefOf, noSuchChat } from '../chat-ref.ts';
 import { requireAccount } from '../config.ts';
 import type { WhatsAppContext } from '../context.ts';
 import { WhatsAppIndex } from '../index-db.ts';
 import { type ChatView, type MessageView, Presenter } from '../present.ts';
 import type { ChatKind } from '../source/types.ts';
+import { Visibility } from '../visibility.ts';
 
 /**
  * Reading: chats, one chat, search. Each opens only the local index — never WhatsApp's own files — so none of them
@@ -37,9 +38,10 @@ function kindsOf(kind: string | undefined): readonly ChatKind[] {
   return [kind as ChatKind];
 }
 
+/** The account's index, seen through its allow and deny lists. Every read here opens it this way. */
 async function openIndex(context: WhatsAppContext, accountName: string | undefined) {
   const { name, account } = requireAccount(await context.config.load(), accountName);
-  const index = await WhatsAppIndex.open(context.accountDir(account), name);
+  const index = await WhatsAppIndex.open(context.accountDir(account), name, new Visibility(account.chats));
   return { name, index };
 }
 
@@ -92,11 +94,7 @@ export async function readChat(
   const { name, index } = await openIndex(context, request.account);
   try {
     const chat = index.chat(chatId);
-    if (!chat) {
-      throw new CommsError('NOT_FOUND', `no chat ${chatId} in "${name}"`, {
-        hint: 'List them with `chats`. A chat that started after the last sync appears after the next one.',
-      });
-    }
+    if (!chat) throw noSuchChat(chatId, name);
     let before: ReturnType<WhatsAppIndex['message']> | undefined;
     if (request.before !== undefined) {
       before = index.message(request.before);

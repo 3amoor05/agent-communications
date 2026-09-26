@@ -74,6 +74,9 @@ const EXCEPTIONS = {
   add: 'choosing which file on this Mac an agent reads is a person’s decision, and the first read is when macOS asks them',
   remove: 'the other half of add: a person’s lifecycle step',
   mcp: 'it starts the server a tool would need already running',
+  allow: 'which chats an agent may see is the person’s choice, made at their terminal; no agent sets it',
+  deny: 'the other side of allow: an agent neither widens nor narrows what it sees',
+  clear: 'undoes allow and deny, which are the person’s',
 } as const;
 
 /** Envelope boundaries are random per response, and a sync stamps the time: both are set aside to compare. */

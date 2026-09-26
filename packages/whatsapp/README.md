@@ -126,6 +126,9 @@ Business, pass `--source ~/Library/Group\ Containers/group.net.whatsapp.WhatsApp
 |---|---|---|
 | `add <org/whatsapp> [--source]` | — | a person names the store; the first read, when macOS asks |
 | `remove <org/whatsapp>` | — | forget it and delete its index |
+| `allow <chat> --account` | — | let agents see this chat; once any is allowed, only allowed chats are visible |
+| `deny <chat> --account` | — | hide this chat from agents entirely |
+| `clear [chat] --account` | — | take a chat off both lists, or with no chat empty them |
 | `status [--account] [--no-check]` | `whatsapp_status` | what is set up, whether it can be read, what the index holds |
 | `sync --account` | `whatsapp_sync` | copy, check, index, delete the copy |
 | `chats --account [--kind] [--limit]` | `whatsapp_chats` | chats, newest first; status updates only with `--kind status` |
@@ -145,12 +148,34 @@ An id none of these match is `unknown`, never guessed at.
 
 Each command and its tool call the same function in `src/operations/`; `test/mcp.test.ts` runs both and compares the
 results. `add` and `remove` have no tool on purpose: which file an agent may read is a person's choice, and the first
-read is when macOS asks that person. `draft --open` is refused to an agent — a filled-in message box landing on the
+read is when macOS asks that person; nor do `allow`, `deny` and `clear` (below). `draft --open` is refused to an agent — a filled-in message box landing on the
 screen of someone typing elsewhere is one Enter away from sent — so an agent hands over the link. `draft` takes a
 phone number or any id `chats` and `read` print: an `…@s.whatsapp.net` id is its number. A group has no number, so its
 draft comes back as text to paste, with the reason; so does a chat with someone who hides their number (`@lid`), a
 broadcast list and a channel. A status update is not a chat anyone writes to, and is refused — for `<number>@status`,
 naming the number to write to instead.
+
+## Hiding chats from agents
+
+Each account can carry two lists of chats, by chat id or phone number, kept in the spike's own config file:
+
+- **deny** — chats an agent must never see. A denied chat is not listed, searched, read, drafted to or counted, and
+  asking for it by id gets the same `NOT_FOUND`, word for word, as a chat that does not exist.
+- **allow** — once anything is on it, the only chats an agent sees. Denied wins over allowed.
+
+With neither list every chat is visible, except that status updates are left out of listings and searches unless
+asked for. A phone number names a person rather than one chat: their one-to-one chat, their own status posts
+(`<number>@status`) and, in the status feed, the posts they wrote. A group is a chat — denying someone does not take
+what they wrote out of a group an agent may see. `status` reports how many chats each list holds, never which.
+
+The lists apply at once, to every read on both surfaces: `WhatsAppIndex` cannot be opened without them, and every
+query filters through them. `sync` applies them too, leaving what they hide out of the index, so a hidden chat's
+messages are not kept in a second copy on disk; a chat the last sync left out comes back only at the next one. A draft
+names its account with `--account` and is checked against that account's lists; without one, against every account's.
+
+`allow`, `deny` and `clear` are a person's, like `add`: there is no tool for them, and at the command line they are
+refused when core's agent marker is set (exit 10), as `draft --open` is. Not even `deny` is left to an agent — which
+chats an agent may see is not the agent's to decide, in either direction.
 
 Every message body, caption, sender name, group name and file name comes back inside core's untrusted-content
 envelope; bidi and zero-width characters are removed and counted (`hidden: { characters, bidi }`); links are
@@ -182,9 +207,9 @@ hard-codes the two channels it has:
 | Risk | What would lower it |
 |---|---|
 | WhatsApp changes the layout; the reader refuses (safe) or, if a column keeps its name and changes its meaning, misreads (unsafe). | Run against the real store once, read-only, and compare a handful of chats by eye; pin the WhatsApp version it was checked against; keep refusing on unknown `ZMESSAGETYPE` values. |
-| The index is a second plaintext copy of every message, owner-only on disk. | Encrypt it at rest with a key in core's secret store; index only chosen chats; let `remove` also shred. |
+| The index is a second plaintext copy of every message, owner-only on disk. | Encrypt it at rest with a key in core's secret store; let `remove` also shred. Chats the lists hide are already left out of it. |
 | Full Disk Access is far broader than WhatsApp's folder, and it is granted to the whole terminal or MCP client. | Grant "Allow" per session instead where possible; run the MCP server from a dedicated signed binary and grant only that; revoke when done. |
-| An agent sees everything in every chat, including other people's messages sent to the owner. | Allow- or deny-lists of chats in the account config; exclude `status@broadcast` and groups by default. |
+| An agent sees everything in every chat, including other people's messages sent to the owner. | Done: allow and deny lists per account, and status updates left out by default. Still open: groups are visible by default, and a denied person's messages in a visible group are shown. |
 | Message content is untrusted and reaches a model. | Already enveloped and defused; the residual risk is a model following instructions anyway — keep the send step with a person, as `draft` does. |
 | A draft link could be made to a number the person did not intend. | The person sees the number and text in WhatsApp before sending; `--open` is refused to agents. |
 | `node:sqlite` is marked experimental in Node 22 (the warning is filtered). | Pin Node; revisit when it is stable. |
