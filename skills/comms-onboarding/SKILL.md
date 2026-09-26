@@ -33,14 +33,19 @@ happens in chat, or through the commands in "Without the MCP tools".
 
 Ask in one message, and wait:
 
-1. **Which channels:** Gmail, Slack, or both.
-2. **Which accounts:** each mailbox address, each Slack workspace. Names are
-   `organisation/platform` — `acme/gmail`, `acme/slack`.
+1. **Which channels:** Gmail, Slack, Resend (email a company sends from its own domain) and WhatsApp
+   (the chats WhatsApp for Mac keeps, read-only).
+2. **Which accounts:** each mailbox address, each Slack workspace, each Resend team, the WhatsApp store.
+   Names are `organisation/platform` — `acme/gmail`, `acme/slack`, `acme/resend`, `personal/whatsapp`.
 3. **What each account may do.**
    - Gmail: `read` (Google itself refuses to send), `draft` (also writes drafts) or `organize` (also
      labels, archives, bins). `draft` and `organize` can both send once a person approves — only this
      software stops them.
    - Slack: `read` (cannot post: Slack itself refuses) or `send` (posts, with approval).
+   - Resend: `read` or `send`. Resend has no read-only key, so `read` is enforced by this software
+     only. The key is typed by the person at a terminal (`agent-resend account add`) — never in chat.
+   - WhatsApp: read only, always. The person adds the store at a terminal (`agent-whatsapp add`); a
+     reply is a draft link they send themselves in WhatsApp.
 4. **How sends and changes are approved:** by a yes in chat (`chat`, the default) or at a terminal
    with a typed code (`confirm`). A send policy can also be `never`: nothing is sent or posted from
    here, and they do it in Gmail or Slack themselves.
