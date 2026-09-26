@@ -413,13 +413,13 @@ test('update --check: what is behind, what is up to date, what pins nothing, and
     const report = await ok('comms_update', { check: true });
     assert.equal(report.core, VERSION);
     // Gmail's npx package is asked about only when something starts it; nothing here does.
+    // Resend is neither registered nor installed here, so nobody asks the registry about it.
     assert.deepEqual(report.latest, {
       [PACKAGES.core]: LATEST,
       [PACKAGES.gmail]: LATEST,
-      [PACKAGES.resend]: LATEST,
       [PACKAGES.slack]: LATEST,
     });
-    assert.deepEqual([...deps.asked].sort(), [PACKAGES.core, PACKAGES.gmail, PACKAGES.resend, PACKAGES.slack]);
+    assert.deepEqual([...deps.asked].sort(), [PACKAGES.core, PACKAGES.gmail, PACKAGES.slack]);
 
     const behind = report.behind as Item[];
     assert.deepEqual(of(behind, 'registration'), [
@@ -992,6 +992,24 @@ function cli(m: Machine, args: string[], extra: Record<string, string>) {
   );
 }
 
+test('a channel this machine does not use is never asked about, so its absence from the registry stops nothing', async () => {
+  // 0.7.0 adds channels whose first publish is by hand: had core asked npm about every channel it knows, every
+  // machine's update would have stopped at the registry's 404 for a package nobody there uses.
+  const m = machine();
+  cursor(m, { gmail: npx('gmail', OLD, ['--inbox', 'acme/gmail']) });
+  const { resend: _resend, ...published } = EVERYTHING_LATEST;
+  const deps = fakes(m, { latest: published });
+  const { ok, close } = await connect(m, { update: deps });
+  try {
+    const check = await ok('comms_update', { check: true });
+    assert.equal((check.latest as Record<string, string>)[PACKAGES.resend], undefined);
+    assert.ok(!deps.asked.includes(PACKAGES.resend), 'the registry was asked about a channel nobody here uses');
+    assert.ok((check.behind as unknown[]).length > 0, 'the update still found what is behind');
+  } finally {
+    await close();
+  }
+});
+
 test('`agentcomms update` gives the tool’s check and preview, and claims the approval the tool prepared', async () => {
   /*
    * Both surfaces with nothing injected: the registry is one on the loopback address, named the way npm names one
@@ -1012,9 +1030,16 @@ test('`agentcomms update` gives the tool’s check and preview, and claims the a
     const byCommand = await cli(m, ['update', '--check', '--json'], extra);
     assert.equal(byCommand.status, 0, byCommand.stderr);
     assert.deepEqual(byCommand.json().data, check);
-    // Gmail's npx package, asked about because an entry starts it.
-    assert.deepEqual(check.latest, EVERYTHING_LATEST);
+    // Core itself, and Gmail's packages because an entry starts them — nothing about a channel this machine does not
+    // use, which may not be on the registry at all.
+    assert.deepEqual(check.latest, {
+      [PACKAGES.core]: LATEST,
+      [PACKAGES.gmail]: LATEST,
+      [PACKAGES.gmailMcp]: LATEST,
+    });
     assert.ok(served.requests.some((request) => request.url === '/@agentcomms%2fgmail-mcp'));
+    assert.ok(!served.requests.some((request) => request.url === '/@agentcomms%2fresend'), 'resend was asked about');
+    assert.ok(!served.requests.some((request) => request.url === '/@agentcomms%2fslack'), 'slack was asked about');
     assert.deepEqual(check.unreadable, [], 'npm ls -g read the empty prefix');
     // A check reads; an approval handed to it is refused, not ignored, as the tool refuses it.
     const stray = await cli(m, ['update', '--check', '--approval', 'ap_00000000000000000000000000', '--json'], extra);

@@ -375,11 +375,18 @@ async function inspect(core: Core, env: NodeJS.ProcessEnv, deps: UpdateDeps): Pr
     });
   }
 
-  // A server-only package (Gmail's npx one) only when something starts it or it is installed: every channel's always.
-  const wanted = new Set(CHANNEL_PACKAGES);
-  for (const name of SERVER_PACKAGES) {
-    if (found.some((entry) => entry.package === name) || name in installed) wanted.add(name);
+  /*
+   * Only what this machine uses is asked about: core itself, every package a registration here starts, and every one
+   * installed globally. A channel nobody here uses may not be on the registry at all — a release that adds a channel
+   * can reach npm before that channel's first publish — and asking about it would stop the update for everyone who
+   * does not use it.
+   */
+  const wanted = new Set<string>([channelServer('core').packageName]);
+  for (const entry of found) {
+    wanted.add(channelServer(entry.channel).packageName);
+    wanted.add(entry.package);
   }
+  for (const name of Object.keys(installed)) wanted.add(name);
   const latest = await latestReleases(
     [...wanted].sort(),
     deps.latestVersion ?? ((name) => npmLatestVersion(name, { env })),
