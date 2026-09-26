@@ -7,7 +7,17 @@ import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { createWhatsAppMcpServer } from '../src/mcp/server.ts';
 import { allowChat, clearChats, denyChat } from '../src/operations/chat-lists.ts';
 import { Visibility } from '../src/visibility.ts';
-import { ALICE, addMessages, BOB, ERIN_STATUS, type Fixture, GROUP, HIDDEN, message } from './support/fixture.ts';
+import {
+  ALICE,
+  addMessages,
+  BOB,
+  buildFixtureStore,
+  ERIN_STATUS,
+  type Fixture,
+  GROUP,
+  HIDDEN,
+  message,
+} from './support/fixture.ts';
 import { type Harness, newHarness } from './support/harness.ts';
 
 /**
@@ -66,9 +76,11 @@ function surfaces(harness: Harness, call: Awaited<ReturnType<typeof connect>>['c
       assert.ok(!tool.isError, JSON.stringify(tool.structuredContent));
       return { code: 0, ids: (cli.data().messages as { id: string }[]).map((message) => message.id) };
     },
-    async draft(to: string, withAccount = true) {
-      const cli = await harness.cli(['draft', to, 'hello', ...(withAccount ? ['--account', ACCOUNT] : []), '--json']);
-      const tool = await call('whatsapp_draft', { ...(withAccount ? { account: ACCOUNT } : {}), to, text: 'hello' });
+    /** A draft on both surfaces: with `--account`, or another account named, or (false) none. */
+    async draft(to: string, withAccount: boolean | string = true) {
+      const account = withAccount === true ? ACCOUNT : withAccount === false ? undefined : withAccount;
+      const cli = await harness.cli(['draft', to, 'hello', ...(account ? ['--account', account] : []), '--json']);
+      const tool = await call('whatsapp_draft', { ...(account ? { account } : {}), to, text: 'hello' });
       if (cli.code !== 0) {
         assert.equal(tool.isError, true, `${to}: the tool refuses it too`);
         assert.deepEqual(tool.structuredContent.error, cli.json().error);
@@ -348,6 +360,97 @@ test('a group is a chat: a denied person’s messages in a group the agent may s
     await person(harness, 'deny', GROUP);
     assert.deepEqual(await on.search('harbour'), [], 'denying the group is what hides it');
     assert.equal((await on.read(GROUP)).code, 66);
+  } finally {
+    await close();
+  }
+});
+
+test('a draft cannot tell a hidden chat from one that does not exist, on both surfaces, by number or by id', async () => {
+  const harness = await newHarness();
+  await harness.ready(ACCOUNT);
+  const { call, close } = await connect(harness);
+  const on = surfaces(harness, call);
+  try {
+    // Nothing hidden: nothing to give away, so any number is drafted to, in the index or not.
+    assert.equal((await on.draft(NOBODY)).code, 0, 'a number with no chat, while the lists hide nobody');
+    assert.equal((await on.draft(NOBODY, false)).code, 0);
+
+    await person(harness, 'deny', '+1 555 555 0102');
+    for (const withAccount of [true, false]) {
+      const absent = await on.draft(NOBODY, withAccount);
+      const hidden = await on.draft(BOB, withAccount);
+      assert.equal(hidden.code, 66, `hidden, ${withAccount ? 'with' : 'without'} --account`);
+      assert.equal(absent.code, 66, 'and one with no chat, the same');
+      assert.deepEqual(
+        { code: hidden.error?.code, message: hidden.error?.message, hint: hidden.error?.hint },
+        { code: absent.error?.code, ...asIfAbsent(absent.error, BOB) },
+        'word for word',
+      );
+      assert.equal((await on.draft('+1 555 555 0102', withAccount)).code, 66, 'by number too');
+    }
+    // A status id says it cannot be drafted to before anything is looked up, hidden author or not.
+    const denied = await on.draft('15555550102@status');
+    const nobody = await on.draft('15555550199@status');
+    assert.deepEqual([denied.code, denied.error?.code], [64, 'USAGE']);
+    assert.deepEqual(denied.error?.message, nobody.error?.message);
+    // A visible chat in the index is drafted to as before.
+    assert.equal((await on.draft(ALICE)).code, 0);
+    assert.equal((await on.draft('+1 555 555 0101', false)).code, 0);
+  } finally {
+    await close();
+  }
+});
+
+test('a number denied on any account is not drafted to through another — a draft is a link to a number, not to an account', async () => {
+  const harness = await newHarness();
+  await harness.ready(ACCOUNT);
+  const business = await buildFixtureStore(join(harness.root, 'business'));
+  const added = await harness.cli(['add', 'biz/whatsapp', '--source', business.path, '--json'], {
+    env: harness.personEnv,
+  });
+  assert.equal(added.code, 0, added.stdout);
+  await harness.cli(['sync', '--account', 'biz/whatsapp'], { env: harness.personEnv });
+  const { call, close } = await connect(harness);
+  const on = surfaces(harness, call);
+  try {
+    await person(harness, 'deny', BOB);
+    const viaBiz = await on.draft(BOB, 'biz/whatsapp');
+    const absentInBiz = await on.draft(NOBODY, 'biz/whatsapp');
+    assert.equal(viaBiz.code, 66, 'refused through the other account');
+    assert.deepEqual(
+      { message: viaBiz.error?.message, hint: viaBiz.error?.hint },
+      asIfAbsent(absentInBiz.error, BOB),
+      'as a chat that is not there',
+    );
+    assert.equal((await on.draft(ALICE, 'biz/whatsapp')).code, 0, 'the others, as before');
+    assert.equal((await on.read(BOB)).code, 66);
+
+    // An allow list is its own account's: it holds for a draft that names no account, not for one that names another
+    // — even while that other account's own lists hide something.
+    await person(harness, 'clear');
+    await person(harness, 'allow', ALICE);
+    const bizDenies = await harness.cli(['deny', GROUP, '--account', 'biz/whatsapp', '--json']);
+    assert.equal(bizDenies.code, 0, bizDenies.stdout);
+    assert.equal((await on.draft(BOB, false)).code, 66, 'no account named: every account’s lists');
+    assert.equal((await on.draft(BOB, 'biz/whatsapp')).code, 0, 'the account named: its own');
+    assert.equal((await on.draft(GROUP, 'biz/whatsapp')).code, 66);
+    await harness.cli(['clear', '--account', 'biz/whatsapp']);
+    await person(harness, 'clear');
+    await person(harness, 'deny', BOB);
+
+    // A server pinned to the other account serves that account alone, and its lists.
+    const { server } = await createWhatsAppMcpServer({ env: harness.env, account: 'biz/whatsapp' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'test', version: '0' });
+    await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+    try {
+      const pinned = (await client.callTool({ name: 'whatsapp_draft', arguments: { to: BOB, text: 'hi' } })) as {
+        isError?: boolean;
+      };
+      assert.ok(!pinned.isError, 'nothing about another account reaches a pinned server');
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
   } finally {
     await close();
   }

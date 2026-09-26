@@ -27,6 +27,8 @@ session. That is the design, and it holds only as long as nobody works around it
 - A group, a chat with someone who hides their number, a broadcast list and a channel have no number a
   link can use: the draft comes back as text to paste, with the reason. A status update cannot be
   drafted to.
+- While the person's lists hide anything, a draft goes only to a chat you could read; any other is
+  `NOT_FOUND`, exactly as a hidden one is. Do not try numbers to see which are refused.
 - Opening the link on the person's screen (`draft --open`) is theirs to do, not yours: it is refused
   to an agent. A filled-in message box landing on someone's screen is one keypress from sent.
 

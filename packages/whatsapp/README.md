@@ -121,6 +121,13 @@ is one Enter away from sent.
 to paste, with the reason; so does a chat with someone who hides their number (`@lid`), a broadcast list and a channel.
 A status update is not a chat anyone writes to, and is refused.
 
+A draft cannot be used to find out which chats you hid. While your lists hide anything, a draft goes only to a chat
+an agent could read — in the index, and visible — and a hidden one is refused with the same `NOT_FOUND` as a chat that
+is not there; while they hide nothing, any number is drafted to. With no account named, every account's lists apply.
+And every account's **deny** list applies to every draft, named account or not: a draft is a link to a number, not to
+an account, so a number you denied on one is not drafted to by naming another. A pinned server consults its own
+account's lists only.
+
 **A pinned server** (`agent-whatsapp mcp --account personal/whatsapp`, which `mcp install --account` writes) acts on
 that account whether or not a call names it, refuses any other, and names no other account — not in its greeting,
 not in `whatsapp_status`. The pin follows the account through a rename.

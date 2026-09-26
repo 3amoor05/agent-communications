@@ -1,6 +1,7 @@
-import { CommsError, escapeForDisplay, isDangerous } from '@agentcomms/core';
+import { CommsError, escapeForDisplay, isCommsError, isDangerous } from '@agentcomms/core';
 import { chatRefOf, noSuchChat } from '../chat-ref.ts';
-import type { WhatsAppContext } from '../context.ts';
+import type { ResolvedAccount, WhatsAppContext } from '../context.ts';
+import { WhatsAppIndex } from '../index-db.ts';
 import type { ChatKind } from '../source/types.ts';
 import { Visibility } from '../visibility.ts';
 
@@ -114,22 +115,54 @@ export function composeDraft(request: { to: string; text: string }): DraftResult
 /**
  * The draft as both surfaces offer it: `draft` and `whatsapp_draft` call this.
  *
- * `account` names the account the chat belongs to, and its allow and deny lists decide whether an agent may draft to
- * it; a pinned server's account is named whether the call names it or not. Without one, every account's lists must
- * allow it — the draft could be meant for any of them. A chat the lists hide is refused exactly as `read` refuses a
- * chat that does not exist.
+ * **A draft cannot be used to ask which chats are hidden.** Everything that does not depend on the person's lists —
+ * the text, and whether the recipient is something a message can be written to at all — is checked first. Then, while
+ * the lists hide anything, a draft goes only to a chat an agent could read: one in the index and visible, answered
+ * word for word as `read` answers a chat that does not exist when it is not. Otherwise "not found" for a hidden number
+ * and a link for any other would say which numbers the person hid. While the lists hide nothing there is nothing to
+ * give away, and any number is drafted to, in the index or not.
+ *
+ * Which lists: the named account's — a pinned server's is named whether the call names it or not — or, with none
+ * named, every account's, since the draft could be meant for any. And on a server that is not pinned, **every
+ * account's deny list, always**: a draft is a link to a number, not to an account, so a number the person denied on
+ * one account is not drafted to by naming another. A pinned server serves its account alone and consults no other.
  */
 export async function draftMessage(
   context: WhatsAppContext,
   request: { account?: string | undefined; to: string; text: string },
 ): Promise<DraftResult> {
-  // One account when it is named, or when the server is pinned to one; otherwise every WhatsApp account's lists.
-  const names =
-    request.account !== undefined || context.pinned !== undefined ? [request.account] : await context.accountNames();
+  const draft = composeDraft({ to: request.to, text: request.text });
   const chat = chatRefOf(request.to);
-  for (const named of names) {
-    const { name, lists } = await context.account(named);
-    if (!new Visibility(lists).seesChat(chat.id)) throw noSuchChat(chat.id, name);
+  const named = request.account !== undefined || context.pinned !== undefined;
+  // Every account — or, on a pinned server, its one: `accountNames` says nothing of any other there.
+  const everyAccount = await Promise.all((await context.accountNames()).map((name) => context.account(name)));
+  const scope = named ? [await context.account(request.account)] : everyAccount;
+  // No account, no lists and no index: nothing can be hidden.
+  if (scope.length === 0) return draft;
+  const hidesAnything =
+    scope.some(({ lists }) => lists.allow.length > 0 || lists.deny.length > 0) ||
+    everyAccount.some(({ lists }) => lists.deny.length > 0);
+  if (!hidesAnything) return draft;
+
+  // One answer for hidden and for absent, naming the same account whichever it is.
+  const absent = noSuchChat(chat.id, (scope[0] as ResolvedAccount).name);
+  if (everyAccount.some(({ lists }) => !new Visibility({ allow: [], deny: lists.deny }).seesChat(chat.id)))
+    throw absent;
+  if (scope.some(({ lists }) => !new Visibility(lists).seesChat(chat.id))) throw absent;
+  for (const { name, account, lists } of scope) {
+    let index: WhatsAppIndex;
+    try {
+      index = await WhatsAppIndex.open(context.accountDir(account), name, new Visibility(lists));
+    } catch (error) {
+      // An account never synced holds no chat; named alone, it says so, which gives away nothing about the lists.
+      if (scope.length > 1 && isCommsError(error) && error.details?.reason === 'NOT_SYNCED') continue;
+      throw error;
+    }
+    try {
+      if (index.chat(chat.id)) return draft;
+    } finally {
+      index.close();
+    }
   }
-  return composeDraft({ to: request.to, text: request.text });
+  throw absent;
 }
