@@ -10,6 +10,7 @@
  */
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, relative, resolve, sep } from 'node:path';
+import { REGISTRY } from './channels.mjs';
 
 const root = process.cwd();
 const skillsRoot = resolve(root, 'skills');
@@ -324,7 +325,8 @@ const ANYWHERE = [
   new RegExp(String.raw`\binbox-(${ALIAS})\.md`, 'g'),
   // A correct download path has two segments — `…/acme/gmail/exports/…` — so a first segment followed by a
   // platform is the organisation, not a flat name.
-  new RegExp(String.raw`agent-communications/(${ALIAS})/(?!(?:gmail|slack)(?:-[a-z0-9-]+)?/)`, 'g'),
+  // The platforms are the channels' own words, from the registry, so a new channel's paths are read the same way.
+  new RegExp(String.raw`agent-communications/(${ALIAS})/(?!(?:${REGISTRY.platforms.join('|')})(?:-[a-z0-9-]+)?/)`, 'g'),
 ];
 const IN_CODE = [
   new RegExp(String.raw`\b(?:inbox|workspace) (?:add|remove|reauth|finish) (${ALIAS})(?![\w/-])`, 'g'),

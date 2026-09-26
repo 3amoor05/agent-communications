@@ -39,6 +39,7 @@ import { realpathSync } from 'node:fs';
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { REGISTRY } from './channels.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SELF = import.meta.url;
@@ -47,29 +48,19 @@ const SELF = import.meta.url;
  * Each package's two surfaces, as the drive loads them: the module a command line runs through, and the module that
  * builds the MCP server. The core's CLI exports `main(argv, env)`; the channels' export `run(argv, deps)`.
  *
- * `test/parity.test.mjs` fails when a package in `registries.mjs`'s `SURFACES` is missing here, so a new channel's
- * rows cannot go undriven.
+ * Read from the channel registry (`channels.mjs`), so a new channel's rows are driven as soon as its package declares
+ * itself. `test/parity.test.mjs` fails when a package in `registries.mjs`'s `SURFACES` is missing here, so a new
+ * channel's rows cannot go undriven.
  */
-export const DRIVERS = Object.freeze({
-  core: {
-    cli: 'packages/core/src/cli.ts',
-    run: 'main',
-    server: 'packages/core/src/mcp/server.ts',
-    factory: 'createCoreMcpServer',
-  },
-  gmail: {
-    cli: 'packages/gmail/src/cli/program.ts',
-    run: 'run',
-    server: 'packages/gmail/src/mcp/server.ts',
-    factory: 'createGmailMcpServer',
-  },
-  slack: {
-    cli: 'packages/slack/src/cli/program.ts',
-    run: 'run',
-    server: 'packages/slack/src/mcp/server.ts',
-    factory: 'createSlackMcpServer',
-  },
-});
+export const DRIVERS = Object.freeze(
+  Object.fromEntries(Object.entries(REGISTRY.drivers).map(([pkg, driver]) => [pkg, Object.freeze({ ...driver })])),
+);
+
+/**
+ * The platform an account name is made up for, when a drive has to pass one: the package's own, and for the core —
+ * which manages every channel's accounts — the first channel that has any.
+ */
+const placeholderPlatform = (pkg) => (REGISTRY.platforms.includes(pkg) ? pkg : (REGISTRY.platforms[0] ?? pkg));
 
 /** Where a package's operations live. */
 export const operationsDir = (pkg) => join(ROOT, 'packages', pkg, 'src', 'operations');
@@ -405,6 +396,22 @@ async function coreReexports(modules) {
   return names;
 }
 
+/**
+ * The function a server module builds its server with: the one the registry names (`create<Label>McpServer`), or —
+ * when the module calls it something else — the one `create…McpServer` it exports. Two, or none, is an error that
+ * says which, rather than a drive that reads no tools.
+ */
+function serverFactory(module, driver) {
+  if (typeof module[driver.factory] === 'function') return module[driver.factory];
+  const found = Object.keys(module).filter(
+    (name) => /^create\w*McpServer$/.test(name) && typeof module[name] === 'function',
+  );
+  if (found.length === 1) return module[found[0]];
+  throw new Error(
+    `${driver.server} should export ${driver.factory}${found.length > 1 ? `, and exports several servers: ${found.join(', ')}` : ''}`,
+  );
+}
+
 const MARK = 'agentcomms-parity-stand-in';
 const PACKAGES = join(ROOT, 'packages');
 
@@ -433,7 +440,7 @@ async function installHooks(modules, reexports) {
   const { registerHooks } = await import('node:module');
   const standIns = new Map([...modules].map(([url, entry]) => [url, { pkg: entry.pkg, names: entry.functions }]));
   // The MCP client is a dependency of the packages, not of the root: resolved as a package's own server resolves it.
-  const packageParent = pathToFileURL(join(ROOT, DRIVERS.gmail.server)).href;
+  const packageParent = pathToFileURL(join(ROOT, DRIVERS.core.server)).href;
   registerHooks({
     resolve(specifier, context, nextResolve) {
       if (specifier === '@napi-rs/keyring' || specifier.startsWith('@napi-rs/keyring/')) {
@@ -580,7 +587,7 @@ async function traced({ wanted, foreign }, body) {
 /** A value for an argument nobody said anything about, by its name: shaped so that guards before the call pass. */
 function placeholder(name, pkg) {
   if (/approval/i.test(name)) return PLACEHOLDER_APPROVAL;
-  if (/^(inbox|alias|workspace|account|from|to)$/i.test(name)) return `parity/${pkg === 'slack' ? 'slack' : 'gmail'}`;
+  if (/^(inbox|alias|workspace|account|from|to)$/i.test(name)) return `parity/${placeholderPlatform(pkg)}`;
   return 'parity';
 }
 
@@ -672,7 +679,7 @@ async function drive(inputPath, outputPath) {
   // Built outside any drive, so a stand-in called while a server starts runs nothing and records nothing.
   for (const [pkg, driver] of Object.entries(DRIVERS)) {
     clis[pkg] = (await import(pathToFileURL(join(ROOT, driver.cli)).href))[driver.run];
-    const factory = (await import(pathToFileURL(join(ROOT, driver.server)).href))[driver.factory];
+    const factory = serverFactory(await import(pathToFileURL(join(ROOT, driver.server)).href), driver);
     const built = await factory({ env: process.env, keyring: null, fetch: blocked, probe: blocked });
     const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: 'agentcomms-parity', version: '0' });
@@ -697,7 +704,8 @@ async function drive(inputPath, outputPath) {
         stderr: Object.assign(err, { isTTY: false }),
         stdin: Object.assign(stdin, { isTTY: false }),
       };
-      if (pkg === 'core') await clis.core(argv, process.env);
+      // The core's `main(argv, env)`; a channel's `run(argv, deps)`.
+      if (DRIVERS[pkg].run === 'main') await clis[pkg](argv, process.env);
       else {
         await clis[pkg](argv, {
           env: process.env,

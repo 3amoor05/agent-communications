@@ -12,6 +12,7 @@
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { REGISTRY, skillFamilyOf } from './channels.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const SKILLS = join(ROOT, 'skills');
@@ -22,8 +23,14 @@ const SKILLS = join(ROOT, 'skills');
  * agent following `slack-reading` was told to call `gmail_inboxes_list`, that only `gmail-send` sends, and to fall
  * back to `npx @agentcomms/gmail` when the Slack tools were missing. Choosing by prefix, and refusing a skill whose
  * prefix has no contract, means a new platform cannot inherit another's rules by default.
+ *
+ * The prefixes and their contracts are the channels' own (`skills` in each manifest, through the registry), so a
+ * skill whose prefix no channel declares has no contract at all, and is refused.
  */
-const contractFor = (name) => join(SKILLS, '_shared', `contract-${name.split('-')[0]}.md`);
+const contractFor = (name) => {
+  const family = skillFamilyOf(REGISTRY, name);
+  return family ? join(ROOT, family.contract) : null;
+};
 const README = join(ROOT, 'README.md');
 const check = process.argv.includes('--check');
 
@@ -88,9 +95,14 @@ for (const name of names) {
   rows.push(meta);
 
   // The contract, copied rather than linked: a skill is installed as a directory and a link out of it would break.
-  const contract = await readFile(contractFor(name), 'utf8').catch(() => null);
-  if (contract === null) {
-    problems.push(`skills/${name}: no contract for its platform — add ${contractFor(name).replace(ROOT, '')}`);
+  const contractPath = contractFor(name);
+  const contract = contractPath === null ? null : await readFile(contractPath, 'utf8').catch(() => null);
+  if (contractPath === null) {
+    problems.push(
+      `skills/${name}: no channel's skills start "${name.split('-')[0]}-" — name it for its channel, whose manifest says which contract it carries`,
+    );
+  } else if (contract === null) {
+    problems.push(`skills/${name}: no contract for its platform — add ${contractPath.replace(ROOT, '')}`);
   } else {
     await put(join(SKILLS, name, 'references', 'contract.md'), contract);
   }

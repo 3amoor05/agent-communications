@@ -12,10 +12,11 @@
 import { readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+// The one list of packages, read rather than copied: this script kept a copy of its own, which nothing checked.
+import { PACKAGES } from './packages.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const check = process.argv.includes('--check');
-const PACKAGES = ['core', 'gmail', 'gmail-mcp', 'slack'];
 const LICENCE_FILES = ['LICENSE', 'LICENSE.md', 'LICENCE', 'LICENCE.md', 'LICENSE.txt', 'license'];
 const problems = [];
 

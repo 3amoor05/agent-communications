@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { cp, mkdir, writeFile } from 'node:fs/promises';
+import { cp, mkdir, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +11,17 @@ const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '.
 async function fixture() {
   const root = await tempDir('verify-skills-');
   await cp(path.join(repository, 'scripts'), path.join(root, 'scripts'), { recursive: true });
+  // The scripts read which channels there are from their manifests (`scripts/channels.mjs`), so those come too, with
+  // every package they name.
+  for (const entry of await readdir(path.join(repository, 'packages'), { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const directory = entry.name;
+    await mkdir(path.join(root, 'packages', directory), { recursive: true });
+    await cp(
+      path.join(repository, 'packages', directory, 'package.json'),
+      path.join(root, 'packages', directory, 'package.json'),
+    );
+  }
   await mkdir(path.join(root, 'skills', 'valid-skill', 'references'), { recursive: true });
   await writeFile(
     path.join(root, 'skills', 'valid-skill', 'SKILL.md'),

@@ -3,6 +3,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import { extname, join, relative } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { REGISTRY } from '../scripts/channels.mjs';
 
 /**
  * Documentation that names a tool which does not exist is worse than no documentation: an agent follows it, the call
@@ -19,37 +20,12 @@ const ROOT = fileURLToPath(new URL('..', import.meta.url));
  * The products whose names are checked, each with its tool prefix and its binary.
  *
  * Gmail was the only one for a long time, and the test read `packages/gmail` by name — so when the Slack server
- * shipped eleven tools, ten of them were documented nowhere and nothing failed. A product added here is checked in
- * both directions from the start.
+ * shipped eleven tools, ten of them were documented nowhere and nothing failed. The list is the channel registry's
+ * (`scripts/channels.mjs`), so a channel is checked in both directions from the moment its package declares itself.
+ * The core server installs the others; its CLI is not Commander, and its commands are the lines of the usage table
+ * in `src/cli.ts`, which `usage` says to read.
  */
-const PRODUCTS = [
-  {
-    tool: 'gmail',
-    binary: 'agent-gmail',
-    server: 'packages/gmail/src/mcp/server.ts',
-    reference: 'docs/reference/mcp-tools.md',
-    program: 'packages/gmail/src/cli/program.ts',
-  },
-  {
-    tool: 'slack',
-    binary: 'agent-slack',
-    server: 'packages/slack/src/mcp/server.ts',
-    reference: 'docs/reference/slack-mcp-tools.md',
-    program: 'packages/slack/src/cli/program.ts',
-  },
-  /*
-   * The core server, which installs the others. Its CLI is not Commander: its commands are the lines of the usage
-   * table in `src/cli.ts`, so `usage` says to read them from there.
-   */
-  {
-    tool: 'comms',
-    binary: 'agentcomms',
-    server: 'packages/core/src/mcp/server.ts',
-    reference: 'docs/reference/core-mcp-tools.md',
-    program: 'packages/core/src/cli.ts',
-    usage: true,
-  },
-];
+const PRODUCTS = REGISTRY.products;
 
 /** Every tool a server registers. Read from the registration calls, not from a list kept beside them. */
 async function registeredTools(product) {

@@ -13,15 +13,21 @@
  * **The order is load-bearing.** A consumer installing `gmail` must find the exact `core` it pins already on the
  * registry, so a package comes after everything it depends on. That is checked, not trusted.
  *
+ * **Derived from the channels' manifests** (`scripts/channels.mjs`): every package that declares a channel, and every
+ * package a channel's server is run through, in an order computed from their dependencies. A new channel is published
+ * by being a package with the field — there is no list here to add it to, and the test above still fails when a
+ * publishable package is not in the result.
+ *
  *   node scripts/packages.mjs      # prints: core gmail gmail-mcp slack
  */
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { REGISTRY, SCOPE } from './channels.mjs';
 
-export const SCOPE = '@agentcomms';
+export { SCOPE };
 
 /** Directory names under `packages/`, which are also the unscoped package names. */
-export const PACKAGES = Object.freeze(['core', 'gmail', 'gmail-mcp', 'slack']);
+export const PACKAGES = Object.freeze([...REGISTRY.packages]);
 
 // Run directly, print the list for a shell loop. Compared through realpath because a runner's temp directory can be
 // a symlink (macOS `/tmp` → `/private/tmp`), and a plain string comparison would then print nothing — which a

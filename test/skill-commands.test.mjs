@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { REGISTRY } from '../scripts/channels.mjs';
 
 /**
  * Every command a skill or readme promises, against the CLI that exists.
@@ -73,10 +74,20 @@ async function exists(entry, binary, argv) {
   return usage.startsWith([binary, ...argv].join(' '));
 }
 
-for (const cli of [
-  { binary: 'agent-slack', entry: 'packages/slack/src/cli.ts', prefix: 'slack-', readme: 'packages/slack/README.md' },
-  { binary: 'agent-gmail', entry: 'packages/gmail/src/cli.ts', prefix: 'gmail-', readme: 'packages/gmail/README.md' },
-]) {
+/** Every channel's Commander CLI, with the prefix of its skills and its README — from the channel registry. */
+const CLIS = REGISTRY.surfaces
+  .filter((surface) => surface.cli === 'commander')
+  .map((surface) => {
+    const family = REGISTRY.skillFamilies.find((each) => each.channel === surface.package);
+    return { binary: surface.binary, entry: surface.entry, prefix: family?.prefix, readme: family?.readme };
+  });
+
+test('every channel CLI is checked here, with the skills that name it', () => {
+  assert.ok(CLIS.length >= 2, 'the registry should list the channel CLIs');
+  for (const cli of CLIS) assert.ok(cli.prefix && cli.readme, `${cli.binary} has no skills family in its manifest`);
+});
+
+for (const cli of CLIS) {
   test(`every ${cli.binary} command the skills and readme promise actually exists`, async () => {
     const dirs = (await readdir(join(ROOT, 'skills'), { withFileTypes: true }))
       .filter((entry) => entry.isDirectory() && entry.name.startsWith(cli.prefix))

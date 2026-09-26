@@ -156,8 +156,9 @@ test('a version bump reaches the Slack pin in the Gemini extension', async () =>
       'package.json',
       'scripts/sync-versions.mjs',
       // What sync-versions imports, and the list of manifests it rewrites — read, not copied out, so a package
-      // added there is carried here too.
+      // added there is carried here too. The list is derived from the channels' manifests by the registry.
       'scripts/packages.mjs',
+      'scripts/channels.mjs',
       '.claude-plugin/marketplace.json',
       'gemini-extension.json',
       'bin/agent-gmail-launch',

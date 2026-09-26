@@ -130,8 +130,15 @@ test('the release workflow reads the shared list in every loop', async () => {
   );
 });
 
-test('the local release script, sync-versions and the package verifier read the shared list', async () => {
-  for (const script of ['release.mjs', 'sync-versions.mjs', 'verify-package.mjs', 'release-ci.mjs']) {
+test('the local release script, sync-versions, the package verifier and the licence notices read the shared list', async () => {
+  // `third-party-licenses.mjs` kept a hand-written copy of its own that nothing checked; it is on this list now.
+  for (const script of [
+    'release.mjs',
+    'sync-versions.mjs',
+    'verify-package.mjs',
+    'release-ci.mjs',
+    'third-party-licenses.mjs',
+  ]) {
     const source = await readFile(join(ROOT, 'scripts', script), 'utf8');
     assert.match(source, /from '\.\/packages\.mjs'/, `scripts/${script} does not read scripts/packages.mjs`);
     assert.doesNotMatch(source, LITERAL_LIST, `scripts/${script} carries its own package list`);
@@ -293,7 +300,7 @@ test(
     assert.equal(rerun.status, 0);
     assert.deepEqual(
       rerun.calls.map((call) => /--filter @agentcomms\/([\w-]+) publish/.exec(call)?.[1]),
-      ['gmail-mcp', 'slack'],
+      PACKAGES.filter((name) => name !== 'core' && name !== 'gmail'),
     );
     assert.ok(rerun.calls.every((call) => call.startsWith('--config.pnpmfile=scripts/record-git-head.cjs ')));
 
@@ -763,6 +770,9 @@ test('an empty package list fails the run, rather than reading as everything alr
   const scratch = await tempDir('empty-list-');
   await mkdir(join(scratch, 'scripts'), { recursive: true });
   await cp(CI, join(scratch, 'scripts', 'release-ci.mjs'));
+  // The list is derived from the channels under `packages/`, so the copy reads the registry from an empty tree.
+  await cp(join(ROOT, 'scripts', 'channels.mjs'), join(scratch, 'scripts', 'channels.mjs'));
+  await mkdir(join(scratch, 'packages'), { recursive: true });
   const shared = await readFile(join(ROOT, 'scripts', 'packages.mjs'), 'utf8');
   const emptied = shared.replace(/Object\.freeze\(\[[^\]]*\]\)/, 'Object.freeze([])');
   assert.notEqual(emptied, shared, 'the list is still declared as one frozen array');

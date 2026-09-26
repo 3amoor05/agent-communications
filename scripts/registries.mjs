@@ -14,6 +14,7 @@ import { spawn } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { REGISTRY } from './channels.mjs';
 
 export const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -37,36 +38,24 @@ export const scratchEnv = (dir = join(ROOT, '.tmp-reference-config')) => ({
 /**
  * The packages with a surface of their own: a CLI, and — when that CLI has an `mcp` command that runs — a server.
  *
- * `cli` says how the command tree is read. Gmail's and Slack's CLIs are Commander programs; the core's is not, and its
+ * `cli` says how the command tree is read. A channel's CLI is a Commander program; the core's is not, and its
  * `--help` is one usage table with a line per command. `program` is the module exporting `run()`, imported directly
  * because `dist/cli.mjs` is a bin that runs on import and neither bundle re-exports `run`.
+ *
+ * Read from the channel registry (`channels.mjs`), which derives it from each channel's manifest: a new channel's
+ * surface is read the moment its package declares itself.
  */
-export const SURFACES = Object.freeze([
-  { package: 'core', binary: 'agentcomms', entry: 'packages/core/src/cli.ts', cli: 'usage' },
-  {
-    package: 'gmail',
-    binary: 'agent-gmail',
-    entry: 'packages/gmail/src/cli.ts',
-    program: 'packages/gmail/src/cli/program.ts',
-    cli: 'commander',
-  },
-  {
-    package: 'slack',
-    binary: 'agent-slack',
-    entry: 'packages/slack/src/cli.ts',
-    program: 'packages/slack/src/cli/program.ts',
-    cli: 'commander',
-  },
-]);
+export const SURFACES = Object.freeze(REGISTRY.surfaces.map((surface) => Object.freeze({ ...surface })));
 
 /**
  * Packages that publish another package's surface under a second name, and so have none of their own to read.
  *
  * `@agentcomms/gmail-mcp` is one call to `createGmailMcpServer` — the server `agent-gmail mcp` runs. A package that
  * is neither here nor in `SURFACES` fails `test/parity.test.mjs`: Slack's server once shipped with eleven tools and a
- * reference for none of them, because the generator only knew Gmail's.
+ * reference for none of them, because the generator only knew Gmail's. Derived from the channels' manifests: a
+ * channel whose `server.npxPackage` is another package of this suite is wrapped by it.
  */
-export const WRAPPERS = Object.freeze({ 'gmail-mcp': 'gmail' });
+export const WRAPPERS = Object.freeze({ ...REGISTRY.wrappers });
 
 export const surfaceOf = (name) => {
   const found = SURFACES.find((surface) => surface.package === name);

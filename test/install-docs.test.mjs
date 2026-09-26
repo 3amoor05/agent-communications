@@ -6,6 +6,8 @@ import { join, relative } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { REGISTRY } from '../scripts/channels.mjs';
+import { PACKAGES } from '../scripts/packages.mjs';
 
 /**
  * What the documents tell a person to run to register, re-register and tidy up the MCP server, against what the
@@ -39,9 +41,8 @@ async function documents() {
     ...(await markdownUnder('docs')).filter((path) => !/[/\\](?:reference|superpowers)[/\\]/.test(path)),
     ...(await markdownUnder('skills')),
     join(ROOT, 'README.md'),
-    join(ROOT, 'packages', 'gmail', 'README.md'),
-    join(ROOT, 'packages', 'gmail-mcp', 'README.md'),
-    join(ROOT, 'packages', 'slack', 'README.md'),
+    // Every published package's README, from the channel registry: a new channel's is checked from its first commit.
+    ...PACKAGES.map((name) => join(ROOT, 'packages', name, 'README.md')),
     join(ROOT, '.claude-plugin', 'marketplace.json'),
     join(ROOT, 'gemini-extension.json'),
   ];
@@ -56,18 +57,34 @@ async function documents() {
  */
 function installCommands(text) {
   const found = [];
-  const pattern =
-    /(agent-gmail|agent-slack|(?<![@\w/-])agentcomms|@agentcomms\/(?:gmail|slack|core)(?:@\S+)?) mcp install([^`|"\n]*)/g;
-  for (const [command, binary, tail] of text.matchAll(pattern)) {
+  for (const [command, binary, tail] of text.matchAll(INSTALL)) {
     const words = (tail.split('#')[0] ?? '').trim().split(/\s+/).filter(Boolean);
     found.push({
       command: command.trim(),
-      cli: binary.includes('slack') ? 'slack' : binary.includes('gmail') ? 'gmail' : 'core',
+      cli: channelOf(binary),
       flags: words.filter((word) => word.startsWith('--')),
     });
   }
   return found;
 }
+
+const escapeRegExp = (text) => text.replace(/[\\^$.*+?()[\]{}|/]/g, '\\$&');
+
+/**
+ * How each channel's `mcp install` is spelled in a document — by its binary, or by its package through `npx` — read
+ * from the channel registry, so a new channel's install commands are checked like the others'.
+ */
+const SPELLINGS = REGISTRY.channels.flatMap(({ directory, packageName, manifest }) => [
+  // Not part of a longer word or of the scope: `agentcomms` is also the start of `@agentcomms/…`.
+  { channel: directory, pattern: `(?<![@\\w-])${escapeRegExp(manifest.binary)}` },
+  { channel: directory, pattern: `${escapeRegExp(packageName)}(?:@\\S+)?` },
+]);
+const INSTALL = new RegExp(
+  `(${SPELLINGS.map((spelling) => spelling.pattern).join('|')}) mcp install([^\`|"\\n]*)`,
+  'g',
+);
+const channelOf = (spelled) =>
+  SPELLINGS.find((spelling) => new RegExp(`^(?:${spelling.pattern})$`).test(spelled))?.channel;
 
 /** The flags `mcp install --help` lists, read with a scratch home: `--help` reads no config, and must not start to. */
 async function installFlags(cli) {
@@ -88,11 +105,9 @@ async function installFlags(cli) {
 }
 
 test('every `mcp install` a document gives names a client, and passes only flags the CLI has', async () => {
-  const known = {
-    gmail: await installFlags('gmail'),
-    slack: await installFlags('slack'),
-    core: await installFlags('core'),
-  };
+  const known = Object.fromEntries(
+    await Promise.all(REGISTRY.channels.map(async ({ directory }) => [directory, await installFlags(directory)])),
+  );
   assert.ok(known.gmail.has('--client') && known.slack.has('--force'), 'the help text was not read');
   assert.ok(known.core.has('--client') && known.core.has('--approval'), 'the core usage table was not read');
 
