@@ -146,8 +146,10 @@ export async function draftMessage(
 
   // One answer for hidden and for absent, naming the same account whichever it is.
   const absent = noSuchChat(chat.id, (scope[0] as ResolvedAccount).name);
-  if (everyAccount.some(({ lists }) => !new Visibility({ allow: [], deny: lists.deny }).seesChat(chat.id)))
-    throw absent;
+  const deniedAnywhere = everyAccount.some(
+    ({ lists }) => !new Visibility({ allow: [], deny: lists.deny }).seesChat(chat.id),
+  );
+  if (deniedAnywhere) throw absent;
   if (scope.some(({ lists }) => !new Visibility(lists).seesChat(chat.id))) throw absent;
   for (const { name, account, lists } of scope) {
     let index: WhatsAppIndex;
