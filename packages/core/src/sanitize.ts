@@ -1138,9 +1138,38 @@ export interface OutboundHtmlReport {
   /** Interactive fields — input, button, select, textarea — whether or not they sit inside a form. */
   formFields: number;
   scripts: number;
+  /**
+   * Every picture or piece of media a mail client would draw, whatever its source: `data:`, `cid:` and relative as
+   * well as remote, and an `<img>` with no source at all, whose alt text a client shows in its place.
+   *
+   * None of them is in the text a preview shows. Remote ones are in `remoteResources` as well: that list is about
+   * what is fetched, this one about what is drawn, and a `data:` image is drawn without being fetched.
+   */
+  images: { where: string; url: string }[];
+  /**
+   * Markup that makes a mail client show text other than `comparableText`, or the same text in another order.
+   *
+   * `comparableText` is the HTML's text in source order, and a sender compares it with the text part. Each entry is a
+   * way for the two to agree while the recipient reads something else: a stylesheet that adds or moves text, inline
+   * CSS that does the same, bidi markup and characters that reorder it, drawings and embedded documents with text of
+   * their own, elements that show their markup as text, and table and list markup a client draws out of source order.
+   * `reason` is a phrase a refusal can quote as it is.
+   */
+  alterations: { where: string; reason: string }[];
 }
 
-const URL_ATTRIBUTES = ['href', 'src', 'action', 'background', 'poster', 'data', 'formaction', 'cite', 'longdesc'];
+const URL_ATTRIBUTES = [
+  'href',
+  'xlink:href',
+  'src',
+  'action',
+  'background',
+  'poster',
+  'data',
+  'formaction',
+  'cite',
+  'longdesc',
+];
 const AUTO_LOADING = new Set([
   'img',
   'image',
@@ -1154,17 +1183,190 @@ const AUTO_LOADING = new Set([
   'track',
   'input',
 ]);
+/** SVG elements that fetch what their `href` or `xlink:href` points at, where an HTML element's `href` is a link. */
+const SVG_LOADING = new Set(['image', 'feimage', 'use']);
+/** Elements that draw a picture or play media. Every source they have is an image, whatever its scheme. */
+const MEDIA_TAGS = new Set(['img', 'image', 'feimage', 'video', 'audio', 'source']);
+/** The attributes that give those elements something to draw. */
+const MEDIA_SOURCES = ['src', 'srcset', 'href', 'xlink:href', 'poster', 'lowsrc', 'dynsrc'];
+/** Media that shows something even with no source: an image's alt text, a player's frame. */
+const DRAWN_WITHOUT_SOURCE = new Set(['img', 'video', 'audio']);
 const FORM_FIELD_TAGS = new Set(['input', 'button', 'select', 'textarea']);
 const CSS_URL = /url\(\s*(['"]?)([^'")]+)\1\s*\)/gi;
+/** The CSS image functions that take their source as a plain string rather than inside url(). */
+const CSS_IMAGE_FUNCTION = /(?:image-set|image|cross-fade|element)\s*\(([^)]*)\)/gi;
+const CSS_IMPORT = /@import\s+(['"])(.*?)\1/gi;
 
+/**
+ * Elements whose presence alone means the recipient may read something other than the text compared.
+ *
+ * None of them has a place in a message an agent writes, and each has been, or is, a way past the text comparison:
+ * a stylesheet can add text with `::before` or fetch another with `@import`; a drawing or a formula lays out text and
+ * images of its own; an embedded document shows another page inside the message; an `<xmp>` shows its markup as text;
+ * a `<base>` sends every relative link and image somewhere the preview never named.
+ */
+const ELEMENT_ALTERATIONS: Readonly<Record<string, string>> = {
+  style: 'a <style> block, which can add, hide, move or restyle any text',
+  link: 'a <link>, which can load a stylesheet',
+  base: 'a <base>, which changes where every relative link and image points',
+  bdo: 'a <bdo>, which forces the order its text is shown in',
+  svg: 'an <svg> drawing, which places text and images of its own',
+  math: 'a <math> formula, which lays out text in an order of its own',
+  iframe: 'an <iframe>, which shows another document inside the message',
+  frame: 'a <frame>, which shows another document inside the message',
+  frameset: 'a <frameset>, which shows other documents inside the message',
+  object: 'an <object>, which shows another document inside the message',
+  embed: 'an <embed>, which shows another document inside the message',
+  applet: 'an <applet>, which shows another document inside the message',
+  portal: 'a <portal>, which shows another document inside the message',
+  fencedframe: 'a <fencedframe>, which shows another document inside the message',
+  xmp: 'an <xmp>, which shows markup as text',
+  plaintext: 'a <plaintext>, which shows markup as text',
+  listing: 'a <listing>, which shows markup as text',
+};
+
+/** What a client keeps where it is written inside each part of a table. Anything else it moves out, above the table. */
+const TABLE_CONTENT: Readonly<Record<string, ReadonlySet<string>>> = {
+  table: new Set(['caption', 'colgroup', 'col', 'thead', 'tbody', 'tfoot', 'tr', 'script', 'template', 'style']),
+  thead: new Set(['tr', 'script', 'template', 'style']),
+  tbody: new Set(['tr', 'script', 'template', 'style']),
+  tfoot: new Set(['tr', 'script', 'template', 'style']),
+  tr: new Set(['td', 'th', 'script', 'template', 'style']),
+};
+
+/**
+ * Right-to-left letters: the Hebrew, Arabic, Syriac, Thaana, N'Ko and later blocks, their presentation forms, the
+ * supplementary ranges Unicode gives a right-to-left default, and the right-to-left mark.
+ */
+const RIGHT_TO_LEFT = /[\u0590-\u08FF\u200F\uFB1D-\uFDFF\uFE70-\uFEFE]|[\u{10800}-\u{10FFF}\u{1E800}-\u{1EFFF}]/u;
+/** The bidi formatting characters: marks, embeddings, overrides and isolates. */
+const BIDI_CONTROL = /[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/u;
+
+/** Schemes a mail client resolves without the network: inline data, a part of the same message, or nothing at all. */
+const LOCAL_SCHEMES = new Set(['data', 'cid', 'mid', 'about', 'blob', 'javascript']);
+
+/**
+ * Whether a client reaches out over the network to load this.
+ *
+ * Not only http(s): `file://host/share` and `\\host\share` are opened over SMB by Outlook on Windows, which hands the
+ * reader's credentials to the host, and anything else with a scheme is something some client may try. What stays
+ * local is data carried in the message itself — `data:`, `cid:` — and a relative URL with nothing to resolve against.
+ */
 function isRemote(url: string): boolean {
-  return /^(?:https?:)?\/\//i.test(url.trim());
+  // Browsers drop tabs and newlines from a URL before reading it, so `ht&#9;tp://` is http.
+  const compact = url.trim().replace(/[\t\n\r]/g, '');
+  if (/^[\\/]{2}/.test(compact)) return true;
+  const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(compact)?.[1]?.toLowerCase();
+  return scheme !== undefined && !LOCAL_SCHEMES.has(scheme);
+}
+
+/** The URLs of a `srcset`, where a `data:` URL may itself hold a comma: a URL runs to whitespace, not to a comma. */
+function srcsetUrls(value: string): string[] {
+  const urls: string[] = [];
+  let rest = value;
+  for (;;) {
+    rest = rest.replace(/^[\s,]+/, '');
+    if (!rest) return urls;
+    const url = /^\S+/.exec(rest)?.[0] ?? '';
+    rest = rest.slice(url.length);
+    if (url.endsWith(',')) {
+      urls.push(url.replace(/,+$/, ''));
+      continue;
+    }
+    urls.push(url);
+    const next = rest.indexOf(',');
+    rest = next < 0 ? '' : rest.slice(next + 1);
+  }
+}
+
+/**
+ * Whether text holds anything a client lays out right to left. A bidi control character is not looked for here: it is
+ * reported wherever it appears, as the text is visited.
+ */
+function readsRightToLeft(text: string): boolean {
+  return RIGHT_TO_LEFT.test(text);
+}
+
+/** Properties that only add text when their value is a string or a function such as `symbols()`. */
+const STRING_DRAWING_PROPERTIES = new Set([
+  'list-style',
+  'list-style-type',
+  'quotes',
+  'text-overflow',
+  'text-emphasis',
+  'text-emphasis-style',
+  'hyphenate-character',
+]);
+
+/** What one declaration of a style attribute does to the text shown, or null when it leaves the text as written. */
+function declarationEffect(property: string, value: string): string | null {
+  switch (property) {
+    case 'content':
+      return 'adds text';
+    case 'direction':
+      return value === 'ltr' ? null : 'reorders text';
+    case 'unicode-bidi':
+      return value === 'normal' ? null : 'reorders text';
+    case 'writing-mode':
+      return value === 'horizontal-tb' ? null : 'turns the direction text runs in';
+    case 'text-orientation':
+      return value === 'mixed' ? null : 'turns the direction text runs in';
+    case 'transform':
+    case 'rotate':
+    case 'scale':
+    case 'translate':
+    case 'box-reflect':
+      return value === 'none' ? null : 'moves, turns or mirrors text';
+    case 'float':
+      return value === 'none' ? null : 'moves text out of its place';
+    case 'position':
+      return value === 'static' ? null : 'moves text out of its place';
+    case 'order':
+    case 'flex-order':
+    case 'box-ordinal-group':
+      return 'reorders text';
+    case 'flex-direction':
+    case 'flex-flow':
+    case 'flex-wrap':
+    case 'box-direction':
+      return /reverse/.test(value) ? 'reorders text' : null;
+    case 'display':
+      return /table-(?:header-group|footer-group|caption)/.test(value) ? 'moves text out of order' : null;
+    case 'caption-side':
+      return 'moves text out of order';
+    case 'text-security':
+      return 'draws shapes in place of text';
+  }
+  if (property.startsWith('offset')) return value === 'none' ? null : 'moves text out of its place';
+  if (property.startsWith('grid')) return 'places text out of order';
+  if (property.startsWith('counter-')) return 'changes the numbers a list shows';
+  if (STRING_DRAWING_PROPERTIES.has(property) && /["'(]/.test(value)) return 'adds text';
+  return null;
+}
+
+/**
+ * What a `style` attribute does to the text a recipient sees: each declaration that adds text, reorders it, moves it,
+ * or draws something in its place, as a phrase for a refusal.
+ *
+ * A style that cannot be read with confidence is reported as such. CSS escapes and comments are both read by a
+ * browser — `con\74ent` is `content`, `u\72l(` is `url(`, and a comment may sit between a property and its colon —
+ * and a string-level reading misses all of them. A message an agent writes has no use for either.
+ */
+function styleAlterations(style: string): string[] {
+  const found: string[] = [];
+  if (/\\|\/\*/.test(style)) found.push('a style attribute with CSS escapes or comments, which this check cannot read');
+  for (const [written, value] of parseStyle(style)) {
+    const effect = declarationEffect(written.replace(/^-(?:webkit|moz|ms|o)-/, ''), value);
+    if (effect) found.push(`\`${written}\` in a style attribute, which ${effect}`);
+  }
+  return found;
 }
 
 /**
  * Analyses HTML an agent is about to send. The opposite of the inbound sanitiser: it shows hidden content instead of
- * dropping it, and lists every URL and every resource a mail client would load on open, so a preview cannot look
- * clean while the HTML carries a beacon or hidden text to the recipient.
+ * dropping it, and lists every URL and every resource a mail client would load on open, every image it would draw,
+ * and everything that would make it show text other than the text compared — so a preview cannot look clean while
+ * the HTML carries a beacon, a picture, hidden text or rearranged text to the recipient.
  */
 export function analyseOutboundHtml(html: string): OutboundHtmlReport {
   const document = parseDocument(html, { decodeEntities: true, lowerCaseTags: true, lowerCaseAttributeNames: true });
@@ -1178,6 +1380,8 @@ export function analyseOutboundHtml(html: string): OutboundHtmlReport {
     forms: 0,
     formFields: 0,
     scripts: 0,
+    images: [],
+    alterations: [],
   };
   const addUrl = (where: string, url: string, autoLoads: boolean): void => {
     const trimmed = url.trim();
@@ -1186,23 +1390,92 @@ export function analyseOutboundHtml(html: string): OutboundHtmlReport {
     if (autoLoads && isRemote(trimmed)) report.remoteResources.push(trimmed);
     if (/^\s*javascript:/i.test(trimmed)) report.scripts += 1;
   };
+  const addImage = (where: string, url: string): void => {
+    report.images.push({ where, url: url.trim() });
+  };
+  const alter = (where: string, reason: string): void => {
+    report.alterations.push({ where, reason });
+  };
+  const visitImages = (node: Element, tag: string): void => {
+    const isImageInput = tag === 'input' && (node.attribs.type ?? '').trim().toLowerCase() === 'image';
+    if (MEDIA_TAGS.has(tag) || isImageInput) {
+      let sources = 0;
+      for (const name of MEDIA_SOURCES) {
+        const value = node.attribs[name];
+        if (value === undefined) continue;
+        sources += 1;
+        if (name === 'srcset') for (const url of srcsetUrls(value)) addImage(`${tag}[srcset]`, url);
+        else addImage(`${tag}[${name}]`, value);
+      }
+      if (sources === 0 && DRAWN_WITHOUT_SOURCE.has(tag)) addImage(tag, '');
+    }
+    if (node.attribs.background !== undefined) addImage(`${tag}[background]`, node.attribs.background);
+    const style = node.attribs.style;
+    if (style !== undefined) {
+      for (const match of style.matchAll(CSS_URL)) addImage(`${tag}[style]`, match[2] ?? '');
+      for (const match of style.matchAll(CSS_IMAGE_FUNCTION)) {
+        const strings = [...(match[1] ?? '').matchAll(/(['"])(.*?)\1/g)].map((string) => string[2] ?? '');
+        for (const url of strings.length > 0 ? strings : [match[0]]) {
+          addImage(`${tag}[style]`, url);
+          if (strings.length > 0) addUrl(`${tag}[style]`, url, true);
+        }
+      }
+    }
+  };
+  const visitTable = (node: Element, tag: string): void => {
+    const kept = TABLE_CONTENT[tag];
+    if (!kept) return;
+    const strays = node.children.some((child) =>
+      isText(child) ? child.data.trim() !== '' : isTag(child) && !kept.has(child.name.toLowerCase()),
+    );
+    if (strays) alter(tag, `content directly inside a <${tag}>, which a client moves above the table`);
+    if (tag !== 'table') return;
+    const parts = node.children.filter(isTag).map((child) => child.name.toLowerCase());
+    const rows = (name: string) => name === 'tbody' || name === 'tr';
+    const footer = parts.indexOf('tfoot');
+    if (footer >= 0 && parts.slice(footer + 1).some(rows)) {
+      alter('tfoot', 'a <tfoot> written before other rows, which a client shows last');
+    }
+    const header = parts.indexOf('thead');
+    if (header >= 0 && parts.slice(0, header).some((name) => rows(name) || name === 'tfoot')) {
+      alter('thead', 'a <thead> written after other rows, which a client shows first');
+    }
+    const caption = parts.indexOf('caption');
+    if (caption >= 0 && parts.slice(0, caption).some((name) => rows(name) || name === 'thead' || name === 'tfoot')) {
+      alter('caption', 'a <caption> written after rows, which a client shows first');
+    }
+  };
   const visit = (nodes: ChildNode[], hiddenAncestor: boolean): void => {
     for (const node of nodes) {
       if (isComment(node)) {
         if (node.data.trim()) report.hidden.push({ reason: 'comment', text: node.data.trim().slice(0, 500) });
         continue;
       }
+      if (isText(node)) {
+        // Stripped from both sides of the comparison as an invisible character, so the text part could read 12345678
+        // while the HTML carried an override that shows it reversed.
+        const control = BIDI_CONTROL.exec(node.data)?.[0];
+        if (control !== undefined) {
+          const code = (control.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, '0');
+          alter('text', `a bidi control character (U+${code}), which reorders text`);
+        }
+        continue;
+      }
       if (!isTag(node)) continue;
-      const tag = node.name;
+      // Lower-cased here although the parser is asked to: inside an <svg> it keeps the case written, `feImage`.
+      const tag = node.name.toLowerCase();
       if (tag === 'script') report.scripts += 1;
       if (tag === 'form') report.forms += 1;
       else if (FORM_FIELD_TAGS.has(tag)) report.formFields += 1;
+      const element = ELEMENT_ALTERATIONS[tag];
+      if (element !== undefined) alter(tag, element);
       if (tag === 'style') {
         const css = node.children
           .filter(isText)
           .map((t) => t.data)
           .join('');
         for (const match of css.matchAll(CSS_URL)) addUrl('style block', match[2] ?? '', true);
+        for (const match of css.matchAll(CSS_IMPORT)) addUrl('style block', match[2] ?? '', true);
         continue;
       }
       for (const [name, value] of Object.entries(node.attribs)) {
@@ -1212,15 +1485,40 @@ export function analyseOutboundHtml(html: string): OutboundHtmlReport {
             name === 'background' ||
             (name === 'src' && AUTO_LOADING.has(tag)) ||
             (name === 'data' && tag === 'object') ||
-            name === 'poster';
+            name === 'poster' ||
+            ((name === 'href' || name === 'xlink:href') && SVG_LOADING.has(tag));
           addUrl(`${tag}[${name}]`, value, autoLoads || (tag === 'link' && name === 'href'));
         }
         if (name === 'srcset') {
-          for (const candidate of value.split(','))
-            addUrl(`${tag}[srcset]`, candidate.trim().split(/\s+/)[0] ?? '', true);
+          for (const url of srcsetUrls(value)) addUrl(`${tag}[srcset]`, url, true);
         }
-        if (name === 'style')
+        if (name === 'style') {
           for (const match of value.matchAll(CSS_URL)) addUrl(`${tag}[style]`, match[2] ?? '', true);
+          for (const reason of styleAlterations(value)) alter(`${tag}[style]`, reason);
+        }
+      }
+      visitImages(node, tag);
+      visitTable(node, tag);
+      // Bidi. `dir="ltr"` is the direction every message already has, and `auto` or `<bdi>` settle on it when their
+      // text holds nothing right-to-left; anything else can show the text in an order the preview does not.
+      const dir = node.attribs.dir?.trim().toLowerCase();
+      if (dir === 'rtl') alter(`${tag}[dir]`, 'dir="rtl", which reorders text');
+      else if (dir !== undefined && dir !== 'ltr' && readsRightToLeft(textOfNode(node))) {
+        alter(`${tag}[dir]`, 'a dir attribute around right-to-left text, which can reorder it');
+      }
+      if (tag === 'bdi' && readsRightToLeft(textOfNode(node))) {
+        alter('bdi', 'a <bdi> around right-to-left text, which can reorder it');
+      }
+      // Lists. The text conversion numbers from `start` in the list's own `type`, as a client does; these three it
+      // does not follow, so the text part would show different numbers from the ones the recipient reads.
+      if (tag === 'ol' && 'reversed' in node.attribs) {
+        alter('ol[reversed]', 'a reversed list, which a client numbers the other way round');
+      }
+      if (tag === 'li' && 'value' in node.attribs) {
+        alter('li[value]', 'a list item with a number of its own, which the text does not show');
+      }
+      if (tag === 'li' && 'type' in node.attribs) {
+        alter('li[type]', 'a list item with a numbering of its own, which the text does not show');
       }
       let hidden = hiddenAncestor;
       if (!hiddenAncestor && (isHiddenElement(node, rules) || DROP_TAGS.has(tag))) {
