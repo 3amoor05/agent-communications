@@ -1,0 +1,5 @@
+{
+  "kind": "requestOnly",
+  "group": "communications",
+  "useWhen": "Send email through Resend: prepare it, show the person the whole preview, and send it once they approve — then check what happened, and see or cancel what is scheduled."
+}
