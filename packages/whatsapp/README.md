@@ -44,7 +44,8 @@ other WhatsApp server it finds registered.
 - **macOS will ask for permission to read WhatsApp's data**, for the app this runs in — below. If you grant **Full
   Disk Access** instead, you grant it to your whole terminal or MCP client, which is far broader than WhatsApp.
 - **An agent reads other people's messages to you.** Hide chats with `deny`, or allow only some with `allow`.
-  Groups are visible unless you hide them, and a person you have denied is still visible in a group you have not.
+  Groups are visible unless you hide them, and a person you have denied is still visible in a group you have not:
+  to keep a group from agents, deny the group.
 - **Messages are untrusted.** Anyone with your number can send text meant for the agent. Every message, name and
   file name reaches it inside the untrusted-content envelope, with invisible and bidirectional characters removed
   and counted; the residual risk is a model following an instruction anyway — which is why sending stays with you.
@@ -145,9 +146,19 @@ Each account can carry two lists, by chat id or phone number:
 - **allow** — once anything is on it, the only chats an agent sees. Denied wins over allowed.
 
 A phone number names a person rather than one chat: their one-to-one chat, their own status posts and, in the status
-feed, the posts they wrote. A group is a chat — denying someone does not take what they wrote out of a group an agent
-may see. The lists apply at once to every read on both surfaces, and `sync` applies them too, leaving what they hide
-out of the index. `status` reports how many chats each list holds, never which.
+feed, the posts they wrote. A status post is checked against its author, so it needs one: a post WhatsApp recorded no
+author for could be anyone's, including someone you denied, so while either list has anything on it, such a post is
+hidden, and `status` says how many (`unattributedStatus`). Your own posts are always shown. An author WhatsApp recorded
+under a hidden-number id (`…@lid`) is matched by that id, not by their number: deny the id as well.
+
+A group is a chat, allowed or denied whole: denying someone does not take what they wrote out of a group an agent may
+see, whether or not WhatsApp recorded them as the author. That is a decision, not an oversight. Hiding one person's
+lines would leave the others' replies and quotes describing them; a member can appear under a hidden-number id their
+number does not match; and a group on the allow list would lose everyone who is not on it too. To keep a group from
+agents, deny the group.
+
+The lists apply at once to every read on both surfaces, and `sync` applies them too, leaving what they hide out of
+the index. `status` reports how many chats each list holds, never which.
 
 The lists are kept in `whatsapp-chats.json` beside `config.json`, by account id — not in `config.json`. Everything in
 that file is kept through every write, but only a few settings are *judged* when a write loosens something, and a

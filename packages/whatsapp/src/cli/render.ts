@@ -56,6 +56,9 @@ export function renderStatus(result: StatusResult, color: boolean): string {
       lines.push(
         `  index   ${account.index.chats} chats, ${account.index.messages} messages, ${account.index.media} with media, ${account.index.statusChats} status-update chat(s) · synced ${account.index.indexedAt}`,
       );
+      if (account.index.unattributedStatus > 0) {
+        lines.push(`          ${unattributed(account.index.unattributedStatus)}`);
+      }
       for (const entry of account.index.degraded) {
         lines.push(paint(color, 'dim', `          without ${entry.part}: ${entry.costs}`));
       }
@@ -81,8 +84,14 @@ export function renderSync(result: SyncResult, color: boolean): string {
       `Copied ${result.copied.join(' and ')} (attempt ${result.snapshot.attempts}); the copy is deleted. WhatsApp's files were only read.`,
     ),
   ];
+  if (result.unattributedStatus > 0) lines.push(paint(color, 'dim', unattributed(result.unattributedStatus)));
   for (const entry of result.degraded) lines.push(paint(color, 'yellow', `Without ${entry.part}: ${entry.costs}.`));
   return lines.join('\n');
+}
+
+/** Status updates the lists hid because nobody could be named as their author. */
+function unattributed(count: number): string {
+  return `${count} status update(s) hidden: WhatsApp recorded no author for them, and while the lists hide anyone, a post that could be theirs is not shown.`;
 }
 
 export function renderChatLists(result: ChatListsResult, color: boolean): string {

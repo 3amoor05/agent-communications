@@ -41,6 +41,11 @@ export interface AccountStatus {
         statusChats: number;
         messages: number;
         media: number;
+        /**
+         * Status updates hidden because WhatsApp recorded no author for them and the lists hide someone: such a post
+         * could be anyone's. A count, never which.
+         */
+        unattributedStatus: number;
         degraded: { part: string; costs: string }[];
       };
 }
@@ -104,6 +109,7 @@ async function statusOf(context: WhatsAppContext, named: string, check: boolean)
         statusChats: stats.statusChats,
         messages: stats.messages,
         media: stats.media,
+        unattributedStatus: stats.unattributedStatus,
         degraded: stats.degraded,
       };
     } finally {

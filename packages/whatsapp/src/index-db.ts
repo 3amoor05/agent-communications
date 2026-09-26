@@ -79,6 +79,12 @@ export interface IndexStats {
   statusChats: number;
   messages: number;
   media: number;
+  /**
+   * Status updates someone else posted with no author the lists can be checked against, hidden because the lists hide
+   * someone (`Visibility.unattributed`). A count, never which: the sync's, left out of the index, and those the index
+   * holds that the lists hide now.
+   */
+  unattributedStatus: number;
   degraded: { part: string; costs: string }[];
   copied: string[];
 }
@@ -141,6 +147,8 @@ export async function rebuildIndex(
     const insertText = db.prepare('INSERT INTO messages_fts (rowid, body, sender, chat, media) VALUES (?, ?, ?, ?, ?)');
     let messages = 0;
     let media = 0;
+    // By chat, so a count is reported only while its chat may be seen.
+    const unattributed: Record<string, number> = {};
     for (const message of readMessages(snapshot, report)) {
       const chat = byPk.get(message.chatPk);
       if (!chat) continue;
@@ -163,7 +171,12 @@ export async function rebuildIndex(
           senderName = oneToOne ? (chat.name ?? pushed) : pushed;
         }
       }
-      if (!visibility.seesMessage(chat.id, chat.kind, senderJid)) continue;
+      if (!visibility.seesMessage(chat.id, chat.kind, senderJid, message.fromMe)) {
+        if (visibility.unattributed(chat.id, chat.kind, senderJid, message.fromMe)) {
+          unattributed[chat.id] = (unattributed[chat.id] ?? 0) + 1;
+        }
+        continue;
+      }
       const result = insertMessage.run(
         message.pk,
         chat.id,
@@ -202,6 +215,7 @@ export async function rebuildIndex(
     setMeta.run('indexedAt', info.indexedAt);
     setMeta.run('degraded', JSON.stringify(degraded));
     setMeta.run('copied', JSON.stringify(info.copied));
+    setMeta.run('unattributed', JSON.stringify(unattributed));
     db.exec('COMMIT');
     const statusChats = [...byPk.values()].filter((chat) => chat.kind === 'status').length;
     stats = {
@@ -210,6 +224,7 @@ export async function rebuildIndex(
       statusChats,
       messages,
       media,
+      unattributedStatus: Object.values(unattributed).reduce((sum, n) => sum + n, 0),
       degraded,
       copied: [...info.copied],
     };
@@ -266,8 +281,13 @@ export class WhatsAppIndex {
     }
     // The lists, as SQL can ask them: every query below filters with these, so none can forget to.
     db.function('agent_sees_chat', { deterministic: true }, (id) => (visibility.seesChat(String(id)) ? 1 : 0));
-    db.function('agent_sees_message', { deterministic: true }, (chatId, kind, sender) =>
-      visibility.seesMessage(String(chatId), String(kind), typeof sender === 'string' ? sender : null) ? 1 : 0,
+    const row = (chatId: unknown, kind: unknown, sender: unknown, fromMe: unknown) =>
+      [String(chatId), String(kind), typeof sender === 'string' ? sender : null, Number(fromMe) === 1] as const;
+    db.function('agent_sees_message', { deterministic: true }, (chatId, kind, sender, fromMe) =>
+      visibility.seesMessage(...row(chatId, kind, sender, fromMe)) ? 1 : 0,
+    );
+    db.function('agent_unattributed', { deterministic: true }, (chatId, kind, sender, fromMe) =>
+      visibility.unattributed(...row(chatId, kind, sender, fromMe)) ? 1 : 0,
     );
     return new WhatsAppIndex(db);
   }
@@ -290,6 +310,16 @@ export class WhatsAppIndex {
       statusChats: count("SELECT COUNT(*) AS n FROM chats WHERE kind = 'status' AND agent_sees_chat(id)"),
       messages: count(`SELECT COUNT(*) AS n ${MESSAGES_SEEN}`),
       media: count(`SELECT COUNT(*) AS n ${MESSAGES_SEEN} AND m.has_media = 1`),
+      unattributedStatus:
+        count(
+          `SELECT COALESCE(SUM(j.value), 0) AS n
+           FROM json_each((SELECT value FROM meta WHERE key = 'unattributed' AND json_valid(value))) j
+           WHERE agent_sees_chat(j.key)`,
+        ) +
+        count(
+          `SELECT COUNT(*) AS n FROM messages m JOIN chats c ON c.id = m.chat_id
+           WHERE agent_sees_chat(c.id) AND ${UNATTRIBUTED} AND NOT ${SEES_MESSAGE}`,
+        ),
       degraded: JSON.parse(meta.get('degraded') ?? '[]'),
       copied: JSON.parse(meta.get('copied') ?? '[]'),
     };
@@ -379,7 +409,10 @@ export class WhatsAppIndex {
 }
 
 /** Whether the account's lists let an agent see `m`, in chat `c`. */
-const SEES_MESSAGE = 'agent_sees_message(m.chat_id, c.kind, m.sender_jid)';
+const SEES_MESSAGE = 'agent_sees_message(m.chat_id, c.kind, m.sender_jid, m.from_me)';
+
+/** Whether `m` is a status post by someone else whose author is unknown. */
+const UNATTRIBUTED = 'agent_unattributed(m.chat_id, c.kind, m.sender_jid, m.from_me)';
 
 /** Every message the lists let an agent see, for counting. */
 const MESSAGES_SEEN = `FROM messages m JOIN chats c ON c.id = m.chat_id WHERE ${SEES_MESSAGE}`;
