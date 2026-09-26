@@ -25,7 +25,7 @@ import { openDatabase } from './sqlite.ts';
  */
 
 export const INDEX_FILE = 'index.sqlite';
-export const INDEX_FORMAT = 1;
+export const INDEX_FORMAT = 2;
 
 export function accountStateDir(stateDir: string, accountId: string): string {
   return join(stateDir, 'whatsapp', accountId);

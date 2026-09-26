@@ -28,8 +28,12 @@ test('sync indexes every chat and message, groups and hidden-number chats includ
   assert.equal(synced.code, 0, synced.stdout);
   const data = synced.data() as Record<string, unknown>;
   assert.equal(data.chats, 6);
-  assert.equal(data.messages, 17);
-  assert.equal(data.media, 4, 'a document, a photo, a voice note and a hostile file name');
+  assert.equal(data.messages, 21);
+  assert.equal(
+    data.media,
+    6,
+    'a document, a photo, a voice note, a hostile file name, a type no source names and an undownloaded video',
+  );
   assert.deepEqual(data.copied, ['ChatStorage.sqlite']);
 });
 
@@ -166,6 +170,50 @@ test('media is listed by type, size and name only — never a path, never the fi
   const everything = JSON.stringify(read.json());
   assert.doesNotMatch(everything, /Media\//, 'no local path, so nothing points into the container');
   assert.doesNotMatch(everything, /ZMEDIALOCALPATH|Group Containers/);
+});
+
+test('media only where there is media: a text reply and a call keep their empty media rows to themselves', async () => {
+  const harness = await ready();
+  const read = await harness.cli(['read', HIDDEN, '--account', ACCOUNT, '--json']);
+  assert.equal(read.code, 0, read.stdout);
+  const byId = new Map((read.data().messages as MessageView[]).map((message) => [message.id, message]));
+
+  const reply = byId.get('18') as MessageView;
+  assert.equal(reply.kind, 'text');
+  assert.equal(reply.media, null, 'a reply’s row holds the quoted message, not media');
+  assert.equal(text(reply.content), 'Thanks, got it.');
+
+  const call = byId.get('19') as MessageView;
+  assert.equal(call.kind, 'call', 'a call is a call event');
+  assert.equal(call.media, null, 'not media, whatever row it has');
+  assert.equal(call.content, null);
+
+  const unnamed = byId.get('20') as MessageView;
+  assert.equal(unnamed.kind, 'unknown:20');
+  assert.deepEqual(
+    { type: unnamed.media?.type, mime: unnamed.media?.mime, size: unnamed.media?.size },
+    { type: 'unknown:20', mime: 'image/jpeg', size: 30000 },
+    'a type no source names is media when its row names a stored file',
+  );
+  assert.equal(text(unnamed.media?.name), '12000000-0000-4000-8000-000000000020.jpg');
+
+  const pending = byId.get('21') as MessageView;
+  assert.deepEqual(
+    pending.media && { type: pending.media.type, mime: pending.media.mime, size: pending.media.size },
+    { type: 'video', mime: 'video/mp4', size: 5242880 },
+    'a video not yet downloaded has no file, and is a video all the same',
+  );
+  assert.equal(pending.media?.name, null);
+
+  const human = (await harness.cli(['read', HIDDEN, '--account', ACCOUNT])).stdout;
+  assert.doesNotMatch(human, /\[(?:text|call)\b/, 'no media line for a text message or a call');
+  assert.doesNotMatch(human, /\b0 B\b/);
+  assert.match(human, /#19 {2}call\n/, 'the call shows as a call');
+  assert.match(human, /\[video video\/mp4, 5\.0 MB — not downloaded\]/);
+
+  const status = (await harness.cli(['status', '--account', ACCOUNT, '--no-check', '--json'])).data();
+  assert.equal((status.accounts as { index: { media: number } }[])[0]?.index.media, 6, 'only real media is counted');
+  assert.match((await harness.cli(['status', '--no-check'])).stdout, /21 messages, 6 with media/);
 });
 
 test('a read before any sync says to sync first', async () => {

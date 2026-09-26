@@ -97,6 +97,26 @@ export function readPushNames(db: DatabaseSync, report: SchemaReport): Map<strin
 
 const MIME = /^[a-z]+\/[a-z0-9][a-z0-9.+-]{0,99}$/i;
 
+/**
+ * Whether a message carries media — never merely because it has a `ZWAMEDIAITEM` row.
+ *
+ * WhatsApp keeps a media item row for far more than media: the same row holds a reply's quoted message in
+ * `ZMETADATA` ([K] reads replies from it; [I] counts 1,350 such rows across its test images), and a real store had one
+ * on most text messages and on every call, with no media type, no size and no file. So the row's existence says
+ * nothing. What the sources treat as media:
+ *
+ * - [K] exports a media item only `WHERE ZMEDIALOCALPATH IS NOT NULL`, and [I] shows an attachment only when
+ *   `ZMEDIALOCALPATH` is set: a row that names a stored file is media, whatever the message's type.
+ * - [F] and [W] name the media types (`MEDIA_KINDS`): a photo not yet downloaded has no file, and is a photo all the
+ *   same — listed with whatever size and type its row has.
+ *
+ * A message is media when either holds, and otherwise not: a text message, a call or a location with an empty row
+ * shows no media line and is not counted as media.
+ */
+export function carriesMedia(kind: MessageKind, storedPath: string | null): boolean {
+  return MEDIA_KINDS.has(kind) || (storedPath !== null && storedPath.trim() !== '');
+}
+
 export function* readMessages(db: DatabaseSync, report: SchemaReport): Generator<SourceMessage> {
   const members = has(report, 'ZWAGROUPMEMBER');
   const media = has(report, 'ZWAMEDIAITEM');
@@ -109,7 +129,6 @@ export function* readMessages(db: DatabaseSync, report: SchemaReport): Generator
            ${column(report, 'm', 'ZWAMESSAGE', 'ZGROUPEVENTTYPE')} AS groupEvent,
            ${members ? 'gm.ZMEMBERJID' : 'NULL'} AS memberJid,
            ${memberName} AS memberName,
-           ${media ? 'mi.ZMESSAGE' : 'NULL'} AS mediaRow,
            ${column(report, 'mi', 'ZWAMEDIAITEM', 'ZVCARDSTRING')} AS mediaMime,
            ${column(report, 'mi', 'ZWAMEDIAITEM', 'ZFILESIZE')} AS mediaSize,
            ${column(report, 'mi', 'ZWAMEDIAITEM', 'ZTITLE')} AS mediaTitle,
@@ -126,9 +145,9 @@ export function* readMessages(db: DatabaseSync, report: SchemaReport): Generator
     const typeCode = numeric(row.type);
     const { kind, viewOnce } = kindOf(typeCode);
     const atSeconds = numeric(row.at);
-    const hasMedia = row.mediaRow !== null && row.mediaRow !== undefined;
     const mime = text(row.mediaMime);
     const path = text(row.mediaPath);
+    const hasMedia = carriesMedia(kind, path);
     yield {
       pk,
       chatPk,
@@ -144,16 +163,15 @@ export function* readMessages(db: DatabaseSync, report: SchemaReport): Generator
       fromJid: text(row.fromJid),
       memberJid: text(row.memberJid),
       memberName: text(row.memberName),
-      media:
-        hasMedia || MEDIA_KINDS.has(kind)
-          ? {
-              // A contact card keeps the vCard itself in this column; only a MIME type is ever passed on.
-              mime: kind !== 'contact' && mime !== null && MIME.test(mime) ? mime.toLowerCase() : null,
-              size: numeric(row.mediaSize),
-              title: text(row.mediaTitle),
-              fileName: path === null ? null : (path.split('/').pop() ?? null) || null,
-            }
-          : null,
+      media: hasMedia
+        ? {
+            // A contact card keeps the vCard itself in this column; only a MIME type is ever passed on.
+            mime: kind !== 'contact' && mime !== null && MIME.test(mime) ? mime.toLowerCase() : null,
+            size: numeric(row.mediaSize),
+            title: text(row.mediaTitle),
+            fileName: path === null ? null : (path.split('/').pop() ?? null) || null,
+          }
+        : null,
     };
   }
 }

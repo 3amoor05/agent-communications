@@ -149,19 +149,18 @@ export class Presenter {
       const { domain, flags } = analyseLink(match[0], match[0]);
       return { domain, flags };
     });
+    const kind = message.kind === 'unknown' && message.typeCode !== null ? `unknown:${message.typeCode}` : message.kind;
     return {
       id: message.id,
       chatId: message.chatId,
       at: message.at,
       fromMe: message.fromMe,
-      kind: message.kind === 'unknown' && message.typeCode !== null ? `unknown:${message.typeCode}` : message.kind,
+      kind,
       viewOnce: message.viewOnce,
       ...(message.groupEvent === null || message.groupEvent === 0 ? {} : { groupEvent: message.groupEvent }),
       sender: message.fromMe ? null : { jid: message.senderJid, name: senderName },
       content,
-      media: message.media
-        ? { type: message.kind, mime: message.media.mime, size: message.media.size, name: mediaName }
-        : null,
+      media: message.media ? { type: kind, mime: message.media.mime, size: message.media.size, name: mediaName } : null,
       links,
       hidden: merge(content?.hidden, senderName?.hidden, mediaName?.hidden),
       tokensNeutralised:

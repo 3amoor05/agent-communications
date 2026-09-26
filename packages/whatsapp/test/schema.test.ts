@@ -102,3 +102,21 @@ test('a store without the optional tables still syncs, and says what it is doing
   const accounts = status.data().accounts as { index: { degraded: unknown[] } }[];
   assert.equal(accounts[0]?.index.degraded.length, 3);
 });
+
+test('an index an earlier reader built, under older rules, is refused until the next sync', async () => {
+  const harness = await newHarness();
+  await harness.ready();
+  const config = JSON.parse(
+    readFileSync(join(harness.env.AGENT_COMMS_CONFIG_DIR as string, 'whatsapp-spike.json'), 'utf8'),
+  ) as { accounts: Record<string, { id: string }> };
+  const id = Object.values(config.accounts)[0]?.id as string;
+  const index = await openDatabase(join(harness.env.AGENT_COMMS_STATE_DIR as string, 'whatsapp', id, 'index.sqlite'));
+  index.exec("UPDATE meta SET value = '1' WHERE key = 'format'");
+  index.close();
+
+  const stale = await harness.cli(['chats', '--account', 'acme/whatsapp', '--json']);
+  assert.equal(stale.code, 78, stale.stdout);
+  assert.match(String(stale.json().error?.hint), /agent-whatsapp sync --account acme\/whatsapp/);
+  assert.equal((await harness.cli(['sync', '--account', 'acme/whatsapp'])).code, 0);
+  assert.equal((await harness.cli(['chats', '--account', 'acme/whatsapp', '--json'])).code, 0);
+});

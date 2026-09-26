@@ -75,6 +75,15 @@ The macOS app is the iOS app built for the Mac, which is why the iOS readers app
 itself. Facts were taken from these projects, not code. Where the sources say nothing — most `ZMESSAGETYPE` numbers
 — the reader reports `unknown:<n>` rather than guess.
 
+**What counts as media.** WhatsApp keeps a `ZWAMEDIAITEM` row for much more than media: a reply's quoted message lives
+in it (KnugiHK reads replies from its `ZMETADATA`; iLEAPP counts 1,350 such rows), and the first run against a real
+store found one on most text messages and on every call, with no type, no size and no file. So a row alone is not
+media. A message is media when its type is one ForensicWace and wa-explorer name as media — a photo not yet downloaded
+has no file and is still a photo — or when its row names a stored file (`ZMEDIALOCALPATH`, the test KnugiHK and
+iLEAPP use). Anything else — text, a call, a location — shows no media line and is not counted as media. A call is
+shown as a call, without a duration: both KnugiHK and iLEAPP read call durations from `CallHistory.sqlite`, a separate
+file this reader never opens.
+
 ## macOS permission
 
 macOS protects other apps' data. On recent versions (reported for group containers from macOS 15.2), the first
