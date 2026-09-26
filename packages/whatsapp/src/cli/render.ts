@@ -14,7 +14,8 @@ import { innerText, type MessageView, type UntrustedField } from '../present.ts'
 
 function name(field: UntrustedField | null, fallback: string, width = 32): string {
   const text = innerText(field);
-  return text === '' ? fallback : truncateDisplay(text, width);
+  // The fallback is an id — from WhatsApp's store, so escaped too, whatever the sync let through.
+  return text === '' ? escapeForDisplay(fallback) : truncateDisplay(text, width);
 }
 
 function size(bytes: number | null): string {
@@ -121,7 +122,7 @@ export function renderChats(result: ChatsResult, color: boolean): string {
     lines.push(
       `${name(chat.name, chat.phone ? `+${chat.phone}` : chat.id, 34).padEnd(34)} ${chat.kind.padEnd(13)} ${String(chat.messages).padStart(6)}  ${chat.lastMessageAt ?? ''}`,
     );
-    lines.push(paint(color, 'dim', `  ${chat.id}`));
+    lines.push(paint(color, 'dim', `  ${escapeForDisplay(chat.id)}`));
   }
   if (!result.complete) lines.push('', paint(color, 'dim', 'More chats remain: ask for a larger --limit.'));
   lines.push(paint(color, 'dim', `As of the last sync, ${result.indexedAt}.`));

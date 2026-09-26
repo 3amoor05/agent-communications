@@ -3,6 +3,7 @@ import { chmod, rename, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { CommsError, DIR_MODE, ensurePrivateDir, FILE_MODE, isGroupOrWorldAccessible } from '@agentcomms/core';
+import { CHAT_ID } from './chat-ref.ts';
 import { readChats, readMessages, readPushNames } from './source/read-source.ts';
 import type { SchemaReport } from './source/schema.ts';
 import type { ChatKind } from './source/types.ts';
@@ -137,7 +138,13 @@ export async function rebuildIndex(
     const insertChat = db.prepare(
       'INSERT OR IGNORE INTO chats (id, source_pk, kind, name, last_message_at) VALUES (?, ?, ?, ?, ?)',
     );
+    let malformed = 0;
     for (const chat of chats) {
+      // An id is a key everywhere after this, and printed as it is: one not in WhatsApp's own form is left out.
+      if (!CHAT_ID.test(chat.jid)) {
+        malformed += 1;
+        continue;
+      }
       if (!visibility.seesChat(chat.jid)) continue;
       // A one-to-one chat with no saved name shows the name the person chose for themselves, as WhatsApp does.
       const name = chat.name ?? (chat.kind === 'group' ? null : (pushNames.get(chat.jid) ?? null));
@@ -160,9 +167,12 @@ export async function rebuildIndex(
       let senderJid: string | null = null;
       let senderName: string | null = null;
       if (!message.fromMe) {
-        if (message.memberJid) {
-          senderJid = message.memberJid;
-          senderName = message.memberName ?? pushNames.get(message.memberJid) ?? null;
+        // A sender id not in WhatsApp's form names nobody: the message is kept, from no one that can be named.
+        const memberJid = message.memberJid !== null && CHAT_ID.test(message.memberJid) ? message.memberJid : null;
+        const fromJid = message.fromJid !== null && CHAT_ID.test(message.fromJid) ? message.fromJid : null;
+        if (memberJid) {
+          senderJid = memberJid;
+          senderName = message.memberName ?? pushNames.get(memberJid) ?? null;
         } else {
           /*
            * In a one-to-one chat the other person is the chat, and its name is theirs. Anywhere else — a group
@@ -170,7 +180,7 @@ export async function rebuildIndex(
            * is never lent to the sender; and a `ZFROMJID` that is the chat's own id names no person at all.
            */
           const oneToOne = chat.kind === 'direct' || chat.kind === 'hidden-number';
-          const from = message.fromJid && message.fromJid !== chat.id ? message.fromJid : null;
+          const from = fromJid && fromJid !== chat.id ? fromJid : null;
           senderJid = from ?? (oneToOne ? chat.id : null);
           const pushed = senderJid ? (pushNames.get(senderJid) ?? null) : null;
           senderName = oneToOne ? (chat.name ?? pushed) : pushed;
@@ -215,6 +225,12 @@ export async function rebuildIndex(
     }
     db.exec('UPDATE chats SET message_count = (SELECT COUNT(*) FROM messages WHERE messages.chat_id = chats.id)');
     const degraded = report.degraded.map((entry) => ({ ...entry }));
+    if (malformed > 0) {
+      degraded.push({
+        part: 'well-formed chat ids',
+        costs: `${malformed} chat(s) whose id in WhatsApp's store is not in WhatsApp's form were left out, with their messages`,
+      });
+    }
     const setMeta = db.prepare('INSERT INTO meta (key, value) VALUES (?, ?)');
     setMeta.run('format', String(INDEX_FORMAT));
     setMeta.run('indexedAt', info.indexedAt);

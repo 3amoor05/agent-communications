@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { UNTRUSTED_TAG } from '@agentcomms/core';
+import { renderChats } from '../src/cli/render.ts';
 import type { ChatView, MessageView, UntrustedField } from '../src/present.ts';
-import { ALICE, HOSTILE, HOSTILE_GROUP } from './support/fixture.ts';
-import { newHarness } from './support/harness.ts';
+import { ALICE, addMessages, addRows, type Fixture, HOSTILE, HOSTILE_GROUP, message } from './support/fixture.ts';
+import { type CliRun, newHarness } from './support/harness.ts';
 
 /**
  * Everything a contact controls reaches a model only inside core's untrusted-content envelope: message text, a
@@ -117,4 +118,65 @@ test('links in a body are reported by domain with core’s flags, and never outs
     { domain: 'bit.ly', flags: ['shortener'] },
   ]);
   assert.equal(message.kind, 'link');
+});
+
+test('an id from the store that is not in WhatsApp’s form never reaches output: its chat is left out and said to be, a sender’s is dropped', async () => {
+  const ESC = '\u001b';
+  const harness = await newHarness();
+  const fixture = harness.fixture as Fixture;
+  await addRows(fixture, 'ZWACHATSESSION', [
+    { Z_PK: 20, ZCONTACTJID: `1203630000000009${ESC}[2J@g.us`, ZPARTNERNAME: null, ZSESSIONTYPE: 1 },
+    { Z_PK: 21, ZCONTACTJID: '120363000000000021@g.us', ZPARTNERNAME: null, ZSESSIONTYPE: 1 },
+  ]);
+  await addRows(fixture, 'ZWAGROUPMEMBER', [
+    { Z_PK: 30, ZCHATSESSION: 21, ZMEMBERJID: `1555${ESC}]52;c;eA==@s.whatsapp.net` },
+  ]);
+  await addMessages(fixture, [
+    message(40, 20, 800000500, 0, 'weirdly addressed'),
+    message(41, 21, 800000501, 0, 'oddly sent', { ZGROUPMEMBER: 30 }),
+    message(42, 21, 800000502, 0, 'oddly from', { ZFROMJID: `x${ESC}[1A@s.whatsapp.net` }),
+  ]);
+  await harness.ready(ACCOUNT);
+  const again = await harness.cli(['sync', '--account', ACCOUNT, '--json']);
+  const degraded = again.data().degraded as { part: string; costs: string }[];
+  assert.ok(
+    degraded.some((entry) => /chat ids/.test(entry.part) && /1 chat/.test(entry.costs)),
+    JSON.stringify(degraded),
+  );
+  assert.match((await harness.cli(['sync', '--account', ACCOUNT])).stdout, /1 chat\(s\) .*left out/);
+
+  const everything = [
+    await harness.cli(['chats', '--account', ACCOUNT, '--limit', '500', '--json']),
+    await harness.cli(['chats', '--account', ACCOUNT, '--limit', '500']),
+    await harness.cli(['read', '120363000000000021@g.us', '--account', ACCOUNT, '--json']),
+    await harness.cli(['read', '120363000000000021@g.us', '--account', ACCOUNT]),
+    await harness.cli(['search', 'weirdly', '--account', ACCOUNT, '--json']),
+    await harness.cli(['status', '--no-check']),
+  ];
+  for (const output of everything) assert.ok(!output.stdout.includes(ESC), output.stdout);
+  const read = everything[2]?.data().messages as MessageView[];
+  assert.deepEqual(
+    read.map((entry) => [entry.id, entry.sender?.jid ?? null]),
+    [
+      ['42', null],
+      ['41', null],
+    ],
+    'the messages are kept, from nobody that can be named',
+  );
+  const found = (everything[4] as CliRun).data().results as unknown[];
+  assert.equal(found.length, 0, 'the chat is not in the index at all');
+});
+
+test('an id printed in place of a name is escaped on its way to the terminal, whatever reached the index', () => {
+  const id = '1203630000000009\u001b[2J@g.us';
+  const text = renderChats(
+    {
+      account: ACCOUNT,
+      indexedAt: '2026-09-26T00:00:00.000Z',
+      chats: [{ id, kind: 'group', phone: null, name: null, lastMessageAt: null, messages: 0 }],
+      complete: true,
+    },
+    false,
+  );
+  assert.ok(!text.includes('\u001b'), text);
 });

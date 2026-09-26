@@ -338,10 +338,15 @@ export async function buildFixtureStore(directory: string, options: FixtureOptio
  * test needs and the others' counts must not see. Rows are `message(...)`s, and chats are the fixture's own.
  */
 export async function addMessages(fixture: Fixture, rows: readonly Row[]): Promise<void> {
+  await addRows(fixture, 'ZWAMESSAGE', rows);
+}
+
+/** Rows in any of the fixture's tables, the same way. */
+export async function addRows(fixture: Fixture, table: string, rows: readonly Row[]): Promise<void> {
   const db = await openDatabase(fixture.path);
   try {
-    const columns = new Set(TABLES.ZWAMESSAGE?.map((definition) => definition.split(' ')[0] as string));
-    for (const row of rows) insert(db, 'ZWAMESSAGE', { Z_ENT: 1, Z_OPT: 1, ...row }, columns);
+    const columns = new Set(TABLES[table]?.map((definition) => definition.split(' ')[0] as string));
+    for (const row of rows) insert(db, table, { Z_ENT: 1, Z_OPT: 1, ...row }, columns);
   } finally {
     db.close();
   }
