@@ -573,6 +573,203 @@
     },
 
     {
+      "id": "resend.account.add",
+      "package": "resend",
+      "cli": "account add",
+      "mcp": null,
+      "status": "exception",
+      "reason": "A Resend API key is typed by a person at a terminal, from a hidden prompt or `RESEND_API_KEY` in that terminal: a key typed into a chat stays in the transcript. From chat, the answer is the command to run."
+    },
+    {
+      "id": "resend.account.list",
+      "package": "resend",
+      "cli": "account list",
+      "mcp": "resend_accounts_list",
+      "status": "both",
+      "operation": "listAccounts"
+    },
+    {
+      "id": "resend.account.show",
+      "package": "resend",
+      "cli": "account show",
+      "mcp": "resend_account_show",
+      "status": "both",
+      "operation": "showAccount"
+    },
+    {
+      "id": "resend.account.remove",
+      "package": "resend",
+      "cli": "account remove",
+      "mcp": "resend_account_remove",
+      "status": "both",
+      "operation": "removeAccountChange",
+      "reason": "A change approval, because a deleted key cannot be taken back."
+    },
+    {
+      "id": "resend.account.policy",
+      "package": "resend",
+      "cli": "account policy",
+      "mcp": "resend_account_policy",
+      "status": "both",
+      "operation": "policyChange",
+      "argv": ["--send", "confirm"],
+      "args": { "sendPolicy": "confirm" },
+      "reason": "Reports, and tightens at once; loosening the send policy, the mode or the change policy is a change approval, under the change policy in force before it — the account's own when it sets one."
+    },
+    {
+      "id": "resend.doctor",
+      "package": "resend",
+      "cli": "doctor",
+      "mcp": "resend_doctor",
+      "status": "both",
+      "operation": "runDoctor"
+    },
+    {
+      "id": "resend.domains",
+      "package": "resend",
+      "cli": "domains",
+      "mcp": "resend_domains",
+      "status": "both",
+      "operation": "listDomains"
+    },
+    {
+      "id": "resend.emails.list",
+      "package": "resend",
+      "cli": "emails list",
+      "mcp": "resend_emails_list",
+      "status": "both",
+      "operation": "listSentEmails"
+    },
+    {
+      "id": "resend.emails.show",
+      "package": "resend",
+      "cli": "emails show",
+      "mcp": "resend_email_show",
+      "status": "both",
+      "operation": "showSentEmail"
+    },
+    {
+      "id": "resend.received.list",
+      "package": "resend",
+      "cli": "received list",
+      "mcp": "resend_received_list",
+      "status": "both",
+      "operation": "listReceived"
+    },
+    {
+      "id": "resend.received.show",
+      "package": "resend",
+      "cli": "received show",
+      "mcp": "resend_received_show",
+      "status": "both",
+      "operation": "showReceived"
+    },
+    {
+      "id": "resend.received.download",
+      "package": "resend",
+      "cli": "received download",
+      "mcp": "resend_received_download",
+      "status": "both",
+      "operation": "downloadReceived"
+    },
+    {
+      "id": "resend.metrics",
+      "package": "resend",
+      "cli": "metrics",
+      "mcp": "resend_metrics",
+      "status": "both",
+      "operation": "getMetrics"
+    },
+    {
+      "id": "resend.suppressions",
+      "package": "resend",
+      "cli": "suppressions",
+      "mcp": "resend_suppressions",
+      "status": "both",
+      "operation": "listSuppressions"
+    },
+    {
+      "id": "resend.send.prepare",
+      "package": "resend",
+      "cli": "send prepare",
+      "mcp": "resend_send_prepare",
+      "status": "both",
+      "operation": "prepareSend"
+    },
+    {
+      "id": "resend.send.execute",
+      "package": "resend",
+      "cli": "send execute",
+      "mcp": "resend_send_execute",
+      "status": "both",
+      "operation": "executeSend",
+      "reason": "Sends once, and only an email a person approved: the claim, the content and the recipients are all checked again before Resend is asked."
+    },
+    {
+      "id": "resend.send.status",
+      "package": "resend",
+      "cli": "send status",
+      "mcp": "resend_send_status",
+      "status": "both",
+      "operation": "sendStatus"
+    },
+    {
+      "id": "resend.scheduled.list",
+      "package": "resend",
+      "cli": "scheduled list",
+      "mcp": "resend_scheduled_list",
+      "status": "both",
+      "operation": "listScheduled"
+    },
+    {
+      "id": "resend.scheduled.cancel",
+      "package": "resend",
+      "cli": "scheduled cancel",
+      "mcp": "resend_scheduled_cancel",
+      "status": "both",
+      "operation": "cancelScheduledChange",
+      "reason": "One this machine scheduled is cancelled at once; one scheduled elsewhere is a change approval, because a cancelled email cannot be rescheduled."
+    },
+    {
+      "id": "resend.approve",
+      "package": "resend",
+      "cli": "approve",
+      "mcp": null,
+      "status": "exception",
+      "reason": "Approving under the `confirm` policy means a person at a terminal typing the code shown. A tool that approved would make `confirm` mean nothing; over MCP the answer is the command to run."
+    },
+    {
+      "id": "resend.mcp.serve",
+      "package": "resend",
+      "cli": "mcp",
+      "mcp": null,
+      "status": "exception",
+      "reason": "It runs the MCP server. A tool is a call into a server that is already running, so no tool can be the one that starts it."
+    },
+    {
+      "id": "resend.mcp.install",
+      "package": "resend",
+      "cli": "mcp install",
+      "mcp": "comms_server_install",
+      "status": "both",
+      "operation": "serverInstallChange",
+      "argv": ["--client", "claude-code"],
+      "args": { "channel": "resend", "client": "claude-code" },
+      "expect": { "request.channel": "resend" },
+      "reason": "From chat this is the core server's comms_server_install, which registers any channel's server: `channel: \"resend\"` is this command — the same change, `serverInstallChange`, so an approval either one prepared is claimed by the other (design §5). Pinned with the generic `account`, as `--account` here."
+    },
+    {
+      "id": "resend.mcp.prune",
+      "package": "resend",
+      "cli": "mcp prune",
+      "mcp": "comms_server_prune",
+      "status": "both",
+      "operation": "serverPruneChange",
+      "args": { "channel": "resend" },
+      "expect": { "request.channel": "resend" },
+      "reason": "From chat this is the core server's comms_server_prune, which prunes any channel's runtimes: `channel: \"resend\"` is this command — the same change, `serverPruneChange`, so an approval either one prepared is claimed by the other (design §5)."
+    },
+    {
       "id": "slack.manifest",
       "package": "slack",
       "cli": "manifest",

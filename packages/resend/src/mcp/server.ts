@@ -14,7 +14,6 @@ import {
   listAccounts,
   policyChange,
   policyReport,
-  policySetsNothing,
   policyWanted,
   removeAccountChange,
   showAccount,
@@ -267,7 +266,8 @@ export async function createResendMcpServer(options: ResendMcpOptions = {}): Pro
       }) => {
         const name = await resolve(args.account);
         const wanted = policyWanted({ send: args.sendPolicy, mode: args.mode, change: args.changePolicy });
-        if (policySetsNothing(wanted)) return policyReport(context, name);
+        if (wanted.send === undefined && wanted.mode === undefined && wanted.change === undefined)
+          return policyReport(context, name);
         return runChange(policyChange(context, name, wanted), args.approvalId);
       },
     ),

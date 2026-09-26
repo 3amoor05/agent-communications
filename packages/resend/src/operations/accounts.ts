@@ -381,11 +381,6 @@ export function policyWanted(raw: { send?: unknown; mode?: unknown; change?: unk
   return { send: sendPolicyOf(raw.send), mode: modeOf(raw.mode), change: changePolicyOf(raw.change) };
 }
 
-/** Whether a request sets anything, or only asks for the report. */
-export function policySetsNothing(wanted: PolicyWanted): boolean {
-  return wanted.send === undefined && wanted.mode === undefined && wanted.change === undefined;
-}
-
 export interface PolicyReport {
   name: string;
   mode: Mode;

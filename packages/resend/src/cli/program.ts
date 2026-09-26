@@ -31,7 +31,6 @@ import {
   modeOf,
   policyChange,
   policyReport,
-  policySetsNothing,
   policyWanted,
   removeAccountChange,
   sendPolicyOf,
@@ -288,16 +287,17 @@ Exit codes: 0 ok · 1 unexpected · 10 a send or a change was refused or needs a
   ).action(
     act(async (context, _options, name: string, flags: Options) => {
       const wanted = policyWanted({ send: flags.send, mode: flags.mode, change: flags.change });
-      const result = policySetsNothing(wanted)
-        ? await policyReport(context, name)
-        : await changeAt(
-            context,
-            policyChange(context, name, wanted),
-            flags,
-            `agent-resend account policy ${name}${wanted.send ? ` --send ${wanted.send}` : ''}${
-              wanted.mode ? ` --mode ${wanted.mode}` : ''
-            }${wanted.change ? ` --change ${wanted.change}` : ''}`,
-          );
+      const result =
+        wanted.send === undefined && wanted.mode === undefined && wanted.change === undefined
+          ? await policyReport(context, name)
+          : await changeAt(
+              context,
+              policyChange(context, name, wanted),
+              flags,
+              `agent-resend account policy ${name}${wanted.send ? ` --send ${wanted.send}` : ''}${
+                wanted.mode ? ` --mode ${wanted.mode}` : ''
+              }${wanted.change ? ` --change ${wanted.change}` : ''}`,
+            );
       writeResult(result, output(), renderPolicy, streams);
     }),
   );

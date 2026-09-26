@@ -620,13 +620,14 @@ function sample(schema, name, pkg) {
 }
 
 /**
- * A tool's arguments: its schema's required ones, the account it acts on (`inbox`, `workspace`, which the server
- * requires even where the schema cannot), and then the row's own `args` over the top.
+ * A tool's arguments: its schema's required ones, the account it acts on (`inbox`, `workspace`, and every channel
+ * after them the generic `account` — which the server requires even where the schema cannot), and then the row's own
+ * `args` over the top. Not `account` for the core, whose tools take it only to name a channel's account on request.
  */
 function toolArguments(tool, pkg, row) {
   const schema = tool.inputSchema ?? {};
   const args = sample({ ...schema, type: 'object' }, '', pkg);
-  for (const key of ['inbox', 'workspace']) {
+  for (const key of pkg === 'core' ? ['inbox', 'workspace'] : ['inbox', 'workspace', 'account']) {
     if (schema.properties?.[key] && args[key] === undefined) args[key] = placeholder(key, pkg);
   }
   return { ...args, ...(row.args ?? {}) };
