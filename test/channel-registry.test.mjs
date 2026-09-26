@@ -229,6 +229,50 @@ test('a channel whose word is not its directory, or whose package is not its own
   await assert.rejects(snapshotSource(root), /@agentcomms\/newcomer: agentcomms\.accounts\.modes/);
 });
 
+test('a new channel that borrows Gmail’s or Slack’s shapes, or a command outside agent-*, fails verify:channels', async () => {
+  /*
+   * `inboxes`, `--inbox` and `--read-only` are Gmail's, `--workspace` Slack's, kept because their entries already say
+   * them; a channel after them keeps its accounts in `accounts`, is pinned by `--account` alone, and is started by an
+   * `agent-*` command. A newcomer declaring otherwise used to be snapshotted into core as if it were a Gmail or a Slack.
+   */
+  const { root, version } = await treeWithNewcomer();
+  const path = join(root, 'packages', 'newcomer', 'package.json');
+  const manifest = newcomerManifest(version);
+  const declare = (agentcomms) => writeFile(path, JSON.stringify({ ...manifest, agentcomms }));
+  const { accounts } = manifest.agentcomms;
+
+  await declare({ ...manifest.agentcomms, accounts: { ...accounts, map: 'inboxes' } });
+  await assert.rejects(
+    snapshotSource(root),
+    /@agentcomms\/newcomer: agentcomms\.accounts\.map: `inboxes` is Gmail's alone/,
+  );
+
+  await declare({ ...manifest.agentcomms, narrowing: [{ option: 'workspace', flag: '--workspace', kind: 'pin' }] });
+  await assert.rejects(
+    snapshotSource(root),
+    /@agentcomms\/newcomer: agentcomms\.narrowing: .*pinned by `account` \/ `--account` and nothing else/,
+  );
+
+  await declare({
+    ...manifest.agentcomms,
+    narrowing: [
+      { option: 'inbox', flag: '--inbox', kind: 'pin' },
+      { option: 'readOnly', flag: '--read-only', kind: 'switch' },
+    ],
+  });
+  await assert.rejects(snapshotSource(root), /@agentcomms\/newcomer: agentcomms\.narrowing: .*and nothing else/);
+
+  await declare({ ...manifest.agentcomms, binary: 'teams', approve: 'teams approve' });
+  await assert.rejects(
+    snapshotSource(root),
+    /@agentcomms\/newcomer: agentcomms\.binary: a channel's command is `agent-<something>`/,
+  );
+
+  // As declared in the first place, it is accepted.
+  await declare(manifest.agentcomms);
+  assert.match(await snapshotSource(root), /channel: 'newcomer'/);
+});
+
 /**
  * Everything that walks the channels reads the registry — directly, or through `packages.mjs` — rather than keeping a
  * list. Checked as text, as `release-packages.test.mjs` checks the release scripts: some of these cannot be run here

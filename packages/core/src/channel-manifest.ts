@@ -132,6 +132,41 @@ const narrowingSchema = z.strictObject({
   kind: z.enum(['pin', 'switch']),
 });
 
+/**
+ * The shapes Gmail and Slack had before there was a manifest, kept because their entries, tools and skills already
+ * say them — and nobody else's.
+ *
+ * Gmail's mailboxes are in `inboxes`, and its server is pinned by `--inbox` and narrowed by `--read-only`; Slack's is
+ * pinned by `--workspace`. Every channel after them keeps its accounts in `accounts` and is pinned by `--account`
+ * alone (design 2026-09-26, §2 and §6). Allowed to anyone, either shape made a new channel's accounts mailboxes to the
+ * core — its pin checked against the inbox map — or wrote Slack's flag for it; so each exception is its channel's, by
+ * name, and exactly as shipped.
+ */
+const KEPT_SHAPES: Readonly<
+  Record<string, { label: string; map: 'inboxes' | 'accounts'; narrowing: readonly ChannelNarrowing[] }>
+> = {
+  gmail: {
+    label: 'Gmail',
+    map: 'inboxes',
+    narrowing: [
+      { option: 'inbox', flag: '--inbox', kind: 'pin' },
+      { option: 'readOnly', flag: '--read-only', kind: 'switch' },
+    ],
+  },
+  slack: { label: 'Slack', map: 'accounts', narrowing: [{ option: 'workspace', flag: '--workspace', kind: 'pin' }] },
+};
+
+/** Every channel's after Gmail and Slack: accounts in `accounts`, and the generic pin alone. */
+const GENERIC_NARROWING: readonly ChannelNarrowing[] = [{ option: 'account', flag: '--account', kind: 'pin' }];
+
+/** The narrowing as the flags it writes, for a message: `inbox` / `--inbox`, `readOnly` / `--read-only`. */
+const narrowingWords = (narrowing: readonly ChannelNarrowing[]) =>
+  narrowing.map((entry) => `\`${entry.option}\` / \`${entry.flag}\``).join(' and ');
+
+/** A command a person types: the core's is `agentcomms`, and every channel's is `agent-<something>`. */
+const CORE_BINARY = 'agentcomms';
+const CHANNEL_BINARY = /^agent-[a-z0-9][a-z0-9-]*$/;
+
 const manifestSchema = z
   .strictObject({
     contract: z.literal(CHANNEL_CONTRACT),
@@ -191,7 +226,40 @@ const manifestSchema = z
       // One pin, so a server can always be narrowed to one account — the thing `--force` must never widen.
       const pins = (manifest.narrowing ?? []).filter((n) => n.kind === 'pin');
       if (pins.length !== 1) issue(['narrowing'], 'a channel has exactly one pin');
+      // Gmail's and Slack's own shapes, and every other channel's: see `KEPT_SHAPES`.
+      const kept = Object.hasOwn(KEPT_SHAPES, manifest.channel) ? KEPT_SHAPES[manifest.channel] : undefined;
+      const map = kept?.map ?? 'accounts';
+      if (manifest.accounts !== undefined && manifest.accounts.map !== map) {
+        issue(
+          ['accounts', 'map'],
+          map === 'inboxes'
+            ? `${kept?.label}'s mailboxes are in \`inboxes\`, where every entry and tool already reads them`
+            : "`inboxes` is Gmail's alone: every channel after it keeps its accounts in `accounts`",
+        );
+      }
+      const narrowing = kept?.narrowing ?? GENERIC_NARROWING;
+      if (
+        manifest.narrowing !== undefined &&
+        JSON.stringify(manifest.narrowing.map(({ option, flag, kind }) => ({ option, flag, kind }))) !==
+          JSON.stringify(narrowing)
+      ) {
+        issue(
+          ['narrowing'],
+          kept
+            ? `${kept.label}'s server is pinned by ${narrowingWords(narrowing)}, as its entries have always been written`
+            : `\`inbox\`, \`--read-only\` and \`workspace\` are Gmail's and Slack's; a channel after them is pinned by ${narrowingWords(narrowing)} and nothing else`,
+        );
+      }
     }
+    // The commands a person types: the core's own, or `agent-<something>`, so no channel's reads as anything else.
+    if (isCore) {
+      if (manifest.binary !== CORE_BINARY) issue(['binary'], `the core's command is \`${CORE_BINARY}\``);
+    } else if (!CHANNEL_BINARY.test(manifest.binary)) {
+      issue(['binary'], "a channel's command is `agent-<something>`");
+    }
+    (manifest.server.bins ?? []).forEach((bin, index) => {
+      if (!CHANNEL_BINARY.test(bin)) issue(['server', 'bins', index], "a channel's command is `agent-<something>`");
+    });
     const narrowing = manifest.narrowing ?? [];
     narrowing.forEach((entry, index) => {
       if ((entry.option === 'readOnly') !== (entry.kind === 'switch')) {

@@ -33,16 +33,16 @@ strict, so an unknown key is an error rather than something quietly ignored.
 | `contract` | The version of this contract the manifest is written against | `1` |
 | `channel` | The platform word: the second half of every account name (`acme/<channel>`), the prefix of the server's tools (`<channel>_…`) and of its secret references | A platform word (`[a-z][a-z0-9]{0,15}`), equal to the package's directory name; `core` is the core's |
 | `label` | How a person is shown it: `Gmail`, `Slack` | One line |
-| `binary` | The command a person types | `agent-<something>`; the approve command starts with it |
+| `binary` | The command a person types | `agent-<something>` (the core's is `agentcomms`), and so is every one of `server.bins`; the approve command starts with it |
 | `server.defaultName` | The name a client shows for its server | Unique across channels |
 | `server.npxPackage` | What `npx` runs: the package itself, or a thin server-only package | A package of this suite |
 | `server.npxArgs` | What `npx` runs it with before the server's flags: `["mcp"]` for a whole CLI | Optional |
 | `server.entryFiles`, `server.bins` | Other files and commands that start the same server (Gmail's `agent-gmail-mcp`) | Optional |
-| `accounts.map` | The config map its accounts live in | `inboxes` is Gmail's; every channel after it uses `accounts` |
+| `accounts.map` | The config map its accounts live in | `inboxes` is Gmail's, and only Gmail's; every other channel uses `accounts` |
 | `accounts.noun` | What one is called in a sentence: `mailbox`, `workspace`, `account` | Used in every preview |
 | `accounts.modes` | The modes it offers, narrow to wide | From `read`, `send`, each once, in that order |
 | `accounts.guarantee` | What holds each end: `floor` (what stops `read` from reaching anyone) and `ceiling`, each `grant` (the platform's credential enforces it) or `code` (only this suite does), and `why` in a sentence | Resend has no read-only key, so its floor is `code` and its `doctor` says so |
-| `narrowing` | The flags that narrow its server: `{ option, flag, kind }`, in the order they are written | Exactly one `pin`; `readOnly` is the one `switch` |
+| `narrowing` | The flags that narrow its server: `{ option, flag, kind }`, in the order they are written | Exactly one `pin`; `readOnly` is the one `switch`. Gmail's is `inbox` / `--inbox` and the `readOnly` / `--read-only` switch, Slack's `workspace` / `--workspace`, as their entries were written before the manifest; every other channel's is `account` / `--account` and nothing else |
 | `rivals` | Other servers for the same service, which a registration warns about: `packages` (by name; `unscoped` also matches the bare name), or `word` with `can` (what such a server can do unapproved) | Optional; `word` and `can` come together |
 | `hosts` | The hosts its code talks to | Declared, not yet enforced (§9). `[]` for a channel that talks to none — WhatsApp reads a file on the Mac — which must still say so |
 | `approve` | The command that approves under `confirm`: `agent-gmail approve` | The channel's own binary |

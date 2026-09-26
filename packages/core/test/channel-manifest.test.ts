@@ -364,11 +364,12 @@ test('a manifest is refused for what would make a server, a pin or a skill mean 
       /platform word/,
     ],
     [
-      'a second slack',
+      // Two channels of the generic shape: Gmail renamed to `slack` is refused for its shape before it can collide.
+      'a second whatsapp',
       (e) => {
-        at(e, 'gmail').channel = 'slack';
+        at(e, 'resend').channel = 'whatsapp';
       },
-      /channel "slack" is @agentcomms\/gmail's too/,
+      /channel "whatsapp" is @agentcomms\/resend's too/,
     ],
     [
       'a shared binary',
@@ -402,6 +403,115 @@ test('a manifest is refused for what would make a server, a pin or a skill mean 
     ],
   ];
   for (const [what, edit, expected] of cases) assert.match(problemsAfter(edit), expected, what);
+});
+
+test('only Gmail and Slack keep the shapes they had before the manifest; every other channel is `accounts`, `--account` and `agent-*`', () => {
+  /*
+   * Gmail's accounts are in `inboxes` and its server is pinned by `--inbox` and narrowed by `--read-only`; Slack's is
+   * pinned by `--workspace`. Both are kept only because entries, tools and skills already say them. A new channel that
+   * borrowed either shape passed, and the core then treated its accounts as mailboxes — checking its pin against the
+   * inbox map — or wrote Slack's flag for it. So each exception is Gmail's or Slack's by name, and nobody else's.
+   */
+  const cases: [string, (entries: ReturnType<typeof valid>) => void, RegExp][] = [
+    [
+      'a new channel keeping its accounts in inboxes',
+      (e) => {
+        (at(e, 'resend').accounts as Record<string, unknown>).map = 'inboxes';
+      },
+      /@agentcomms\/resend: agentcomms\.accounts\.map: `inboxes` is Gmail's alone/,
+    ],
+    [
+      'Slack keeping its accounts in inboxes',
+      (e) => {
+        (at(e, 'slack').accounts as Record<string, unknown>).map = 'inboxes';
+      },
+      /@agentcomms\/slack: agentcomms\.accounts\.map: `inboxes` is Gmail's alone/,
+    ],
+    [
+      'Gmail moving its mailboxes to accounts',
+      (e) => {
+        (at(e, 'gmail').accounts as Record<string, unknown>).map = 'accounts';
+      },
+      /@agentcomms\/gmail: agentcomms\.accounts\.map: Gmail's mailboxes are in `inboxes`/,
+    ],
+    [
+      'a new channel pinned by --inbox',
+      (e) => {
+        at(e, 'resend').narrowing = [{ option: 'inbox', flag: '--inbox', kind: 'pin' }];
+      },
+      /@agentcomms\/resend: agentcomms\.narrowing: .*pinned by `account` \/ `--account` and nothing else/,
+    ],
+    [
+      'a new channel pinned by --workspace',
+      (e) => {
+        at(e, 'resend').narrowing = [{ option: 'workspace', flag: '--workspace', kind: 'pin' }];
+      },
+      /@agentcomms\/resend: agentcomms\.narrowing: .*pinned by `account` \/ `--account` and nothing else/,
+    ],
+    [
+      'a new channel with the generic pin under another flag',
+      (e) => {
+        at(e, 'resend').narrowing = [{ option: 'account', flag: '--acct', kind: 'pin' }];
+      },
+      /@agentcomms\/resend: agentcomms\.narrowing: .*`--account` and nothing else/,
+    ],
+    [
+      'a new channel with Gmail’s read-only switch',
+      (e) => void at(e, 'resend').narrowing.push({ option: 'readOnly', flag: '--read-only', kind: 'switch' }),
+      /@agentcomms\/resend: agentcomms\.narrowing: .*and nothing else/,
+    ],
+    [
+      'Slack pinned by the generic flag',
+      (e) => {
+        at(e, 'slack').narrowing = [{ option: 'account', flag: '--account', kind: 'pin' }];
+      },
+      /@agentcomms\/slack: agentcomms\.narrowing: Slack's server is pinned by `workspace` \/ `--workspace`/,
+    ],
+    [
+      'Slack with Gmail’s read-only switch',
+      (e) => void at(e, 'slack').narrowing.push({ option: 'readOnly', flag: '--read-only', kind: 'switch' }),
+      /@agentcomms\/slack: agentcomms\.narrowing: Slack's server/,
+    ],
+    [
+      'Gmail pinned by --workspace',
+      (e) => {
+        at(e, 'gmail').narrowing = [
+          { option: 'workspace', flag: '--workspace', kind: 'pin' },
+          { option: 'readOnly', flag: '--read-only', kind: 'switch' },
+        ];
+      },
+      /@agentcomms\/gmail: agentcomms\.narrowing: Gmail's server is pinned by `inbox` \/ `--inbox`/,
+    ],
+    [
+      'a new channel whose command is not agent-*',
+      (e) => {
+        at(e, 'resend').binary = 'teams';
+        at(e, 'resend').approve = 'teams approve';
+      },
+      /@agentcomms\/resend: agentcomms\.binary: a channel's command is `agent-<something>`/,
+    ],
+    [
+      'another command for a channel that is not agent-*',
+      (e) => {
+        at(e, 'gmail').server.bins = ['gmail-mcp-server'];
+      },
+      /@agentcomms\/gmail: agentcomms\.server\.bins\.0: a channel's command is `agent-<something>`/,
+    ],
+    [
+      'a core whose command is not agentcomms',
+      (e) => {
+        at(e, 'core').binary = 'agent-core';
+        at(e, 'core').approve = 'agent-core approve';
+      },
+      /@agentcomms\/core: agentcomms\.binary: the core's command is `agentcomms`/,
+    ],
+  ];
+  for (const [what, edit, expected] of cases) assert.match(problemsAfter(edit), expected, what);
+  assert.equal(
+    problemsAfter(() => undefined),
+    '',
+    'the committed manifests pass',
+  );
 });
 
 test('a channel that reaches no host says so with an empty list, and must still say it', () => {
