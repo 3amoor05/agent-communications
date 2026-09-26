@@ -1,3 +1,5 @@
+import type { ChannelManifest, ChannelRivalPackage } from './channel-manifest.ts';
+import { CHANNEL_SNAPSHOT } from './channels.generated.ts';
 import { displayUrl, type RegisteredServer } from './mcp-clients.ts';
 import { isProductServer, type McpProduct } from './mcp-install.ts';
 
@@ -11,8 +13,9 @@ import { isProductServer, type McpProduct } from './mcp-install.ts';
  * These lived in the Gmail and Slack packages, and only their own `mcp install` warned; registering the same server
  * from chat — the core server's `comms_server_install`, which builds the product from `CHANNEL_SERVERS` and cannot
  * import a channel package — said nothing about the very servers the warning exists for. They are facts about
- * the services rather than about either package's code, so they are here, beside the rest of each channel's facts,
- * and every surface that registers a server warns the same way.
+ * the services rather than about either package's code, so each channel declares them in its manifest (`rivals`),
+ * and the detectors here read them from core's snapshot: every surface that registers a server warns the same way,
+ * and a new channel warns about its own rivals by declaring them.
  */
 
 // ── Gmail ───────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -25,15 +28,29 @@ export interface LegacyServerFinding extends RegisteredServer {
   removal: string;
 }
 
-/** Third-party Gmail servers known to send mail with no approval step. */
-const UNGATED_GMAIL_SERVERS: ReadonlyArray<{ pattern: RegExp; name: string }> = [
-  { pattern: /@artymclabin\/gmail-mcp/, name: '@artymclabin/gmail-mcp' },
-  {
-    pattern: /@gongrzhe\/server-gmail-autoauth-mcp|(?<![\w@/-])server-gmail-autoauth-mcp/,
-    name: '@gongrzhe/server-gmail-autoauth-mcp',
-  },
-  { pattern: /@shinzolabs\/gmail-mcp/, name: '@shinzolabs/gmail-mcp' },
-];
+/**
+ * A pattern for each package a channel's manifest names as a rival (`rivals.packages`).
+ *
+ * A scoped name matches anywhere on the command line — `npx -y @shinzolabs/gmail-mcp@1.2.3` — and, with `unscoped`,
+ * so does the bare name, as a word of its own: `npx server-gmail-autoauth-mcp`, but not `@someone/server-gmail-…`.
+ */
+function rivalPatterns(packages: readonly ChannelRivalPackage[]): ReadonlyArray<{ pattern: RegExp; name: string }> {
+  return packages.map(({ name, unscoped }) => {
+    const bare = name.includes('/') ? name.slice(name.indexOf('/') + 1) : name;
+    const whole = name.startsWith('@') ? escapeRegExp(name) : `(?<![\\w@/-])${escapeRegExp(name)}`;
+    const alone = unscoped && name.startsWith('@') ? `|(?<![\\w@/-])${escapeRegExp(bare)}` : '';
+    return { pattern: new RegExp(`${whole}${alone}`), name };
+  });
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[\\^$.*+?()[\]{}|/]/g, '\\$&');
+}
+
+/** The rivals a channel's manifest declares, read from core's snapshot. */
+function rivalsOf(channel: string): NonNullable<ChannelManifest['rivals']> {
+  return CHANNEL_SNAPSHOT.find((entry) => entry.manifest.channel === channel)?.manifest.rivals ?? {};
+}
 
 function gmailRemoval({ client, name: server, path, scope }: RegisteredServer): string {
   // A project's entry is out of reach of the user-scope commands below, run from wherever `doctor` was.
@@ -50,12 +67,19 @@ function gmailRemoval({ client, name: server, path, scope }: RegisteredServer): 
   }
 }
 
-/** Registered servers known to send mail with no approval step, each with why it matters and how to remove it. */
-export function findUngatedGmailServers(servers: readonly RegisteredServer[]): LegacyServerFinding[] {
+/**
+ * Registered servers that are one of `packages` — another server for the same service whose send tools no approval
+ * step gates — each with why it matters and how to remove it.
+ */
+export function findRivalPackageServers(
+  servers: readonly RegisteredServer[],
+  packages: readonly ChannelRivalPackage[],
+): LegacyServerFinding[] {
+  const patterns = rivalPatterns(packages);
   const findings: LegacyServerFinding[] = [];
   for (const server of servers) {
     const line = [server.command, ...server.args].join(' ');
-    const known = UNGATED_GMAIL_SERVERS.find((candidate) => candidate.pattern.test(line));
+    const known = patterns.find((candidate) => candidate.pattern.test(line));
     if (!known) continue;
     findings.push({
       ...server,
@@ -67,12 +91,25 @@ export function findUngatedGmailServers(servers: readonly RegisteredServer[]): L
   return findings;
 }
 
-/** What registering the Gmail server says about them: one line each. */
-export function gmailServerWarnings(servers: readonly RegisteredServer[]): string[] {
-  return findUngatedGmailServers(servers).map(
+/** What registering a server says about the rival packages its manifest names: one line each. */
+export function rivalPackageWarnings(
+  servers: readonly RegisteredServer[],
+  packages: readonly ChannelRivalPackage[],
+): string[] {
+  return findRivalPackageServers(servers, packages).map(
     (finding) =>
       `${finding.packageName} is registered with ${finding.client} as "${finding.name}": ${finding.reason}. Remove it: ${finding.removal}`,
   );
+}
+
+/** Registered servers known to send mail with no approval step, each with why it matters and how to remove it. */
+export function findUngatedGmailServers(servers: readonly RegisteredServer[]): LegacyServerFinding[] {
+  return findRivalPackageServers(servers, rivalsOf('gmail').packages ?? []);
+}
+
+/** What registering the Gmail server says about them: one line each. */
+export function gmailServerWarnings(servers: readonly RegisteredServer[]): string[] {
+  return rivalPackageWarnings(servers, rivalsOf('gmail').packages ?? []);
 }
 
 // ── Slack ───────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -94,10 +131,23 @@ export function findOtherSlackServers(
   servers: readonly RegisteredServer[],
   product: Pick<McpProduct, 'packageName' | 'npxPackage' | 'entryFiles' | 'binary' | 'bins'>,
 ): RegisteredServer[] {
+  return findRivalWordServers(servers, rivalsOf('slack').word ?? 'slack', product);
+}
+
+/**
+ * Registered servers that name the service's `word` anywhere — their name, command, arguments or URL — and are not
+ * `product` itself: a channel's `rivals.word`, for a service with too many other servers to list.
+ */
+export function findRivalWordServers(
+  servers: readonly RegisteredServer[],
+  word: string,
+  product: Pick<McpProduct, 'packageName' | 'npxPackage' | 'entryFiles' | 'binary' | 'bins'>,
+): RegisteredServer[] {
+  const pattern = new RegExp(escapeRegExp(word), 'i');
   return servers.filter(
     (server) =>
       !isProductServer(server, product) &&
-      /slack/i.test([server.name, server.command, ...server.args, server.url ?? ''].join(' ')),
+      pattern.test([server.name, server.command, ...server.args, server.url ?? ''].join(' ')),
   );
 }
 
@@ -130,8 +180,19 @@ export function slackServerWarnings(
   servers: readonly RegisteredServer[],
   product: Pick<McpProduct, 'packageName' | 'npxPackage' | 'entryFiles' | 'binary' | 'bins'>,
 ): string[] {
-  return findOtherSlackServers(servers, product).map(
+  const rivals = rivalsOf('slack');
+  return rivalWordWarnings(servers, rivals.word ?? 'slack', rivals.can ?? 'post to Slack', product);
+}
+
+/** What registering a server says about the servers its manifest's `rivals.word` finds: one line each. */
+export function rivalWordWarnings(
+  servers: readonly RegisteredServer[],
+  word: string,
+  can: string,
+  product: Pick<McpProduct, 'packageName' | 'npxPackage' | 'entryFiles' | 'binary' | 'bins'>,
+): string[] {
+  return findRivalWordServers(servers, word, product).map(
     (server) =>
-      `${describeOtherSlackServer(server)} can post to Slack with no approval step from this package. Remove it if this is meant to be the only route.`,
+      `${describeOtherSlackServer(server)} can ${can} with no approval step from this package. Remove it if this is meant to be the only route.`,
   );
 }

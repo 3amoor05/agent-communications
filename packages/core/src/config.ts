@@ -3,6 +3,7 @@ import { chmod, open, readFile, stat } from 'node:fs/promises';
 import { homedir, platform } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { z } from 'zod';
+import { CHANNEL_SNAPSHOT } from './channels.generated.ts';
 import { type ConfigVersion, NEW_CONFIG_VERSION } from './config-version.ts';
 import { CommsError } from './errors.ts';
 import { FILE_MODE, writeFileAtomic } from './fs.ts';
@@ -1088,14 +1089,19 @@ export const ACCOUNT_MODES: readonly ['read', 'send'] = Object.freeze(['read', '
 export type AccountMode = (typeof ACCOUNT_MODES)[number];
 
 /**
- * The platforms whose accounts live in `accounts` and whose modes this release can judge, with the modes each has.
+ * The platforms whose accounts live in `accounts` and whose modes this release can judge, with the modes each has —
+ * read from each channel's manifest, through core's snapshot of them.
  *
  * On any other platform a mode is only a word: `read` means what Slack's token guarantees on Slack, and nothing this
  * release can vouch for anywhere else.
  */
-const ACCOUNT_PLATFORM_MODES: Readonly<Record<string, readonly AccountMode[]>> = Object.freeze({
-  slack: ACCOUNT_MODES,
-});
+const ACCOUNT_PLATFORM_MODES: Readonly<Record<string, readonly AccountMode[]>> = Object.freeze(
+  Object.fromEntries(
+    CHANNEL_SNAPSHOT.flatMap(({ manifest }) =>
+      manifest.accounts?.map === 'accounts' ? [[manifest.channel, manifest.accounts.modes]] : [],
+    ),
+  ),
+);
 
 /** Where `mode` sits on `platform`, narrow to wide — or `Infinity` for a word or a platform this release does not know. */
 function modeRank(platform: string, mode: string): number {

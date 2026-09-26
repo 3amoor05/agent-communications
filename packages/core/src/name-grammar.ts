@@ -36,6 +36,9 @@ export const NAME_PATTERN: RegExp = new RegExp(
   `^(?!(?:${WINDOWS_RESERVED.join('|')})/)(${ORG})/(${PLATFORM})(?:-(${QUALIFIER}))?$`,
 );
 
+/** A platform word on its own — `gmail`, `slack` — which is also a channel's word in its manifest. */
+export const PLATFORM_PATTERN: RegExp = new RegExp(`^${PLATFORM}$`);
+
 export const NAME_MESSAGE =
   'names look like organisation/platform, optionally with a qualifier: cue/gmail, wf/gmail-tech, cue/slack';
 

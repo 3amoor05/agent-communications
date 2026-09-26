@@ -53,5 +53,23 @@
     "@modelcontextprotocol/client": "2.0.0",
     "@modelcontextprotocol/server": "^2.0.0",
     "@types/html-to-text": "^9.0.4"
+  },
+  "agentcomms": {
+    "contract": 1,
+    "channel": "core",
+    "label": "agentcomms (core)",
+    "binary": "agentcomms",
+    "server": {
+      "defaultName": "agentcomms",
+      "npxPackage": "@agentcomms/core",
+      "npxArgs": [
+        "mcp"
+      ]
+    },
+    "approve": "agentcomms approve",
+    "skills": {
+      "prefix": "comms-",
+      "contract": "skills/_shared/contract-comms.md"
+    }
   }
 }

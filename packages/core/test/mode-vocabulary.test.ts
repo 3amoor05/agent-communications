@@ -62,6 +62,11 @@ test('mode: any mode on a platform this release does not know is a loosening', (
   assert.deepEqual(loosened(emptyConfig(), withAccount('zed', { platform: 'discord', tier: 'read' })), [
     'accounts.zed.mode',
   ]);
+  // Nor is a channel whose accounts live elsewhere: Gmail's are mailboxes, and the core connects none, so neither
+  // has an `accounts` entry whose mode this release could vouch for.
+  for (const platform of ['gmail', 'core']) {
+    assert.deepEqual(loosened(emptyConfig(), withAccount('zed', { platform, mode: 'read' })), ['accounts.zed.mode']);
+  }
   // An account moved onto an unknown platform under the same id is measured on the platform it arrives on.
   assert.deepEqual(
     loosened(withAccount('acme', { mode: 'read' }), withAccount('acme', { platform: 'discord', mode: 'read' })),

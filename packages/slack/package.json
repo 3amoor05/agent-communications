@@ -47,5 +47,50 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "agentcomms": {
+    "contract": 1,
+    "channel": "slack",
+    "label": "Slack",
+    "binary": "agent-slack",
+    "server": {
+      "defaultName": "slack",
+      "npxPackage": "@agentcomms/slack",
+      "npxArgs": [
+        "mcp"
+      ]
+    },
+    "accounts": {
+      "map": "accounts",
+      "noun": "workspace",
+      "modes": [
+        "read",
+        "send"
+      ],
+      "guarantee": {
+        "ceiling": "grant",
+        "floor": "grant",
+        "why": "A workspace connected to read holds a user token with no posting scope, so Slack itself refuses to post with it; one connected to send holds the scopes its app declares and no more."
+      }
+    },
+    "narrowing": [
+      {
+        "option": "workspace",
+        "flag": "--workspace",
+        "kind": "pin"
+      }
+    ],
+    "rivals": {
+      "word": "slack",
+      "can": "post to Slack"
+    },
+    "hosts": [
+      "slack.com"
+    ],
+    "approve": "agent-slack approve",
+    "skills": {
+      "prefix": "slack-",
+      "contract": "skills/_shared/contract-slack.md"
+    }
   }
 }
