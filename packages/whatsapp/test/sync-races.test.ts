@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } 
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
+import { syncAccount } from '../src/operations/sync.ts';
 import { nodeSourceIo, type SourceIo } from '../src/source/snapshot.ts';
 import { openDatabase } from '../src/sqlite.ts';
 import { BOB } from './support/fixture.ts';
@@ -82,18 +83,38 @@ test('a remove made while a sync runs waits for it, then removes everything: no 
 });
 
 test('a sync that waited behind a remove finds its account gone, and writes nothing', async () => {
+  /*
+   * In-process, and ordered by the sync's own progress rather than a timer: it first looks its account up, then
+   * waits for the lock a remove holds. The remove happens only once the lookup is done, so the sync is certainly
+   * waiting behind it. A timer let a slow start look the account up after it was gone — refused by the lookup, not
+   * by the check made once the lock is held, which is what this proves.
+   */
   const harness = await newHarness();
   await harness.ready(ACCOUNT);
   const dir = accountDir(harness);
-  const lock = `${dir}.sync.lock`;
+  const context = harness.context();
   // Another process holds the account's sync lock, as a remove does while it removes.
   mkdirSync(join(dir, '..'), { recursive: true });
+  const lock = `${dir}.sync.lock`;
   writeFileSync(
     lock,
     JSON.stringify({ pid: process.pid, at: new Date().toISOString(), token: 'fake-lock-held-by-a-remove' }),
   );
-  const syncing = harness.cli(['sync', '--account', ACCOUNT, '--json'], { env: harness.personEnv });
-  await delay(200);
+  let lookedUp!: () => void;
+  const lookup = new Promise<void>((resolve) => {
+    lookedUp = resolve;
+  });
+  const account = context.account.bind(context);
+  context.account = async (...args: Parameters<typeof account>) => {
+    const found = await account(...args);
+    lookedUp();
+    return found;
+  };
+  const syncing = syncAccount(context, { account: ACCOUNT }).then(
+    () => null,
+    (error: unknown) => error,
+  );
+  await lookup;
   // What that remove does: the account out of config.json, its folder deleted; then it lets go.
   const configPath = join(harness.configDir, 'config.json');
   const config = JSON.parse(readFileSync(configPath, 'utf8'));
@@ -101,10 +122,10 @@ test('a sync that waited behind a remove finds its account gone, and writes noth
   writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
   rmSync(dir, { recursive: true, force: true });
   rmSync(lock);
-  const synced = await syncing;
-  assert.equal(synced.code, 66, synced.stdout);
-  assert.equal(synced.json().error?.code, 'NOT_FOUND');
-  assert.match(String(synced.json().error?.message), /removed/);
+  const refused = (await syncing) as { code?: string; message?: string } | null;
+  assert.ok(refused, 'the sync went ahead for an account that was removed while it waited');
+  assert.equal(refused.code, 'NOT_FOUND');
+  assert.match(String(refused.message), /removed/);
   assert.ok(!existsSync(dir), 'no folder, and no index in it, for an account that is gone');
 });
 
