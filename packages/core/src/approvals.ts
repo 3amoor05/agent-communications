@@ -1,5 +1,6 @@
 import { open, readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { channelApproveCommands } from './channel-words.ts';
 import {
   type ChangePolicy,
   canonicalLoosening,
@@ -387,13 +388,13 @@ export class ApprovalStore {
           'USAGE',
           `approval ${id} is for a configuration change, not a send`,
           record,
-          `A person approves it with \`agentcomms approve ${id}\` — or \`agent-gmail approve\` or \`agent-slack approve\`, whichever is installed — and it permits only the change it was prepared for.`,
+          `A person approves it with \`agentcomms approve ${id}\` — or ${channelApproveCommands()}, whichever is installed — and it permits only the change it was prepared for.`,
         )
       : refuseChange(
           'USAGE',
           `approval ${id} is for a send, not a configuration change`,
           record,
-          'It is approved with the command that prepared it — `agent-gmail approve` or `agent-slack approve` — and permits only that send.',
+          `It is approved with the command that prepared it — ${channelApproveCommands()} — and permits only that send.`,
         );
   }
 

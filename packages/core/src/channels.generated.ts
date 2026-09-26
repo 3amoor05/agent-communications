@@ -4,6 +4,9 @@
  */
 import type { ChannelEntry } from './channel-manifest.ts';
 
+/** The channels built into this release, by their word: a channel is a string, and these are the known ones. */
+export type BuiltInChannel = 'core' | 'gmail' | 'slack';
+
 /** Every first-party channel, the core first: what core knows about each without installing it. */
 export const CHANNEL_SNAPSHOT: readonly ChannelEntry[] = [
   {

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
 import { approveChangeAtTerminal, gatedChangeAtTerminal } from './change-flow.ts';
-import { CHANNEL_LABELS } from './channel-servers.ts';
+import { channelLabel } from './channel-servers.ts';
 import {
   colorEnabled,
   defaultStreams,
@@ -45,7 +45,7 @@ import { VERSION } from './version.ts';
 /**
  * `agentcomms` — the provider-neutral command: where things live, whether this machine is healthy, what was written
  * to mailboxes, which approvals exist, moving secrets between backends, the change policy, and registering the MCP
- * servers of every channel. Provider commands live in their own binaries (`agent-gmail`, `agent-slack`).
+ * servers of every channel. A channel's own commands live in its own binary (`agent-gmail`, `agent-slack`, …).
  *
  * Every command here is an operation in `src/operations/` that the core MCP server's tool calls too, and every one
  * that changes something goes through `gatedChangeAtTerminal`: a person at a terminal approves there and then, and an
@@ -484,7 +484,7 @@ function describeItem(item: UpdateItem): string {
     item.version === null
       ? 'pins no release'
       : `${item.version}${item.version === item.latest ? '' : ` → ${item.latest}`}`;
-  return `${CHANNEL_LABELS[item.channel]} with ${item.client} as "${item.name}" ${where} (${item.launcher}, ${version}${pins})`;
+  return `${channelLabel(item.channel)} with ${item.client} as "${item.name}" ${where} (${item.launcher}, ${version}${pins})`;
 }
 
 function renderUpdateCheck(report: UpdateReport): string {

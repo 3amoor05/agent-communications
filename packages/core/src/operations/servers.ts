@@ -2,7 +2,18 @@ import { access, constants, readFile, realpath } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { GatedChange } from '../change-flow.ts';
-import { CHANNEL_LABELS, CHANNEL_SERVERS, CHANNELS, type Channel, isChannel } from '../channel-servers.ts';
+import type { NarrowingOption } from '../channel-manifest.ts';
+import {
+  CHANNEL_SERVERS,
+  CHANNELS,
+  type Channel,
+  channelLabel,
+  channelServer,
+  isChannel,
+  requireChannelManifest,
+  type ServerFacts,
+} from '../channel-servers.ts';
+import { accountNoun, hasNarrowing, narrowingOwner, pinOption } from '../channel-words.ts';
 import type { Config } from '../config.ts';
 import type { Core } from '../core.ts';
 import { CommsError } from '../errors.ts';
@@ -36,7 +47,7 @@ import { VERSION } from '../version.ts';
 /**
  * Registering, pruning and listing the MCP servers of every channel, from the core.
  *
- * `agentcomms mcp install` registers the core server; `comms_server_install` registers any of the three; and
+ * `agentcomms mcp install` registers the core server; `comms_server_install` registers any channel's; and
  * `agent-gmail mcp install` and `agent-slack mcp install` register their own. All four are the one change here, over
  * the shared installer (`mcp-install.ts`), and all go through the change flow: registering a server is a loosening in
  * the design's terms (§3.1) — it hands a client a new set of tools — and so is asked for once and applied on the
@@ -99,7 +110,7 @@ const exists = (path: string) =>
  */
 async function localModuleUrl(channel: Channel): Promise<string> {
   const coreRoot = await corePackageRoot();
-  const unscopedName = CHANNEL_SERVERS[channel].packageName.split('/').at(-1) ?? channel;
+  const unscopedName = channelServer(channel).packageName.split('/').at(-1) ?? channel;
   const root = channel === 'core' ? coreRoot : join(dirname(coreRoot), unscopedName);
   const source = join(root, 'src', 'cli.ts');
   const built = join(root, 'dist', 'cli.mjs');
@@ -113,7 +124,7 @@ async function localModuleUrl(channel: Channel): Promise<string> {
   }
   throw new CommsError(
     'USAGE',
-    `\`--launcher local\` registers a checkout's own code, and there is no ${CHANNEL_SERVERS[channel].packageName} beside this one`,
+    `\`--launcher local\` registers a checkout's own code, and there is no ${channelServer(channel).packageName} beside this one`,
     { hint: `Looked in ${root}. Use the managed launcher, or run the install from that checkout.` },
   );
 }
@@ -132,7 +143,7 @@ export async function channelProduct(
   version: string = VERSION,
 ): Promise<McpProduct> {
   return {
-    ...CHANNEL_SERVERS[channel],
+    ...channelServer(channel),
     version,
     // Only the `local` launcher reads `moduleUrl`, and only it needs a checkout beside this one; the others must not
     // be refused for the lack of one.
@@ -151,10 +162,10 @@ export async function channelProduct(
  * the person would have approved a sentence that was not true.
  */
 function ownProduct<P extends Pick<McpProduct, 'packageName'>>(channel: Channel, own: P | undefined): P | undefined {
-  if (own !== undefined && own.packageName !== CHANNEL_SERVERS[channel].packageName) {
+  if (own !== undefined && own.packageName !== channelServer(channel).packageName) {
     throw new CommsError(
       'UNEXPECTED',
-      `${own.packageName} is not the ${CHANNEL_LABELS[channel]} server's package, so it cannot register that server`,
+      `${own.packageName} is not the ${channelLabel(channel)} server's package, so it cannot register that server`,
     );
   }
   return own;
@@ -166,9 +177,15 @@ export interface ServerInstallRequest {
   channel: Channel;
   client: SupportedClient;
   name?: string | undefined;
-  /** Gmail's pin: serve one mailbox. */
+  /**
+   * The pin, for any channel: serve one account, by its name `organisation/<channel>` (design 2026-09-26). Every
+   * channel after Gmail and Slack is pinned this way; for those two it is the same as `inbox` and `workspace`, which
+   * stay, so their entries, tools and skills work as they did.
+   */
+  account?: string | undefined;
+  /** Gmail's pin: serve one mailbox. The same as `account` for Gmail. */
   inbox?: string | undefined;
-  /** Slack's pin: serve one workspace. */
+  /** Slack's pin: serve one workspace. The same as `account` for Slack. */
   workspace?: string | undefined;
   /** Gmail only: leave out every tool that changes a mailbox. */
   readOnly?: boolean | undefined;
@@ -209,39 +226,79 @@ function checkRequest(request: ServerInstallRequest): void {
   // Where the name enters, for every surface — the tool and all three `mcp install` commands — before anything is
   // planned or asked: it is quoted in the preview, so a name that reads as a pin is a preview that lies.
   if (request.name !== undefined) checkServerName(request.name);
-  const refuse = (what: string, only: Channel) => {
+  const label = channelLabel(request.channel);
+  /*
+   * A channel's own names for its pin and its switches, refused on a server that has none — by whose option each is,
+   * from the manifests, in the words the refusal always had.
+   */
+  const refuse = (option: NarrowingOption) => {
+    const owner = narrowingOwner(option);
     throw new CommsError(
       'USAGE',
-      `${what} is an option of the ${CHANNEL_LABELS[only]} server; the ${CHANNEL_LABELS[request.channel]} server has no such option`,
+      owner === undefined
+        ? `\`${option}\` is not an option of the ${label} server`
+        : `\`${option}\` is an option of the ${owner.label} server; the ${label} server has no such option`,
     );
   };
-  if (request.inbox !== undefined && request.channel !== 'gmail') refuse('`inbox`', 'gmail');
-  if (request.readOnly && request.channel !== 'gmail') refuse('`readOnly`', 'gmail');
-  if (request.workspace !== undefined && request.channel !== 'slack') refuse('`workspace`', 'slack');
+  if (request.inbox !== undefined && !hasNarrowing(request.channel, 'inbox')) refuse('inbox');
+  if (request.readOnly && !hasNarrowing(request.channel, 'readOnly')) refuse('readOnly');
+  if (request.workspace !== undefined && !hasNarrowing(request.channel, 'workspace')) refuse('workspace');
+  if (request.account !== undefined) {
+    // The generic pin is every channel's that has a pin at all: the core reaches no account, so it has none.
+    const own = pinOption(request.channel);
+    if (own === undefined) {
+      throw new CommsError('USAGE', `\`account\` is not an option of the ${label} server: it reaches no account`);
+    }
+    // Given twice, it has to say one thing: a server is pinned to one account.
+    const alias = own === 'account' ? undefined : request[own];
+    if (alias !== undefined && alias !== request.account) {
+      throw new CommsError(
+        'USAGE',
+        `\`account\` and \`${own}\` both pin the ${label} server, to different accounts: give one`,
+      );
+    }
+  }
+}
+
+/** The account a request pins its server to — by the generic `account`, or the channel's own name for its pin. */
+function pinOf(request: ServerInstallRequest): string | undefined {
+  const own = pinOption(request.channel);
+  if (own === undefined || own === 'readOnly') return undefined;
+  return request[own] ?? request.account;
 }
 
 /**
  * The pin, resolved before anything is written, as each channel's own installer does.
  *
  * A server pinned to a mailbox or workspace that does not exist — or to one renamed since — starts, fails, and says so
- * only in a client's log. A former name is refused with the name it has now.
+ * only in a client's log. A former name is refused with the name it has now. An account of another platform is
+ * refused too: a Slack server pinned to a mailbox's name starts and serves nothing.
  */
 function checkPin(config: Config, request: ServerInstallRequest): void {
-  if (request.inbox !== undefined) resolveName(config, 'inbox', request.inbox);
-  if (request.workspace !== undefined) {
-    const { account } = resolveName(config, 'account', request.workspace);
-    if (account.platform !== 'slack') {
-      throw new CommsError('USAGE', `"${request.workspace}" is not a Slack workspace`);
-    }
+  const pin = pinOf(request);
+  if (pin === undefined) return;
+  const accounts = requireChannelManifest(request.channel).accounts;
+  if (accounts?.map === 'inboxes') {
+    resolveName(config, 'inbox', pin);
+    return;
+  }
+  const { account } = resolveName(config, 'account', pin);
+  if (account.platform !== request.channel) {
+    throw new CommsError('USAGE', `"${pin}" is not a ${channelLabel(request.channel)} ${accountNoun(request.channel)}`);
   }
 }
 
 function installOptions(request: ServerInstallRequest): InstallOptions {
+  // The pin under the channel's own name for it, whichever name it was given by: `--inbox` is what Gmail's server
+  // reads, `--workspace` Slack's, `--account` every channel's after them.
+  const own = pinOption(request.channel);
+  const pin = pinOf(request);
   return {
     client: request.client,
     name: request.name,
-    inbox: request.inbox,
-    workspace: request.workspace,
+    inbox: own === 'inbox' ? pin : request.inbox,
+    workspace: own === 'workspace' ? pin : request.workspace,
+    ...(own === 'account' && pin !== undefined ? { account: pin } : {}),
     readOnly: request.readOnly,
     launcher: request.launcher,
     noVerify: request.noVerify,
@@ -274,8 +331,11 @@ export function serverInstallChange(
   checkRequest(request);
   ownProduct(request.channel, own);
   const context: InstallContext = { env, core };
-  const facts = CHANNEL_SERVERS[request.channel];
-  const label = CHANNEL_LABELS[request.channel];
+  const facts = channelServer(request.channel);
+  const label = channelLabel(request.channel);
+  const noun = accountNoun(request.channel);
+  const pinName = pinOption(request.channel);
+  const switchable = hasNarrowing(request.channel, 'readOnly');
   const name = request.name ?? facts.defaultServerName;
   const launcher = request.launcher ?? 'managed';
   const productNow = async (): Promise<McpProduct> => own ?? (await channelProduct(request.channel, request.launcher));
@@ -288,9 +348,10 @@ export function serverInstallChange(
       const { target, previous, effective, kept } = await preflightInstall(context, product, installOptions(request));
       const effects: string[] = [];
       if (target.writes) {
+        // The pin and the switch the server is started with, in the channel's words: "pinned to the mailbox …".
+        const pinned = pinName === undefined || pinName === 'readOnly' ? undefined : effective[pinName];
         const pins = [
-          effective.inbox !== undefined ? `pinned to the mailbox ${effective.inbox}` : '',
-          effective.workspace !== undefined ? `pinned to the workspace ${effective.workspace}` : '',
+          pinned !== undefined ? `pinned to the ${noun} ${pinned}` : '',
           effective.readOnly ? 'read-only' : '',
         ].filter(Boolean);
         const replacing =
@@ -303,17 +364,15 @@ export function serverInstallChange(
         /*
          * What it may reach, said when it is everything rather than left to be inferred from a pin not mentioned.
          * A preview that names only the narrowing a server has reads the same to a person skimming it whether that
-         * narrowing is there or not; the widest registration is the one that most needs to say so.
+         * narrowing is there or not; the widest registration is the one that most needs to say so. A server that
+         * reaches no account — the core's — has nothing to say here.
          */
-        const everyMailbox = request.channel === 'gmail' && effective.inbox === undefined;
-        const everyTool = request.channel === 'gmail' && effective.readOnly !== true;
-        if (everyMailbox) {
-          effects.push(`not pinned: it reaches every mailbox on this machine${everyTool ? ', with every tool' : ''}`);
+        const everyAccount = pinName !== undefined && pinned === undefined;
+        const everyTool = switchable && effective.readOnly !== true;
+        if (everyAccount) {
+          effects.push(`not pinned: it reaches every ${noun} on this machine${everyTool ? ', with every tool' : ''}`);
         } else if (everyTool) {
-          effects.push(`not read-only: it has every tool for ${effective.inbox}, including those that change it`);
-        }
-        if (request.channel === 'slack' && effective.workspace === undefined) {
-          effects.push('not pinned: it reaches every workspace on this machine');
+          effects.push(`not read-only: it has every tool for ${pinned}, including those that change it`);
         }
         if (launcher === 'npx') {
           effects.push(`${request.client} will fetch ${facts.npxPackage}@${version} from npm each time it starts it`);
@@ -385,11 +444,11 @@ export function serverPruneChange(
   }
   const context: InstallContext = { env, core };
   const { packageName, version } = ownProduct(request.channel, own) ?? {
-    packageName: CHANNEL_SERVERS[request.channel].packageName,
+    packageName: channelServer(request.channel).packageName,
     version: VERSION,
   };
   const product = { packageName, version };
-  const label = CHANNEL_LABELS[request.channel];
+  const label = channelLabel(request.channel);
   const base = {
     includePrinted: request.includePrinted === true,
     ...(request.processes ? { processes: request.processes } : {}),
@@ -491,7 +550,7 @@ async function versionBehind(binPath: string, packageName: string): Promise<stri
 }
 
 /** How a registered entry starts its server: the launcher `mcp install` wrote it with, or `other` for one it did not. */
-export function launcherOf(server: RegisteredServer, facts: (typeof CHANNEL_SERVERS)[Channel]): Launcher | 'other' {
+export function launcherOf(server: RegisteredServer, facts: ServerFacts): Launcher | 'other' {
   const parts = [server.command, ...server.args];
   if (parts.some((part) => managedRuntimeVersion(part, facts.packageName) !== null)) return 'managed';
   if (server.args.some((arg) => arg.startsWith(`${facts.npxPackage}@`))) return 'npx';
@@ -510,7 +569,7 @@ export async function channelsAvailable(core: Core, env: NodeJS.ProcessEnv): Pro
   const scan = await scanRegisteredServers(env);
   const channels: ChannelAvailability[] = [];
   for (const channel of CHANNELS) {
-    const facts = CHANNEL_SERVERS[channel];
+    const facts = channelServer(channel);
     const runtimes = await listManagedRuntimes(core.paths.dataDir, facts.packageName);
     const bin = await whichExecutable(facts.binary, env);
     const onPath = bin ? { path: bin, version: await versionBehind(bin, facts.packageName) } : null;
@@ -532,7 +591,7 @@ export async function channelsAvailable(core: Core, env: NodeJS.ProcessEnv): Pro
     }
     channels.push({
       channel,
-      label: CHANNEL_LABELS[channel],
+      label: channelLabel(channel),
       package: facts.packageName,
       binary: facts.binary,
       serverName: facts.defaultServerName,

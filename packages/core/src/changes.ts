@@ -7,6 +7,7 @@ import {
   stricterPolicy,
 } from './approvals.ts';
 import type { AuditRecord } from './audit.ts';
+import { channelApproveCommands } from './channel-words.ts';
 import {
   type ChangePolicy,
   type Config,
@@ -299,7 +300,7 @@ async function changeRecord(core: Core, approvalId: string): Promise<ApprovalRec
   }
   if (approvalKind(record) !== 'change') {
     throw new CommsError('USAGE', `approval ${approvalId} is for a send, not a configuration change`, {
-      hint: 'Approve it with the command that prepared it: `agent-gmail approve` or `agent-slack approve`.',
+      hint: `Approve it with the command that prepared it: ${channelApproveCommands()}.`,
     });
   }
   /*

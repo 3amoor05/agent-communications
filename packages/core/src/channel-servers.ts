@@ -1,5 +1,6 @@
 import type { ChannelEntry, ChannelManifest } from './channel-manifest.ts';
-import { CHANNEL_SNAPSHOT } from './channels.generated.ts';
+import { type BuiltInChannel, CHANNEL_SNAPSHOT } from './channels.generated.ts';
+import { CommsError } from './errors.ts';
 import type { InstallOptions, McpProduct, Narrowing } from './mcp-install.ts';
 import { rivalPackageWarnings, rivalWordWarnings } from './other-servers.ts';
 
@@ -24,12 +25,17 @@ import { rivalPackageWarnings, rivalWordWarnings } from './other-servers.ts';
  * `narrowing` and `rivals`, so a new channel is a manifest rather than an edit here, and a golden test holds the
  * derived behaviour to what the hand-written table did.
  */
-export type Channel = 'core' | 'gmail' | 'slack';
+/**
+ * A channel's word: `core`, `gmail`, `slack` — a string, checked against core's snapshot of the manifests
+ * (`isChannel`, `channelServer`) wherever one arrives from outside, rather than a union a new channel has to be
+ * added to by hand. `BuiltInChannel` is the union of this release's, generated with the snapshot.
+ */
+export type Channel = string;
+
+export type { BuiltInChannel };
 
 /** Every channel in core's snapshot, the core first. */
-export const CHANNELS: readonly Channel[] = Object.freeze(
-  CHANNEL_SNAPSHOT.map((entry) => entry.manifest.channel as Channel),
-);
+export const CHANNELS: readonly Channel[] = Object.freeze(CHANNEL_SNAPSHOT.map((entry) => entry.manifest.channel));
 
 /** Everything about a server except the version being installed and where its code lives. */
 export type ServerFacts = Omit<McpProduct, 'version' | 'moduleUrl'>;
@@ -100,17 +106,17 @@ export function serverFactsOf({ packageName, manifest }: ChannelEntry): ServerFa
   };
 }
 
-export const CHANNEL_SERVERS: Readonly<Record<Channel, ServerFacts>> = Object.freeze(
+export const CHANNEL_SERVERS: Readonly<Record<BuiltInChannel, ServerFacts>> = Object.freeze(
   Object.fromEntries(CHANNEL_SNAPSHOT.map((entry) => [entry.manifest.channel, serverFactsOf(entry)])) as Record<
-    Channel,
+    BuiltInChannel,
     ServerFacts
   >,
 );
 
 /** How each server is named to a person: in a preview, and in what a tool returns. */
-export const CHANNEL_LABELS: Readonly<Record<Channel, string>> = Object.freeze(
+export const CHANNEL_LABELS: Readonly<Record<BuiltInChannel, string>> = Object.freeze(
   Object.fromEntries(CHANNEL_SNAPSHOT.map((entry) => [entry.manifest.channel, entry.manifest.label])) as Record<
-    Channel,
+    BuiltInChannel,
     string
   >,
 );
@@ -122,4 +128,28 @@ export function channelManifest(channel: string): ChannelManifest | undefined {
 
 export function isChannel(value: unknown): value is Channel {
   return typeof value === 'string' && (CHANNELS as readonly string[]).includes(value);
+}
+
+/** Refuses a word that is not a channel of this release, naming the ones that are. */
+function notAChannel(value: unknown): CommsError {
+  return new CommsError('USAGE', `"${String(value)}" is not a channel`, { hint: `One of: ${CHANNELS.join(', ')}.` });
+}
+
+/** A channel's server facts, by its word; refused for a word that is not a channel. */
+export function channelServer(channel: Channel): ServerFacts {
+  if (!isChannel(channel)) throw notAChannel(channel);
+  return CHANNEL_SERVERS[channel as BuiltInChannel];
+}
+
+/** How a channel's server is named to a person, by its word; refused for a word that is not a channel. */
+export function channelLabel(channel: Channel): string {
+  if (!isChannel(channel)) throw notAChannel(channel);
+  return CHANNEL_LABELS[channel as BuiltInChannel];
+}
+
+/** A channel's manifest, by its word; refused for a word that is not a channel. */
+export function requireChannelManifest(channel: Channel): ChannelManifest {
+  const manifest = channelManifest(channel);
+  if (manifest === undefined) throw notAChannel(channel);
+  return manifest;
 }

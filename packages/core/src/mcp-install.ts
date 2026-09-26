@@ -102,6 +102,8 @@ export type SupportedClient = 'claude-code' | 'claude-desktop' | 'codex' | 'curs
 export interface InstallOptions {
   client: SupportedClient;
   name?: string | undefined;
+  /** The pin of every channel after Gmail and Slack: `--account <organisation/channel>` (design 2026-09-26). */
+  account?: string | undefined;
   /** Gmail's pin. */
   inbox?: string | undefined;
   /** Slack's pin. */
@@ -121,7 +123,14 @@ export interface InstallOptions {
 }
 
 /** What narrows what a server may reach: its pin to one account, and `--read-only`. */
-export type Narrowing = Pick<InstallOptions, 'inbox' | 'workspace' | 'readOnly'>;
+export type Narrowing = Pick<InstallOptions, 'account' | 'inbox' | 'workspace' | 'readOnly'>;
+
+/** The install options that pin a server to one account: the generic one, and Gmail's and Slack's own names. */
+export const PIN_OPTIONS: readonly ('account' | 'inbox' | 'workspace')[] = Object.freeze([
+  'account',
+  'inbox',
+  'workspace',
+]);
 
 export interface ServerEntry {
   command: string;
@@ -627,8 +636,10 @@ function keepNarrowing(
   const kept: Narrowing = {};
   for (const server of previous) {
     const narrowing = product.narrowingOf(server.args);
-    if (!options.inbox && !kept.inbox && narrowing.inbox) kept.inbox = narrowing.inbox;
-    if (!options.workspace && !kept.workspace && narrowing.workspace) kept.workspace = narrowing.workspace;
+    for (const pin of PIN_OPTIONS) {
+      const value = narrowing[pin];
+      if (!options[pin] && !kept[pin] && value) kept[pin] = value;
+    }
     if (!options.readOnly && narrowing.readOnly) kept.readOnly = true;
   }
   return { options: { ...options, ...kept }, kept: product.serverArgs({ client: options.client, ...kept }) };

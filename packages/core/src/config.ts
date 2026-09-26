@@ -97,7 +97,19 @@ export interface Defaults {
 }
 
 /**
- * A connected account on a platform that is not mail: a Slack workspace, and whatever follows it.
+ * A connected account on a platform that is not mail: a Slack workspace, and every channel after it (design
+ * 2026-09-26) — one generic record, whatever the platform.
+ *
+ * `id`, `platform`, `workspace` (the container: a Slack team, a Resend team, a WhatsApp store), `userId` (who it acts
+ * as), `tier`, `mode`, `grantedScopes`, `secretRef`, the two policies and `createdAt` are every channel's. A channel
+ * may keep keys of its own beside them — Slack's `appId`, `redirectPort` — and they are kept through every write. It
+ * may not add a safety setting: only `sendPolicy`, `changePolicy` and `mode` are judged by `classifyChange`, so a key
+ * of a channel's own that loosened something would loosen it unasked.
+ *
+ * `secretRef` stays required, although the 2026-09-26 contract made it optional for a channel with no credential:
+ * every earlier release requires it, and they share this file — an account without one would make the whole
+ * configuration unreadable to a server started last week. Such a channel records a reference that names no secret,
+ * `<platform>:none:<id>`, until a config version can say otherwise.
  *
  * It sits beside `inboxes` rather than replacing it. The spec asked for one `accounts` map holding everything, and
  * that rename is the one change this file cannot take: `version: 1` is additive precisely because an MCP server
@@ -118,6 +130,7 @@ export interface AccountConfig {
   userId: string;
   tier: string;
   grantedScopes: string[];
+  /** Where its credential is in the secret store, `<platform>:…` — for a channel that stores none, `<platform>:none:<id>`. */
   secretRef: string;
   sendPolicy?: SendPolicy | undefined;
   /** Overrides `defaults.changePolicy` for changes to this account. */
@@ -569,6 +582,14 @@ function canonicalJson(value: unknown): string {
 /** The send policy that applies to an inbox: its own, else the default. */
 export function effectiveSendPolicy(config: Config, inbox: string): SendPolicy {
   return config.inboxes[inbox]?.sendPolicy ?? config.defaults.sendPolicy;
+}
+
+/**
+ * The send policy that applies to an account in `accounts` — a Slack workspace, and every channel after it — by name:
+ * its own, else the default. Slack worked this out for itself, and a second channel would have been a third copy.
+ */
+export function effectiveAccountSendPolicy(config: Config, account: string): SendPolicy {
+  return own(config.accounts, account)?.sendPolicy ?? config.defaults.sendPolicy;
 }
 
 /** The change policy that applies where nothing overrides it: the default, and `chat` when none is set. */

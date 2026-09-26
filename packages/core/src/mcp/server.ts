@@ -2,6 +2,7 @@ import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { changeToolResult, type GatedChange, gatedChange } from '../change-flow.ts';
 import { CHANNELS } from '../channel-servers.ts';
+import { accountChannels, listed, narrowingOwner } from '../channel-words.ts';
 import { type Core, openCore } from '../core.ts';
 import { CommsError, toCommsError } from '../errors.ts';
 import { SERVER_NAME_MESSAGE, SERVER_NAME_PATTERN } from '../mcp-install.ts';
@@ -63,6 +64,24 @@ export interface CoreMcpServer {
   connectStdio(): Promise<void>;
 }
 
+/*
+ * How this server names the channels, from their manifests: a channel's tools and descriptions say what it is called
+ * the moment its package declares itself, rather than when somebody remembers this file. For Gmail and Slack every
+ * word is what it was (`test/wording-identity.test.ts`).
+ */
+const CHANNEL_LABELS_LISTED = accountChannels().map((manifest) => manifest.label);
+/** The nouns and platforms of the accounts in `accounts` — Slack's workspaces, and every channel after it. */
+const ACCOUNT_MAP = accountChannels().filter((manifest) => manifest.accounts?.map === 'accounts');
+const MAIL = accountChannels().find((manifest) => manifest.accounts?.map === 'inboxes');
+const ACCOUNT_NOUNS = listed([...new Set(ACCOUNT_MAP.map((manifest) => manifest.accounts?.noun ?? 'account'))], 'or');
+const MAILBOX = MAIL?.accounts?.noun ?? 'mailbox';
+
+/** "Gmail only: serve this one mailbox" — whose option it is, and what one of its accounts is called. */
+function onlyFor(option: 'inbox' | 'workspace' | 'readOnly', what: (noun: string) => string): string {
+  const owner = narrowingOwner(option);
+  return `${owner?.label ?? 'no channel'} only: ${what(owner?.accounts?.noun ?? 'account')}`;
+}
+
 async function buildInstructions(core: Core): Promise<string> {
   let policy = 'chat';
   try {
@@ -71,7 +90,7 @@ async function buildInstructions(core: Core): Promise<string> {
     // A config that cannot be read is for comms_doctor to report, not a reason to refuse to start.
   }
   return [
-    'agent-communications core: install and manage the Gmail and Slack servers, and look after this machine.',
+    `agent-communications core: install and manage the ${listed(CHANNEL_LABELS_LISTED, 'and')} servers, and look after this machine.`,
     '',
     'Reading needs nobody: comms_paths, comms_doctor, comms_audit_tail, comms_approvals_list,',
     'comms_channels_available, comms_change_policy without `set`, and comms_update with `check`.',
@@ -229,8 +248,7 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
     'comms_channels_available',
     {
       title: 'What can be installed',
-      description:
-        'Which channel servers exist (core, Gmail, Slack), which are on this machine and at which version, and which MCP clients start each — with the version an entry pins and whether a file it starts has gone. Reads files only.',
+      description: `Which channel servers exist (${['core', ...CHANNEL_LABELS_LISTED].join(', ')}), which are on this machine and at which version, and which MCP clients start each — with the version an entry pins and whether a file it starts has gone. Reads files only.`,
       inputSchema: {},
       annotations: readsLocal,
     },
@@ -241,11 +259,21 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
     'comms_change_policy',
     {
       title: 'The change policy',
-      description:
-        'Report or set the change policy — how a loosening is approved: `chat`, a yes in this conversation, or `confirm`, a code the person types at their own terminal — for the defaults, one mailbox, or one workspace. Without `set` it only reports. Tightening to `confirm` applies at once. Loosening to `chat` is itself a change, approved under the policy in force, `confirm`: the person runs `agentcomms approve <approvalId>` before you call again with the id. A mailbox or workspace that sets `chat` itself keeps it when the default is tightened: the result then carries `warning` and `looser`, each with the call that tightens it — show the warning to the person.',
+      description: `Report or set the change policy — how a loosening is approved: \`chat\`, a yes in this conversation, or \`confirm\`, a code the person types at their own terminal — for the defaults, one ${MAILBOX}, or one ${ACCOUNT_NOUNS}. Without \`set\` it only reports. Tightening to \`confirm\` applies at once. Loosening to \`chat\` is itself a change, approved under the policy in force, \`confirm\`: the person runs \`agentcomms approve <approvalId>\` before you call again with the id. A ${MAILBOX} or ${ACCOUNT_NOUNS} that sets \`chat\` itself keeps it when the default is tightened: the result then carries \`warning\` and \`looser\`, each with the call that tightens it — show the warning to the person.`,
       inputSchema: {
-        inbox: z.string().optional().describe('one mailbox, as `organisation/gmail`'),
-        account: z.string().optional().describe('one workspace, as `organisation/slack`'),
+        inbox: z
+          .string()
+          .optional()
+          .describe(`one ${MAILBOX}, as \`organisation/${MAIL?.channel ?? 'gmail'}\``),
+        account: z
+          .string()
+          .optional()
+          .describe(
+            `one ${ACCOUNT_NOUNS}, as ${listed(
+              ACCOUNT_MAP.map((manifest) => `\`organisation/${manifest.channel}\``),
+              'or',
+            )}`,
+          ),
         set: z
           .enum(CHANGE_POLICIES as [string, ...string[]])
           .optional()
@@ -272,8 +300,11 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
     'comms_server_install',
     {
       title: 'Register a server',
-      description:
-        'Register a channel’s MCP server — `gmail`, `slack`, or `core` (this one) — with an MCP client, and prove it starts. A change: the first call returns the preview and an approvalId; call again with it once the person agrees. `print` only returns the entry to paste, and asks nobody. The new server appears after the client is restarted — tell the person.',
+      description: `Register a channel’s MCP server — ${listed(
+        [...accountChannels().map((manifest) => `\`${manifest.channel}\``), '`core` (this one)'],
+        'or',
+        { oxford: true },
+      )} — with an MCP client, and prove it starts. A change: the first call returns the preview and an approvalId; call again with it once the person agrees. \`print\` only returns the entry to paste, and asks nobody. The new server appears after the client is restarted — tell the person.`,
       inputSchema: {
         channel: z.enum(CHANNELS as [string, ...string[]]).describe('which server'),
         client: z.enum(CLIENTS as [string, ...string[]]).describe('which MCP client to register it with'),
@@ -284,9 +315,24 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
           .regex(SERVER_NAME_PATTERN, SERVER_NAME_MESSAGE)
           .optional()
           .describe('the name the client shows; the channel’s own when left out. 1–64 of A–Z a–z 0–9 . _ -'),
-        inbox: z.string().optional().describe('Gmail only: serve this one mailbox'),
-        workspace: z.string().optional().describe('Slack only: serve this one workspace'),
-        readOnly: z.boolean().optional().describe('Gmail only: leave out every tool that changes a mailbox'),
+        account: z
+          .string()
+          .optional()
+          .describe(
+            'any channel but the core: serve this one account, named `organisation/<channel>` — the same as `inbox` for Gmail and `workspace` for Slack',
+          ),
+        inbox: z
+          .string()
+          .optional()
+          .describe(onlyFor('inbox', (noun) => `serve this one ${noun}`)),
+        workspace: z
+          .string()
+          .optional()
+          .describe(onlyFor('workspace', (noun) => `serve this one ${noun}`)),
+        readOnly: z
+          .boolean()
+          .optional()
+          .describe(onlyFor('readOnly', (noun) => `leave out every tool that changes a ${noun}`)),
         launcher: z
           .enum(LAUNCHERS as [string, ...string[]])
           .optional()
@@ -308,6 +354,7 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
             channel: args.channel as (typeof CHANNELS)[number],
             client: args.client as (typeof CLIENTS)[number],
             name: args.name,
+            account: args.account,
             inbox: args.inbox,
             workspace: args.workspace,
             readOnly: args.readOnly,
@@ -356,8 +403,7 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
     'comms_update',
     {
       title: 'Update to the latest release',
-      description:
-        'Bring this machine to the latest published release. `check: true` reads the npm registry and this machine and returns what is behind — `{ latest, behind, upToDate, unpinned, unreadable }` — asking nobody. Without it, a change: the first call returns a preview listing every step and an approvalId — each client registration of core, Gmail or Slack registered again at the latest version with exactly its name, client, scope, launcher and pins; each managed runtime that needs installing; each global @agentcomms package updated — and the call again with the approvalId, once the person agrees, applies it and reports each step. Nothing behind: it says so and prepares nothing. The new servers load only after each client is restarted: tell the person, then prune the old runtimes with comms_server_prune.',
+      description: `Bring this machine to the latest published release. \`check: true\` reads the npm registry and this machine and returns what is behind — \`{ latest, behind, upToDate, unpinned, unreadable }\` — asking nobody. Without it, a change: the first call returns a preview listing every step and an approvalId — each client registration of ${listed(['core', ...CHANNEL_LABELS_LISTED], 'or')} registered again at the latest version with exactly its name, client, scope, launcher and pins; each managed runtime that needs installing; each global @agentcomms package updated — and the call again with the approvalId, once the person agrees, applies it and reports each step. Nothing behind: it says so and prepares nothing. The new servers load only after each client is restarted: tell the person, then prune the old runtimes with comms_server_prune.`,
       inputSchema: {
         check: z.boolean().optional().describe('only report what is behind and what is up to date; change nothing'),
         noVerify: z.boolean().optional().describe('do not start each registered server to check that it answers'),

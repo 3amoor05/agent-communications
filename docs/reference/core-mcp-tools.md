@@ -111,6 +111,7 @@ Register a channel’s MCP server — `gmail`, `slack`, or `core` (this one) —
 | `channel` | `core` \\| `gmail` \\| `slack` | **yes** | which server |
 | `client` | `claude-code` \\| `claude-desktop` \\| `codex` \\| `cursor` \\| `gemini` \\| `vscode` \\| `json` | **yes** | which MCP client to register it with |
 | `name` | string | no | the name the client shows; the channel’s own when left out. 1–64 of A–Z a–z 0–9 . _ - |
+| `account` | string | no | any channel but the core: serve this one account, named `organisation/<channel>` — the same as `inbox` for Gmail and `workspace` for Slack |
 | `inbox` | string | no | Gmail only: serve this one mailbox |
 | `workspace` | string | no | Slack only: serve this one workspace |
 | `readOnly` | boolean | no | Gmail only: leave out every tool that changes a mailbox |

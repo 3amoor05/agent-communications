@@ -1,5 +1,6 @@
 import type { GatedChange } from '../change-flow.ts';
-import { CHANNEL_LABELS, CHANNEL_SERVERS, CHANNELS, type Channel } from '../channel-servers.ts';
+import { CHANNELS, type Channel, channelLabel, channelServer, requireChannelManifest } from '../channel-servers.ts';
+import { accountNoun, listed, pinOption } from '../channel-words.ts';
 import type { Config } from '../config.ts';
 import type { Core } from '../core.ts';
 import { CommsError, toCommsError } from '../errors.ts';
@@ -43,14 +44,19 @@ import { channelProduct, launcherOf } from './servers.ts';
  * the yes is a different change, and the claim is refused. Nothing behind, nothing is prepared.
  */
 
-/** The packages this suite publishes, whose latest releases an update reads. */
-const PUBLISHED = Object.freeze({
-  core: CHANNEL_SERVERS.core.packageName,
-  gmail: CHANNEL_SERVERS.gmail.packageName,
-  gmailMcp: CHANNEL_SERVERS.gmail.npxPackage,
-  slack: CHANNEL_SERVERS.slack.packageName,
-});
-const PUBLISHED_NAMES: readonly string[] = Object.freeze([...new Set(Object.values(PUBLISHED))].sort());
+/**
+ * The packages this suite publishes, whose latest releases an update reads: every channel's, from the manifests, and
+ * every package a channel's server is run through by `npx` when that is another one — Gmail's `gmail-mcp`.
+ */
+const CHANNEL_PACKAGES: readonly string[] = Object.freeze(
+  CHANNELS.map((channel) => channelServer(channel).packageName),
+);
+const SERVER_PACKAGES: readonly string[] = Object.freeze(
+  CHANNELS.map((channel) => channelServer(channel).npxPackage).filter((name) => !CHANNEL_PACKAGES.includes(name)),
+);
+const PUBLISHED_NAMES: readonly string[] = Object.freeze(
+  [...new Set([...CHANNEL_PACKAGES, ...SERVER_PACKAGES])].sort(),
+);
 
 /**
  * What an update does outside this process, each replaceable: a test hands in stand-ins, and nothing it runs reads
@@ -202,15 +208,13 @@ interface Inspection {
 }
 
 function narrowingArgs(channel: Channel, narrowing: Narrowing): string[] {
-  return CHANNEL_SERVERS[channel].serverArgs({ client: 'json', ...narrowing });
+  return channelServer(channel).serverArgs({ client: 'json', ...narrowing });
 }
 
 /** Every registration of every channel's server, as the core's `channels` finds them — nothing an `env` holds. */
 function registrations(servers: readonly RegisteredServer[]): { channel: Channel; server: RegisteredServer }[] {
   return CHANNELS.flatMap((channel) =>
-    servers
-      .filter((server) => isProductServer(server, CHANNEL_SERVERS[channel]))
-      .map((server) => ({ channel, server })),
+    servers.filter((server) => isProductServer(server, channelServer(channel))).map((server) => ({ channel, server })),
   );
 }
 
@@ -252,7 +256,7 @@ async function latestReleases(
 
 /** How to register an entry again by hand: its channel's own `mcp install`, with every flag that decides its reach. */
 function installCommand(item: RegistrationItem): string {
-  const facts = CHANNEL_SERVERS[item.channel];
+  const facts = channelServer(item.channel);
   const words = [facts.binary, 'mcp', 'install', '--client', item.client];
   if (item.name !== facts.defaultServerName) words.push('--name', item.name);
   words.push(...item.narrowing, '--force');
@@ -286,11 +290,14 @@ async function whyNotUpdatable(
       ? `\`${target.cliName}\` is not on PATH, so the entry cannot be replaced from here; run \`${installCommand(item)}\` where it is`
       : `this environment names no ${item.client} configuration to write to`;
   }
-  if (narrowing.inbox !== undefined || narrowing.workspace !== undefined) {
+  const own = pinOption(item.channel);
+  const pin = own === undefined || own === 'readOnly' ? undefined : narrowing[own];
+  if (pin !== undefined) {
     if (config === null) return 'the configuration could not be read, so the account it is pinned to cannot be checked';
     try {
-      if (narrowing.inbox !== undefined) resolveName(config, 'inbox', narrowing.inbox);
-      if (narrowing.workspace !== undefined) resolveName(config, 'account', narrowing.workspace);
+      // In the map the channel's accounts live in: Gmail's mailboxes, or everyone else's accounts.
+      if (requireChannelManifest(item.channel).accounts?.map === 'inboxes') resolveName(config, 'inbox', pin);
+      else resolveName(config, 'account', pin);
     } catch (error) {
       const refused = toCommsError(error);
       return `it is pinned to an account this machine does not have by that name — ${refused.message}; register it again with the account's name as it is now`;
@@ -318,7 +325,7 @@ async function runtimesNeeded(
 ): Promise<RuntimeItem[]> {
   const needed: RuntimeItem[] = [];
   for (const channel of CHANNELS) {
-    const packageName = CHANNEL_SERVERS[channel].packageName;
+    const packageName = channelServer(channel).packageName;
     const version = latest[packageName];
     if (version === undefined) continue;
     if (!managed.some((item) => item.channel === channel && item.launcher === 'managed')) continue;
@@ -341,7 +348,7 @@ async function inspect(core: Core, env: NodeJS.ProcessEnv, deps: UpdateDeps): Pr
   const scan = await scanRegisteredServers(env);
   const unreadable: UnreadableConfig[] = [...scan.unreadable];
   const found = registrations(scan.servers).map(({ channel, server }) => {
-    const facts = CHANNEL_SERVERS[channel];
+    const facts = channelServer(channel);
     const narrowing = facts.narrowingOf(server.args);
     return {
       channel,
@@ -368,10 +375,10 @@ async function inspect(core: Core, env: NodeJS.ProcessEnv, deps: UpdateDeps): Pr
     });
   }
 
-  // Gmail's npx package only when something starts it or it is installed: the other three always.
-  const wanted = new Set([PUBLISHED.core, PUBLISHED.gmail, PUBLISHED.slack]);
-  if (found.some((entry) => entry.package === PUBLISHED.gmailMcp) || PUBLISHED.gmailMcp in installed) {
-    wanted.add(PUBLISHED.gmailMcp);
+  // A server-only package (Gmail's npx one) only when something starts it or it is installed: every channel's always.
+  const wanted = new Set(CHANNEL_PACKAGES);
+  for (const name of SERVER_PACKAGES) {
+    if (found.some((entry) => entry.package === name) || name in installed) wanted.add(name);
   }
   const latest = await latestReleases(
     [...wanted].sort(),
@@ -399,7 +406,7 @@ async function inspect(core: Core, env: NodeJS.ProcessEnv, deps: UpdateDeps): Pr
       name: entry.server.name,
       scope: entry.server.scope ?? 'user',
       path: entry.server.path,
-      launcher: launcherOf(entry.server, CHANNEL_SERVERS[entry.channel]),
+      launcher: launcherOf(entry.server, channelServer(entry.channel)),
       version: entry.version,
       latest: latest[entry.package] ?? '',
       narrowing: narrowingArgs(entry.channel, entry.narrowing),
@@ -433,7 +440,7 @@ async function inspect(core: Core, env: NodeJS.ProcessEnv, deps: UpdateDeps): Pr
   );
   behind.push(...needed);
   for (const channel of CHANNELS) {
-    const packageName = CHANNEL_SERVERS[channel].packageName;
+    const packageName = channelServer(channel).packageName;
     const version = latest[packageName];
     if (version === undefined || (await reusableRuntime(core.paths.dataDir, packageName, version)) === null) continue;
     upToDate.push({
@@ -491,24 +498,21 @@ interface Planned {
   nothingBehind: boolean;
 }
 
-/** What a registration may reach, as the preview of `mcp install` says it. Empty for the core, which reaches no account. */
+/**
+ * What a registration may reach, as the preview of `mcp install` says it, in the channel's words: "pinned to the
+ * mailbox …", "not pinned: it reaches every workspace on this machine". Empty for the core, which reaches no account.
+ */
 function reachOf(channel: Channel, narrowing: Narrowing): string {
-  if (channel === 'gmail') {
-    return [
-      narrowing.inbox !== undefined
-        ? `pinned to the mailbox ${narrowing.inbox}`
-        : 'not pinned: it reaches every mailbox on this machine',
-      narrowing.readOnly ? 'read-only' : '',
-    ]
-      .filter(Boolean)
-      .join(', ');
-  }
-  if (channel === 'slack') {
-    return narrowing.workspace !== undefined
-      ? `pinned to the workspace ${narrowing.workspace}`
-      : 'not pinned: it reaches every workspace on this machine';
-  }
-  return '';
+  const own = pinOption(channel);
+  if (own === undefined || own === 'readOnly') return '';
+  const noun = accountNoun(channel);
+  const pin = narrowing[own];
+  return [
+    pin !== undefined ? `pinned to the ${noun} ${pin}` : `not pinned: it reaches every ${noun} on this machine`,
+    narrowing.readOnly ? 'read-only' : '',
+  ]
+    .filter(Boolean)
+    .join(', ');
 }
 
 /**
@@ -518,8 +522,8 @@ function reachOf(channel: Channel, narrowing: Narrowing): string {
  */
 function registrationEffects(step: RegistrationStep): string[] {
   const { item } = step;
-  const reach = reachOf(item.channel, CHANNEL_SERVERS[item.channel].narrowingOf(item.narrowing));
-  const entry = `registers the ${CHANNEL_LABELS[item.channel]} MCP server with ${item.client} as "${item.name}" again (${item.scope} scope, ${item.launcher} launcher), at ${item.latest} in place of ${item.version}${reach ? ` — ${reach}, as now` : ''}`;
+  const reach = reachOf(item.channel, channelServer(item.channel).narrowingOf(item.narrowing));
+  const entry = `registers the ${channelLabel(item.channel)} MCP server with ${item.client} as "${item.name}" again (${item.scope} scope, ${item.launcher} launcher), at ${item.latest} in place of ${item.version}${reach ? ` — ${reach}, as now` : ''}`;
   return item.launcher === 'npx'
     ? [entry, `${item.client} will fetch ${item.package}@${item.latest} from npm each time it starts "${item.name}"`]
     : [entry];
@@ -650,10 +654,16 @@ export function updateChange(
 
 /** The product a runtime of `packageName` is installed as: the channel whose package it is. */
 function runtimeProduct(packageName: string, version: string): Promise<McpProduct> {
-  const channel = CHANNELS.find((each) => CHANNEL_SERVERS[each].packageName === packageName);
+  const channel = CHANNELS.find((each) => channelServer(each).packageName === packageName);
   if (channel === undefined) throw new CommsError('UNEXPECTED', `${packageName} is not a channel's package`);
   return channelProduct(channel, 'managed', version);
 }
+
+/** Every channel's `mcp prune`, as a person types it: "`agentcomms mcp prune`, `agent-gmail mcp prune` and …". */
+const PRUNE_COMMANDS = listed(
+  CHANNELS.map((channel) => `\`${channelServer(channel).binary} mcp prune\``),
+  'and',
+);
 
 function message(error: unknown): string {
   return error instanceof CommsError ? error.message : error instanceof Error ? error.message : String(error);
@@ -711,7 +721,7 @@ async function applyUpdate(context: InstallContext, planned: Planned, deps: Upda
     try {
       // The pins the plan checked the install's own keep-the-pin rule arrives at, given outright: the entry is written
       // with exactly those whatever it finds to replace now, and says nothing of keeping what it was told.
-      const pins = CHANNEL_SERVERS[item.channel].narrowingOf(item.narrowing);
+      const pins = channelServer(item.channel).narrowingOf(item.narrowing);
       const result = await mcpInstall(context, product, { ...options, ...pins });
       if (!result.applied) {
         steps.push({ ...base, outcome: 'failed', detail: result.notApplied ?? 'nothing was registered' });
@@ -755,7 +765,7 @@ async function applyUpdate(context: InstallContext, planned: Planned, deps: Upda
   ];
   const next =
     clients.length > 0
-      ? `Restart ${clients.length === 1 ? clients[0] : `${clients.slice(0, -1).join(', ')} and ${clients.at(-1)}`} to load the new servers: no MCP client loads a new server into a session that is already running. Then, from the restarted server, prune the runtimes the old versions leave behind: comms_server_prune for each channel — at a terminal, \`agentcomms mcp prune\`, \`agent-gmail mcp prune\` and \`agent-slack mcp prune\`.`
+      ? `Restart ${clients.length === 1 ? clients[0] : `${clients.slice(0, -1).join(', ')} and ${clients.at(-1)}`} to load the new servers: no MCP client loads a new server into a session that is already running. Then, from the restarted server, prune the runtimes the old versions leave behind: comms_server_prune for each channel — at a terminal, ${PRUNE_COMMANDS}.`
       : null;
   return { status, latest: planned.latest, steps, manual: planned.manual, ok, next };
 }

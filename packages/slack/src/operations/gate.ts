@@ -1,3 +1,4 @@
+import { effectiveAccountSendPolicy } from '@agentcomms/core';
 import { closedPermit, type WritePermit } from '../api/guard.ts';
 import type { SlackContext } from '../context.ts';
 import type { PostDeps, PrepareDeps } from './send.ts';
@@ -32,7 +33,7 @@ export async function gateDepsFor(context: SlackContext, alias: string, deps: Se
     workspaceId: teamId,
     workspaceName: name,
     postingAs: account.userId,
-    policy: account.sendPolicy ?? config.defaults.sendPolicy,
+    policy: effectiveAccountSendPolicy(config, name),
     approvals: context.core.approvals,
     audit: context.core.audit,
     surface: context.surface,

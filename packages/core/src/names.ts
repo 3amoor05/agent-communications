@@ -1,3 +1,4 @@
+import { connectMailboxCommand } from './channel-words.ts';
 import {
   type AccountConfig,
   type Config,
@@ -77,13 +78,17 @@ export function resolveName(
   throw notFound?.() ?? defaultNotFound(config, kind, name);
 }
 
+/** What to say when there are no mailboxes at all: the command that connects one, from the mail channel's manifest. */
+function noInboxesHint(): string {
+  const connect = connectMailboxCommand();
+  return connect ? `No inboxes yet: add one with \`${connect}\`.` : 'No inboxes yet.';
+}
+
 function defaultNotFound(config: Config, kind: NameKind, name: string): CommsError {
   if (kind === 'inbox') {
     const known = Object.keys(config.inboxes);
     return new CommsError('NOT_FOUND', `no inbox called "${name}"`, {
-      hint: known.length
-        ? `Known inboxes: ${known.join(', ')}.`
-        : 'No inboxes yet: add one with `agent-gmail inbox add`.',
+      hint: known.length ? `Known inboxes: ${known.join(', ')}.` : noInboxesHint(),
     });
   }
   return new CommsError('NOT_FOUND', `no account called "${name}"`);
