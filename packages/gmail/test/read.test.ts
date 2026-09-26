@@ -125,11 +125,13 @@ test('a message comes back with its headers, its attachment and the body a perso
   assert.equal(result.unread, true);
   assert.equal(result.auth.evaluatedBy, 'mx.google.com');
   assert.equal(result.auth.aligned, true);
+  // The name the sender gave is theirs, so it is wrapped with the body's boundary; a plain MIME type stays plain.
+  const boundary = /boundary="([^"]+)"/.exec(result.body.enveloped)?.[1];
   assert.deepEqual(result.attachments, [
     {
       partId: '1',
       attachmentId: 'att-1',
-      filename: 'phase2-plan.pdf',
+      filename: `<untrusted-content boundary="${boundary}" field="filename" inbox="work" id="m1">\nphase2-plan.pdf\n</untrusted-content boundary="${boundary}">`,
       mimeType: 'application/pdf',
       size: 412_000,
       inline: false,

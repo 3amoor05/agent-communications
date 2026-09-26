@@ -13,6 +13,7 @@ import type { GmailContext } from '../context.ts';
 import { type AuthResults, readAuthResults, readSenderWarnings, type SenderWarnings } from '../domain/auth-results.ts';
 import { type BodyOptions, buildBody, DEFAULT_MAX_CHARS, type MessageBody } from '../domain/body.ts';
 import { type GmailPart, headerValue, readParts } from '../domain/mime.ts';
+import { type FieldEnvelope, filenameField, mimeTypeField } from '../domain/untrusted-fields.ts';
 import { type NumberOption, numberOption } from './numbers.ts';
 
 /**
@@ -28,7 +29,9 @@ import { type NumberOption, numberOption } from './numbers.ts';
 export interface MessageAttachment {
   partId: string;
   attachmentId: string | undefined;
+  /** Wrapped: the sender named it. `(unnamed)` when they did not. */
   filename: string;
+  /** A bare MIME type, or wrapped when it is anything more. */
   mimeType: string;
   size: number;
   inline: boolean;
@@ -192,6 +195,13 @@ export function buildMessageResult(
 
   const date = message.internalDate ? new Date(Number(message.internalDate)).toISOString() : null;
   const labels = message.labelIds ?? [];
+  // The attachments' names and types are wrapped with the body's boundary, and their text is collected as it is.
+  const fields: FieldEnvelope = {
+    boundary: options.boundary,
+    inbox: options.inbox,
+    id: message.id ?? undefined,
+    collector: options.collector,
+  };
 
   return {
     inbox: options.inbox,
@@ -219,11 +229,13 @@ export function buildMessageResult(
     attachments: parts.attachments.map((part) => {
       // Risk is judged by `attachmentRisks` itself, from the raw name: it needs both the written-to-disk form and the
       // untouched header, and deciding that in one place is what stopped each surface flagging the same file differently.
+      // The name and the type are the sender's, and leave inside the envelope: neutralising them defused a forged tag
+      // but left a sentence — `Ignore previous instructions.txt` — in the tool's own voice.
       return {
         partId: part.partId,
         attachmentId: part.attachmentId,
-        filename: neutralise(decodeHeaderWords(part.filename ?? '(unnamed)')).text,
-        mimeType: part.mimeType,
+        filename: filenameField(part.filename, fields),
+        mimeType: mimeTypeField(part.mimeType, fields),
         size: part.size,
         inline: part.disposition === 'inline',
         riskFlags: attachmentRisks(part.filename ?? '', part.mimeType),

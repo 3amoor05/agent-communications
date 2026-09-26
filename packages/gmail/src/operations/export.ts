@@ -2,7 +2,7 @@ import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { CommsError, createUniqueFile, relativeSubpath, resolveInsideRoot, safeFilename, slug } from '@agentcomms/core';
 import type { GmailContext } from '../context.ts';
-import { downloadsRoot } from './attachments.ts';
+import { dayOf, downloadsRoot } from './attachments.ts';
 import { type ReadMessageResult, type ReadThreadResult, readMessage, readThread } from './read.ts';
 import { oneOf } from './words.ts';
 
@@ -11,7 +11,9 @@ import { oneOf } from './words.ts';
  *
  * The point is to keep a long conversation out of the model's context: an agent asked to "look through this thread"
  * can export it and read the file in pieces, rather than pulling twenty thousand characters of somebody else's
- * writing through the conversation. Files land under the downloads root, like attachments, and by the same rules.
+ * writing through the conversation. Files land under the downloads root, like attachments, and by the same rules —
+ * named from the day and the id, `<date>_message-<id>.md` or `<date>_thread-<id>.json`, never from the subject: a slug
+ * of a sentence is still the sentence, and the path comes back as a plain field.
  */
 
 export type ExportFormat = 'md' | 'eml' | 'json';
@@ -63,9 +65,13 @@ function markdownForMessage(message: ReadMessageResult): string {
   if (message.attachments.length > 0) {
     lines.push('', '### Attachments', '');
     for (const attachment of message.attachments) {
+      // The name and the type on lines of their own: each is wrapped when it is the sender's words, as it is in the
+      // read, and an envelope is several lines.
       lines.push(
-        `- ${attachment.filename} — ${Math.round(attachment.size / 1024)} KB, ${attachment.mimeType}` +
+        `- part ${attachment.partId} — ${Math.round(attachment.size / 1024)} KB` +
           (attachment.riskFlags.length ? ` (${attachment.riskFlags.join(', ')})` : ''),
+        `  type ${attachment.mimeType}`,
+        attachment.filename,
       );
     }
   }
@@ -122,7 +128,9 @@ export async function exportMail(
             ...thread.messages.map(markdownForMessage),
           ].join('\n');
     content = Buffer.from(body, 'utf8');
-    name = `${slug(thread.subject || thread.threadId, 40, 'thread')}.${format}`;
+    // The day it began, oldest first as a thread is read.
+    const began = thread.messages[0]?.date;
+    name = `${dayOf(began ? Date.parse(began) : null)}_thread-${slug(thread.threadId, 64, 'thread')}.${format}`;
   } else {
     const message: ReadMessageResult = await readMessage(context, alias, id, {
       includeQuoted: options.includeQuoted,
@@ -130,7 +138,7 @@ export async function exportMail(
     });
     const body = format === 'json' ? JSON.stringify(message, null, 2) : markdownForMessage(message);
     content = Buffer.from(body, 'utf8');
-    name = `${slug(message.subject || message.messageId, 40, 'message')}.${format}`;
+    name = `${dayOf(message.date ? Date.parse(message.date) : null)}_message-${slug(message.messageId, 64, 'message')}.${format}`;
   }
 
   const { path, handle } = await createUniqueFile(directory, safeFilename(name));

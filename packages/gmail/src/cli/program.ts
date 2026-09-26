@@ -743,7 +743,9 @@ Exit codes: 0 ok · 1 unexpected · 10 send refused or approval required · 64 u
     );
   attachments
     .command('download <messageId...>')
-    .description('download the attachments of one or more messages, under the downloads folder')
+    .description(
+      'download the attachments of one or more messages under the downloads folder, each saved by its part id',
+    )
     .requiredOption('--inbox <alias>', 'which mailbox')
     .option('--part <partId>', 'one specific attachment')
     .option('--out <subpath>', 'a folder inside the downloads root')

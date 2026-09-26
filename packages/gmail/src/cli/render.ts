@@ -279,11 +279,15 @@ export function renderMessage(message: ReadMessageResult, color: boolean): strin
 
   if (message.attachments.length > 0) {
     lines.push('', paint(color, 'bold', 'Attachments'));
+    // The name the sender gave is wrapped, several lines long, and so is a type that is more than a type: each is
+    // printed as it came, never folded into a line of the tool's own.
     for (const attachment of message.attachments) {
       lines.push(
-        `  ${attachment.filename} · ${Math.round(attachment.size / 1024)} KB · ${attachment.mimeType}${
+        `  part ${attachment.partId} · ${Math.round(attachment.size / 1024)} KB${
           attachment.riskFlags.length ? paint(color, 'yellow', `  [${attachment.riskFlags.join(', ')}]`) : ''
         }`,
+        `  type ${attachment.mimeType}`,
+        attachment.filename,
       );
     }
   }
@@ -348,24 +352,24 @@ export function renderSendAs(addresses: SendAsSummary[], color: boolean): string
 
 export function renderAttachments(result: FindAttachmentsResult, color: boolean): string {
   if (result.rows.length === 0) return 'No attachments matched.';
-  const lines = [
-    table(
-      [
-        ['WHEN', 'INBOX', 'FROM', 'FILE', 'SIZE', 'FLAGS'],
-        ...result.rows.map((row) => [
-          row.date?.slice(0, 10) ?? '—',
-          row.inbox,
-          row.from ?? '—',
-          row.filename,
-          `${Math.round(row.size / 1024)} KB`,
-          row.riskFlags.join(', '),
-        ]),
-      ],
-      color,
-    ),
+  // A block per attachment rather than a table: the file name, and an address or a type that is more than one, come
+  // wrapped, several lines each — they cannot sit in a cell, and printed bare they would read as the tool's own words.
+  const lines: string[] = [];
+  for (const [index, row] of result.rows.entries()) {
+    lines.push(
+      `${paint(color, 'dim', String(index + 1).padStart(2))} ${row.date?.slice(0, 10) ?? '—'}  ${paint(color, 'bold', row.inbox)}  ` +
+        `message ${row.messageId} · part ${row.partId} · ${Math.round(row.size / 1024)} KB${
+          row.riskFlags.length ? paint(color, 'yellow', `  [${row.riskFlags.join(', ')}]`) : ''
+        }`,
+      `   from ${row.from ?? 'unknown'}`,
+      `   type ${row.mimeType}`,
+      row.filename,
+    );
+  }
+  lines.push(
     '',
-    `${result.rows.length} attachment(s). Download with \`agent-gmail attachments download <messageId> --inbox <name>\`.`,
-  ];
+    `${result.rows.length} attachment(s). Download with \`agent-gmail attachments download <messageId> --inbox <name> --part <partId>\`.`,
+  );
   if (result.driveLinks > 0) {
     lines.push(
       paint(color, 'dim', `${result.driveLinks} Drive link(s) were skipped: they are links, not files in the message.`),
@@ -378,9 +382,11 @@ export function renderAttachments(result: FindAttachmentsResult, color: boolean)
 export function renderDownloads(result: DownloadResult, color: boolean): string {
   const lines: string[] = [];
   for (const file of result.files) {
+    // The path is the package's own; what the sender called the file follows it, wrapped.
     lines.push(
       `${file.duplicate ? paint(color, 'dim', 'same as') : 'saved '} ${file.path}` +
         (file.riskFlags.length ? paint(color, 'yellow', `  [${file.riskFlags.join(', ')}]`) : ''),
+      file.filename,
     );
   }
   for (const skip of result.skipped) lines.push(paint(color, 'yellow', `skipped ${skip.messageId}: ${skip.reason}`));

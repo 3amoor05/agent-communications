@@ -318,7 +318,7 @@ agent-gmail attachments find [options]
 
 ### `agent-gmail attachments download`
 
-download the attachments of one or more messages, under the downloads folder
+download the attachments of one or more messages under the downloads folder, each saved by its part id
 
 ```
 agent-gmail attachments download [options] <messageId...>

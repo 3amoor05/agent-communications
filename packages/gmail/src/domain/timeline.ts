@@ -21,6 +21,7 @@ export interface TimelineEvent {
   to: string[];
   cc: string[];
   isDraft: boolean;
+  /** Each `filename` as the read gave it: wrapped, since the sender chose it. */
   attachments: Array<{ filename: string; size: number; riskFlags: string[] }>;
   subjectChanged: boolean;
   /** Hours since the previous message in the thread; null for the first. */
@@ -185,7 +186,21 @@ function shortDate(at: string | null): string {
   return at.replace('T', ' ').replace(/:\d{2}\.\d{3}Z$/, '');
 }
 
-/** A table a person can read at a glance. Display names are sender-controlled, so only addresses are shown. */
+/**
+ * What an event carried, by count and risk: the names are the senders', wrapped in the structured events, and an
+ * envelope is several lines — it cannot sit in a table cell, and a bare name there would be the sender's sentence in
+ * this tool's voice.
+ */
+function attachmentsCell(attachments: TimelineEvent['attachments']): string {
+  if (attachments.length === 0) return '—';
+  const flags = [...new Set(attachments.flatMap((attachment) => attachment.riskFlags))];
+  return `${attachments.length} ${attachments.length === 1 ? 'file' : 'files'}${flags.length ? ` (${flags.join(', ')})` : ''}`;
+}
+
+/**
+ * A table a person can read at a glance. Display names and attachment names are sender-controlled, so only addresses
+ * are shown, and attachments by count.
+ */
 export function renderTimelineMarkdown(timeline: Timeline): string {
   const lines = [
     `**${timeline.subject}** — ${timeline.messageCount} messages in ${timeline.inbox}`,
@@ -206,9 +221,9 @@ export function renderTimelineMarkdown(timeline: Timeline): string {
     lines.push(
       `| ${event.index + 1} | ${shortDate(event.at)} | ${event.direction === 'in' ? 'received' : 'sent'} | ${
         event.from ?? '—'
-      } | ${event.gapHours === null ? '—' : `${event.gapHours}h`} | ${
-        event.attachments.map((attachment) => attachment.filename).join(', ') || '—'
-      } | ${changes || '—'} |`,
+      } | ${event.gapHours === null ? '—' : `${event.gapHours}h`} | ${attachmentsCell(event.attachments)} | ${
+        changes || '—'
+      } |`,
     );
   }
   lines.push('');
