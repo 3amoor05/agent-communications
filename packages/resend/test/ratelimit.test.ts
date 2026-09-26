@@ -146,6 +146,29 @@ test('a 429 through one account holds every account until the time Resend gave',
   assert.equal(harness.fake.requests.length, 6);
 });
 
+test('a request waiting for its slot does not leave once a 429 has arrived while it waited', async () => {
+  const state = tempDir('agent-resend-throttle-');
+  let now = 1_000_000;
+  // The first request goes at once and is answered 429, retry-after 60 — while the second sleeps 500 ms behind it.
+  const first = new Throttle(state, { now: () => now, sleep: async () => undefined });
+  const second = new Throttle(state, {
+    now: () => now,
+    sleep: async (ms) => {
+      await first.after(429, new Headers({ 'retry-after': '60' }));
+      now += ms;
+    },
+  });
+  await first.before();
+  await assert.rejects(second.before(), (error: unknown) => {
+    assert.ok(error instanceof CommsError);
+    assert.equal(error.code, 'TRANSIENT');
+    assert.equal(error.details?.retryAfterSeconds, 60);
+    return true;
+  });
+  now += 61_000;
+  await second.before();
+});
+
 test('without retry-after, ratelimit-reset decides; and a reply saying none are left stops the next one', async () => {
   const state = tempDir('agent-resend-throttle-');
   let now = 5_000_000;

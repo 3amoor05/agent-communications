@@ -77,28 +77,38 @@ export class Throttle {
     return state.blockedUntil > this.#now() ? new Date(state.blockedUntil).toISOString() : null;
   }
 
+  /** Throws while Resend has asked for no requests. */
+  #refuseIfHeld(state: ThrottleFile): void {
+    const now = this.#now();
+    if (state.blockedUntil <= now) return;
+    const seconds = Math.ceil((state.blockedUntil - now) / 1000);
+    throw new CommsError('TRANSIENT', 'Resend asked this machine to stop for now (rate limit)', {
+      hint: `Nothing was sent to Resend. Try again in ${seconds} second(s); the team's own mail shares this limit.`,
+      details: { retryAfterSeconds: seconds, blockedUntil: new Date(state.blockedUntil).toISOString() },
+    });
+  }
+
   /**
    * Waits for this request's slot, or refuses at once while Resend has asked for none.
    *
    * The slot is reserved under the lock and waited for outside it, so a slow request does not hold every other
-   * process's reservation.
+   * process's reservation. **And the hold is looked at again after the wait**: a request queued behind another is
+   * still waiting when that one comes back 429, and the stop Resend asked for covers it as much as anything asked
+   * later.
    */
   async before(): Promise<void> {
     const wait = await withFileLock(`${this.path}.lock`, async () => {
       const state = await this.#read();
+      this.#refuseIfHeld(state);
       const now = this.#now();
-      if (state.blockedUntil > now) {
-        const seconds = Math.ceil((state.blockedUntil - now) / 1000);
-        throw new CommsError('TRANSIENT', 'Resend asked this machine to stop for now (rate limit)', {
-          hint: `Nothing was sent to Resend. Try again in ${seconds} second(s); the team's own mail shares this limit.`,
-          details: { retryAfterSeconds: seconds, blockedUntil: new Date(state.blockedUntil).toISOString() },
-        });
-      }
       const slot = Math.max(now, state.next);
       await writeFileAtomic(this.path, JSON.stringify({ ...state, next: slot + this.#interval }));
       return slot - now;
     });
-    if (wait > 0) await this.#sleep(wait);
+    if (wait > 0) {
+      await this.#sleep(wait);
+      this.#refuseIfHeld(await this.#read());
+    }
   }
 
   /**
