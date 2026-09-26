@@ -360,6 +360,48 @@ test('HTML an agent could not show a person is refused before an approval exists
   assert.match(fine.preview, /HTML part: 13 characters/);
 });
 
+test('no image of any kind is sent, wherever it comes from: the preview cannot show one', async () => {
+  harness = await newHarness();
+  await sendMode();
+  const context = harness.context();
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  for (const html of [
+    `<p>Hi Sam</p><img src="data:image/png;base64,${png}" width="600" height="200">`,
+    '<p>Hi Sam</p><img src="cid:banner@acme.test">',
+    '<p>Hi Sam</p><img alt="">',
+    '<p>Hi Sam</p><svg width="1" height="1"><image href="https://tracker.test/p.png"/></svg>',
+    '<p>Hi Sam</p><svg width="1" height="1"><image xlink:href="https://tracker.test/p2.png"/></svg>',
+    '<p>Hi Sam</p><picture><source srcset="data:image/png;base64,AAAA"></picture>',
+    `<p style="background-image:url(data:image/png;base64,${png})">Hi Sam</p>`,
+    `<style>p{background:url('cid:banner@acme.test')}</style><p>Hi Sam</p>`,
+    '<table background="cid:banner@acme.test"><tr><td>Hi Sam</td></tr></table>',
+    '<p>Hi Sam</p><video poster="data:image/png;base64,AAAA"></video>',
+    '<p>Hi Sam</p><object data="data:image/svg+xml;base64,AAAA"></object>',
+    '<p>Hi Sam</p><link rel="stylesheet" href="data:text/css,p{color:red}">',
+  ]) {
+    await assert.rejects(
+      prepareSend(context, 'acme/resend', message({ text: 'Hi Sam', html })),
+      (error: unknown) => {
+        refusal('UNSENDABLE_HTML')(error);
+        assert.match((error as Error).message, /image|embedded/, html);
+        return true;
+      },
+      html,
+    );
+  }
+  assert.deepEqual(await harness.core.approvals.list(), []);
+  // A link is not an image, and a word that names one is not either.
+  const fine = await prepareSend(
+    context,
+    'acme/resend',
+    message({
+      text: 'Hi Sam, the image of the plan: https://acme.test/plan',
+      html: '<p>Hi Sam, the image of the plan: <a href="https://acme.test/plan">https://acme.test/plan</a></p>',
+    }),
+  );
+  assert.equal(fine.effectivePolicy, 'chat');
+});
+
 test('a reply keeps its thread, and a scheduled send says when — both as the preview showed', async () => {
   harness = await newHarness();
   await sendMode();

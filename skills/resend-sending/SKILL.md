@@ -50,8 +50,9 @@ It refuses before any approval exists when:
   domain list, so the preview says it was not checked, and Resend refuses an unverified domain itself);
 - the email reaches more than 50 people — that is a broadcast, which this does not send;
 - an attachment is outside the allowed folders;
-- the HTML loads anything from the internet, hides parts, has forms or scripts, or shows something other than the
-  text part (`UNSENDABLE_HTML`) — send plain text instead, or HTML that shows exactly the text.
+- the HTML loads anything from the internet, shows an image of any kind (inline `data:` and `cid:` ones too), hides
+  parts, has forms or scripts, or shows something other than the text part (`UNSENDABLE_HTML`) — send plain text
+  instead, or HTML that shows exactly the text.
 
 A refusal is the answer. Say what it was and ask; do not reshape the email to slip past it.
 

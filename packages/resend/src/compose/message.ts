@@ -251,6 +251,8 @@ export async function buildMessage(
     if (report.remoteResources.length > 0) {
       problems.push(`it loads ${report.remoteResources.length} thing(s) from the internet when opened`);
     }
+    const images = imagesIn(input.html, report.urls);
+    if (images > 0) problems.push(`it shows ${images} image(s) or embedded object(s) the preview cannot`);
     if (report.hidden.length > 0) problems.push(`${report.hidden.length} part(s) a reader would not see`);
     if (report.forms + report.formFields > 0) problems.push('it has form elements');
     if (report.scripts > 0) problems.push('it has scripts');
@@ -333,6 +335,27 @@ export async function buildMessage(
 /** Everyone the email reaches, once each — BCC included. */
 export function uniqueRecipients(message: Pick<OutboundMessage, 'to' | 'cc' | 'bcc'>): string[] {
   return [...new Set([...message.to, ...message.cc, ...message.bcc])];
+}
+
+/**
+ * Elements that show a recipient something that is not text: images, SVG, media, frames, embedded objects — and
+ * `link`, which pulls a stylesheet in. Matched on the source rather than on what a parser makes of it, so a spelling
+ * the analyser does not know (`xlink:href`, say) is refused all the same; a false match only refuses HTML, and plain
+ * text is always there.
+ */
+const IMAGE_ELEMENT = /<(?:img|image|picture|svg|video|audio|object|embed|iframe|frame|canvas|link)\b/gi;
+/** Where a URL is shown or loaded on open, whatever its scheme — `data:` and `cid:` as much as `https:`. */
+const SHOWN_ON_OPEN = /\[(?:src|srcset|background|poster|data|style)\]$|^style block$/;
+
+/**
+ * How many images, or other things a preview cannot show, the HTML carries. The analyser counts only what a mail
+ * client fetches from the internet; an image inlined as `data:` or attached as `cid:` fetches nothing and still puts
+ * pixels in front of the recipient — a bank detail, say — that the approver never saw. So none are sent, as the
+ * refusal's hint has always said.
+ */
+function imagesIn(html: string, urls: readonly { where: string; url: string }[]): number {
+  const elements = html.match(IMAGE_ELEMENT)?.length ?? 0;
+  return elements + urls.filter((entry) => SHOWN_ON_OPEN.test(entry.where)).length;
 }
 
 /** The digest an approval is bound to: everything a recipient can see or that decides who receives it. */
