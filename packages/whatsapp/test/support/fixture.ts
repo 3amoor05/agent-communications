@@ -95,6 +95,11 @@ export const DAVE = '15555550104@s.whatsapp.net';
 export const GROUP = '120363000000000001@g.us';
 export const HOSTILE_GROUP = '120363000000000002@g.us';
 export const HIDDEN = '100000000000001@lid';
+export const ERIN = '15555550105@s.whatsapp.net';
+/** One contact's status posts, in a session of its own — the shape a real store's status updates took. */
+export const ERIN_STATUS = '15555550105@status';
+/** A broadcast list: the owner's one message, sent to each recipient separately. */
+export const BROADCAST_LIST = '1690000000@broadcast';
 
 /** Strings a hostile contact might send, kept here so tests can look for them in outputs. */
 export const HOSTILE = {
@@ -120,6 +125,14 @@ const CHATS: Row[] = [
     ZPARTNERNAME: HOSTILE.groupName,
     ZSESSIONTYPE: 1,
     ZLASTMESSAGEDATE: 800000010,
+  },
+  { Z_PK: 7, ZCONTACTJID: ERIN_STATUS, ZPARTNERNAME: null, ZSESSIONTYPE: 3, ZLASTMESSAGEDATE: 800000060 },
+  {
+    Z_PK: 8,
+    ZCONTACTJID: BROADCAST_LIST,
+    ZPARTNERNAME: 'Broadcast Test',
+    ZSESSIONTYPE: 2,
+    ZLASTMESSAGEDATE: 800000030,
   },
 ];
 
@@ -184,6 +197,8 @@ export const MESSAGES: Row[] = [
   // downloaded, which has no file but is a video all the same.
   message(20, 4, 800000093, 20, null, { ZFROMJID: HIDDEN }),
   message(21, 4, 800000094, 2, null, { ZFROMJID: HIDDEN }),
+  message(22, 7, 800000060, 0, 'Beach day, back on Monday', { ZFROMJID: ERIN }),
+  message(23, 8, 800000030, 0, 'Office closed on Friday', { ZISFROMME: 1 }),
 ];
 
 const MEDIA: Row[] = [
@@ -284,8 +299,8 @@ export async function buildFixtureStore(directory: string, options: FixtureOptio
   };
   if (columns.has('Z_PRIMARYKEY')) {
     fill('Z_PRIMARYKEY', [
-      { Z_ENT: 1, Z_NAME: 'WAChatSession', Z_SUPER: 0, Z_MAX: 6 },
-      { Z_ENT: 2, Z_NAME: 'WAMessage', Z_SUPER: 0, Z_MAX: 21 },
+      { Z_ENT: 1, Z_NAME: 'WAChatSession', Z_SUPER: 0, Z_MAX: 8 },
+      { Z_ENT: 2, Z_NAME: 'WAMessage', Z_SUPER: 0, Z_MAX: 23 },
     ]);
   }
   fill('ZWACHATSESSION', CHATS);

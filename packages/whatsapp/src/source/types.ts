@@ -71,14 +71,24 @@ export function kindOf(code: number | null): { kind: MessageKind; viewOnce: bool
 /** What a chat is, from its JID — the one part of a chat WhatsApp assigns and nobody in it can choose. */
 export type ChatKind = 'direct' | 'hidden-number' | 'group' | 'status' | 'broadcast' | 'channel' | 'unknown';
 
+/**
+ * [M] imports exactly three kinds of conversation — `@s.whatsapp.net`, `@lid` and `@g.us` — and skips every other
+ * session, comparing JIDs lower-cased; [I] names `@newsletter` chats as channels. The rest were seen rather than
+ * sourced: a real store kept each contact's status posts in a session of its own, `<number>@status`, and WhatsApp's
+ * own status feed and broadcast lists use `status@broadcast` and `<id>@broadcast`. A JID none of these match is
+ * `unknown`, never guessed at.
+ */
 export function chatKindOf(jid: string): ChatKind {
-  if (jid === 'status@broadcast') return 'status';
-  if (jid.endsWith('@s.whatsapp.net')) return 'direct';
+  const id = jid.trim().toLowerCase();
+  // Status updates: posts, not a conversation. Listed and searched only when asked for by kind.
+  if (id === 'status@broadcast' || id.endsWith('@status')) return 'status';
+  if (id.endsWith('@s.whatsapp.net')) return 'direct';
   // WhatsApp's "LID" addresses stand in for a phone number the other person has hidden. [M]
-  if (jid.endsWith('@lid')) return 'hidden-number';
-  if (jid.endsWith('@g.us')) return 'group';
-  if (jid.endsWith('@broadcast')) return 'broadcast';
-  if (jid.endsWith('@newsletter')) return 'channel';
+  if (id.endsWith('@lid')) return 'hidden-number';
+  if (id.endsWith('@g.us')) return 'group';
+  // A broadcast list: the owner's one message, delivered to each recipient separately.
+  if (id.endsWith('@broadcast')) return 'broadcast';
+  if (id.endsWith('@newsletter')) return 'channel';
   return 'unknown';
 }
 

@@ -133,7 +133,7 @@ export async function createWhatsAppMcpServer(options: WhatsAppMcpOptions = {}):
     {
       title: 'List chats',
       description:
-        'Chats, most recent first, as of the last sync. Each name arrives inside an untrusted-content envelope. `phone` is set for one-to-one chats; groups and people who hide their number have none.',
+        'Chats, most recent first, as of the last sync. Status updates are left out unless `kind` is `status`. Each name arrives inside an untrusted-content envelope. `phone` is set for one-to-one chats; groups and people who hide their number have none.',
       inputSchema: {
         account,
         limit: z.number().int().optional().describe('1 to 500; 50 when left out'),
@@ -183,12 +183,17 @@ export async function createWhatsAppMcpServer(options: WhatsAppMcpOptions = {}):
     {
       title: 'Search',
       description:
-        'Words in message text, captions, file names, sender names and chat names, as of the last sync. Each word is matched as a word; there is no query syntax. Results are inside untrusted-content envelopes.',
+        'Words in message text, captions, file names, sender names and chat names, as of the last sync. Each word is matched as a word; there is no query syntax. Status updates are searched only when `kind` is `status` or `chat` names one. Results are inside untrusted-content envelopes.',
       inputSchema: {
         account,
         query: z.string().describe('the words to find'),
         chat: z.string().optional().describe('only in this chat'),
         sender: z.string().optional().describe('only from senders whose name contains this'),
+        kind: z
+          .string()
+          .meta({ enum: [...CHAT_KINDS] })
+          .optional()
+          .describe('only in one kind of chat'),
         limit: z.number().int().optional().describe('1 to 100; 20 when left out'),
       },
       annotations: readsLocal,
@@ -201,6 +206,7 @@ export async function createWhatsAppMcpServer(options: WhatsAppMcpOptions = {}):
             query: args.query,
             chat: args.chat,
             sender: args.sender,
+            kind: args.kind,
             limit: args.limit,
           }),
         );

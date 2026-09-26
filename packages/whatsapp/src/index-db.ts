@@ -59,7 +59,10 @@ export interface IndexedMessage {
 
 export interface IndexStats {
   indexedAt: string;
+  /** Conversations: every chat but status updates. */
   chats: number;
+  /** Status-update sessions — each contact's posts, and WhatsApp's status feed — which are not conversations. */
+  statusChats: number;
   messages: number;
   media: number;
   degraded: { part: string; costs: string }[];
@@ -182,7 +185,16 @@ export async function rebuildIndex(
     setMeta.run('degraded', JSON.stringify(degraded));
     setMeta.run('copied', JSON.stringify(info.copied));
     db.exec('COMMIT');
-    stats = { indexedAt: info.indexedAt, chats: byPk.size, messages, media, degraded, copied: [...info.copied] };
+    const statusChats = [...byPk.values()].filter((chat) => chat.kind === 'status').length;
+    stats = {
+      indexedAt: info.indexedAt,
+      chats: byPk.size - statusChats,
+      statusChats,
+      messages,
+      media,
+      degraded,
+      copied: [...info.copied],
+    };
   } catch (error) {
     db.close();
     await rm(building, { force: true });
@@ -239,7 +251,8 @@ export class WhatsAppIndex {
     const count = (sql: string): number => Number((this.#db.prepare(sql).get() as { n: number | bigint }).n);
     return {
       indexedAt: meta.get('indexedAt') ?? '',
-      chats: count('SELECT COUNT(*) AS n FROM chats'),
+      chats: count("SELECT COUNT(*) AS n FROM chats WHERE kind <> 'status'"),
+      statusChats: count("SELECT COUNT(*) AS n FROM chats WHERE kind = 'status'"),
       messages: count('SELECT COUNT(*) AS n FROM messages'),
       media: count('SELECT COUNT(*) AS n FROM messages WHERE has_media = 1'),
       degraded: JSON.parse(meta.get('degraded') ?? '[]'),
@@ -247,15 +260,17 @@ export class WhatsAppIndex {
     };
   }
 
-  chats(options: { limit: number; kinds?: readonly ChatKind[] | undefined }): IndexedChat[] {
-    const kinds = options.kinds && options.kinds.length > 0 ? options.kinds : null;
+  /** Chats of the given kinds, most recent first. The caller says which kinds: there is no "all" by omission. */
+  chats(options: { limit: number; kinds: readonly ChatKind[] }): IndexedChat[] {
+    const kinds = options.kinds;
+    if (kinds.length === 0) return [];
     const rows = this.#db
       .prepare(
         `SELECT id, kind, name, last_message_at, message_count FROM chats
-         ${kinds ? `WHERE kind IN (${kinds.map(() => '?').join(', ')})` : ''}
+         WHERE kind IN (${kinds.map(() => '?').join(', ')})
          ORDER BY last_message_at IS NULL, last_message_at DESC, id LIMIT ?`,
       )
-      .all(...(kinds ?? []), options.limit) as Record<string, unknown>[];
+      .all(...kinds, options.limit) as Record<string, unknown>[];
     return rows.map((row) => ({
       id: String(row.id),
       kind: row.kind as ChatKind,
@@ -305,25 +320,35 @@ export class WhatsAppIndex {
 
   /**
    * Full-text search. `words` are matched as words — each quoted, so nothing typed is ever FTS5 syntax — across the
-   * body and caption, the sender's name, the chat's name and a file's name.
+   * body and caption, the sender's name, the chat's name and a file's name. `kinds`, when given, keeps only chats of
+   * those kinds.
    */
   search(
     words: readonly string[],
-    options: { limit: number; chatId?: string | undefined; sender?: string | undefined },
+    options: {
+      limit: number;
+      chatId?: string | undefined;
+      sender?: string | undefined;
+      kinds?: readonly ChatKind[] | undefined;
+    },
   ): IndexedMessage[] {
     const match = words.map((word) => `"${word.replace(/"/g, '""')}"*`).join(' ');
+    const kinds = options.kinds;
+    if (kinds && kinds.length === 0) return [];
     const rows = this.#db
       .prepare(
         `${MESSAGE_SELECT}
          JOIN messages_fts f ON f.rowid = m.id
          WHERE messages_fts MATCH ?
          ${options.chatId ? 'AND m.chat_id = ?' : ''}
+         ${kinds ? `AND c.kind IN (${kinds.map(() => '?').join(', ')})` : ''}
          ${options.sender ? "AND m.sender_name LIKE ? ESCAPE '\\'" : ''}
          ORDER BY bm25(messages_fts), COALESCE(m.at_seconds, 0) DESC LIMIT ?`,
       )
       .all(
         match,
         ...(options.chatId ? [options.chatId] : []),
+        ...(kinds ?? []),
         ...(options.sender ? [`%${options.sender.replace(/[\\%_]/g, (c) => `\\${c}`)}%`] : []),
         options.limit,
       ) as Record<string, unknown>[];

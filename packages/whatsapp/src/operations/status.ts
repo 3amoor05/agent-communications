@@ -32,6 +32,7 @@ export interface AccountStatus {
         synced: true;
         indexedAt: string;
         chats: number;
+        statusChats: number;
         messages: number;
         media: number;
         degraded: { part: string; costs: string }[];
@@ -94,6 +95,7 @@ async function statusOf(
         synced: true,
         indexedAt: stats.indexedAt,
         chats: stats.chats,
+        statusChats: stats.statusChats,
         messages: stats.messages,
         media: stats.media,
         degraded: stats.degraded,

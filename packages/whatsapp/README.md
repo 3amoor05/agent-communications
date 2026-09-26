@@ -128,11 +128,20 @@ Business, pass `--source ~/Library/Group\ Containers/group.net.whatsapp.WhatsApp
 | `remove <org/whatsapp>` | — | forget it and delete its index |
 | `status [--account] [--no-check]` | `whatsapp_status` | what is set up, whether it can be read, what the index holds |
 | `sync --account` | `whatsapp_sync` | copy, check, index, delete the copy |
-| `chats --account [--kind] [--limit]` | `whatsapp_chats` | chats, newest first |
+| `chats --account [--kind] [--limit]` | `whatsapp_chats` | chats, newest first; status updates only with `--kind status` |
 | `read <chat> --account [--before] [--limit]` | `whatsapp_read` | one chat, newest first |
-| `search <words> --account [--chat] [--sender] [--limit]` | `whatsapp_search` | full-text: text, captions, file names, sender and chat names |
+| `search <words> --account [--chat] [--sender] [--kind] [--limit]` | `whatsapp_search` | full-text: text, captions, file names, sender and chat names |
 | `draft <to> <text> [--open]` | `whatsapp_draft` | a `whatsapp://send` and a `https://wa.me/` link; the person sends |
 | `mcp` | — | the MCP server on stdio |
+
+**Kinds of chat.** A chat's kind comes from its id, which WhatsApp assigns: `direct` (`…@s.whatsapp.net`),
+`hidden-number` (`…@lid`), `group` (`…@g.us`) — the three msgvault imports as conversations — `channel`
+(`…@newsletter`, as iLEAPP names them), `broadcast` (a broadcast list, `…@broadcast`) and `status`. Status updates are
+WhatsApp's status feed (`status@broadcast`) and, in a real store, one session per contact (`<number>@status`): posts,
+not conversations, and numerous enough to bury the chats. They are indexed, but `chats` and `search` leave them out
+and `status` and `sync` do not count them as chats (`statusChats` says how many there are) unless asked for with
+`--kind status` (`kind: "status"`); one named by its id — in `read`, or `search --chat` — is read like any other chat.
+An id none of these match is `unknown`, never guessed at.
 
 Each command and its tool call the same function in `src/operations/`; `test/mcp.test.ts` runs both and compares the
 results. `add` and `remove` have no tool on purpose: which file an agent may read is a person's choice, and the first

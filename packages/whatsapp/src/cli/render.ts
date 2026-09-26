@@ -50,7 +50,7 @@ export function renderStatus(result: StatusResult, color: boolean): string {
     if (account.access.hint) lines.push(`          ${account.access.hint}`);
     if (account.index.synced) {
       lines.push(
-        `  index   ${account.index.chats} chats, ${account.index.messages} messages, ${account.index.media} with media · synced ${account.index.indexedAt}`,
+        `  index   ${account.index.chats} chats, ${account.index.messages} messages, ${account.index.media} with media, ${account.index.statusChats} status · synced ${account.index.indexedAt}`,
       );
       for (const entry of account.index.degraded) {
         lines.push(paint(color, 'dim', `          without ${entry.part}: ${entry.costs}`));
@@ -66,6 +66,11 @@ export function renderStatus(result: StatusResult, color: boolean): string {
 export function renderSync(result: SyncResult, color: boolean): string {
   const lines = [
     `${paint(color, 'green', 'Synced')} ${result.account}: ${result.chats} chats, ${result.messages} messages, ${result.media} with media.`,
+    paint(
+      color,
+      'dim',
+      `${result.statusChats} status-update chat(s) are indexed too, and listed or searched only with --kind status.`,
+    ),
     paint(
       color,
       'dim',

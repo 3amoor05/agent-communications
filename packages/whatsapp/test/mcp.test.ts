@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { createWhatsAppMcpServer } from '../src/mcp/server.ts';
-import { ALICE } from './support/fixture.ts';
+import { ALICE, ERIN_STATUS } from './support/fixture.ts';
 import { type Harness, newHarness } from './support/harness.ts';
 
 /**
@@ -39,6 +39,11 @@ const PARITY = [
     args: { account: ACCOUNT, limit: 3 },
   },
   {
+    cli: ['chats', '--account', ACCOUNT, '--kind', 'status'],
+    tool: 'whatsapp_chats',
+    args: { account: ACCOUNT, kind: 'status' },
+  },
+  {
     cli: ['read', ALICE, '--account', ACCOUNT, '--limit', '4'],
     tool: 'whatsapp_read',
     args: { account: ACCOUNT, chat: ALICE, limit: 4 },
@@ -47,6 +52,11 @@ const PARITY = [
     cli: ['search', 'report', '--account', ACCOUNT, '--sender', 'Bobby'],
     tool: 'whatsapp_search',
     args: { account: ACCOUNT, query: 'report', sender: 'Bobby' },
+  },
+  {
+    cli: ['search', 'beach', '--account', ACCOUNT, '--kind', 'status'],
+    tool: 'whatsapp_search',
+    args: { account: ACCOUNT, query: 'beach', kind: 'status' },
   },
   {
     cli: ['draft', '+15555550101', 'hi there'],
@@ -121,6 +131,32 @@ test('every command and its tool run the same operation and return the same resu
       assert.ok(covered, `the command "${command}" has no tool and no stated reason`);
     }
     for (const row of PARITY) assert.ok(tools.has(row.tool));
+  } finally {
+    await close();
+  }
+});
+
+test('the tools leave status updates out too, unless asked for by kind or by chat', async () => {
+  const harness = await newHarness();
+  await harness.ready(ACCOUNT);
+  const { call, close } = await connect(harness);
+  try {
+    const chats = await call('whatsapp_chats', { account: ACCOUNT });
+    const kinds = (chats.structuredContent.chats as { kind: string }[]).map((chat) => chat.kind);
+    assert.ok(kinds.length > 0 && !kinds.includes('status') && !kinds.includes('unknown'), kinds.join(', '));
+    const statuses = await call('whatsapp_chats', { account: ACCOUNT, kind: 'status' });
+    assert.deepEqual(
+      (statuses.structuredContent.chats as { id: string }[]).map((chat) => chat.id),
+      [ERIN_STATUS, 'status@broadcast'],
+    );
+    const ids = async (args: Record<string, unknown>) => {
+      const result = await call('whatsapp_search', { account: ACCOUNT, query: 'beach', ...args });
+      assert.ok(!result.isError, JSON.stringify(result.structuredContent));
+      return (result.structuredContent.results as { message: { id: string } }[]).map((hit) => hit.message.id);
+    };
+    assert.deepEqual(await ids({}), []);
+    assert.deepEqual(await ids({ kind: 'status' }), ['22']);
+    assert.deepEqual(await ids({ chat: ERIN_STATUS }), ['22']);
   } finally {
     await close();
   }

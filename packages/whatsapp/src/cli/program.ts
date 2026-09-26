@@ -154,7 +154,7 @@ be waiting) · 77 permission needed (macOS privacy) · 78 configuration problem.
     );
 
   accountOption(program.command('chats'))
-    .description('chats, most recent first, as of the last sync')
+    .description('chats, most recent first, as of the last sync; status updates only with --kind status')
     .option('--limit <n>', 'how many: 1 to 500', '50')
     .addOption(new Option('--kind <kind>', 'only one kind of chat').choices([...CHAT_KINDS]))
     .action(
@@ -188,6 +188,11 @@ be waiting) · 77 permission needed (macOS privacy) · 78 configuration problem.
     .description('words, in text, captions, file names, sender names and chat names, as of the last sync')
     .option('--chat <chat>', 'only in this chat')
     .option('--sender <name>', 'only from senders whose name contains this')
+    .addOption(
+      new Option('--kind <kind>', 'only in one kind of chat; status updates are searched only when asked for').choices([
+        ...CHAT_KINDS,
+      ]),
+    )
     .option('--limit <n>', 'how many: 1 to 100', '20')
     .action(
       act(async (context, options, query: string, flags: Options) => {
@@ -196,6 +201,7 @@ be waiting) · 77 permission needed (macOS privacy) · 78 configuration problem.
           query,
           chat: flags.chat === undefined ? undefined : String(flags.chat),
           sender: flags.sender === undefined ? undefined : String(flags.sender),
+          kind: flags.kind === undefined ? undefined : String(flags.kind),
           limit: flags.limit,
         });
         writeResult(result, options, () => renderSearch(result, options.color), streams);

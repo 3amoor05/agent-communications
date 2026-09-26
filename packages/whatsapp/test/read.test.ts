@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { rmSync } from 'node:fs';
 import { test } from 'node:test';
 import { innerText, type MessageView, type UntrustedField } from '../src/present.ts';
-import { ALICE, BOB, CAROL, DAVE, GROUP, HIDDEN } from './support/fixture.ts';
+import { ALICE, BOB, BROADCAST_LIST, CAROL, DAVE, ERIN_STATUS, GROUP, HIDDEN } from './support/fixture.ts';
 import { newHarness } from './support/harness.ts';
 
 /**
@@ -27,8 +27,9 @@ test('sync indexes every chat and message, groups and hidden-number chats includ
   const synced = await harness.cli(['sync', '--account', ACCOUNT, '--json']);
   assert.equal(synced.code, 0, synced.stdout);
   const data = synced.data() as Record<string, unknown>;
-  assert.equal(data.chats, 6);
-  assert.equal(data.messages, 21);
+  assert.equal(data.chats, 6, 'status updates are not counted as chats');
+  assert.equal(data.statusChats, 2);
+  assert.equal(data.messages, 23);
   assert.equal(
     data.media,
     6,
@@ -43,11 +44,12 @@ test('chats come newest first, with their kind, a phone number only where there 
   const chats = all.data().chats as { id: string; kind: string; phone: string | null; name: UntrustedField }[];
   assert.deepEqual(
     chats.map((chat) => chat.id),
-    [GROUP, ALICE, BOB, HIDDEN, 'status@broadcast', '120363000000000002@g.us'],
+    [GROUP, ALICE, BOB, HIDDEN, BROADCAST_LIST, '120363000000000002@g.us'],
+    'status updates are left out unless asked for',
   );
   assert.deepEqual(
     chats.map((chat) => chat.kind),
-    ['group', 'direct', 'direct', 'hidden-number', 'status', 'group'],
+    ['group', 'direct', 'direct', 'hidden-number', 'broadcast', 'group'],
   );
   assert.equal(chats[1]?.phone, '15555550101');
   assert.equal(chats[0]?.phone, null, 'a group has no number');
@@ -64,6 +66,37 @@ test('chats come newest first, with their kind, a phone number only where there 
     (groups.data().chats as { kind: string }[]).map((chat) => chat.kind),
     ['group', 'group'],
   );
+});
+
+test('status updates are left out of chats, search and the chat count, unless asked for by kind', async () => {
+  const harness = await ready();
+  const chats = async (...argv: string[]) => {
+    const result = await harness.cli(['chats', '--account', ACCOUNT, ...argv, '--json']);
+    assert.equal(result.code, 0, result.stdout);
+    return (result.data().chats as { id: string; kind: string }[]).map((chat) => `${chat.id} ${chat.kind}`);
+  };
+  assert.ok(!(await chats()).some((chat) => chat.endsWith(' status') || chat.endsWith(' unknown')));
+  assert.deepEqual(await chats('--kind', 'status'), [`${ERIN_STATUS} status`, 'status@broadcast status']);
+  assert.deepEqual(await chats('--kind', 'broadcast'), [`${BROADCAST_LIST} broadcast`], 'a broadcast list is a chat');
+
+  const search = async (...argv: string[]) => {
+    const result = await harness.cli(['search', ...argv, '--account', ACCOUNT, '--json']);
+    assert.equal(result.code, 0, result.stdout);
+    return (result.data().results as { message: MessageView }[]).map((hit) => hit.message.id);
+  };
+  assert.deepEqual(await search('beach'), [], 'a status post is not found by default');
+  assert.deepEqual(await search('update'), []);
+  assert.deepEqual(await search('beach', '--kind', 'status'), ['22']);
+  assert.deepEqual(await search('beach', '--chat', ERIN_STATUS), ['22'], 'naming the chat is asking for it');
+  assert.deepEqual(await search('Office'), ['23']);
+
+  const read = await harness.cli(['read', ERIN_STATUS, '--account', ACCOUNT, '--json']);
+  assert.equal(read.code, 0, 'a status chat named by its id can be read');
+  assert.equal((read.data().chat as { kind: string }).kind, 'status');
+
+  const status = (await harness.cli(['status', '--no-check', '--json'])).data();
+  const index = (status.accounts as { index: { chats: number; statusChats: number } }[])[0]?.index;
+  assert.deepEqual({ chats: index?.chats, statusChats: index?.statusChats }, { chats: 6, statusChats: 2 });
 });
 
 test('read returns a chat newest first, names each sender, and pages with the `next` it gives', async () => {
@@ -213,7 +246,7 @@ test('media only where there is media: a text reply and a call keep their empty 
 
   const status = (await harness.cli(['status', '--account', ACCOUNT, '--no-check', '--json'])).data();
   assert.equal((status.accounts as { index: { media: number } }[])[0]?.index.media, 6, 'only real media is counted');
-  assert.match((await harness.cli(['status', '--no-check'])).stdout, /21 messages, 6 with media/);
+  assert.match((await harness.cli(['status', '--no-check'])).stdout, /23 messages, 6 with media/);
 });
 
 test('a read before any sync says to sync first', async () => {

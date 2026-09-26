@@ -20,6 +20,22 @@ export const CHAT_KINDS: readonly ChatKind[] = Object.freeze([
   'unknown',
 ]);
 
+/**
+ * What `chats` lists and `search` searches when no kind is asked for: every kind but status updates, which are posts
+ * to everyone rather than a conversation — and, in a real store, one session per contact, enough to bury the chats.
+ * They are there for the asking (`--kind status`), and a status chat named by its id is read like any other.
+ */
+export const DEFAULT_KINDS: readonly ChatKind[] = Object.freeze(CHAT_KINDS.filter((kind) => kind !== 'status'));
+
+/** The one kind asked for, checked; or, when none was, the default kinds. */
+function kindsOf(kind: string | undefined): readonly ChatKind[] {
+  if (kind === undefined) return DEFAULT_KINDS;
+  if (!(CHAT_KINDS as readonly string[]).includes(kind)) {
+    throw new CommsError('USAGE', `"${kind}" is not a kind of chat`, { hint: `One of ${CHAT_KINDS.join(', ')}.` });
+  }
+  return [kind as ChatKind];
+}
+
 async function openIndex(context: WhatsAppContext, accountName: string | undefined) {
   const { name, account } = requireAccount(await context.config.load(), accountName);
   const index = await WhatsAppIndex.open(context.accountDir(account), name);
@@ -50,14 +66,10 @@ export async function listChats(
   request: { account?: string | undefined; limit?: unknown; kind?: string | undefined },
 ): Promise<ChatsResult> {
   const limit = wholeNumber(request.limit ?? 50, { name: 'limit', min: 1, max: 500 }) as number;
-  if (request.kind !== undefined && !(CHAT_KINDS as readonly string[]).includes(request.kind)) {
-    throw new CommsError('USAGE', `"${request.kind}" is not a kind of chat`, {
-      hint: `One of ${CHAT_KINDS.join(', ')}.`,
-    });
-  }
+  const kinds = kindsOf(request.kind);
   const { name, index } = await openIndex(context, request.account);
   try {
-    const rows = index.chats({ limit: limit + 1, kinds: request.kind ? [request.kind as ChatKind] : undefined });
+    const rows = index.chats({ limit: limit + 1, kinds });
     const present = new Presenter(name);
     return {
       account: name,
@@ -151,6 +163,7 @@ export async function searchMessages(
     query: string;
     chat?: string | undefined;
     sender?: string | undefined;
+    kind?: string | undefined;
     limit?: unknown;
   },
 ): Promise<SearchResult> {
@@ -162,9 +175,16 @@ export async function searchMessages(
     });
   }
   const chatId = request.chat === undefined ? undefined : chatIdOf(request.chat);
+  // Naming a chat is asking for it, whatever its kind; otherwise the default kinds, or the one asked for.
+  const kinds = chatId !== undefined && request.kind === undefined ? undefined : kindsOf(request.kind);
   const { name, index } = await openIndex(context, request.account);
   try {
-    const rows = index.search(words, { limit: limit + 1, chatId, sender: request.sender?.trim() || undefined });
+    const rows = index.search(words, {
+      limit: limit + 1,
+      chatId,
+      sender: request.sender?.trim() || undefined,
+      kinds,
+    });
     const present = new Presenter(name);
     const chats = new Map<string, SearchHit['chat']>();
     const results = rows.slice(0, limit).map((message) => {
