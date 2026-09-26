@@ -1,0 +1,94 @@
+{
+  "name": "@agentcomms/resend",
+  "version": "0.6.0",
+  "private": true,
+  "description": "Resend for coding agents: read domains, sent and received mail, metrics and suppressions, and send mail that nothing sends without a person's approval of exactly what goes out.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Criss Moldovan",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/crissmoldovan/agent-communications.git",
+    "directory": "packages/resend"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs"
+    }
+  },
+  "main": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
+  "bin": {
+    "agent-resend": "./dist/cli.mjs"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsdown",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --experimental-strip-types --test --test-timeout=60000 \"test/**/*.test.ts\""
+  },
+  "agentcomms": {
+    "contract": 1,
+    "core": "0.7.x",
+    "channel": "resend",
+    "label": "Resend",
+    "binary": "agent-resend",
+    "bins": [],
+    "server": {
+      "defaultName": "resend",
+      "npxPackage": "@agentcomms/resend",
+      "npxArgs": [
+        "mcp"
+      ]
+    },
+    "accounts": {
+      "map": "accounts",
+      "noun": "account",
+      "modes": [
+        "read",
+        "send"
+      ],
+      "guarantee": {
+        "ceiling": "grant",
+        "floor": "code",
+        "why": "Resend has no read-only key. A full-access key can read and send, so read mode is enforced by agent-resend's own code; a sending-access key can only send, and Resend enforces that."
+      }
+    },
+    "narrowing": [
+      {
+        "option": "account",
+        "flag": "--account",
+        "kind": "pin"
+      }
+    ],
+    "rivals": {
+      "word": "resend"
+    },
+    "hosts": [
+      "api.resend.com",
+      "inbound-cdn.resend.com"
+    ],
+    "approve": "agent-resend approve",
+    "skills": {
+      "prefix": "resend-"
+    }
+  },
+  "optionalDependencies": {
+    "@napi-rs/keyring": "2.1.0"
+  },
+  "devDependencies": {
+    "@agentcomms/core": "workspace:*",
+    "@modelcontextprotocol/client": "2.0.0",
+    "@modelcontextprotocol/server": "^2.0.0",
+    "commander": "^15.0.0",
+    "zod": "catalog:"
+  }
+}

@@ -1,0 +1,100 @@
+import { CommsError, type GatedChange } from '@agentcomms/core';
+import { resendRequest } from '../api/client.ts';
+import { closedPermit, spendOn } from '../api/guard.ts';
+import { SendRecords } from '../compose/store.ts';
+import type { ResendContext } from '../context.ts';
+import { resendId } from './read.ts';
+
+/**
+ * Cancelling a scheduled email.
+ *
+ * Cancelling only reduces who gets mail, so it loosens nothing (contract: "no loosening, but audited"). It cannot be
+ * taken back, though — Resend will not reschedule a cancelled email — so one rule is added on top: an email this
+ * machine scheduled is cancelled at once; one scheduled by anything else (the team's own production code, say) is a
+ * change a person approves, through the same change flow as every other irreversible act. Rescheduling is not
+ * offered: a new time is a new send, prepared and approved again.
+ */
+
+export interface CancelledEmail {
+  account: string;
+  id: string;
+  cancelled: true;
+  /** Whether this machine had scheduled it. */
+  fromThisMachine: boolean;
+  recipients: number;
+}
+
+export function cancelScheduledChange(context: ResendContext, name: string, id: unknown): GatedChange<CancelledEmail> {
+  const emailId = resendId(id, 'email id');
+  const look = async () => {
+    const named = await context.accounts.require(name);
+    if (named.account.mode !== 'send') {
+      throw new CommsError('SCOPE_MISSING', `"${name}" is in read mode, so it changes nothing at Resend`, {
+        hint: 'Cancelling needs an account in send mode.',
+      });
+    }
+    if (named.account.tier !== 'full_access') {
+      throw new CommsError('SCOPE_MISSING', 'a sending-only key cannot look up or cancel a scheduled email', {
+        hint: 'Cancel it in the Resend dashboard, or use a full-access account.',
+      });
+    }
+    const transport = await context.transport(named);
+    const email = await resendRequest<Record<string, unknown>>(transport, 'GET', `/emails/${emailId}`);
+    if (email.last_event !== 'scheduled') {
+      throw new CommsError(
+        'BAD_DATA',
+        `email ${emailId} is not scheduled (its last event is ${String(email.last_event)})`,
+        {
+          hint: 'Only an email still waiting to go can be cancelled.',
+        },
+      );
+    }
+    const count = new Set(
+      [email.to, email.cc, email.bcc].flatMap((value) =>
+        Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [],
+      ),
+    ).size;
+    const ours = await new SendRecords(context.core.paths.stateDir, context.now).byResendId(named.account.id, emailId);
+    return { named, count, ours };
+  };
+  return {
+    plan: async (config) => {
+      const { count, ours } = await look();
+      return {
+        summary: `Cancel the scheduled email ${emailId} from ${name}`,
+        before: config,
+        after: config,
+        effects: ours
+          ? []
+          : [
+              `cancels the scheduled email ${emailId} to ${count} recipient(s), which was not scheduled from this machine; a cancelled email cannot be rescheduled`,
+            ],
+      };
+    },
+    apply: async () => {
+      const { named, count, ours } = await look();
+      const permit = closedPermit();
+      const transport = await context.transport(named, permit);
+      await spendOn(permit, emailId, 'emails.cancel', () =>
+        resendRequest(transport, 'POST', `/emails/${emailId}/cancel`),
+      );
+      if (ours) {
+        await new SendRecords(context.core.paths.stateDir, context.now).record(named.account.id, {
+          approvalId: ours.approvalId,
+          event: 'cancelled',
+          resendId: emailId,
+        });
+      }
+      await context.core.audit.append({
+        inboxId: named.account.id,
+        alias: name,
+        operation: 'resend.scheduled.cancel',
+        outcome: 'ok',
+        surface: context.surface,
+        ids: { emailIds: [emailId] },
+        reason: ours ? 'scheduled from this machine' : 'scheduled elsewhere; approved as a change',
+      });
+      return { account: name, id: emailId, cancelled: true, fromThisMachine: ours !== null, recipients: count };
+    },
+  };
+}
