@@ -40,7 +40,7 @@ owner can add (npmjs.com → the package → Settings → Trusted publishing: th
 `release`). An agent cannot check or add it; the workflow's preflight is what finds out.
 
 **A package's first version is always published by hand**, because npm cannot hold a trusted publisher for a package
-that does not exist. `@agentcomms/resend` and `@agentcomms/whatsapp` are new in 0.7.0, so 0.7.0 needs it for both.
+that does not exist. `@agentcomms/resend` and `@agentcomms/whatsapp` were first published this way at 0.7.0.
 The preflight catches it: it says the package was never published, prints the exact command, and publishes nothing
 (step 6).
 

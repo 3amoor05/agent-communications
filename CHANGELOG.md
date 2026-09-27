@@ -3,7 +3,16 @@
 All notable changes to this project are recorded here, newest first. Every package in this repository is released
 together under one version.
 
-## 0.7.0
+## 0.7.1
+
+**0.7.0, released in full.** 0.7.0 reached npm only as `@agentcomms/resend` and `@agentcomms/whatsapp`. The release
+then stopped on Windows, where four of WhatsApp's test files ran past their 60-second limit: every test that
+finished passed, and the rest of those four files was cut off. Core, both Gmail packages and Slack stayed at 0.6.0.
+0.7.1 gives each WhatsApp and Resend test file ten minutes, still a limit so a hang ends, and is otherwise 0.7.0:
+nothing any package runs has changed. Everything below is what 0.7.1 brings over 0.6.0.
+
+What it means for you: a patch over 0.7.0, so if you installed Resend or WhatsApp at 0.7.0, `agentcomms update`
+moves them to 0.7.1 with the rest and nothing else differs. From 0.6.0, read on.
 
 **Two new channels: Resend and WhatsApp.** Channels are now separate packages that declare themselves to core, so a
 new one needs no edits to core.
@@ -85,7 +94,12 @@ changes in three ways a script may notice:
   reorders text.
 
 Gmail's and Slack's approval previews are word for word as in 0.6.0; the only new sentences are refusal reasons. To
-get 0.7.0, run `agentcomms update` (or say "update my comms" in chat), then restart your client.
+get 0.7.1, run `agentcomms update` (or say "update my comms" in chat), then restart your client.
+
+## 0.7.0
+
+Published only as the first versions of `@agentcomms/resend` and `@agentcomms/whatsapp`. The release stopped
+before the other packages; everything 0.7.0 was to bring is under 0.7.1.
 
 ## 0.6.0
 

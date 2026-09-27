@@ -37,8 +37,8 @@ The first release of each package happened from a maintainer's laptop, because n
 publisher for a package that does not exist — so no CI workflow could have performed a first publish. For core,
 gmail and gmail-mcp that was 0.1.0, and from 0.1.1 CI is the publisher. `@agentcomms/slack` was first published by
 hand at 0.4.0, so it needs its own trusted publisher added once, by the package owner, before CI can publish it.
-`@agentcomms/resend` and `@agentcomms/whatsapp` are new in 0.7.0 and are in the same position: see
-[a new package's first version](#a-new-packages-first-version).
+`@agentcomms/resend` and `@agentcomms/whatsapp` were first published by hand at 0.7.0 and are in the same position:
+see [a new package's first version](#a-new-packages-first-version).
 
 **Whether a package trusts this workflow cannot be read from outside.** npm's trust settings need an authenticated
 owner (`npm trust list @agentcomms/<name>`, npm 11.15 or later, or npmjs.com → the package → Settings → Trusted
