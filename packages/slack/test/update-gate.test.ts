@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
-import { gatedChange, UPDATE_FIRST, updateCheckPath, updateLaterChange } from '@agentcomms/core';
+import { EXIT_CODES, gatedChange, UPDATE_FIRST, updateCheckPath, updateLaterChange } from '@agentcomms/core';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { run } from '../src/cli/program.ts';
 import { createSlackMcpServer } from '../src/mcp/server.ts';
+import type { FileDownloader, FileDownloadResult } from '../src/operations/files.ts';
 import { type Harness, newHarness } from './support/harness.ts';
 
 /*
@@ -148,4 +149,291 @@ test('agent-slack: with nobody to ask a command exits 11 naming both ways on, an
   const listener = await command(['sign-in-listen', 'flow_none', '--json']);
   assert.notEqual(listener.exit, 11, listener.stdout);
   assert.doesNotMatch(listener.stdout, /UPDATE_REQUIRED/);
+});
+
+// ── Saving files: `slack_file_download` and `agent-slack files download` ─────────────────────────────────────────
+
+/*
+ * The download is the one Slack surface that writes to this machine, so it is held to the stop by name rather than
+ * left to "every tool registered after the gate" and "every command that runs through `act`". Each case counts what
+ * reached Slack, what reached the file transport and what reached the disk: a stop that answered correctly after the
+ * download had begun would pass a test that read only the answer.
+ */
+
+const FILE_ID = 'F0AAA1';
+
+/** Slack, as far as one file by id needs it, recording each method it is asked; never the real one. */
+function slackForOneFile() {
+  const asked: string[] = [];
+  const fetch = async (input: string | URL | Request, _init?: RequestInit) => {
+    const url = String(input instanceof Request ? input.url : input);
+    const method = url.split('/api/')[1]?.split('?')[0] ?? '';
+    asked.push(method);
+    const replies: Record<string, unknown> = {
+      'files.info': {
+        ok: true,
+        file: {
+          id: FILE_ID,
+          name: 'numbers.pdf',
+          title: 'Numbers',
+          mimetype: 'application/pdf',
+          user: 'U0001',
+          url_private_download: `https://files.slack.com/files-pri/T0001-${FILE_ID}/download/numbers.pdf`,
+          shares: { public: { C0AAA1: [{ ts: '1700000000.000100' }] } },
+        },
+      },
+      'users.info': { ok: true, user: { id: 'U0001', profile: { display_name: 'sam' } } },
+    };
+    return new Response(JSON.stringify(replies[method] ?? { ok: false, error: 'unknown_method' }));
+  };
+  return { fetch, asked };
+}
+
+/** The file transport's stand-in: the bytes of the one file, recording each file asked for. */
+function fileTransport() {
+  const asked: string[] = [];
+  const download: FileDownloader = async (_call, request) => {
+    asked.push(request.fileId);
+    return { bytes: Buffer.from('%PDF-1.4 numbers'), contentType: 'application/pdf' };
+  };
+  return { download, asked };
+}
+
+/** Everything under the downloads root, as paths below it: empty when nothing was ever written there. */
+function saved(harness: Harness): string[] {
+  const root = harness.core.paths.downloadsDir;
+  return existsSync(root) ? (readdirSync(root, { recursive: true }) as string[]).sort() : [];
+}
+
+async function downloadAudits(harness: Harness): Promise<number> {
+  const records = await harness.core.audit.tail({ limit: 50 });
+  return records.filter((record) => record.operation === 'files.download').length;
+}
+
+/** The check's file as a check that could not reach the registry leaves it: asked today, nothing learnt. */
+function offline(harness: Harness): void {
+  harness.env.AGENT_COMMS_UPDATE_CHECK = 'on';
+  harness.env.npm_config_registry = 'http://127.0.0.1:9/';
+  const stateDir = harness.core.paths.stateDir;
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(
+    updateCheckPath(stateDir),
+    JSON.stringify({
+      lastChecked: new Date().toISOString(),
+      latest: null,
+      behind: null,
+      current: null,
+      lastError: 'http://127.0.0.1:9 could not be reached (ECONNREFUSED)',
+    }),
+  );
+}
+
+/**
+ * The ways past the stop that are not an update. "Not now" is written an hour ahead rather than at the midnight the
+ * product writes, so a run that crosses midnight cannot see it run out; the gate reads only whether it is still ahead.
+ */
+const WAYS_PAST: readonly { label: string; apply: (harness: Harness) => Promise<void> | void }[] = [
+  {
+    label: 'not now',
+    apply: (harness) => {
+      updateOut(harness);
+      writeFileSync(
+        updateCheckPath(harness.core.paths.stateDir),
+        JSON.stringify({
+          lastChecked: new Date().toISOString(),
+          latest: '99.0.0',
+          behind: true,
+          current: null,
+          snoozedUntil: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        }),
+      );
+    },
+  },
+  {
+    label: 'switched off for the process',
+    apply: (harness) => {
+      updateOut(harness);
+      harness.env.AGENT_COMMS_UPDATE_CHECK = 'off';
+    },
+  },
+  {
+    label: 'turned off for the machine',
+    apply: async (harness) => {
+      updateOut(harness);
+      await harness.core.config.update(
+        (config) => ({ ...config, defaults: { ...config.defaults, updateCheck: 'off' } }),
+        { consent: { kind: 'loosening-consent', paths: ['defaults.updateCheck'] } },
+      );
+    },
+  },
+  {
+    label: 'CI',
+    apply: (harness) => {
+      updateOut(harness);
+      harness.env.CI = 'true';
+    },
+  },
+  { label: 'offline', apply: offline },
+];
+
+async function downloadOverMcp(harness: Harness, args: Record<string, unknown> = {}) {
+  const slack = slackForOneFile();
+  const transport = fileTransport();
+  const { server } = await createSlackMcpServer({
+    core: harness.core,
+    env: harness.env,
+    fetch: slack.fetch,
+    fileDownload: transport.download,
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'test', version: '0' });
+  await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+  try {
+    const result = (await client.callTool({
+      name: 'slack_file_download',
+      arguments: { workspace: 'acme', fileIds: [FILE_ID], ...args },
+    })) as ToolResult;
+    return { result, slack: slack.asked, transport: transport.asked };
+  } finally {
+    await Promise.all([client.close(), server.close()]);
+  }
+}
+
+/** The command with no terminal on any end, as a script or an agent's shell runs it. */
+async function downloadAtCommand(harness: Harness, extra: string[] = [], options: { json?: boolean } = {}) {
+  const slack = slackForOneFile();
+  const transport = fileTransport();
+  let stdout = '';
+  let stderr = '';
+  const out = new PassThrough();
+  out.on('data', (chunk) => {
+    stdout += String(chunk);
+  });
+  const err = new PassThrough();
+  err.on('data', (chunk) => {
+    stderr += String(chunk);
+  });
+  const argv = [
+    ...(options.json === false ? [] : ['--json']),
+    ...['files', 'download', '--workspace', 'acme', '--file', FILE_ID],
+    ...extra,
+  ];
+  const exit = await run(argv, {
+    core: harness.core,
+    env: harness.env,
+    streams: {
+      stdout: Object.assign(out, { isTTY: false }),
+      stderr: Object.assign(err, { isTTY: false }),
+      stdin: Object.assign(new PassThrough(), { isTTY: false }),
+    },
+    openBrowser: () => undefined,
+    probe: (input, init) => harness.probe(input, init),
+    read: slack.fetch,
+    fileDownload: transport.download,
+  });
+  return { exit, stdout, stderr, slack: slack.asked, transport: transport.asked };
+}
+
+test('slack_file_download: an update that is out answers "Hang on a minute" and saves nothing — no Slack, no transport, no disk', async () => {
+  const harness = await newHarness();
+  await harness.addWorkspace({ alias: 'acme' });
+  updateOut(harness);
+  const { result, slack, transport } = await downloadOverMcp(harness);
+  assert.equal(result.isError, true, JSON.stringify(result.structuredContent));
+  assert.equal(code(result), 'UPDATE_REQUIRED', JSON.stringify(result.structuredContent));
+  assert.ok(text(result).startsWith("Hang on a minute, there's an update. Let's update first."), text(result));
+  assert.match(text(result), /This is agent-slack /);
+  assert.match(text(result), /slack_file_download did not run/);
+  const error = (result.structuredContent as { error: { message: string; details: Record<string, unknown> } }).error;
+  assert.ok(error.message.startsWith(UPDATE_FIRST), 'the structured content carries the same words');
+  assert.equal(error.details.tool, 'slack_file_download');
+  assert.equal(error.details.server, 'agent-slack');
+  assert.deepEqual(slack, [], 'Slack was asked about the file');
+  assert.deepEqual(transport, [], 'the file was fetched');
+  assert.deepEqual(saved(harness), [], 'something was written under the downloads root');
+  assert.equal(await downloadAudits(harness), 0, 'a download was audited');
+});
+
+test('agent-slack files download: with no terminal an update that is out exits 11 and writes nothing', async () => {
+  for (const json of [true, false]) {
+    const label = json ? '--json' : 'plain';
+    const harness = await newHarness();
+    await harness.addWorkspace({ alias: 'acme' });
+    updateOut(harness);
+    const stopped = await downloadAtCommand(harness, [], { json });
+    assert.equal(stopped.exit, EXIT_CODES.UPDATE, `${label}: ${stopped.stdout}${stopped.stderr}`);
+    assert.equal(stopped.exit, 11);
+    if (json) {
+      const error = (JSON.parse(stopped.stdout) as { error: { code: string; message: string } }).error;
+      assert.equal(error.code, 'UPDATE_REQUIRED');
+      assert.ok(error.message.startsWith(UPDATE_FIRST), error.message);
+      assert.match(error.message, /`agentcomms update`/);
+      assert.match(error.message, /`agentcomms update --later`/);
+    } else {
+      assert.ok(stopped.stderr.includes(UPDATE_FIRST), `${label}: ${stopped.stderr}`);
+      assert.doesNotMatch(stopped.stdout, /numbers|F0AAA1/, `${label}: the command reported a download`);
+    }
+    assert.deepEqual(stopped.slack, [], `${label}: Slack was asked about the file`);
+    assert.deepEqual(stopped.transport, [], `${label}: the file was fetched`);
+    assert.deepEqual(saved(harness), [], `${label}: something was written under the downloads root`);
+    assert.equal(await downloadAudits(harness), 0, `${label}: a download was audited`);
+  }
+});
+
+test('the download goes ahead when the update is put off, switched off, turned off, in CI or offline — over MCP and at the command', async () => {
+  for (const { label, apply } of WAYS_PAST) {
+    // Over MCP. The same call is stopped first, so what lets it through is the way past and nothing else; offline
+    // has no update out to be stopped for.
+    const tool = await newHarness();
+    await tool.addWorkspace({ alias: 'acme' });
+    if (label !== 'offline') {
+      updateOut(tool);
+      const control = await downloadOverMcp(tool);
+      assert.equal(code(control.result), 'UPDATE_REQUIRED', `${label}: the control call was not stopped`);
+    }
+    await apply(tool);
+    const passed = await downloadOverMcp(tool);
+    assert.notEqual(passed.result.isError, true, `${label}: ${JSON.stringify(passed.result.structuredContent)}`);
+    const result = passed.result.structuredContent as unknown as FileDownloadResult;
+    assert.equal(result.files.length, 1, `${label}: ${JSON.stringify(result)}`);
+    assert.ok(existsSync(result.files[0]?.path ?? ''), `${label}: the saved file is not on disk`);
+    assert.deepEqual(passed.transport, [FILE_ID], `${label}: the file was not fetched over MCP`);
+
+    // At the command, with no terminal: exit 0 and the file on disk, where the same command was stopped first.
+    const command = await newHarness();
+    await command.addWorkspace({ alias: 'acme' });
+    if (label !== 'offline') {
+      updateOut(command);
+      assert.equal((await downloadAtCommand(command)).exit, 11, `${label}: the control command was not stopped`);
+    }
+    await apply(command);
+    const ran = await downloadAtCommand(command);
+    assert.equal(ran.exit, EXIT_CODES.OK, `${label}: ${ran.stdout}${ran.stderr}`);
+    const data = (JSON.parse(ran.stdout) as { data: FileDownloadResult }).data;
+    assert.equal(data.files.length, 1, `${label}: ${ran.stdout}`);
+    assert.ok(existsSync(data.files[0]?.path ?? ''), `${label}: the saved file is not on disk`);
+    assert.deepEqual(ran.transport, [FILE_ID], `${label}: the file was not fetched at the command`);
+  }
+});
+
+test('the download takes no approval, so one it claims is refused as usage and cannot walk it past the stop', async () => {
+  // The stop lets through a call carrying an approval this machine holds (§2). A download needs no approval and
+  // declares none: `approvalId` on the tool, or `--approval` on the command, is refused before the gate is asked — so
+  // even a real one opens nothing here, and the download stays stopped until the update or "not now".
+  const harness = await newHarness();
+  await harness.addWorkspace({ alias: 'acme' });
+  const approvalId = await heldApproval(harness);
+  updateOut(harness);
+
+  const tool = await downloadOverMcp(harness, { approvalId });
+  assert.equal(code(tool.result), 'USAGE', JSON.stringify(tool.result.structuredContent));
+  assert.match(text(tool.result), /does not take `approvalId`/);
+  assert.deepEqual([...tool.slack, ...tool.transport], [], 'the claimed approval reached Slack or the transport');
+
+  const command = await downloadAtCommand(harness, ['--approval', approvalId]);
+  assert.equal(command.exit, EXIT_CODES.USAGE, `${command.stdout}${command.stderr}`);
+  assert.deepEqual([...command.slack, ...command.transport], [], 'the claimed approval reached Slack or the transport');
+
+  assert.deepEqual(saved(harness), [], 'something was written under the downloads root');
+  assert.equal(await downloadAudits(harness), 0, 'a download was audited');
 });

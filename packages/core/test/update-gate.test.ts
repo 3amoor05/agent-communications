@@ -934,7 +934,17 @@ test('which commands are never stopped: update, doctor, paths, approve, approval
   ]) {
     assert.equal(exemptFromUpdateGate(path), true, path.join(' '));
   }
-  for (const path of [['channels'], ['policy'], ['mcp', 'install'], ['mcp', 'prune'], ['audit', 'tail'], ['search']]) {
+  for (const path of [
+    ['channels'],
+    ['policy'],
+    ['mcp', 'install'],
+    ['mcp', 'prune'],
+    ['audit', 'tail'],
+    ['search'],
+    // A channel's command that writes to this machine: Slack's `files download`, Gmail's `attachments download`.
+    ['files', 'download'],
+    ['attachments', 'download'],
+  ]) {
     assert.equal(exemptFromUpdateGate(path), false, path.join(' '));
   }
   assert.equal(exemptFromUpdateGate(['status'], ['status']), true, 'a channel adds its own doctor');
