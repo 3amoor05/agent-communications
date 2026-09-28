@@ -527,7 +527,7 @@ const BOTH = [
 ];
 
 interface HandOff {
-  handoff: { authUrl: string; finish: string; registerWith?: { client: string; launcher?: string } };
+  handoff: { authUrl: string; finish: string; registerWith?: { client: string; launcher?: string; replace?: boolean } };
   blocked: { step: string; hint: string };
   did: string[];
 }
@@ -817,6 +817,44 @@ test('clientServesInbox counts only a user-scope entry of ours, under the name, 
   assert.equal(await clientServesInbox(env, { client: 'cursor', inbox: 'home' }), false, 'another client');
 });
 
+/*
+ * `setup --replace-server` goes with the sign-in too. It used to stop at `setup`: the finish found the entry it had
+ * been asked to replace and called the client registered, or prepared a change `mcp install` could not claim, since
+ * replacing had not been asked for there.
+ */
+test('`setup --replace-server` travels with the sign-in, and the finish replaces the entry once `mcp install --force --approval` claims it', async () => {
+  const machine = await clientOnly();
+  await cursorHolds(machine, { gmail: ours() });
+  const report = await handedOff(machine, ['--replace-server']);
+  assert.deepEqual(report.handoff.registerWith, { client: 'cursor', launcher: 'local', replace: true });
+  // In the sign-in's record, where the finish reads it.
+  const flowId = String(/--finish (fl_\w+)/.exec(report.handoff.finish)?.[1]);
+  assert.deepEqual((await flowRecord(machine.harness, flowId)).registerWith, report.handoff.registerWith);
+
+  const finished = await finishing(machine, report);
+  // Not "already registered", although that entry serves the mailbox: replacing it is what was asked for.
+  assert.equal(finished.run.code, 10, finished.run.stdout);
+  assert.equal(finished.registration?.status, 'approval-required', finished.run.stdout);
+  assert.match(String(finished.registration?.preview), /as "gmail", replacing its own earlier entry of that name/);
+  assert.deepEqual(finished.inboxes, ['home']);
+
+  // The printed claim is the prepared change, `--force` and all: it claims, and replaces the entry.
+  const claimed = await cli(machine.harness, [...argvOf(String(finished.registration?.claim)), '--json'], {
+    env: machine.env,
+  });
+  assert.equal(claimed.code, 0, `${claimed.stdout}${claimed.stderr}`);
+  assert.equal(claimed.envelope<{ applied: boolean }>().data?.applied, true);
+  const written = JSON.parse(await readFile(machine.cursor, 'utf8')) as {
+    mcpServers: { gmail: { command: string; args: string[] } };
+  };
+  assert.doesNotMatch(written.mcpServers.gmail.args.join(' '), /@agentcomms\/gmail-mcp/, 'the npx entry was replaced');
+  assert.match(written.mcpServers.gmail.args.join(' '), /packages[/\\]+gmail[/\\]+(src|dist)[/\\]+cli\./);
+  assert.equal(
+    finished.registration?.claim,
+    `agent-gmail mcp install --client cursor --launcher local --force --approval ${finished.registration?.approvalId}`,
+  );
+});
+
 test('a sign-in that carries no registration finishes exactly as it always did', async () => {
   // Started by `inbox add --start`, as every flow before this change was: its record has no `registerWith` at all.
   const machine = await clientOnly();
@@ -889,4 +927,26 @@ test('gmail_inbox_finish decides `pendingRegistration` by the entry that serves 
   const serving = await clientOnly();
   await cursorHolds(serving, { gmail: ours('--inbox', 'home') });
   assert.equal(Object.hasOwn(await finishedOverMcp(serving), 'pendingRegistration'), false);
+});
+
+test('gmail_inbox_finish hands `--replace-server` back as `force`, which comms_server_install needs to replace the entry', async () => {
+  const machine = await clientOnly();
+  await cursorHolds(machine, { gmail: ours() });
+  const pending = (await finishedOverMcp(machine, ['--replace-server'])).pendingRegistration as
+    | Record<string, unknown>
+    | undefined;
+  // Pending although that entry serves the mailbox: replacing it is what `setup` was asked for.
+  assert.ok(pending, 'replacing was asked for, so the registration is pending');
+  const args = pending.arguments as Record<string, unknown>;
+  assert.deepEqual(args, { channel: 'gmail', client: 'cursor', launcher: 'local', force: true });
+  assert.match(String(pending.next), /agent-gmail mcp install --client cursor --launcher local --force`/);
+
+  // And the core server takes those arguments as the replacement they are, where without `force` it refuses.
+  const server = await coreServer(machine.harness, machine.env);
+  try {
+    const asked = approvalAsked(await server.call('comms_server_install', args));
+    assert.match(asked.preview, /as "gmail", replacing its own earlier entry of that name/);
+  } finally {
+    await server.close();
+  }
 });

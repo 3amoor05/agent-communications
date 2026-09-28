@@ -42,11 +42,23 @@ export interface OAuthFlow {
   registerWith?: RegistrationIntent | undefined;
 }
 
-/** A registration a sign-in carries to its finish: the client, and how `setup` was asked to start the server. */
+/**
+ * A registration a sign-in carries to its finish: the client, how `setup` was asked to start the server, and whether
+ * it was asked to replace the entry already there.
+ */
 export interface RegistrationIntent {
   client: string;
   /** `setup --launcher`, when it was given; the installer's default otherwise. */
   launcher?: string | undefined;
+  /**
+   * `setup --replace-server`: an entry of this server's own under the same name is replaced, not kept. The finish
+   * makes it as `force`, and the `mcp install` that claims it carries `--force`.
+   *
+   * Carried for the same reason the client is: it used to stop at `setup`, so the finish found the very entry it had
+   * been asked to replace and called the client registered, or prepared a change that could not be claimed because
+   * replacing had not been asked for. Only written when given; a flow without it finishes as it always did.
+   */
+  replace?: boolean | undefined;
 }
 
 export type FlowOutcome = { code: string } | { error: string; description?: string | undefined };

@@ -372,12 +372,13 @@ Exit codes: 0 ok · 1 unexpected · 10 send refused or approval required · 64 u
    *
    * The mailbox is connected by the time this runs, and nothing here may say otherwise — what happens to the
    * registration is reported beside it, never in its place. A client whose entry of ours already serves this mailbox
-   * is left alone (`clientServesInbox`). Otherwise it is `setup`'s own registration step, through the same change: a
-   * person at this terminal reads the preview and approves it there and then; an agent, or anything without a
-   * terminal, gets the preview, the approval id and the `mcp install` command that claims it — the same change, so the
-   * claim succeeds — and the command exits 10, as `setup` does when it stops at this step, so a script reading only
-   * the status does not take a registration nobody approved for one that happened. One the change refuses — somebody
-   * else's server under that name, or ours there already — is `not-registered`, with the refusal's reason.
+   * is left alone (`clientServesInbox`), unless `setup` was given `--replace-server`, which asked for exactly that
+   * entry to be replaced. Otherwise it is `setup`'s own registration step, through the same change: a person at this
+   * terminal reads the preview and approves it there and then; an agent, or anything without a terminal, gets the
+   * preview, the approval id and the `mcp install` command that claims it — the same change, so the claim succeeds —
+   * and the command exits 10, as `setup` does when it stops at this step, so a script reading only the status does
+   * not take a registration nobody approved for one that happened. One the change refuses — somebody else's server
+   * under that name, or ours without `--replace-server` — is `not-registered`, with the refusal's reason.
    */
   const registerForFinish = async (
     context: GmailContext,
@@ -386,21 +387,30 @@ Exit codes: 0 ok · 1 unexpected · 10 send refused or approval required · 64 u
     connected: { alias: string; inbox: { email: string } },
   ): Promise<FinishRegistration> => {
     const { client } = intent;
-    const { clientServesInbox } = await import('../mcp/install.ts');
-    if (await clientServesInbox(env, { client, inbox: connected.alias })) {
-      return { client, status: 'already-registered' };
+    const replace = intent.replace === true;
+    if (!replace) {
+      const { clientServesInbox } = await import('../mcp/install.ts');
+      if (await clientServesInbox(env, { client, inbox: connected.alias })) {
+        return { client, status: 'already-registered' };
+      }
     }
     // `mcp install` with what `setup` was given: the request `setupRegistration` makes, and so the same change.
     const install = [
       'agent-gmail mcp install --client',
       client,
       ...(intent.launcher ? ['--launcher', intent.launcher] : []),
+      // Without it the claim's own preflight refuses the entry the prepared change replaces: not the same change.
+      ...(replace ? ['--force'] : []),
     ].join(' ');
     const person =
       agentMarker(env) === null &&
       canPrompt(env, streams, { json: globalOptions.json, noInput: globalOptions.noInput });
     try {
-      const change = await setupRegistration(context, intent);
+      const change = await setupRegistration(context, {
+        client,
+        ...(intent.launcher ? { launcher: intent.launcher } : {}),
+        force: replace,
+      });
       let result: ServerInstallResult;
       if (person) {
         // Said before the preview, so the person deciding knows the mailbox is in whatever they answer.
@@ -1700,6 +1710,8 @@ Exit codes: 0 ok · 1 unexpected · 10 send refused or approval required · 64 u
                 ? {
                     client: String(options.mcpClient),
                     ...(options.launcher ? { launcher: String(options.launcher) } : {}),
+                    // `--replace-server` too: the finish makes the registration this run would have, not a narrower one.
+                    ...(options.replaceServer === true ? { replace: true } : {}),
                   }
                 : undefined;
               const { startSignIn } = await import('../operations/signin.ts');
