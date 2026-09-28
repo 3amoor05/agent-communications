@@ -5,6 +5,7 @@ import { errorEnvelope, okEnvelope, SCHEMA_VERSION } from '../src/output.ts';
 
 test('every error code maps to its documented exit code', () => {
   assert.equal(new CommsError('APPROVAL_REQUIRED', 'x').exitCode, 10);
+  assert.equal(new CommsError('UPDATE_REQUIRED', 'x').exitCode, 11);
   assert.equal(new CommsError('USAGE', 'x').exitCode, 64);
   assert.equal(new CommsError('BAD_DATA', 'x').exitCode, 65);
   assert.equal(new CommsError('NOT_FOUND', 'x').exitCode, 66);

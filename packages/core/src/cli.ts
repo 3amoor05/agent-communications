@@ -1,12 +1,10 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
 import { approveChangeAtTerminal, gatedChangeAtTerminal } from './change-flow.ts';
-import { channelLabel } from './channel-servers.ts';
 import {
   colorEnabled,
   defaultStreams,
   type OutputOptions,
-  paint,
   runCommand,
   writeError,
   writeResult,
@@ -32,14 +30,16 @@ import {
   serverInstallChange,
   serverPruneChange,
 } from './operations/servers.ts';
+import { updateChange, updateCheck } from './operations/update.ts';
 import {
-  type UpdateItem,
-  type UpdateReport,
-  type UpdateResult,
-  updateChange,
-  updateCheck,
-} from './operations/update.ts';
-import { renderDoctor, renderInstall, renderPrune } from './render.ts';
+  type UpdateAutoResult,
+  type UpdateLaterResult,
+  updateAutoChange,
+  updateLaterChange,
+} from './operations/update-settings.ts';
+import { renderDoctor, renderInstall, renderPrune, renderUpdate, renderUpdateCheck } from './render.ts';
+import { terminalUpdateHooks } from './update-check.ts';
+import { exemptFromUpdateGate, updateGateAtTerminal } from './update-gate.ts';
 import { VERSION } from './version.ts';
 
 /**
@@ -78,6 +78,10 @@ Usage:
   agentcomms update [--check] [--no-verify] [--approval <id>]
                                            bring every registration, runtime and global package to the latest
                                            release; --check only says what is behind
+  agentcomms update --later [--approval <id>]
+                                           not now: nothing stops for the update until midnight
+  agentcomms update --auto on|off [--approval <id>]
+                                           turn the daily update check on or off for this machine
   agentcomms secrets migrate --to keychain|file [--approval <id>]
   agentcomms names migrate [--rename <old>=<new>] [--dry-run] [--approval <id>]
 
@@ -87,14 +91,20 @@ approval id (exit 10), and runs the command again with --approval <id> once the 
 the \`chat\` change policy, with \`agentcomms approve\` under \`confirm\`. A tightening — policy confirm — applies at
 once and asks nobody, and a --dry-run changes nothing.
 
+Once a day this machine asks npm whether a newer release is out. When one is, every command but update, doctor,
+paths, approve and approvals stops first: at a terminal it asks "Update now, later today, or cancel?"; anywhere else
+it exits 11 and names \`agentcomms update\` and \`agentcomms update --later\`. Putting it off (--later) and turning the
+check off (--auto off) are changes a person approves. CI, and AGENT_COMMS_UPDATE_CHECK=off, skip it.
+
 Options:
   --json        print the versioned JSON envelope
   --no-color    disable colour (also NO_COLOR, TERM=dumb)
   -h, --help    show this help
   -v, --version show the version
 
-Exit codes: 0 ok · 1 unexpected · 10 approval required · 64 usage · 65 bad data · 66 not found
-            69 provider unavailable · 75 transient · 77 auth or scope missing · 78 config error
+Exit codes: 0 ok · 1 unexpected · 10 approval required · 11 an update is out: update first, or put it off
+            64 usage · 65 bad data · 66 not found · 69 provider unavailable · 75 transient
+            77 auth or scope missing · 78 config error
 `;
 
 function usage(message: string): CommsError {
@@ -135,6 +145,8 @@ function parse(argv: string[]) {
       'no-verify': { type: 'boolean', default: false },
       'include-printed': { type: 'boolean', default: false },
       check: { type: 'boolean', default: false },
+      later: { type: 'boolean', default: false },
+      auto: { type: 'string' },
     },
   });
 }
@@ -177,6 +189,25 @@ export async function main(
     const { startCoreStdioServer } = await import('./mcp/server.ts');
     await startCoreStdioServer({ core, env });
     return EXIT_CODES.OK;
+  }
+
+  // The daily update check (design 2026-09-28 §3): before any command but the exempt ones, an update that is out
+  // stops it — a person is asked, anything else ends with UPDATE_REQUIRED.
+  if (!exemptFromUpdateGate(positionals.slice(0, 2))) {
+    let ended: number | null = null;
+    const gated = await runCommand(output, async () => {
+      ended = await updateGateAtTerminal({
+        core,
+        env,
+        binary: 'agentcomms',
+        running: VERSION,
+        output,
+        streams: defaultStreams,
+        ...terminalUpdateHooks(core, env, { output, streams: defaultStreams }),
+      });
+    });
+    if (gated !== EXIT_CODES.OK) return gated;
+    if (ended !== null) return ended;
   }
 
   const code = await runCommand(output, async () => {
@@ -315,7 +346,30 @@ export async function main(
         throw usage('usage: agentcomms mcp [install|prune]');
       }
       case 'update': {
-        if (sub !== undefined) throw usage('usage: agentcomms update [--check] [--no-verify] [--approval <id>]');
+        if (sub !== undefined) {
+          throw usage('usage: agentcomms update [--check | --later | --auto on|off] [--no-verify] [--approval <id>]');
+        }
+        const modes = [values.check, values.later, values.auto !== undefined].filter(Boolean).length;
+        if (modes > 1 || (values['no-verify'] && (values.later || values.auto !== undefined))) {
+          throw usage('--check, --later and --auto are one at a time, and --no-verify is for the update itself');
+        }
+        if (values.later) {
+          const result = await gatedChangeAtTerminal(core, updateLaterChange(core), {
+            ...approval,
+            command: 'agentcomms update --later',
+          });
+          writeResult(result, output, renderLater);
+          return;
+        }
+        if (values.auto !== undefined) {
+          if (values.auto !== 'on' && values.auto !== 'off') throw usage('--auto takes on or off');
+          const result = await gatedChangeAtTerminal(core, updateAutoChange(core, values.auto), {
+            ...approval,
+            command: shellCommand(['agentcomms', 'update', '--auto', values.auto]),
+          });
+          writeResult(result, output, renderAuto);
+          return;
+        }
         if (values.check) {
           if (values.approval !== undefined) {
             throw usage('--check only reads, so it takes no --approval; leave out --check to update');
@@ -443,6 +497,20 @@ function renderPolicy(report: ChangePolicyReport): string {
   return lines.join('\n');
 }
 
+function renderLater(result: UpdateLaterResult): string {
+  if (result.snoozedUntil === null) return 'Nothing was put off: no update has been found on this machine.';
+  const what = result.latest ? `The update to ${result.latest} is` : 'The daily update check is';
+  return `${what} put off until ${new Date(result.snoozedUntil).toString()}${result.changed ? '' : ' (it already was)'}: nothing stops for it until then, and the first command after asks again.`;
+}
+
+function renderAuto(result: UpdateAutoResult): string {
+  const state =
+    result.updateCheck === 'on'
+      ? 'on: once a day this machine asks npm for a newer release, and stops until it is updated or put off'
+      : 'off: nothing on this machine asks npm for a newer release, and nothing stops for one';
+  return `The daily update check is ${state}${result.changed ? '' : ' (it already was)'}.`;
+}
+
 function renderChannels(report: ChannelsReport): string {
   const lines: string[] = [];
   for (const channel of report.channels) {
@@ -460,101 +528,6 @@ function renderChannels(report: ChannelsReport): string {
     }
   }
   for (const file of report.unreadable) lines.push(`Could not read ${file.path}: ${file.reason}.`);
-  return lines.join('\n');
-}
-
-/** One item of an update check, as a line. */
-function describeItem(item: UpdateItem): string {
-  if (item.kind === 'global') {
-    return `global ${item.package} ${item.version}${item.version === item.latest ? '' : ` → ${item.latest}`}`;
-  }
-  if (item.kind === 'runtime') {
-    return item.version === item.latest
-      ? `${item.package} runtime ${item.latest} in ${item.path}`
-      : `${item.package} runtime ${item.version ?? '(none yet)'} → ${item.latest}, to install into ${item.path}`;
-  }
-  const where = item.scope === 'project' ? `for a project, in ${item.path}` : `in ${item.path}`;
-  const pins = item.narrowing.length > 0 ? `, ${item.narrowing.join(' ')}` : '';
-  const version =
-    item.version === null
-      ? 'pins no release'
-      : `${item.version}${item.version === item.latest ? '' : ` → ${item.latest}`}`;
-  return `${channelLabel(item.channel)} with ${item.client} as "${item.name}" ${where} (${item.launcher}, ${version}${pins})`;
-}
-
-function renderUpdateCheck(report: UpdateReport): string {
-  const latest = Object.entries(report.latest)
-    .map(([name, version]) => `${name} ${version}`)
-    .join(', ');
-  const lines = [`Latest: ${latest}. This core is ${report.core}.`];
-  const section = (title: string, items: readonly UpdateItem[]) => {
-    if (items.length === 0) return;
-    lines.push('', `${title}:`);
-    for (const item of items) {
-      lines.push(`  ${describeItem(item)}`);
-      if (item.kind === 'registration' && item.reason) lines.push(`    ${item.reason}`);
-    }
-  };
-  section('Behind', report.behind);
-  section('Up to date', report.upToDate);
-  section('Pinned to no release', report.unpinned);
-  for (const file of report.unreadable) lines.push('', `Could not read ${file.path}: ${file.reason}.`);
-  const updatable = report.behind.some((item) => item.kind !== 'registration' || item.updatable === true);
-  lines.push(
-    '',
-    report.behind.length === 0
-      ? 'Everything here is at the latest release.'
-      : updatable
-        ? 'Run `agentcomms update` to bring what is behind to the latest release.'
-        : 'Nothing behind can be updated from here; each says why above.',
-  );
-  return lines.join('\n');
-}
-
-function renderUpdate(result: UpdateResult, color: boolean): string {
-  const lines: string[] = [];
-  for (const step of result.steps) {
-    if (step.kind === 'runtime') {
-      lines.push(
-        step.outcome === 'installed'
-          ? paint(color, 'green', `Installed ${step.package}@${step.version} into ${step.path}.`)
-          : paint(
-              color,
-              'red',
-              `Could not install ${step.package}@${step.version}: ${step.detail ?? 'no reason given'}`,
-            ),
-      );
-    } else if (step.kind === 'registration') {
-      const what = `"${step.name}" with ${step.client} at ${step.to}`;
-      if (step.outcome === 'registered') {
-        lines.push(paint(color, 'green', `Registered ${what}, in place of ${step.from}.`));
-        if (step.verification === 'passed') lines.push(`  Checked: ${step.detail}`);
-        else if (step.verification === 'failed') lines.push(paint(color, 'red', `  Failed to start: ${step.detail}`));
-        else lines.push(paint(color, 'yellow', `  Not checked: ${step.detail ?? 'skipped'}`));
-        for (const warning of step.warnings ?? []) lines.push(`  ${warning}`);
-      } else {
-        lines.push(
-          paint(
-            color,
-            'red',
-            `${step.outcome === 'skipped' ? 'Skipped' : 'Could not register'} ${what}: ${step.detail}`,
-          ),
-        );
-      }
-    } else {
-      lines.push(
-        step.outcome === 'updated'
-          ? paint(color, 'green', `Updated the global ${step.package} from ${step.from} to ${step.to}.`)
-          : paint(color, 'red', `Could not update the global ${step.package}: ${step.detail ?? 'no reason given'}`),
-      );
-    }
-  }
-  if (result.status === 'up-to-date') lines.push('Everything here is at the latest release. Nothing was changed.');
-  if (result.status === 'manual') lines.push('Nothing was changed: what is behind is left for you.');
-  for (const item of result.manual) {
-    lines.push(paint(color, 'yellow', `Left for you: ${describeItem(item)}`), `  ${item.reason ?? ''}`);
-  }
-  if (result.next) lines.push('', result.next);
   return lines.join('\n');
 }
 

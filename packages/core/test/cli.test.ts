@@ -20,7 +20,15 @@ function run(args: string[], env: Record<string, string> = {}) {
   const config = env.AGENT_COMMS_CONFIG_DIR ?? tempDir();
   const result = spawnSync(process.execPath, [...NODE_FLAGS, CLI, ...args], {
     encoding: 'utf8',
-    env: { PATH: process.env.PATH ?? '', HOME: tempDir(), AGENT_COMMS_CONFIG_DIR: config, NO_COLOR: '1', ...env },
+    env: {
+      PATH: process.env.PATH ?? '',
+      HOME: tempDir(),
+      AGENT_COMMS_CONFIG_DIR: config,
+      NO_COLOR: '1',
+      // The daily update check, off: no test here asks the real npm registry (design 2026-09-28).
+      AGENT_COMMS_UPDATE_CHECK: 'off',
+      ...env,
+    },
   });
   return { ...result, config };
 }

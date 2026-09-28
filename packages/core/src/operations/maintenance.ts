@@ -11,6 +11,15 @@ import { isGroupOrWorldAccessible } from '../fs.ts';
 import { resolveName } from '../names.ts';
 import type { ResolvedPaths } from '../paths.ts';
 import { type KeyringModule, keychainNamespace, loadKeyringModule, probeKeychain } from '../secrets.ts';
+import {
+  countedLatest,
+  readUpdateCheck,
+  UPDATE_CHECK_ENV,
+  updateCheckEnabled,
+  updateSnoozed,
+  updateVerdict,
+} from '../update-state.ts';
+import { VERSION } from '../version.ts';
 import { type ChannelRegistration, CLIENTS, channelsAvailable } from './servers.ts';
 
 /**
@@ -150,8 +159,48 @@ export async function doctor(core: Core, env: NodeJS.ProcessEnv, options: Doctor
     ok: true,
     detail: config.secrets?.store ?? 'not chosen yet (keychain by default)',
   });
+  checks.push(await updateCheckLine(core, env));
   checks.push(...(await registrationChecks(core, env, readable ? config : null)));
   return { checks, ok: checks.every((c) => c.ok) };
+}
+
+/**
+ * The daily update check, in one line (design 2026-09-28 §4): on or off — and what turned it off — when the registry
+ * was last asked, the latest release it named, and the release running here. Never a failure: an update that is out
+ * is something to look at, with the two ways on, and the rest is information.
+ */
+async function updateCheckLine(core: Core, env: NodeJS.ProcessEnv): Promise<DoctorCheck> {
+  const enabled = await updateCheckEnabled(core, env);
+  const record = await readUpdateCheck(core.paths.stateDir);
+  const now = new Date();
+  const off = enabled.on
+    ? 'on'
+    : `off (${enabled.by === 'setting' ? 'agentcomms update --auto off' : enabled.by === 'CI' ? 'CI is set' : `${UPDATE_CHECK_ENV} is set`})`;
+  const latest =
+    record.latest === null
+      ? 'unknown'
+      : countedLatest(record) === null
+        ? `${record.latest} (a prerelease, not counted)`
+        : record.latest;
+  const snoozed = updateSnoozed(record, now);
+  const parts = [off, `last checked ${record.lastChecked ?? 'never'}`, `latest ${latest}`, `running ${VERSION}`];
+  if (snoozed && record.snoozedUntil !== null) parts.push(`put off until ${record.snoozedUntil}`);
+  if (record.lastError !== null) parts.push(`the last check got no answer: ${record.lastError}`);
+  const pending = enabled.on && !snoozed ? updateVerdict(record, VERSION) : null;
+  return {
+    name: 'update check',
+    ok: true,
+    ...(pending ? { warn: true as const } : {}),
+    detail: parts.join(' · '),
+    ...(pending === null
+      ? {}
+      : {
+          fix:
+            pending.kind === 'restart'
+              ? `${pending.latest} is installed on this machine: restart the MCP clients, and run commands from it.`
+              : 'Run `agentcomms update` (comms_update from a chat), or `agentcomms update --later` to put it off until tomorrow.',
+        }),
+  };
 }
 
 /**

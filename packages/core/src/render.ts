@@ -1,7 +1,9 @@
+import { channelLabel } from './channel-servers.ts';
 import { isDangerous } from './chars.ts';
 import { paint } from './cli-runtime.ts';
 import type { InstallResult, PruneResult } from './mcp-install.ts';
 import type { DoctorReport } from './operations/maintenance.ts';
+import type { UpdateItem, UpdateReport, UpdateResult } from './operations/update.ts';
 
 /**
  * One renderer for every surface a send preview is shown on — the chat, an elicitation form, a terminal. Text the
@@ -389,5 +391,102 @@ export function renderPrune(result: PruneResult, color: boolean): string {
   for (const item of result.removed) lines.push(paint(color, 'green', `${verb} ${item.version}: ${item.path}`));
   for (const item of result.kept) lines.push(`Kept ${item.version} (${item.reason}): ${item.path}`);
   if (lines.length === 0) lines.push(`No managed runtimes to remove in ${result.runtimeDir}.`);
+  return lines.join('\n');
+}
+
+// ── An update, as `agentcomms update` prints it — here so a channel's command can print one too ──────────────────
+
+/** One item of an update check, as a line. */
+function describeItem(item: UpdateItem): string {
+  if (item.kind === 'global') {
+    return `global ${item.package} ${item.version}${item.version === item.latest ? '' : ` → ${item.latest}`}`;
+  }
+  if (item.kind === 'runtime') {
+    return item.version === item.latest
+      ? `${item.package} runtime ${item.latest} in ${item.path}`
+      : `${item.package} runtime ${item.version ?? '(none yet)'} → ${item.latest}, to install into ${item.path}`;
+  }
+  const where = item.scope === 'project' ? `for a project, in ${item.path}` : `in ${item.path}`;
+  const pins = item.narrowing.length > 0 ? `, ${item.narrowing.join(' ')}` : '';
+  const version =
+    item.version === null
+      ? 'pins no release'
+      : `${item.version}${item.version === item.latest ? '' : ` → ${item.latest}`}`;
+  return `${channelLabel(item.channel)} with ${item.client} as "${item.name}" ${where} (${item.launcher}, ${version}${pins})`;
+}
+
+export function renderUpdateCheck(report: UpdateReport): string {
+  const latest = Object.entries(report.latest)
+    .map(([name, version]) => `${name} ${version}`)
+    .join(', ');
+  const lines = [`Latest: ${latest}. This core is ${report.core}.`];
+  const section = (title: string, items: readonly UpdateItem[]) => {
+    if (items.length === 0) return;
+    lines.push('', `${title}:`);
+    for (const item of items) {
+      lines.push(`  ${describeItem(item)}`);
+      if (item.kind === 'registration' && item.reason) lines.push(`    ${item.reason}`);
+    }
+  };
+  section('Behind', report.behind);
+  section('Up to date', report.upToDate);
+  section('Pinned to no release', report.unpinned);
+  for (const file of report.unreadable) lines.push('', `Could not read ${file.path}: ${file.reason}.`);
+  const updatable = report.behind.some((item) => item.kind !== 'registration' || item.updatable === true);
+  lines.push(
+    '',
+    report.behind.length === 0
+      ? 'Everything here is at the latest release.'
+      : updatable
+        ? 'Run `agentcomms update` to bring what is behind to the latest release.'
+        : 'Nothing behind can be updated from here; each says why above.',
+  );
+  return lines.join('\n');
+}
+
+export function renderUpdate(result: UpdateResult, color: boolean): string {
+  const lines: string[] = [];
+  for (const step of result.steps) {
+    if (step.kind === 'runtime') {
+      lines.push(
+        step.outcome === 'installed'
+          ? paint(color, 'green', `Installed ${step.package}@${step.version} into ${step.path}.`)
+          : paint(
+              color,
+              'red',
+              `Could not install ${step.package}@${step.version}: ${step.detail ?? 'no reason given'}`,
+            ),
+      );
+    } else if (step.kind === 'registration') {
+      const what = `"${step.name}" with ${step.client} at ${step.to}`;
+      if (step.outcome === 'registered') {
+        lines.push(paint(color, 'green', `Registered ${what}, in place of ${step.from}.`));
+        if (step.verification === 'passed') lines.push(`  Checked: ${step.detail}`);
+        else if (step.verification === 'failed') lines.push(paint(color, 'red', `  Failed to start: ${step.detail}`));
+        else lines.push(paint(color, 'yellow', `  Not checked: ${step.detail ?? 'skipped'}`));
+        for (const warning of step.warnings ?? []) lines.push(`  ${warning}`);
+      } else {
+        lines.push(
+          paint(
+            color,
+            'red',
+            `${step.outcome === 'skipped' ? 'Skipped' : 'Could not register'} ${what}: ${step.detail}`,
+          ),
+        );
+      }
+    } else {
+      lines.push(
+        step.outcome === 'updated'
+          ? paint(color, 'green', `Updated the global ${step.package} from ${step.from} to ${step.to}.`)
+          : paint(color, 'red', `Could not update the global ${step.package}: ${step.detail ?? 'no reason given'}`),
+      );
+    }
+  }
+  if (result.status === 'up-to-date') lines.push('Everything here is at the latest release. Nothing was changed.');
+  if (result.status === 'manual') lines.push('Nothing was changed: what is behind is left for you.');
+  for (const item of result.manual) {
+    lines.push(paint(color, 'yellow', `Left for you: ${describeItem(item)}`), `  ${item.reason ?? ''}`);
+  }
+  if (result.next) lines.push('', result.next);
   return lines.join('\n');
 }

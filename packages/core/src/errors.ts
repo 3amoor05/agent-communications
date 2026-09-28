@@ -1,12 +1,19 @@
 /**
  * Every failure a user or an agent can act on carries a specific, stable code from this registry, a message, an
  * optional one-line hint and structured `details`. The code decides the process exit status; agents and skills branch
- * on the code, humans read the message. Exit statuses follow BSD sysexits where one fits; 10 is ours.
+ * on the code, humans read the message. Exit statuses follow BSD sysexits where one fits; 10 and 11 are ours.
  */
 export const EXIT_CODES = {
   OK: 0,
   UNEXPECTED: 1,
   APPROVAL: 10,
+  /**
+   * A command that did not run because a newer release is out and nobody at a terminal could be asked about it
+   * (design 2026-09-28 §3). None of sysexits' codes means "run something else first", and a script that branches on
+   * it has exactly two things to do — update, or put it off — so it has one of its own. 11, beside 10: both mean a
+   * person has to decide before the command can go on.
+   */
+  UPDATE: 11,
   USAGE: 64,
   BAD_DATA: 65,
   NOT_FOUND: 66,
@@ -33,6 +40,7 @@ export type ErrorCode =
   | 'RATE_CAPPED'
   | 'UNSENDABLE_HTML'
   | 'LOOSENING_REFUSED'
+  | 'UPDATE_REQUIRED'
   | 'USAGE'
   | 'CURSOR_MISMATCH'
   | 'BAD_DATA'
@@ -77,6 +85,11 @@ export const ERROR_REGISTRY: Readonly<Record<ErrorCode, ErrorSpec>> = {
     exit: EXIT_CODES.APPROVAL,
     retryable: false,
     summary: 'a safety setting can only be loosened by a person',
+  },
+  UPDATE_REQUIRED: {
+    exit: EXIT_CODES.UPDATE,
+    retryable: false,
+    summary: 'a newer release is out: update first, or put it off until tomorrow',
   },
   USAGE: { exit: EXIT_CODES.USAGE, retryable: false, summary: 'the command or arguments are wrong' },
   CURSOR_MISMATCH: { exit: EXIT_CODES.USAGE, retryable: false, summary: 'the cursor belongs to a different query' },

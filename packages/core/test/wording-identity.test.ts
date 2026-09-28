@@ -91,6 +91,7 @@ function machine(body: Record<string, unknown> = {}): Machine {
     AGENT_COMMS_DATA_DIR: join(home, 'data'),
     NO_COLOR: '1',
     npm_config_offline: 'true',
+    AGENT_COMMS_UPDATE_CHECK: 'off', // no test asks the real npm registry, or stops for a release
   };
   const core = openCore({ env, now: () => new Date('2026-09-26T10:00:00.000Z') });
   return { home, env, core, dataDir: core.paths.dataDir };

@@ -40,6 +40,8 @@ export type SendPolicy = 'chat' | 'confirm' | 'never';
  * way to change it, and that passes no gate at all.
  */
 export type ChangePolicy = 'chat' | 'confirm';
+/** Whether this machine checks for a newer release once a day, and stops until it is updated or put off. */
+export type UpdateCheckSetting = 'on' | 'off';
 export type StoreKind = 'keychain' | 'file';
 
 export interface ClientConfig {
@@ -94,6 +96,15 @@ export interface Defaults {
      */
     elicitationClients: string[];
   };
+  /**
+   * The daily update check (design 2026-09-28): once a day this machine asks npm whether a newer release is out, and
+   * every server and command stops until it is updated or put off until tomorrow. Absent reads as `on`.
+   *
+   * Absent rather than filled in, as `changePolicy` is: a default the schema supplied would be written into the file
+   * by the next unrelated change, where it would look like a choice somebody made. Turning it off is a loosening —
+   * it is what keeps a machine from quietly falling behind a release — so it is approved like one; on applies at once.
+   */
+  updateCheck?: UpdateCheckSetting | undefined;
 }
 
 /**
@@ -296,6 +307,7 @@ const defaultsSchema = z.looseObject({
   downloadsDir: z.string().optional(),
   timezone: z.string().default('system'),
   confirm: z.looseObject({ elicitationClients: z.array(z.string()).default([]) }).default({ elicitationClients: [] }),
+  updateCheck: z.enum(['on', 'off']).optional(),
 });
 
 export const RESERVED_ALIASES: ReadonlySet<string> = new Set(['all']);
@@ -595,6 +607,11 @@ export function effectiveAccountSendPolicy(config: Config, account: string): Sen
 /** The change policy that applies where nothing overrides it: the default, and `chat` when none is set. */
 export function defaultChangePolicy(config: Config): ChangePolicy {
   return config.defaults.changePolicy ?? 'chat';
+}
+
+/** Whether this machine's daily update check is on: `defaults.updateCheck`, absent reading as `on`. */
+export function updateCheckSetting(config: Config): UpdateCheckSetting {
+  return config.defaults.updateCheck ?? 'on';
 }
 
 /**
@@ -1261,6 +1278,10 @@ export function classifyChange(before: Config, after: Config): { loosened: strin
     loosen('defaults.changePolicy', defaultChangePolicy(before), defaultChangePolicy(after));
   }
   if (b.riskEscalation && !a.riskEscalation) loosen('defaults.riskEscalation', b.riskEscalation, a.riskEscalation);
+  // Off stops the one thing that tells a person this machine has fallen behind a release: a person agrees to that.
+  if (updateCheckSetting(before) === 'on' && updateCheckSetting(after) === 'off') {
+    loosen('defaults.updateCheck', updateCheckSetting(before), updateCheckSetting(after));
+  }
   if (a.sendCaps.perHour > b.sendCaps.perHour || a.sendCaps.perDay > b.sendCaps.perDay)
     loosen('defaults.sendCaps', b.sendCaps, a.sendCaps);
   // Paths are compared by what they resolve to: a path written with `~` and the same path written in full are the

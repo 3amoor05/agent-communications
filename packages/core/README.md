@@ -20,7 +20,17 @@ npx @agentcomms/core policy        # the change policy: how a loosening is appro
 npx @agentcomms/core channels      # which servers exist, which are installed, and where each is registered
 npx @agentcomms/core mcp install --client claude-code   # register the core MCP server
 npx @agentcomms/core update --check  # what is behind the latest release; `update` brings it there, as one change
+npx @agentcomms/core update --later  # not now: nothing stops for the update until midnight (a change you approve)
+npx @agentcomms/core update --auto off  # no daily update check on this machine (a change you approve); --auto on
 ```
+
+**Once a day this machine asks npm whether a newer release is out.** When one is, every server and every command
+stops before doing anything — "Hang on a minute, there's an update. Let's update first." — until it is updated or put
+off until midnight. At a terminal you are asked "Update now, later today, or cancel?"; anything without a terminal
+exits `11` (`UPDATE_REQUIRED`), naming `agentcomms update` and `agentcomms update --later`. `update`, `doctor`,
+`paths`, `approve`, `approvals` and `mcp` (the server stops each call itself) are never stopped, and neither is a
+call that claims an approval already given. A registry that cannot be reached stops nothing. The check is skipped
+when `CI` is set, or `AGENT_COMMS_UPDATE_CHECK=off`; `doctor` shows it on one line.
 
 Every command takes `--json` and prints `{ "ok": true, "schemaVersion": 1, "data": … }` or
 `{ "ok": false, "schemaVersion": 1, "error": { "code", "message", "hint" } }`.
@@ -43,7 +53,7 @@ is the one registration that cannot come from chat. After a restart of the clien
 | `comms_channels_available` | which servers exist — core, Gmail, Slack — which are installed and at which version, and which clients start each |
 | `comms_server_install` | register the Gmail, Slack or core server with a client; the server appears once the client restarts |
 | `comms_server_prune` | remove the managed runtimes old releases left behind; `dryRun` lists them |
-| `comms_update` | what is behind the latest release (`check`), and bringing every registration, runtime and global package there as one change |
+| `comms_update` | what is behind the latest release (`check`), and bringing every registration, runtime and global package there as one change; `later` puts the daily check's stop off until midnight, `auto` turns the check on or off |
 | `comms_change_policy` | report or set the change policy of the defaults, a mailbox or a workspace |
 | `comms_names_migrate` | rename every account to `organisation/platform`; `dryRun` shows the mapping |
 | `comms_secrets_migrate` | move every credential between the keychain and files |

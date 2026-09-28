@@ -492,6 +492,7 @@ const SETTING_LABELS: Readonly<Record<string, string>> = {
   'defaults.attachDeny': 'files attachments may never come from',
   'defaults.downloadsDir': 'downloads folder',
   'defaults.confirm.elicitationClients': 'clients trusted to ask for a send approval',
+  'defaults.updateCheck': 'daily update check',
   'secrets.store': 'where credentials are kept',
 };
 
@@ -533,6 +534,8 @@ function meaning(field: string, after: SettingValue, scope: 'inboxes' | 'account
       return 'files from other people will be saved here';
     case 'defaults.confirm.elicitationClients':
       return 'these clients may ask you to approve a send in their own window';
+    case 'defaults.updateCheck':
+      return 'nothing on this machine will ask npm for a newer release, or stop until one is installed';
     case 'secrets.store':
       return 'credentials will move out of the system keychain into files on this disk';
     default:
