@@ -4,7 +4,15 @@ import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { CommsError } from '../src/errors.ts';
-import { checkAttachable, createUniqueFile, isInside, resolveInsideRoot, safeFilename, slug } from '../src/jail.ts';
+import {
+  checkAttachable,
+  createUniqueFile,
+  isInside,
+  relativeSubpath,
+  resolveInsideRoot,
+  safeFilename,
+  slug,
+} from '../src/jail.ts';
 import { tempDir } from './helpers/temp.ts';
 
 const posix = process.platform !== 'win32';
@@ -62,6 +70,20 @@ test('resolveInsideRoot refuses traversal and links that leave the root', async 
     symlinkSync(outside, join(root, 'link'));
     await assert.rejects(resolveInsideRoot(root, 'link/file.pdf'), /link that leaves/);
   }
+});
+
+test('relativeSubpath refuses in words that fit every channel that calls it', () => {
+  // Gmail, Resend and Slack all pass their `out` through it, so its hint names no one channel's kind of account.
+  for (const out of ['/etc/cron.d', '../other']) {
+    assert.throws(
+      () => relativeSubpath(out),
+      (error: CommsError) =>
+        error.code === 'BAD_DATA' &&
+        error.hint === 'Pass something like "reports/august". It is always placed inside this account’s own folder.',
+      out,
+    );
+  }
+  assert.equal(relativeSubpath('reports/./august/'), 'reports/august');
 });
 
 test('createUniqueFile never overwrites and never follows a final symlink', async () => {

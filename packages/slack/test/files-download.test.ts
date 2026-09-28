@@ -517,7 +517,12 @@ test('the jail refuses an `out` that is absolute, climbs out, or leaves the root
   for (const out of ['/etc/cron.d', '../other', 'reports/../../other', 'C:\\Users\\x', '\\\\server\\share']) {
     await assert.rejects(
       run({ fileIds: ['F0AAA1'], out }, { download: bytes.download }),
-      (error: CommsError) => error.code === 'BAD_DATA' && /out must be a relative subpath/.test(error.message),
+      (error: CommsError) =>
+        error.code === 'BAD_DATA' &&
+        /out must be a relative subpath/.test(error.message) &&
+        // The jail is core's, shared by every channel: its hint was Gmail's, and told a Slack user about a mailbox.
+        /inside this account’s own folder/.test(error.hint ?? '') &&
+        !/mailbox/i.test(error.hint ?? ''),
       out,
     );
   }

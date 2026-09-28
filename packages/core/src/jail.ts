@@ -234,7 +234,8 @@ export function relativeSubpath(out: string | undefined, field = 'out'): string 
   if (!value) return '';
   const refuse = (why: string): never => {
     throw new CommsError('BAD_DATA', `${field} must be a relative subpath: ${why}`, {
-      hint: `Pass something like "reports/august". It is always placed inside the mailbox's own folder.`,
+      // Gmail, Resend and Slack all pass their `out` through here, so the hint names no one channel's kind of account.
+      hint: 'Pass something like "reports/august". It is always placed inside this account’s own folder.',
       details: { value },
     });
   };
