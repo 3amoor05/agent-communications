@@ -511,8 +511,8 @@ test(
       }),
       ['/abs/one', '/abs/three'],
     );
-    assert.deepEqual(clientCliDirectories({ HOME: '/home/sam', AGENT_COMMS_CLIENT_CLI_DIRS: '' }), [
-      join('/home/sam', '.local', 'bin'),
+    assert.deepEqual(clientCliDirectories({ HOME: '/abs/home', AGENT_COMMS_CLIENT_CLI_DIRS: '' }), [
+      join('/abs/home', '.local', 'bin'),
     ]);
   },
 );
