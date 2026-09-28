@@ -225,6 +225,7 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
       core: context.core,
       env: context.env,
       server: 'agent-slack',
+      channel: 'slack',
       running: VERSION,
       exempt: ['slack_doctor'],
       refresh: () => checkForUpdates(context.core, context.env),

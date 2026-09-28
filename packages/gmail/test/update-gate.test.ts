@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { test } from 'node:test';
-import { UPDATE_FIRST, updateCheckPath } from '@agentcomms/core';
+import { gatedChange, UPDATE_FIRST, updateCheckPath, updateLaterChange } from '@agentcomms/core';
 import { type Harness, newHarness } from './support/harness.ts';
 import { cli, connect, type ToolResult } from './support/surfaces.ts';
 
@@ -12,15 +12,22 @@ import { cli, connect, type ToolResult } from './support/surfaces.ts';
  * points at a port nobody answers on besides.
  */
 
-function updateOut(harness: Harness): void {
+function updateOut(harness: Harness, current: { registered: string[]; global: string[] } | null = null): void {
   harness.env.AGENT_COMMS_UPDATE_CHECK = 'on';
   harness.env.npm_config_registry = 'http://127.0.0.1:9/';
   const stateDir = harness.core.paths.stateDir;
   mkdirSync(stateDir, { recursive: true });
   writeFileSync(
     updateCheckPath(stateDir),
-    JSON.stringify({ lastChecked: new Date().toISOString(), latest: '99.0.0', behind: true }),
+    JSON.stringify({ lastChecked: new Date().toISOString(), latest: '99.0.0', behind: true, current }),
   );
+}
+
+/** An approval this machine holds, prepared before the update was found — as a send approved moments before is. */
+async function heldApproval(harness: Harness): Promise<string> {
+  const prepared = await gatedChange(harness.core, updateLaterChange(harness.core), { surface: 'mcp' });
+  assert.equal(prepared.status, 'approval-required');
+  return (prepared as { prepared: { approvalId: string } }).prepared.approvalId;
 }
 
 const code = (result: ToolResult) =>
@@ -30,6 +37,7 @@ const text = (result: ToolResult) => (result.content ?? []).find((part) => part.
 test('an update that is out stops every Gmail tool but the doctor, and a call claiming an approval goes ahead', async () => {
   const harness = await newHarness();
   await harness.addInbox({ alias: 'work', email: 'jo@example.test', refreshToken: 'fake-refresh-token' });
+  const approvalId = await heldApproval(harness);
   updateOut(harness);
   const { call, close } = await connect({ core: harness.core, env: harness.env });
   try {
@@ -40,8 +48,16 @@ test('an update that is out stops every Gmail tool but the doctor, and a call cl
     assert.match(text(listed), /gmail_inboxes_list did not run/);
     assert.notEqual(code(await call('gmail_doctor', {})), 'UPDATE_REQUIRED');
     // Claiming an approval the person already gave: past the stop, to the tool's own answer.
-    const cancel = await call('gmail_send_cancel', { approvalId: `ap_${'0'.repeat(26)}` });
+    const cancel = await call('gmail_send_cancel', { approvalId });
     assert.notEqual(code(cancel), 'UPDATE_REQUIRED');
+    // One nobody here prepared claims nothing, and is stopped like any new call.
+    assert.equal(code(await call('gmail_send_cancel', { approvalId: `ap_${'0'.repeat(26)}` })), 'UPDATE_REQUIRED');
+    // Every registration of Gmail's server here names the latest: restart the client. Another channel's, or Gmail's
+    // global command, says nothing of this server: update.
+    updateOut(harness, { registered: ['gmail'], global: [] });
+    assert.match(text(await call('gmail_inboxes_list', {})), /Restart the client first/);
+    updateOut(harness, { registered: ['slack'], global: ['gmail'] });
+    assert.ok(text(await call('gmail_inboxes_list', {})).startsWith(UPDATE_FIRST));
   } finally {
     await close();
   }
@@ -49,6 +65,7 @@ test('an update that is out stops every Gmail tool but the doctor, and a call cl
 
 test('agent-gmail: with nobody to ask a command exits 11 naming both ways on, and the doctor still runs', async () => {
   const harness = await newHarness();
+  const approvalId = await heldApproval(harness);
   updateOut(harness);
   const listed = await cli(harness, ['inbox', 'list', '--json']);
   assert.equal(listed.code, 11, listed.stdout + listed.stderr);
@@ -63,4 +80,15 @@ test('agent-gmail: with nobody to ask a command exits 11 naming both ways on, an
   const listener = await cli(harness, ['oauth-listen', 'flow_none', '--json']);
   assert.notEqual(listener.code, 11, listener.stdout);
   assert.doesNotMatch(listener.stdout, /UPDATE_REQUIRED/);
+  // A command carrying an approval this machine holds goes past the stop, as `gmail_send_cancel` does over MCP — by
+  // its argument here — to the command's own answer; one nobody here prepared does not.
+  const held = await cli(harness, ['send', 'cancel', approvalId, '--json']);
+  assert.notEqual(held.code, 11, held.stdout + held.stderr);
+  assert.doesNotMatch(held.stdout, /UPDATE_REQUIRED/);
+  assert.equal((await cli(harness, ['send', 'cancel', `ap_${'0'.repeat(26)}`, '--json'])).code, 11);
+  // Gmail's package installed globally at the latest, and this copy older: stopped, and told to run the installed one.
+  updateOut(harness, { registered: [], global: ['gmail'] });
+  const older = await cli(harness, ['inbox', 'list', '--json']);
+  assert.equal(older.code, 11, older.stdout);
+  assert.match((older.envelope<unknown>().error as { message: string }).message, /isn't running it yet/);
 });

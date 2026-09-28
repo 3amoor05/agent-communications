@@ -196,6 +196,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
       core: context.core,
       env: context.env,
       server: 'agent-gmail',
+      channel: 'gmail',
       running: VERSION,
       exempt: ['gmail_doctor'],
       refresh: () => checkForUpdates(context.core, context.env),

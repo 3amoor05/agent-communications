@@ -154,6 +154,7 @@ export async function createResendMcpServer(options: ResendMcpOptions = {}): Pro
       core: context.core,
       env: context.env,
       server: 'agent-resend',
+      channel: 'resend',
       running: VERSION,
       exempt: ['resend_doctor'],
       refresh: () => checkForUpdates(context.core, context.env),

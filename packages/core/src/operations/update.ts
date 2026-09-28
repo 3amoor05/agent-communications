@@ -26,7 +26,7 @@ import {
 } from '../mcp-install.ts';
 import { resolveName } from '../names.ts';
 import { compareVersions, isBehind, isVersion, npmGlobalPackages, npmInstallGlobal, npmLatestVersion } from '../npm.ts';
-import { changeUpdateCheck, updateCheckSwitchedOff } from '../update-state.ts';
+import { changeUpdateCheck, type UpdateCurrent, updateCheckSwitchedOff } from '../update-state.ts';
 import { VERSION } from '../version.ts';
 import { channelProduct, launcherOf } from './servers.ts';
 
@@ -73,8 +73,6 @@ export interface UpdateDeps {
   installGlobal?: ((spec: string) => Promise<void>) | undefined;
   /** Installs a managed runtime of exactly this version, as the managed launcher would. */
   installRuntime?: ((packageName: string, version: string) => Promise<void>) | undefined;
-  /** Gives up on the registry and `npm ls` when this aborts: the terminal's daily check waits about three seconds. */
-  signal?: AbortSignal | undefined;
   /** The clock a check or an update is recorded by in the daily check's file. */
   now?: (() => Date) | undefined;
 }
@@ -369,9 +367,7 @@ async function inspect(core: Core, env: NodeJS.ProcessEnv, deps: UpdateDeps): Pr
 
   let installed: Record<string, string> = {};
   try {
-    const listed = await (
-      deps.globalPackages ?? (() => npmGlobalPackages(env, PUBLISHED_NAMES, { signal: deps.signal }))
-    )();
+    const listed = await (deps.globalPackages ?? (() => npmGlobalPackages(env, PUBLISHED_NAMES)))();
     installed = Object.fromEntries(
       Object.entries(listed).filter(([name, version]) => PUBLISHED_NAMES.includes(name) && isVersion(version)),
     );
@@ -397,7 +393,7 @@ async function inspect(core: Core, env: NodeJS.ProcessEnv, deps: UpdateDeps): Pr
   for (const name of Object.keys(installed)) wanted.add(name);
   const latest = await latestReleases(
     [...wanted].sort(),
-    deps.latestVersion ?? ((name) => npmLatestVersion(name, { env, signal: deps.signal })),
+    deps.latestVersion ?? ((name) => npmLatestVersion(name, { env })),
   );
 
   let config: Config | null = null;
@@ -498,34 +494,94 @@ async function inspect(core: Core, env: NodeJS.ProcessEnv, deps: UpdateDeps): Pr
  */
 export async function updateCheck(core: Core, env: NodeJS.ProcessEnv, deps: UpdateDeps = {}): Promise<UpdateReport> {
   const { report } = await inspect(core, env, deps);
-  const behind = report.behind.length > 0 ? true : report.unreadable.length > 0 ? null : false;
-  await recordFound(core, env, { latest: report.latest[CORE_PACKAGE], behind }, deps);
+  await recordFound(core, env, report, deps);
   return report;
 }
 
 const CORE_PACKAGE = channelServer('core').packageName;
 
+/** One registration, however many of a client's files hold a copy of it: an update registers it again as one. */
+const registrationKey = (entry: { channel: Channel; client: string; name: string }): string =>
+  `${entry.channel}\u0000${entry.client}\u0000${entry.name}`;
+
 /**
  * What a check or an update found, written to the daily update check's file (design 2026-09-28 §1): when the registry
- * was asked, the latest release it named, and whether anything here is still behind it.
+ * was asked, the latest release it named, whether anything here is still behind it, and — channel by channel — where
+ * this machine is known to run it.
  *
- * So an update applied here is known at once, not a day later: a server started before it stops saying "update" and
- * says "restart" instead. `behind` is only ever false when nothing here was behind, or could not be read. Best
- * effort, and skipped wherever the check is switched off: what was asked for is the report or the update, and it is
- * returned whether or not this lands.
+ * So an update applied here is known at once, not a day later: a server started before it, every registration of
+ * which the update moved, stops saying "update" and says "restart" instead. `after` is the update's result, when this
+ * records one. Best effort, and skipped wherever the check is switched off: what was asked for is the report or the
+ * update, and it is returned whether or not this lands.
  */
 async function recordFound(
   core: Core,
   env: NodeJS.ProcessEnv,
-  found: { latest: string | undefined; behind: boolean | null },
+  report: UpdateReport,
   deps: Pick<UpdateDeps, 'now'>,
+  after: UpdateResult | null = null,
 ): Promise<void> {
-  if (updateCheckSwitchedOff(env) !== null || found.latest === undefined || !isVersion(found.latest)) return;
+  const latest = report.latest[CORE_PACKAGE];
+  if (updateCheckSwitchedOff(env) !== null || latest === undefined || !isVersion(latest)) return;
   const at = (deps.now ?? (() => new Date()))().toISOString();
-  const latest = found.latest;
+  const { behind, current } = updateCheckFindings(report, latest, after);
   await changeUpdateCheck(core.paths.stateDir, (record) => ({
-    record: { ...record, lastChecked: at, latest, behind: found.behind, lastError: null },
+    record: { ...record, lastChecked: at, latest, behind, current, lastError: null, checking: null },
   })).catch(() => undefined);
+}
+
+/**
+ * What a report says of `latest`, for the daily check's file: as the machine was, or — with `after` — as the update
+ * left it.
+ *
+ * `behind` is the machine as a whole: true while anything is behind, or the update left something behind; null when
+ * some of it could not be known — a configuration or the global packages unread, a registration that pins nothing to
+ * compare; false only when all of it was seen and none of it is behind.
+ *
+ * `current` is each channel's own, and only what was seen, because it is what lets a server say "restart" instead of
+ * "update" — advice that stops every call until it is taken, and that only works when restarting starts `latest`.
+ * `registered`: there is a registration of the channel's server, every one pins `latest` (or was just registered
+ * again at it), none pins nothing, and every client's configuration was read — one that was not may hold another.
+ * `global`: the channel's own package is installed globally at `latest`, or was just now. A server nothing here
+ * registers — a plugin's, an extension's, one started from a checkout — is in neither, and stays `update`.
+ */
+export function updateCheckFindings(
+  report: UpdateReport,
+  latest: string,
+  after: UpdateResult | null = null,
+): { behind: boolean | null; current: UpdateCurrent } {
+  const moved = new Set<string>();
+  const installed = new Set<string>();
+  for (const step of after?.steps ?? []) {
+    if (step.kind === 'registration' && step.outcome === 'registered' && step.verification !== 'failed') {
+      moved.add(registrationKey(step));
+    }
+    if (step.kind === 'global' && step.outcome === 'updated') installed.add(step.package);
+  }
+  const atLatest = (version: string | null) => version !== null && isVersion(version) && !isBehind(version, latest);
+  const items = [...report.behind, ...report.upToDate];
+  const registrations = items.filter((item): item is RegistrationItem => item.kind === 'registration');
+  const clientsUnread = report.unreadable.some((file) => file.client !== 'npm');
+  const registered = clientsUnread
+    ? []
+    : CHANNELS.filter((channel) => {
+        const own = registrations.filter((item) => item.channel === channel);
+        return (
+          own.length > 0 &&
+          !report.unpinned.some((item) => item.channel === channel) &&
+          own.every((item) => atLatest(moved.has(registrationKey(item)) ? item.latest : item.version))
+        );
+      });
+  const globals = items.filter((item): item is GlobalItem => item.kind === 'global');
+  const global = CHANNELS.filter((channel) => {
+    const name = channelServer(channel).packageName;
+    return globals.some((item) => item.package === name && atLatest(installed.has(name) ? item.latest : item.version));
+  });
+  // What an update did not settle is still behind: a step that failed, or something left for a person.
+  const stillBehind =
+    after === null ? report.behind.length > 0 : !(after.ok && after.manual.length === 0 && after.status !== 'manual');
+  const unknown = report.unreadable.length > 0 || report.unpinned.length > 0;
+  return { behind: stillBehind ? true : unknown ? null : false, current: { registered, global } };
 }
 
 // ── The change ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -537,6 +593,8 @@ interface RegistrationStep {
 }
 
 interface Planned {
+  /** The report the plan was made from: what the daily check's file records, as the update leaves it. */
+  report: UpdateReport;
   latest: Record<string, string>;
   runtimes: RuntimeItem[];
   registrations: RegistrationStep[];
@@ -670,6 +728,7 @@ export function updateChange(
         steps.map((step) => step.item),
       );
       planned = {
+        report: inspection.report,
         latest: inspection.report.latest,
         runtimes,
         registrations: steps,
@@ -695,10 +754,9 @@ export function updateChange(
     apply: async () => {
       if (planned === null) throw new CommsError('UNEXPECTED', 'the update was applied before it was planned');
       const result = await applyUpdate(context, planned, deps);
-      // Nothing left behind — every step worked and nothing was left for a person — is what lets a server started
+      // What it moved to the latest release — and only what worked — is what lets a server or a command started
       // before this say "restart" rather than "update" from now on.
-      const settled = result.ok && result.manual.length === 0 && result.status !== 'manual';
-      await recordFound(core, env, { latest: planned.latest[CORE_PACKAGE], behind: !settled }, deps);
+      await recordFound(core, env, planned.report, deps, result);
       return result;
     },
   };

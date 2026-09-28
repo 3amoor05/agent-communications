@@ -1,6 +1,7 @@
 import {
   agentMarker,
   approvalKind,
+  approvalsOf,
   approveChangeAtTerminal,
   CHANNELS,
   CommsError,
@@ -160,11 +161,13 @@ a macOS dialog may be waiting) · 77 permission needed (macOS privacy) · 78 con
           core,
           env,
           binary: 'agent-whatsapp',
+          channel: 'whatsapp',
           running: VERSION,
           output: output(),
           noInput: false,
           streams,
           approveCommand: 'agent-whatsapp approve',
+          approvals: approvalsOf(command),
         });
       },
       streams,

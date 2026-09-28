@@ -42,8 +42,6 @@ export async function npmLatestVersion(
     env: NodeJS.ProcessEnv;
     fetch?: typeof fetch | undefined;
     timeoutMs?: number | undefined;
-    /** Given up on when this aborts too: the terminal's daily check waits about three seconds, and no longer. */
-    signal?: AbortSignal | undefined;
   },
 ): Promise<string> {
   const base = registryUrl(options.env);
@@ -63,9 +61,7 @@ export async function npmLatestVersion(
   }
   let response: Response;
   try {
-    const timeout = AbortSignal.timeout(timeoutMs);
-    const signal = options.signal ? AbortSignal.any([timeout, options.signal]) : timeout;
-    response = await (options.fetch ?? fetch)(url, { headers, signal });
+    response = await (options.fetch ?? fetch)(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
   } catch (error) {
     const name = (error as { name?: unknown } | undefined)?.name;
     const code = (error as { cause?: { code?: unknown } } | undefined)?.cause?.code;
@@ -90,20 +86,14 @@ export async function npmLatestVersion(
   return latest;
 }
 
-/** A command's exit status and output, given up on after `timeoutMs`, or when `signal` aborts. */
+/** A command's exit status and output, given up on after `timeoutMs`. */
 function capture(
   args: string[],
   env: NodeJS.ProcessEnv,
   timeoutMs: number,
-  signal?: AbortSignal | undefined,
 ): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(new Error('npm was not started: the wait for it was already over'));
-      return;
-    }
-    // With `signal`, Node kills the child when it aborts, and `error` rejects below.
-    const child = spawn(process.execPath, args, { env, stdio: ['ignore', 'pipe', 'pipe'], signal });
+    const child = spawn(process.execPath, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     const timer = setTimeout(() => {
@@ -138,14 +128,12 @@ function capture(
 export async function npmGlobalPackages(
   env: NodeJS.ProcessEnv,
   names: readonly string[],
-  options: { signal?: AbortSignal | undefined } = {},
 ): Promise<Record<string, string>> {
   const npmCli = await findNpmCli();
   const { stdout } = await capture(
     [npmCli, 'ls', '--global', '--depth=0', '--json', '--no-update-notifier'],
     env,
     60_000,
-    options.signal,
   );
   let tree: { dependencies?: Record<string, { version?: unknown }>; error?: { code?: unknown } };
   try {

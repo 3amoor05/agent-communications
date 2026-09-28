@@ -35,30 +35,60 @@ export const UPDATE_FIRST = "Hang on a minute, there's an update. Let's update f
 
 export interface UpdateCheckRecord {
   /**
-   * When the registry was last asked, as an ISO time — whether or not it answered. A failed ask counts: a machine
-   * that is offline would otherwise ask again on every command, and a command at a terminal waits for it.
+   * When the registry was last asked, as an ISO time, written once the ask is over — whether or not it answered. A
+   * failed ask counts: a machine that is offline would otherwise ask again on every command, and a command at a
+   * terminal waits for it.
    */
   lastChecked: string | null;
   /** The latest release the registry last named: the `latest` dist-tag of `@agentcomms/core`. */
   latest: string | null;
   /**
    * Whether anything on this machine — a registration, a runtime, a global package — was behind `latest` at that
-   * check, as `comms_update` with `check` finds it. `false` with an older server running is an update installed and
-   * not yet loaded: the client has to be restarted, not updated again. `null` when it is not known.
+   * check, as `comms_update` with `check` finds it: the machine as a whole. `null` when it is not known — a client's
+   * configuration or the global packages could not be read, or a registration pins no release to compare.
    */
   behind: boolean | null;
+  /**
+   * Where this machine is known to run `latest`, channel by channel, as that check found it: what tells "updated but
+   * not restarted" apart from "not updated" (§1). Null when that check found out neither.
+   */
+  current: UpdateCurrent | null;
   /** Why the last ask got no answer, when it got none. Kept for the doctor; nothing is stopped on its account. */
   lastError: string | null;
   /** A person's "not now": nothing stops until this ISO time, the local midnight after they said it. */
   snoozedUntil: string | null;
+  /**
+   * A check under way: when a process claimed it. Nobody else asks while it is younger than `UPDATE_CHECK_LEASE_MS`.
+   * `lastChecked` is written only once the ask is over, so an ask that never finished — a command the person
+   * interrupted, a server whose client closed it part-way — does not use up the day: its claim runs out, and the next
+   * process asks.
+   */
+  checking: string | null;
+}
+
+/**
+ * The channels whose `latest` this machine runs, by the way each is started. Each is a positive finding: a channel
+ * the scan could not see, or saw registered with no release pinned, is in neither.
+ */
+export interface UpdateCurrent {
+  /**
+   * Every registration of the channel's server pins `latest` — at least one does, none pins an older release or none
+   * at all, and every client's configuration was read. A server of one of these that is older was started before it
+   * was registered again, and restarting the client starts `latest`.
+   */
+  registered: string[];
+  /** The channel's package is installed globally at `latest`: its command, run again from there, is `latest`. */
+  global: string[];
 }
 
 export const EMPTY_UPDATE_CHECK: Readonly<UpdateCheckRecord> = Object.freeze({
   lastChecked: null,
   latest: null,
   behind: null,
+  current: null,
   lastError: null,
   snoozedUntil: null,
+  checking: null,
 });
 
 export function updateCheckPath(stateDir: string): string {
@@ -66,6 +96,15 @@ export function updateCheckPath(stateDir: string): string {
 }
 
 const isTime = (value: unknown): value is string => typeof value === 'string' && Number.isFinite(Date.parse(value));
+
+const isWords = (value: unknown): value is string[] =>
+  Array.isArray(value) && value.every((word) => typeof word === 'string');
+
+function readCurrent(value: unknown): UpdateCurrent | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const { registered, global } = value as Record<string, unknown>;
+  return isWords(registered) && isWords(global) ? { registered: [...registered], global: [...global] } : null;
+}
 
 /**
  * The record as the file holds it, each field checked on its own: one that is missing or not what it should be reads
@@ -83,8 +122,10 @@ export async function readUpdateCheck(stateDir: string): Promise<UpdateCheckReco
     lastChecked: isTime(held.lastChecked) ? held.lastChecked : null,
     latest: isVersion(held.latest) ? held.latest : null,
     behind: typeof held.behind === 'boolean' ? held.behind : null,
+    current: readCurrent(held.current),
     lastError: typeof held.lastError === 'string' ? held.lastError.slice(0, 300) : null,
     snoozedUntil: isTime(held.snoozedUntil) ? held.snoozedUntil : null,
+    checking: isTime(held.checking) ? held.checking : null,
   };
 }
 
@@ -122,6 +163,20 @@ export function updateCheckDue(record: UpdateCheckRecord, now: Date): boolean {
 }
 
 const CLOCK_SKEW_MS = 5 * 60 * 1000;
+
+/**
+ * How long a claimed check keeps others from asking: longer than the longest a check takes — the registry's ten
+ * seconds, `npm ls`'s minute — so two processes never ask at once, and short enough that one whose process ended
+ * part-way holds nobody up for long.
+ */
+export const UPDATE_CHECK_LEASE_MS: number = 2 * 60 * 1000;
+
+/** Whether another process is asking the registry now: it claimed the check less than a lease ago. */
+export function updateCheckUnderway(record: UpdateCheckRecord, now: Date): boolean {
+  if (record.checking === null) return false;
+  const since = now.getTime() - Date.parse(record.checking);
+  return since >= -CLOCK_SKEW_MS && since < UPDATE_CHECK_LEASE_MS;
+}
 
 /** What turned the check off for this process, from its environment: `CI`, or the switch. Null when neither did. */
 export function updateCheckSwitchedOff(env: NodeJS.ProcessEnv): 'CI' | typeof UPDATE_CHECK_ENV | null {
@@ -178,51 +233,80 @@ export function countedLatest(record: UpdateCheckRecord): string | null {
   return record.latest !== null && isVersion(record.latest) && !isPrerelease(record.latest) ? record.latest : null;
 }
 
+/** What a process is, for the verdict: a channel's server, which a client starts, or its command, which a person runs. */
+export interface UpdateSurface {
+  /** Whose server or command it is: `core`, `gmail`, `whatsapp`. */
+  channel: string;
+  /** `server`: an MCP server, started from its registrations. `command`: a CLI, started from wherever it is installed. */
+  surface: 'server' | 'command';
+}
+
 /** An update that stops a server or a command running `running`. */
 export interface PendingUpdate {
   /**
-   * `update`: a newer release is out and this machine is behind it, or it is not known whether it is. `restart`: it
-   * is installed — nothing on this machine is behind — and this process simply started before it was.
+   * `update`: a newer release is out, and this process is not known to have it anywhere to restart into. `restart`:
+   * the check found it installed where this process starts from — every registration of this server, or this
+   * command's global package, is at `latest` — and this process simply started before it was.
    */
   kind: 'update' | 'restart';
   running: string;
   latest: string;
 }
 
-/** What the record means for a process running `running`, ignoring any "not now": null when there is nothing newer. */
-export function updateVerdict(record: UpdateCheckRecord, running: string): PendingUpdate | null {
+/**
+ * What the record means for a process running `running`, ignoring any "not now": null when there is nothing newer.
+ *
+ * `restart` only on the check's positive finding about this very server or command (`current`): a server whose every
+ * registration names `latest`, or a command whose package is installed globally at `latest`. Anything else — no
+ * registration the scan could see (a plugin's, an extension's, one written by hand), one that pins no release, a
+ * configuration it could not read, a check that found out nothing — is `update`: restarting would start the same old
+ * code, and a reply that said to restart would stop every call with advice that cannot work.
+ */
+export function updateVerdict(record: UpdateCheckRecord, running: string, where: UpdateSurface): PendingUpdate | null {
   const latest = countedLatest(record);
   if (latest === null || !isVersion(running) || !isBehind(running, latest)) return null;
-  return { kind: record.behind === false ? 'restart' : 'update', running, latest };
+  const installed = where.surface === 'server' ? record.current?.registered : record.current?.global;
+  return { kind: installed?.includes(where.channel) === true ? 'restart' : 'update', running, latest };
 }
 
 /**
  * The update that stops this process now, from the file as it is — or null: switched off, snoozed, or nothing newer.
  * Reads two files and asks nobody.
  */
-export async function pendingUpdate(options: {
-  core: Core;
-  env: NodeJS.ProcessEnv;
-  running: string;
-  now?: (() => Date) | undefined;
-}): Promise<PendingUpdate | null> {
+export async function pendingUpdate(
+  options: UpdateSurface & {
+    core: Core;
+    env: NodeJS.ProcessEnv;
+    running: string;
+    now?: (() => Date) | undefined;
+  },
+): Promise<PendingUpdate | null> {
   if (!(await updateCheckEnabled(options.core, options.env)).on) return null;
   const record = await readUpdateCheck(options.core.paths.stateDir);
   if (updateSnoozed(record, (options.now ?? (() => new Date()))())) return null;
-  return updateVerdict(record, options.running);
+  return updateVerdict(record, options.running, options);
 }
 
-/** The two ways on, as a tool call and as a command, for a reply's details. */
+/**
+ * The two ways on, as a tool call and as a command — and the command through npx, for a machine with no `agentcomms`
+ * installed: one that runs only a plugin's server, say, has neither the core server nor the command.
+ */
 export const UPDATE_WAYS: {
   readonly update: { readonly tool: 'comms_update'; readonly command: string; readonly npx: string };
   readonly later: {
     readonly tool: 'comms_update';
     readonly arguments: { readonly later: true };
     readonly command: string;
+    readonly npx: string;
   };
 } = Object.freeze({
   update: { tool: 'comms_update', command: 'agentcomms update', npx: 'npx -y @agentcomms/core@latest update' },
-  later: { tool: 'comms_update', arguments: { later: true }, command: 'agentcomms update --later' },
+  later: {
+    tool: 'comms_update',
+    arguments: { later: true },
+    command: 'agentcomms update --later',
+    npx: 'npx -y @agentcomms/core@latest update --later',
+  },
 });
 
 /**
@@ -231,12 +315,11 @@ export const UPDATE_WAYS: {
  */
 export function updateStopMessage(pending: PendingUpdate, where: { server: string; tool: string }): string {
   const didNotRun = `Nothing was done: ${where.tool} did not run.`;
-  const later =
-    'Not now: call comms_update with `later: true` — a change the person approves — and nothing stops again until midnight; the next request after it asks again. At a terminal: `agentcomms update --later`.';
+  const later = `Not now: call comms_update with \`later: true\` — a change the person approves — and nothing stops again until midnight; the next request after it asks again. At a terminal: \`${UPDATE_WAYS.later.command}\` (\`${UPDATE_WAYS.later.npx}\` where agentcomms is not installed).`;
   if (pending.kind === 'restart') {
     return [
       "Hang on a minute, the update is installed, but this server isn't running it yet. Restart the client first.",
-      `This is ${where.server} ${pending.running}; ${pending.latest} is installed on this machine, and a client starts it only once it is restarted. ${didNotRun}`,
+      `This is ${where.server} ${pending.running}; ${pending.latest} is installed on this machine — every registration of this server names it — and a client starts it only once it is restarted. ${didNotRun}`,
       `Ask the person to restart the MCP client — quit it and open it again — and carry on after. ${later}`,
     ].join('\n');
   }
@@ -244,7 +327,7 @@ export function updateStopMessage(pending: PendingUpdate, where: { server: strin
     UPDATE_FIRST,
     `This is ${where.server} ${pending.running}; the latest release is ${pending.latest}. ${didNotRun}`,
     'Ask the person which they want:',
-    `- Update now: call comms_update on the agentcomms (core) server. It shows every step and asks before it changes anything; restart the client after. At a terminal: \`${UPDATE_WAYS.update.command}\` (\`${UPDATE_WAYS.update.npx}\` where agentcomms is not installed).`,
+    `- Update now: call comms_update on the agentcomms (core) server. It shows every step and asks before it changes anything; restart the client after. At a terminal: \`${UPDATE_WAYS.update.command}\` (\`${UPDATE_WAYS.update.npx}\` where agentcomms is not installed). A server comms_update does not find registered here — a plugin's, an extension's — is updated where it was installed.`,
     `- ${later}`,
   ].join('\n');
 }

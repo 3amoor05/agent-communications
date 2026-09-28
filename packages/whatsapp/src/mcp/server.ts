@@ -115,6 +115,7 @@ export async function createWhatsAppMcpServer(options: WhatsAppMcpOptions = {}):
       core: context.core,
       env: context.env,
       server: 'agent-whatsapp',
+      channel: 'whatsapp',
       running: VERSION,
       exempt: ['whatsapp_status'],
       now: context.now,

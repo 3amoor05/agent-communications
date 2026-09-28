@@ -2,7 +2,6 @@ import { gatedChangeAtTerminal } from './change-flow.ts';
 import { channelServer } from './channel-servers.ts';
 import { type OutputOptions, type Streams, writeResult } from './cli-runtime.ts';
 import type { Core } from './core.ts';
-import { EXIT_CODES } from './errors.ts';
 import { npmLatestVersion } from './npm.ts';
 import { type UpdateDeps, updateChange, updateCheck } from './operations/update.ts';
 import { renderUpdate } from './render.ts';
@@ -14,6 +13,7 @@ import {
   type UpdateCheckRecord,
   updateCheckDue,
   updateCheckEnabled,
+  updateCheckUnderway,
 } from './update-state.ts';
 import { isPrerelease, isVersion } from './versions.ts';
 
@@ -26,9 +26,15 @@ import { isPrerelease, isVersion } from './versions.ts';
  * it found goes in `update-check.json`, where every server and command reads it.
  *
  * Two processes finding the file a day old at the same moment do not both ask: the first to take the file's lock
- * records the time before it asks, and the second, reading the file under the same lock, finds it fresh. An ask that
- * fails — offline, a registry that does not answer — is recorded as the day's ask, keeps the last result, and stops
- * nothing. It never throws.
+ * claims the check (`checking`), and the second, reading the file under the same lock, finds it claimed. The day's
+ * `lastChecked` is written when the ask is over, so an ask cut short — a command the person interrupted, a server
+ * whose client closed it — does not use up the day: its claim runs out (`UPDATE_CHECK_LEASE_MS`) and the next process
+ * asks. An ask that fails — offline, a registry that does not answer — is recorded as the day's ask, keeps the last
+ * result, and stops nothing. It never throws.
+ *
+ * Nothing here gives up on the registry sooner than the registry's own timeout: a command at a terminal stops
+ * *waiting* after about three seconds and goes on, and the check carries on beside it. Cut off at three seconds, a
+ * registry that takes five would have been asked every day and heard from never.
  *
  * WhatsApp imports none of this: see `update-state.ts`.
  */
@@ -39,8 +45,6 @@ export interface UpdateCheckOptions {
   /** The registry and `npm ls`, for a test — nothing a test runs reads the real ones. */
   deps?: UpdateDeps | undefined;
   now?: (() => Date) | undefined;
-  /** Gives up when this aborts: a command at a terminal waits about three seconds for the check, and no longer. */
-  signal?: AbortSignal | undefined;
 }
 
 export interface UpdateCheckOutcome {
@@ -59,17 +63,18 @@ export async function checkForUpdates(
   const now = options.now ?? (() => new Date());
   try {
     if (!(await updateCheckEnabled(core, env)).on) return { asked: false, record: await readUpdateCheck(stateDir) };
-    // The claim: under the lock, due or not is decided on the file as it is now, and the time written before anyone
-    // asks — so of two processes that both found it a day old, one asks. The time is read under the lock too: read
-    // before it, the second process's time could be earlier than the first's claim, which reads as a clock gone back.
-    const claim = await changeUpdateCheck<boolean>(stateDir, (record) => {
+    // The claim: under the lock, due or not — and claimed by another process or not — is decided on the file as it is
+    // now, and the claim written before anyone asks, so of two processes that both found it a day old, one asks. The
+    // time is read under the lock too: read before it, the second process's time could be earlier than the first's
+    // claim, which reads as a clock gone back.
+    const claim = await changeUpdateCheck<string>(stateDir, (record) => {
       const claimedAt = now();
-      return updateCheckDue(record, claimedAt)
-        ? { record: { ...record, lastChecked: claimedAt.toISOString() }, result: true }
-        : null;
+      if (!updateCheckDue(record, claimedAt) || updateCheckUnderway(record, claimedAt)) return null;
+      const checking = claimedAt.toISOString();
+      return { record: { ...record, checking }, result: checking };
     }).catch(() => null);
-    if (claim === null || claim.result !== true) return { asked: false, record: await readUpdateCheck(stateDir) };
-    await ask(core, env, { ...options, now });
+    if (claim?.result === undefined) return { asked: false, record: await readUpdateCheck(stateDir) };
+    await ask(core, env, { ...options, now, claimedAt: claim.result });
     return { asked: true, record: await readUpdateCheck(stateDir) };
   } catch {
     // The check never stops anything, a command least of all: whatever went wrong, the file is what it was.
@@ -80,51 +85,43 @@ export async function checkForUpdates(
 async function ask(
   core: Core,
   env: NodeJS.ProcessEnv,
-  options: UpdateCheckOptions & { now: () => Date },
+  options: UpdateCheckOptions & { now: () => Date; claimedAt: string },
 ): Promise<void> {
   const deps = options.deps ?? {};
-  const signal = options.signal ?? deps.signal;
-  const failed = (error: unknown) =>
+  /** The ask is over: what it found is written, the day's check recorded as of the claim, and the claim given up. */
+  const settle = (found: Partial<UpdateCheckRecord>) =>
     changeUpdateCheck(core.paths.stateDir, (record) => ({
-      record: { ...record, lastError: (error instanceof Error ? error.message : String(error)).slice(0, 300) },
+      record: { ...record, ...found, lastChecked: options.claimedAt, checking: null },
     })).catch(() => undefined);
+  const reason = (error: unknown) => (error instanceof Error ? error.message : String(error)).slice(0, 300);
   let latest: string;
   try {
-    latest = await (deps.latestVersion ?? ((name: string) => npmLatestVersion(name, { env, signal })))(CORE_PACKAGE);
+    latest = await (deps.latestVersion ?? ((name: string) => npmLatestVersion(name, { env })))(CORE_PACKAGE);
     if (!isVersion(latest))
       throw new Error(
         `the npm registry names ${JSON.stringify(String(latest)).slice(0, 60)} as the latest release, which is not a version`,
       );
   } catch (error) {
-    await failed(error);
+    await settle({ lastError: reason(error) });
     return;
   }
   if (isPrerelease(latest)) {
     // Recorded as the registry said it, and never counted: nobody is stopped for a release candidate.
-    await changeUpdateCheck(core.paths.stateDir, (record) => ({
-      record: { ...record, latest, behind: null, lastError: null },
-    })).catch(() => undefined);
+    await settle({ latest, behind: null, current: null, lastError: null });
     return;
   }
   try {
-    // `comms_update`'s own check, handed the one number: it records what it finds, by this clock.
-    await updateCheck(core, env, { ...deps, latestVersion: async () => latest, signal, now: options.now });
+    // `comms_update`'s own check, handed the one number: it records what it finds, by this clock, and so ends the ask.
+    await updateCheck(core, env, { ...deps, latestVersion: async () => latest, now: options.now });
   } catch (error) {
     // The registry answered, and something here could not be read: what is known is recorded, and the rest is not.
-    await changeUpdateCheck(core.paths.stateDir, (record) => ({
-      record: {
-        ...record,
-        latest,
-        behind: null,
-        lastError: (error instanceof Error ? error.message : String(error)).slice(0, 300),
-      },
-    })).catch(() => undefined);
+    await settle({ latest, behind: null, current: null, lastError: reason(error) });
   }
 }
 
 /**
  * What a command at a terminal hands the update gate (`updateGateAtTerminal`): the check, and the update itself for
- * the person's "now" — its own preview and yes, then "Updated. Run your command again."
+ * the person's "now" — its own preview and yes.
  *
  * Every command but WhatsApp's is given these. WhatsApp's is given neither, and reads the file as it is.
  */
@@ -141,8 +138,8 @@ export function terminalUpdateHooks(
   },
 ): TerminalUpdateHooks {
   return {
-    check: async (signal) => {
-      await checkForUpdates(core, env, { deps: options.deps, now: options.now, signal });
+    check: async () => {
+      await checkForUpdates(core, env, { deps: options.deps, now: options.now });
     },
     update: async () => {
       const result = await gatedChangeAtTerminal(core, updateChange(core, env, {}, options.deps), {
@@ -153,9 +150,10 @@ export function terminalUpdateHooks(
         streams: options.streams,
       });
       writeResult(result, options.output, (r) => renderUpdate(r, options.output.color), options.streams);
-      if (!result.ok || result.status === 'manual') return EXIT_CODES.UNAVAILABLE;
-      options.streams.stdout.write('Updated. Run your command again.\n');
-      return EXIT_CODES.OK;
+      if (!result.ok) return 'failed';
+      // Every step worked and nothing was left for a person. Anything short of that — nothing it could do, or
+      // something left behind — is not "Updated": the gate says so, and the command still does not run.
+      return result.status === 'updated' && result.manual.length === 0 ? 'updated' : 'short';
     },
   };
 }

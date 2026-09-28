@@ -1,6 +1,7 @@
 import {
   agentMarker,
   approvalKind,
+  approvalsOf,
   approveChangeAtTerminal,
   CommsError,
   canPrompt,
@@ -185,11 +186,13 @@ is out: update first, or put it off (agentcomms update, agentcomms update --late
           core,
           env,
           binary: 'agent-resend',
+          channel: 'resend',
           running: VERSION,
           output: output(),
           noInput: false,
           streams,
           approveCommand: 'agent-resend approve',
+          approvals: approvalsOf(command),
           ...terminalUpdateHooks(core, env, { output: output(), streams, approveCommand: 'agent-resend approve' }),
         });
       },

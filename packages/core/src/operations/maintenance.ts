@@ -186,7 +186,11 @@ async function updateCheckLine(core: Core, env: NodeJS.ProcessEnv): Promise<Doct
   const parts = [off, `last checked ${record.lastChecked ?? 'never'}`, `latest ${latest}`, `running ${VERSION}`];
   if (snoozed && record.snoozedUntil !== null) parts.push(`put off until ${record.snoozedUntil}`);
   if (record.lastError !== null) parts.push(`the last check got no answer: ${record.lastError}`);
-  const pending = enabled.on && !snoozed ? updateVerdict(record, VERSION) : null;
+  // The core's server and its command, each as its own stop reads it: installed only when both would start `latest`.
+  const verdict = (surface: 'server' | 'command') =>
+    enabled.on && !snoozed ? updateVerdict(record, VERSION, { channel: 'core', surface }) : null;
+  const [asServer, asCommand] = [verdict('server'), verdict('command')];
+  const pending = asServer ?? asCommand;
   return {
     name: 'update check',
     ok: true,
@@ -196,7 +200,7 @@ async function updateCheckLine(core: Core, env: NodeJS.ProcessEnv): Promise<Doct
       ? {}
       : {
           fix:
-            pending.kind === 'restart'
+            asServer?.kind === 'restart' && asCommand?.kind === 'restart'
               ? `${pending.latest} is installed on this machine: restart the MCP clients, and run commands from it.`
               : 'Run `agentcomms update` (comms_update from a chat), or `agentcomms update --later` to put it off until tomorrow.',
         }),

@@ -10,22 +10,38 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { type GatedChange, gatedChange } from '../src/change-flow.ts';
+import { CHANNEL_SERVERS } from '../src/channel-servers.ts';
 import type { Streams } from '../src/cli-runtime.ts';
 import { type Core, openCore } from '../src/core.ts';
 import { CommsError } from '../src/errors.ts';
 import { type CoreMcpOptions, createCoreMcpServer } from '../src/mcp/server.ts';
-import type { UpdateDeps } from '../src/operations/update.ts';
+import {
+  type RegistrationItem,
+  type UpdateDeps,
+  type UpdateReport,
+  type UpdateResult,
+  type UpdateStep,
+  updateCheckFindings,
+} from '../src/operations/update.ts';
 import { updateAutoChange, updateLaterChange } from '../src/operations/update-settings.ts';
 import { checkForUpdates, terminalUpdateHooks } from '../src/update-check.ts';
-import { exemptFromUpdateGate, updateGateAtTerminal, updateToolGate } from '../src/update-gate.ts';
+import {
+  approvalsOf,
+  claimsApproval,
+  exemptFromUpdateGate,
+  updateGateAtTerminal,
+  updateToolGate,
+} from '../src/update-gate.ts';
 import {
   nextLocalMidnight,
   pendingUpdate,
   readUpdateCheck,
   UPDATE_CHECK_FILE,
+  UPDATE_CHECK_LEASE_MS,
   UPDATE_FIRST,
   type UpdateCheckRecord,
   updateCheckPath,
+  updateVerdict,
 } from '../src/update-state.ts';
 import { VERSION } from '../src/version.ts';
 import { tempDir } from './helpers/temp.ts';
@@ -46,6 +62,18 @@ const CORE = '@agentcomms/core';
 const CLI = fileURLToPath(new URL('../src/cli.ts', import.meta.url));
 const SRC = fileURLToPath(new URL('../src/', import.meta.url));
 const NODE_FLAGS = ['--experimental-strip-types', '--disable-warning=ExperimentalWarning'];
+/** The core's server, and its command: what a verdict is asked for. */
+const SERVER = { channel: 'core', surface: 'server' } as const;
+const COMMAND = { channel: 'core', surface: 'command' } as const;
+const EMPTY: UpdateCheckRecord = {
+  lastChecked: null,
+  latest: null,
+  behind: null,
+  current: null,
+  lastError: null,
+  snoozedUntil: null,
+  checking: null,
+};
 
 interface Machine {
   home: string;
@@ -334,7 +362,11 @@ test('offline, the check stops nothing: it keeps the last result, says why, and 
   assert.equal(outcome.record.latest, null);
   assert.equal(outcome.record.lastChecked, now.toISOString(), 'the ask counts as the day’s');
   assert.match(String(outcome.record.lastError), /ECONNREFUSED/);
-  assert.equal(await pendingUpdate({ core: m.core, env: m.env, running: VERSION }), null, 'nothing is stopped');
+  assert.equal(
+    await pendingUpdate({ core: m.core, env: m.env, running: VERSION, ...SERVER }),
+    null,
+    'nothing is stopped',
+  );
   assert.equal((await checkForUpdates(m.core, m.env, { deps: deps(offline.latestVersion) })).asked, false);
   assert.equal(offline.asked.length, 1);
 
@@ -372,7 +404,7 @@ test('a hanging registry never delays a tool call: the check runs in the backgro
 test('a prerelease named latest never stops anything, in the file or from the registry', async () => {
   const m = machine();
   seed(m, { latest: '99.0.0-rc.1', behind: true });
-  assert.equal(await pendingUpdate({ core: m.core, env: m.env, running: VERSION }), null);
+  assert.equal(await pendingUpdate({ core: m.core, env: m.env, running: VERSION, ...SERVER }), null);
   const { call, close } = await connect(m);
   try {
     assert.ok(!stopped(await call('comms_channels_available')));
@@ -385,10 +417,10 @@ test('a prerelease named latest never stops anything, in the file or from the re
   const outcome = await checkForUpdates(fresh.core, fresh.env, { deps: deps(rc.latestVersion) });
   assert.equal(outcome.record.latest, '99.0.0-rc.1');
   assert.equal(outcome.record.behind, null);
-  assert.equal(await pendingUpdate({ core: fresh.core, env: fresh.env, running: VERSION }), null);
+  assert.equal(await pendingUpdate({ core: fresh.core, env: fresh.env, running: VERSION, ...SERVER }), null);
   // And the release after it is: 99.0.0 is newer than anything this checkout is.
   seed(fresh, { latest: LATEST, behind: true });
-  assert.notEqual(await pendingUpdate({ core: fresh.core, env: fresh.env, running: VERSION }), null);
+  assert.notEqual(await pendingUpdate({ core: fresh.core, env: fresh.env, running: VERSION, ...SERVER }), null);
 });
 
 // ── The server's stop ───────────────────────────────────────────────────────────────────────────────────────────
@@ -410,6 +442,10 @@ test('an update that is out stops a tool with the owner’s words, and never the
     assert.match(textOf(result), /comms_update/);
     assert.match(textOf(result), /`agentcomms update`/);
     assert.match(textOf(result), /`later: true`/);
+    // Both ways on have an npx form, for a machine with neither the core server nor `agentcomms` — a plugin's alone.
+    assert.match(textOf(result), /`npx -y @agentcomms\/core@latest update`/);
+    assert.match(textOf(result), /`npx -y @agentcomms\/core@latest update --later`/);
+    assert.match(textOf(result), /a plugin's, an extension's — is updated where it was installed/);
     assert.match(textOf(result), /comms_channels_available did not run/);
     // Claude Code and Codex show the model only the structured content: the same words are there.
     const error = (result.structuredContent as { error: { message: string; details: Record<string, unknown> } }).error;
@@ -432,35 +468,41 @@ test('an update that is out stops a tool with the owner’s words, and never the
   }
 });
 
-test('a call that claims an approval the person already gave goes ahead; the next new one is stopped', async () => {
+test('a call that claims an approval this machine holds goes ahead; an empty or unknown one, and a new call, are stopped', async () => {
   const m = machine();
   const { call, close } = await connect(m);
   try {
     // Prepared before the check landed.
-    const asked = await call('comms_change_policy', { set: 'confirm' });
-    assert.equal(asked.isError, undefined);
     const prepared = await call('comms_update', { later: true });
     const approvalId = (prepared.structuredContent as { approvalId: string }).approvalId;
     assert.match(approvalId, /^ap_/);
+    assert.equal(await claimsApproval(m.core, approvalId), true);
     // The check lands.
     seed(m, { latest: LATEST, behind: true });
     const revoke = await call('comms_approval_revoke', { approvalId });
     assert.ok(!stopped(revoke), JSON.stringify(revoke.structuredContent));
     assert.equal(revoke.isError, undefined);
-    // A made-up id still goes past the stop — to be refused by the tool itself, as it always was.
-    const claimed = await call('comms_change_policy', { set: 'chat', approvalId: `ap_${'0'.repeat(26)}` });
-    assert.ok(!stopped(claimed));
-    assert.equal(codeOf(claimed), 'NOT_FOUND');
+    // The key alone claims nothing. Let past, each of these would run the tool's first call with an update out — and
+    // a tightening applies at once: the policy would be `confirm` now, with no approval claimed at all.
+    for (const claimed of ['', 'ap_', 'not-an-approval', `ap_${'0'.repeat(26)}`]) {
+      assert.equal(await claimsApproval(m.core, claimed), false, JSON.stringify(claimed));
+      const result = await call('comms_change_policy', { set: 'confirm', approvalId: claimed });
+      assert.ok(stopped(result), `${JSON.stringify(claimed)}: ${JSON.stringify(result.structuredContent)}`);
+    }
+    assert.equal((await m.core.config.load()).defaults.changePolicy, undefined, 'the policy was changed');
     // Without one: stopped.
-    assert.ok(stopped(await call('comms_change_policy', { set: 'chat' })));
+    assert.ok(stopped(await call('comms_change_policy', { set: 'confirm' })));
   } finally {
     await close();
   }
 });
 
+// ── "Restart", only where restarting starts the latest ─────────────────────────────────────────────────────────
+
 test('an update installed but not yet loaded says to restart the client, not to update', async () => {
   const m = machine();
-  seed(m, { latest: LATEST, behind: false });
+  // What the check found: every registration of the core server names 99.0.0.
+  seed(m, { latest: LATEST, behind: false, current: { registered: ['core'], global: [] } });
   const { call, close } = await connect(m);
   try {
     const result = await call('comms_audit_tail');
@@ -480,21 +522,227 @@ test('an update installed but not yet loaded says to restart the client, not to 
     await close();
   }
 
-  // And an update applied here is what makes it so: the old server stops saying "update" at once.
+  // And an update applied here is what makes it so: the old server, registered with Cursor, stops saying "update" at
+  // once. A server nothing here registers — Gmail's, started by a plugin — is not made "installed" by it.
   const updated = machine();
+  cursorWith(updated, { agentcomms: npxEntry('core', OLD) });
   seed(updated, { latest: LATEST, behind: true });
   const { latestVersion } = registry();
   const server = await connect(updated, { update: deps(latestVersion) });
   try {
     assert.match(textOf(await server.call('comms_audit_tail')), /Let's update first/);
-    const first = (await server.call('comms_update', {})).structuredContent as { approvalId: string };
-    const applied = await server.call('comms_update', { approvalId: first.approvalId });
+    const first = (await server.call('comms_update', { noVerify: true })).structuredContent as { approvalId: string };
+    const applied = await server.call('comms_update', { noVerify: true, approvalId: first.approvalId });
     assert.equal(applied.isError, undefined, JSON.stringify(applied.structuredContent));
-    assert.equal((await readUpdateCheck(updated.stateDir)).behind, false);
+    const record = await readUpdateCheck(updated.stateDir);
+    assert.equal(record.behind, false);
+    assert.deepEqual(record.current, { registered: ['core'], global: ['core'] });
     assert.match(textOf(await server.call('comms_audit_tail')), /Restart the client first/);
+    const gmail = await pendingUpdate({
+      core: updated.core,
+      env: updated.env,
+      running: VERSION,
+      channel: 'gmail',
+      surface: 'server',
+    });
+    assert.equal(gmail?.kind, 'update');
   } finally {
     await server.close();
   }
+});
+
+/** Cursor's own configuration, in this machine's home, holding `servers`: a client the scan reads. */
+function cursorWith(m: Machine, servers: Record<string, { command: string; args: string[] }>): void {
+  mkdirSync(join(m.home, '.cursor'), { recursive: true });
+  writeFileSync(join(m.home, '.cursor', 'mcp.json'), `${JSON.stringify({ mcpServers: servers }, null, 2)}\n`);
+}
+
+/** An entry the npx launcher writes for `channel` — pinned to `version`, or, as one written by hand, to nothing. */
+function npxEntry(channel: 'core' | 'gmail', version: string | null): { command: string; args: string[] } {
+  const facts = CHANNEL_SERVERS[channel];
+  const spec = version === null ? facts.npxPackage : `${facts.npxPackage}@${version}`;
+  return { command: 'npx', args: ['-y', spec, ...(facts.npxArgs ?? [])] };
+}
+
+test('"restart" is never said for a server the check did not find registered at the latest release', async () => {
+  const verdict = (record: Partial<UpdateCheckRecord>, where: { channel: string; surface: 'server' | 'command' }) =>
+    updateVerdict({ ...EMPTY, latest: LATEST, ...record }, VERSION, where)?.kind;
+  // Nothing behind, and nothing found at the latest either: "update", not "restart" — machine-wide `behind` says
+  // nothing about this server. Nor does a check that could not tell.
+  assert.equal(verdict({ behind: false, current: null }, SERVER), 'update');
+  assert.equal(verdict({ behind: null, current: null }, SERVER), 'update');
+  assert.equal(verdict({ behind: false, current: { registered: [], global: [] } }, SERVER), 'update');
+  // Each channel its own, and each surface its own: a server by its registrations, a command by its global package.
+  const current = { registered: ['gmail'], global: ['core'] };
+  assert.equal(verdict({ current }, { channel: 'gmail', surface: 'server' }), 'restart');
+  assert.equal(verdict({ current }, SERVER), 'update');
+  assert.equal(verdict({ current }, COMMAND), 'restart');
+  assert.equal(verdict({ current }, { channel: 'gmail', surface: 'command' }), 'update');
+
+  // The machine the review found: no registration the scan can see (a plugin's server) and no global package. The
+  // check finds nothing behind, and the server still says "update".
+  const bare = machine();
+  const { latestVersion } = registry();
+  await checkForUpdates(bare.core, bare.env, { deps: deps(latestVersion, {}) });
+  const found = await readUpdateCheck(bare.stateDir);
+  assert.equal(found.behind, false);
+  assert.deepEqual(found.current, { registered: [], global: [] });
+  const { call, close } = await connect(bare);
+  try {
+    const text = textOf(await call('comms_audit_tail'));
+    assert.ok(text.startsWith(UPDATE_FIRST), text);
+    assert.doesNotMatch(text, /Restart the client/);
+  } finally {
+    await close();
+  }
+
+  // A hand-written entry that pins no release, and a Gmail one pinned at the latest beside it: Gmail is not known to
+  // be at the latest — restarting may start the unpinned one's npx cache — and the machine is not known either way.
+  const unpinned = machine();
+  cursorWith(unpinned, { gmail: npxEntry('gmail', null), 'gmail-latest': npxEntry('gmail', LATEST) });
+  await checkForUpdates(unpinned.core, unpinned.env, { deps: deps(latestVersion, {}) });
+  const record = await readUpdateCheck(unpinned.stateDir);
+  assert.equal(record.behind, null);
+  assert.deepEqual(record.current, { registered: [], global: [] });
+  const gate = updateToolGate({
+    core: unpinned.core,
+    env: unpinned.env,
+    server: 'agent-gmail',
+    channel: 'gmail',
+    running: VERSION,
+    exempt: [],
+  });
+  const stop = (await gate('gmail_search', {})) as { content: { text: string }[] } | null;
+  assert.ok(stop?.content[0]?.text.startsWith(UPDATE_FIRST), JSON.stringify(stop));
+
+  // Pinned at the latest and nothing else: that server, and only that one, is "installed".
+  const pinned = machine();
+  cursorWith(pinned, { gmail: npxEntry('gmail', LATEST) });
+  await checkForUpdates(pinned.core, pinned.env, { deps: deps(latestVersion, {}) });
+  assert.deepEqual((await readUpdateCheck(pinned.stateDir)).current, { registered: ['gmail'], global: [] });
+});
+
+/** One client's registration of `channel`'s server, as a report lists it. */
+function registration(channel: string, version: string | null, over: Partial<RegistrationItem> = {}): RegistrationItem {
+  return {
+    kind: 'registration',
+    channel,
+    package: `@agentcomms/${channel}`,
+    client: 'cursor',
+    name: channel,
+    scope: 'user',
+    path: 'mcp.json',
+    launcher: 'npx',
+    version,
+    latest: LATEST,
+    narrowing: [],
+    ...over,
+  };
+}
+
+const globalPackage = (name: string, version: string) =>
+  ({ kind: 'global', package: name, version, latest: LATEST }) as const;
+
+function report(over: Partial<UpdateReport> = {}): UpdateReport {
+  return { core: VERSION, latest: { [CORE]: LATEST }, behind: [], upToDate: [], unpinned: [], unreadable: [], ...over };
+}
+
+test('what a check records: a channel is current only on what the scan saw pinning the latest release', () => {
+  const find = (over: Partial<UpdateReport>) => updateCheckFindings(report(over), LATEST);
+  assert.deepEqual(
+    find({}),
+    { behind: false, current: { registered: [], global: [] } },
+    'nothing seen, nothing current',
+  );
+  const atLatest = registration('gmail', LATEST);
+  assert.deepEqual(find({ upToDate: [atLatest] }).current.registered, ['gmail']);
+  // Another registration of the same channel that pins nothing: not current, and the machine not known.
+  const unpinned = find({ upToDate: [atLatest], unpinned: [registration('gmail', null, { name: 'mine' })] });
+  assert.deepEqual(unpinned, { behind: null, current: { registered: [], global: [] } });
+  // Another channel's pins nothing: Gmail is still current.
+  assert.deepEqual(find({ upToDate: [atLatest], unpinned: [registration('slack', null)] }).current.registered, [
+    'gmail',
+  ]);
+  // One behind beside one at the latest: not current.
+  const behind = find({ upToDate: [atLatest], behind: [registration('gmail', OLD, { name: 'old' })] });
+  assert.deepEqual(behind, { behind: true, current: { registered: [], global: [] } });
+  // A client's configuration unread may hold another: nothing is current. The global list unread says nothing of
+  // registrations.
+  const client = { client: 'gemini', path: 'settings.json', reason: 'it is not JSON, even allowing comments' };
+  assert.deepEqual(find({ upToDate: [atLatest], unreadable: [client] }).current.registered, []);
+  const npm = { client: 'npm', path: 'the global packages (npm ls --global)', reason: 'npm was not found' };
+  assert.deepEqual(find({ upToDate: [atLatest], unreadable: [npm] }), {
+    behind: null,
+    current: { registered: ['gmail'], global: [] },
+  });
+  // A command's own package, installed globally at the latest; and only its own: gmail-mcp is not agent-gmail.
+  assert.deepEqual(find({ upToDate: [globalPackage(CORE, LATEST)] }).current.global, ['core']);
+  assert.deepEqual(find({ behind: [globalPackage(CORE, OLD)] }).current.global, []);
+  assert.deepEqual(find({ upToDate: [globalPackage('@agentcomms/gmail-mcp', LATEST)] }).current.global, []);
+});
+
+test('what an update records: what it moved counts, and a step that failed, was skipped or left for a person does not', () => {
+  const core = registration('core', OLD);
+  const before = report({ behind: [core, globalPackage(CORE, OLD)] });
+  const registered = (
+    outcome: 'registered' | 'failed' | 'skipped',
+    verification?: 'passed' | 'failed' | 'skipped',
+  ): UpdateStep => ({
+    kind: 'registration',
+    channel: 'core',
+    client: core.client,
+    name: core.name,
+    scope: 'user',
+    path: core.path,
+    launcher: 'npx',
+    from: OLD,
+    to: LATEST,
+    narrowing: [],
+    outcome,
+    ...(verification ? { verification } : {}),
+  });
+  const installed = (outcome: 'updated' | 'failed'): UpdateStep => ({
+    kind: 'global',
+    package: CORE,
+    from: OLD,
+    to: LATEST,
+    outcome,
+  });
+  const result = (steps: UpdateResult['steps'], over: Partial<UpdateResult> = {}): UpdateResult => ({
+    status: 'updated',
+    latest: { [CORE]: LATEST },
+    steps,
+    manual: [],
+    ok: true,
+    next: null,
+    ...over,
+  });
+  assert.deepEqual(
+    updateCheckFindings(before, LATEST, result([registered('registered', 'skipped'), installed('updated')])),
+    { behind: false, current: { registered: ['core'], global: ['core'] } },
+  );
+  for (const step of [registered('failed'), registered('skipped'), registered('registered', 'failed')]) {
+    assert.deepEqual(
+      updateCheckFindings(before, LATEST, result([step, installed('failed')], { status: 'failed', ok: false })),
+      { behind: true, current: { registered: [], global: [] } },
+      JSON.stringify(step),
+    );
+  }
+  // Every step worked, and a second registration of the core server was left for a person: still behind, and the
+  // core server is not current — restarting may start the one left behind.
+  const left = registration('core', OLD, { name: 'by-hand', launcher: 'other' });
+  const withManual = report({ behind: [core, left, globalPackage(CORE, OLD)] });
+  assert.deepEqual(
+    updateCheckFindings(
+      withManual,
+      LATEST,
+      result([registered('registered'), installed('updated')], { manual: [left] }),
+    ),
+    { behind: true, current: { registered: [], global: ['core'] } },
+  );
+  // Nothing it could do — what is behind is all a person's — is still behind; nothing to do at all is not.
+  assert.equal(updateCheckFindings(report(), LATEST, result([], { status: 'manual' })).behind, true);
+  assert.equal(updateCheckFindings(report(), LATEST, result([], { status: 'up-to-date' })).behind, false);
 });
 
 // ── Not now ───────────────────────────────────────────────────────────────────────────────────────────────────
@@ -515,7 +763,7 @@ test('not now lasts until local midnight, and holds for every server on the mach
   const result = await change.apply(undefined, plan);
   assert.equal(result.snoozedUntil, midnight.toISOString());
 
-  const at = (when: Date) => pendingUpdate({ core: m.core, env: m.env, running: VERSION, now: () => when });
+  const at = (when: Date) => pendingUpdate({ core: m.core, env: m.env, running: VERSION, now: () => when, ...SERVER });
   assert.equal(await at(evening), null);
   assert.equal(await at(new Date(midnight.getTime() - 1)), null, 'a millisecond before midnight: still put off');
   assert.notEqual(await at(midnight), null, 'at midnight it asks again');
@@ -526,6 +774,7 @@ test('not now lasts until local midnight, and holds for every server on the mach
     core: other.core,
     env: m.env,
     server: 'agent-gmail',
+    channel: 'gmail',
     running: VERSION,
     exempt: [],
     now: () => evening,
@@ -535,6 +784,7 @@ test('not now lasts until local midnight, and holds for every server on the mach
     core: other.core,
     env: m.env,
     server: 'agent-gmail',
+    channel: 'gmail',
     running: VERSION,
     exempt: [],
     now: () => midnight,
@@ -649,7 +899,7 @@ test('CI, AGENT_COMMS_UPDATE_CHECK=off and the machine’s own setting each skip
     const outcome = await checkForUpdates(m.core, m.env, { deps: deps(latestVersion) });
     assert.equal(outcome.asked, false, label);
     assert.deepEqual(asked, [], `${label}: the registry was asked`);
-    assert.equal(await pendingUpdate({ core: m.core, env: m.env, running: VERSION }), null, label);
+    assert.equal(await pendingUpdate({ core: m.core, env: m.env, running: VERSION, ...SERVER }), null, label);
     const { call, close } = await connect(m, { update: deps(latestVersion) });
     try {
       assert.ok(!stopped(await call('comms_channels_available')), label);
@@ -666,7 +916,7 @@ test('CI, AGENT_COMMS_UPDATE_CHECK=off and the machine’s own setting each skip
   // `CI=false` and `CI=0` are not CI.
   const notCi = machine({ CI: 'false' });
   seed(notCi, { latest: LATEST, behind: true });
-  assert.notEqual(await pendingUpdate({ core: notCi.core, env: notCi.env, running: VERSION }), null);
+  assert.notEqual(await pendingUpdate({ core: notCi.core, env: notCi.env, running: VERSION, ...SERVER }), null);
 });
 
 // ── The terminal ──────────────────────────────────────────────────────────────────────────────────────────────
@@ -688,6 +938,17 @@ test('which commands are never stopped: update, doctor, paths, approve, approval
     assert.equal(exemptFromUpdateGate(path), false, path.join(' '));
   }
   assert.equal(exemptFromUpdateGate(['status'], ['status']), true, 'a channel adds its own doctor');
+});
+
+test('the approvals a command claims: --approval, --mcp-approval, and an argument named approvalId', () => {
+  // As Commander hands a `preAction` hook the command: its options, and its arguments as read.
+  const command = {
+    opts: () => ({ approval: 'ap_one', mcpApproval: 'ap_two', account: 'acme/resend' }),
+    registeredArguments: [{ name: () => 'inbox' }, { name: () => 'approvalId' }],
+    processedArgs: ['work', 'ap_three'],
+  };
+  assert.deepEqual(approvalsOf(command), ['ap_one', 'ap_two', 'ap_three']);
+  assert.deepEqual(approvalsOf({ opts: () => ({}) }), [undefined, undefined]);
 });
 
 /** A terminal a person answers: each prompt on stderr gets the next answer, and every answer is used. */
@@ -716,18 +977,23 @@ function terminal(answers: string[]) {
   };
 }
 
-async function gateAt(m: Machine, answers: string[], extra: Partial<Parameters<typeof updateGateAtTerminal>[0]> = {}) {
+async function gateAt(
+  m: Machine,
+  answers: string[],
+  extra: Partial<Parameters<typeof updateGateAtTerminal>[0]> = {},
+  update: UpdateDeps = deps(registry().latestVersion),
+) {
   const tty = terminal(answers);
-  const { latestVersion } = registry();
-  const output = { json: false, color: false };
+  const output = extra.output ?? { json: false, color: false };
   const outcome = await updateGateAtTerminal({
     core: m.core,
     env: m.env,
     binary: 'agentcomms',
+    channel: 'core',
     running: VERSION,
     output,
     streams: tty.streams,
-    ...terminalUpdateHooks(m.core, m.env, { output, streams: tty.streams, deps: deps(latestVersion) }),
+    ...terminalUpdateHooks(m.core, m.env, { output, streams: tty.streams, deps: update }),
     ...extra,
   }).then(
     (value) => ({ value, error: null as CommsError | null }),
@@ -771,6 +1037,7 @@ test('at a terminal: "Update now, later today, or cancel?" — and each answer d
   assert.match(update.tty.out(), /updates the global @agentcomms\/core from 0\.0\.1 to 99\.0\.0/);
   assert.match(update.tty.out(), /Updated\. Run your command again\.\n$/);
   assert.equal((await readUpdateCheck(now.stateDir)).behind, false, 'recorded as updated');
+  assert.equal((await pendingUpdate({ core: now.core, env: now.env, running: VERSION, ...COMMAND }))?.kind, 'restart');
 
   // Without a network-capable update (WhatsApp): it says what to run, and ends.
   const reader = machine();
@@ -815,22 +1082,213 @@ test('with nobody to ask, the command does not run and ends with UPDATE_REQUIRED
 test('at a terminal the check waits about three seconds at most, then the command goes on without it', async () => {
   const m = machine();
   const started = Date.now();
-  const outcome = await updateGateAtTerminal({
+  // A check that never ends, and hears nothing: nothing but the gate's own wait can end the wait. (A second limit
+  // here, so that a gate that waits for ever fails this test rather than hanging it.)
+  const gate = updateGateAtTerminal({
     core: m.core,
     env: m.env,
     binary: 'agentcomms',
+    channel: 'core',
     running: VERSION,
     output: { json: true, color: false },
     streams: terminal([]).streams,
-    check: (signal) => new Promise((resolve) => signal.addEventListener('abort', () => resolve())),
+    check: () => new Promise<void>(() => undefined),
     waitMs: 200,
   });
-  assert.equal(outcome, null, 'nothing known, nothing stopped');
-  assert.ok(Date.now() - started < 2_000);
+  let limit: NodeJS.Timeout | undefined;
+  const outcome = await Promise.race([
+    gate,
+    new Promise<'waited on'>((resolve) => {
+      limit = setTimeout(() => resolve('waited on'), 10_000);
+    }),
+  ]);
+  clearTimeout(limit);
+  assert.equal(outcome, null, 'nothing known, nothing stopped — and the command went on');
+  assert.ok(Date.now() - started < 5_000, `waited ${Date.now() - started} ms`);
   // The real wait is about three seconds.
   const { TERMINAL_CHECK_WAIT_MS } = await import('../src/update-gate.ts');
   assert.equal(TERMINAL_CHECK_WAIT_MS, 3_000);
   assert.equal(existsSync(join(m.stateDir, UPDATE_CHECK_FILE)), false, 'a check that gave up wrote nothing here');
+});
+
+test('a registry slower than the terminal waits is still heard from: the check finishes beside the command', async () => {
+  const m = machine();
+  const served = await loopbackRegistry(LATEST, 1_500);
+  const env = { ...m.env, npm_config_registry: served.url };
+  try {
+    const started = Date.now();
+    const output = { json: true, color: false };
+    const streams = terminal([]).streams;
+    const outcome = await updateGateAtTerminal({
+      core: m.core,
+      env,
+      binary: 'agentcomms',
+      channel: 'core',
+      running: VERSION,
+      output,
+      streams,
+      ...terminalUpdateHooks(m.core, env, { output, streams, deps: { globalPackages: async () => ({}) } }),
+      waitMs: 200,
+    });
+    assert.equal(outcome, null, 'the command goes on');
+    assert.ok(Date.now() - started < 1_400, `the command waited ${Date.now() - started} ms for the registry`);
+    // The ask was not cut off at the wait: its answer lands, and the day's check is a real one.
+    await until(async () => (await readUpdateCheck(m.stateDir)).latest === LATEST, 'the answer to be recorded', 15_000);
+    const record = await readUpdateCheck(m.stateDir);
+    assert.equal(record.lastError, null);
+    assert.equal(record.checking, null, 'the claim was given up');
+    assert.deepEqual(served.requests, ['/@agentcomms%2fcore']);
+  } finally {
+    await served.close();
+  }
+});
+
+test('an ask that never finished does not use up the day: its claim runs out and the next process asks', async () => {
+  const m = machine();
+  const start = new Date('2026-09-28T09:00:00.000Z');
+  const at = (ms: number) => () => new Date(start.getTime() + ms);
+  // The first process claims the check and is gone before the registry answers — interrupted, or closed by its client.
+  const gone = registry(() => new Promise<string>(() => undefined));
+  void checkForUpdates(m.core, m.env, { deps: deps(gone.latestVersion), now: at(0) });
+  await until(() => gone.asked.length === 1, 'the first process to ask');
+  const claimed = await readUpdateCheck(m.stateDir);
+  assert.equal(claimed.checking, start.toISOString());
+  assert.equal(claimed.lastChecked, null, 'the day was used up before the ask was over');
+  // While the claim holds, nobody else asks.
+  const next = registry();
+  assert.equal(
+    (await checkForUpdates(m.core, m.env, { deps: deps(next.latestVersion), now: at(60_000) })).asked,
+    false,
+  );
+  assert.deepEqual(next.asked, []);
+  // Once it has run out, the next process does, and the day's check is its.
+  const after = await checkForUpdates(m.core, m.env, {
+    deps: deps(next.latestVersion),
+    now: at(UPDATE_CHECK_LEASE_MS),
+  });
+  assert.equal(after.asked, true);
+  assert.equal(after.record.latest, LATEST);
+  assert.equal(after.record.lastChecked, at(UPDATE_CHECK_LEASE_MS)().toISOString());
+  assert.equal(after.record.checking, null);
+});
+
+test('at a terminal, an agent or --json is never asked, even with a terminal on both ends', async () => {
+  for (const [label, env, output] of [
+    ['an agent (CLAUDECODE)', { CLAUDECODE: '1' }, { json: false, color: false }],
+    ['--json', {}, { json: true, color: false }],
+  ] as const) {
+    const m = machine(env);
+    seed(m, { latest: LATEST, behind: true });
+    const asked = await gateAt(m, ['later'], { output });
+    assert.equal(asked.error?.code, 'UPDATE_REQUIRED', `${label}: ${String(asked.error)}`);
+    assert.equal(asked.tty.err(), '', `${label}: it was asked`);
+    assert.equal(asked.tty.left(), 1, `${label}: an answer was taken`);
+    assert.equal((await readUpdateCheck(m.stateDir)).snoozedUntil, null, `${label}: put off with nobody asked`);
+  }
+});
+
+test('at a terminal, an update installed and an older copy running stops as the servers do, and says to run the installed one', async () => {
+  const m = machine();
+  seed(m, { latest: LATEST, behind: false, current: { registered: [], global: ['core'] } });
+  // Nobody to ask: stopped, and told so — not a note beside a command that runs.
+  const script = await gateAt(m, [], { output: { json: true, color: false } });
+  assert.equal(script.error?.code, 'UPDATE_REQUIRED');
+  assert.match(
+    String(script.error?.message),
+    /^Hang on a minute, the update is installed, but this command isn't running it yet\./,
+  );
+  assert.match(String(script.error?.message), /99\.0\.0 is installed globally, and this agentcomms is /);
+  assert.match(String(script.error?.message), /`agentcomms update --later`/);
+  // A person: now says to run it again from the installed one, ends 11, and runs nothing and updates nothing.
+  let updated = false;
+  const person = await gateAt(m, ['now'], {
+    update: async () => {
+      updated = true;
+      return 'updated';
+    },
+  });
+  assert.match(person.tty.err(), /^99\.0\.0 is installed \(this is [^)]+\)\. Switch now, later today, or cancel\? /);
+  assert.equal(person.value, 11);
+  assert.match(person.tty.out(), /Run your command again from the installed one\. agentcomms did not run\./);
+  assert.equal(updated, false, 'there was nothing to update');
+  // Later: put off, and the command runs.
+  const later = await gateAt(m, ['later']);
+  assert.equal(later.value, null);
+  assert.notEqual((await readUpdateCheck(m.stateDir)).snoozedUntil, null);
+});
+
+test('now, at a terminal: "Updated" only when this command is at the latest release after it; the command never runs', async () => {
+  // The update has nothing to do — this copy is not what it updates (npx's cache, say): not "Updated", and exit 11.
+  const short = machine();
+  seed(short, { latest: LATEST, behind: null });
+  const nothing = await gateAt(short, ['now', 'yes'], {}, deps(registry().latestVersion, {}));
+  assert.equal(nothing.error, null, String(nothing.error));
+  assert.equal(nothing.value, 11);
+  assert.doesNotMatch(nothing.tty.out(), /Updated\./);
+  assert.match(nothing.tty.out(), /agentcomms did not run: the update did not bring it to 99\.0\.0/);
+
+  // The check could not tell (npm ls unreadable, say), and the global package was at the latest all along: the update
+  // changes nothing, and says so — not "Updated" — and the command still did not run.
+  const already = machine();
+  seed(already, { latest: LATEST, behind: null });
+  const installed = await gateAt(already, ['now', 'yes'], {}, deps(registry().latestVersion, { [CORE]: LATEST }));
+  assert.equal(installed.value, 11, installed.tty.out());
+  assert.match(installed.tty.out(), /Nothing was changed\./);
+  assert.doesNotMatch(installed.tty.out(), /Updated\./);
+  assert.match(
+    installed.tty.out(),
+    /99\.0\.0 is installed here: run your command again from it\. agentcomms did not run\./,
+  );
+
+  // A step fails: said, not "Updated", exit 69 — and the file keeps saying "update", not "restart".
+  const failing = machine();
+  seed(failing, { latest: LATEST, behind: true });
+  const broken = {
+    ...deps(registry().latestVersion),
+    installGlobal: async () => {
+      throw new Error('npm could not write to the global directory (EACCES)');
+    },
+  };
+  const failed = await gateAt(failing, ['now', 'yes'], {}, broken);
+  assert.equal(failed.value, 69, failed.tty.out());
+  assert.doesNotMatch(failed.tty.out(), /Updated\./);
+  assert.match(failed.tty.out(), /agentcomms did not run: the update did not finish/);
+  const record = await readUpdateCheck(failing.stateDir);
+  assert.equal(record.behind, true, 'a failed update was recorded as done');
+  assert.deepEqual(record.current, { registered: [], global: [] });
+  assert.equal(
+    (await pendingUpdate({ core: failing.core, env: failing.env, running: VERSION, ...COMMAND }))?.kind,
+    'update',
+  );
+  assert.equal(
+    (await pendingUpdate({ core: failing.core, env: failing.env, running: VERSION, ...SERVER }))?.kind,
+    'update',
+  );
+});
+
+test('at a terminal, a command claiming an approval this machine holds runs, as the same call over MCP does', async () => {
+  const m = machine();
+  const prepared = await gatedChange(m.core, updateLaterChange(m.core), { surface: 'mcp' });
+  assert.equal(prepared.status, 'approval-required');
+  const approvalId = (prepared as { prepared: { approvalId: string } }).prepared.approvalId;
+  assert.match(approvalId, /^ap_/);
+  seed(m, { latest: LATEST, behind: true });
+  const claimed = await gateAt(m, [], { output: { json: true, color: false }, approvals: [undefined, approvalId] });
+  assert.equal(claimed.error, null, String(claimed.error));
+  assert.equal(claimed.value, null, 'the command runs');
+  for (const approvals of [[''], ['ap_'], [`ap_${'0'.repeat(26)}`], [undefined, undefined]]) {
+    const refused = await gateAt(m, [], { output: { json: true, color: false }, approvals });
+    assert.equal(refused.error?.code, 'UPDATE_REQUIRED', JSON.stringify(approvals));
+  }
+  // And through the command itself: `--approval` with a held id goes past the stop — to the command's own answer —
+  // and one nobody prepared does not.
+  const run = (args: string[]) =>
+    spawnSync(process.execPath, [...NODE_FLAGS, CLI, ...args], { encoding: 'utf8', env: m.env });
+  const held = run(['policy', 'chat', '--approval', approvalId, '--json']);
+  assert.notEqual(held.status, 11, held.stdout + held.stderr);
+  assert.doesNotMatch(held.stdout, /UPDATE_REQUIRED/);
+  const unknown = run(['policy', 'chat', '--approval', `ap_${'0'.repeat(26)}`, '--json']);
+  assert.equal(unknown.status, 11, unknown.stdout + unknown.stderr);
 });
 
 // ── The doctor ────────────────────────────────────────────────────────────────────────────────────────────────
@@ -850,6 +1308,16 @@ test('the doctor gives the check one line: on or off, when last checked, the lat
     assert.equal(line[0]?.detail, `on · last checked ${checked.toISOString()} · latest ${LATEST} · running ${VERSION}`);
     assert.equal(line[0]?.warn, true);
     assert.match(String(line[0]?.fix), /agentcomms update --later/);
+    // "Installed: restart" only when both the core's server and its command would start the latest: the doctor
+    // speaks for both.
+    const fixFor = async (current: UpdateCheckRecord['current']) => {
+      seed(m, { latest: LATEST, behind: false, current }, checked);
+      const again = (await call('comms_doctor')).structuredContent as { checks: { name: string; fix?: string }[] };
+      return String(again.checks.find((check) => check.name === 'update check')?.fix);
+    };
+    assert.match(await fixFor({ registered: ['core'], global: [] }), /^Run `agentcomms update`/);
+    assert.match(await fixFor({ registered: [], global: ['core'] }), /^Run `agentcomms update`/);
+    assert.match(await fixFor({ registered: ['core'], global: ['core'] }), /is installed on this machine: restart/);
   } finally {
     await close();
   }

@@ -13,6 +13,7 @@ import {
   updateCheckEnabled,
   updateCheckSwitchedOff,
   updateStopMessage,
+  updateVerdict,
 } from './update-state.ts';
 
 /**
@@ -21,6 +22,21 @@ import {
  * Reader only, like `update-state.ts`: what asks the registry is handed in — `refresh` to a server's gate, `check` and
  * `update` to a command's — by every package but WhatsApp, which has no network code and hands in nothing.
  */
+
+/**
+ * Whether a call claims an approval the person already gave (§2): an approval id this machine's approval store holds
+ * — pending, approved or used; every channel keeps its approvals there. Only then does the call go past the stop.
+ *
+ * The key alone is not a claim. An empty `approvalId`, or an id nobody prepared, claims nothing, and let past it
+ * would run the tool's first-call path with an update out — a preview, or a tightening applied at once. Each tool
+ * refuses an approval it does not know anyway; the stop must not be what an unknown one walks around. The store
+ * refuses anything that is not an approval id before it looks, so that is not checked twice.
+ */
+export async function claimsApproval(core: Core, id: unknown): Promise<boolean> {
+  // No id at all, the usual call: nothing to look up.
+  if (typeof id !== 'string') return false;
+  return (await core.approvals.get(id).catch(() => null)) !== null;
+}
 
 // ── A server: every tool call ─────────────────────────────────────────────────────────────────────────────────
 
@@ -35,6 +51,8 @@ export interface UpdateToolGateOptions {
   env: NodeJS.ProcessEnv;
   /** The server, as the reply names it: `agent-gmail`, `agentcomms`. */
   server: string;
+  /** Its channel, `gmail`, `core`: whose registrations say whether restarting the client would start `latest`. */
+  channel: string;
   /** The version this server is. */
   running: string;
   /** Tools never stopped: the update's own, and what a person needs to see what is wrong — each doctor, the paths. */
@@ -52,9 +70,9 @@ export interface UpdateToolGateOptions {
  * on — the setting, `CI` and `AGENT_COMMS_UPDATE_CHECK` — the tool is not exempt, and the call claims no approval the
  * person already gave, the tool does not run and the call is answered with the stop.
  *
- * The file is read as it is: the check itself never delays a call. A call carrying `approvalId` goes ahead — the
- * person said yes to exactly it, perhaps moments before the check landed — and the stop applies from the next new
- * request (§2, as agreed).
+ * The file is read as it is: the check itself never delays a call. A call carrying the id of an approval this machine
+ * holds goes ahead — the person said yes to exactly it, perhaps moments before the check landed — and the stop applies
+ * from the next new request (§2, as agreed).
  */
 export function updateToolGate(options: UpdateToolGateOptions): ToolGate {
   const exempt = new Set(options.exempt);
@@ -70,9 +88,10 @@ export function updateToolGate(options: UpdateToolGateOptions): ToolGate {
           running = null;
         });
     }
-    if (exempt.has(tool) || args.approvalId !== undefined) return null;
-    const pending = await pendingUpdate(options);
-    return pending === null ? null : stoppedCall(pending, { server: options.server, tool });
+    if (exempt.has(tool)) return null;
+    const pending = await pendingUpdate({ ...options, surface: 'server' });
+    if (pending === null || (await claimsApproval(options.core, args.approvalId))) return null;
+    return stoppedCall(pending, { server: options.server, tool });
   };
 }
 
@@ -139,12 +158,41 @@ export function commandPathOf(command: CommandLike): string[] {
   return path;
 }
 
+/**
+ * The approvals a Commander command claims: its `--approval`, the `--mcp-approval` Gmail's `setup` carries beside it,
+ * and an argument named `approvalId` — `agent-gmail send cancel <approvalId>`, `agent-resend send execute
+ * <approvalId>`, the commands whose tools take it as `approvalId`. What the gate hands `claimsApproval`, as a tool
+ * call's `approvalId` is handed it. Commander has read the arguments by the time a `preAction` hook runs.
+ */
+export function approvalsOf(command: {
+  opts(): Record<string, unknown>;
+  readonly registeredArguments?: readonly { name(): string }[];
+  readonly processedArgs?: readonly unknown[];
+}): unknown[] {
+  const options = command.opts();
+  const named = (command.registeredArguments ?? []).flatMap((argument, index) =>
+    argument.name() === 'approvalId' ? [command.processedArgs?.[index]] : [],
+  );
+  return [options.approval, options.mcpApproval, ...named];
+}
+
+/**
+ * How the update a person asked for at the terminal went: `updated`, every step worked and nothing was left for a
+ * person; `short`, it could do nothing, or left something for a person; `failed`, a step failed. Each has been
+ * reported by then.
+ */
+export type TerminalUpdateOutcome = 'updated' | 'short' | 'failed';
+
 /** What asks the registry for a command: handed in by every CLI but WhatsApp's — see `terminalUpdateHooks`. */
 export interface TerminalUpdateHooks {
-  /** The check, when the file is a day old; it gives up when `signal` aborts, and never throws. */
-  check?: ((signal: AbortSignal) => Promise<void>) | undefined;
-  /** The update, at this terminal, with its own preview and yes. Resolves to the exit status to end with. */
-  update?: (() => Promise<number>) | undefined;
+  /**
+   * The check, when the file is a day old. It never throws, and it is never cut short: the gate stops waiting for it
+   * after about three seconds, and it carries on beside the command — the process ends by its exit code, so it ends
+   * once the check has.
+   */
+  check?: (() => Promise<void>) | undefined;
+  /** The update, at this terminal, with its own preview and yes. */
+  update?: (() => Promise<TerminalUpdateOutcome>) | undefined;
 }
 
 export interface TerminalGateOptions extends TerminalUpdateHooks {
@@ -152,6 +200,8 @@ export interface TerminalGateOptions extends TerminalUpdateHooks {
   env: NodeJS.ProcessEnv;
   /** The command a person typed, `agent-gmail`: what the prompt and the messages name. */
   binary: string;
+  /** Its channel, `gmail`, `core`: whose global package says whether running the command again would run `latest`. */
+  channel: string;
   /** The version this command is. */
   running: string;
   output: OutputOptions;
@@ -159,8 +209,13 @@ export interface TerminalGateOptions extends TerminalUpdateHooks {
   streams: Streams;
   /** The command that approves a change beside this CLI, for "later" under the `confirm` change policy. */
   approveCommand?: string | undefined;
+  /**
+   * The approval ids the command carries — `--approval`, `--mcp-approval` (`approvalsOf`). One this machine holds lets
+   * the command run, as a tool call carrying it does over MCP (§2): the person said yes to exactly that.
+   */
+  approvals?: readonly unknown[] | undefined;
   now?: (() => Date) | undefined;
-  /** How long the check may take before the command goes on without it. About three seconds. */
+  /** How long the command waits for the check before it goes on without it. About three seconds. */
   waitMs?: number | undefined;
 }
 
@@ -171,7 +226,8 @@ export const TERMINAL_CHECK_WAIT_MS = 3_000;
  * end with instead; throws `UPDATE_REQUIRED` (exit 11) where nobody can be asked.
  *
  * It reads the file first. If the file is a day old it asks the registry — through `check` — waiting at most about
- * three seconds and going on without it after that. Then, when a newer release is out and nothing puts it off:
+ * three seconds and going on without it after that. Then, when a newer release is out, nothing puts it off, and the
+ * command claims no approval the person already gave:
  *
  * - a person at a terminal (stdin and stdout a terminal, no `--json`, not `CI`, not an agent) is asked "Update now,
  *   later today, or cancel?". Now runs the update, with its own preview and yes, and ends asking them to run the
@@ -180,69 +236,63 @@ export const TERMINAL_CHECK_WAIT_MS = 3_000;
  * - anything else — a script, cron, an agent, `--json` — gets `UPDATE_REQUIRED`, naming `agentcomms update` and
  *   `agentcomms update --later`, and the command does not run.
  *
- * An update installed but not yet run by this command — nothing on the machine behind — stops nothing: there is no
- * client to restart and nothing to update, so it is said on stderr and the command runs.
+ * An update installed and not yet run by this command — this command's package is installed globally at the latest
+ * release, and what is running is an older copy from somewhere else — stops it the same way, as the servers stop for
+ * a client not yet restarted (§3: the terminal stops as chat does). Its "now" says to run the command again from the
+ * installed one: there is nothing to update.
  */
 export async function updateGateAtTerminal(options: TerminalGateOptions): Promise<number | null> {
   const { core, env, streams, output } = options;
   const now = options.now ?? (() => new Date());
   if (!(await updateCheckEnabled(core, env)).on) return null;
+  for (const id of options.approvals ?? []) if (await claimsApproval(core, id)) return null;
   if (options.check && updateCheckDue(await readUpdateCheck(core.paths.stateDir), now())) {
-    // A timer of its own rather than `AbortSignal.timeout`, whose timer does not keep the process alive: a check
-    // waiting on something that does not either would let the command end mid-wait, having run nothing.
-    const wait = new AbortController();
-    const timer = setTimeout(() => wait.abort(), options.waitMs ?? TERMINAL_CHECK_WAIT_MS);
-    const gaveUp = new Promise<void>((resolve) =>
-      wait.signal.addEventListener('abort', () => resolve(), { once: true }),
-    );
+    // Stops waiting, and goes on: the check itself is not cut short, and finishes beside the command. A timer that
+    // keeps the process alive, so the wait is the wait, whatever the check is waiting on.
+    let timer: NodeJS.Timeout | undefined;
+    const gaveUp = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, options.waitMs ?? TERMINAL_CHECK_WAIT_MS);
+    });
     try {
-      await Promise.race([options.check(wait.signal).catch(() => undefined), gaveUp]);
+      await Promise.race([options.check().catch(() => undefined), gaveUp]);
     } finally {
       clearTimeout(timer);
     }
   }
-  const pending = await pendingUpdate({ core, env, running: options.running, now });
+  const where = { channel: options.channel, surface: 'command' as const };
+  const pending = await pendingUpdate({ core, env, running: options.running, now, ...where });
   if (pending === null) return null;
-  if (pending.kind === 'restart') {
-    streams.stderr.write(
-      `${paint(output.color, 'dim', 'note')}: this is ${options.binary} ${pending.running}; ${pending.latest} is installed on this machine. Run the command from it to use it.\n`,
-    );
-    return null;
-  }
 
   const person =
     agentMarker(env) === null && canPrompt(env, streams, { json: output.json, noInput: options.noInput === true });
-  if (!person) {
-    throw new CommsError(
-      'UPDATE_REQUIRED',
-      `${UPDATE_FIRST} ${pending.latest} is out (you have ${pending.running}): run \`${UPDATE_WAYS.update.command}\` first, or \`${UPDATE_WAYS.later.command}\` to put it off until tomorrow`,
-      {
-        hint: `Nothing was done. Both are changes a person approves: an agent gets the preview and an approval id (exit 10), and runs the same command again with --approval <id> once the person agrees. Where agentcomms is not installed: \`${UPDATE_WAYS.update.npx}\`.`,
-        details: {
-          running: pending.running,
-          latest: pending.latest,
-          update: UPDATE_WAYS.update,
-          later: UPDATE_WAYS.later,
-        },
-      },
-    );
-  }
+  if (!person) throw updateRequired(pending, options.binary);
 
+  const bold = (word: string) => paint(output.color, 'bold', word);
   const answer = (
     await askLine(
       streams,
-      `${pending.latest} is out (you have ${pending.running}). Update ${paint(output.color, 'bold', 'now')}, ${paint(output.color, 'bold', 'later')} today, or ${paint(output.color, 'bold', 'cancel')}? `,
+      pending.kind === 'restart'
+        ? `${pending.latest} is installed (this is ${pending.running}). Switch ${bold('now')}, ${bold('later')} today, or ${bold('cancel')}? `
+        : `${pending.latest} is out (you have ${pending.running}). Update ${bold('now')}, ${bold('later')} today, or ${bold('cancel')}? `,
     )
   )
     .trim()
     .toLowerCase();
   if (answer === 'now' || answer === 'update') {
-    if (options.update) return options.update();
-    // WhatsApp: it has no network code, so it cannot fetch an update itself; `agentcomms update` does it for all.
-    streams.stdout.write(
-      `${options.binary} reads only this machine and cannot fetch the update itself. Run \`${UPDATE_WAYS.update.command}\` (\`${UPDATE_WAYS.update.npx}\` where agentcomms is not installed), then run your command again.\n`,
-    );
-    return EXIT_CODES.UPDATE;
+    if (pending.kind === 'restart') {
+      streams.stdout.write(
+        `${pending.latest} is installed globally; this ${options.binary} is ${pending.running}, started from somewhere else — npx's cache, a project's own install, a checkout. Run your command again from the installed one. ${options.binary} did not run.\n`,
+      );
+      return EXIT_CODES.UPDATE;
+    }
+    if (!options.update) {
+      // WhatsApp: it has no network code, so it cannot fetch an update itself; `agentcomms update` does it for all.
+      streams.stdout.write(
+        `${options.binary} reads only this machine and cannot fetch the update itself. Run \`${UPDATE_WAYS.update.command}\` (\`${UPDATE_WAYS.update.npx}\` where agentcomms is not installed), then run your command again.\n`,
+      );
+      return EXIT_CODES.UPDATE;
+    }
+    return afterUpdate(await options.update(), options, pending);
   }
   if (answer === 'later' || answer === 'l') {
     // The person's answer is the approval, as for `setup`'s "Connect this to an agent?": under `chat` nothing more is
@@ -263,6 +313,77 @@ export async function updateGateAtTerminal(options: TerminalGateOptions): Promis
   throw new CommsError('USAGE', `cancelled: ${options.binary} did not run, and nothing was changed`, {
     hint: `Update with \`${UPDATE_WAYS.update.command}\`, or put it off until tomorrow with \`${UPDATE_WAYS.later.command}\`.`,
   });
+}
+
+/**
+ * The stop where nobody can be asked: the command does not run. "Update" names the update and "not now"; "restart"
+ * — the update installed, and an older copy running — says to run the command from the installed one.
+ */
+function updateRequired(pending: PendingUpdate, binary: string): CommsError {
+  const later = `\`${UPDATE_WAYS.later.command}\` to put it off until tomorrow`;
+  const npx = `Where agentcomms is not installed: \`${UPDATE_WAYS.update.npx}\`, and \`${UPDATE_WAYS.later.npx}\`.`;
+  const details = {
+    running: pending.running,
+    latest: pending.latest,
+    installed: pending.kind === 'restart',
+    update: UPDATE_WAYS.update,
+    later: UPDATE_WAYS.later,
+  };
+  if (pending.kind === 'restart') {
+    return new CommsError(
+      'UPDATE_REQUIRED',
+      `Hang on a minute, the update is installed, but this command isn't running it yet. ${pending.latest} is installed globally, and this ${binary} is ${pending.running}: run the command again from the installed one, or ${later}`,
+      {
+        hint: `Nothing was done. An older copy is running — npx's cache, a project's own install, a checkout. "Not now" is a change a person approves: an agent gets the preview and an approval id (exit 10), and runs the same command again with --approval <id> once the person agrees. ${npx}`,
+        details,
+      },
+    );
+  }
+  return new CommsError(
+    'UPDATE_REQUIRED',
+    `${UPDATE_FIRST} ${pending.latest} is out (you have ${pending.running}): run \`${UPDATE_WAYS.update.command}\` first, or ${later}`,
+    {
+      hint: `Nothing was done. Both are changes a person approves: an agent gets the preview and an approval id (exit 10), and runs the same command again with --approval <id> once the person agrees. ${npx}`,
+      details,
+    },
+  );
+}
+
+/**
+ * What the terminal says after the person's "now", and the exit status. "Updated. Run your command again." only when
+ * the update did everything and this command's release is now installed where it runs from — its global package at
+ * the latest. Anything short of that says what, and ends with a status that is not 0: the command has not run, and a
+ * script that goes on after `cmd && next` must not take it for the command's success.
+ */
+async function afterUpdate(
+  outcome: TerminalUpdateOutcome,
+  options: TerminalGateOptions,
+  before: PendingUpdate,
+): Promise<number> {
+  const { streams, binary } = options;
+  const notRun = `${binary} did not run`;
+  if (outcome === 'failed') {
+    streams.stdout.write(`${notRun}: the update did not finish — each step says how it went, above.\n`);
+    return EXIT_CODES.UNAVAILABLE;
+  }
+  const after = updateVerdict(await readUpdateCheck(options.core.paths.stateDir), options.running, {
+    channel: options.channel,
+    surface: 'command',
+  });
+  if (after === null || after.kind === 'restart') {
+    if (outcome === 'updated') {
+      streams.stdout.write('Updated. Run your command again.\n');
+      return EXIT_CODES.OK;
+    }
+    streams.stdout.write(`${before.latest} is installed here: run your command again from it. ${notRun}.\n`);
+    return EXIT_CODES.UPDATE;
+  }
+  // Nothing the update reaches runs this command: `agentcomms update` moves registrations and global packages, and
+  // this copy is neither. Saying "Updated" here would send the person round the same question again.
+  streams.stdout.write(
+    `${notRun}: the update did not bring it to ${before.latest}. \`${UPDATE_WAYS.update.command}\` updates what this machine registers and has installed globally — what it found is said above — and this ${binary} ${before.running} is started from somewhere else: npx's cache, a project's own install, a checkout. Run it from ${before.latest}, or put this off until tomorrow with \`${UPDATE_WAYS.later.command}\`.\n`,
+  );
+  return EXIT_CODES.UPDATE;
 }
 
 async function askLine(streams: Streams, question: string): Promise<string> {

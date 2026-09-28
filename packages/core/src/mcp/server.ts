@@ -161,6 +161,7 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
       core,
       env,
       server: 'agentcomms',
+      channel: 'core',
       running: VERSION,
       exempt: ['comms_update', 'comms_doctor', 'comms_paths'],
       refresh: () => checkForUpdates(core, env, { deps: options.update, now: options.update?.now }),

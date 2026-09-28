@@ -192,7 +192,8 @@ export async function main(
   }
 
   // The daily update check (design 2026-09-28 §3): before any command but the exempt ones, an update that is out
-  // stops it — a person is asked, anything else ends with UPDATE_REQUIRED.
+  // stops it — a person is asked, anything else ends with UPDATE_REQUIRED. One carrying an approval the person
+  // already gave goes ahead, as the same call over MCP does.
   if (!exemptFromUpdateGate(positionals.slice(0, 2))) {
     let ended: number | null = null;
     const gated = await runCommand(output, async () => {
@@ -200,9 +201,11 @@ export async function main(
         core,
         env,
         binary: 'agentcomms',
+        channel: 'core',
         running: VERSION,
         output,
         streams: defaultStreams,
+        approvals: [values.approval],
         ...terminalUpdateHooks(core, env, { output, streams: defaultStreams }),
       });
     });

@@ -70,6 +70,15 @@ test('with the network cut off, an update in the file stops every tool but whats
       assert.match(text, /This is agent-whatsapp /);
       const status = await call('whatsapp_status', {});
       assert.notEqual(status.isError, true, JSON.stringify(status.structuredContent));
+      // Every registration of WhatsApp's server here names the latest — the file says so, and no network is needed
+      // to read it: restart the client, not update.
+      const record = { lastChecked: checked, latest: '99.0.0', behind: true };
+      const installed = { ...record, current: { registered: ['whatsapp'], global: [] } };
+      writeFileSync(updateCheckPath(core.paths.stateDir), JSON.stringify(installed));
+      const restart = await call('whatsapp_chats', { account: ACCOUNT });
+      const restartText = (restart as { content?: { type: string; text?: string }[] }).content?.[0]?.text ?? '';
+      assert.match(restartText, /Restart the client first/);
+      writeFileSync(updateCheckPath(core.paths.stateDir), JSON.stringify(record));
     } finally {
       await close();
     }
@@ -80,6 +89,17 @@ test('with the network cut off, an update in the file stops every tool but whats
     assert.match(error.message, /`agentcomms update`/);
     assert.match(error.message, /`agentcomms update --later`/);
     assert.equal((await harness.cli(['status', '--json'])).code, 0);
+    // WhatsApp's package installed globally at the latest, and this copy older: stopped, and told to run the
+    // installed one.
+    const stale = { lastChecked: checked, latest: '99.0.0', behind: true };
+    writeFileSync(
+      updateCheckPath(core.paths.stateDir),
+      JSON.stringify({ ...stale, current: { registered: [], global: ['whatsapp'] } }),
+    );
+    const older = await harness.cli(['chats', '--account', ACCOUNT, '--json']);
+    assert.equal(older.code, 11, older.stdout);
+    assert.match((older.json().error as { message: string }).message, /isn't running it yet/);
+    writeFileSync(updateCheckPath(core.paths.stateDir), JSON.stringify(stale));
 
     // "Not now", said anywhere on the machine — here through core's own change — holds for WhatsApp too.
     const later = updateLaterChange(core);
