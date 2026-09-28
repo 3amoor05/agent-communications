@@ -264,7 +264,7 @@ export interface SkippedSlackFile {
   /**
    * The same, as a word to branch on: one of the transport's refusals (`external`, `wrong-host`, `wrong-path`,
    * `redirect`, `sign-in-page`, `too-large`, `http-error`, `network`), or `max-files`, `lookup`, `deleted`, `hidden`,
-   * `no-address`, `bad-id`, `unexpected`.
+   * `no-address`, `bad-id`, `unexpected` — or `stopped`, a file the run stopped before it was saved.
    */
   readonly cause: string;
 }
@@ -278,7 +278,11 @@ export interface FileDownloadResult {
   readonly skipped: readonly SkippedSlackFile[];
   readonly manifestPath: string;
   readonly totalBytes: number;
-  /** False when the most files a run may save left some unread: skipped as `max-files`, or never listed. */
+  /**
+   * False when not every file named was tried: the most files a run may save left some unread — skipped as
+   * `max-files`, or never listed — or the run stopped part-way, and the files it stopped before are skipped as
+   * `stopped`. Only the manifest can say the second: a run that stopped ends in an error, not in a result.
+   */
   readonly complete: boolean;
 }
 
@@ -590,6 +594,8 @@ export async function downloadFiles(
   let totalBytes = 0;
   // Boxed, so that even something thrown as `undefined` still counts as the run having stopped.
   let stopped: { readonly error: unknown } | undefined;
+  // A file whose write failed and whose part-written copy could not be removed either: see below.
+  let leftBehind: { readonly fileId: string; readonly path: string } | undefined;
   const seen = new Set<string>();
   let reached = 0;
 
@@ -618,8 +624,10 @@ export async function downloadFiles(
     }
   };
 
+  let at = 0;
   try {
-    for (const candidate of found.candidates) {
+    for (; at < found.candidates.length; at += 1) {
+      const candidate = found.candidates[at] as Candidate;
       const { fileId } = candidate;
       if (seen.has(fileId)) continue;
       seen.add(fileId);
@@ -703,9 +711,15 @@ export async function downloadFiles(
          * A file cut short is worse than none. It looks like the file, under the file's own name, and neither the
          * manifest nor the audit lists it — and a run again saves the whole one beside it as `-2`. So it is removed
          * before the failure goes on; the path was created here, exclusively, so what is removed is this run's own.
+         *
+         * The removal can fail too: a full copy-on-write disk, a handle Windows still holds. Then the part-written
+         * file stays, and the error, the manifest and the audit record each name it — the one thing worse than a file
+         * cut short is one nobody mentions.
          */
         await handle.close().catch(() => undefined);
-        await rm(path, { force: true }).catch(() => undefined);
+        await rm(path, { force: true }).catch(() => {
+          leftBehind = { fileId, path };
+        });
         throw error;
       }
       totalBytes += body.bytes.byteLength;
@@ -723,6 +737,31 @@ export async function downloadFiles(
     // A file that could not be written, or a folder that could not be made, is this machine's problem and stops the
     // run. What was saved before it is still recorded, below, before the failure is reported.
     stopped = { error };
+  }
+
+  /*
+   * The files the run stopped before: the one it was on, and each it never reached.
+   *
+   * Without them the manifest of a run that stopped part-way listed what was saved and nothing else, and said it was
+   * complete — while the error sent the caller to that manifest to ask only for what was missing. For files named by
+   * id the caller could work that out; for a conversation's files, nothing recorded which they were.
+   */
+  const stoppedBefore: string[] = [];
+  if (stopped !== undefined) {
+    complete = false;
+    const current = found.candidates[at]?.fileId;
+    for (const { fileId } of found.candidates.slice(at)) {
+      if (fileId !== current && seen.has(fileId)) continue;
+      if (stoppedBefore.includes(fileId)) continue;
+      stoppedBefore.push(fileId);
+      skip(fileId, {
+        cause: 'stopped',
+        reason:
+          leftBehind?.fileId === fileId
+            ? `the download stopped while it was being written, and the part written could not be removed: ${leftBehind.path}`
+            : 'the download stopped before this file was saved',
+      });
+    }
   }
 
   const files = await describe(call, workspace, saved);
@@ -774,14 +813,14 @@ export async function downloadFiles(
       },
       reason: `${files.length} file(s), ${totalBytes} bytes; ${skipped.length} skipped${
         manifestFailure === undefined ? '' : '; manifest.json not written'
-      }`,
+      }${leftBehind === undefined ? '' : `; part of ${leftBehind.fileId} could not be removed: ${leftBehind.path}`}`,
     });
   } catch (error) {
     auditFailure = { error };
   }
 
   if (stopped === undefined && manifestFailure === undefined && auditFailure === undefined) return result;
-  throw unfinished({ stopped, manifestFailure, auditFailure, files, manifestPath });
+  throw unfinished({ stopped, manifestFailure, auditFailure, files, manifestPath, stoppedBefore, leftBehind });
 }
 
 /** A failure's message, whatever was thrown. */
@@ -794,9 +833,14 @@ function messageOf(error: unknown): string {
  *
  * A bare filesystem error — `ENOTDIR`, `EISDIR` — told the caller only that the call failed. An agent told that runs
  * it again, and every file saved the first time is saved a second time beside itself as `-2`. So the error says how
- * many were saved and which record lists them, and carries their ids and paths in `details` for when neither record
- * could be written. A refusal the run stopped on keeps its own code and hint; anything else is `CONFIG`, as another
- * file this machine could not write is.
+ * many were saved and which record lists them, which files it stopped before, and any part-written file it could not
+ * remove, and carries the same in `details`. A refusal the run stopped on keeps its own code and hint; anything else is
+ * `CONFIG`, as another file this machine could not write is.
+ *
+ * When neither the manifest nor the audit record could be written, the hint names the files itself. `details` has
+ * them too, but the command line prints `details` only with `--json`, and a person reading the hint had nowhere else
+ * to find what was on their disk. Every one of those paths and ids is this package's own — dates and Slack's ids —
+ * so none of it is anybody's words.
  */
 function unfinished(state: {
   readonly stopped: { readonly error: unknown } | undefined;
@@ -804,18 +848,14 @@ function unfinished(state: {
   readonly auditFailure: { readonly error: unknown } | undefined;
   readonly files: readonly SavedSlackFile[];
   readonly manifestPath: string;
+  readonly stoppedBefore: readonly string[];
+  readonly leftBehind: { readonly fileId: string; readonly path: string } | undefined;
 }): CommsError {
-  const { stopped, manifestFailure, auditFailure, files, manifestPath } = state;
+  const { stopped, manifestFailure, auditFailure, files, manifestPath, stoppedBefore, leftBehind } = state;
   const cause = (stopped ?? manifestFailure ?? auditFailure)?.error;
   const own = cause instanceof CommsError ? cause : undefined;
   const count = files.length;
   const them = count === 1 ? 'it' : 'them';
-  const listed =
-    manifestFailure === undefined
-      ? `manifest.json lists ${them}`
-      : auditFailure === undefined
-        ? 'the audit log records which'
-        : `\`savedFiles\` in this error lists ${them}`;
 
   // Said only when it is true: a run that saved nothing — every file skipped — has nothing to say was saved.
   const savedSoFar = count === 0 ? '' : `${count === 1 ? 'the file was' : 'the files were'} saved`;
@@ -826,17 +866,49 @@ function unfinished(state: {
   } else {
     message = `${savedSoFar === '' ? '' : `${savedSoFar} and manifest.json lists ${them}, but `}the audit log could not be written: ${messageOf(auditFailure?.error)}`;
   }
-  const saved =
-    count === 0
-      ? 'Nothing was saved.'
-      : `${count === 1 ? '1 file was' : `${count} files were`} saved${stopped === undefined ? '' : ' before it stopped'}, and ${listed}. Running it again saves each of ${them} again, as a second copy, so ask only for what is missing.`;
+
+  const hint: string[] = [];
+  if (own?.hint !== undefined) hint.push(own.hint);
+  if (count === 0) hint.push('Nothing was saved.');
+  else {
+    const listed =
+      manifestFailure === undefined
+        ? `, and manifest.json lists ${them}`
+        : auditFailure === undefined
+          ? ', and the audit log records which'
+          : `, and nothing else records ${count === 1 ? 'it' : 'which'}: ${files.map((file) => file.path).join(', ')}`;
+    hint.push(
+      `${count === 1 ? '1 file was' : `${count} files were`} saved${stopped === undefined ? '' : ' before it stopped'}${listed}.`,
+      `Running the download again saves ${count === 1 ? 'that file' : 'each of those files'} a second time, so ask only for what is missing.`,
+    );
+  }
+  if (stoppedBefore.length > 0) {
+    const which =
+      stoppedBefore.length === 1
+        ? 'The file it stopped before is'
+        : `The ${stoppedBefore.length} files it stopped before are`;
+    hint.push(
+      manifestFailure === undefined
+        ? `${which} in manifest.json under \`skipped\`, as \`stopped\`.`
+        : auditFailure === undefined
+          ? `${which} in the audit log, among the skipped.`
+          : `${which} ${stoppedBefore.join(', ')}.`,
+    );
+  }
+  if (leftBehind !== undefined) {
+    hint.push(
+      `Part of ${leftBehind.fileId} was written and could not be removed: delete ${leftBehind.path}, which is not the whole file.`,
+    );
+  }
 
   return new CommsError(own?.code ?? 'CONFIG', message, {
-    hint: own?.hint === undefined ? saved : `${own.hint} ${saved}`,
+    hint: hint.join(' '),
     details: {
       ...(own?.details ?? {}),
       saved: count,
       savedFiles: files.map((file) => ({ fileId: file.fileId, path: file.path })),
+      stoppedBefore: [...stoppedBefore],
+      partialFile: leftBehind?.path ?? null,
       manifestPath: manifestFailure === undefined ? manifestPath : null,
       audited: auditFailure === undefined,
     },

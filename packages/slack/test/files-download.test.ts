@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { lstat, mkdir, readdir, readFile, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readdir, readFile, stat, symlink, writeFile } from 'node:fs/promises';
 import { join, relative, sep } from 'node:path';
 import { test } from 'node:test';
 import { CommsError } from '@agentcomms/core';
@@ -835,10 +835,16 @@ test('a file that cannot be written stops the run, and what was saved before it 
       assert.deepEqual(error.details, {
         saved: 1,
         savedFiles: [{ fileId: 'F0A', path: savedPath }],
+        stoppedBefore: ['F0B'],
+        partialFile: null,
         manifestPath,
         audited: true,
       });
-      assert.match(error.hint ?? '', /1 file was saved before it stopped, and manifest\.json lists it/);
+      // Whole, because one file is where the wording goes wrong: it once read "saves each of it again".
+      assert.equal(
+        error.hint,
+        '1 file was saved before it stopped, and manifest.json lists it. Running the download again saves that file a second time, so ask only for what is missing. The file it stopped before is in manifest.json under `skipped`, as `stopped`.',
+      );
       return true;
     },
   );
@@ -848,9 +854,66 @@ test('a file that cannot be written stops the run, and what was saved before it 
     manifest.files.map((file) => file.fileId),
     ['F0A'],
   );
+  assert.equal(manifest.complete, false, 'a run that stopped part-way is not complete');
+  assert.deepEqual(manifest.skipped, [
+    { fileId: 'F0B', reason: 'the download stopped before this file was saved', cause: 'stopped' },
+  ]);
   const [record] = await audited(harness);
   assert.equal(record?.outcome, 'failed');
   assert.deepEqual(record?.ids?.fileIds, ['F0A']);
+  assert.deepEqual(record?.ids?.skippedFileIds, ['F0B']);
+});
+
+test('a conversation’s download that stops part-way names every file it stopped before, and says it is incomplete', async () => {
+  /*
+   * Files named by id, the caller can count. A conversation's files, nobody named: before, the manifest of a run
+   * that stopped listed what was saved and nothing else, said it was complete, and the error sent the caller there to
+   * ask only for what was missing.
+   */
+  const shared = (channel: string) => ({ shares: { public: { [channel]: [{ ts: TS }] } } });
+  const { harness, root, run } = await setup({
+    'files.list': {
+      ok: true,
+      files: [
+        fileRecord('F0A', shared('C0AAA1')),
+        fileRecord('F0B', shared('C0AAA1')),
+        fileRecord('F0C', shared('C0CCC1')),
+        fileRecord('F0D', shared('C0AAA1')),
+      ],
+      paging: { count: 4, total: 4, page: 1, pages: 1 },
+    },
+  });
+  // F0C is saved under the one message it was shared in, and there a file is in the way of its folder.
+  await mkdir(join(root, 'acme'), { recursive: true });
+  await writeFile(join(root, 'acme', `2023-11-14_C0CCC1-${TS}`), 'in the way');
+  const bytes = transport({ F0A: 'a', F0B: 'b', F0C: 'c', F0D: 'd' });
+
+  await assert.rejects(run({ channel: 'C0AAA1' }, { download: bytes.download }), (error: unknown) => {
+    assert.ok(error instanceof CommsError);
+    assert.deepEqual(error.details?.stoppedBefore, ['F0C', 'F0D']);
+    assert.equal(
+      error.hint,
+      '2 files were saved before it stopped, and manifest.json lists them. Running the download again saves each of those files a second time, so ask only for what is missing. The 2 files it stopped before are in manifest.json under `skipped`, as `stopped`.',
+    );
+    return true;
+  });
+
+  assert.deepEqual(bytes.fileIds(), ['F0A', 'F0B', 'F0C'], 'F0D was never reached');
+  const manifest = JSON.parse(await readFile(join(root, 'acme', 'manifest.json'), 'utf8')) as FileDownloadResult;
+  assert.equal(manifest.complete, false);
+  assert.deepEqual(
+    manifest.files.map((file) => file.fileId),
+    ['F0A', 'F0B'],
+  );
+  assert.deepEqual(
+    manifest.skipped.map((entry) => [entry.fileId, entry.cause]),
+    [
+      ['F0C', 'stopped'],
+      ['F0D', 'stopped'],
+    ],
+  );
+  const [record] = await audited(harness);
+  assert.deepEqual(record?.ids?.skippedFileIds, ['F0C', 'F0D']);
 });
 
 test('the audit record is written for what was saved even when the manifest cannot be, and the error says so', async () => {
@@ -878,10 +941,14 @@ test('the audit record is written for what was saved even when the manifest cann
         assert.deepEqual(error.details, {
           saved: 1,
           savedFiles: [{ fileId: 'F0A', path: savedPath }],
+          stoppedBefore: stopped ? ['F0B'] : [],
+          partialFile: null,
           manifestPath: null,
           audited: true,
         });
         assert.match(error.hint ?? '', /the audit log records which/);
+        if (stopped)
+          assert.match(error.hint ?? '', /The file it stopped before is in the audit log, among the skipped\.$/);
         return true;
       },
     );
@@ -920,6 +987,8 @@ test('an audit log that cannot be written fails the call, which still says what 
         assert.deepEqual(error.details, {
           saved: saving ? 1 : 0,
           savedFiles: saving ? [{ fileId: 'F0A', path: join(root, 'acme', 'undated_F0A', 'F0A.pdf') }] : [],
+          stoppedBefore: [],
+          partialFile: null,
           manifestPath,
           audited: false,
         });
@@ -933,6 +1002,44 @@ test('an audit log that cannot be written fails the call, which still says what 
     const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as FileDownloadResult;
     assert.equal(manifest.files.length, saving ? 1 : 0, 'the manifest was still written');
   }
+});
+
+test('when neither the manifest nor the audit log can be written, the hint itself names what was saved and what was not', async () => {
+  /*
+   * `details` carries `savedFiles`, but the command line prints `details` only with `--json`: a hint that pointed a
+   * person at it pointed at nothing they could see. The paths and ids are this package's own, so the hint can hold them.
+   */
+  const records = {
+    F0A: fileRecord('F0A', { shares: {} }),
+    F0B: fileRecord('F0B', { shares: {} }),
+    F0C: fileRecord('F0C', { shares: { public: { C0CCC1: [{ ts: TS }] } } }),
+    F0D: fileRecord('F0D', { shares: {} }),
+  };
+  const { harness, root, run } = await setup({ 'files.info': filesInfo(records) });
+  await mkdir(join(root, 'acme', 'manifest.json'), { recursive: true });
+  await writeFile(join(root, 'acme', `2023-11-14_C0CCC1-${TS}`), 'in the way');
+  Object.assign(harness.core.audit, {
+    append: async () => {
+      throw Object.assign(new Error('EACCES: permission denied, open'), { code: 'EACCES' });
+    },
+  });
+  const first = join(root, 'acme', 'undated_F0A', 'F0A.pdf');
+  const second = join(root, 'acme', 'undated_F0B', 'F0B.pdf');
+
+  await assert.rejects(
+    run({ fileIds: ['F0A', 'F0B', 'F0C', 'F0D'] }, { download: transport({ F0A: 'a', F0B: 'b', F0C: 'c' }).download }),
+    (error: unknown) => {
+      assert.ok(error instanceof CommsError);
+      assert.equal(
+        error.hint,
+        `2 files were saved before it stopped, and nothing else records which: ${first}, ${second}. Running the download again saves each of those files a second time, so ask only for what is missing. The 2 files it stopped before are F0C, F0D.`,
+      );
+      assert.doesNotMatch(error.hint ?? '', /savedFiles/, 'nothing a person without --json cannot see');
+      assert.equal(error.details?.audited, false);
+      assert.equal(error.details?.manifestPath, null);
+      return true;
+    },
+  );
 });
 
 test('a file whose write fails part-way is removed, not left cut short beside the files the manifest lists', async () => {
@@ -967,3 +1074,61 @@ test('a file whose write fails part-way is removed, not left cut short beside th
   const [record] = await audited(harness);
   assert.deepEqual(record?.ids?.fileIds, ['F0A']);
 });
+
+test('a part-written file that cannot be removed either is named in the error, the manifest and the audit record', async () => {
+  /*
+   * Two failures in a row: the write, then the removal — a full copy-on-write disk, a handle Windows still holds.
+   * Here the folder is made read-only between the two, which is what refuses the removal on macOS and Linux. Windows
+   * does not refuse a removal for that, and root is refused nothing, so neither runs it.
+   */
+  if (!posix || process.getuid?.() === 0) return;
+  const records = { F0A: fileRecord('F0A', { shares: {} }), F0B: fileRecord('F0B', { shares: {} }) };
+  const { harness, root, run } = await setup({ 'files.info': filesInfo(records) });
+  const folder = join(root, 'acme', 'undated_F0B');
+  const download: FileDownloader = async (_call, request) => {
+    if (request.fileId === 'F0A') return { bytes: Buffer.from('whole'), contentType: null };
+    const failing = {
+      byteLength: 7,
+      async *[Symbol.asyncIterator]() {
+        yield Buffer.from('partial');
+        await chmod(folder, 0o500);
+        throw Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' });
+      },
+    };
+    return { bytes: failing as unknown as Buffer, contentType: null };
+  };
+  const partial = join(folder, 'F0B.pdf');
+
+  try {
+    await assert.rejects(run({ fileIds: ['F0A', 'F0B'] }, { download }), (error: unknown) => {
+      assert.ok(error instanceof CommsError);
+      assert.match(error.message, /^the download stopped part-way: ENOSPC/);
+      assert.equal(error.details?.partialFile, partial);
+      assert.match(
+        error.hint ?? '',
+        new RegExp(
+          `Part of F0B was written and could not be removed: delete ${escaped(partial)}, which is not the whole file\\.$`,
+        ),
+      );
+      return true;
+    });
+    assert.equal(await readFile(partial, 'utf8'), 'partial', 'the file the error names is the one left behind');
+    const manifest = JSON.parse(await readFile(join(root, 'acme', 'manifest.json'), 'utf8')) as FileDownloadResult;
+    assert.deepEqual(manifest.skipped, [
+      {
+        fileId: 'F0B',
+        reason: `the download stopped while it was being written, and the part written could not be removed: ${partial}`,
+        cause: 'stopped',
+      },
+    ]);
+    const [record] = await audited(harness);
+    assert.match(record?.reason ?? '', new RegExp(`; part of F0B could not be removed: ${escaped(partial)}$`));
+  } finally {
+    await chmod(folder, 0o700);
+  }
+});
+
+/** A path as a regular expression matching it exactly. */
+function escaped(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}

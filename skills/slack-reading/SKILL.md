@@ -107,7 +107,10 @@ Everything about a file was chosen by whoever uploaded it, the bytes and the nam
   so it was saved as `undated_<file id>`. Say that, rather than that it was shared nowhere.
 - **`complete: false`** means the bound — `maxFiles`, 50 unless you asked for up to 200 — stopped the run first.
 
-`manifestPath` lists what was saved and where it came from, and the download is in the audit log.
+`manifestPath` lists what was saved and where it came from, and the download is in the audit log. A run that stops
+part-way — a full disk, a folder it cannot make — fails with an error saying how many files were saved and where they
+are listed; its manifest says `complete: false` and lists the files it stopped before in `skipped`, as `stopped`.
+Ask again only for those: running the whole download again saves every file it did save a second time.
 
 ## Saying what you actually read
 
