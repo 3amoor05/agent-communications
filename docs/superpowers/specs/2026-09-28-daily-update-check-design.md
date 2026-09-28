@@ -1,8 +1,8 @@
-# Daily update check — design (parked)
+# Daily update check — design
 
-Status: **parked 2026-09-28**, mid-design. The intent, the three decisions, the approach and section 1 are agreed with
-the owner. Sections 2–4 are proposals written down so the work can resume; they have **not** been reviewed and are not
-agreed. Nothing is implemented. Resume at section 2.
+Status: **agreed 2026-09-28, being implemented.** The intent, the three decisions, the approach and sections 1–4 are
+agreed with the owner. Section 2's open question is resolved: a call that claims an approval the person already gave is
+not stopped (below).
 
 ## Intent
 
@@ -66,7 +66,7 @@ Rejected:
   registration already names the latest version, the reply says to restart the client rather than to update, which
   covers the gap between applying an update and restarting.
 
-## 2. The reply, and what is never stopped (proposal — not reviewed)
+## 2. The reply, and what is never stopped (agreed)
 
 - When the file says an update is available, it is not snoozed, and the tool is not exempt, the tool does not run.
   It returns a result that opens "Hang on a minute, there's an update. Let's update first.", then the versions (running,
@@ -75,12 +75,13 @@ Rejected:
   `later: true` returns a preview ("Skip the update to X until tomorrow") and an approval id, applied on the person's
   yes under `chat` or their typed code under `confirm`. Otherwise the agent could clear the stop without asking, and
   the feature would do nothing.
-- **Never stopped:** `comms_update` (all forms), `comms_doctor`, `comms_paths`, and, per channel, its doctor. Open
-  question for review: whether claiming an approval already given (a send approved moments before the check landed)
-  should pass, or be stopped and left to expire.
+- **Never stopped:** `comms_update` (all forms), `comms_doctor`, `comms_paths`, and, per channel, its doctor.
+- **A call that claims an approval the person already gave is not stopped.** When its arguments carry `approvalId` —
+  a send approved moments before the check landed, say — it goes ahead: the person has already said yes to exactly
+  that, and stopping it would only let the approval expire. The stop applies from the next new request.
 - If the core server is not registered in a client, the reply still names `agentcomms update` at a terminal.
 
-## 3. The terminal (proposal — not reviewed)
+## 3. The terminal (agreed)
 
 - Every command except the exempt ones (`update` in every form, `doctor`, `paths`, `approve`, `approvals`, `mcp` —
   the server gates each call itself — `--help`, `--version`) reads the file first; if it is older than 24 hours it
@@ -92,7 +93,7 @@ Rejected:
   own exit status (to be chosen against `packages/core/src/errors.ts`), naming `agentcomms update` and
   `agentcomms update --later`.
 
-## 4. Setting, CI and tests (proposal — not reviewed)
+## 4. Setting, CI and tests (agreed)
 
 - `agentcomms update --auto off|on`, and the same as a `comms_update` argument. Turning it off is a change with a
   preview and an approval; turning it on applies at once, as tightening does elsewhere. Stored in core's
@@ -104,7 +105,6 @@ Rejected:
   terminal's three answers and its non-terminal exit; parity rows for the new `comms_update` arguments.
 - A behaviour change that can stop calls: released as a minor version (0.8.0) with a changelog entry.
 
-## Resuming
+## Implementing
 
-Review section 2 with the owner (including its open question), then 3 and 4; then write the spec proper from this
-file, get it approved, and plan with the writing-plans skill.
+Sections 1–4 are implemented as written, on the branch `feat/daily-update-check`.
