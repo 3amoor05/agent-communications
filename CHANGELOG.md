@@ -32,6 +32,8 @@ The sign-in now carries it:
   `--replace-server` is carried through. The mailbox is connected either way.
 - From chat, `gmail_inbox_finish` connects the mailbox and names the `comms_server_install` call that registers it.
 - Every printed finish command waits 60 seconds; setup's said 120.
+- A detached sign-in's listener has thirty seconds to start, not ten. On a busy or slow machine it took longer,
+  and the sign-in was thrown away as failed.
 
 Why: a report from a second Mac. A WhatsApp install from chat said it had succeeded, registered nothing, and every
 check stayed green.
