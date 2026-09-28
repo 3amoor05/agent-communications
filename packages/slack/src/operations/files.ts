@@ -481,11 +481,28 @@ function tooLarge(maxBytes: number, caps: Caps): string {
     : `larger than the ${bytes(Math.max(maxBytes, 0))} left of the ${bytes(caps.perRun)} one run may save`;
 }
 
+/** Whether the file's own record says it is a web page: an HTML file, which Slack's sign-in page looks like. */
+function declaredAsWebPage(record: Raw): boolean {
+  return str(record.mimetype)?.split(';')[0]?.trim().toLowerCase() === 'text/html' || record.filetype === 'html';
+}
+
 /** A refusal from the transport — or anything else it threw — as the skipped entry it becomes. */
-function refusalOf(error: unknown, maxBytes: number, caps: Caps): { cause: string; reason: string } {
+function refusalOf(error: unknown, record: Raw, maxBytes: number, caps: Caps): { cause: string; reason: string } {
   const message = error instanceof Error ? error.message : String(error);
   const details = error instanceof CommsError ? error.details : undefined;
   const reason = typeof details?.reason === 'string' ? details.reason : undefined;
+  /*
+   * The transport refuses any web page, because that is what Slack's sign-in page is, and it cannot tell that page
+   * from a file that is one. When the file is declared as a web page, blaming the token would send the person to fix
+   * scopes that are fine, so the reason says what is actually known. The refusal, and its cause, stay the same.
+   */
+  if (reason === 'sign-in-page' && declaredAsWebPage(record)) {
+    return {
+      cause: reason,
+      reason:
+        'Slack answered with a web page, and this file is declared as one: the two cannot be told apart, so it was not saved',
+    };
+  }
   if (reason !== undefined && Object.hasOwn(REASONS, reason)) {
     return { cause: reason, reason: REASONS[reason as keyof typeof REASONS] };
   }
@@ -620,7 +637,7 @@ export async function downloadFiles(
       try {
         body = await download(call, { url, teamId, fileId, maxBytes });
       } catch (error) {
-        skip(fileId, refusalOf(error, maxBytes, caps));
+        skip(fileId, refusalOf(error, record, maxBytes, caps));
         continue;
       }
       // The transport holds the bytes to the cap. Checked again before anything is written, because a cap that holds

@@ -285,6 +285,35 @@ test('a file that cannot be fetched is skipped with its reason, and the rest are
   assert.equal(record?.reason, `2 file(s), 6 bytes; ${result.skipped.length} skipped`);
 });
 
+test('an HTML file answered with a web page is not blamed on the token', async () => {
+  /*
+   * The transport refuses any web page, because that is what Slack's sign-in page is. A file that is itself declared
+   * as a web page cannot be told apart from it, so it is refused as well — but saying the token cannot read it would
+   * send the person to fix scopes that are fine.
+   */
+  const records = {
+    F0WEB1: fileRecord('F0WEB1', { name: 'page.html', mimetype: 'text/html; charset=utf-8' }),
+    F0WEB2: fileRecord('F0WEB2', { name: 'page', mimetype: undefined, filetype: 'html' }),
+    F0PDF1: fileRecord('F0PDF1'),
+  };
+  const { run } = await setup({ 'files.info': filesInfo(records) });
+  const signIn = refusal('sign-in-page');
+  const bytes = transport({ F0WEB1: signIn, F0WEB2: signIn, F0PDF1: signIn });
+
+  const result = await run({ fileIds: ['F0WEB1', 'F0WEB2', 'F0PDF1'] }, { download: bytes.download });
+
+  const byId = new Map(result.skipped.map((entry) => [entry.fileId, entry]));
+  for (const id of ['F0WEB1', 'F0WEB2']) {
+    assert.equal(byId.get(id)?.cause, 'sign-in-page', id);
+    assert.equal(
+      byId.get(id)?.reason,
+      'Slack answered with a web page, and this file is declared as one: the two cannot be told apart, so it was not saved',
+      id,
+    );
+  }
+  assert.match(byId.get('F0PDF1')?.reason ?? '', /sign-in page: this workspace’s token cannot read the file/);
+});
+
 test('what Slack says about a file is held to Slack’s shapes before it becomes a folder, an address or an id', async () => {
   const records = {
     // Shares under a key that is no conversation id, and a timestamp that is no timestamp: neither names a folder.
