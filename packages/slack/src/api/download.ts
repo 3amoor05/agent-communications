@@ -21,7 +21,11 @@ import { fileOfPath, SLACK_FILES_ORIGIN } from './methods.ts';
  *   `http:`, a port, credentials in the URL, or not a URL at all.
  * - `wrong-path` — the right host, but not the path of this team's copy of this file.
  * - `redirect` — the host answered with a redirect. It is never followed.
- * - `sign-in-page` — the host answered with a web page rather than the file: the token cannot read it.
+ * - `sign-in-page` — the host answered with a web page rather than the file: the token cannot read it. A file that is
+ *   itself a web page — an uploaded `.html` — arrives exactly as that page does, and nothing in the answer tells the
+ *   two apart, so it is refused too, always. It is never let through on the type its record declares: the uploader
+ *   chose that, and trusting it would save the sign-in page as the file, and report success, whenever the token could
+ *   not read an HTML file. The caller reports such a file as indistinguishable from the sign-in page.
  * - `too-large` — more bytes than the cap, whether declared up front or counted as they arrived.
  * - `http-error` — any other status that is not success, with `details.status`.
  * - `network` — the connection failed or the time ran out, before or during the body.
@@ -301,6 +305,9 @@ export async function slackFileDownload(context: SlackCall, request: SlackFileRe
        * What the host sends a token it will not serve this file to is a web page, and saving that as the file would
        * put a login form on disk under the file's name and report success. Checked before the size, because the page
        * is small and the question it answers is the one the person needs.
+       *
+       * An HTML file is refused here as well, by design and not by oversight: it comes back as a web page, which is
+       * all the page above is, and no status, header or path tells one from the other.
        */
       if (contentType === 'text/html') {
         discard();

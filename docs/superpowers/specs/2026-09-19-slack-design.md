@@ -425,6 +425,21 @@ a persistent connection for a feature we cannot yet specify is how a v1 acquires
 
 The design reserves it (§5, D9) and the verification below is the gate on building it.
 
+### D15 — a file download never saves a web page, an HTML file included
+
+`agent-slack files download` and `slack_file_download` (0.8.0) fetch a file's bytes from `files.slack.com` with the
+user token. When the token cannot read a file, that host answers with Slack's sign-in page, as `text/html`; saved as
+the file, it would put a login form on disk under the file's name and report success. So every `text/html` answer is
+refused, and the file is listed in `skipped` as `sign-in-page`.
+
+An HTML file is refused too, always. It arrives as a web page, exactly as the sign-in page does, and nothing in the
+answer — status, headers, path — tells the two apart. It is not accepted on the type its record declares either: the
+uploader chose that type, and accepting on it would save the sign-in page as the file, and report success, whenever
+the token could not read an HTML file. What the refusal says is what is known: such a file is reported as
+indistinguishable from the sign-in page ("Slack answered with a web page, and this file is declared as one: the two
+cannot be told apart, so it was not saved"), rather than blamed on the token's scopes, which may be fine. Its cause is
+still `sign-in-page`. A person who needs the file opens it in Slack.
+
 ### The six unknowns, and how v1 behaves without answering them
 
 The research marked six things as unverified. None of them blocks v1, because each is designed around rather than

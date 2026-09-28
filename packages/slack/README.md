@@ -116,11 +116,13 @@ with the title and the uploader's name. The type comes back inside it too, unles
 
 The bytes come from `files.slack.com` alone, with the workspace's token, and only at the address of the file just
 looked up: a file held outside Slack, a redirect or Slack's sign-in page is refused, and no file may be over 100 MiB
-or a run over 500 MiB. A file that cannot be fetched is listed under `skipped` with the reason while the rest are
-saved; `manifest.json` lists what was saved, and the download goes in the audit log. A run that stops part-way — a
-disk that fills, a folder it cannot make — ends in an error that says what was saved, and its manifest lists the
-files it stopped before under `skipped`, as `stopped`. It is a read, so it works in `read` mode and needs nobody's
-approval.
+or a run over 500 MiB. An HTML file is refused too, always: Slack answers with a web page when the token cannot read a
+file, and an HTML file is a web page, so the two cannot be told apart. It is listed under `skipped` as
+indistinguishable from the sign-in page; open it in Slack instead. A file that cannot be fetched is listed under
+`skipped` with the reason while the rest are saved; `manifest.json` lists what was saved, and the download goes in the
+audit log. A run that stops part-way — a disk that fills, a folder it cannot make — ends in an error that says what
+was saved, and its manifest lists the files it stopped before under `skipped`, as `stopped`. It is a read, so it works
+in `read` mode and needs nobody's approval.
 
 Everything a sender controls arrives inside an `<untrusted-content>` envelope — the message, the notification
 half when it disagrees, attachments, and anything Slack unfurled, each labelled with what it is and whose page it
