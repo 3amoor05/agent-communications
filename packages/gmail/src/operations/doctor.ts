@@ -516,6 +516,7 @@ async function mcpChecks(context: GmailContext, scope: Scope | undefined): Promi
     return at === -1 || server.args[at + 1] === undefined || server.args[at + 1] === scope.name;
   });
 
+  const registered = ours.filter((entry) => isProductServer(entry, GMAIL_MCP));
   const stale = ours
     .map((server) => {
       const pin = server.args.map((arg) => pinnedVersion(arg, GMAIL_MCP)).find((version) => version !== null);
@@ -524,28 +525,49 @@ async function mcpChecks(context: GmailContext, scope: Scope | undefined): Promi
     .filter((entry): entry is { server: RegisteredServer; version: string } => entry !== null)
     .filter((entry) => entry.version !== VERSION);
 
-  checks.push({
-    id: 'registered-server-version',
-    title: 'Registered server version',
-    status: stale.length === 0 ? 'ok' : 'warn',
-    detail:
-      stale.length === 0
-        ? `this release, ${VERSION}`
-        : stale
-            .map(
-              (entry) =>
-                `${entry.server.client} runs ${entry.version} as "${entry.server.name}"; this release is ${VERSION}`,
-            )
-            .join('; '),
-    fix: stale.length === 0 ? undefined : stale.map((entry) => repairCommand(entry.server)).join(' && '),
-  });
+  /*
+   * Nothing registered is not "this release". With no entry at all nothing was stale, so the check said ok — "this
+   * release, 0.7.1" — on a machine where no client could reach the server, and people read that as "ours is
+   * registered". So it says what it found, as something to look at rather than a fault: the server can be started by
+   * a plugin or an extension this scan of config files cannot see, and a machine used only from the command line
+   * needs no registration at all.
+   */
+  checks.push(
+    registered.length === 0 && stale.length === 0
+      ? {
+          id: 'registered-server-version',
+          title: 'Registered server version',
+          status: 'warn',
+          detail: `${
+            scope
+              ? `none registered that serves ${scope.name}: no MCP client's config file starts one that reaches it`
+              : "none registered: no MCP client's config file starts this server"
+          } (one a plugin or an extension starts is not visible from here)`,
+          fix: 'agent-gmail mcp install --client <client>',
+        }
+      : {
+          id: 'registered-server-version',
+          title: 'Registered server version',
+          status: stale.length === 0 ? 'ok' : 'warn',
+          detail:
+            stale.length === 0
+              ? `this release, ${VERSION}`
+              : stale
+                  .map(
+                    (entry) =>
+                      `${entry.server.client} runs ${entry.version} as "${entry.server.name}"; this release is ${VERSION}`,
+                  )
+                  .join('; '),
+          fix: stale.length === 0 ? undefined : stale.map((entry) => repairCommand(entry.server)).join(' && '),
+        },
+  );
 
   /*
    * Whether each of our entries still starts. Matched with the installer's own idea of "ours": this looked for
    * `agent-gmail` in the command line, which neither a managed nor an npx entry contains, so the check skipped
    * every real registration and could only ever pass.
    */
-  for (const server of ours.filter((entry) => isProductServer(entry, GMAIL_MCP))) {
+  for (const server of registered) {
     const missing = await missingEntryFile(server);
     checks.push({
       id: 'mcp-command',

@@ -216,7 +216,9 @@ the new one:
 npx -y @agentcomms/gmail@latest doctor --json | jq '.data.checks[] | select(.id == "registered-server-version")'
 ```
 
-Checks are selected by `id`, which is stable; `title` is wording and can change. A `warn` names each stale entry,
+Checks are selected by `id`, which is stable; `title` is wording and can change. A `warn` whose detail starts
+"none registered" means no client's config file starts the server at all — one a plugin or an extension starts is
+not visible from there — and its `fix` is `mcp install --client <client>`. Otherwise a `warn` names each stale entry,
 and its `fix` is the command that re-registers that entry as it is — keeping its `--name`, `--inbox` and
 `--read-only` — rather than a default one. Run that fix with the new version:
 

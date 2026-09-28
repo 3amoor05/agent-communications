@@ -325,6 +325,41 @@ test('doctor says when the registered MCP server is an older version than this o
   assert.equal(byId(currentOld.checks, 'registered-server-version')?.status, 'ok');
 });
 
+test('doctor with nothing registered says so, as something to look at — not as this release', async () => {
+  /*
+   * With no entry at all nothing was stale, so the check said ok — "this release, 0.7.1" — beside "Other Gmail MCP
+   * servers: none registered", on a machine where no client could reach the server. People read that as "ours is
+   * registered".
+   */
+  const harness = await newHarness({ accounts: [] });
+  const env = { ...harness.env, HOME: harness.configDir };
+  const byId = <T extends { id: string }>(checks: readonly T[], id: string) => checks.find((check) => check.id === id);
+
+  const bare = byId((await doctor(new GmailContext({ core: harness.core, env }))).checks, 'registered-server-version');
+  assert.equal(bare?.status, 'warn', bare?.detail);
+  assert.match(bare?.detail ?? '', /^none registered: /);
+  assert.doesNotMatch(bare?.detail ?? '', /this release/);
+  assert.equal(bare?.fix, 'agent-gmail mcp install --client <client>');
+
+  // Scoped to one mailbox, an entry pinned to another is not one that serves it — and is not named.
+  await harness.addInbox({ alias: 'work', email: 'jo@example.test', refreshToken: 'rt_work' });
+  await harness.addInbox({ alias: 'home', email: 'sam@example.test', refreshToken: 'rt_home' });
+  const pinned = managedRuntimeEntry(harness.core.paths.dataDir, '@agentcomms/gmail', VERSION);
+  await writeFile(
+    join(harness.configDir, '.claude.json'),
+    JSON.stringify({ mcpServers: { 'gmail-home': { command: 'node', args: [pinned, 'mcp', '--inbox', 'home'] } } }),
+  );
+  const context = new GmailContext({ core: harness.core, env });
+  const scoped = byId((await doctor(context, { inbox: 'work' })).checks, 'registered-server-version');
+  assert.equal(scoped?.status, 'warn', scoped?.detail);
+  assert.match(scoped?.detail ?? '', /^none registered that serves work: /);
+  assert.doesNotMatch(`${scoped?.detail} ${scoped?.fix}`, /home/);
+  // Unscoped, that entry is ours and current.
+  const all = byId((await doctor(context)).checks, 'registered-server-version');
+  assert.equal(all?.status, 'ok', all?.detail);
+  assert.equal(all?.detail, `this release, ${VERSION}`);
+});
+
 test('doctor says when a registered entry’s runtime is gone, and recognises entries the installer really writes', async () => {
   /*
    * This check looked for `agent-gmail` in the command line, which neither a managed nor an npx entry contains —
