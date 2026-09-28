@@ -458,7 +458,7 @@ test('the resolved listener entry understands oauth-listen', async () => {
 
   const child = spawn(entry.command, [...entry.args, 'oauth-listen', 'flw_doesnotexist'], {
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, AGENT_COMMS_CONFIG_DIR: await tempDir() },
+    env: { ...process.env, AGENT_COMMS_CONFIG_DIR: await tempDir(), AGENT_COMMS_UPDATE_CHECK: 'off' },
   });
   let output = '';
   child.stdout.on('data', (chunk) => {

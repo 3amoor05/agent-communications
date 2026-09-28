@@ -1,0 +1,127 @@
+import assert from 'node:assert/strict';
+import childProcess from 'node:child_process';
+import dns from 'node:dns';
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+import net from 'node:net';
+import { join } from 'node:path';
+import { test } from 'node:test';
+import tls from 'node:tls';
+import { fileURLToPath } from 'node:url';
+import { openCore, UPDATE_FIRST, updateCheckPath, updateLaterChange } from '@agentcomms/core';
+import { newHarness, tempDir } from './support/harness.ts';
+import { ACCOUNT, connect } from './support/surfaces.ts';
+
+/*
+ * The daily update check on WhatsApp (design 2026-09-28): this package has no network code, so it never asks the
+ * registry — it imports the reader alone, and stops for an update once any other server or command on the machine
+ * has found one. Shown with the network cut off at the socket, DNS, TLS, `fetch` and process creation, as
+ * `no-network.test.ts` cuts it; and in the bundle as it ships, which carries the reader and not the checker.
+ */
+
+const PACKAGE = fileURLToPath(new URL('..', import.meta.url));
+
+function files(directory: string): string[] {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) =>
+    entry.isDirectory() ? files(join(directory, entry.name)) : [join(directory, entry.name)],
+  );
+}
+
+test('with the network cut off, an update in the file stops every tool but whatsapp_status and every command but status', async () => {
+  const harness = await newHarness({ env: { AGENT_COMMS_UPDATE_CHECK: 'on' } });
+  await harness.ready();
+  const core = openCore({ env: harness.env });
+  // A day stale on purpose: anything that could ask the registry would ask now. WhatsApp must not.
+  const checked = new Date(Date.now() - 3 * 24 * 3_600_000).toISOString();
+  mkdirSync(core.paths.stateDir, { recursive: true });
+  writeFileSync(
+    updateCheckPath(core.paths.stateDir),
+    JSON.stringify({ lastChecked: checked, latest: '99.0.0', behind: true }),
+  );
+
+  const attempts: string[] = [];
+  const refuse = (what: string) =>
+    function refused(): never {
+      attempts.push(what);
+      throw new Error(`network attempted: ${what}`);
+    };
+  const saved = {
+    connect: net.Socket.prototype.connect,
+    tlsConnect: tls.connect,
+    lookup: dns.lookup,
+    fetch: globalThis.fetch,
+    spawn: childProcess.spawn,
+    execFile: childProcess.execFile,
+  };
+  net.Socket.prototype.connect = refuse('net.Socket.connect') as typeof net.Socket.prototype.connect;
+  tls.connect = refuse('tls.connect') as typeof tls.connect;
+  dns.lookup = refuse('dns.lookup') as unknown as typeof dns.lookup;
+  globalThis.fetch = refuse('fetch') as typeof fetch;
+  childProcess.spawn = refuse('child_process.spawn') as typeof childProcess.spawn;
+  childProcess.execFile = refuse('child_process.execFile') as unknown as typeof childProcess.execFile;
+  syncBuiltinESMExports();
+  try {
+    const { call, close } = await connect(harness);
+    try {
+      const chats = await call('whatsapp_chats', { account: ACCOUNT });
+      assert.equal(chats.structuredContent.error?.code, 'UPDATE_REQUIRED');
+      const text = (chats as { content?: { type: string; text?: string }[] }).content?.[0]?.text ?? '';
+      assert.ok(text.startsWith(UPDATE_FIRST), text);
+      assert.match(text, /This is agent-whatsapp /);
+      const status = await call('whatsapp_status', {});
+      assert.notEqual(status.isError, true, JSON.stringify(status.structuredContent));
+    } finally {
+      await close();
+    }
+    const refused = await harness.cli(['chats', '--account', ACCOUNT, '--json']);
+    assert.equal(refused.code, 11, refused.stdout + refused.stderr);
+    const error = refused.json().error as { code: string; message: string };
+    assert.equal(error.code, 'UPDATE_REQUIRED');
+    assert.match(error.message, /`agentcomms update`/);
+    assert.match(error.message, /`agentcomms update --later`/);
+    assert.equal((await harness.cli(['status', '--json'])).code, 0);
+
+    // "Not now", said anywhere on the machine — here through core's own change — holds for WhatsApp too.
+    const later = updateLaterChange(core);
+    await later.apply(undefined, await later.plan(await core.config.load()));
+    assert.equal((await harness.cli(['chats', '--account', ACCOUNT, '--json'])).code, 0);
+  } finally {
+    net.Socket.prototype.connect = saved.connect;
+    tls.connect = saved.tlsConnect;
+    dns.lookup = saved.lookup;
+    globalThis.fetch = saved.fetch;
+    childProcess.spawn = saved.spawn;
+    childProcess.execFile = saved.execFile;
+    syncBuiltinESMExports();
+  }
+  assert.deepEqual(attempts, [], 'nothing reached for the network');
+  const record = JSON.parse(readFileSync(updateCheckPath(core.paths.stateDir), 'utf8')) as { lastChecked: string };
+  assert.equal(record.lastChecked, checked, 'WhatsApp did not check, stale as the file was');
+});
+
+test('the bundle as it ships carries the update gate’s reader, and none of the checker', async () => {
+  const { build } = await import('tsdown');
+  const outDir = tempDir('agent-whatsapp-gate-bundle-');
+  await build({
+    config: false,
+    cwd: PACKAGE,
+    entry: { index: 'src/index.ts', cli: 'src/cli.ts' },
+    format: 'esm',
+    platform: 'node',
+    target: 'node22',
+    outDir,
+    dts: false,
+    noExternal: [/.*/],
+    external: ['@napi-rs/keyring'],
+    logLevel: 'silent',
+  });
+  const shipped = files(outDir)
+    .filter((file) => file.endsWith('.mjs'))
+    .map((file) => readFileSync(file, 'utf8'))
+    .join('\n');
+  assert.match(shipped, /update-check\.json/, 'the reader is there');
+  assert.match(shipped, /Hang on a minute, there's an update\. Let's update first\./);
+  for (const checker of ['checkForUpdates', 'npmLatestVersion', 'terminalUpdateHooks', 'npmGlobalPackages']) {
+    assert.ok(!shipped.includes(checker), `the bundle carries ${checker}`);
+  }
+});

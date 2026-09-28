@@ -89,6 +89,9 @@ export async function newHarness(
     AGENT_COMMS_STATE_DIR: join(root, 'state'),
     AGENT_COMMS_DATA_DIR: join(root, 'data'),
     NO_COLOR: '1',
+    // The daily update check, off: no test asks the real npm registry, and no call stops for a release the tests did
+    // not make. The gate's own tests turn it back on, with a registry and a clock of their own (design 2026-09-28).
+    AGENT_COMMS_UPDATE_CHECK: 'off',
     ...options.env,
   };
   const personEnv = Object.fromEntries(Object.entries(env).filter(([name]) => !AGENT_MARKERS.includes(name)));

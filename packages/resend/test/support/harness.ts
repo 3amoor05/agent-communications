@@ -92,6 +92,9 @@ export async function newHarness(): Promise<Harness> {
     USERPROFILE: dir,
     NO_COLOR: '1',
     PATH: process.env.PATH ?? '',
+    // The daily update check, off: no test asks the real npm registry, and no call stops for a release the tests did
+    // not make. The gate's own tests turn it back on, with a registry and a clock of their own (design 2026-09-28).
+    AGENT_COMMS_UPDATE_CHECK: 'off',
   };
   const core = openCore({ env });
   mkdirSync(join(dir, 'config'), { recursive: true, mode: 0o700 });

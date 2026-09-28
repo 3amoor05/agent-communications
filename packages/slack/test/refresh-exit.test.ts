@@ -221,7 +221,10 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
           '--eval',
           script,
         ],
-        { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, AGENT_COMMS_CONFIG_DIR: tempDir() } },
+        {
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: { ...process.env, AGENT_COMMS_CONFIG_DIR: tempDir(), AGENT_COMMS_UPDATE_CHECK: 'off' },
+        },
       );
       let output = '';
       child.stdout.on('data', (chunk) => {

@@ -1,10 +1,12 @@
 import {
   CommsError,
   changeToolResult,
+  checkForUpdates,
   type GatedChange,
   gatedChange,
   strictToolArguments,
   toCommsError,
+  updateToolGate,
 } from '@agentcomms/core';
 import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
@@ -143,7 +145,20 @@ export async function createResendMcpServer(options: ResendMcpOptions = {}): Pro
 
   // Every tool registered from here on refuses a key it does not declare, and arguments its schema rejects, as USAGE
   // in the envelope above — before its handler runs.
-  strictToolArguments(server, fail);
+  // Then the daily update check's stop (design 2026-09-28): an update that is out stops every tool but this server's
+  // doctor, and the check itself runs in the background, never delaying a call.
+  strictToolArguments(
+    server,
+    fail,
+    updateToolGate({
+      core: context.core,
+      env: context.env,
+      server: 'agent-resend',
+      running: VERSION,
+      exempt: ['resend_doctor'],
+      refresh: () => checkForUpdates(context.core, context.env),
+    }),
+  );
 
   /** Which account a call acts on. A pinned server refuses any other, and re-checks the pin against the id. */
   const resolve = async (named: string | undefined): Promise<string> => {

@@ -7,11 +7,14 @@ import {
   canPrompt,
   channelManifest,
   colorEnabled,
+  commandPathOf,
   EXIT_CODES,
+  exemptFromUpdateGate,
   type GatedChange,
   gatedChangeAtTerminal,
   installExitStatus,
   type OutputOptions,
+  openCore,
   paint,
   renderInstall,
   renderPrune,
@@ -20,6 +23,7 @@ import {
   type SupportedClient,
   serverInstallChange,
   serverPruneChange,
+  updateGateAtTerminal,
   writeResult,
 } from '@agentcomms/core';
 
@@ -113,7 +117,8 @@ Getting started (a person, in a terminal):
 
 Nothing here connects to WhatsApp or any other server, and nothing here can send. Needs Node 22.16 or newer.
 
-Exit codes: 0 ok · 1 unexpected · 10 only a person may do that, or a change needs approval · 64 usage
+Exit codes: 0 ok · 1 unexpected · 10 only a person may do that, or a change needs approval · 11 an update
+is out: update first, or put it off (agentcomms update, agentcomms update --later) · 64 usage
 · 65 bad data (a store whose layout changed) · 66 not found · 69 unavailable · 75 temporary (retry;
 a macOS dialog may be waiting) · 77 permission needed (macOS privacy) · 78 configuration problem.`,
     )
@@ -133,11 +138,49 @@ a macOS dialog may be waiting) · 77 permission needed (macOS privacy) · 78 con
    */
   let softExit: number | null = null;
 
+  /*
+   * The daily update check (design 2026-09-28 §3), before any command but the exempt ones: an update that is out
+   * stops it — a person at a terminal is asked "Update now, later today, or cancel?", anything else ends with
+   * UPDATE_REQUIRED (exit 11). A hook on the program, so a command added later is gated by being a command at all;
+   * `act` ends with the exit status it decided, when it decided one.
+   * WhatsApp's has no network code: it reads the file as the machine's other servers and commands left it, and its
+   * "now" says what to run rather than fetching the update itself.
+   *
+   */
+  let gated: number | null = null;
+  program.hook('preAction', async (_program, command) => {
+    const path = commandPathOf(command);
+    if (exemptFromUpdateGate(path, ['status'])) return;
+    const core = openCore({ env });
+    let ended: number | null = null;
+    const code = await runCommand(
+      output(),
+      async () => {
+        ended = await updateGateAtTerminal({
+          core,
+          env,
+          binary: 'agent-whatsapp',
+          running: VERSION,
+          output: output(),
+          noInput: false,
+          streams,
+          approveCommand: 'agent-whatsapp approve',
+        });
+      },
+      streams,
+    );
+    gated = code !== 0 ? code : ended;
+  });
+
   const act =
     <A extends unknown[]>(body: (context: WhatsAppContext, options: OutputOptions, ...args: A) => Promise<void>) =>
     async (...args: A): Promise<void> => {
       ran = true;
       softExit = null;
+      if (gated !== null) {
+        exitCode = gated;
+        return;
+      }
       exitCode = await runCommand(
         output(),
         async () => {
