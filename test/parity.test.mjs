@@ -686,6 +686,65 @@ test('a table without its array, a row that is not an object, and a side that is
   );
 });
 
+test('the daily update check’s two settings each have a row, as a flag of `update` and an argument of comms_update', async () => {
+  /*
+   * A flag is not a command, so nothing in the registries misses a row for `--later` or `--auto`: without these two,
+   * the command and the tool could each reach something else and the check would never drive either (design
+   * 2026-09-28).
+   */
+  const { capabilities } = await readTable();
+  const row = (id) => capabilities.find((entry) => entry.id === id);
+  assert.deepEqual(
+    [row('core.update.later'), row('core.update.auto')].map((entry) => ({
+      cli: entry?.cli,
+      mcp: entry?.mcp,
+      operation: entry?.operation,
+      argv: entry?.argv,
+      args: entry?.args,
+    })),
+    [
+      { cli: 'update', mcp: 'comms_update', operation: 'updateLaterChange', argv: ['--later'], args: { later: true } },
+      {
+        cli: 'update',
+        mcp: 'comms_update',
+        operation: 'updateAutoChange',
+        argv: ['--auto', 'off'],
+        args: { auto: 'off' },
+      },
+    ],
+  );
+  assert.deepEqual(row('core.update.auto')?.expect, { setting: 'off' });
+});
+
+test('one command and one tool may be several rows, told apart by what each runs them with, and not otherwise', () => {
+  // `agentcomms update --later` and `comms_update` with `later: true` are one capability; the same pair with
+  // `--auto off` and `auto: "off"` is another. Each is driven with its own words to its own operation.
+  assert.deepEqual(
+    breaking(({ table }) => {
+      table.capabilities.push({
+        ...table.capabilities[1],
+        id: 'gmail.search.recent',
+        argv: ['--recent'],
+        args: { recent: true },
+      });
+    }),
+    [],
+  );
+  // The same words again are the same row again.
+  assertNamed(
+    breaking(({ table }) => {
+      const recent = {
+        ...table.capabilities[1],
+        id: 'gmail.search.recent',
+        argv: ['--recent'],
+        args: { recent: true },
+      };
+      table.capabilities.push(recent, { ...recent, id: 'gmail.search.recent.again' });
+    }),
+    'row "gmail.search.recent.again" repeats row "gmail.search.recent"',
+  );
+});
+
 test('a repeated id, a repeated row, an unknown status or field, and an unknown package each fail', () => {
   assertNamed(
     breaking(({ row }) => {

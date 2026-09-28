@@ -1,5 +1,5 @@
 {
-  "about": "Every capability: the CLI command and the MCP tool that provide it, and the operation both of them run. `cli` is the command path without the binary; `mcp` is a tool name; `operation` is the function exported from packages/<package>/src/operations (or the core's) that both reach — a list when the command is several. `argv` and `args` are what the check adds to the command and the tool to get there, `via` another row's operation a side passes through first, `expect` what the operation must receive from both sides, by parameter name (`null` for not given) — needed where another row runs the same operation through another command and another tool, so the two cannot be swapped unnoticed — and `unchecked` says why a row is not checked, instead of `operation`. Checked by test/parity.test.mjs in `pnpm verify` against both registries, read from the running product, and by running each row's command and tool with every operation replaced by a stand-in that records the call and its arguments; `pnpm verify:parity --strict`, also part of `pnpm verify`, refuses any pending row. How to add one: CONTRIBUTING.md, \"Adding a capability\". Design: docs/superpowers/specs/2026-09-25-cli-mcp-parity-design.md.",
+  "about": "Every capability: the CLI command and the MCP tool that provide it, and the operation both of them run. `cli` is the command path without the binary; `mcp` is a tool name; `operation` is the function exported from packages/<package>/src/operations (or the core's) that both reach — a list when the command is several. `argv` and `args` are what the check adds to the command and the tool to get there — and what tells apart two rows of one command and one tool, `update --later` from `update --auto off` — `via` another row's operation a side passes through first, `expect` what the operation must receive from both sides, by parameter name (`null` for not given) — needed where another row runs the same operation through another command and another tool, so the two cannot be swapped unnoticed — and `unchecked` says why a row is not checked, instead of `operation`. Checked by test/parity.test.mjs in `pnpm verify` against both registries, read from the running product, and by running each row's command and tool with every operation replaced by a stand-in that records the call and its arguments; `pnpm verify:parity --strict`, also part of `pnpm verify`, refuses any pending row. How to add one: CONTRIBUTING.md, \"Adding a capability\". Design: docs/superpowers/specs/2026-09-25-cli-mcp-parity-design.md.",
   "capabilities": [
     {
       "id": "core.paths",
@@ -84,6 +84,29 @@
       "status": "both",
       "operation": "updateChange",
       "reason": "One change for every step: each registration registered again at the latest release with its own name, client, scope, launcher and pins, the runtimes that needs, and the global packages. `update --check` and `check: true` are `updateCheck`, the read both sides run instead, which asks nobody."
+    },
+    {
+      "id": "core.update.later",
+      "package": "core",
+      "cli": "update",
+      "mcp": "comms_update",
+      "status": "both",
+      "operation": "updateLaterChange",
+      "argv": ["--later"],
+      "args": { "later": true },
+      "reason": "Not now: the daily update check's stop put off until local midnight, for the whole machine — a change the person approves, so an agent cannot clear the stop by itself (design 2026-09-28)."
+    },
+    {
+      "id": "core.update.auto",
+      "package": "core",
+      "cli": "update",
+      "mcp": "comms_update",
+      "status": "both",
+      "operation": "updateAutoChange",
+      "argv": ["--auto", "off"],
+      "args": { "auto": "off" },
+      "expect": { "setting": "off" },
+      "reason": "The daily update check on or off for this machine, in config.json: off is a loosening the person approves, on applies at once (design 2026-09-28)."
     },
     {
       "id": "core.approve",

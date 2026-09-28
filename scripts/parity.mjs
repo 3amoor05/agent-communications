@@ -106,6 +106,12 @@ const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
  * because a tool call cannot sit waiting on a browser. And the design's core server installs every channel's server,
  * so one `comms_server_install` will stand behind `agent-gmail mcp install` and `agent-slack mcp install` alike. What
  * a row may not do is repeat another row, or pair a side that an `exception` row says has no counterpart.
+ *
+ * A row repeats another when it names the same command and tool *and* runs them with the same `argv` and `args`. One
+ * command and one tool can be several capabilities, each reached by a flag and an argument of its own —
+ * `agentcomms update --later` and `comms_update` with `later: true` put the update off, while the same pair with
+ * `--auto off` and `auto: "off"` turns the daily check off — and each such row is driven with its own words to the
+ * operation it names, so telling them apart by those words checks every one of them.
  */
 export function checkParity(table, registries, { strict = false } = {}) {
   const rows = table?.capabilities;
@@ -281,7 +287,7 @@ export function checkParity(table, registries, { strict = false } = {}) {
       }
     }
 
-    const pair = JSON.stringify([row.package, cli, mcp]);
+    const pair = JSON.stringify([row.package, cli, mcp, row.argv ?? null, row.args ?? null]);
     if (pairs.has(pair)) problems.push(`${at} repeats row "${pairs.get(pair)}"`);
     else pairs.set(pair, row.id);
 
