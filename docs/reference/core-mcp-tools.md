@@ -18,7 +18,7 @@ applies a change it did not plan itself.
 | Tool | What it does |
 |---|---|
 | [`comms_paths`](#comms_paths) | Where the configuration, state, data, secrets and downloads live on this machine. |
-| [`comms_doctor`](#comms_doctor) | Check this machine: Node, the directories, the configuration, account names, and the secret store — each check with the fix when it fails. |
+| [`comms_doctor`](#comms_doctor) | Check this machine: Node, the directories, the configuration, account names, the secret store, and which MCP clients start each server — each check with the fix when it fails. |
 | [`comms_audit_tail`](#comms_audit_tail) | The most recent audit records, newest last: every send, change and approval step, with the surface it came from. |
 | [`comms_approvals_list`](#comms_approvals_list) | Every approval on this machine — for sends, posts and configuration changes — with its state and when it expires. |
 | [`comms_approval_revoke`](#comms_approval_revoke) | Cancel an approval so it can never be used: a send, a post, or a configuration change the person said no to. |
@@ -40,7 +40,7 @@ Takes no arguments.
 
 ### `comms_doctor`
 
-Check this machine: Node, the directories, the configuration, account names, and the secret store — each check with the fix when it fails. `ok` is false when any check fails.
+Check this machine: Node, the directories, the configuration, account names, the secret store, and which MCP clients start each server — each check with the fix when it fails. `ok` is false when any check fails; a check with `warn` is something to look at, and leaves `ok` true.
 
 *read-only*
 
@@ -102,7 +102,7 @@ Report or set the change policy — how a loosening is approved: `chat`, a yes i
 
 ### `comms_server_install`
 
-Register a channel’s MCP server — `gmail`, `resend`, `slack`, `whatsapp`, or `core` (this one) — with an MCP client, and prove it starts. A change: the first call returns the preview and an approvalId; call again with it once the person agrees. `print` only returns the entry to paste, and asks nobody. The new server appears after the client is restarted — tell the person.
+Register a channel’s MCP server — `gmail`, `resend`, `slack`, `whatsapp`, or `core` (this one) — with an MCP client, and prove it starts. A change: the first call returns the preview and an approvalId; call again with it once the person agrees. `print` only returns the entry to paste, and asks nobody. An install that registers nothing — the client’s own command cannot be found — or whose server does not start is an error, with the entry to paste in its `details`. The new server appears after the client is restarted — tell the person.
 
 *writes*
 

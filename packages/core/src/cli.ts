@@ -39,7 +39,7 @@ import {
   updateChange,
   updateCheck,
 } from './operations/update.ts';
-import { renderInstall, renderPrune } from './render.ts';
+import { renderDoctor, renderInstall, renderPrune } from './render.ts';
 import { VERSION } from './version.ts';
 
 /**
@@ -59,7 +59,8 @@ const HELP = `agentcomms ${VERSION} — agent-communications core
 
 Usage:
   agentcomms paths                         where config, state, data and downloads live
-  agentcomms doctor                        check this machine: Node, directories, secret store
+  agentcomms doctor                        check this machine: Node, directories, secret store, and which MCP
+                                           clients start each server
   agentcomms audit tail [--inbox <alias>] [--since <ISO time>] [--limit <n>]
   agentcomms approvals list [--inbox <alias>] [--state <state>]
   agentcomms approvals revoke <approvalId>
@@ -188,14 +189,8 @@ export async function main(
         );
         return;
       case 'doctor': {
-        const report = await doctor(core);
-        writeResult(report, output, (r) =>
-          r.checks
-            .map(
-              (c) => `${c.ok ? 'ok  ' : 'FAIL'} ${c.name.padEnd(16)} ${c.detail}${c.fix ? `\n     fix: ${c.fix}` : ''}`,
-            )
-            .join('\n'),
-        );
+        const report = await doctor(core, env);
+        writeResult(report, output, renderDoctor);
         if (!report.ok)
           throw new CommsError('CONFIG', 'doctor found problems', { hint: 'Apply the fixes listed above.' });
         return;

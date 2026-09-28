@@ -1,6 +1,7 @@
 import { isDangerous } from './chars.ts';
 import { paint } from './cli-runtime.ts';
 import type { InstallResult, PruneResult } from './mcp-install.ts';
+import type { DoctorReport } from './operations/maintenance.ts';
 
 /**
  * One renderer for every surface a send preview is shown on — the chat, an elicitation form, a terminal. Text the
@@ -363,6 +364,21 @@ export function renderInstall(result: InstallResult, color: boolean): string {
   } else lines.push(paint(color, 'yellow', `Not checked: ${result.verifyDetail ?? 'skipped'}`));
   for (const warning of result.warnings) lines.push('', paint(color, 'red', warning));
   return lines.join('\n');
+}
+
+/**
+ * What `agentcomms doctor` prints: one line a check — `ok`, `warn` or `FAIL` — and the fix under any that has one.
+ *
+ * Here rather than inside the command, so a test can read the lines a person reads: the command itself probes the
+ * login keychain, which no test may touch.
+ */
+export function renderDoctor(report: DoctorReport): string {
+  return report.checks
+    .map(
+      (c) =>
+        `${c.ok ? (c.warn ? 'warn' : 'ok  ') : 'FAIL'} ${c.name.padEnd(16)} ${c.detail}${c.fix ? `\n     fix: ${c.fix}` : ''}`,
+    )
+    .join('\n');
 }
 
 /** What `mcp prune` removed and kept, and why each one it kept is still needed. */

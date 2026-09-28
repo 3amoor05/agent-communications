@@ -6,6 +6,7 @@ import type { Core } from '../core.ts';
 import { CommsError, toCommsError } from '../errors.ts';
 import { type RegisteredServer, scanRegisteredServers, type UnreadableConfig } from '../mcp-clients.ts';
 import {
+  clientCliSearch,
   type InstallContext,
   type InstallOptions,
   type InstallResult,
@@ -287,7 +288,7 @@ async function whyNotUpdatable(
   const target = await installTarget(context, { client: item.client as SupportedClient, apply: true });
   if (!target.writes) {
     return target.cliName
-      ? `\`${target.cliName}\` is not on PATH, so the entry cannot be replaced from here; run \`${installCommand(item)}\` where it is`
+      ? `\`${target.cliName}\` is not ${clientCliSearch(context.env)}, so the entry cannot be replaced from here; run \`${installCommand(item)}\` where it is`
       : `this environment names no ${item.client} configuration to write to`;
   }
   const own = pinOption(item.channel);

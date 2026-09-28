@@ -172,7 +172,64 @@ export interface InstallResult {
 
 /** Looks for an executable on PATH, the way a shell would. */
 export async function whichExecutable(name: string, env: NodeJS.ProcessEnv): Promise<string | null> {
-  const paths = (env.PATH ?? '').split(delimiter).filter(Boolean);
+  return executableIn(name, (env.PATH ?? '').split(delimiter), env);
+}
+
+/**
+ * Where a client's own command is usually installed, looked in after PATH: `~/.local/bin`, where Anthropic's native
+ * installer puts `claude`, then `/opt/homebrew/bin` and `/usr/local/bin`, where Homebrew puts `claude` and `codex` on
+ * Apple Silicon and on Intel.
+ *
+ * An install run from inside an MCP server has the PATH written into that server's entry at registration —
+ * `node`'s own directory, `/usr/local/bin`, `/usr/bin`, `/bin` — and nothing of the person's shell. `claude` from
+ * Homebrew on an Apple Silicon Mac, or from the native installer anywhere, is on none of those, so a registration
+ * asked for from chat found no `claude`, registered nothing, and printed the entry instead. That PATH is left as it
+ * is: it is in every entry already registered, and changing it would rewrite them all.
+ *
+ * The home is the environment's own `HOME`, never `os.homedir()`, so a test's temporary home is the only home looked
+ * in. `AGENT_COMMS_CLIENT_CLI_DIRS` replaces the two system directories — a list, separated as PATH is, and empty for
+ * none — which is how the tests keep every lookup inside their own directories: a `claude` or `codex` really
+ * installed on the machine running them would otherwise be found, and run, by a test that meant to have none.
+ */
+export function clientCliDirectories(env: NodeJS.ProcessEnv): string[] {
+  const home = env.HOME || env.USERPROFILE;
+  const system =
+    env.AGENT_COMMS_CLIENT_CLI_DIRS !== undefined
+      ? env.AGENT_COMMS_CLIENT_CLI_DIRS.split(delimiter)
+      : process.platform === 'win32'
+        ? []
+        : ['/opt/homebrew/bin', '/usr/local/bin'];
+  return [...(home ? [join(home, '.local', 'bin')] : []), ...system].filter(Boolean);
+}
+
+/**
+ * A client's own command — `claude`, `codex` — on PATH, or else where it is usually installed: see
+ * `clientCliDirectories`. Every place that looks for a client's command looks through here, so the one that plans a
+ * registration and the one that makes it cannot disagree about whether it is there.
+ */
+export async function findClientCli(name: string, env: NodeJS.ProcessEnv): Promise<string | null> {
+  return (await whichExecutable(name, env)) ?? executableIn(name, clientCliDirectories(env), env);
+}
+
+/** Where `findClientCli` looked, as a sentence ends: "on PATH or in ~/.local/bin, /opt/homebrew/bin or /usr/local/bin". */
+export function clientCliSearch(env: NodeJS.ProcessEnv): string {
+  const directories = clientCliDirectories(env);
+  if (directories.length === 0) return 'on PATH';
+  const last = directories.at(-1) as string;
+  const rest = directories.slice(0, -1);
+  return `on PATH or in ${rest.length > 0 ? `${rest.join(', ')} or ${last}` : last}`;
+}
+
+/**
+ * The first of `directories` that holds an executable `name`. PATH is read by the caller, once: a test that counts
+ * how often the installer looks at PATH counts exactly the looks it means.
+ */
+async function executableIn(
+  name: string,
+  directories: readonly string[],
+  env: NodeJS.ProcessEnv,
+): Promise<string | null> {
+  const paths = directories.filter(Boolean);
   const extensions = process.platform === 'win32' ? (env.PATHEXT ?? '.EXE;.CMD;.BAT').split(';') : [''];
   for (const directory of paths) {
     for (const extension of extensions) {
@@ -777,8 +834,9 @@ async function backUp(
 
 /**
  * Where an install with these options goes: the client's own CLI and the file it keeps its servers in, and whether
- * anything will be written there at all — `--print`, `--client json` and a client whose CLI is not on PATH all end
- * with an entry printed rather than registered.
+ * anything will be written there at all — `--print`, `--client json` and a client whose CLI cannot be found all end
+ * with an entry printed rather than registered. The CLI is looked for on PATH and then where it is usually installed:
+ * see `findClientCli`.
  *
  * Exported because a registration is a change a person approves, and what they are shown has to be what then
  * happens. The core server plans an install with this before asking, and the install itself decides with it, so the
@@ -796,7 +854,7 @@ export async function installTarget(
 }> {
   const apply = options.apply ?? true;
   const cliName = options.client === 'claude-code' ? 'claude' : options.client === 'codex' ? 'codex' : null;
-  const binary = cliName ? await whichExecutable(cliName, context.env) : null;
+  const binary = cliName ? await findClientCli(cliName, context.env) : null;
   // The file this client keeps its servers in, as this environment resolves it — for Claude Code and codex, the
   // one their own CLI writes. `--client json` has none.
   const own = knownClientConfigs(context.env).find((file) => file.client === options.client)?.path;
@@ -1193,7 +1251,7 @@ export async function mcpInstall(
     method = 'cli';
     applied = true;
   } else if (cliName && apply) {
-    notApplied = `${cliName} was not found on PATH, so nothing was registered`;
+    notApplied = `${cliName} was not found ${clientCliSearch(context.env)}, so nothing was registered`;
   } else if (configPath && writes) {
     await mergeIntoJsonConfig(configPath, options.client, name, entry);
     method = 'file';
@@ -1259,6 +1317,49 @@ export async function mcpInstall(
  */
 export function installExitStatus(result: Pick<InstallResult, 'notApplied' | 'verification'>): number {
   return result.notApplied || result.verification === 'failed' ? EXIT_CODES.UNAVAILABLE : EXIT_CODES.OK;
+}
+
+/**
+ * The same verdict for a surface that has no exit status to end with — the core server's `comms_server_install`: the
+ * error an install is wherever `installExitStatus` is not 0, and null wherever it is.
+ *
+ * Its code, `PROVIDER_UNAVAILABLE`, is the one that exits with `installExitStatus`'s status, so the tool and the
+ * command say one thing. The whole result goes in its details, as the command prints it: the entry to add by hand is
+ * `snippet`, and a `--print` of an entry that starts — or was not started — is no error at all.
+ */
+export function installFailure(result: InstallResult): CommsError | null {
+  if (installExitStatus(result) === EXIT_CODES.OK) return null;
+  const details = { ...result } as unknown as Record<string, unknown>;
+  const where = result.configPath ?? `the MCP configuration of ${result.client}`;
+  if (result.notApplied) {
+    return new CommsError(
+      'PROVIDER_UNAVAILABLE',
+      `registering "${result.name}" with ${result.client}: ${result.notApplied}`,
+      {
+        hint: `The entry is in details.snippet: add it to ${where} by hand, or put the client's own command where the message says this looked, and ask again. Nothing was registered, so restarting ${result.client} changes nothing.`,
+        details,
+      },
+    );
+  }
+  const why = result.verifyDetail ?? 'no reason given';
+  if (result.applied) {
+    return new CommsError(
+      'PROVIDER_UNAVAILABLE',
+      `registered "${result.name}" with ${result.client}, but it did not start when it was tried: ${why}`,
+      {
+        hint: `Restarting ${result.client} will not load it until what stopped it is fixed.${result.backupPath ? ` The entry it replaced is in ${result.backupPath}, to put back by hand.` : ''}`,
+        details,
+      },
+    );
+  }
+  return new CommsError(
+    'PROVIDER_UNAVAILABLE',
+    `the entry for "${result.name}" did not start when it was tried: ${why}`,
+    {
+      hint: 'Nothing was written. Fix what stopped it, and ask for the entry again.',
+      details,
+    },
+  );
 }
 
 /** Merges the entry into a client's JSON config, keeping everything else in the file exactly as it was. */

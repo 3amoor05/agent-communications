@@ -5,7 +5,7 @@ import { CHANNELS } from '../channel-servers.ts';
 import { accountChannels, listed, narrowingOwner } from '../channel-words.ts';
 import { type Core, openCore } from '../core.ts';
 import { CommsError, toCommsError } from '../errors.ts';
-import { SERVER_NAME_MESSAGE, SERVER_NAME_PATTERN } from '../mcp-install.ts';
+import { installFailure, SERVER_NAME_MESSAGE, SERVER_NAME_PATTERN } from '../mcp-install.ts';
 import {
   CHANGE_POLICIES,
   changePolicyChange,
@@ -191,11 +191,11 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
     {
       title: 'Check this machine',
       description:
-        'Check this machine: Node, the directories, the configuration, account names, and the secret store — each check with the fix when it fails. `ok` is false when any check fails.',
+        'Check this machine: Node, the directories, the configuration, account names, the secret store, and which MCP clients start each server — each check with the fix when it fails. `ok` is false when any check fails; a check with `warn` is something to look at, and leaves `ok` true.',
       inputSchema: {},
       annotations: readsLocal,
     },
-    async () => read(() => doctor(core, options.keyring !== undefined ? { keyring: options.keyring } : {})),
+    async () => read(() => doctor(core, env, options.keyring !== undefined ? { keyring: options.keyring } : {})),
   );
 
   server.registerTool(
@@ -304,7 +304,7 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
         [...accountChannels().map((manifest) => `\`${manifest.channel}\``), '`core` (this one)'],
         'or',
         { oxford: true },
-      )} — with an MCP client, and prove it starts. A change: the first call returns the preview and an approvalId; call again with it once the person agrees. \`print\` only returns the entry to paste, and asks nobody. The new server appears after the client is restarted — tell the person.`,
+      )} — with an MCP client, and prove it starts. A change: the first call returns the preview and an approvalId; call again with it once the person agrees. \`print\` only returns the entry to paste, and asks nobody. An install that registers nothing — the client’s own command cannot be found — or whose server does not start is an error, with the entry to paste in its \`details\`. The new server appears after the client is restarted — tell the person.`,
       inputSchema: {
         channel: z.enum(CHANNELS as [string, ...string[]]).describe('which server'),
         client: z.enum(CLIENTS as [string, ...string[]]).describe('which MCP client to register it with'),
@@ -347,24 +347,35 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
       },
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     },
-    async (args) =>
-      change(
-        () =>
-          serverInstallChange(core, env, {
-            channel: args.channel as (typeof CHANNELS)[number],
-            client: args.client as (typeof CLIENTS)[number],
-            name: args.name,
-            account: args.account,
-            inbox: args.inbox,
-            workspace: args.workspace,
-            readOnly: args.readOnly,
-            launcher: args.launcher as (typeof LAUNCHERS)[number] | undefined,
-            force: args.force,
-            print: args.print,
-            noVerify: args.noVerify,
-          }),
-        args.approvalId,
-      ),
+    async (args) => {
+      try {
+        const install = serverInstallChange(core, env, {
+          channel: args.channel as (typeof CHANNELS)[number],
+          client: args.client as (typeof CLIENTS)[number],
+          name: args.name,
+          account: args.account,
+          inbox: args.inbox,
+          workspace: args.workspace,
+          readOnly: args.readOnly,
+          launcher: args.launcher as (typeof LAUNCHERS)[number] | undefined,
+          force: args.force,
+          print: args.print,
+          noVerify: args.noVerify,
+        });
+        const outcome = await gatedChange(core, install, { surface: 'mcp', approvalId: args.approvalId });
+        /*
+         * Registered nothing although it was asked to — the client's own command was not found — or registered an
+         * entry that did not start: the command ends such an install non-zero (`installExitStatus`), and here it was
+         * `applied: true`, which an agent read as done and told the person to restart for a server that was never
+         * registered. So it is the error it is, with the whole result — the entry to paste — in its details, as a
+         * secrets migration that switched but left originals behind is below. Printing, asked for, is no error.
+         */
+        const failure = outcome.status === 'applied' ? installFailure(outcome.result) : null;
+        return failure ? fail(failure) : reply(changeToolResult(outcome));
+      } catch (error) {
+        return fail(error);
+      }
+    },
   );
 
   server.registerTool(

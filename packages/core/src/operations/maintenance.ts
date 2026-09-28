@@ -2,6 +2,8 @@ import { access, constants, stat } from 'node:fs/promises';
 import { type ApprovalRecord, type ApprovalState, approvalKind, publicView } from '../approvals.ts';
 import type { AuditRecord } from '../audit.ts';
 import { revokeChange } from '../changes.ts';
+import { type Channel, channelServer } from '../channel-servers.ts';
+import { listed, manifestOf } from '../channel-words.ts';
 import { type Config, emptyConfig, secretsStoreOf } from '../config.ts';
 import type { Core } from '../core.ts';
 import { CommsError } from '../errors.ts';
@@ -9,6 +11,7 @@ import { isGroupOrWorldAccessible } from '../fs.ts';
 import { resolveName } from '../names.ts';
 import type { ResolvedPaths } from '../paths.ts';
 import { type KeyringModule, keychainNamespace, loadKeyringModule, probeKeychain } from '../secrets.ts';
+import { type ChannelRegistration, CLIENTS, channelsAvailable } from './servers.ts';
 
 /**
  * The core's own read-only and housekeeping operations: where things live, whether this machine is healthy, what the
@@ -27,6 +30,12 @@ export function corePaths(core: Core): ResolvedPaths {
 export interface DoctorCheck {
   name: string;
   ok: boolean;
+  /**
+   * Something to look at rather than a failure: a channel with accounts that no client starts, a client config that
+   * cannot be read. `ok` stays true, and so does the report's — a doctor that failed on a machine used only from a
+   * terminal would be failing on nothing. Present only on such a check, so every other reads as it always did.
+   */
+  warn?: true;
   detail: string;
   fix?: string;
 }
@@ -44,7 +53,11 @@ export interface DoctorOptions {
   keyring?: KeyringModule | null | undefined;
 }
 
-export async function doctor(core: Core, options: DoctorOptions = {}): Promise<DoctorReport> {
+/**
+ * Whether this machine is healthy. `env` is where the MCP clients' configs are found — the one `agentcomms` runs with,
+ * or the core server's — as `agentcomms channels` finds them.
+ */
+export async function doctor(core: Core, env: NodeJS.ProcessEnv, options: DoctorOptions = {}): Promise<DoctorReport> {
   const checks: DoctorCheck[] = [];
   const [major = 0, minor = 0] = process.versions.node.split('.').map(Number);
   const nodeOk = major > 22 || (major === 22 && minor >= 12);
@@ -137,7 +150,95 @@ export async function doctor(core: Core, options: DoctorOptions = {}): Promise<D
     ok: true,
     detail: config.secrets?.store ?? 'not chosen yet (keychain by default)',
   });
+  checks.push(...(await registrationChecks(core, env, readable ? config : null)));
   return { checks, ok: checks.every((c) => c.ok) };
+}
+
+/**
+ * Which MCP clients start each server, read the way `agentcomms channels` reads it.
+ *
+ * Every check above passed on a machine where an install had registered nothing: the only symptom was a client with
+ * none of the tools, and the doctor said all was well. So every client config is read for every server:
+ *
+ *  - an entry whose command or script has gone fails, with the command that registers it again — the client starts
+ *    it, it exits, and the client says only that it failed;
+ *  - a channel with accounts here that no client starts is something to look at, not a failure: it may be used only
+ *    from a terminal, but somebody who connected a mailbox and sees no Gmail tools has usually hit exactly this;
+ *  - a client config that cannot be read is said to be unreadable, and nothing is concluded from its silence.
+ *
+ * `config` is null when it could not be read: the check above says so, and no channel is said to have accounts.
+ */
+async function registrationChecks(core: Core, env: NodeJS.ProcessEnv, config: Config | null): Promise<DoctorCheck[]> {
+  const report = await channelsAvailable(core, env);
+  const checks: DoctorCheck[] = report.unreadable.map((file) => ({
+    name: 'client config',
+    ok: true,
+    warn: true,
+    detail: `${file.path} could not be read (${file.reason}), so which servers ${file.client} starts is not known`,
+    fix: `Look at ${file.path}: until it can be read, nothing here can say what it registers.`,
+  }));
+  const blind = report.unreadable.map((file) => file.path);
+  const where = (entry: ChannelRegistration) =>
+    `${entry.client} as "${entry.name}" in ${entry.path}${entry.scope === 'project' ? ' (for one project)' : ''}`;
+  for (const channel of report.channels) {
+    const name = `${channel.channel} server`;
+    for (const entry of channel.registered) {
+      if (entry.missing === null) continue;
+      checks.push({
+        name,
+        ok: false,
+        detail: `registered with ${where(entry)}, but ${entry.missing} is no longer there, so ${entry.client} cannot start it`,
+        fix: registerAgain(channel.channel, entry),
+      });
+    }
+    const working = channel.registered.filter((entry) => entry.missing === null);
+    if (working.length > 0) {
+      checks.push({ name, ok: true, detail: `registered with ${working.map(where).join('; ')}` });
+      continue;
+    }
+    // Registered, and every entry of it broken: the failures above say so, each with what to run.
+    if (channel.registered.length > 0) continue;
+    const accounts = config === null ? [] : accountsOf(config, channel.channel);
+    if (accounts.length === 0) continue;
+    const clients = CLIENTS.filter((client) => client !== 'json').join(', ');
+    checks.push({
+      name,
+      ok: true,
+      warn: true,
+      detail: `${listed(accounts, 'and')} ${accounts.length === 1 ? 'is' : 'are'} set up here, but no MCP client${blind.length > 0 ? ' this could read' : ''} starts the ${channel.label} server${blind.length > 0 ? ` — ${listed(blind, 'and')} could not be read` : ''}`,
+      fix: `Register it with the client you use: \`${channel.binary} mcp install --client <client>\` (${clients}), or comms_server_install with channel "${channel.channel}" from a chat. Used only from a terminal, it needs nothing.`,
+    });
+  }
+  return checks;
+}
+
+/** The names of a channel's accounts on this machine, from the map its manifest keeps them in; none for the core. */
+function accountsOf(config: Config, channel: Channel): string[] {
+  const accounts = manifestOf(channel)?.accounts;
+  if (accounts === undefined) return [];
+  if (accounts.map === 'inboxes') return Object.keys(config.inboxes).sort();
+  return Object.entries(config.accounts)
+    .filter(([, account]) => account.platform === channel)
+    .map(([name]) => name)
+    .sort();
+}
+
+/**
+ * What registers a broken entry again as it was: its client, its name, its pin and `--read-only`, and its launcher —
+ * the flags `mcp install`'s own hint repeats when it refuses to replace an entry without `--force`, so following it
+ * narrows or widens nothing. A project's entry is not one `mcp install` writes, and is said to be where it is instead.
+ */
+function registerAgain(channel: Channel, entry: ChannelRegistration): string {
+  if (entry.scope === 'project') {
+    return `It is registered for one project, in ${entry.path}, and \`mcp install\` registers at user scope only: remove it or register it again there, with ${entry.client}'s own command.`;
+  }
+  const facts = channelServer(channel);
+  const words = [facts.binary, 'mcp', 'install', '--client', entry.client];
+  if (entry.name !== facts.defaultServerName) words.push('--name', entry.name);
+  words.push(...entry.narrowing);
+  if (entry.launcher === 'npx' || entry.launcher === 'local') words.push('--launcher', entry.launcher);
+  words.push('--force');
+  return `Register it again: \`${words.join(' ')}\`.`;
 }
 
 /** An inbox's id from its name — the current one, so a former name is answered with what it is called now. */

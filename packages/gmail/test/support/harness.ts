@@ -74,6 +74,10 @@ export async function newHarness(options: FakeGoogleOptions = {}): Promise<Harne
     AGENT_COMMS_GOOGLE_ROOT_URL: google.url,
     HOME: configDir,
     NO_COLOR: '1',
+    // Where a client's own command is looked for beyond PATH: this home, and nowhere else. Left out, /opt/homebrew/bin
+    // and /usr/local/bin are searched too, and a real `claude` or `codex` there would be found — and run — by a test
+    // that meant to have none.
+    AGENT_COMMS_CLIENT_CLI_DIRS: '',
   };
   const core = openCore({ env });
   /*

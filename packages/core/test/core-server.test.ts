@@ -11,10 +11,12 @@ import { beginChangeApproval, finishChangeApproval } from '../src/changes.ts';
 import { CHANNEL_SERVERS } from '../src/channel-servers.ts';
 import type { AccountConfig, InboxConfig } from '../src/config.ts';
 import { type Core, openCore } from '../src/core.ts';
-import { CommsError } from '../src/errors.ts';
+import { CommsError, ERROR_REGISTRY, EXIT_CODES } from '../src/errors.ts';
 import { type CoreMcpOptions, createCoreMcpServer } from '../src/mcp/server.ts';
 import { type McpProduct, managedRuntimeDir, managedRuntimeEntry, pruneManagedRuntimes } from '../src/mcp-install.ts';
+import type { DoctorCheck, DoctorReport } from '../src/operations/maintenance.ts';
 import { serverInstallChange, serverPruneChange } from '../src/operations/servers.ts';
+import { renderDoctor } from '../src/render.ts';
 import type { SecretStore } from '../src/secrets.ts';
 import { VERSION } from '../src/version.ts';
 import { tempDir } from './helpers/temp.ts';
@@ -105,6 +107,10 @@ function machine(body?: Record<string, unknown>): Machine {
     PATH: bin,
     AGENT_COMMS_CONFIG_DIR: configDir,
     NO_COLOR: '1',
+    // Where a client's own command is looked for beyond PATH: this home, and nowhere else. Left out, /opt/homebrew/bin
+    // and /usr/local/bin are searched too, and a real `claude` or `codex` there would be found — and run — by a test
+    // that meant to have none.
+    AGENT_COMMS_CLIENT_CLI_DIRS: '',
   };
   return { home, bin, configDir, env, core: openCore({ env }) };
 }
@@ -329,6 +335,111 @@ test('the doctor over MCP is the same report, and the keychain it probes is the 
   } finally {
     await close();
   }
+});
+
+/** A machine whose every other check passes, with Gmail and Slack accounts, and client configs of its own. */
+function doctorMachine(): Machine {
+  const base = machine({
+    secrets: { store: 'file' },
+    inboxes: { 'acme/gmail': inbox() },
+    accounts: { 'acme/slack': account() },
+  });
+  // Owner-only, as the store makes it: a loose directory would fail the doctor for another reason.
+  chmodSync(base.configDir, 0o700);
+  return { ...base, env: { ...base.env, CLAUDE_CONFIG_DIR: base.home } };
+}
+
+async function doctorChecks(m: Machine): Promise<{ report: DoctorReport; checks: DoctorCheck[] }> {
+  const { ok, close } = await connect(m, { keyring: null });
+  try {
+    const report = (await ok('comms_doctor')) as unknown as DoctorReport;
+    return { report, checks: report.checks };
+  } finally {
+    await close();
+  }
+}
+
+test('the doctor: a channel with accounts that no client starts is something to look at, and not a failure', async () => {
+  /*
+   * An install that registered nothing left the doctor green: it looked at Node, the directories and the secret
+   * store, and never at whether any client starts any server. Nothing is registered here, and both channels have an
+   * account.
+   */
+  const m = doctorMachine();
+  const { report, checks } = await doctorChecks(m);
+  const gmail = checks.find((check) => check.name === 'gmail server');
+  assert.equal(gmail?.warn, true, JSON.stringify(checks));
+  assert.equal(gmail?.ok, true, 'to look at, not a failure');
+  assert.equal(gmail?.detail, 'acme/gmail is set up here, but no MCP client starts the Gmail server');
+  assert.match(gmail?.fix ?? '', /`agent-gmail mcp install --client <client>`/);
+  assert.match(gmail?.fix ?? '', /comms_server_install with channel "gmail"/);
+  const slack = checks.find((check) => check.name === 'slack server');
+  assert.equal(slack?.warn, true);
+  assert.match(slack?.fix ?? '', /`agent-slack mcp install --client <client>`/);
+  assert.equal(
+    checks.some((check) => check.name === 'core server' || check.name === 'resend server'),
+    false,
+    'nothing to say of a server with no accounts and no registration',
+  );
+  assert.equal(report.ok, true, 'a warning leaves `ok` alone');
+  assert.match(renderDoctor(report), /^warn gmail server {5}acme\/gmail is set up here/m);
+
+  // Registered with Cursor, from a runtime that is there: said, with the client and the file.
+  const entry = managedRuntimeEntry(m.core.paths.dataDir, '@agentcomms/gmail', VERSION);
+  mkdirSync(dirname(entry), { recursive: true });
+  writeFileSync(entry, '');
+  const cursor = join(m.home, '.cursor', 'mcp.json');
+  mkdirSync(dirname(cursor));
+  writeFileSync(cursor, JSON.stringify({ mcpServers: { gmail: { command: process.execPath, args: [entry, 'mcp'] } } }));
+  const registered = (await doctorChecks(m)).checks.find((check) => check.name === 'gmail server');
+  assert.deepEqual(registered, {
+    name: 'gmail server',
+    ok: true,
+    detail: `registered with cursor as "gmail" in ${cursor}`,
+  });
+
+  // A config that cannot be read is said to be unreadable, and Slack is not said to be registered nowhere.
+  const claude = join(m.home, '.claude.json');
+  writeFileSync(claude, '{ "mcpServers": ');
+  const blind = await doctorChecks(m);
+  const unreadable = blind.checks.find((check) => check.name === 'client config');
+  assert.equal(unreadable?.warn, true);
+  assert.match(
+    unreadable?.detail ?? '',
+    new RegExp(`^${claude.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} could not be read`),
+  );
+  assert.equal(
+    blind.checks.find((check) => check.name === 'slack server')?.detail,
+    `acme/slack is set up here, but no MCP client this could read starts the Slack server — ${claude} could not be read`,
+  );
+  assert.equal(blind.report.ok, true);
+});
+
+test('the doctor fails a registration whose runtime has gone, and says what registers it again', async () => {
+  // Slack, registered with Claude Code from a managed runtime deleted since, pinned to one workspace.
+  const m = doctorMachine();
+  const gone = managedRuntimeEntry(m.core.paths.dataDir, '@agentcomms/slack', VERSION);
+  const claude = join(m.home, '.claude.json');
+  writeFileSync(
+    claude,
+    JSON.stringify({
+      mcpServers: {
+        slack: { command: process.execPath, args: [gone, 'mcp', '--workspace', 'acme/slack'], env: { TOKEN: 'x' } },
+      },
+    }),
+  );
+  const { report, checks } = await doctorChecks(m);
+  const slack = checks.filter((check) => check.name === 'slack server');
+  assert.deepEqual(slack, [
+    {
+      name: 'slack server',
+      ok: false,
+      detail: `registered with claude-code as "slack" in ${claude}, but ${gone} is no longer there, so claude-code cannot start it`,
+      fix: 'Register it again: `agent-slack mcp install --client claude-code --workspace acme/slack --force`.',
+    },
+  ]);
+  assert.equal(report.ok, false, 'a server a client cannot start is a failure');
+  assert.match(renderDoctor(report), /^FAIL slack server {5}registered with claude-code/m);
 });
 
 // ── The change policy ───────────────────────────────────────────────────────────────────────────────────────────
@@ -606,6 +717,51 @@ test('printing an entry registers nothing, and so asks nobody', async () => {
     assert.match(String(result.snippet), /"slack"/);
     assert.match(String(result.snippet), new RegExp(`runtime[/\\\\]+${VERSION.replaceAll('.', '\\.')}-slack`));
     assert.deepEqual(await m.core.approvals.list(), []);
+  } finally {
+    await close();
+  }
+});
+
+test('an install that registered nothing is an error from chat, not `applied: true`; printing is still no error', async () => {
+  /*
+   * Asked from chat with the client's own command nowhere to be found, the install printed the entry, registered
+   * nothing — and came back `{ applied: true, result: { applied: false, notApplied: … } }`, which an agent read as
+   * done: it told the person to restart for a server that was never registered. The command exits 69 for the same
+   * install. Here `claude` is on no PATH and in no directory the lookup is allowed to search.
+   */
+  const base = machine();
+  const m = { ...base, env: { ...base.env, CLAUDE_CONFIG_DIR: join(base.home, 'claude') } };
+  const { call, ok, close } = await connect(m);
+  try {
+    const args = { channel: 'core', client: 'claude-code', launcher: 'local', noVerify: true };
+    const result = await call('comms_server_install', args);
+    assert.equal(result.isError, true, JSON.stringify(result.structuredContent));
+    assert.notEqual(result.structuredContent?.applied, true);
+    const error = result.structuredContent?.error as {
+      code: keyof typeof ERROR_REGISTRY;
+      message: string;
+      hint: string;
+      details: Record<string, unknown>;
+    };
+    assert.equal(error.code, 'PROVIDER_UNAVAILABLE');
+    assert.equal(ERROR_REGISTRY[error.code].exit, EXIT_CODES.UNAVAILABLE, 'what `agentcomms mcp install` exits with');
+    assert.match(
+      error.message,
+      /^registering "agentcomms" with claude-code: claude was not found on PATH or in .+, so nothing was registered$/,
+    );
+    assert.match(error.hint, /details\.snippet/);
+    // Everything the command prints is still there: the entry to add by hand above all.
+    assert.equal(error.details.applied, false);
+    assert.equal(error.details.restart, null, 'nothing to restart for');
+    assert.match(String(error.details.snippet), /"agentcomms"/);
+
+    // `print` asks for the entry and nothing else: getting it is what was asked, so it is no error.
+    const printed = await ok('comms_server_install', { ...args, print: true });
+    assert.equal(printed.applied, true);
+    const entry = printed.result as Record<string, unknown>;
+    assert.equal(entry.applied, false);
+    assert.equal(entry.notApplied, undefined);
+    assert.match(String(entry.snippet), /"agentcomms"/);
   } finally {
     await close();
   }

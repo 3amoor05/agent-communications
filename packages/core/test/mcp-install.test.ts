@@ -4,12 +4,14 @@ import { stat } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { pathToFileURL } from 'node:url';
-import { EXIT_CODES } from '../src/errors.ts';
+import { ERROR_REGISTRY, EXIT_CODES } from '../src/errors.ts';
 import { knownClientConfigs } from '../src/mcp-clients.ts';
 import {
   handedOutRuntimesPath,
   type InstallContext,
   installExitStatus,
+  installFailure,
+  installTarget,
   isProductServer,
   type McpProduct,
   managedRuntimeDir,
@@ -39,7 +41,11 @@ const GMAIL = {
 } as const;
 
 function context(dataDir: string, home: string): InstallContext {
-  return { env: { HOME: home, PATH: '' }, core: { paths: { dataDir, configDir: join(home, 'config') } } };
+  // No client command beyond PATH but in this home: a real `claude` or `codex` elsewhere is never found, nor run.
+  return {
+    env: { HOME: home, PATH: '', AGENT_COMMS_CLIENT_CLI_DIRS: '' },
+    core: { paths: { dataDir, configDir: join(home, 'config') } },
+  };
 }
 
 /** A runtime as `installManagedRuntime` leaves one: the package inside, and a manifest pinning it. */
@@ -353,13 +359,14 @@ const NOT_ON_WINDOWS =
   process.platform === 'win32' ? { skip: 'mcp install cannot spawn a .cmd; see install-force.test.ts in gmail' } : {};
 
 /**
- * A stand-in for `claude`, on PATH, that keeps its servers in the one `.claude.json` it is given.
+ * A stand-in for `claude`, in `bin` — a directory of its own unless one is named — that keeps its servers in the one
+ * `.claude.json` it is given.
  *
  * That is what Claude Code does with the `CLAUDE_CONFIG_DIR` of the shell that ran it. The path is written into
  * the script rather than read from its environment, which is this test process's own and may name a real one.
  */
-function fakeClaude(config: string): string {
-  const bin = tempDir();
+function fakeClaude(config: string, bin: string = tempDir()): string {
+  mkdirSync(bin, { recursive: true });
   const script = [
     '#!/usr/bin/env node',
     'const fs = require("node:fs");',
@@ -420,6 +427,69 @@ test(
     assert.deepEqual(
       gone.removed.map((item) => item.version),
       ['0.0.1'],
+    );
+  },
+);
+
+test(
+  "a client's own command is found where it is installed when PATH does not have it, and registered through",
+  NOT_ON_WINDOWS,
+  async () => {
+    /*
+     * An install asked for from chat runs inside an MCP server, whose PATH is the one written into its entry at
+     * registration: node's own directory, /usr/local/bin, /usr/bin, /bin. `claude` from Anthropic's native installer
+     * (~/.local/bin) or from Homebrew on an Apple Silicon Mac (/opt/homebrew/bin) is on none of them, so the install
+     * found no `claude`, registered nothing, and printed the entry. Here PATH is an empty directory each time, and the
+     * stand-in is only where it is usually installed. Every lookup stays inside these directories: the system ones
+     * are replaced with a directory of the test's own, or with none.
+     */
+    const lookIn = async (where: 'home' | 'system') => {
+      const home = tempDir();
+      const claudeDir = tempDir();
+      const config = join(claudeDir, '.claude.json');
+      const system = tempDir();
+      const bin = where === 'home' ? join(home, '.local', 'bin') : system;
+      fakeClaude(config, bin);
+      const installing: InstallContext = {
+        env: {
+          HOME: home,
+          PATH: tempDir(),
+          CLAUDE_CONFIG_DIR: claudeDir,
+          // Standing in for /opt/homebrew/bin and /usr/local/bin.
+          AGENT_COMMS_CLIENT_CLI_DIRS: system,
+        },
+        core: context(tempDir(), home).core,
+      };
+      const target = await installTarget(installing, { client: 'claude-code' });
+      assert.equal(target.binary, join(bin, 'claude'), `looked for claude in ${where}`);
+      const result = await mcpInstall(installing, pinnedProduct(), {
+        client: 'claude-code',
+        launcher: 'npx',
+        noVerify: true,
+      });
+      assert.equal(result.notApplied, undefined, `${where}: ${result.notApplied}`);
+      assert.equal(result.applied, true, where);
+      assert.equal(result.method, 'cli', where);
+      const written = JSON.parse(readFileSync(config, 'utf8'));
+      assert.deepEqual(written.mcpServers.example.args, ['-y', '@agentcomms/example@0.0.1'], where);
+    };
+    await lookIn('home');
+    await lookIn('system');
+
+    // Found nowhere, it registers nothing — and says where it looked, so a person knows where to put it.
+    const home = tempDir();
+    const nowhere = await mcpInstall(
+      {
+        env: { HOME: home, PATH: tempDir(), CLAUDE_CONFIG_DIR: tempDir(), AGENT_COMMS_CLIENT_CLI_DIRS: '' },
+        core: context(tempDir(), home).core,
+      },
+      pinnedProduct(),
+      { client: 'claude-code', launcher: 'npx', noVerify: true },
+    );
+    assert.equal(nowhere.applied, false);
+    assert.equal(
+      nowhere.notApplied,
+      `claude was not found on PATH or in ${join(home, '.local', 'bin')}, so nothing was registered`,
     );
   },
 );
@@ -680,6 +750,12 @@ test('an entry that was checked and failed to start says so, and ends the comman
   assert.match(renderInstall(result, false), /Failed to start: /);
   assert.doesNotMatch(renderInstall(result, false), /Not checked/);
   assert.equal(installExitStatus(result), EXIT_CODES.UNAVAILABLE);
+  // The same verdict for a surface with no exit status: an error whose code exits with that status.
+  const failure = installFailure(result);
+  assert.ok(failure, 'a failed check is an error on every surface');
+  assert.equal(ERROR_REGISTRY[failure.code].exit, installExitStatus(result));
+  assert.match(failure.message, /did not start/);
+  assert.equal(failure.details?.snippet, result.snippet, 'the entry is still there to read');
 
   // Skipped is not failed: `--no-verify` asked for no check, and gets no failure.
   const skipped = await mcpInstall(context(tempDir(), tempDir()), product, {
@@ -691,4 +767,5 @@ test('an entry that was checked and failed to start says so, and ends the comman
   assert.equal(skipped.verification, 'skipped');
   assert.match(renderInstall(skipped, false), /Not checked/);
   assert.equal(installExitStatus(skipped), EXIT_CODES.OK);
+  assert.equal(installFailure(skipped), null);
 });
