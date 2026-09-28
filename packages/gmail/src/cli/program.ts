@@ -371,12 +371,13 @@ Exit codes: 0 ok · 1 unexpected · 10 send refused or approval required · 64 u
    * Takes up the registration a finished sign-in carried from `setup --mcp-client`: see `OAuthFlow.registerWith`.
    *
    * The mailbox is connected by the time this runs, and nothing here may say otherwise — what happens to the
-   * registration is reported beside it, never in its place. A client that already has the server is left alone.
-   * Otherwise it is `setup`'s own registration step, through the same change: a person at this terminal reads the
-   * preview and approves it there and then; an agent, or anything without a terminal, gets the preview, the approval
-   * id and the `mcp install` command that claims it — the same change, so the claim succeeds — and the command exits
-   * 10, as `setup` does when it stops at this step, so a script reading only the status does not take a registration
-   * nobody approved for one that happened.
+   * registration is reported beside it, never in its place. A client whose entry of ours already serves this mailbox
+   * is left alone (`clientServesInbox`). Otherwise it is `setup`'s own registration step, through the same change: a
+   * person at this terminal reads the preview and approves it there and then; an agent, or anything without a
+   * terminal, gets the preview, the approval id and the `mcp install` command that claims it — the same change, so the
+   * claim succeeds — and the command exits 10, as `setup` does when it stops at this step, so a script reading only
+   * the status does not take a registration nobody approved for one that happened. One the change refuses — somebody
+   * else's server under that name, or ours there already — is `not-registered`, with the refusal's reason.
    */
   const registerForFinish = async (
     context: GmailContext,
@@ -385,8 +386,10 @@ Exit codes: 0 ok · 1 unexpected · 10 send refused or approval required · 64 u
     connected: { alias: string; inbox: { email: string } },
   ): Promise<FinishRegistration> => {
     const { client } = intent;
-    const { clientsRegisteredWith } = await import('../mcp/install.ts');
-    if ((await clientsRegisteredWith(env)).includes(client)) return { client, status: 'already-registered' };
+    const { clientServesInbox } = await import('../mcp/install.ts');
+    if (await clientServesInbox(env, { client, inbox: connected.alias })) {
+      return { client, status: 'already-registered' };
+    }
     // `mcp install` with what `setup` was given: the request `setupRegistration` makes, and so the same change.
     const install = [
       'agent-gmail mcp install --client',

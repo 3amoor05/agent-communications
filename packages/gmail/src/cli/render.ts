@@ -102,6 +102,7 @@ export function renderSignInStarted(started: StartedSignIn, mode: 'add' | 'reaut
  * outcome says which it is, and only `registered` carries an install that wrote an entry.
  */
 export type FinishRegistration =
+  /** The client's entry of ours under the name `setup` registers already serves this mailbox: `clientServesInbox`. */
   | { client: string; status: 'already-registered' }
   | { client: string; status: 'registered'; install: ServerInstallResult }
   | {
@@ -130,7 +131,7 @@ function renderFinishRegistration(registration: FinishRegistration, color: boole
   const { client } = registration;
   switch (registration.status) {
     case 'already-registered':
-      return `Setup asked for the Gmail server to be registered with ${client}; it already is, so nothing was changed.`;
+      return `Setup asked for the Gmail server to be registered with ${client}; its entry there already serves this mailbox, so nothing was changed.`;
     case 'registered':
       return [
         `Setup asked for the Gmail server to be registered with ${client}:`,

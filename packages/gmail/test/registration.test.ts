@@ -8,6 +8,7 @@ import { managedRuntimeDir, managedRuntimeEntry } from '@agentcomms/core';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { GmailContext } from '../src/context.ts';
+import { clientServesInbox } from '../src/mcp/install.ts';
 import { clientAdd } from '../src/operations/clients.ts';
 import { VERSION } from '../src/version.ts';
 import { type Harness, newHarness, TEST_CLIENT_ID, TEST_CLIENT_SECRET, tempDir } from './support/harness.ts';
@@ -532,8 +533,8 @@ interface HandOff {
 }
 
 /** `setup` handing the sign-in off, as an agent runs it, and the browser coming back: what the finish then finds. */
-async function handedOff(machine: Awaited<ReturnType<typeof clientOnly>>): Promise<HandOff> {
-  const run = await cli(machine.harness, [...BOTH, '--json'], { env: machine.env });
+async function handedOff(machine: Awaited<ReturnType<typeof clientOnly>>, extra: string[] = []): Promise<HandOff> {
+  const run = await cli(machine.harness, [...BOTH, ...extra, '--json'], { env: machine.env });
   assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
   const report = run.envelope<HandOff>().data;
   assert.ok(report?.handoff, run.stdout);
@@ -661,6 +662,161 @@ test('a client that already has the server is left alone by the finish', async (
   assert.deepEqual(await machine.harness.core.approvals.list(), [], 'nobody was asked anything');
 });
 
+/*
+ * "Already registered" is decided by the entry, not by the client's name: only an entry of ours that serves the
+ * mailbox just connected counts — at user scope, under the name the registration would use, unpinned or pinned to that
+ * mailbox, and able to start. Every other entry used to count too, and the finish reported success for a mailbox no
+ * server reached. Now the registration is made, and what its own preflight refuses is reported as not made.
+ */
+
+/** Cursor's config as it stood before `setup` ran, returned as written so the test can say it was left alone. */
+async function cursorHolds(
+  machine: Awaited<ReturnType<typeof clientOnly>>,
+  servers: Record<string, { command: string; args: string[] }>,
+): Promise<string> {
+  await mkdir(dirname(machine.cursor), { recursive: true });
+  const text = JSON.stringify({ mcpServers: servers });
+  await writeFile(machine.cursor, text);
+  return text;
+}
+
+/** Our server as `npx` starts it, which names no file that could be missing: serving, unless pinned elsewhere. */
+const ours = (...args: string[]) => ({ command: 'npx', args: ['-y', '@agentcomms/gmail-mcp', ...args] });
+
+interface Finished {
+  alias: string;
+  registration: {
+    client: string;
+    status: string;
+    reason?: string;
+    hint?: string;
+    approvalId?: string;
+    claim?: string;
+    preview?: string;
+  };
+}
+
+/** The finish as an agent runs it, and whether the mailbox is connected afterwards, whatever the registration did. */
+async function finishing(machine: Awaited<ReturnType<typeof clientOnly>>, report: HandOff) {
+  const run = await cli(machine.harness, [...argvOf(report.handoff.finish), '--json'], { env: machine.env });
+  const envelope = run.envelope<Finished>();
+  const listed = await cli(machine.harness, ['inbox', 'list', '--json'], { env: machine.env });
+  return {
+    run,
+    envelope,
+    registration: envelope.data?.registration,
+    inboxes: listed.envelope<{ alias: string }[]>().data?.map((inbox) => inbox.alias),
+  };
+}
+
+test('an entry of ours pinned to another mailbox does not serve this one: the finish registers, and reports the refusal', async () => {
+  const machine = await clientOnly();
+  const before = await cursorHolds(machine, { gmail: ours('--inbox', 'other') });
+  const finished = await finishing(machine, await handedOff(machine));
+  // Not "already registered": that entry reaches `other` only. The registration `setup` asked for was made, and its
+  // own preflight refused it — ours under that name, with no `--replace-server` — which is said, with the way on.
+  assert.equal(finished.registration?.status, 'not-registered', finished.run.stdout);
+  assert.match(String(finished.registration?.reason), /cursor already has this server registered as "gmail"/);
+  assert.match(String(finished.registration?.hint), /--force/);
+  // The mailbox is connected, in an envelope that says the finish worked; the status is the registration's refusal.
+  assert.equal(finished.envelope.ok, true, finished.run.stdout);
+  assert.equal(finished.envelope.data?.alias, 'home');
+  assert.deepEqual(finished.inboxes, ['home']);
+  assert.equal(finished.run.code, 78, finished.run.stdout);
+  assert.equal(await readFile(machine.cursor, 'utf8'), before, 'nothing was replaced');
+});
+
+test('an entry of ours whose runtime is gone serves nothing: the finish registers, and reports the refusal', async () => {
+  const machine = await clientOnly();
+  // A managed runtime deleted by hand: the entry still reads as ours, and starts nothing.
+  const gone = managedRuntimeEntry(join(tempDir(), 'data'), '@agentcomms/gmail', '0.0.1');
+  const before = await cursorHolds(machine, { gmail: { command: 'node', args: [gone, 'mcp'] } });
+  const finished = await finishing(machine, await handedOff(machine));
+  assert.equal(finished.registration?.status, 'not-registered', finished.run.stdout);
+  assert.match(String(finished.registration?.reason), /cursor already has this server registered as "gmail"/);
+  assert.deepEqual(finished.inboxes, ['home']);
+  assert.equal(await readFile(machine.cursor, 'utf8'), before);
+});
+
+test("somebody else's `gmail` server is never replaced by the finish: not registered, with the reason, and the mailbox connected", async () => {
+  const machine = await clientOnly();
+  // Beside it, one of ours under another name and for another mailbox — which, by the client's name alone, was "it".
+  const before = await cursorHolds(machine, {
+    gmail: { command: 'npx', args: ['-y', '@gongrzhe/server-gmail-autoauth-mcp'] },
+    'gmail-other': ours('--inbox', 'other'),
+  });
+  const finished = await finishing(machine, await handedOff(machine));
+  assert.equal(finished.registration?.status, 'not-registered', finished.run.stdout);
+  assert.match(
+    String(finished.registration?.reason),
+    /cursor already has an MCP server called "gmail", and it is not this one \(it runs @gongrzhe\/server-gmail-autoauth-mcp\)/,
+  );
+  assert.equal(finished.envelope.ok, true, finished.run.stdout);
+  assert.deepEqual(finished.inboxes, ['home']);
+  assert.equal(await readFile(machine.cursor, 'utf8'), before, 'the foreign entry is untouched');
+  assert.deepEqual(await machine.harness.core.approvals.list(), [], 'nobody was asked to approve a refused change');
+
+  // Read by a person: connected, then what did not happen and why.
+  const other = await clientOnly();
+  await cursorHolds(other, { gmail: { command: 'npx', args: ['-y', '@gongrzhe/server-gmail-autoauth-mcp'] } });
+  const plain = await cli(other.harness, argvOf((await handedOff(other)).handoff.finish), { env: other.env });
+  assert.match(plain.stdout, /Connected sam@example\.test as "home"/);
+  assert.match(
+    plain.stdout,
+    /The Gmail server was not registered with cursor: cursor already has an MCP server called "gmail"/,
+  );
+});
+
+test('an entry of ours under another name is not the one setup registers: the finish prepares it', async () => {
+  const machine = await clientOnly();
+  await cursorHolds(machine, { 'gmail-all': ours() });
+  const finished = await finishing(machine, await handedOff(machine));
+  assert.equal(finished.registration?.status, 'approval-required', finished.run.stdout);
+  assert.match(String(finished.registration?.preview), /registers the Gmail MCP server with cursor as "gmail"/);
+  assert.equal(finished.run.code, 10);
+  assert.deepEqual(finished.inboxes, ['home']);
+});
+
+test('clientServesInbox counts only a user-scope entry of ours, under the name, for this mailbox, that can start', async () => {
+  const home = tempDir();
+  const env = { HOME: home, USERPROFILE: home, APPDATA: join(home, 'AppData', 'Roaming') };
+  const holds = (config: Record<string, unknown>) => writeFile(join(home, '.claude.json'), JSON.stringify(config));
+  const serves = (inbox = 'home', name?: string) =>
+    clientServesInbox(env, { client: 'claude-code', inbox, ...(name ? { name } : {}) });
+  const present = await readyRuntime((await machine()).harness);
+
+  // Nothing registered at all, and a config that is not there.
+  assert.equal(await serves(), false);
+
+  // A project's entry is not the user-scope one a registration writes, however ours it is.
+  await holds({ projects: { [home]: { mcpServers: { gmail: ours() } } } });
+  assert.equal(await serves(), false, 'project scope');
+
+  for (const [entry, expected, why] of [
+    [ours(), true, 'unpinned'],
+    [ours('--inbox', 'home'), true, 'pinned to this mailbox'],
+    [ours('--inbox=home'), true, 'pinned in the one-word form'],
+    [ours('--inbox', 'other'), false, 'pinned to another mailbox'],
+    [{ command: 'node', args: [present, 'mcp'] }, true, 'a managed runtime that is there'],
+    [
+      { command: 'node', args: [join(home, 'gone', 'node_modules', '@agentcomms', 'gmail', 'dist', 'cli.mjs'), 'mcp'] },
+      false,
+      'a runtime that is gone',
+    ],
+    [{ command: 'npx', args: ['-y', '@gongrzhe/server-gmail-autoauth-mcp'] }, false, 'somebody else’s server'],
+  ] as const) {
+    await holds({ mcpServers: { gmail: entry } });
+    assert.equal(await serves(), expected, why);
+  }
+
+  // Under another name it is not what the registration would find in its place — unless that is the name asked for.
+  await holds({ mcpServers: { 'gmail-all': ours() } });
+  assert.equal(await serves(), false, 'another name');
+  assert.equal(await serves('home', 'gmail-all'), true, 'the name asked for');
+  // Another client's entry is that client's.
+  assert.equal(await clientServesInbox(env, { client: 'cursor', inbox: 'home' }), false, 'another client');
+});
+
 test('a sign-in that carries no registration finishes exactly as it always did', async () => {
   // Started by `inbox add --start`, as every flow before this change was: its record has no `registerWith` at all.
   const machine = await clientOnly();
@@ -697,10 +853,40 @@ test('gmail_inbox_finish connects the mailbox and hands the registration back fo
     assert.equal(pending.client, 'cursor');
     assert.equal(pending.tool, 'comms_server_install');
     assert.deepEqual(pending.arguments, { channel: 'gmail', client: 'cursor', launcher: 'local' });
-    assert.match(String(pending.next), /not registered with cursor yet/);
+    assert.match(String(pending.next), /no Gmail server registered with cursor serves it yet/);
   } finally {
     await server.close();
   }
   assert.equal(existsSync(machine.cursor), false, 'this server registers nothing');
   assert.deepEqual(await machine.harness.core.approvals.list(), [], 'and prepares nothing');
+});
+
+/** gmail_inbox_finish on a sign-in `setup` handed off with `extra`, and what it hands back. */
+async function finishedOverMcp(
+  machine: Awaited<ReturnType<typeof clientOnly>>,
+  extra: string[] = [],
+): Promise<Record<string, unknown>> {
+  const report = await handedOff(machine, extra);
+  const flowId = /--finish (fl_\w+)/.exec(report.handoff.finish)?.[1];
+  const server = await connect({ core: machine.harness.core, env: { ...machine.harness.env, ...machine.env } });
+  try {
+    return wire(await server.call('gmail_inbox_finish', { flowId, waitSeconds: 10 }));
+  } finally {
+    await server.close();
+  }
+}
+
+test('gmail_inbox_finish decides `pendingRegistration` by the entry that serves the mailbox, as `--finish` does', async () => {
+  // Pinned to another mailbox: it serves `home` no more than no entry would, so the registration is still pending.
+  const pinned = await clientOnly();
+  const before = await cursorHolds(pinned, { gmail: ours('--inbox', 'other') });
+  const pending = (await finishedOverMcp(pinned)).pendingRegistration as Record<string, unknown> | undefined;
+  assert.ok(pending, 'an entry for another mailbox is not this one');
+  assert.deepEqual(pending.arguments, { channel: 'gmail', client: 'cursor', launcher: 'local' });
+  assert.equal(await readFile(pinned.cursor, 'utf8'), before);
+
+  // One that serves it: nothing pending, as the command says "already-registered".
+  const serving = await clientOnly();
+  await cursorHolds(serving, { gmail: ours('--inbox', 'home') });
+  assert.equal(Object.hasOwn(await finishedOverMcp(serving), 'pendingRegistration'), false);
 });

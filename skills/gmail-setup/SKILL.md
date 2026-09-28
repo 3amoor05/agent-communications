@@ -226,7 +226,9 @@ send policy?" either: `gmail_inboxes_list` answers that in one call.
    connected. From an agent that finish exits `10` with the mailbox connected and `registration: { status:
    "approval-required", approvalId, preview, claim }`: show `preview`, and after the user's yes run
    `claim` — `agent-gmail mcp install --client <client> --approval <id>`. `"already-registered"` means the
-   client had it; nothing was asked.
+   client's `gmail` entry already serves this mailbox; nothing was asked. `"not-registered"` means it did
+   not happen, and `reason` says why — somebody else's server under that name, ours there already, or a
+   client this cannot write to. The mailbox is connected all the same, and nothing was replaced.
    **Complete when:** every step you can drive has run, and anything left is named in `blocked`.
 
 2. **Offer the import when a legacy setup exists.** If `~/.gmail-mcp` is there, run
