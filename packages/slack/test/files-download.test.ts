@@ -445,6 +445,43 @@ test('a conversation’s files — a DM’s or a group DM’s — from a timesta
   }
 });
 
+test('a conversation’s files, listed as Slack lists them — without their shares — are looked up for the message they were shared in', async () => {
+  /*
+   * Slack's `files.list` documents its records with `channels`, `groups` and `ims`, the conversations a file is in,
+   * and no `shares`: no message. `files.info` gives the shares, with the timestamp of the message that carried each.
+   */
+  const listed = (id: string): Record<string, unknown> => {
+    const { shares: _shares, ...rest } = fileRecord(id);
+    return { ...rest, channels: ['C0AAA1'], groups: [], ims: [] };
+  };
+  const { slack, root, run } = await setup({
+    'files.list': {
+      ok: true,
+      files: [listed('F0L1'), listed('F0L2')],
+      paging: { count: 2, total: 2, page: 1, pages: 1 },
+    },
+    // F0L2 cannot be looked up: the listing's own record is still enough to save it, as undated.
+    'files.info': filesInfo({ F0L1: fileRecord('F0L1') }),
+  });
+  const bytes = transport({ F0L1: 'one', F0L2: 'two' });
+
+  const result = await run({ channel: 'C0AAA1' }, { download: bytes.download });
+
+  assert.deepEqual(
+    result.files.map((file) => where(root, file.path)),
+    [`acme/2023-11-14_C0AAA1-${TS}/F0L1.pdf`, 'acme/undated_F0L2/F0L2.pdf'],
+  );
+  assert.deepEqual(result.skipped, []);
+  assert.deepEqual(slack.methods(), ['files.list', 'files.info', 'files.info', 'users.info']);
+  assert.deepEqual(
+    bytes.asked.map((request) => request.url),
+    [
+      'https://files.slack.com/files-pri/T0001-F0L1/download/numbers.pdf',
+      'https://files.slack.com/files-pri/T0001-F0L2/download/numbers.pdf',
+    ],
+  );
+});
+
 // ── Refusals, before anything is read ──────────────────────────────────────────────────────────────────────────────
 
 test('exactly one way of naming files, refused in the words of the surface that asked, before Slack is asked anything', async () => {

@@ -571,6 +571,22 @@ export async function downloadFiles(
       }
 
       let record = candidate.record;
+      /*
+       * A listing names the conversations a file is in, not the message: Slack documents `files.list` records with
+       * `channels`, `groups` and `ims` and no `shares`, which `files.info` has, with each message's timestamp. Without
+       * one the file would be saved as `undated_<id>` although it was shared in the very conversation asked about, so
+       * it is looked up by id — as a message's files are, and as `--file` already pays for. Should the lookup fail,
+       * the listing's own record still says where the bytes are, and the file is saved as undated.
+       */
+      if (record !== undefined && firstShare(record) === undefined) {
+        try {
+          const response = await callSlack(call, 'files.info', { file: fileId });
+          const own = response.file;
+          if (typeof own === 'object' && own !== null) record = own as Raw;
+        } catch {
+          // Kept as listed.
+        }
+      }
       if (record === undefined) {
         try {
           const response = await callSlack(call, 'files.info', { file: fileId });

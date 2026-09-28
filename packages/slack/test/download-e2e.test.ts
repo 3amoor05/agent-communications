@@ -104,6 +104,22 @@ const RECORDS: Record<string, Record<string, unknown>> = {
   F0OK01: fileRecord('F0OK01', 'fine.pdf'),
 };
 
+/**
+ * A file as `files.list` describes one, which is not as `files.info` does: Slack's documented listing names the
+ * conversations a file is in — `channels`, `groups`, `ims` — and carries no `shares`, so no message timestamp.
+ */
+function listed(record: Record<string, unknown>): Record<string, unknown> {
+  const { shares, ...rest } = record;
+  const byKind = (shares ?? {}) as Record<string, Record<string, unknown> | undefined>;
+  const conversations = [...Object.keys(byKind.public ?? {}), ...Object.keys(byKind.private ?? {})];
+  return {
+    ...rest,
+    channels: conversations.filter((id) => id.startsWith('C')),
+    groups: conversations.filter((id) => id.startsWith('G')),
+    ims: conversations.filter((id) => id.startsWith('D')),
+  };
+}
+
 /** The bytes as the files host serves them, keyed by the `<TEAM>-<FILEID>` its path names. */
 function fileAnswers(fake: FakeSlack): Record<string, () => FileReply> {
   return {
@@ -146,7 +162,7 @@ function script(): FakeSlack['script'] {
     },
     'files.list': ({ params }) =>
       params.get('channel') === GROUP_DM && params.get('ts_from') === '1700000000'
-        ? { ok: true, files: [RECORDS.F0MP01], paging: { count: 50, total: 1, page: 1, pages: 1 } }
+        ? { ok: true, files: [listed(RECORDS.F0MP01 ?? {})], paging: { count: 50, total: 1, page: 1, pages: 1 } }
         : { ok: true, files: [], paging: { count: 50, total: 0, page: 1, pages: 1 } },
     'users.info': ({ params }) =>
       params.get('user') === 'U0EXT1'
@@ -385,6 +401,11 @@ test('a file in a group DM is found by listing the conversation, and saved under
   const listing = byTool.fake.requests.find((seen) => seen.method === 'files.list');
   assert.equal(listing?.params.get('channel'), GROUP_DM);
   assert.equal(listing?.params.get('ts_from'), '1700000000');
+  // The listing names no message, so the file is looked up by id for the one it was shared in.
+  assert.deepEqual(
+    byTool.fake.requests.filter((seen) => seen.method === 'files.info').map((seen) => seen.params.get('file')),
+    ['F0MP01'],
+  );
 });
 
 test('a message with two files saves both in its folder, one of them a Slack Connect guest’s under their own team', async () => {
