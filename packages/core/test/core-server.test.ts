@@ -745,9 +745,13 @@ test('an install that registered nothing is an error from chat, not `applied: tr
     };
     assert.equal(error.code, 'PROVIDER_UNAVAILABLE');
     assert.equal(ERROR_REGISTRY[error.code].exit, EXIT_CODES.UNAVAILABLE, 'what `agentcomms mcp install` exits with');
+    // Windows looks on PATH alone (a client there is a `.cmd` shim this cannot start without a shell), so it names
+    // only PATH; everywhere else it names the directories it also looked in.
     assert.match(
       error.message,
-      /^registering "agentcomms" with claude-code: claude was not found on PATH or in .+, so nothing was registered$/,
+      process.platform === 'win32'
+        ? /^registering "agentcomms" with claude-code: claude was not found on PATH, so nothing was registered$/
+        : /^registering "agentcomms" with claude-code: claude was not found on PATH or in .+, so nothing was registered$/,
     );
     assert.match(error.hint, /details\.snippet/);
     // Everything the command prints is still there: the entry to add by hand above all.
