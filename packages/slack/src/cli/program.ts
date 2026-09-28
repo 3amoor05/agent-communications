@@ -782,7 +782,8 @@ configuration problem.`,
     .option('--file <id...>', 'these files, by Slack file id')
     .addOption(messageOption)
     .option('--channel <id>', 'the files shared in this conversation — a channel, a DM or a group DM — newest first')
-    .option('--since <ts>', 'with --channel: only files shared at or after this Slack timestamp')
+    // Uploaded, not shared: `files.list` filters on when a file was created, in whole seconds.
+    .option('--since <ts>', 'with --channel: only files uploaded at or after this Slack timestamp, to the second')
     .option('--out <folder>', 'a folder inside the downloads root')
     .option('--max-files <n>', 'stop after this many files: 1 to 200 (default 50)')
     .action(

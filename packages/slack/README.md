@@ -106,11 +106,13 @@ agent-slack files download --workspace acme/slack --message C024BE7LR 1700000000
 agent-slack files download --workspace acme/slack --channel D024BE7LR --since 1700000000 --out invoices
 ```
 
-By id, the files of one message, or a conversation's files from a timestamp on — a channel, a DM or a group DM. Each
-is saved under your downloads folder (`~/Downloads/agent-communications`, or `defaults.downloadsDir`) as
+By id, the files of one message, or a conversation's files — a channel, a DM or a group DM — uploaded from a
+timestamp on (`--since` goes by upload time, to the second: a file uploaded earlier and shared later is left out).
+Each is saved under your downloads folder (`~/Downloads/agent-communications`, or `defaults.downloadsDir`) as
 `<workspace>/<out>/<date>_<channel>-<ts>/<file id>`, keeping its extension only for a common document or image type:
 never under the name the uploader gave it, which comes back beside the path inside the untrusted-content envelope,
-with the title, the uploader's name, the type and any risk flags. Nothing is opened or run.
+with the title and the uploader's name. The type comes back inside it too, unless it is a plain MIME type such as
+`application/pdf`, and any risk flags beside it. Nothing is opened or run.
 
 The bytes come from `files.slack.com` alone, with the workspace's token, and only at the address of the file just
 looked up: a file held outside Slack, a redirect or Slack's sign-in page is refused, and no file may be over 100 MiB

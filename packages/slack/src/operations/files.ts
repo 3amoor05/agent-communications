@@ -102,7 +102,12 @@ export interface FileDownloadRequest {
   channel?: string | undefined;
   /** With `channel`: the message whose files to save. */
   ts?: string | undefined;
-  /** With `channel` alone: only files shared at or after this Slack timestamp. */
+  /**
+   * With `channel` alone: only files uploaded at or after this Slack timestamp, to the second.
+   *
+   * Uploaded, not shared: `files.list` filters on a file's `created` time, so a file uploaded earlier and shared into
+   * the conversation after `since` is left out.
+   */
   since?: string | undefined;
   /** A folder inside the workspace's own downloads folder. Never absolute, never climbing out. */
   out?: string | undefined;

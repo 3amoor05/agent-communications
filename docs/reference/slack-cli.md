@@ -303,7 +303,7 @@ agent-slack files download [options]
 | `--file <id...>` | these files, by Slack file id | — |
 | `--message <channel> <ts>` | the files of one message: its conversation and its ts | — |
 | `--channel <id>` | the files shared in this conversation — a channel, a DM or a group DM — newest first | — |
-| `--since <ts>` | with --channel: only files shared at or after this Slack timestamp | — |
+| `--since <ts>` | with --channel: only files uploaded at or after this Slack timestamp, to the second | — |
 | `--out <folder>` | a folder inside the downloads root | — |
 | `--max-files <n>` | stop after this many files: 1 to 200 (default 50) | — |
 
