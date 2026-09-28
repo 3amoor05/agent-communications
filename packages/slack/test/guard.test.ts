@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
+import { readdir, readFile } from 'node:fs/promises';
+import { join, relative, sep } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { CommsError } from '@agentcomms/core';
 import { callSlack } from '../src/api/call.ts';
 import { closedPermit, configureWith, downloadWith, guardSlackRequests, spendOn } from '../src/api/guard.ts';
@@ -834,3 +837,34 @@ test('reading a file’s path is linear, even on a path made of dashes and slash
   assert.ok(performance.now() - started < 250, `fileOfPath took ${Math.round(performance.now() - started)}ms`);
 });
 
+/** Every source file of this package, as a path relative to `src` with forward slashes, and its text. */
+async function sources(): Promise<{ path: string; text: string }[]> {
+  const root = fileURLToPath(new URL('../src/', import.meta.url));
+  const out: { path: string; text: string }[] = [];
+  const walk = async (dir: string): Promise<void> => {
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) await walk(full);
+      else if (entry.name.endsWith('.ts')) {
+        out.push({ path: relative(root, full).split(sep).join('/'), text: await readFile(full, 'utf8') });
+      }
+    }
+  };
+  await walk(root);
+  return out;
+}
+
+test('only the download transport opens a download grant', async () => {
+  /*
+   * The grant is what makes the files host reachable at all, so the question is who can open one. One module:
+   * `api/download.ts`, which opens it only for a link it has already checked against the file looked up. Anything
+   * else that imported it could fetch any file's path with the token on it.
+   */
+  const files = await sources();
+  assert.deepEqual(
+    files
+      .filter((file) => file.path !== 'api/guard.ts' && /^import [^;]*\bdownloadWith\b[^;]*;/m.test(file.text))
+      .map((file) => file.path),
+    ['api/download.ts'],
+  );
+});
