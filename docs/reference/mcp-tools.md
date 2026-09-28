@@ -302,7 +302,7 @@ Begin connecting a Gmail account. Returns a sign-in link and stops — this serv
 
 ### `gmail_inbox_finish`
 
-Complete a sign-in started by gmail_inbox_add or gmail_inbox_reauth, once Google has returned a grant for it. APPROVAL_PENDING means the browser flow has not completed yet and the link is still good — wait and call again, do not start a new one. When the browser is on another machine and its page could not load, pass the whole address it ended up at as `url`. The same as `agent-gmail inbox add --finish` (or `inbox reauth --finish`).
+Complete a sign-in started by gmail_inbox_add or gmail_inbox_reauth, once Google has returned a grant for it. APPROVAL_PENDING means the browser flow has not completed yet and the link is still good — wait and call again, do not start a new one. When the browser is on another machine and its page could not load, pass the whole address it ended up at as `url`. A sign-in handed off by `agent-gmail setup --mcp-client` also returns `pendingRegistration`: the mailbox is connected, and registering the server is a change of its own that this tool does not make — call the core server’s comms_server_install with the arguments it gives. The same as `agent-gmail inbox add --finish` (or `inbox reauth --finish`).
 
 *writes*
 

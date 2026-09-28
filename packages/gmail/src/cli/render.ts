@@ -1,4 +1,5 @@
-import { paint } from '@agentcomms/core';
+import { type InstallResult, paint, renderInstall, type ServerInstallResult } from '@agentcomms/core';
+import type { RegistrationIntent } from '../auth/flows.ts';
 import type { LabelSummary, SendAsSummary } from '../operations/analyse.ts';
 import type { DownloadResult, FindAttachmentsResult } from '../operations/attachments.ts';
 import type { ClientAddResult, ClientView } from '../operations/clients.ts';
@@ -12,7 +13,7 @@ import type { ModifyResult, TrashResult } from '../operations/organise.ts';
 import type { ReadMessageResult, ReadThreadResult } from '../operations/read.ts';
 import type { SearchResult } from '../operations/search.ts';
 import type { listApprovals, SendPreparation, SendResult } from '../operations/send.ts';
-import type { StartedSignIn } from '../operations/signin.ts';
+import { FINISH_WAIT_SECONDS, type StartedSignIn } from '../operations/signin.ts';
 
 type ApprovalView = Awaited<ReturnType<typeof listApprovals>>[number];
 
@@ -64,7 +65,7 @@ export function renderClientAdd(result: ClientAddResult, color: boolean): string
 }
 
 export function renderSignInStarted(started: StartedSignIn, mode: 'add' | 'reauth', color: boolean): string {
-  const finish = `agent-gmail inbox ${mode} --finish ${started.flowId} --wait 60`;
+  const finish = `agent-gmail inbox ${mode} --finish ${started.flowId} --wait ${FINISH_WAIT_SECONDS}`;
   return [
     paint(
       color,
@@ -93,7 +94,73 @@ export function renderSignInStarted(started: StartedSignIn, mode: 'add' | 'reaut
   ].join('\n');
 }
 
-export function renderSignedIn(result: ConsentResult, color: boolean): string {
+/**
+ * What became of the registration a finished sign-in carried from `setup --mcp-client`, reported beside the mailbox.
+ *
+ * Beside it, never instead of it: the mailbox is connected whatever happens here, and a registration waiting for a
+ * person, or refused, is not a sign-in that failed. Nor is one that did not happen reported as one that did — each
+ * outcome says which it is, and only `registered` carries an install that wrote an entry.
+ */
+export type FinishRegistration =
+  | { client: string; status: 'already-registered' }
+  | { client: string; status: 'registered'; install: ServerInstallResult }
+  | {
+      client: string;
+      status: 'approval-required';
+      approvalId: string;
+      policy: string;
+      summary: string;
+      /** What the person reads before agreeing. */
+      preview: string;
+      expiresAt: string;
+      /** The command that claims the approval once the person has agreed: `mcp install`, the same change. */
+      claim: string;
+      hint: string;
+    }
+  | {
+      client: string;
+      status: 'not-registered';
+      reason: string;
+      hint?: string | undefined;
+      /** Present when the install ran and only printed the entry: what to paste instead. */
+      install?: InstallResult | undefined;
+    };
+
+function renderFinishRegistration(registration: FinishRegistration, color: boolean): string {
+  const { client } = registration;
+  switch (registration.status) {
+    case 'already-registered':
+      return `Setup asked for the Gmail server to be registered with ${client}; it already is, so nothing was changed.`;
+    case 'registered':
+      return [
+        `Setup asked for the Gmail server to be registered with ${client}:`,
+        renderInstall(registration.install, color),
+      ].join('\n');
+    case 'approval-required':
+      return [
+        paint(
+          color,
+          'bold',
+          `Setup also asked to register the Gmail server with ${client}. That waits for the person's approval:`,
+        ),
+        '',
+        registration.preview,
+        '',
+        registration.hint,
+      ].join('\n');
+    case 'not-registered':
+      return [
+        paint(color, 'yellow', `The Gmail server was not registered with ${client}: ${registration.reason}`),
+        ...(registration.hint ? [registration.hint] : []),
+        ...(registration.install ? [renderInstall(registration.install, color)] : []),
+      ].join('\n');
+  }
+}
+
+export function renderSignedIn(
+  result: ConsentResult & { registration?: FinishRegistration | undefined },
+  color: boolean,
+): string {
   const lines = [
     paint(
       color,
@@ -111,6 +178,7 @@ export function renderSignedIn(result: ConsentResult, color: boolean): string {
     );
   }
   lines.push('', `Check it: \`agent-gmail whoami --inbox ${result.alias}\``);
+  if (result.registration) lines.push('', renderFinishRegistration(result.registration, color));
   return lines.join('\n');
 }
 
@@ -641,8 +709,11 @@ export function renderSetupPlan(
       | { step: string; needs: string; hint?: string | undefined; preview?: string | undefined }
       | null
       | undefined;
-    /** The link and the command, when the only thing left is a person approving it. */
-    handoff?: { authUrl: string; finish: string } | null | undefined;
+    /**
+     * The link and the command, when the only thing left is a person approving it — and the registration the finish
+     * will go on to ask for, when `--mcp-client` came with the mailbox.
+     */
+    handoff?: { authUrl: string; finish: string; registerWith?: RegistrationIntent | undefined } | null | undefined;
     /** A name the config accepts, for the examples: `acme/gmail` once names are organisation/platform. */
     nameExample?: string | undefined;
   },
@@ -665,6 +736,12 @@ export function renderSetupPlan(
     lines.push('');
     lines.push('Then, once the browser flow has returned a grant:');
     lines.push(`  ${state.handoff.finish}`);
+    // Said here because this is the step that stops before it: `--mcp-client` is not forgotten, it moves to the finish.
+    if (state.handoff.registerWith) {
+      lines.push(
+        `Finishing it will also register the Gmail server with ${state.handoff.registerWith.client}, after the person approves the registration.`,
+      );
+    }
     return lines.join('\n');
   }
 

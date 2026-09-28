@@ -30,6 +30,23 @@ export interface OAuthFlow {
   expect: { email?: string | undefined; sub?: string | undefined; inboxId?: string | undefined };
   /** Set when a detached listener is waiting for the browser redirect. */
   listenerPid?: number | undefined;
+  /**
+   * The MCP client `setup --mcp-client` was asked to register the server with, when `setup` handed this sign-in off.
+   *
+   * `setup` without a terminal cannot wait for the browser, so it returns once the link exists and its own
+   * registration step never runs. The request used to end there: the mailbox was connected later by a finish that
+   * knew nothing of it, everything exited 0, and the server was never registered. So it travels with the flow, and
+   * the finish that connects the mailbox takes it up. Absent on every other flow, and on every flow written before
+   * this field existed; those finish exactly as they always did.
+   */
+  registerWith?: RegistrationIntent | undefined;
+}
+
+/** A registration a sign-in carries to its finish: the client, and how `setup` was asked to start the server. */
+export interface RegistrationIntent {
+  client: string;
+  /** `setup --launcher`, when it was given; the installer's default otherwise. */
+  launcher?: string | undefined;
 }
 
 export type FlowOutcome = { code: string } | { error: string; description?: string | undefined };

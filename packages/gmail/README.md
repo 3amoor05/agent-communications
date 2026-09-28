@@ -42,10 +42,11 @@ agent-gmail setup --client-json ~/Downloads/client_secret_*.json \
   --inbox acme/gmail --email you@example.com --mcp-client claude-code --json
 ```
 
-The one step it cannot finish is the grant: it returns the sign-in link and the command that completes it.
-Registering the OAuth client and registering the MCP server are changes you approve. Run by an agent, `setup` stops
-at each with the preview and an approval id, and runs again with `--approval <id>` for the OAuth client or
-`--mcp-approval <id>` for the MCP server once you have said yes; at a terminal it asks you there.
+The one step it cannot finish is the grant: it returns the sign-in link and the command that completes it, which
+goes on to register the MCP server when `--mcp-client` came with the mailbox. Registering the OAuth client and
+registering the MCP server are changes you approve. Run by an agent, `setup` stops at each with the preview and an
+approval id, and runs again with `--approval <id>` for the OAuth client or `--mcp-approval <id>` for the MCP server
+once you have said yes; at a terminal it asks you there.
 
 ### By hand
 

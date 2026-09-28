@@ -7,16 +7,20 @@ import { fileURLToPath } from 'node:url';
 import { managedRuntimeDir, managedRuntimeEntry } from '@agentcomms/core';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
+import { GmailContext } from '../src/context.ts';
+import { clientAdd } from '../src/operations/clients.ts';
 import { VERSION } from '../src/version.ts';
-import { type Harness, newHarness, tempDir } from './support/harness.ts';
+import { type Harness, newHarness, TEST_CLIENT_ID, TEST_CLIENT_SECRET, tempDir } from './support/harness.ts';
 import {
   applied,
   approvalAsked,
   type CliRun,
   cli,
+  connect,
   pendingApproval,
   type ToolResult,
   toolError,
+  wire,
 } from './support/surfaces.ts';
 
 /*
@@ -480,3 +484,223 @@ test(
     }
   },
 );
+
+/*
+ * `setup --inbox … --mcp-client …` without a terminal stops at the browser: the sign-in is handed off, and the
+ * registration step comes after it. That step used to be dropped there — the mailbox was connected later by a finish
+ * that knew nothing of it, everything exited 0, and the server was never registered. The request now travels with the
+ * sign-in, and the finish that connects the mailbox takes it up, through the same change `setup` and `mcp install`
+ * make. None of these sign-ins leaves a listener waiting: each is consented to before its test ends.
+ */
+
+/** A machine `setup` has taken past its client step — an OAuth client, no mailbox — with a home for client configs. */
+async function clientOnly(): Promise<{ harness: Harness; env: NodeJS.ProcessEnv; cursor: string }> {
+  const harness = await newHarness({ accounts: [{ sub: 'sub-2', email: 'sam@example.test' }] });
+  const file = join(tempDir(), 'client_secret.json');
+  await writeFile(
+    file,
+    JSON.stringify({ installed: { client_id: TEST_CLIENT_ID, client_secret: TEST_CLIENT_SECRET } }),
+  );
+  await clientAdd(new GmailContext({ core: harness.core, env: harness.env }), { path: file, store: 'file' });
+  const home = tempDir();
+  const env = {
+    HOME: home,
+    USERPROFILE: home,
+    APPDATA: join(home, 'AppData', 'Roaming'),
+    LOCALAPPDATA: join(home, 'AppData', 'Local'),
+  };
+  return { harness, env, cursor: join(home, '.cursor', 'mcp.json') };
+}
+
+/** `setup` asked for a mailbox and the agent connection at once, with the launcher that needs nothing from npm. */
+const BOTH = [
+  'setup',
+  '--inbox',
+  'home',
+  '--email',
+  'sam@example.test',
+  '--mcp-client',
+  'cursor',
+  '--launcher',
+  'local',
+];
+
+interface HandOff {
+  handoff: { authUrl: string; finish: string; registerWith?: { client: string; launcher?: string } };
+  blocked: { step: string; hint: string };
+  did: string[];
+}
+
+/** `setup` handing the sign-in off, as an agent runs it, and the browser coming back: what the finish then finds. */
+async function handedOff(machine: Awaited<ReturnType<typeof clientOnly>>): Promise<HandOff> {
+  const run = await cli(machine.harness, [...BOTH, '--json'], { env: machine.env });
+  assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+  const report = run.envelope<HandOff>().data;
+  assert.ok(report?.handoff, run.stdout);
+  await fetch(machine.harness.google.consent(report.handoff.authUrl));
+  return report;
+}
+
+/** A printed command as the argv this CLI takes: without the binary. */
+const argvOf = (command: string) => command.split(' ').slice(1);
+
+/** The sign-in's record on disk, as the finish will read it. */
+async function flowRecord(harness: Harness, flowId: string): Promise<Record<string, unknown>> {
+  return JSON.parse(await readFile(join(harness.core.paths.stateDir, 'flows', `${flowId}.json`), 'utf8'));
+}
+
+test('`setup --inbox --mcp-client` hands the registration on with the sign-in, and says the finish will ask for it', async () => {
+  const machine = await clientOnly();
+  const run = await cli(machine.harness, BOTH, { env: machine.env });
+  assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+  const finish = /agent-gmail inbox add --finish (fl_\w+) --wait (\d+)/.exec(run.stdout);
+  assert.ok(finish, run.stdout);
+  // One wait, whoever prints the finish: `setup` said 120 where `inbox add --start` said 60.
+  assert.equal(finish[2], '60');
+  assert.match(
+    run.stdout,
+    /--wait 60\nFinishing it will also register the Gmail server with cursor, after the person approves the registration\./,
+  );
+  // Recorded where the finish will find it, and nothing registered yet.
+  assert.deepEqual((await flowRecord(machine.harness, String(finish[1]))).registerWith, {
+    client: 'cursor',
+    launcher: 'local',
+  });
+  assert.equal(existsSync(machine.cursor), false);
+  const link = /^\s+(http\S+)$/m.exec(run.stdout)?.[1];
+  assert.ok(link, run.stdout);
+  await fetch(machine.harness.google.consent(link));
+});
+
+test('finishing it without a terminal connects the mailbox and hands back the registration, which `mcp install --approval` claims', async () => {
+  const machine = await clientOnly();
+  const report = await handedOff(machine);
+  assert.deepEqual(report.handoff.registerWith, { client: 'cursor', launcher: 'local' });
+  assert.match(report.blocked.hint, /also registers the server with cursor/);
+  assert.deepEqual(report.did, ['started a sign-in for "home"'], 'nothing claims the registration happened');
+
+  const finished = await cli(machine.harness, [...argvOf(report.handoff.finish), '--json'], { env: machine.env });
+  // Exit 10, "waiting for an approval", in an envelope that says the finish itself worked.
+  assert.equal(finished.code, 10, `${finished.stdout}${finished.stderr}`);
+  const envelope = finished.envelope<{
+    alias: string;
+    inbox: { email: string };
+    registration: { client: string; status: string; approvalId: string; preview: string; claim: string };
+  }>();
+  assert.equal(envelope.ok, true, finished.stdout);
+  assert.equal(envelope.data?.alias, 'home');
+  assert.equal(envelope.data?.inbox.email, 'sam@example.test');
+  const registration = envelope.data?.registration;
+  assert.equal(registration?.client, 'cursor');
+  assert.equal(registration?.status, 'approval-required');
+  assert.match(String(registration?.approvalId), /^ap_/);
+  assert.match(String(registration?.preview), /registers the Gmail MCP server with cursor as "gmail"/);
+  assert.equal(
+    registration?.claim,
+    `agent-gmail mcp install --client cursor --launcher local --approval ${registration?.approvalId}`,
+  );
+  assert.equal(existsSync(machine.cursor), false, 'nothing is registered before the person agrees');
+  // The mailbox is connected whatever the registration is waiting for.
+  const listed = await cli(machine.harness, ['inbox', 'list', '--json'], { env: machine.env });
+  assert.deepEqual(
+    listed.envelope<{ alias: string }[]>().data?.map((inbox) => inbox.alias),
+    ['home'],
+  );
+
+  // The same change `mcp install` makes, so its `--approval` claims it and registers.
+  const claimed = await cli(machine.harness, [...argvOf(String(registration?.claim)), '--json'], {
+    env: machine.env,
+  });
+  assert.equal(claimed.code, 0, `${claimed.stdout}${claimed.stderr}`);
+  assert.equal(claimed.envelope<{ applied: boolean }>().data?.applied, true);
+  const written = JSON.parse(await readFile(machine.cursor, 'utf8')) as { mcpServers: Record<string, unknown> };
+  assert.ok(written.mcpServers.gmail, JSON.stringify(written));
+
+  // Read by a person, the finish says the same: connected, then what waits, and the command that claims it.
+  const other = await clientOnly();
+  const plain = await cli(other.harness, argvOf((await handedOff(other)).handoff.finish), { env: other.env });
+  assert.equal(plain.code, 10, `${plain.stdout}${plain.stderr}`);
+  assert.match(plain.stdout, /Connected sam@example\.test as "home"/);
+  assert.match(plain.stdout, /register the Gmail server with cursor\. That waits for the person's approval/);
+  assert.match(plain.stdout, /CHANGE PREVIEW[\s\S]*registers the Gmail MCP server with cursor/);
+  assert.match(plain.stdout, /run `agent-gmail mcp install --client cursor --launcher local --approval ap_\w+`/);
+});
+
+test('a person finishing it at a terminal approves the registration there and then', async () => {
+  const machine = await clientOnly();
+  const report = await handedOff(machine);
+  const finished = await cli(machine.harness, argvOf(report.handoff.finish), {
+    env: machine.env,
+    tty: true,
+    answer: true,
+  });
+  assert.equal(finished.code, 0, `${finished.stdout}${finished.stderr}`);
+  assert.match(finished.stderr, /Connected sam@example\.test as "home"\. Setup also asked to register/);
+  assert.match(
+    finished.stdout,
+    /CHANGE PREVIEW[\s\S]*registers the Gmail MCP server with cursor/,
+    'shown before asked',
+  );
+  assert.match(finished.stdout, /Registered "gmail" with cursor/);
+  assert.ok(existsSync(machine.cursor));
+});
+
+test('a client that already has the server is left alone by the finish', async () => {
+  const machine = await clientOnly();
+  await mkdir(dirname(machine.cursor), { recursive: true });
+  const entry = JSON.stringify({ mcpServers: { gmail: { command: 'npx', args: ['-y', '@agentcomms/gmail-mcp'] } } });
+  await writeFile(machine.cursor, entry);
+  const report = await handedOff(machine);
+  const finished = await cli(machine.harness, [...argvOf(report.handoff.finish), '--json'], { env: machine.env });
+  assert.equal(finished.code, 0, `${finished.stdout}${finished.stderr}`);
+  assert.deepEqual(finished.envelope<{ registration: unknown }>().data?.registration, {
+    client: 'cursor',
+    status: 'already-registered',
+  });
+  assert.equal(await readFile(machine.cursor, 'utf8'), entry);
+  assert.deepEqual(await machine.harness.core.approvals.list(), [], 'nobody was asked anything');
+});
+
+test('a sign-in that carries no registration finishes exactly as it always did', async () => {
+  // Started by `inbox add --start`, as every flow before this change was: its record has no `registerWith` at all.
+  const machine = await clientOnly();
+  const started = await cli(
+    machine.harness,
+    ['inbox', 'add', 'home', '--start', '--email', 'sam@example.test', '--json'],
+    { env: machine.env },
+  );
+  const flow = started.envelope<{ flowId: string; authUrl: string }>().data;
+  assert.ok(flow, started.stdout);
+  assert.equal(Object.hasOwn(await flowRecord(machine.harness, flow.flowId), 'registerWith'), false);
+  await fetch(machine.harness.google.consent(flow.authUrl));
+
+  const finished = await cli(machine.harness, ['inbox', 'add', '--finish', flow.flowId, '--json'], {
+    env: machine.env,
+  });
+  assert.equal(finished.code, 0, `${finished.stdout}${finished.stderr}`);
+  const data = finished.envelope<Record<string, unknown>>().data ?? {};
+  assert.deepEqual(Object.keys(data).sort(), ['alias', 'inbox', 'missingScopes', 'reauthorised']);
+  assert.equal(existsSync(machine.cursor), false);
+  assert.deepEqual(await machine.harness.core.approvals.list(), []);
+});
+
+test('gmail_inbox_finish connects the mailbox and hands the registration back for comms_server_install, making none', async () => {
+  const machine = await clientOnly();
+  const report = await handedOff(machine);
+  const flowId = /--finish (fl_\w+)/.exec(report.handoff.finish)?.[1];
+  const server = await connect({ core: machine.harness.core, env: { ...machine.harness.env, ...machine.env } });
+  try {
+    const result = wire(await server.call('gmail_inbox_finish', { flowId, waitSeconds: 10 }));
+    assert.equal(result.alias, 'home');
+    assert.equal(result.email, 'sam@example.test');
+    const pending = result.pendingRegistration as Record<string, unknown>;
+    assert.equal(pending.client, 'cursor');
+    assert.equal(pending.tool, 'comms_server_install');
+    assert.deepEqual(pending.arguments, { channel: 'gmail', client: 'cursor', launcher: 'local' });
+    assert.match(String(pending.next), /not registered with cursor yet/);
+  } finally {
+    await server.close();
+  }
+  assert.equal(existsSync(machine.cursor), false, 'this server registers nothing');
+  assert.deepEqual(await machine.harness.core.approvals.list(), [], 'and prepares nothing');
+});

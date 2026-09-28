@@ -12,7 +12,7 @@ import {
   requireInbox,
   wholeNumber,
 } from '@agentcomms/core';
-import type { OAuthFlow } from '../auth/flows.ts';
+import type { OAuthFlow, RegistrationIntent } from '../auth/flows.ts';
 import { aboutFlow, FLOW_TTL_MS } from '../auth/flows.ts';
 import { startLoopback } from '../auth/loopback.ts';
 import { buildAuthUrl, newPkce, newState, oauthError } from '../auth/oauth.ts';
@@ -39,6 +39,8 @@ export interface StartOptions {
   listenerCommand?: { command: string; args: string[] } | undefined;
   /** False keeps the listener in this process (the interactive flow, which waits). */
   detached?: boolean | undefined;
+  /** Recorded in the flow for the finish to take up: see `OAuthFlow.registerWith`. Only `setup` passes it. */
+  registerWith?: RegistrationIntent | undefined;
 }
 
 export interface StartedSignIn {
@@ -179,6 +181,8 @@ export async function startSignIn(context: GmailContext, options: StartOptions):
     redirectUri: '',
     port: 0,
     expect,
+    // Only when asked for, so a flow started any other way is written exactly as it always was.
+    ...(options.registerWith ? { registerWith: options.registerWith } : {}),
   });
 
   const started =
@@ -471,6 +475,15 @@ export function checkedPort(raw: unknown, surface: 'cli' | 'mcp'): number | unde
 export const MAX_WAIT_SECONDS: number = FLOW_TTL_MS / 1000;
 
 /**
+ * How long a finish waits when nothing says otherwise, and the `--wait` every finish command printed here carries.
+ *
+ * One number, because there were two: `setup` handed off `--wait 120` while `inbox add --start` and the "nobody has
+ * finished yet" hint said 60, for the same command finishing the same kind of sign-in. Sixty, because many agent
+ * shells stop a command at 120 seconds, and a finish that is stopped says nothing at all.
+ */
+export const FINISH_WAIT_SECONDS = 60;
+
+/**
  * How long `--finish` or `gmail_inbox_finish` waits for the browser, checked rather than coerced.
  *
  * `--wait` was `Number.parseInt`, so `--wait abc` was NaN — a deadline no clock reaches, and a finish that waited for
@@ -479,7 +492,7 @@ export const MAX_WAIT_SECONDS: number = FLOW_TTL_MS / 1000;
  * sign-in's own life, and anything else refused as USAGE with the range named, before anything is read.
  */
 export function checkedWait(raw: unknown, surface: 'cli' | 'mcp'): number {
-  const given = raw ?? 60;
+  const given = raw ?? FINISH_WAIT_SECONDS;
   // Digits, or a whole number: read as every number option is (core's `readWholeNumber`).
   const seconds = readWholeNumber(given);
   if (Number.isNaN(seconds) || seconds < 0 || seconds > MAX_WAIT_SECONDS) {
@@ -493,11 +506,24 @@ export function checkedWait(raw: unknown, surface: 'cli' | 'mcp'): number {
   return seconds;
 }
 
+/** A finished sign-in: the mailbox as it was saved, and the registration its flow carried, when it carried one. */
+export interface FinishedSignIn extends ConsentResult {
+  /**
+   * What `setup --mcp-client` asked for when it handed this sign-in off: see `OAuthFlow.registerWith`.
+   *
+   * Only data. Registering is a change of its own, approved on its own, and each surface takes it up its own way:
+   * `inbox add --finish` through the change `mcp install` runs, and `gmail_inbox_finish` by naming the core server's
+   * `comms_server_install`, since this server has no tool that registers. Absent when the flow carried none, which
+   * leaves the result exactly as it was.
+   */
+  registerWith?: RegistrationIntent | undefined;
+}
+
 /**
  * Completes a sign-in exactly once. A wait that times out leaves the flow alone, so the user can run `--finish`
  * again; only an answer from the browser claims it.
  */
-export async function finishSignIn(context: GmailContext, options: FinishOptions): Promise<ConsentResult> {
+export async function finishSignIn(context: GmailContext, options: FinishOptions): Promise<FinishedSignIn> {
   // Checked before anything is read: a wait that is not one is refused whatever the flow, and leaves it as it was.
   const waitSeconds = checkedWait(options.waitSeconds, context.surface);
   const flow = await context.flows.get(options.flowId);
@@ -548,7 +574,9 @@ export async function finishSignIn(context: GmailContext, options: FinishOptions
 
   const claimed = await context.flows.claim(flow.flowId);
   try {
-    return await completeConsent(context, claimed, code);
+    const connected = await completeConsent(context, claimed, code);
+    // Read off the flow before it is discarded below: nothing else remembers what `setup` was asked for.
+    return claimed.registerWith ? { ...connected, registerWith: claimed.registerWith } : connected;
   } finally {
     stopListener(claimed);
     await context.flows.discard(flow.flowId);
@@ -580,7 +608,7 @@ async function waitForOutcome(
         hint:
           context.surface === 'mcp'
             ? `Open the link, choose the account, then call gmail_inbox_finish with flowId ${flow.flowId} again.`
-            : `Open the link, choose the account, then run \`agent-gmail inbox ${flow.mode === 'reauth' ? 'reauth' : 'add'} --finish ${flow.flowId} --wait 60\` again.`,
+            : `Open the link, choose the account, then run \`agent-gmail inbox ${flow.mode === 'reauth' ? 'reauth' : 'add'} --finish ${flow.flowId} --wait ${FINISH_WAIT_SECONDS}\` again.`,
         details: { flowId: flow.flowId, expiresAt: flow.expiresAt },
       });
     }

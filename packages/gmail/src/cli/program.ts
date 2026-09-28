@@ -14,12 +14,15 @@ import {
   type OutputOptions,
   paint,
   runCommand,
+  type ServerInstallResult,
   type Streams,
   serverInstallChange,
   serverPruneChange,
+  toCommsError,
   writeResult,
 } from '@agentcomms/core';
 import { Command, CommanderError, Option } from 'commander';
+import type { RegistrationIntent } from '../auth/flows.ts';
 import { TIERS } from '../auth/scopes.ts';
 import { GmailContext, type GmailContextOptions } from '../context.ts';
 import type { Launcher, SupportedClient } from '../mcp/install.ts';
@@ -63,6 +66,7 @@ import {
 import {
   checkedPort,
   checkedWait,
+  FINISH_WAIT_SECONDS,
   finishSignIn,
   inboxReauthChange,
   MAX_WAIT_SECONDS,
@@ -73,6 +77,7 @@ import { openInBrowser } from './browser.ts';
 import { askFor } from './prompt.ts';
 import {
   CLIENT_KIND_LABEL,
+  type FinishRegistration,
   renderApprovals,
   renderAttachments,
   renderClientAdd,
@@ -338,6 +343,111 @@ Exit codes: 0 ok · 1 unexpected · 10 send refused or approval required · 64 u
       streams,
     });
 
+  /**
+   * The agent connection as a change: the one `mcp install` and `comms_server_install` make, for this package's own
+   * server, with what `setup` has always registered — the default name, pinned to nothing. `setup --mcp-client` makes
+   * it, and so does `inbox add --finish` for a sign-in `setup` handed off with that flag: one change, written once, so
+   * an approval any of them prepared is claimed by the others, `mcp install --approval` among them.
+   */
+  const setupRegistration = async (
+    context: GmailContext,
+    request: { client: string; launcher?: string | undefined; force?: boolean | undefined },
+  ) => {
+    const { GMAIL_MCP } = await import('../mcp/install.ts');
+    return serverInstallChange(
+      context.core,
+      env,
+      {
+        channel: 'gmail',
+        client: request.client as SupportedClient,
+        force: request.force === true,
+        ...(request.launcher ? { launcher: request.launcher as Launcher } : {}),
+      },
+      GMAIL_MCP,
+    );
+  };
+
+  /**
+   * Takes up the registration a finished sign-in carried from `setup --mcp-client`: see `OAuthFlow.registerWith`.
+   *
+   * The mailbox is connected by the time this runs, and nothing here may say otherwise — what happens to the
+   * registration is reported beside it, never in its place. A client that already has the server is left alone.
+   * Otherwise it is `setup`'s own registration step, through the same change: a person at this terminal reads the
+   * preview and approves it there and then; an agent, or anything without a terminal, gets the preview, the approval
+   * id and the `mcp install` command that claims it — the same change, so the claim succeeds — and the command exits
+   * 10, as `setup` does when it stops at this step, so a script reading only the status does not take a registration
+   * nobody approved for one that happened.
+   */
+  const registerForFinish = async (
+    context: GmailContext,
+    globalOptions: GlobalOptions,
+    intent: RegistrationIntent,
+    connected: { alias: string; inbox: { email: string } },
+  ): Promise<FinishRegistration> => {
+    const { client } = intent;
+    const { clientsRegisteredWith } = await import('../mcp/install.ts');
+    if ((await clientsRegisteredWith(env)).includes(client)) return { client, status: 'already-registered' };
+    // `mcp install` with what `setup` was given: the request `setupRegistration` makes, and so the same change.
+    const install = [
+      'agent-gmail mcp install --client',
+      client,
+      ...(intent.launcher ? ['--launcher', intent.launcher] : []),
+    ].join(' ');
+    const person =
+      agentMarker(env) === null &&
+      canPrompt(env, streams, { json: globalOptions.json, noInput: globalOptions.noInput });
+    try {
+      const change = await setupRegistration(context, intent);
+      let result: ServerInstallResult;
+      if (person) {
+        // Said before the preview, so the person deciding knows the mailbox is in whatever they answer.
+        streams.stderr.write(
+          `Connected ${connected.inbox.email} as "${connected.alias}". Setup also asked to register the Gmail server with ${client}.\n\n`,
+        );
+        result = await gatedChangeAtTerminal(context.core, change, {
+          env,
+          output: { json: globalOptions.json || globalOptions.noInput, color: globalOptions.color },
+          command: install,
+          approveCommand: 'agent-gmail approve',
+          streams,
+        });
+      } else {
+        const outcome = await gatedChange(context.core, change, {
+          surface: 'cli',
+          approveCommand: 'agent-gmail approve',
+        });
+        if (outcome.status === 'approval-required') {
+          const { prepared } = outcome;
+          const claim = `${install} --approval ${prepared.approvalId}`;
+          softExit = EXIT_CODES.APPROVAL;
+          return {
+            client,
+            status: 'approval-required',
+            approvalId: prepared.approvalId,
+            policy: prepared.policy,
+            summary: prepared.summary,
+            preview: prepared.preview,
+            expiresAt: prepared.expiresAt,
+            claim,
+            hint: approvalHint(prepared, claim, 'agent-gmail approve'),
+          };
+        }
+        result = outcome.result;
+      }
+      const status = installExitStatus(result);
+      if (status !== EXIT_CODES.OK) softExit = status;
+      // Written, or only printed because the client could not be written to: the second is not a registration.
+      return result.applied
+        ? { client, status: 'registered', install: result }
+        : { client, status: 'not-registered', reason: result.notApplied ?? 'nothing was written', install: result };
+    } catch (error) {
+      // Refused, or declined at the terminal: the registration did not happen, and the mailbox still did.
+      const failure = toCommsError(error);
+      softExit = failure.exitCode;
+      return { client, status: 'not-registered', reason: failure.message, hint: failure.hint };
+    }
+  };
+
   // ---- clients ----------------------------------------------------------------
   const client = program.command('client').description('the Google Cloud OAuth client every inbox signs in through');
   client
@@ -416,7 +526,7 @@ Exit codes: 0 ok · 1 unexpected · 10 send refused or approval required · 64 u
       .option(
         '--wait <seconds>',
         `with --finish, how long to wait for the browser: 0 to ${MAX_WAIT_SECONDS} seconds`,
-        '60',
+        String(FINISH_WAIT_SECONDS),
       );
 
   const signIn = async (
@@ -437,6 +547,22 @@ Exit codes: 0 ok · 1 unexpected · 10 send refused or approval required · 64 u
         url: options.url ? String(options.url) : undefined,
         waitSeconds,
       });
+      /*
+       * A sign-in `setup --mcp-client` handed off carries the registration it was asked for, and this is where it is
+       * made: `setup` returned before the browser, so nothing else is left to make it. Only for a new mailbox — the
+       * only kind `setup` starts — and only when the flow carries one: any other finish prints what it always did.
+       */
+      if (mode === 'add' && result.registerWith) {
+        const { registerWith, ...connected } = result;
+        const registration = await registerForFinish(context, globalOptions, registerWith, connected);
+        writeResult(
+          { ...connected, registration },
+          output(),
+          (data) => renderSignedIn(data, globalOptions.color),
+          streams,
+        );
+        return;
+      }
       writeResult(result, output(), (data) => renderSignedIn(data, globalOptions.color), streams);
       return;
     }
@@ -1467,27 +1593,19 @@ Exit codes: 0 ok · 1 unexpected · 10 send refused or approval required · 64 u
         const dim = (text: string) => paint(globalOptions.color, 'dim', text);
 
         /**
-         * The agent connection as a change: the one `mcp install` and `comms_server_install` make, for this
-         * package's own server, with what `setup` has always registered. An approval for it from either of those
-         * is claimed here with `--mcp-approval`, and one from here by them.
+         * The agent connection as a change: `setupRegistration`, the one `mcp install` and `comms_server_install`
+         * make. An approval for it from either of those is claimed here with `--mcp-approval`, and one from here by
+         * them.
          */
-        const registration = async (client: string) => {
-          const { GMAIL_MCP } = await import('../mcp/install.ts');
-          return serverInstallChange(
-            context.core,
-            env,
-            {
-              channel: 'gmail',
-              client: client as SupportedClient,
-              // `force` removes an existing entry before adding its replacement. Doing that silently, from a
-              // headless run, would take somebody's working server away on the strength of a flag they passed for
-              // a different reason — so it needs asking for, exactly as `mcp install` makes you ask.
-              force: options.replaceServer === true,
-              ...(options.launcher ? { launcher: String(options.launcher) as Launcher } : {}),
-            },
-            GMAIL_MCP,
-          );
-        };
+        const registration = (client: string) =>
+          setupRegistration(context, {
+            client,
+            ...(options.launcher ? { launcher: String(options.launcher) } : {}),
+            // `force` removes an existing entry before adding its replacement. Doing that silently, from a
+            // headless run, would take somebody's working server away on the strength of a flag they passed for
+            // a different reason — so it needs asking for, exactly as `mcp install` makes you ask.
+            force: options.replaceServer === true,
+          });
         const mcpApproval = typeof options.mcpApproval === 'string' ? options.mcpApproval : undefined;
         // This command again, without the approvals it carried: the OAuth client's is spent by the time the
         // registration is reached, and the registration's is the one to put back.
@@ -1529,7 +1647,7 @@ Exit codes: 0 ok · 1 unexpected · 10 send refused or approval required · 64 u
             preview?: string;
             expiresAt?: string;
           } | null = null;
-          let handoff: { authUrl: string; finish: string } | null = null;
+          let handoff: { authUrl: string; finish: string; registerWith?: RegistrationIntent } | null = null;
 
           if (state.next === 'client') {
             const path = options.clientJson ? String(options.clientJson) : '';
@@ -1569,6 +1687,18 @@ Exit codes: 0 ok · 1 unexpected · 10 send refused or approval required · 64 u
           if (!blocked && (state.next === 'inbox' || options.inbox)) {
             const alias = options.inbox ? String(options.inbox) : '';
             if (alias) {
+              /*
+               * `--mcp-client` asked for a step this run stops before: the registration comes after the mailbox, and
+               * the mailbox waits for a browser. So it goes with the sign-in, and the finish that connects the
+               * mailbox registers the server too — approved there, as this run would have had it approved. It used
+               * to be dropped here, and a setup asked for both ended with one of them and exit 0.
+               */
+              const registerWith: RegistrationIntent | undefined = options.mcpClient
+                ? {
+                    client: String(options.mcpClient),
+                    ...(options.launcher ? { launcher: String(options.launcher) } : {}),
+                  }
+                : undefined;
               const { startSignIn } = await import('../operations/signin.ts');
               const started = await startSignIn(context, {
                 mode: 'add',
@@ -1576,16 +1706,20 @@ Exit codes: 0 ok · 1 unexpected · 10 send refused or approval required · 64 u
                 ...(options.email ? { email: String(options.email) } : {}),
                 detached: true,
                 ...(deps.listenerCommand ? { listenerCommand: deps.listenerCommand } : {}),
+                ...(registerWith ? { registerWith } : {}),
               });
               handoff = {
                 authUrl: started.authUrl,
-                finish: `agent-gmail inbox add --finish ${started.flowId} --wait 120`,
+                finish: `agent-gmail inbox add --finish ${started.flowId} --wait ${FINISH_WAIT_SECONDS}`,
+                ...(registerWith ? { registerWith } : {}),
               };
               did.push(`started a sign-in for "${alias}"`);
               blocked = {
                 step: 'inbox',
                 needs: 'the link opened and approved in a browser',
-                hint: 'This command does not open browsers or grant consent. Give the user the link, then run the finish command.',
+                hint: registerWith
+                  ? `This command does not open browsers or grant consent. Give the user the link, then run the finish command: it also registers the server with ${registerWith.client}, and stops for the person's approval of that.`
+                  : 'This command does not open browsers or grant consent. Give the user the link, then run the finish command.',
               };
             } else {
               blocked = { step: 'inbox', needs: '--inbox <alias> [--email <address>]' };

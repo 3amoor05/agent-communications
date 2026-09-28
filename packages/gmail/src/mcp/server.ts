@@ -48,6 +48,7 @@ import {
 } from '../operations/send.ts';
 import { CONSOLE_STEPS, setupState } from '../operations/setup.ts';
 import {
+  FINISH_WAIT_SECONDS,
   finishSignIn,
   inboxReauthChange,
   MAX_WAIT_SECONDS,
@@ -55,6 +56,7 @@ import {
   startSignIn,
 } from '../operations/signin.ts';
 import { VERSION } from '../version.ts';
+import { clientsRegisteredWith } from './install.ts';
 import { inboxArgument, mcpBoolean, mcpInboxes, mcpInteger, mcpStringArray } from './schemas.ts';
 
 export interface GmailMcpOptions extends GmailContextOptions {
@@ -1292,7 +1294,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
         {
           title: 'Finish connecting a mailbox',
           description:
-            'Complete a sign-in started by gmail_inbox_add or gmail_inbox_reauth, once Google has returned a grant for it. APPROVAL_PENDING means the browser flow has not completed yet and the link is still good — wait and call again, do not start a new one. When the browser is on another machine and its page could not load, pass the whole address it ended up at as `url`. The same as `agent-gmail inbox add --finish` (or `inbox reauth --finish`).',
+            'Complete a sign-in started by gmail_inbox_add or gmail_inbox_reauth, once Google has returned a grant for it. APPROVAL_PENDING means the browser flow has not completed yet and the link is still good — wait and call again, do not start a new one. When the browser is on another machine and its page could not load, pass the whole address it ended up at as `url`. A sign-in handed off by `agent-gmail setup --mcp-client` also returns `pendingRegistration`: the mailbox is connected, and registering the server is a change of its own that this tool does not make — call the core server’s comms_server_install with the arguments it gives. The same as `agent-gmail inbox add --finish` (or `inbox reauth --finish`).',
           inputSchema: z.object({
             flowId: z.string().min(1),
             url: z
@@ -1310,7 +1312,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
               .meta({ minimum: 0, maximum: MAX_WAIT_SECONDS })
               .optional()
               .describe(
-                'how long to wait for the grant, default 60 and at most 600 — the sign-in itself lasts ten minutes. Many clients give up on a call after about a minute; if yours does, keep this under that and call again. A call the client gives up on stops waiting and leaves the sign-in as it was',
+                `how long to wait for the grant, default ${FINISH_WAIT_SECONDS} and at most ${MAX_WAIT_SECONDS} — the sign-in itself lasts ten minutes. Many clients give up on a call after about a minute; if yours does, keep this under that and call again. A call the client gives up on stops waiting and leaves the sign-in as it was`,
               ),
           }),
           outputSchema: z.object({
@@ -1322,6 +1324,21 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
             inbox: z
               .looseObject({ id: z.string(), email: z.string(), client: z.string(), tier: z.string() })
               .describe('the mailbox as it was saved, as `--finish --json` prints it, without where its token is kept'),
+            pendingRegistration: z
+              .object({
+                client: z.string(),
+                tool: z.literal('comms_server_install'),
+                arguments: z.object({
+                  channel: z.literal('gmail'),
+                  client: z.string(),
+                  launcher: z.string().optional(),
+                }),
+                next: z.string(),
+              })
+              .optional()
+              .describe(
+                'present when `agent-gmail setup --mcp-client` handed this sign-in off and that client does not have the server yet: nothing was registered — call comms_server_install with `arguments`, show its preview, and claim it after the user says yes',
+              ),
           }),
           annotations: { readOnlyHint: false, openWorldHint: true },
         },
@@ -1346,6 +1363,27 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
             // What `--finish --json` prints, less one field: `secretRef`, where the refresh token is kept, which no
             // tool here names (gmail_inbox_show and gmail_clients_list leave it out too).
             const { secretRef: _kept, ...saved } = result.inbox;
+            /*
+             * The registration `setup --mcp-client` asked for, handed back rather than made. `inbox add --finish`
+             * makes it, through `mcp install`'s change; this server has no tool that registers anything, and
+             * growing one here would be a second way in for what the core server's comms_server_install already is
+             * — the same change, approved the same way. So an agent is told what to call, and nothing is claimed
+             * that did not happen. A client that already has the server has nothing pending.
+             */
+            const intent = result.registerWith;
+            const pending =
+              intent && !(await clientsRegisteredWith(context.env)).includes(intent.client)
+                ? {
+                    client: intent.client,
+                    tool: 'comms_server_install' as const,
+                    arguments: {
+                      channel: 'gmail' as const,
+                      client: intent.client,
+                      ...(intent.launcher ? { launcher: intent.launcher } : {}),
+                    },
+                    next: `The mailbox is connected; the Gmail server is not registered with ${intent.client} yet. Call comms_server_install on the core server with these arguments, show the person its preview, and call it again with the approvalId once they say yes. Without the core server, the person runs \`agent-gmail mcp install --client ${intent.client}${intent.launcher ? ` --launcher ${intent.launcher}` : ''}\` at a terminal.`,
+                  }
+                : undefined;
             return reply({
               alias: result.alias,
               email: result.inbox.email,
@@ -1353,6 +1391,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
               reauthorised: result.reauthorised,
               missingScopes: result.missingScopes,
               inbox: saved,
+              ...(pending ? { pendingRegistration: pending } : {}),
             });
           } catch (error) {
             return fail(error);

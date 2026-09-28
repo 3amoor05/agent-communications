@@ -1,10 +1,10 @@
 import { lstat, readdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { isProductServer, listRegisteredServers } from '@agentcomms/core';
+import { isProductServer } from '@agentcomms/core';
 import { parseClientJson } from '../auth/oauth.ts';
 import type { GmailContext } from '../context.ts';
-import { GMAIL_MCP } from '../mcp/install.ts';
+import { clientsRegisteredWith, GMAIL_MCP } from '../mcp/install.ts';
 import { readSmallFile } from './small-file.ts';
 
 /**
@@ -324,7 +324,8 @@ export interface SetupStateOptions {
  */
 export function isOurServer(server: { command: string; args: string[]; packageName?: string | undefined }): boolean {
   // One matcher, in core, shared with the installer: what counts as ours here is also what `mcp install --force`
-  // may replace, and two copies of that rule are two chances for them to disagree.
+  // may replace, and two copies of that rule are two chances for them to disagree. `clientsRegisteredWith`, which
+  // `setupState` counts the agent step by, is this same call.
   return isProductServer(server, GMAIL_MCP);
 }
 
@@ -334,13 +335,8 @@ export async function setupState(context: GmailContext, options: SetupStateOptio
   const clients = Object.keys(config.clients);
   const inboxes = Object.keys(config.inboxes);
 
-  let registeredWith: string[] = [];
-  try {
-    const servers = await listRegisteredServers(context.env);
-    registeredWith = [...new Set(servers.filter(isOurServer).map((server) => server.client))];
-  } catch {
-    // Unreadable client configs are not a setup failure; the MCP step simply cannot be skipped automatically.
-  }
+  // Unreadable client configs are not a setup failure; the MCP step simply cannot be skipped automatically.
+  const registeredWith = await clientsRegisteredWith(context.env);
 
   const done: ('client' | 'inbox' | 'mcp')[] = [];
   if (clients.length > 0) done.push('client');

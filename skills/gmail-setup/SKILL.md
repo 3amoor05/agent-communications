@@ -183,7 +183,10 @@ send policy?" either: `gmail_inboxes_list` answers that in one call.
    `gmail_inbox_add` starts a sign-in and returns `authUrl` — it connects nothing on its own. Show the
    person that link, warn them about the unverified-app screen *before* they meet it, then
    `gmail_inbox_finish` with the `flowId`. `APPROVAL_PENDING` means they have not finished yet and the
-   link is still good: wait and call again, never start a second one.
+   link is still good: wait and call again, never start a second one. A sign-in `agent-gmail setup
+   --mcp-client` started can come back with `pendingRegistration`: the mailbox is connected and the server
+   is not registered. Call the core server's `comms_server_install` with its `arguments`, show the preview,
+   and claim it after their yes.
 
    The OAuth client is registered with `gmail_client_add`, from the **path** of the JSON they downloaded —
    `candidates` in `gmail_setup` lists the ones in their Downloads folder. Never ask them to paste the
@@ -217,6 +220,13 @@ send policy?" either: `gmail_inboxes_list` answers that in one call.
    the user `authUrl`, warn them about the unverified-app screen *before* they meet it, and run `finish`
    once the user says the sign-in is done. Hand the link over — it is the user's to open, not yours.
    `did` lists what the run changed. Never claim a step succeeded that is not in `did`.
+
+   `--inbox` with `--mcp-client` stops at the mailbox too, and the registration goes with the sign-in:
+   `handoff.registerWith` names the client, and `finish` registers the server once the mailbox is
+   connected. From an agent that finish exits `10` with the mailbox connected and `registration: { status:
+   "approval-required", approvalId, preview, claim }`: show `preview`, and after the user's yes run
+   `claim` — `agent-gmail mcp install --client <client> --approval <id>`. `"already-registered"` means the
+   client had it; nothing was asked.
    **Complete when:** every step you can drive has run, and anything left is named in `blocked`.
 
 2. **Offer the import when a legacy setup exists.** If `~/.gmail-mcp` is there, run
