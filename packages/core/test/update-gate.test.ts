@@ -23,6 +23,7 @@ import {
   type UpdateReport,
   type UpdateResult,
   type UpdateStep,
+  updateCheck,
   updateCheckFindings,
 } from '../src/operations/update.ts';
 import { updateAutoChange, updateLaterChange } from '../src/operations/update-settings.ts';
@@ -1357,6 +1358,50 @@ test('an ask that never finished does not use up the day: its claim runs out and
   assert.equal(after.record.latest, LATEST);
   assert.equal(after.record.lastChecked, at(UPDATE_CHECK_LEASE_MS)().toISOString());
   assert.equal(after.record.checking, null);
+});
+
+test('a check that lands after a newer finding was written drops its own: its claim was given up', async () => {
+  /*
+   * A background check reads the machine, and before it writes what it read a person's check — or an update — writes
+   * what it found. The background check's finding is older, and written over the newer one it would put back the
+   * machine as it was before: "update" where "restart" is right. Twice: once through the check's finding, and once
+   * through the error it records when the registry failed it.
+   */
+  const m = machine();
+  let release: (packages: Record<string, string>) => void = () => undefined;
+  let reading = false;
+  const background = checkForUpdates(m.core, m.env, {
+    deps: {
+      ...deps(registry().latestVersion),
+      // What the machine was when the background check read it: the global core behind.
+      globalPackages: () => {
+        reading = true;
+        return new Promise((resolve) => (release = resolve));
+      },
+    },
+  });
+  await until(() => reading, 'the background check to read the machine');
+  assert.notEqual((await readUpdateCheck(m.stateDir)).checking, null, 'the background check holds its claim');
+  // Meanwhile a person asks, after the update: the global core is at the latest.
+  await updateCheck(m.core, m.env, deps(registry().latestVersion, { [CORE]: LATEST }));
+  const newer = await readUpdateCheck(m.stateDir);
+  assert.deepEqual([newer.behind, newer.current?.global, newer.checking], [false, ['core'], null]);
+  release({ [CORE]: OLD });
+  await background;
+  assert.deepEqual(await readUpdateCheck(m.stateDir), newer, 'the older finding was written over the newer one');
+
+  // The registry failing it, after the same newer finding: its error is not written over what was found either.
+  const failing = machine();
+  let fail: (error: Error) => void = () => undefined;
+  const asked = checkForUpdates(failing.core, failing.env, {
+    deps: deps(() => new Promise<string>((_, reject) => (fail = reject))),
+  });
+  await until(async () => (await readUpdateCheck(failing.stateDir)).checking !== null, 'the claim');
+  await updateCheck(failing.core, failing.env, deps(registry().latestVersion, { [CORE]: LATEST }));
+  const found = await readUpdateCheck(failing.stateDir);
+  fail(new Error('the registry could not be reached (ECONNRESET)'));
+  await asked;
+  assert.deepEqual(await readUpdateCheck(failing.stateDir), found);
 });
 
 test('at a terminal, an agent or --json is never asked, even with a terminal on both ends', async () => {

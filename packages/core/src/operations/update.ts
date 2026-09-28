@@ -490,11 +490,18 @@ async function inspect(core: Core, env: NodeJS.ProcessEnv, deps: UpdateDeps): Pr
  * same question once a day.
  *
  * It changes nothing but the daily check's own file, where what it found is recorded: a check a person asked for is
- * the day's check too.
+ * the day's check too, and gives up any claim a check running in the background holds, so that one's older finding
+ * is not written over this. `claim` is that background check's own: what it finds is recorded only while the file
+ * still holds it.
  */
-export async function updateCheck(core: Core, env: NodeJS.ProcessEnv, deps: UpdateDeps = {}): Promise<UpdateReport> {
+export async function updateCheck(
+  core: Core,
+  env: NodeJS.ProcessEnv,
+  deps: UpdateDeps = {},
+  claim?: string,
+): Promise<UpdateReport> {
   const { report } = await inspect(core, env, deps);
-  await recordFound(core, env, report, deps);
+  await recordFound(core, env, report, deps, null, claim);
   return report;
 }
 
@@ -527,6 +534,11 @@ const registrationKey = (entry: {
  * which the update moved, stops saying "update" and says "restart" instead. `after` is the update's result, when this
  * records one. Best effort, and skipped wherever the check is switched off: what was asked for is the report or the
  * update, and it is returned whether or not this lands.
+ *
+ * Whatever this writes is the newest word on the machine, so it gives up any claim a background check holds. `claim`,
+ * when this is that background check's own finding, is the claim it was made under: the finding is dropped when the
+ * file no longer holds it, because something newer — a check a person asked for, an update — was written meanwhile.
+ * The machine it describes was read before that, and put back it would say "update" where "restart" is right.
  */
 async function recordFound(
   core: Core,
@@ -534,14 +546,17 @@ async function recordFound(
   report: UpdateReport,
   deps: Pick<UpdateDeps, 'now'>,
   after: UpdateResult | null = null,
+  claim?: string,
 ): Promise<void> {
   const latest = report.latest[CORE_PACKAGE];
   if (updateCheckSwitchedOff(env) !== null || latest === undefined || !isVersion(latest)) return;
   const at = (deps.now ?? (() => new Date()))().toISOString();
   const { behind, current } = updateCheckFindings(report, latest, after);
-  await changeUpdateCheck(core.paths.stateDir, (record) => ({
-    record: { ...record, lastChecked: at, latest, behind, current, lastError: null, checking: null },
-  })).catch(() => undefined);
+  await changeUpdateCheck(core.paths.stateDir, (record) =>
+    claim !== undefined && record.checking !== claim
+      ? null
+      : { record: { ...record, lastChecked: at, latest, behind, current, lastError: null, checking: null } },
+  ).catch(() => undefined);
 }
 
 /**

@@ -88,11 +88,19 @@ async function ask(
   options: UpdateCheckOptions & { now: () => Date; claimedAt: string },
 ): Promise<void> {
   const deps = options.deps ?? {};
-  /** The ask is over: what it found is written, the day's check recorded as of the claim, and the claim given up. */
+  /**
+   * The ask is over: what it found is written, the day's check recorded as of the claim, and the claim given up — if
+   * the claim is still this ask's. A check a person asked for, or an update, records what it found and gives up any
+   * claim as it does; so does another process once this claim ran out and it claimed the check itself. Either way
+   * what is in the file is newer than what this ask found, and writing over it would put back the machine as it was
+   * before an update: "update" where "restart" is right.
+   */
   const settle = (found: Partial<UpdateCheckRecord>) =>
-    changeUpdateCheck(core.paths.stateDir, (record) => ({
-      record: { ...record, ...found, lastChecked: options.claimedAt, checking: null },
-    })).catch(() => undefined);
+    changeUpdateCheck(core.paths.stateDir, (record) =>
+      record.checking === options.claimedAt
+        ? { record: { ...record, ...found, lastChecked: options.claimedAt, checking: null } }
+        : null,
+    ).catch(() => undefined);
   const reason = (error: unknown) => (error instanceof Error ? error.message : String(error)).slice(0, 300);
   let latest: string;
   try {
@@ -111,8 +119,9 @@ async function ask(
     return;
   }
   try {
-    // `comms_update`'s own check, handed the one number: it records what it finds, by this clock, and so ends the ask.
-    await updateCheck(core, env, { ...deps, latestVersion: async () => latest, now: options.now });
+    // `comms_update`'s own check, handed the one number: it records what it finds, by this clock, and so ends the ask
+    // — under this ask's claim, so only while the claim is still its own.
+    await updateCheck(core, env, { ...deps, latestVersion: async () => latest, now: options.now }, options.claimedAt);
   } catch (error) {
     // The registry answered, and something here could not be read: what is known is recorded, and the rest is not.
     await settle({ latest, behind: null, current: null, lastError: reason(error) });
