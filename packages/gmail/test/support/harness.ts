@@ -72,7 +72,13 @@ export async function newHarness(options: FakeGoogleOptions = {}): Promise<Harne
   const env: NodeJS.ProcessEnv = {
     AGENT_COMMS_CONFIG_DIR: configDir,
     AGENT_COMMS_GOOGLE_ROOT_URL: google.url,
+    /*
+     * The home under both names core reads it by: `HOME` on macOS and Linux, `USERPROFILE` on Windows. With `HOME`
+     * alone, a Windows run resolved the default data and downloads directories to the real profile of whoever ran the
+     * tests, as the Slack harness did until the 0.8.0 release run caught it.
+     */
     HOME: configDir,
+    USERPROFILE: configDir,
     NO_COLOR: '1',
     // Where a client's own command is looked for beyond PATH: this home, and nowhere else. Left out, /opt/homebrew/bin
     // and /usr/local/bin are searched too, and a real `claude` or `codex` there would be found — and run — by a test
