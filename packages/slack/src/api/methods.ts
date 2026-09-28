@@ -25,6 +25,20 @@
  */
 export const SLACK_ORIGIN = 'https://slack.com';
 
+/**
+ * Where Slack serves a file's bytes, and the only other origin this package talks to.
+ *
+ * Hardcoded for the same reason as {@link SLACK_ORIGIN}, and reachable for one thing only: a `GET` of the path of a
+ * file just looked up with `files.info` or `files.list`, inside a grant for exactly that file (`downloadWith` in
+ * `guard.ts`). The link Slack returns is never followed as given — it is checked against {@link fileOfPath} and
+ * rebuilt on this origin, so a link pointing anywhere else is refused before the token could go with it.
+ *
+ * Unlike Resend's attachment CDN, this host needs the workspace's token: Slack documents that both `url_private` and
+ * `url_private_download` answer only a request carrying `Authorization: Bearer` with a token that has `files:read`.
+ * So the token goes to two hosts, both Slack's, and to nothing else.
+ */
+export const SLACK_FILES_ORIGIN = 'https://files.slack.com';
+
 export type MethodClass =
   /** Reads. No permit, no approval. */
   | 'read'
@@ -54,6 +68,14 @@ export type MethodClass =
    * the one place that opens one is `agent-slack app`.
    */
   | 'configure'
+  /**
+   * A file's bytes, from {@link SLACK_FILES_ORIGIN} rather than the Web API.
+   *
+   * Not a method at all, which is why no row of the table below has this kind and why it has a rule of its own,
+   * {@link FILE_DOWNLOAD}. A read — it changes nothing at Slack and needs no approval — but not reachable like one:
+   * only inside a grant naming the one file, which `slackFileDownload` opens around a single `GET`.
+   */
+  | 'download'
   /** Deliberately unreachable. Listed so the decision is recorded rather than implied by absence. */
   | 'refused';
 
@@ -194,6 +216,22 @@ const RULES: Readonly<Record<string, MethodRule>> = {
   },
 };
 
+/**
+ * The one rule that is not a Web API method: a file's bytes, fetched from {@link SLACK_FILES_ORIGIN}.
+ *
+ * Kept out of the method table on purpose. That table is keyed by the name Slack puts at the end of an `/api/` path,
+ * and a row here would make `https://slack.com/api/<its name>` classify as something — a name for a request Slack's
+ * API does not have, reachable at a host that must never serve it. So the table stays the Web API, and this sits
+ * beside it: `GET` only, at the files origin only, and only for the path {@link fileOfPath} reads as the file a grant
+ * names. `files:read` is what Slack asks of the token, and it is in the read manifest, so a workspace connected to
+ * read can download.
+ */
+export const FILE_DOWNLOAD: MethodRule = Object.freeze({
+  kind: 'download',
+  requiredScopes: ['files:read'],
+  note: 'one file’s bytes, by GET, from files.slack.com, for the file just looked up',
+});
+
 /** What the registry says about a method. `null` when it says nothing, which is itself the answer: refuse it. */
 export function methodRule(method: string): MethodRule | null {
   return RULES[method] ?? null;
@@ -220,7 +258,7 @@ export function writeMethods(): string[] {
 export function scopesFor(kinds: readonly MethodClass[]): string[] {
   return [
     ...new Set(
-      Object.values(RULES)
+      [...Object.values(RULES), FILE_DOWNLOAD]
         .filter((rule) => kinds.includes(rule.kind))
         .flatMap((rule) => rule.requiredScopes ?? []),
     ),
@@ -269,4 +307,64 @@ export function methodOfUrl(url: string): string | null {
   const method = segments.at(-1);
   if (segments.at(-2) !== 'api' || !method) return null;
   return method;
+}
+
+/** A file, as the path of its bytes on {@link SLACK_FILES_ORIGIN} names it. */
+export interface FileOfPath {
+  readonly teamId: string;
+  readonly fileId: string;
+}
+
+/*
+ * A Slack id: upper-case letters and digits, starting with a letter — `T024BE7LD`, `F0H2BJ8GV`.
+ *
+ * No `-` and no `/` in it, which is what makes `<TEAM>-<FILEID>` read one way only. Anchored and bounded, so it
+ * costs the same on any input.
+ */
+const SLACK_ID = /^[A-Z][A-Z0-9]{1,39}$/;
+
+/**
+ * Whether one decoded path segment is a plain file name: something Slack put there, not a way out of the file's
+ * own directory.
+ *
+ * The URL parser already resolves `..` and `%2e%2e` segments, so what is left to refuse is what only a server that
+ * decodes again would see — `%2F`, `%5C` — and the bytes no file name needs.
+ */
+function isPlainName(segment: string | undefined): boolean {
+  if (segment === undefined || segment === '') return false;
+  let name: string;
+  try {
+    name = decodeURIComponent(segment);
+  } catch {
+    return false;
+  }
+  if (name === '.' || name === '..') return false;
+  for (let i = 0; i < name.length; i += 1) {
+    const code = name.charCodeAt(i);
+    if (code === 0x2f || code === 0x5c || code < 0x20 || code === 0x7f) return false;
+  }
+  return true;
+}
+
+/**
+ * The team and file a path on the files host names, or null when it is not the path of one file's bytes.
+ *
+ * Two shapes, and only two, because those are the two links `files.info` returns: `url_private`,
+ * `/files-pri/<TEAM>-<FILEID>/<name>`, and `url_private_download`, `/files-pri/<TEAM>-<FILEID>/download/<name>`.
+ * Thumbnails (`/files-tmb/…`), a bare directory, or anything deeper are not files this package fetches. `pathname`
+ * is a parsed URL's: no query, no fragment, dot segments already resolved.
+ *
+ * A split rather than one regular expression, for the reason {@link methodOfUrl} gives: this sits on the guard, and
+ * a split is linear on any input.
+ */
+export function fileOfPath(pathname: string): FileOfPath | null {
+  const segments = pathname.split('/');
+  if (segments[0] !== '' || segments[1] !== 'files-pri') return null;
+  const shaped = segments.length === 4 || (segments.length === 5 && segments[3] === 'download');
+  if (!shaped || !isPlainName(segments.at(-1))) return null;
+  const pair = (segments[2] ?? '').split('-');
+  const [teamId, fileId] = pair;
+  if (pair.length !== 2 || teamId === undefined || fileId === undefined) return null;
+  if (!SLACK_ID.test(teamId) || !SLACK_ID.test(fileId)) return null;
+  return { teamId, fileId };
 }

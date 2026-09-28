@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { CommsError } from '@agentcomms/core';
+import { CommsError } from '@agentcomms/core';
 import { callSlack } from '../src/api/call.ts';
-import { closedPermit, configureWith, guardSlackRequests, spendOn } from '../src/api/guard.ts';
+import { closedPermit, configureWith, downloadWith, guardSlackRequests, spendOn } from '../src/api/guard.ts';
 import {
   classifiedMethods,
+  FILE_DOWNLOAD,
+  fileOfPath,
   methodOfUrl,
   methodRule,
+  SLACK_FILES_ORIGIN,
   scopesFor,
   unscopedMethods,
   writeMethods,
@@ -119,10 +122,22 @@ test('a method refused by design says why, and the reason travels with the error
 });
 
 test('anything that is not the Slack Web API is refused outright', async () => {
-  const fetch = guardSlackRequests(recorder().inner, closedPermit());
+  const { calls, inner } = recorder();
+  const fetch = guardSlackRequests(inner, closedPermit());
   await assert.rejects(fetch('https://evil.test/collect'), /only calls https:\/\/slack\.com/);
   // The right host, a path that names no method.
   await assert.rejects(fetch('https://slack.com/oauth/v2/authorize'), /only calls the Slack Web API/);
+  /*
+   * The two hosts do not lend each other their paths. A file's path at the API host names no method, and an API path
+   * at the files host names no file — even with a download open for exactly that file.
+   */
+  const permit = closedPermit();
+  const guarded = guardSlackRequests(inner, permit);
+  await downloadWith(permit, { teamId: 'T0AAA1', fileId: 'F0BBB2' }, async () => {
+    await assert.rejects(guarded('https://slack.com/files-pri/T0AAA1-F0BBB2/a.pdf'), /only calls the Slack Web API/);
+    await assert.rejects(guarded(`${SLACK_FILES_ORIGIN}/api/auth.test`), /not the path of the file/);
+  });
+  assert.deepEqual(calls, []);
 });
 
 test('the host is checked, not just the path that names the method', async () => {
@@ -147,6 +162,31 @@ test('the host is checked, not just the path that names the method', async () =>
   ]) {
     await assert.rejects(fetch(url), /only calls https:\/\/slack\.com/, url);
   }
+  // The right origin with credentials in the URL: a second credential on the request that nothing here chose.
+  for (const url of ['https://someone@slack.com/api/auth.test', 'https://someone:pw@slack.com/api/auth.test']) {
+    await assert.rejects(fetch(url), /carrying credentials/, url);
+  }
+  assert.deepEqual(calls, [], 'a request reached the inner fetch despite the wrong origin');
+
+  /*
+   * The files host is the second origin, and exactly that one. Its near misses are refused as any other host is —
+   * inside a download grant for the very file their paths name, so it is the host that refuses them and nothing else.
+   */
+  const permit = closedPermit();
+  const files = guardSlackRequests(inner, permit);
+  await downloadWith(permit, { teamId: 'T0AAA1', fileId: 'F0BBB2' }, async () => {
+    for (const url of [
+      'https://files.slack.com.attacker.net/files-pri/T0AAA1-F0BBB2/a.pdf',
+      'http://files.slack.com/files-pri/T0AAA1-F0BBB2/a.pdf',
+      'https://files.slack.com:8443/files-pri/T0AAA1-F0BBB2/a.pdf',
+      'https://files-edge.slack.com/files-pri/T0AAA1-F0BBB2/a.pdf',
+      'https://slack-files.com/files-pri/T0AAA1-F0BBB2/a.pdf',
+      'https://evil.example/files-pri/T0AAA1-F0BBB2/a.pdf',
+    ]) {
+      await assert.rejects(files(url), /only calls https:\/\/slack\.com and https:\/\/files\.slack\.com/, url);
+    }
+    assert.notEqual(permit.downloading, null, 'a refused host spent the grant');
+  });
   assert.deepEqual(calls, [], 'a request reached the inner fetch despite the wrong origin');
 
   // The error names the origin and nothing else: a query string can carry a token.
@@ -241,6 +281,15 @@ test('every classified method is read, write or refused, and every write is name
   // `auth.test` already returns.
   assert.equal(methodRule('team.info'), null);
 
+  /*
+   * A download is a rule, and not a row of the method table: nothing at the API host can classify as one, so no
+   * `/api/…` path reaches the files branch of the guard, and the name a download is audited under is not a method.
+   */
+  for (const method of methods) assert.notEqual(methodRule(method)?.kind, 'download', method);
+  assert.equal(methodRule('files.download'), null);
+  assert.equal(FILE_DOWNLOAD.kind, 'download');
+  assert.deepEqual(scopesFor(['download']), ['files:read']);
+
   // The four write paths the design enumerated are all classified as writes, by name. A future edit that
   // reclassified one as a read would have to delete a line here saying it is not.
   for (const method of ['chat.postMessage', 'files.completeUploadExternal', 'reactions.add']) {
@@ -307,6 +356,30 @@ test('a redirect is refused rather than followed to an address nothing checked',
   assert.equal(seen?.redirect, 'error', 'a caller turned redirect-following back on');
 });
 
+test('a download is not followed through a redirect either, whatever the caller asks', async () => {
+  /*
+   * It matters more here than at the API: the download carries the token, and the address a 30x names is chosen by
+   * whatever answered, not by the path the guard just checked.
+   */
+  const seen: (RequestInit | undefined)[] = [];
+  const permit = closedPermit();
+  const fetch = guardSlackRequests(async (_input, init) => {
+    seen.push(init);
+    return new Response('bytes');
+  }, permit);
+  const asked = [undefined, 'follow', 'manual'] as const;
+  for (const redirect of asked) {
+    await downloadWith(permit, { teamId: 'T0AAA1', fileId: 'F0BBB2' }, () =>
+      fetch(`${SLACK_FILES_ORIGIN}/files-pri/T0AAA1-F0BBB2/download/a.pdf`, redirect ? { redirect } : {}),
+    );
+  }
+  assert.deepEqual(
+    seen.map((init) => init?.redirect),
+    asked.map(() => 'error'),
+    'a download went out with a redirect mode a caller chose',
+  );
+});
+
 test('the package root does not hand out the key to its own door', async () => {
   /*
    * This exported `guardSlackRequests`, `closedPermit` and `spendOn`, so anything importing the package could
@@ -314,7 +387,17 @@ test('the package root does not hand out the key to its own door', async () => {
    * API is not a boundary.
    */
   const surface = (await import('../src/index.ts')) as Record<string, unknown>;
-  for (const name of ['guardSlackRequests', 'closedPermit', 'spendOn', 'configureWith', 'WritePermit']) {
+  for (const name of [
+    'guardSlackRequests',
+    'closedPermit',
+    'spendOn',
+    'configureWith',
+    'downloadWith',
+    'WritePermit',
+    // The download itself: it carries a token to the files host, and only this package's own operation calls it.
+    'slackFileDownload',
+    'checkedFileUrl',
+  ]) {
     assert.equal(surface[name], undefined, `${name} is exported from the package root`);
   }
   // The method registry stays: knowing a method's name grants nothing, and it is worth reading.
@@ -484,3 +567,270 @@ test('a configuration grant closes when the call inside it throws, and grants do
   );
   assert.equal(permit.configuring, null);
 });
+
+// ── Files: one more origin, for one file's bytes ──────────────────────────────────────────────────────────────
+
+const TEAM = 'T0AAA1';
+const FILE = 'F0BBB2';
+const FILE_URL = `${SLACK_FILES_ORIGIN}/files-pri/${TEAM}-${FILE}/download/report.pdf`;
+
+/** The reason a download refusal carries, which is what the download operation reports a skipped file by. */
+function reasonOf(error: unknown): unknown {
+  return error instanceof CommsError ? error.details?.reason : undefined;
+}
+
+test('files.slack.com is shut outside a download grant, whatever the path', async () => {
+  const { calls, inner } = recorder();
+  const fetch = guardSlackRequests(inner, closedPermit());
+  for (const url of [
+    FILE_URL,
+    `${SLACK_FILES_ORIGIN}/files-pri/${TEAM}-${FILE}/report.pdf`,
+    `${SLACK_FILES_ORIGIN}/`,
+  ]) {
+    await assert.rejects(fetch(url), (error: unknown) => {
+      assert.match(String((error as Error).message), /no download is open/, url);
+      assert.equal(reasonOf(error), 'wrong-path', url);
+      return true;
+    });
+  }
+  assert.deepEqual(calls, []);
+});
+
+test('a download grant opens one GET of that file’s path, and closes behind it', async () => {
+  const { calls, inner } = recorder();
+  const permit = closedPermit();
+  const fetch = guardSlackRequests(inner, permit);
+
+  // Both links `files.info` returns: `url_private_download`, then `url_private`.
+  const plain = `${SLACK_FILES_ORIGIN}/files-pri/${TEAM}-${FILE}/report.pdf`;
+  for (const url of [FILE_URL, plain]) {
+    await downloadWith(permit, { teamId: TEAM, fileId: FILE }, async () => {
+      await fetch(url);
+      // Spent: a second fetch inside the same grant finds the door shut.
+      await assert.rejects(fetch(url), /no download is open/);
+    });
+  }
+  assert.deepEqual(calls, [FILE_URL, plain]);
+  assert.equal(permit.downloading, null);
+  await assert.rejects(fetch(FILE_URL), /no download is open/);
+  assert.equal(calls.length, 2);
+});
+
+test('every near miss of a download is refused, with a reason, and none of them spends the grant', async () => {
+  /*
+   * The allowance is one path shape at one host for one file, fetched one way. Each of these is one step away from
+   * it. All of them are tried inside a single grant, and the right request still goes out at the end — so each was
+   * refused for what it got wrong, not because an earlier one used the grant up.
+   */
+  const { calls, inner } = recorder();
+  const permit = closedPermit();
+  const fetch = guardSlackRequests(inner, permit);
+  const at = (path: string): string => `${SLACK_FILES_ORIGIN}${path}`;
+  const notThePath = /not the path of the file/;
+  const cases: [string, RequestInit | undefined, RegExp, string][] = [
+    // Another team, another file, either way round, or one that merely starts or ends the same.
+    [at(`/files-pri/T0ZZZ9-${FILE}/report.pdf`), undefined, notThePath, 'wrong-path'],
+    [at(`/files-pri/${TEAM}-F0ZZZ9/report.pdf`), undefined, notThePath, 'wrong-path'],
+    [at(`/files-pri/${FILE}-${TEAM}/report.pdf`), undefined, notThePath, 'wrong-path'],
+    [at(`/files-pri/${TEAM}-${FILE}X/report.pdf`), undefined, notThePath, 'wrong-path'],
+    [at(`/files-pri/X${TEAM}-${FILE}/report.pdf`), undefined, notThePath, 'wrong-path'],
+    [at(`/files-pri/${TEAM}-${FILE}-F0CCC3/report.pdf`), undefined, notThePath, 'wrong-path'],
+    [at(`/files-pri/${TEAM.toLowerCase()}-${FILE.toLowerCase()}/report.pdf`), undefined, notThePath, 'wrong-path'],
+    // Other paths on the host: a thumbnail, the bare directory, deeper, or an API path.
+    [at(`/files-tmb/${TEAM}-${FILE}-abc123/report_360.png`), undefined, notThePath, 'wrong-path'],
+    [at(`/files-tmb/${TEAM}-${FILE}/report.pdf`), undefined, notThePath, 'wrong-path'],
+    [at(`/files-pub/${TEAM}-${FILE}/report.pdf`), undefined, notThePath, 'wrong-path'],
+    [at(`/files-pri/${TEAM}-${FILE}`), undefined, notThePath, 'wrong-path'],
+    [at(`/files-pri/${TEAM}-${FILE}/`), undefined, notThePath, 'wrong-path'],
+    [at(`/files-pri/${TEAM}-${FILE}/download/`), undefined, notThePath, 'wrong-path'],
+    [at(`/files-pri/${TEAM}-${FILE}/download/a/report.pdf`), undefined, notThePath, 'wrong-path'],
+    [at(`/files-pri/${TEAM}-${FILE}/other/report.pdf`), undefined, notThePath, 'wrong-path'],
+    [at('/api/auth.test'), undefined, notThePath, 'wrong-path'],
+    // A way out of the file's directory for a server that decodes again, or dot segments the parser resolves.
+    [at(`/files-pri/${TEAM}-${FILE}/download/..%2F..%2Fapi%2Fauth.test`), undefined, notThePath, 'wrong-path'],
+    [at(`/files-pri/${TEAM}-${FILE}/download/report%5Cx.pdf`), undefined, notThePath, 'wrong-path'],
+    [at(`/files-pri/${TEAM}-${FILE}/download/report%00.pdf`), undefined, notThePath, 'wrong-path'],
+    [at(`/files-pri/${TEAM}-${FILE}/../T0ZZZ9-${FILE}/report.pdf`), undefined, notThePath, 'wrong-path'],
+    [at(`/files-pri/${TEAM}-${FILE}/%2e%2e/%2e%2e/api/auth.test`), undefined, notThePath, 'wrong-path'],
+    // Anything but the path: a query, a fragment.
+    [`${FILE_URL}?pub_secret=abc`, undefined, /by its path alone/, 'wrong-path'],
+    [`${FILE_URL}#top`, undefined, /by its path alone/, 'wrong-path'],
+    // Credentials in the URL.
+    [FILE_URL.replace('https://', 'https://someone@'), undefined, /carrying credentials/, 'wrong-host'],
+    [FILE_URL.replace('https://', 'https://someone:pw@'), undefined, /carrying credentials/, 'wrong-host'],
+    // Any verb but GET.
+    [FILE_URL, { method: 'POST' }, /fetched with GET, not POST/, 'wrong-path'],
+    [FILE_URL, { method: 'post' }, /fetched with GET, not POST/, 'wrong-path'],
+    [FILE_URL, { method: 'PUT' }, /fetched with GET, not PUT/, 'wrong-path'],
+    [FILE_URL, { method: 'HEAD' }, /fetched with GET, not HEAD/, 'wrong-path'],
+    [FILE_URL, { method: 'DELETE' }, /fetched with GET, not DELETE/, 'wrong-path'],
+  ];
+
+  await downloadWith(permit, { teamId: TEAM, fileId: FILE }, async () => {
+    for (const [url, init, message, reason] of cases) {
+      await assert.rejects(fetch(url, init), (error: unknown) => {
+        assert.match(String((error as Error).message), message, url);
+        assert.equal(reasonOf(error), reason, url);
+        // The path is not repeated: its last segment is a name somebody in the workspace chose.
+        assert.doesNotMatch(String((error as Error).message), /report/, url);
+        return true;
+      });
+      assert.deepEqual(permit.downloading, { teamId: TEAM, fileId: FILE }, `${url} spent the grant`);
+    }
+    // A Request carrying its own verb meets the same rule as an init that names one.
+    await assert.rejects(fetch(new Request(FILE_URL, { method: 'POST', body: 'x' })), /fetched with GET, not POST/);
+    await fetch(FILE_URL);
+  });
+  assert.deepEqual(calls, [FILE_URL], 'a near miss reached the inner fetch');
+});
+
+test('a download grant lends nothing, borrows nothing, and does not nest', async () => {
+  /*
+   * The third opening on the same permit object, and like the other two it opens only itself. Inside a download a
+   * post and an app change are refused as they always were; inside a post or an app change the files host is shut;
+   * and no grant opens inside another.
+   */
+  const { calls, inner } = recorder();
+  const permit = closedPermit();
+  const fetch = guardSlackRequests(inner, permit);
+
+  await downloadWith(permit, { teamId: TEAM, fileId: FILE }, async () => {
+    await assert.rejects(fetch(`${API}/chat.postMessage`), /no approval is open/);
+    await assert.rejects(fetch(`${API}/apps.manifest.update`), /only `agent-slack app` may call it/);
+    await assert.rejects(
+      downloadWith(permit, { teamId: TEAM, fileId: 'F0CCC3' }, async () => undefined),
+      /already open; they do not nest/,
+    );
+    await assert.rejects(
+      spendOn(permit, 'ap_1', 'chat.postMessage', async () => undefined),
+      /already open; they do not nest/,
+    );
+    await assert.rejects(
+      configureWith(permit, 'apps.manifest.update', async () => undefined),
+      /already open; they do not nest/,
+    );
+    assert.deepEqual(permit.downloading, { teamId: TEAM, fileId: FILE }, 'a refused opening closed the grant');
+  });
+  await spendOn(permit, 'ap_1', 'chat.postMessage', async () => {
+    await assert.rejects(fetch(FILE_URL), /no download is open/);
+    await assert.rejects(
+      downloadWith(permit, { teamId: TEAM, fileId: FILE }, async () => undefined),
+      /already open; they do not nest/,
+    );
+  });
+  await configureWith(permit, 'apps.manifest.update', async () => {
+    await assert.rejects(fetch(FILE_URL), /no download is open/);
+    await assert.rejects(
+      downloadWith(permit, { teamId: TEAM, fileId: FILE }, async () => undefined),
+      /already open; they do not nest/,
+    );
+  });
+  assert.deepEqual(calls, []);
+  assert.deepEqual(permit, closedPermit());
+});
+
+test('a download grant names one Slack team and one Slack file, or it does not open', async () => {
+  /*
+   * `<TEAM>-<FILEID>` reads one way only because neither id can hold a `-` or a `/`. A grant for `T1-F2` and `F3`
+   * would match the path of a different file than either names.
+   */
+  const { calls, inner } = recorder();
+  const permit = closedPermit();
+  const fetch = guardSlackRequests(inner, permit);
+  const bad: [string, string][] = [
+    [`${TEAM}-F0CCC3`, FILE],
+    [TEAM, `${FILE}-F0CCC3`],
+    [TEAM, `${FILE}/x`],
+    [`${TEAM}/files-pri`, FILE],
+    [TEAM.toLowerCase(), FILE],
+    ['', FILE],
+    [TEAM, ''],
+    [TEAM, `F${'0'.repeat(40)}`],
+    ['0AAA1', FILE],
+  ];
+  for (const [teamId, fileId] of bad) {
+    await assert.rejects(
+      downloadWith(permit, { teamId, fileId }, () => fetch(FILE_URL)),
+      (error: unknown) => {
+        assert.match(String((error as Error).message), /names one Slack team id and one Slack file id/);
+        assert.equal(reasonOf(error), 'wrong-path');
+        return true;
+      },
+      `${teamId} / ${fileId}`,
+    );
+    assert.equal(permit.downloading, null);
+  }
+  assert.deepEqual(calls, []);
+});
+
+test('a download grant closes when what runs inside it throws', async () => {
+  const { calls, inner } = recorder();
+  const permit = closedPermit();
+  const fetch = guardSlackRequests(inner, permit);
+  await assert.rejects(
+    downloadWith(permit, { teamId: TEAM, fileId: FILE }, async () => {
+      throw new Error('network died before the request');
+    }),
+    /network died/,
+  );
+  assert.equal(permit.downloading, null, 'a failed download left a grant open behind it');
+  await assert.rejects(fetch(FILE_URL), /no download is open/);
+  assert.deepEqual(calls, []);
+});
+
+test('callSlack stays the Web API: pointed at the files host it is refused, grant or no grant', async () => {
+  /*
+   * `callSlack` builds `/api/<method>` on its base URL. The files host is now an origin the guard serves, so this is
+   * the test that `callSlack` did not become a second way onto it: no `/api/` path is a file's path.
+   */
+  const { calls, inner } = recorder();
+  await assert.rejects(
+    callSlack({ token: 'fake-user-token', fetch: inner, baseUrl: SLACK_FILES_ORIGIN }, 'files.info', { file: FILE }),
+    /no download is open/,
+  );
+  // Inside a grant for a real file it is still refused: every Web API call is a POST, and the files host takes GET.
+  const permit = closedPermit();
+  await downloadWith(permit, { teamId: TEAM, fileId: FILE }, async () => {
+    await assert.rejects(
+      callSlack({ token: 'fake-user-token', fetch: inner, baseUrl: SLACK_FILES_ORIGIN, permit }, 'files.info'),
+      /fetched with GET, not POST/,
+    );
+  });
+  assert.deepEqual(calls, []);
+});
+
+test('the path of a file is read in two shapes only', () => {
+  const cases: [string, { teamId: string; fileId: string } | null][] = [
+    [`/files-pri/${TEAM}-${FILE}/report.pdf`, { teamId: TEAM, fileId: FILE }],
+    [`/files-pri/${TEAM}-${FILE}/download/report.pdf`, { teamId: TEAM, fileId: FILE }],
+    // A file called `download` is still a file.
+    [`/files-pri/${TEAM}-${FILE}/download`, { teamId: TEAM, fileId: FILE }],
+    [`/files-pri/E0GRID1-${FILE}/r%C3%A9sum%C3%A9.pdf`, { teamId: 'E0GRID1', fileId: FILE }],
+    [`/files-pri/${TEAM}-${FILE}/download/.`, null],
+    [`/files-pri/${TEAM}-${FILE}/download/..`, null],
+    [`/files-pri/${TEAM}-${FILE}/download/%2E%2E`, null],
+    [`/files-pri/${TEAM}-${FILE}/download/%E0%A4%A`, null],
+    [`/files-pri/${TEAM}-${FILE}/download/a%2fb`, null],
+    [`/files-pri/${TEAM}-${FILE}/download/a%7fb`, null],
+    [`/files-pri/${TEAM}-${FILE}/x/y`, null],
+    [`/files-tmb/${TEAM}-${FILE}/report.pdf`, null],
+    [`/x/files-pri/${TEAM}-${FILE}/report.pdf`, null],
+    [`/files-pri/${TEAM}${FILE}/report.pdf`, null],
+    [`/files-pri/-${FILE}/report.pdf`, null],
+    [`files-pri/${TEAM}-${FILE}/report.pdf`, null],
+    [`//files-pri/${TEAM}-${FILE}/report.pdf`, null],
+    ['/', null],
+    ['', null],
+  ];
+  for (const [path, expected] of cases) assert.deepEqual(fileOfPath(path), expected, path);
+});
+
+test('reading a file’s path is linear, even on a path made of dashes and slashes', () => {
+  // The same bound as `methodOfUrl`'s: this sits on the guard, and a hostile path must not make it slow.
+  const started = performance.now();
+  assert.equal(fileOfPath(`/files-pri/${'-'.repeat(40_000)}/x`), null);
+  assert.equal(fileOfPath(`/files-pri/${TEAM}-${FILE}/${'/'.repeat(40_000)}x`), null);
+  assert.equal(fileOfPath(`/files-pri/T${'A'.repeat(40_000)}-${FILE}/x`), null);
+  assert.ok(performance.now() - started < 250, `fileOfPath took ${Math.round(performance.now() - started)}ms`);
+});
+

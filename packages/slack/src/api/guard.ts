@@ -1,5 +1,5 @@
 import { CommsError } from '@agentcomms/core';
-import { methodOfUrl, methodRule, SLACK_ORIGIN } from './methods.ts';
+import { type FileOfPath, fileOfPath, methodOfUrl, methodRule, SLACK_FILES_ORIGIN, SLACK_ORIGIN } from './methods.ts';
 
 /**
  * The one door every Slack request goes through.
@@ -12,6 +12,9 @@ import { methodOfUrl, methodRule, SLACK_ORIGIN } from './methods.ts';
  * It fails closed in both directions. An unclassified method is refused, so the registry cannot silently fall
  * behind the code; and a classified write is refused without an open permit, so the approval gate cannot be
  * stepped around by calling Slack directly.
+ *
+ * Two origins, both hardcoded: the Web API, and `files.slack.com` for a file's bytes. The second is shut except
+ * inside a download grant naming one file, and then open for one `GET` of that file's path and nothing else.
  */
 
 export interface WritePermit {
@@ -32,13 +35,68 @@ export interface WritePermit {
    * inside a configuration grant is refused exactly as it always was.
    */
   configuring: string | null;
+  /**
+   * The one file whose bytes may be fetched next, or null — which is always, except inside `downloadWith`.
+   *
+   * On this object for the reason `configuring` is: every request meets every answer in one place. And like it, it
+   * lends nothing: opening it leaves `approvalId` and `configuring` null, so nothing that posts or changes an app
+   * gets through inside a download, and a download is refused inside either of those.
+   */
+  downloading: FileOfPath | null;
 }
 
 export function closedPermit(): WritePermit {
-  return { approvalId: null, method: null, configuring: null };
+  return { approvalId: null, method: null, configuring: null, downloading: null };
 }
 
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
+/**
+ * Why a download was refused, in the words `slackFileDownload` promises its caller.
+ *
+ * The files-host refusals below carry one in `details.reason`, so a refusal that could only come from here — because
+ * the check in `download.ts` was wrong — still arrives with a reason the download operation knows how to report.
+ */
+type DownloadRefusal = 'wrong-host' | 'wrong-path';
+
+function refuseDownload(message: string, reason: DownloadRefusal): CommsError {
+  return new CommsError('SEND_REFUSED', message, {
+    hint: 'This is a bug — please report it.',
+    details: { reason },
+  });
+}
+
+/**
+ * The files host: one `GET`, of the path of the one file the open grant names, and then the grant is spent.
+ *
+ * Every refusal here happens before the grant is spent, so a request that got something wrong does not use up the
+ * download it was meant to be — but it does not go out either.
+ */
+function checkDownload(url: URL, verb: string, permit: WritePermit): void {
+  const grant = permit.downloading;
+  if (grant === null) {
+    throw refuseDownload(
+      `${SLACK_FILES_ORIGIN} is reached only to download a file just looked up, and no download is open`,
+      'wrong-path',
+    );
+  }
+  // Not HEAD, not POST: a file is read by fetching it, and nothing else this host offers is wanted.
+  if (verb !== 'GET') throw refuseDownload(`a file is fetched with GET, not ${verb}`, 'wrong-path');
+  /*
+   * The path alone. A query is not ours to forward — the link came from Slack's reply, and whatever rides in its
+   * query rides with the token — and `slackFileDownload` rebuilds the URL without one.
+   */
+  if (url.search !== '' || url.hash !== '') {
+    throw refuseDownload('a file is fetched by its path alone, with no query', 'wrong-path');
+  }
+  const named = fileOfPath(url.pathname);
+  if (named === null || named.teamId !== grant.teamId || named.fileId !== grant.fileId) {
+    // The path is not repeated: its last segment is a file name somebody in the workspace chose.
+    throw refuseDownload('that is not the path of the file this download is for', 'wrong-path');
+  }
+  // One grant, one request: a second fetch inside the same grant finds the door shut.
+  permit.downloading = null;
+}
 
 /**
  * Wraps `fetch` so every Slack call is classified before it leaves.
@@ -46,11 +104,12 @@ export type FetchLike = (input: string | URL | Request, init?: RequestInit) => P
  * `permit` is read at call time rather than captured, so opening and closing it around a single request is enough
  * to scope what that request may do.
  *
- * **The origin is hardcoded, and there is no argument for it.** The first attempt made it an option defaulting to
- * Slack's, on the reasoning that the check still always ran and only its target moved. That reasoning was wrong:
- * the type was exported from the package root, so any caller could name any origin, which is precisely the
- * production override it claimed not to be. A test reaches a fake Slack by rewriting an already-validated URL in
- * the *inner* fetch — after this has approved it — so there is no mode, anywhere, in which the check is off.
+ * **The origins are hardcoded, and there is no argument for either.** The first attempt made the origin an option
+ * defaulting to Slack's, on the reasoning that the check still always ran and only its target moved. That reasoning
+ * was wrong: the type was exported from the package root, so any caller could name any origin, which is precisely
+ * the production override it claimed not to be. A test reaches a fake Slack by rewriting an already-validated URL in
+ * the *inner* fetch — after this has approved it — so there is no mode, anywhere, in which the check is off. The
+ * files host was added the same way: a second constant beside the first, not a parameter.
  */
 export function guardSlackRequests(inner: FetchLike, permit: WritePermit): FetchLike {
   return async (input, init) => {
@@ -66,21 +125,45 @@ export function guardSlackRequests(inner: FetchLike, permit: WritePermit): Fetch
      * Compared as a parsed origin rather than a prefix: `https://slack.com.attacker.net/…` starts with the
      * right characters and is a different site.
      */
-    let actual: string;
+    let parsed: URL;
     try {
-      actual = new URL(url).origin;
+      parsed = new URL(url);
     } catch {
       throw new CommsError('SEND_REFUSED', 'that is not a URL this package can call', {
         hint: 'This is a bug — please report it.',
       });
     }
-    if (actual !== SLACK_ORIGIN) {
+    const actual = parsed.origin;
+    if (actual !== SLACK_ORIGIN && actual !== SLACK_FILES_ORIGIN) {
       // The origin is named; the rest of the URL is not, because a query can carry a token.
       throw new CommsError(
         'SEND_REFUSED',
-        `this package only calls ${SLACK_ORIGIN}, and that request went to ${actual}`,
+        `this package only calls ${SLACK_ORIGIN} and ${SLACK_FILES_ORIGIN}, and that request went to ${actual}`,
         { hint: 'This is a bug — please report it.' },
       );
+    }
+    /*
+     * Credentials in the URL itself, at either host.
+     *
+     * `https://user@files.slack.com/…` has the right origin and is a request carrying a second credential nobody
+     * here chose. Nothing in this package builds one; a link from Slack's reply could, which is where the files host
+     * gets its URLs from.
+     */
+    if (parsed.username !== '' || parsed.password !== '') {
+      if (actual === SLACK_FILES_ORIGIN) {
+        throw refuseDownload('a URL carrying credentials is never called', 'wrong-host');
+      }
+      throw new CommsError('SEND_REFUSED', 'a URL carrying credentials is never called', {
+        hint: 'This is a bug — please report it.',
+      });
+    }
+
+    if (actual === SLACK_FILES_ORIGIN) {
+      const verb = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
+      checkDownload(parsed, verb, permit);
+      // The redirect rule below holds here too, and matters more: this request carries the token, and a 30x would
+      // take it to an address chosen by whatever answered rather than by the path just checked.
+      return inner(input, { ...init, redirect: 'error' });
     }
 
     const method = methodOfUrl(url);
@@ -176,7 +259,7 @@ export async function spendOn<T>(
   method: string,
   body: () => Promise<T>,
 ): Promise<T> {
-  if (permit.approvalId !== null) {
+  if (permit.approvalId !== null || permit.downloading !== null) {
     throw new CommsError('SEND_REFUSED', 'a permit is already open; they do not nest', {
       hint: 'This is a bug — please report it.',
     });
@@ -206,7 +289,7 @@ export async function configureWith<T>(permit: WritePermit, method: string, body
       hint: 'This is a bug — please report it.',
     });
   }
-  if (permit.approvalId !== null || permit.configuring !== null) {
+  if (permit.approvalId !== null || permit.configuring !== null || permit.downloading !== null) {
     throw new CommsError('SEND_REFUSED', 'a permit is already open; they do not nest', {
       hint: 'This is a bug — please report it.',
     });
@@ -216,5 +299,33 @@ export async function configureWith<T>(permit: WritePermit, method: string, body
     return await body();
   } finally {
     permit.configuring = null;
+  }
+}
+
+/**
+ * Opens a download grant for exactly one `GET` of one file's bytes, and closes it however `body` ends.
+ *
+ * The third of the shape, beside `spendOn` and `configureWith`, and like them it lends nothing: it refuses to open
+ * while a post's permit or a configuration grant is open, and neither opens while it is. The team and file must be
+ * ones a path on the files host could name — Slack ids, with no `-` or `/` in them — or `<TEAM>-<FILEID>` could be
+ * read more than one way, and the grant would name more than one file.
+ *
+ * Not exported from the package root. `api/download.ts` is the one caller, and a test fails if another appears.
+ */
+export async function downloadWith<T>(permit: WritePermit, file: FileOfPath, body: () => Promise<T>): Promise<T> {
+  const named = fileOfPath(`/files-pri/${file.teamId}-${file.fileId}/file`);
+  if (named === null || named.teamId !== file.teamId || named.fileId !== file.fileId) {
+    throw refuseDownload('a download grant names one Slack team id and one Slack file id', 'wrong-path');
+  }
+  if (permit.approvalId !== null || permit.configuring !== null || permit.downloading !== null) {
+    throw new CommsError('SEND_REFUSED', 'a permit is already open; they do not nest', {
+      hint: 'This is a bug — please report it.',
+    });
+  }
+  permit.downloading = { teamId: file.teamId, fileId: file.fileId };
+  try {
+    return await body();
+  } finally {
+    permit.downloading = null;
   }
 }

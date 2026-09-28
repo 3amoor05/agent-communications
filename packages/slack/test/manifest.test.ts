@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { methodRule, scopesFor, writeMethods } from '../src/api/methods.ts';
+import { FILE_DOWNLOAD, methodRule, scopesFor, writeMethods } from '../src/api/methods.ts';
 import { buildManifest, NEVER_REQUESTED, READ_SCOPES, renderManifest, scopesForMode } from '../src/manifest.ts';
 
 /**
@@ -18,6 +18,24 @@ test('read mode asks for reading, and nothing that can post', () => {
   for (const scope of scopesFor(['write', 'prepare'])) {
     assert.equal(scopes.includes(scope), false, `read mode asked for ${scope}, so Slack would allow posting`);
   }
+});
+
+test('a workspace connected to read can download a file, and downloading asks for nothing more', () => {
+  /*
+   * A download is a read: it goes out in read mode and in send mode, with no approval. That is true only if the
+   * scope Slack asks of the files host is one the read manifest already requests — taken from the rule rather than
+   * written out here, so a download that came to need another scope fails this instead of failing at Slack.
+   */
+  const read = scopesForMode('read');
+  const needed = FILE_DOWNLOAD.requiredScopes ?? [];
+  assert.ok(needed.length > 0, 'the download rule records no scope, so nothing here checks one');
+  for (const scope of needed) assert.ok(read.includes(scope), `read mode cannot download: it lacks ${scope}`);
+  assert.deepEqual(scopesFor(['download']), ['files:read']);
+  // And it adds nothing to either manifest: read mode is still exactly the read scopes.
+  assert.deepEqual(
+    buildManifest('read', 'http://localhost:3000/slack').oauth_config.scopes.user,
+    [...READ_SCOPES].sort(),
+  );
 });
 
 test('send mode is read plus exactly what the write methods need', () => {

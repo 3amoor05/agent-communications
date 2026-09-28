@@ -85,7 +85,8 @@
       "can": "post to Slack"
     },
     "hosts": [
-      "slack.com"
+      "slack.com",
+      "files.slack.com"
     ],
     "approve": "agent-slack approve",
     "skills": {
