@@ -353,6 +353,12 @@ interface Case {
 async function bothWays(label: string, { argv, args, mode }: Case) {
   const byCommand = await world(mode);
   const byTool = await world(mode);
+  // Said, not assumed: on Windows the two once shared one downloads folder, and the tool's copy of every file was `-2`.
+  assert.notEqual(
+    byCommand.harness.core.paths.downloadsDir,
+    byTool.harness.core.paths.downloadsDir,
+    `${label}: each surface saves into a folder of its own`,
+  );
   const fromCommand = await viaCommand(byCommand, [...argv, '--out', label]);
   const fromTool = await viaTool(byTool, { ...args, out: label });
 

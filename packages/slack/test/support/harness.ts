@@ -1,7 +1,7 @@
 import { mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { type AccountConfig, type Core, newAccountId, openCore } from '@agentcomms/core';
+import { type AccountConfig, type Core, isInside, newAccountId, openCore, type ResolvedPaths } from '@agentcomms/core';
 import { BUNDLE_VERSION, serialiseBundle, type TokenBundle } from '../../src/auth/bundle.ts';
 import { type InstallMode, scopesForMode } from '../../src/manifest.ts';
 import { secretRefFor } from '../../src/operations/workspaces.ts';
@@ -95,12 +95,36 @@ export interface SlackReplyOverrides extends Record<string, unknown> {
   scopes?: readonly string[];
 }
 
+/**
+ * Refuses a harness any of whose paths is outside its own temporary home.
+ *
+ * Checked where every harness is made, before a test can write anything, because a path that resolves to the real
+ * machine is written to by the first test that saves a file — and what shows is not the path but a later assertion
+ * about a `-2` in a file name, on one platform. The 0.8.0 release run on Windows found it that way.
+ */
+export function assertInsideHome(paths: ResolvedPaths, home: string): void {
+  const outside = Object.entries(paths).filter(([, path]) => !isInside(path, home));
+  if (outside.length > 0) {
+    const named = outside.map(([name, path]) => `${name} to ${path}`).join(' and ');
+    throw new Error(`the harness resolves ${named}, outside its own home ${home}`);
+  }
+}
+
 export async function newHarness(): Promise<Harness> {
   const configDir = tempDir();
   const env: NodeJS.ProcessEnv = {
     AGENT_COMMS_CONFIG_DIR: configDir,
     AGENT_COMMS_STATE_DIR: join(configDir, 'state'),
+    /*
+     * The home, under both of the names core reads it by: `HOME` on macOS and Linux, `USERPROFILE` on Windows, as
+     * Node's own `homedir()` does there. With `HOME` alone, every harness on Windows had its downloads and its data
+     * directory resolved to the real profile of whoever ran the tests. The 0.8.0 release run saved its fixture files
+     * into the runner's own Downloads folder, all of them into one: the command's copy of a file was already there when
+     * the tool saved its own, which came back as `-2`, and a folder a test proved was never made had been made by the
+     * test before it.
+     */
     HOME: configDir,
+    USERPROFILE: configDir,
     NO_COLOR: '1',
     // Where a client's own command is looked for beyond PATH: this home, and nowhere else. Left out, /opt/homebrew/bin
     // and /usr/local/bin are searched too, and a real `claude` or `codex` there would be found — and run — by a test
@@ -108,6 +132,7 @@ export async function newHarness(): Promise<Harness> {
     AGENT_COMMS_CLIENT_CLI_DIRS: '',
   };
   const core = openCore({ env });
+  assertInsideHome(core.paths, configDir);
   /*
    * Version 1, said rather than assumed.
    *
