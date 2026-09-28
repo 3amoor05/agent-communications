@@ -99,7 +99,15 @@ async function installFlags(cli) {
       'install',
       '--help',
     ],
-    { env: { PATH: process.env.PATH ?? '', HOME: home, AGENT_COMMS_CONFIG_DIR: join(home, 'config'), NO_COLOR: '1' } },
+    {
+      env: {
+        PATH: process.env.PATH ?? '',
+        HOME: home,
+        AGENT_COMMS_CONFIG_DIR: join(home, 'config'),
+        NO_COLOR: '1',
+        AGENT_COMMS_UPDATE_CHECK: 'off',
+      },
+    },
   ).finally(() => rm(home, { recursive: true, force: true }));
   return new Set(stdout.match(/--[a-z][a-z-]*/g) ?? []);
 }

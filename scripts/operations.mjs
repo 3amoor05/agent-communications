@@ -244,6 +244,10 @@ export async function driveOperations(table, { dir }) {
     AGENT_COMMS_CONFIG_DIR: join(dir, 'config'),
     AGENT_COMMS_STATE_DIR: join(dir, 'state'),
     AGENT_COMMS_DATA_DIR: join(dir, 'data'),
+    // The daily update check, off: the drive reaches no registry, and no call or command stops for a release. Left
+    // on, a surface would call the check's operations before its own, and the drive would judge them (design
+    // 2026-09-28).
+    AGENT_COMMS_UPDATE_CHECK: 'off',
     TMPDIR: dir,
     TEMP: dir,
     TMP: dir,

@@ -90,7 +90,7 @@ test('the resolved entry understands the listener command', async () => {
 
   const child = spawn(entry.command, [...entry.args, 'sign-in-listen', 'sfl_doesnotexistaaaaaaaa'], {
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, AGENT_COMMS_CONFIG_DIR: tempDir(), NO_COLOR: '1' },
+    env: { ...process.env, AGENT_COMMS_CONFIG_DIR: tempDir(), NO_COLOR: '1', AGENT_COMMS_UPDATE_CHECK: 'off' },
   });
   let output = '';
   child.stdout.on('data', (chunk) => {

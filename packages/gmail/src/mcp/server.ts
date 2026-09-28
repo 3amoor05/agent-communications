@@ -1,6 +1,7 @@
 import {
   CommsError,
   changeToolResult,
+  checkForUpdates,
   findById,
   type GatedChange,
   gatedChange,
@@ -8,6 +9,7 @@ import {
   stricterPolicy,
   strictToolArguments,
   toCommsError,
+  updateToolGate,
 } from '@agentcomms/core';
 import { acceptedContent, inputRequired, inputResponse, McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
@@ -183,8 +185,23 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
    * in the envelope above — before its handler runs, and before the pin below is checked. See `strictToolArguments`:
    * the SDK stripped a key a tool did not declare, which is how `client` and `contacts` were once dropped from
    * `gmail_inbox_add` without a word.
+   *
+   * Then the daily update check's stop (design 2026-09-28): an update that is out stops every tool but the doctor,
+   * and the check itself runs in the background, never delaying a call.
    */
-  strictToolArguments(server, fail);
+  strictToolArguments(
+    server,
+    fail,
+    updateToolGate({
+      core: context.core,
+      env: context.env,
+      server: 'agent-gmail',
+      channel: 'gmail',
+      running: VERSION,
+      exempt: ['gmail_doctor'],
+      refresh: () => checkForUpdates(context.core, context.env),
+    }),
+  );
 
   /**
    * What every tool that changes an account returns: the result once the change is made, or the approval it waits for.

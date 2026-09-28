@@ -1,10 +1,12 @@
 import {
   CommsError,
   changeToolResult,
+  checkForUpdates,
   type GatedChange,
   gatedChange,
   strictToolArguments,
   toCommsError,
+  updateToolGate,
 } from '@agentcomms/core';
 import { McpServer, type Transport } from '@modelcontextprotocol/server';
 import { z } from 'zod';
@@ -220,7 +222,21 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
 
   // Every tool registered from here on refuses a key it does not declare, and arguments its schema rejects, as USAGE
   // in the envelope above — before its handler runs. See `strictToolArguments`.
-  strictToolArguments(server, fail);
+  // Then the daily update check's stop (design 2026-09-28): an update that is out stops every tool but this server's
+  // doctor, and the check itself runs in the background, never delaying a call.
+  strictToolArguments(
+    server,
+    fail,
+    updateToolGate({
+      core: context.core,
+      env: context.env,
+      server: 'agent-slack',
+      channel: 'slack',
+      running: VERSION,
+      exempt: ['slack_doctor'],
+      refresh: () => checkForUpdates(context.core, context.env),
+    }),
+  );
 
   /**
    * Which workspace a call acts on, and whether it is allowed to.

@@ -33,6 +33,8 @@ export const scratchEnv = (dir = join(ROOT, '.tmp-reference-config')) => ({
   AGENT_COMMS_CONFIG_DIR: dir,
   AGENT_COMMS_STATE_DIR: join(dir, 'state'),
   AGENT_COMMS_DATA_DIR: join(dir, 'data'),
+  // The daily update check, off: reading what exists asks no registry (design 2026-09-28).
+  AGENT_COMMS_UPDATE_CHECK: 'off',
 });
 
 /**

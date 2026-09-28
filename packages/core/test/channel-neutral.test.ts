@@ -84,6 +84,7 @@ function machine(
     AGENT_COMMS_DATA_DIR: join(home, 'data'),
     NO_COLOR: '1',
     npm_config_offline: 'true',
+    AGENT_COMMS_UPDATE_CHECK: 'off', // no test asks the real npm registry, or stops for a release
   };
   return { home, env, core: openCore({ env }) };
 }

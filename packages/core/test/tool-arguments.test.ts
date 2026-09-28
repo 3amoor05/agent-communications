@@ -364,6 +364,7 @@ function machine(body: Record<string, unknown> = {}) {
     PATH: join(home, 'bin'),
     AGENT_COMMS_CONFIG_DIR: configDir,
     NO_COLOR: '1',
+    AGENT_COMMS_UPDATE_CHECK: 'off', // no test asks the real npm registry, or stops for a release
   };
   return { home, env, configFile, core: openCore({ env }) };
 }

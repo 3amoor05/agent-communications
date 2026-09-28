@@ -17,7 +17,10 @@ function runBin(args: string[], { closeStdin = true } = {}): Promise<Ran> {
     const child = spawn(
       process.execPath,
       ['--experimental-strip-types', '--disable-warning=ExperimentalWarning', ENTRY, ...args],
-      { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, AGENT_COMMS_CONFIG_DIR: '/tmp/agent-gmail-mcp-test' } },
+      {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: { ...process.env, AGENT_COMMS_CONFIG_DIR: '/tmp/agent-gmail-mcp-test', AGENT_COMMS_UPDATE_CHECK: 'off' },
+      },
     );
     let stdout = '';
     let stderr = '';

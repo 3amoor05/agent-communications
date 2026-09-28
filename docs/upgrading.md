@@ -46,6 +46,46 @@ one whose client's own command is not on `PATH` — is left as it was and listed
 each step as it went, then says which clients to restart. Restart them, then prune the old runtimes from the restarted
 server, as in step 7.
 
+### The daily check
+
+From the release that adds it, a machine does not wait to be asked. Once a day — at most, for the whole machine — the
+first server or command to run asks npm for the latest release of `@agentcomms/core`, runs the same "what is behind"
+check as `update --check`, and records what it found in `update-check.json` in the state directory. When a newer
+release is out:
+
+- **every MCP tool call stops** — except `comms_update`, `comms_doctor`, `comms_paths`, each channel's doctor, and a
+  call carrying the `approvalId` of an approval this machine holds (one the person already gave; an empty or made-up
+  id does not count) — and answers "Hang on a minute, there's an update. Let's update first.", with the running and
+  latest versions and the two ways on. When every registration of that server on this machine already names the
+  latest release, and only the running server is old, it says to restart the client instead. A server nothing here
+  registers — the Claude Code plugin's, the Gemini extension's, one started from a checkout, or an entry written by
+  hand with no version — is always told to update: restarting would start the same old code, so update it where it
+  was installed, or put it off;
+- **every command stops** — except `update`, `doctor`, `paths`, `approve`, `approvals`, `mcp` on its own (the server,
+  which stops each call itself; `mcp install` and `mcp prune` are stopped like any other command), the listener a
+  sign-in starts (`agent-gmail oauth-listen`, `agent-slack sign-in-listen`), WhatsApp's `status`, and a command
+  carrying `--approval` with an approval this machine holds — and at a terminal asks "Update now, later today, or
+  cancel?". Now runs `update`, with its own preview, and says "Updated. Run your command again." only when it
+  brought this command to the latest release; otherwise it says what is left and exits non-zero. Later puts it off;
+  cancel does nothing. Anything without a terminal — a script, an agent, `--json` — exits `11` (`UPDATE_REQUIRED`),
+  naming `agentcomms update` and `agentcomms update --later` (`npx -y @agentcomms/core@latest update`, and
+  `… update --later`, where `agentcomms` is not installed). A command whose release is installed globally while an
+  older copy of it runs — from npx's cache, or a project's own install — stops the same way, and says to run the
+  installed one.
+
+"Not now" (`agentcomms update --later`, or `comms_update` with `later: true`) is a change the person approves, like
+any other, and lasts until midnight, local time, for the whole machine. `agentcomms update --auto off` (or `auto:
+"off"`) turns the check off for this machine, also approved; `--auto on` turns it back on at once. `doctor` shows the
+check on one line: on or off, when it last asked, the latest release, and the one running.
+
+It never gets in the way of a machine that cannot reach npm: an ask that fails keeps the last result, stops nothing,
+and is not tried again that day. A prerelease never counts as an update. A command at a terminal waits about three
+seconds for the answer at most, then goes on while the ask finishes beside it, so a slow registry is still heard from;
+a server never waits for it. An ask cut short — a process ended part-way — does not use up the day: another process
+asks a couple of minutes later. WhatsApp's server and command, which never reach the network, do not ask npm
+themselves; they stop once any other server or command on the machine has found an update. The check is skipped
+entirely when `CI` is set, or when `AGENT_COMMS_UPDATE_CHECK=off`.
+
 Everything below is the long way round — and the only way across the rename, which `update` does not do.
 
 ## Before you start

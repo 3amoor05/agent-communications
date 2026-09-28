@@ -152,6 +152,9 @@ try {
   await writeFile(join(consumer, 'consumer-check.mjs'), check);
   const output = run(process.execPath, ['consumer-check.mjs'], consumer, {
     AGENT_COMMS_CONFIG_DIR: join(tempRoot, 'config'),
+    // The daily update check, off: a consumer check runs every command it tries against a temporary configuration,
+    // and none of them asks the real npm registry or stops for a release (design 2026-09-28).
+    AGENT_COMMS_UPDATE_CHECK: 'off',
   });
   process.stdout.write(output);
   /*

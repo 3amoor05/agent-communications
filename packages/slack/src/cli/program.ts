@@ -1,15 +1,19 @@
 import {
   agentMarker,
   approvalKind,
+  approvalsOf,
   approveChangeAtTerminal,
   CommsError,
   canPrompt,
   colorEnabled,
+  commandPathOf,
   EXIT_CODES,
+  exemptFromUpdateGate,
   type GatedChange,
   gatedChangeAtTerminal,
   installExitStatus,
   type OutputOptions,
+  openCore,
   paint,
   renderChannelPreview,
   renderPrune,
@@ -17,6 +21,8 @@ import {
   type Streams,
   serverInstallChange,
   serverPruneChange,
+  terminalUpdateHooks,
+  updateGateAtTerminal,
   wholeNumber,
   writeResult,
 } from '@agentcomms/core';
@@ -190,7 +196,8 @@ Getting started:
   agent-slack read <channel> --workspace acme/slack
 
 Exit codes: 0 ok · 1 unexpected · 10 a post or a change was refused or needs approval, or a
-sign-in is still waiting · 64 usage · 65 bad data · 66 not found · 69 provider or secret store
+sign-in is still waiting · 11 an update is out: update first, or put it off (agentcomms update,
+agentcomms update --later) · 64 usage · 65 bad data · 66 not found · 69 provider or secret store
 unavailable · 75 temporary (retry later) · 77 sign-in or permission needed · 78
 configuration problem.`,
     )
@@ -212,11 +219,51 @@ configuration problem.`,
    */
   let softExit: number | null = null;
 
+  /*
+   * The daily update check (design 2026-09-28 §3), before any command but the exempt ones: an update that is out
+   * stops it — a person at a terminal is asked "Update now, later today, or cancel?", anything else ends with
+   * UPDATE_REQUIRED (exit 11). A hook on the program, so a command added later is gated by being a command at all;
+   * `act` ends with the exit status it decided, when it decided one.
+   */
+  let gated: number | null = null;
+  program.hook('preAction', async (_program, command) => {
+    const path = commandPathOf(command);
+    // `sign-in-listen` too: it is the listener a sign-in started, not a command anybody types, and stopping it would
+    // break the sign-in the person is in the middle of.
+    if (exemptFromUpdateGate(path, ['sign-in-listen'])) return;
+    const core = openCore({ env });
+    let ended: number | null = null;
+    const code = await runCommand(
+      output(),
+      async () => {
+        ended = await updateGateAtTerminal({
+          core,
+          env,
+          binary: 'agent-slack',
+          channel: 'slack',
+          running: VERSION,
+          output: output(),
+          noInput: false,
+          streams,
+          approveCommand: 'agent-slack approve',
+          approvals: approvalsOf(command),
+          ...terminalUpdateHooks(core, env, { output: output(), streams, approveCommand: 'agent-slack approve' }),
+        });
+      },
+      streams,
+    );
+    gated = code !== 0 ? code : ended;
+  });
+
   const act =
     <A extends unknown[]>(body: (context: SlackContext, options: GlobalOptions, ...args: A) => Promise<void>) =>
     async (...args: A): Promise<void> => {
       ran = true;
       softExit = null;
+      if (gated !== null) {
+        exitCode = gated;
+        return;
+      }
       const context = new SlackContext({ ...deps, env, surface: 'cli' });
       /*
        * Any command that reads may refresh a token, and the MCP server's two protections apply here for the same

@@ -63,7 +63,7 @@ async function exists(entry, binary, argv) {
     const result = await run(
       process.execPath,
       ['--experimental-strip-types', '--disable-warning=ExperimentalWarning', join(ROOT, entry), ...argv, '--help'],
-      { env: { ...process.env, NO_COLOR: '1' } },
+      { env: { ...process.env, NO_COLOR: '1', AGENT_COMMS_UPDATE_CHECK: 'off' } },
     );
     output = `${result.stdout}${result.stderr}`;
   } catch (error) {

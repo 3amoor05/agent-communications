@@ -34,6 +34,13 @@ export {
   serverInstallChange,
   serverPruneChange,
 } from './operations/servers.ts';
+export { type UpdateDeps, updateChange } from './operations/update.ts';
+export {
+  type UpdateAutoResult,
+  type UpdateLaterResult,
+  updateAutoChange,
+  updateLaterChange,
+} from './operations/update-settings.ts';
 export * from './other-servers.ts';
 export * from './output.ts';
 export * from './paths.ts';
@@ -47,6 +54,15 @@ export * from './state.ts';
 export * from './taint.ts';
 export * from './tool-arguments.ts';
 export * from './untrusted.ts';
+/*
+ * The daily update check (design 2026-09-28). The reader and the gate carry no network code, and are all WhatsApp
+ * imports; the checker and the update asks the registry, and every other package imports them for its servers' and
+ * commands' gates.
+ */
+export * from './update-check.ts';
+export * from './update-gate.ts';
+export * from './update-state.ts';
 export { VERSION } from './version.ts';
+export * from './versions.ts';
 
 export const PACKAGE_NAME = '@agentcomms/core';

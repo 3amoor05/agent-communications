@@ -1,4 +1,4 @@
-import { type CommsError, strictToolArguments, toCommsError, UNTRUSTED_NOTICE } from '@agentcomms/core';
+import { type CommsError, strictToolArguments, toCommsError, UNTRUSTED_NOTICE, updateToolGate } from '@agentcomms/core';
 import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { WhatsAppContext, type WhatsAppContextOptions } from '../context.ts';
@@ -103,7 +103,24 @@ export async function createWhatsAppMcpServer(options: WhatsAppMcpOptions = {}):
     };
   };
 
-  strictToolArguments(server, fail);
+  /*
+   * The daily update check's stop (design 2026-09-28), from the file alone: this package has no network code, so it
+   * never asks the registry itself — there is no `refresh` — and learns of an update once any other server or command
+   * on the machine has asked. `whatsapp_status` is its doctor, and is never stopped.
+   */
+  strictToolArguments(
+    server,
+    fail,
+    updateToolGate({
+      core: context.core,
+      env: context.env,
+      server: 'agent-whatsapp',
+      channel: 'whatsapp',
+      running: VERSION,
+      exempt: ['whatsapp_status'],
+      now: context.now,
+    }),
+  );
 
   // Nothing here reaches a network. The index tools read this Mac only; sync reads WhatsApp's store and writes the
   // package's own index — local, and safe to repeat.

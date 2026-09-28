@@ -1,15 +1,19 @@
 import {
   agentMarker,
   approvalKind,
+  approvalsOf,
   approveChangeAtTerminal,
   CommsError,
   canPrompt,
   colorEnabled,
+  commandPathOf,
   EXIT_CODES,
+  exemptFromUpdateGate,
   type GatedChange,
   gatedChangeAtTerminal,
   installExitStatus,
   type OutputOptions,
+  openCore,
   paint,
   renderInstall,
   renderPrune,
@@ -18,6 +22,8 @@ import {
   type SupportedClient,
   serverInstallChange,
   serverPruneChange,
+  terminalUpdateHooks,
+  updateGateAtTerminal,
   writeResult,
 } from '@agentcomms/core';
 import { Command, CommanderError, Option } from 'commander';
@@ -145,7 +151,8 @@ Getting started:
   agent-resend received list --account acme/resend
   agent-resend mcp install --client claude-code   register the server with an agent, once a person approves it
 
-Exit codes: 0 ok · 1 unexpected · 10 a send or a change was refused or needs approval · 64 usage ·
+Exit codes: 0 ok · 1 unexpected · 10 a send or a change was refused or needs approval · 11 an update
+is out: update first, or put it off (agentcomms update, agentcomms update --later) · 64 usage ·
 65 bad data · 66 not found · 69 provider or secret store unavailable · 75 temporary (retry later) ·
 77 key or permission needed · 78 configuration problem.`,
     )
@@ -160,11 +167,49 @@ Exit codes: 0 ok · 1 unexpected · 10 a send or a change was refused or needs a
   };
   const output = (): OutputOptions => ({ json: globals().json, color: globals().color });
 
+  /*
+   * The daily update check (design 2026-09-28 §3), before any command but the exempt ones: an update that is out
+   * stops it — a person at a terminal is asked "Update now, later today, or cancel?", anything else ends with
+   * UPDATE_REQUIRED (exit 11). A hook on the program, so a command added later is gated by being a command at all;
+   * `act` ends with the exit status it decided, when it decided one.
+   */
+  let gated: number | null = null;
+  program.hook('preAction', async (_program, command) => {
+    const path = commandPathOf(command);
+    if (exemptFromUpdateGate(path)) return;
+    const core = openCore({ env });
+    let ended: number | null = null;
+    const code = await runCommand(
+      output(),
+      async () => {
+        ended = await updateGateAtTerminal({
+          core,
+          env,
+          binary: 'agent-resend',
+          channel: 'resend',
+          running: VERSION,
+          output: output(),
+          noInput: false,
+          streams,
+          approveCommand: 'agent-resend approve',
+          approvals: approvalsOf(command),
+          ...terminalUpdateHooks(core, env, { output: output(), streams, approveCommand: 'agent-resend approve' }),
+        });
+      },
+      streams,
+    );
+    gated = code !== 0 ? code : ended;
+  });
+
   const act =
     <A extends unknown[]>(body: (context: ResendContext, options: GlobalOptions, ...args: A) => Promise<void>) =>
     async (...args: A): Promise<void> => {
       ran = true;
       softExit = null;
+      if (gated !== null) {
+        exitCode = gated;
+        return;
+      }
       const context = new ResendContext({ ...deps, env, surface: 'cli' });
       exitCode = await runCommand(output(), () => body(context, globals(), ...args), streams);
       if (exitCode === 0 && softExit !== null) exitCode = softExit;

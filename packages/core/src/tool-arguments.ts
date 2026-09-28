@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { CommsError } from './errors.ts';
+import type { ToolGate } from './update-gate.ts';
 
 /**
  * Tool arguments, held to the tool's schema — every key declared, every value what it says — and refused as `USAGE`
@@ -62,8 +63,14 @@ const TARGET = 'draft-2020-12';
  * `registerTool`, so a tool added later gets the check by being registered at all, and nobody has to remember it.
  * `refuse` is handed a `USAGE` `CommsError` and returns the tool result, so the refusal is in the same envelope as
  * every other refusal that server makes.
+ *
+ * `gate` is asked next, with the checked arguments, before the handler: the daily update check's stop (design
+ * 2026-09-28), which every server builds with `updateToolGate`. Here because this is the one place every tool of every
+ * server already passes through, so no tool can be registered without it; given to the wrapper rather than built
+ * in, because what it asks the registry with is each server's own — and WhatsApp's is nothing at all. A call it
+ * answers reaches nothing, as a refused one does.
  */
-export function strictToolArguments(server: object, refuse: RefuseToolCall): void {
+export function strictToolArguments(server: object, refuse: RefuseToolCall, gate?: ToolGate): void {
   const target = server as { registerTool?: unknown; [APPLIED]?: true };
   if (typeof target.registerTool !== 'function') {
     throw new Error('strictToolArguments needs an MCP server: this has no registerTool');
@@ -81,6 +88,8 @@ export function strictToolArguments(server: object, refuse: RefuseToolCall): voi
     return register(name, { ...config, inputSchema: passThrough(schema) }, async (input: unknown, context: unknown) => {
       const parsed = await schema.safeParseAsync(input ?? {});
       if (!parsed.success) return refuse(refusal(name, published, input, parsed.error.issues));
+      const stopped = gate ? await gate(name, parsed.data as Record<string, unknown>) : null;
+      if (stopped !== null) return stopped;
       return declared ? handler(parsed.data, context) : handler(context);
     });
   };

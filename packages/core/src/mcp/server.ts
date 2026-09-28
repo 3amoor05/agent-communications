@@ -23,8 +23,11 @@ import {
   serverPruneChange,
 } from '../operations/servers.ts';
 import { type UpdateDeps, updateChange, updateCheck } from '../operations/update.ts';
+import { updateAutoChange, updateLaterChange } from '../operations/update-settings.ts';
 import type { KeyringModule, SecretStore } from '../secrets.ts';
 import { strictToolArguments } from '../tool-arguments.ts';
+import { checkForUpdates } from '../update-check.ts';
+import { updateToolGate } from '../update-gate.ts';
 import { VERSION } from '../version.ts';
 
 /**
@@ -55,7 +58,10 @@ export interface CoreMcpOptions {
   secretStores?: { source?: SecretStore; target?: SecretStore } | undefined;
   /** For a test: the running processes prune checks, or null when they cannot be listed. */
   processes?: (() => Promise<readonly string[] | null>) | undefined;
-  /** For a test: the registry, the global packages and the installers an update uses, so none of them is real. */
+  /**
+   * For a test: the registry, the global packages and the installers an update uses, so none of them is real — and
+   * the clock the daily update check reads and records by.
+   */
   update?: UpdateDeps | undefined;
 }
 
@@ -145,8 +151,23 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
     };
   };
   // Every tool registered from here on refuses a key it does not declare, and arguments its schema rejects, as USAGE
-  // in the envelope above — before its handler runs. See `strictToolArguments`.
-  strictToolArguments(server, fail);
+  // in the envelope above — before its handler runs. See `strictToolArguments`. Then the daily update check's stop
+  // (design 2026-09-28): an update that is out stops every tool but the update's own, the doctor and the paths, and
+  // the check itself runs in the background, never delaying a call.
+  strictToolArguments(
+    server,
+    fail,
+    updateToolGate({
+      core,
+      env,
+      server: 'agentcomms',
+      channel: 'core',
+      running: VERSION,
+      exempt: ['comms_update', 'comms_doctor', 'comms_paths'],
+      refresh: () => checkForUpdates(core, env, { deps: options.update, now: options.update?.now }),
+      now: options.update?.now,
+    }),
+  );
   /** One changing call: the change this tool plans, run through the one flow, returned in its one shape. */
   const change = async <T>(build: () => GatedChange<T>, approvalId: string | undefined) => {
     try {
@@ -418,11 +439,37 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
       inputSchema: {
         check: z.boolean().optional().describe('only report what is behind and what is up to date; change nothing'),
         noVerify: z.boolean().optional().describe('do not start each registered server to check that it answers'),
+        later: z
+          .boolean()
+          .optional()
+          .describe(
+            'not now: every server and command on this machine carries on without stopping for the update until midnight, local time. A change the person approves: the first call returns its preview and an approvalId',
+          ),
+        auto: z
+          .enum(['on', 'off'])
+          .optional()
+          .describe(
+            'turn the daily update check on or off for this machine. `off` is a change the person approves, like `later`; `on` applies at once',
+          ),
         ...approvalArg,
       },
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     },
     async (args) => {
+      const modes = [args.check === true, args.later === true, args.auto !== undefined].filter(Boolean).length;
+      if (modes > 1 || (args.noVerify !== undefined && (args.later === true || args.auto !== undefined))) {
+        return fail(
+          new CommsError('USAGE', '`check`, `later` and `auto` are one at a time, and `noVerify` is for the update', {
+            hint: 'Call comms_update with one of them — or none, to update.',
+          }),
+        );
+      }
+      if (args.later === true) {
+        return change(() => updateLaterChange(core, { now: options.update?.now }), args.approvalId);
+      }
+      if (args.auto !== undefined) {
+        return change(() => updateAutoChange(core, args.auto as 'on' | 'off'), args.approvalId);
+      }
       if (args.check === true) {
         return read(() => {
           if (args.approvalId !== undefined) {

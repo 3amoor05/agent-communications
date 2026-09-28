@@ -35,6 +35,7 @@ async function npxArgs(runsCli: boolean | undefined): Promise<string[]> {
     HOME: home,
     USERPROFILE: home,
     APPDATA: join(home, 'AppData', 'Roaming'),
+    AGENT_COMMS_UPDATE_CHECK: 'off', // no test asks the real npm registry, or stops for a release
   };
   // The scanner follows these to where codex and Claude Code keep their real configs; this test reads neither.
   delete env.CODEX_HOME;
