@@ -745,6 +745,65 @@ test('what an update records: what it moved counts, and a step that failed, was 
   assert.equal(updateCheckFindings(report(), LATEST, result([], { status: 'up-to-date' })).behind, false);
 });
 
+test('what an update records: an old entry by the same name in another scope is not the one it moved', () => {
+  /*
+   * Claude Code, with a user-scope `gmail` the update registers again, and a `gmail` one project pins to an old
+   * release. The update leaves the project's for a person (it registers at user scope only), and in that project
+   * Claude Code starts the project's — so Gmail is not known to run the latest there, and restarting would not help.
+   * Twice: a local-scope entry, which Claude Code keeps in the same `~/.claude.json` as the user's, told apart only by
+   * its scope; and a project-scope one, in the project's own `.mcp.json`.
+   */
+  const claudeJson = '~/.claude.json';
+  const user = registration('gmail', OLD, { client: 'claude-code', path: claudeJson });
+  const moved: UpdateStep = {
+    kind: 'registration',
+    channel: 'gmail',
+    client: 'claude-code',
+    name: 'gmail',
+    scope: 'user',
+    path: claudeJson,
+    launcher: 'npx',
+    from: OLD,
+    to: LATEST,
+    narrowing: [],
+    outcome: 'registered',
+    verification: 'passed',
+  };
+  for (const [label, left] of [
+    [
+      'local scope, the same file',
+      registration('gmail', OLD, { client: 'claude-code', scope: 'project', path: claudeJson }),
+    ],
+    [
+      'project scope, its own file',
+      registration('gmail', OLD, { client: 'claude-code', scope: 'project', path: '/work/app/.mcp.json' }),
+    ],
+  ] as const) {
+    const pinnedOld = { ...left, updatable: false, reason: 'it is registered for one project' };
+    const findings = updateCheckFindings(report({ behind: [user, pinnedOld] }), LATEST, {
+      status: 'manual',
+      latest: { [CORE]: LATEST },
+      steps: [moved],
+      manual: [pinnedOld],
+      ok: true,
+      next: null,
+    });
+    assert.deepEqual(findings, { behind: true, current: { registered: [], global: [] } }, label);
+  }
+  // Moved on its own, the user's entry does make Gmail current: the key still finds the registration it moved.
+  assert.deepEqual(
+    updateCheckFindings(report({ behind: [user] }), LATEST, {
+      status: 'updated',
+      latest: { [CORE]: LATEST },
+      steps: [moved],
+      manual: [],
+      ok: true,
+      next: null,
+    }).current.registered,
+    ['gmail'],
+  );
+});
+
 // ── Not now ───────────────────────────────────────────────────────────────────────────────────────────────────
 
 test('not now lasts until local midnight, and holds for every server on the machine', async () => {

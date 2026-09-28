@@ -500,9 +500,23 @@ export async function updateCheck(core: Core, env: NodeJS.ProcessEnv, deps: Upda
 
 const CORE_PACKAGE = channelServer('core').packageName;
 
-/** One registration, however many of a client's files hold a copy of it: an update registers it again as one. */
-const registrationKey = (entry: { channel: Channel; client: string; name: string }): string =>
-  `${entry.channel}\u0000${entry.client}\u0000${entry.name}`;
+/**
+ * One registration: its channel, its client, its scope, the file it is in and its name. Two copies of it in one file —
+ * `servers` and an old `mcpServers` — are one registration, and an update registers them again as one.
+ *
+ * The scope and the file are part of it because a name is not unique to a client. A `gmail` a project pins to an old
+ * release sits beside the user's `gmail` the update moves, in the project's `.mcp.json` — or, for a local-scope entry,
+ * in the very `~/.claude.json` the user's is in, told apart only by its scope. The update leaves such an entry for a
+ * person, and in that project the client starts it rather than the user's. Keyed by name alone it counted as moved,
+ * and every call there was told to restart the client — which starts the same old code.
+ */
+const registrationKey = (entry: {
+  channel: Channel;
+  client: string;
+  scope: 'user' | 'project';
+  path: string;
+  name: string;
+}): string => [entry.channel, entry.client, entry.scope, entry.path, entry.name].join('\u0000');
 
 /**
  * What a check or an update found, written to the daily update check's file (design 2026-09-28 §1): when the registry
