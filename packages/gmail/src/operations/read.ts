@@ -1,11 +1,11 @@
 import {
   decodeHeaderWords,
+  fileRisks,
   neutralise,
   newBoundary,
   type ParsedAddress,
   parseAddressList,
   type SanitizeReport,
-  safeFilename,
   TaintCollector,
   wrapUntrusted,
 } from '@agentcomms/core';
@@ -67,16 +67,6 @@ export interface ReadMessageResult {
   webLink: string;
 }
 
-/** File kinds worth naming before anyone opens one. Nothing here is ever opened or executed by this package. */
-const RISK_RULES: Array<{ flag: string; extensions?: RegExp; mimeTypes?: RegExp }> = [
-  { flag: 'executable', extensions: /\.(exe|msi|bat|cmd|com|scr|pif|app|dmg|pkg|deb|rpm|apk)$/i },
-  { flag: 'script', extensions: /\.(js|mjs|vbs|ps1|sh|bash|zsh|py|rb|jar|jse|wsf|hta)$/i },
-  { flag: 'macro-enabled', extensions: /\.(docm|xlsm|pptm|dotm|xltm|xlam)$/i },
-  { flag: 'markup', extensions: /\.(html?|svg|xhtml|mht|mhtml)$/i, mimeTypes: /^(text\/html|image\/svg\+xml)$/i },
-  { flag: 'archive', extensions: /\.(zip|rar|7z|tar|gz|bz2|xz|iso|cab)$/i },
-  { flag: 'disk-image', extensions: /\.(iso|img|vhd|vmdk)$/i },
-];
-
 /**
  * A parsed address with its display name neutralised.
  *
@@ -106,16 +96,8 @@ function safeAddress<T extends { name: string; address: string } | null>(entry: 
  * find row or a message read at all.
  */
 export function attachmentRisks(filename: string, mimeType: string): string[] {
-  const decoded = decodeHeaderWords(filename);
-  const onDisk = safeFilename(decoded);
-  const flags: string[] = [];
-  for (const rule of RISK_RULES) {
-    if (rule.extensions?.test(onDisk) || rule.mimeTypes?.test(mimeType)) flags.push(rule.flag);
-  }
-  // `invoice.pdf.exe` shows as `invoice.pdf` in clients that hide extensions.
-  if (/\.[a-z0-9]{2,5}\.[a-z0-9]{2,5}$/i.test(onDisk)) flags.push('double-extension');
-  if (/[‪-‮⁦-⁩]/.test(decoded)) flags.push('bidi-filename');
-  return [...new Set(flags)];
+  // The rules are core's, shared with Slack's file download; what is Gmail's own is decoding the header first.
+  return fileRisks(decodeHeaderWords(filename), mimeType);
 }
 
 export interface GmailMessage {
