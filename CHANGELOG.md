@@ -3,6 +3,47 @@
 All notable changes to this project are recorded here, newest first. Every package in this repository is released
 together under one version.
 
+## 0.7.2
+
+**Installing a server from chat works where Homebrew put Claude Code, and says so when it does not.** An MCP server
+runs with a short, fixed PATH. On an Apple Silicon Mac where Claude Code came from Homebrew, `claude` is in
+`/opt/homebrew/bin`, which is not on it. So `comms_server_install`, and a channel's install run from chat, found no
+client, registered nothing, and still answered `applied: true`: the person restarted Claude Code for tools that never
+came.
+- The client's own command is now also looked for in `~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin`.
+- An install from chat that registers nothing, or whose server does not start, is an error (`PROVIDER_UNAVAILABLE`).
+  It says why and carries the entry to add by hand, as the command line has always done with its exit status.
+  `print: true` is still a success.
+
+**The doctors look at what is registered.**
+- `agentcomms doctor` (and `comms_doctor`) checks each channel's registrations. A registered server whose files are
+  gone fails. A channel with accounts on this machine that no client starts is flagged to look at. A client
+  configuration it cannot read is reported, not taken as empty.
+- `agent-gmail doctor` and `agent-slack doctor` said "Registered server version: this release" when no client had
+  the server at all. They now say "none registered", to look at.
+
+**`agent-gmail setup --mcp-client` finishes what it was asked.** With `--inbox` and no browser at hand, setup starts
+the sign-in and hands you a `--finish` command, and the registration asked for with `--mcp-client` was forgotten.
+The sign-in now carries it:
+- The hand-off says that finishing will also register the Gmail server.
+- `agent-gmail inbox add --finish` registers it once you approve: at a terminal there and then; otherwise it
+  returns the preview and the `agent-gmail mcp install … --approval <id>` command that claims it. It skips only
+  when the client already has a Gmail server of ours that serves this mailbox and still starts, and
+  `--replace-server` is carried through. The mailbox is connected either way.
+- From chat, `gmail_inbox_finish` connects the mailbox and names the `comms_server_install` call that registers it.
+- Every printed finish command waits 60 seconds; setup's said 120.
+
+Why: a report from a second Mac. A WhatsApp install from chat said it had succeeded, registered nothing, and every
+check stayed green.
+
+What it means for you: a patch; nothing that worked changes.
+- From chat, an install that could not register is now an error rather than a success, so an agent that read only
+  `applied` sees the failure.
+- `doctor` may show new "to look at" lines, each with what to run.
+- To get 0.7.2, run `agentcomms update` (or say "update my comms" in chat), then restart your client. On a Mac with
+  Claude Code in `/opt/homebrew/bin` that is still on 0.7.1, run it from a terminal: 0.7.1's chat tools cannot find
+  `claude` there.
+
 ## 0.7.1
 
 **0.7.0, released in full.** 0.7.0 reached npm only as `@agentcomms/resend` and `@agentcomms/whatsapp`. The release
