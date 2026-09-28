@@ -854,17 +854,72 @@ async function sources(): Promise<{ path: string; text: string }[]> {
   return out;
 }
 
+/**
+ * The ways a source file could reach `downloadWith`, each by the rule it breaks; empty when it reaches it by none.
+ *
+ * A text scan cannot see through every indirection — a property name built at run time is one — so these close the
+ * ways that read as ordinary code. Naming it in an import or export covers a named, an aliased and a re-exported
+ * import. Calling it, or reading it off an object, covers a namespace import that got past the other rules. And
+ * `guard.ts` may be imported only by name, statically: a namespace import, an `export *` of it, or an `import()` —
+ * of it, or of anything not written out — reaches everything it exports without spelling any of it.
+ *
+ * A comment that cites `downloadWith` in backquotes, as `methods.ts` does, breaks none of them.
+ */
+function grantReach(text: string): string[] {
+  const broken: string[] = [];
+  if (/^\s*(?:import|export)\b[^;]*\bdownloadWith\b[^;]*;/m.test(text)) broken.push('names it in an import or export');
+  if (/\bdownloadWith\s*\(|\.\s*downloadWith\b|\[\s*['"`]downloadWith['"`]\s*\]/.test(text)) {
+    broken.push('calls it or reads it off an object');
+  }
+  if (/\bimport\s*\*\s*as\s+\w+\s+from\s*['"][^'"]*guard(?:\.ts)?['"]/.test(text)) {
+    broken.push('imports guard.ts as a namespace');
+  }
+  if (/\bexport\s*\*[^;]*from\s*['"][^'"]*guard(?:\.ts)?['"]/.test(text)) broken.push('re-exports all of guard.ts');
+  for (const call of text.matchAll(/\bimport\s*\(\s*([^)]*)\)/g)) {
+    const specifier = (call[1] ?? '').trim();
+    if (!/^(['"])[^'"]*\1$/.test(specifier)) broken.push('imports something not written out');
+    else if (/guard(?:\.ts)?['"]$/.test(specifier)) broken.push('imports guard.ts at run time');
+  }
+  return broken;
+}
+
+test('the check for who opens a download grant catches every ordinary way of reaching it', () => {
+  const reaching: Record<string, string> = {
+    named: "import { closedPermit, downloadWith } from './guard.ts';",
+    aliased: "import { downloadWith as fetchFile } from '../api/guard.ts';\nfetchFile(permit, grant, work);",
+    reexported: "export { downloadWith } from './guard.ts';",
+    namespace: "import * as guard from '../api/guard.ts';\nguard.downloadWith(permit, grant, work);",
+    'namespace, bracketed': "import * as g from './guard.ts';\ng['downloadWith'](permit, grant, work);",
+    'export all': "export * from './guard.ts';",
+    'at run time': "const guard = await import('./guard.ts');\nawait guard.downloadWith(permit, grant, work);",
+    'at run time, destructured': "const { downloadWith: open } = await import('../api/guard.ts');",
+    'at run time, computed': "const guard = await import('./gua' + 'rd.ts');",
+  };
+  for (const [how, text] of Object.entries(reaching)) {
+    assert.notDeepEqual(grantReach(text), [], `${how}: caught`);
+  }
+  const innocent: Record<string, string> = {
+    'another export': "import { closedPermit, guardSlackRequests } from './guard.ts';",
+    'a type': "import type { FetchLike } from '../api/guard.ts';",
+    'a comment': ' * inside a grant for exactly that file (`downloadWith` in `guard.ts`).',
+    'another module at run time': "const { startSlackStdioServer } = await import('../mcp/stdio-entry.ts');",
+  };
+  for (const [how, text] of Object.entries(innocent)) {
+    assert.deepEqual(grantReach(text), [], `${how}: not caught`);
+  }
+});
+
 test('only the download transport opens a download grant', async () => {
   /*
    * The grant is what makes the files host reachable at all, so the question is who can open one. One module:
    * `api/download.ts`, which opens it only for a link it has already checked against the file looked up. Anything
-   * else that imported it could fetch any file's path with the token on it.
+   * else that reached it could fetch any file's path with the token on it.
    */
   const files = await sources();
   assert.deepEqual(
     files
-      .filter((file) => file.path !== 'api/guard.ts' && /^import [^;]*\bdownloadWith\b[^;]*;/m.test(file.text))
-      .map((file) => file.path),
-    ['api/download.ts'],
+      .filter((file) => file.path !== 'api/guard.ts' && grantReach(file.text).length > 0)
+      .map((file) => [file.path, grantReach(file.text)]),
+    [['api/download.ts', ['names it in an import or export', 'calls it or reads it off an object']]],
   );
 });
