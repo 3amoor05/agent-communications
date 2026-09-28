@@ -383,8 +383,9 @@ test('a piped `--start` returns immediately: the listener does not hold the call
   // the detached child holds the write end for as long as it waits for a browser — ten minutes. Everything the
   // command was going to print has already been printed either way, so only EOF distinguishes the two.
   const eof = new Promise<'eof'>((resolve) => child.stderr.once('end', () => resolve('eof')));
-  const raced = await Promise.race([eof, new Promise<'held'>((resolve) => setTimeout(() => resolve('held'), 15_000))]);
-  assert.equal(raced, 'eof', `stderr was still open after 15s; it printed: ${stdout}${stderr}`);
+  // Longer than the thirty seconds `--start` may wait for its listener, so a slow start is not read as a held pipe.
+  const raced = await Promise.race([eof, new Promise<'held'>((resolve) => setTimeout(() => resolve('held'), 45_000))]);
+  assert.equal(raced, 'eof', `stderr was still open after 45s; it printed: ${stdout}${stderr}`);
 
   const exit = await new Promise<number | null>((resolve) => child.once('close', (code) => resolve(code)));
   assert.equal(exit, 0);

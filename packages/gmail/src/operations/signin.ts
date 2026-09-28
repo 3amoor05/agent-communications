@@ -21,6 +21,13 @@ import type { GmailContext } from '../context.ts';
 import { type ConsentResult, completeConsent } from './consent.ts';
 import { requireNewInboxName } from './inbox-names.ts';
 
+/**
+ * How long a detached sign-in waits for its listener to say it is ready. Thirty seconds, not ten: starting a process on
+ * a busy machine, or a slow Windows one, took longer than ten, and a listener that was merely slow was killed and its
+ * sign-in thrown away. It bounds only how long a listener that will never report is waited for. Slack's is the same.
+ */
+const LISTENER_START_MS = 30_000;
+
 export interface StartOptions {
   mode: 'add' | 'reauth';
   alias: string;
@@ -304,12 +311,9 @@ async function startDetached(
 
   try {
     await new Promise<void>((resolve, reject) => {
-      // Thirty seconds, not ten: starting a process on a busy machine, or a slow Windows one, took longer than ten,
-      // and a listener that is merely slow was then killed and its sign-in thrown away. This only bounds how long a
-      // listener that will never report is waited for.
       const timer = setTimeout(
         () => reject(new Error('the sign-in listener did not start within thirty seconds')),
-        30_000,
+        LISTENER_START_MS,
       );
       child.once('message', (message: { type?: string; error?: string }) => {
         clearTimeout(timer);

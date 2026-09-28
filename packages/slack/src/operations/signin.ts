@@ -34,6 +34,13 @@ import {
 } from './workspaces.ts';
 
 /**
+ * How long a detached sign-in waits for its listener to say it is ready. Thirty seconds, not ten: starting a process on
+ * a busy machine, or a slow Windows one, took longer than ten, and a listener that was merely slow was killed and its
+ * sign-in thrown away. It bounds only how long a listener that will never report is waited for. Gmail's is the same.
+ */
+const LISTENER_START_MS = 30_000;
+
+/**
  * Signing in, in two halves, because the process that starts one usually cannot wait for it.
  *
  * An agent's shell call returns in seconds; finding the Slack tab, reading the consent screen and approving takes
@@ -282,8 +289,8 @@ async function startDetached(
   try {
     await new Promise<void>((settle, reject) => {
       const timer = setTimeout(
-        () => reject(new Error('the sign-in listener did not start within ten seconds')),
-        10_000,
+        () => reject(new Error('the sign-in listener did not start within thirty seconds')),
+        LISTENER_START_MS,
       );
       child.once('message', (message: { type?: string; error?: string }) => {
         clearTimeout(timer);
