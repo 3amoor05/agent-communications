@@ -84,7 +84,13 @@ export async function newHarness(
   mkdirSync(configDir, { recursive: true });
   writeFileSync(join(configDir, 'config.json'), `${JSON.stringify({ version: 2, secrets: { store: 'file' } })}\n`);
   const env: NodeJS.ProcessEnv = {
+    /*
+     * The home under both names core reads it by: `HOME` on macOS and Linux, `USERPROFILE` on Windows. With `HOME`
+     * alone, a Windows run resolved the default data and downloads directories to the real profile of whoever ran the
+     * tests, as the Slack harness did until the 0.8.0 release run caught it.
+     */
     HOME: home,
+    USERPROFILE: home,
     AGENT_COMMS_CONFIG_DIR: configDir,
     AGENT_COMMS_STATE_DIR: join(root, 'state'),
     AGENT_COMMS_DATA_DIR: join(root, 'data'),
