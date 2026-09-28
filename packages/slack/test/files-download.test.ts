@@ -785,9 +785,7 @@ test('the audit record is written for what was saved even when the manifest cann
         assert.equal(error.code, 'CONFIG');
         assert.match(
           error.message,
-          stopped
-            ? /^the download stopped part-way: /
-            : /^the files were saved, but manifest\.json could not be written/,
+          stopped ? /^the download stopped part-way: / : /^the file was saved, but manifest\.json could not be written/,
         );
         assert.deepEqual(error.details, {
           saved: 1,
@@ -805,6 +803,47 @@ test('the audit record is written for what was saved even when the manifest cann
     assert.equal(record?.outcome, 'failed', `${stopped}: the audit record was written`);
     assert.deepEqual(record?.ids?.fileIds, ['F0A']);
     assert.match(record?.reason ?? '', /; manifest\.json not written$/);
+  }
+});
+
+test('an audit log that cannot be written fails the call, which still says what was saved and where it is listed', async () => {
+  // Once with a file saved, once with the only file skipped: the second must not claim anything was saved.
+  for (const saving of [true, false]) {
+    const { harness, root, run } = await setup({ 'files.info': filesInfo({ F0A: fileRecord('F0A', { shares: {} }) }) });
+    // The audit log is this machine's record of what the download left here; a failure to write it is a failure.
+    Object.assign(harness.core.audit, {
+      append: async () => {
+        throw Object.assign(new Error('EACCES: permission denied, open'), { code: 'EACCES' });
+      },
+    });
+    const manifestPath = join(root, 'acme', 'manifest.json');
+
+    await assert.rejects(
+      run({ fileIds: ['F0A'] }, { download: transport({ F0A: saving ? 'a' : refusal('network') }).download }),
+      (error: unknown) => {
+        assert.ok(error instanceof CommsError, `${saving}: a CommsError, not the raw Node error`);
+        assert.equal(error.code, 'CONFIG');
+        assert.equal(
+          error.message,
+          saving
+            ? 'the file was saved and manifest.json lists it, but the audit log could not be written: EACCES: permission denied, open'
+            : 'the audit log could not be written: EACCES: permission denied, open',
+        );
+        assert.deepEqual(error.details, {
+          saved: saving ? 1 : 0,
+          savedFiles: saving ? [{ fileId: 'F0A', path: join(root, 'acme', 'undated_F0A', 'F0A.pdf') }] : [],
+          manifestPath,
+          audited: false,
+        });
+        assert.match(
+          error.hint ?? '',
+          saving ? /1 file was saved, and manifest\.json lists it\./ : /^Nothing was saved\.$/,
+        );
+        return true;
+      },
+    );
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as FileDownloadResult;
+    assert.equal(manifest.files.length, saving ? 1 : 0, 'the manifest was still written');
   }
 });
 

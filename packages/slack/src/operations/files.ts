@@ -778,12 +778,14 @@ function unfinished(state: {
         ? 'the audit log records which'
         : `\`savedFiles\` in this error lists ${them}`;
 
+  // Said only when it is true: a run that saved nothing — every file skipped — has nothing to say was saved.
+  const savedSoFar = count === 0 ? '' : `${count === 1 ? 'the file was' : 'the files were'} saved`;
   let message: string;
   if (stopped !== undefined) message = `the download stopped part-way: ${messageOf(stopped.error)}`;
   else if (manifestFailure !== undefined) {
-    message = `${count > 0 ? 'the files were saved, but ' : ''}manifest.json could not be written: ${messageOf(manifestFailure.error)}`;
+    message = `${savedSoFar === '' ? '' : `${savedSoFar}, but `}manifest.json could not be written: ${messageOf(manifestFailure.error)}`;
   } else {
-    message = `the files were saved and manifest.json lists ${them}, but the audit log could not be written: ${messageOf(auditFailure?.error)}`;
+    message = `${savedSoFar === '' ? '' : `${savedSoFar} and manifest.json lists ${them}, but `}the audit log could not be written: ${messageOf(auditFailure?.error)}`;
   }
   const saved =
     count === 0
