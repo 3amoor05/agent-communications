@@ -304,9 +304,12 @@ async function startDetached(
 
   try {
     await new Promise<void>((resolve, reject) => {
+      // Thirty seconds, not ten: starting a process on a busy machine, or a slow Windows one, took longer than ten,
+      // and a listener that is merely slow was then killed and its sign-in thrown away. This only bounds how long a
+      // listener that will never report is waited for.
       const timer = setTimeout(
-        () => reject(new Error('the sign-in listener did not start within ten seconds')),
-        10_000,
+        () => reject(new Error('the sign-in listener did not start within thirty seconds')),
+        30_000,
       );
       child.once('message', (message: { type?: string; error?: string }) => {
         clearTimeout(timer);

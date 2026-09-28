@@ -165,7 +165,7 @@ and claimed atomically, so two `--finish` calls cannot both consume it.
 
 **The causes that actually strand a sign-in started from an agent.**
 
-- *The listener could not start.* `--start` waits ten seconds for the detached listener to report
+- *The listener could not start.* `--start` waits thirty seconds for the detached listener to report
   the port it bound; if it does not, the flow is discarded and the error suggests running the
   sign-in on a terminal instead. This is the answer when the command came back quickly with an error
   rather than hanging.
