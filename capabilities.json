@@ -947,6 +947,14 @@
       "operation": "listFiles"
     },
     {
+      "id": "slack.files.download",
+      "package": "slack",
+      "cli": "files download",
+      "mcp": "slack_file_download",
+      "status": "both",
+      "operation": "downloadFiles"
+    },
+    {
       "id": "slack.people",
       "package": "slack",
       "cli": "people",

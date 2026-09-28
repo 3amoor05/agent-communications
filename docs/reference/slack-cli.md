@@ -279,7 +279,7 @@ agent-slack search [options] <query>
 files shared in this workspace
 
 ```
-agent-slack files [options]
+agent-slack files [options] [command]
 ```
 
 | Option | What it does | Default |
@@ -288,6 +288,24 @@ agent-slack files [options]
 | `--channel <id>` | only files in one channel | — |
 | `--limit <n>` | how many: 1 to 200, one page of files | `"50"` |
 | `--page <n>` | which page; an incomplete result says which is next | — |
+
+### `agent-slack files download`
+
+save files to the downloads folder: by id, from one message, or from a conversation. Opens nothing
+
+```
+agent-slack files download [options]
+```
+
+| Option | What it does | Default |
+|---|---|---|
+| `--workspace <name>` | which workspace, as `organisation/slack` | — |
+| `--file <id...>` | these files, by Slack file id | — |
+| `--message <channel> <ts>` | the files of one message: its conversation and its ts | — |
+| `--channel <id>` | the files shared in this conversation — a channel, a DM or a group DM — newest first | — |
+| `--since <ts>` | with --channel: only files shared at or after this Slack timestamp | — |
+| `--out <folder>` | a folder inside the downloads root | — |
+| `--max-files <n>` | stop after this many files: 1 to 200 (default 50) | — |
 
 ### `agent-slack people`
 

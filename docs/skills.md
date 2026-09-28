@@ -48,7 +48,7 @@ Each family of skills shares one contract, copied into every skill as `reference
 | [`resend-reading`](#resend-reading) | Read a Resend team — its domains, the sent emails and what happened to each, received email, delivery metrics and the suppression list — and report what was read without overstating it. |
 | [`resend-sending`](#resend-sending) | Send email through Resend: prepare it, show the person the whole preview, and send it once they approve — then check what happened, and see or cancel what is scheduled. |
 | [`slack-posting`](#slack-posting) | Draft a Slack message and take it through the approval gate, including how many people a post would interrupt. |
-| [`slack-reading`](#slack-reading) | Read a Slack workspace — channels, threads, search, people and files — and report what was read without overstating it. |
+| [`slack-reading`](#slack-reading) | Read a Slack workspace — channels, threads, search, people and files — save the files people shared, and report what was read without overstating it. |
 | [`slack-setup`](#slack-setup) | Connect a Slack workspace to agent-slack: the app manifest, the PKCE sign-in, read and send modes, and what doctor reports. |
 | [`whatsapp-reading`](#whatsapp-reading) | Read WhatsApp on this Mac, read-only: sync, list chats, read, search, and draft a reply as a link the person sends. |
 
@@ -224,9 +224,9 @@ Draft a Slack message and take it through the approval gate, including how many 
 
 ### `slack-reading`
 
-Read a Slack workspace — channels, threads, search, people and files — and report what was read without overstating it.
+Read a Slack workspace — channels, threads, search, people and files — save the files people shared, and report what was read without overstating it.
 
-**Reach for it when:** 'what did they say in #engineering', 'catch me up on that thread', 'search Slack for the invoice', 'who is in this channel'
+**Reach for it when:** 'what did they say in #engineering', 'catch me up on that thread', 'search Slack for the invoice', 'who is in this channel', 'download the file Sam shared'
 
 **Not for** drafting or posting — slack-posting does that.
 

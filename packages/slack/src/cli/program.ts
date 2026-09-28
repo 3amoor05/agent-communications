@@ -42,6 +42,7 @@ import {
 } from '../operations/changes.ts';
 import { runDoctor } from '../operations/doctor.ts';
 import { createDraft, deleteOwnDraft, listDrafts, showDraft } from '../operations/drafts.ts';
+import { downloadFiles, downloadSelection, type FileDownloader } from '../operations/files.ts';
 import type { ProbeFetch } from '../operations/identity.ts';
 import { checkedPort, manifestFor } from '../operations/manifest.ts';
 import { prepareDraftPost, react, sendPost } from '../operations/post.ts';
@@ -72,6 +73,7 @@ import {
   renderDoctor,
   renderDraft,
   renderDrafts,
+  renderFileDownload,
   renderFiles,
   renderHistory,
   renderInstall,
@@ -108,6 +110,11 @@ export interface CliDeps extends SlackContextOptions {
   probe?: ProbeFetch;
   /** The fetch the read commands use. Injected the same way, and for the same reason. */
   read?: FetchLike;
+  /**
+   * What `files download` fetches a file's bytes with: the guarded transport when left out. Injected so a test saves
+   * files without anything being fetched.
+   */
+  fileDownload?: FileDownloader;
   /**
    * The fetch `app update` and `app create` use. Its own, not `read`'s: these calls change an app, carry a
    * configuration token rather than a workspace's, and a test that scripts one should not be able to answer the other.
@@ -737,7 +744,8 @@ configuration problem.`,
       }),
     );
 
-  workspaceOption(program.command('files'))
+  const files = program.command('files');
+  workspaceOption(files)
     .description('files shared in this workspace')
     .option('--channel <id>', 'only files in one channel')
     .option('--limit <n>', 'how many: 1 to 200, one page of files', '50')
@@ -755,6 +763,72 @@ configuration problem.`,
           surface: context.surface,
         });
         writeResult(result, output(), () => renderFiles(result, options.color), streams);
+      }),
+    );
+
+  /*
+   * `--message <channel> <ts>` is one option taking two words.
+   *
+   * Commander has no such option, so this is a variadic one shown as the two words it takes; the action refuses any
+   * other number of them. Written as `<channel...>` the help would promise a list of channels.
+   */
+  const messageOption = new Option('--message <channel> <ts>', 'the files of one message: its conversation and its ts');
+  messageOption.variadic = true;
+
+  files
+    .command('download')
+    .description('save files to the downloads folder: by id, from one message, or from a conversation. Opens nothing')
+    .option('--workspace <name>', 'which workspace, as `organisation/slack`')
+    .option('--file <id...>', 'these files, by Slack file id')
+    .addOption(messageOption)
+    .option('--channel <id>', 'the files shared in this conversation — a channel, a DM or a group DM — newest first')
+    .option('--since <ts>', 'with --channel: only files shared at or after this Slack timestamp')
+    .option('--out <folder>', 'a folder inside the downloads root')
+    .option('--max-files <n>', 'stop after this many files: 1 to 200 (default 50)')
+    .action(
+      act(async (context, options, flags: Options) => {
+        /*
+         * `files` takes `--workspace` and `--channel` too, and Commander gives a name both declare to the parent — so
+         * the subcommand's own is always undefined, as `mcp install` found with `--workspace`. Either counts.
+         */
+        const parent = files.opts();
+        const workspace = (flags.workspace ?? parent.workspace) as string;
+        const channel = (flags.channel ?? parent.channel) as string | undefined;
+        // `files`'s own options, read by `files` and nothing else: taken here they would be dropped without a word.
+        if (files.getOptionValueSource('limit') === 'cli' || parent.page !== undefined) {
+          throw new CommsError(
+            'USAGE',
+            '`--limit` and `--page` page through `files`; `files download` does not take them',
+            {
+              hint: 'Use `--max-files` to bound a download.',
+            },
+          );
+        }
+        const message = flags.message as string[] | undefined;
+        if (message !== undefined && message.length !== 2) {
+          throw new CommsError('USAGE', '`--message` takes two words: the conversation and the message’s ts', {
+            hint: 'For example `--message C024BE7LR 1700000000.000100`.',
+          });
+        }
+        if (message !== undefined && channel !== undefined) {
+          throw new CommsError('USAGE', 'name the files one way, not two: `--message` names its own conversation', {
+            hint: '`--channel` is for the files shared in a whole conversation.',
+          });
+        }
+        const request = {
+          fileIds: flags.file as string[] | undefined,
+          channel: message?.[0] ?? channel,
+          ts: message?.[1],
+          since: flags.since as string | undefined,
+          out: flags.out as string | undefined,
+          maxFiles: flags.maxFiles,
+          surface: context.surface,
+        };
+        // Checked before the workspace is opened, as `slack_file_download` checks it: see `downloadSelection`.
+        downloadSelection(request);
+        const opened = await session(context, workspace);
+        const result = await downloadFiles(context, opened, request, { download: deps.fileDownload });
+        writeResult(result, output(), (data) => renderFileDownload(data, options.color), streams);
       }),
     );
 

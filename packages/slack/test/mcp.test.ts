@@ -424,6 +424,8 @@ test('every tool says whether it writes and whether it reaches Slack', async () 
     assert.deepEqual(writers.sort(), [
       'slack_draft_create',
       'slack_draft_delete',
+      // It writes files on this machine, as `gmail_attachment_download` does — never over one, so not destructive.
+      'slack_file_download',
       'slack_mode_set',
       'slack_post_prepare',
       'slack_post_send',
@@ -448,6 +450,10 @@ test('every tool says whether it writes and whether it reaches Slack', async () 
       assert.equal(tool?.annotations?.destructiveHint, true, `${irreversible} is marked destructive`);
       assert.equal(tool?.annotations?.idempotentHint ?? false, false, `${irreversible} is not safe to repeat`);
     }
+    // A download creates files and never replaces one, and it reaches Slack for them.
+    const download = tools.find((candidate) => candidate.name === 'slack_file_download');
+    assert.equal(download?.annotations?.destructiveHint, false, 'slack_file_download is not destructive');
+    assert.equal(download?.annotations?.openWorldHint, true, 'slack_file_download reaches Slack');
   } finally {
     await close();
   }

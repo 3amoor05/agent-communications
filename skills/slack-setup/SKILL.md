@@ -166,6 +166,7 @@ posts — see `slack-posting`. Changing a workspace goes through a change approv
 | `slack_doctor` | `agent-slack doctor` |
 | `slack_manifest` | `agent-slack manifest` |
 | `slack_channels`, `slack_read`, `slack_thread`, `slack_search`, `slack_people`, `slack_files` | the commands of the same name — see `slack-reading` |
+| `slack_file_download` | `agent-slack files download` — see `slack-reading` |
 | `slack_post_prepare`, `slack_draft_list`, `slack_draft_get`, `slack_draft_delete` | `agent-slack draft …` and `agent-slack post prepare` — see `slack-posting` |
 | `slack_post_send`, `slack_react`, `slack_react_send` | `agent-slack post send`, `agent-slack react` — see `slack-posting` |
 

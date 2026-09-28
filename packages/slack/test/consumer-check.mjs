@@ -149,6 +149,8 @@ try {
     'slack_draft_delete',
     'slack_draft_get',
     'slack_draft_list',
+    // Saves files on this machine, under the downloads folder only: a read as far as Slack is concerned.
+    'slack_file_download',
     'slack_files',
     'slack_manifest',
     'slack_mode',

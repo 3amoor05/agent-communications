@@ -98,6 +98,26 @@ agent-slack search 'in:#engineering invoice' --workspace acme/slack
 Every read is bounded and says so: `complete: false` means a page remained, and a short list is not a quiet
 channel.
 
+### Saving files
+
+```sh
+agent-slack files download --workspace acme/slack --file F07ABCDE123
+agent-slack files download --workspace acme/slack --message C024BE7LR 1700000000.000100
+agent-slack files download --workspace acme/slack --channel D024BE7LR --since 1700000000 --out invoices
+```
+
+By id, the files of one message, or a conversation's files from a timestamp on — a channel, a DM or a group DM. Each
+is saved under your downloads folder (`~/Downloads/agent-communications`, or `defaults.downloadsDir`) as
+`<workspace>/<out>/<date>_<channel>-<ts>/<file id>`, keeping its extension only for a common document or image type:
+never under the name the uploader gave it, which comes back beside the path inside the untrusted-content envelope,
+with the title, the uploader's name, the type and any risk flags. Nothing is opened or run.
+
+The bytes come from `files.slack.com` alone, with the workspace's token, and only at the address of the file just
+looked up: a file held outside Slack, a redirect or Slack's sign-in page is refused, and no file may be over 100 MiB
+or a run over 500 MiB. A file that cannot be fetched is listed under `skipped` with the reason while the rest are
+saved; `manifest.json` lists what was saved, and the download goes in the audit log. It is a read, so it works in
+`read` mode and needs nobody's approval.
+
 Everything a sender controls arrives inside an `<untrusted-content>` envelope — the message, the notification
 half when it disagrees, attachments, and anything Slack unfurled, each labelled with what it is and whose page it
 came from. Two flags are worth acting on:
@@ -156,6 +176,7 @@ on stdio directly.
 | `slack_doctor` | what `agent-slack doctor` checks, as the same JSON |
 | `slack_manifest` | the app manifest, and for a connected workspace the link to its own app's manifest page — changes nothing |
 | `slack_channels`, `slack_read`, `slack_thread`, `slack_search`, `slack_people`, `slack_files` | read, bounded |
+| `slack_file_download` | save files under the downloads folder — by id, from one message, or from a conversation; opens nothing |
 | `slack_post_prepare` | compose a draft and return the preview a person must approve — posts nothing |
 | `slack_post_send` | post a prepared draft once its approval allows it — the operation `agent-slack post send` runs |
 | `slack_react`, `slack_react_send` | add or remove a reaction through the same gate — `agent-slack react` |

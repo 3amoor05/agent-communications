@@ -4,6 +4,7 @@ import type { AppCreated, AppUpdated } from '../operations/app.ts';
 import type { AppUpdateNeeded, PolicyResult } from '../operations/changes.ts';
 import type { DoctorResult } from '../operations/doctor.ts';
 import type { DeletedDraft, DraftView } from '../operations/drafts.ts';
+import type { FileDownloadResult } from '../operations/files.ts';
 import type { ModeReport } from '../operations/mode.ts';
 import type {
   ChannelsResult,
@@ -559,6 +560,30 @@ export function renderFiles(result: FilesResult, color: boolean): string {
     );
   }
   if (!result.complete) lines.push('', paint(color, 'dim', `More remain — ask for page ${result.page}.`));
+  return lines.join('\n');
+}
+
+/**
+ * A download, as Gmail's is shown: each path — this package's own — then the name the uploader gave the file, still in
+ * its envelope; what was skipped and why; and where the manifest is.
+ */
+export function renderFileDownload(result: FileDownloadResult, color: boolean): string {
+  const lines: string[] = [];
+  for (const file of result.files) {
+    lines.push(
+      `saved ${file.path}${file.riskFlags.length ? paint(color, 'yellow', `  [${file.riskFlags.join(', ')}]`) : ''}`,
+      file.name,
+    );
+  }
+  for (const skip of result.skipped) lines.push(paint(color, 'yellow', `skipped ${skip.fileId}: ${skip.reason}`));
+  if (!result.complete) {
+    lines.push(paint(color, 'yellow', 'More files remained than --max-files allowed; not every file was saved.'));
+  }
+  lines.push(
+    '',
+    `${result.files.length} file(s), ${Math.round(result.totalBytes / 1024)} KB, listed in ${result.manifestPath}`,
+    paint(color, 'dim', 'Nothing was opened or run.'),
+  );
   return lines.join('\n');
 }
 
