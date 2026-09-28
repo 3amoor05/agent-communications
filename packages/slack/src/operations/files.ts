@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   CommsError,
@@ -549,7 +549,8 @@ export async function downloadFiles(
   };
   let complete = found.complete;
   let totalBytes = 0;
-  let failure: unknown;
+  // Boxed, so that even something thrown as `undefined` still counts as the run having stopped.
+  let stopped: { readonly error: unknown } | undefined;
   const seen = new Set<string>();
   let reached = 0;
 
@@ -620,8 +621,16 @@ export async function downloadFiles(
       const { path, handle } = await createUniqueFile(folder, `${fileId}${keptExtension(str(record.name) ?? '')}`);
       try {
         await handle.writeFile(body.bytes);
-      } finally {
         await handle.close();
+      } catch (error) {
+        /*
+         * A file cut short is worse than none. It looks like the file, under the file's own name, and neither the
+         * manifest nor the audit lists it — and a run again saves the whole one beside it as `-2`. So it is removed
+         * before the failure goes on; the path was created here, exclusively, so what is removed is this run's own.
+         */
+        await handle.close().catch(() => undefined);
+        await rm(path, { force: true }).catch(() => undefined);
+        throw error;
       }
       totalBytes += body.bytes.byteLength;
       saved.push({
@@ -636,7 +645,7 @@ export async function downloadFiles(
   } catch (error) {
     // A file that could not be written, or a folder that could not be made, is this machine's problem and stops the
     // run. What was saved before it is still recorded, below, before the failure is reported.
-    failure = error;
+    stopped = { error };
   }
 
   const files = await describe(call, workspace, saved);
@@ -651,19 +660,34 @@ export async function downloadFiles(
     totalBytes,
     complete,
   };
-  const keepRecords = async (outcome: 'ok' | 'failed') => {
+
+  /*
+   * The manifest and the audit record, each written whatever became of the other.
+   *
+   * They used to be one step, the manifest first: a manifest that could not be written — a folder where it goes, a
+   * full disk — took the audit record with it, and on a run that had already stopped the two were lost without a
+   * word. Files were on disk that no record named. The audit record is the one this machine keeps, so it is written
+   * even when the manifest is not, and says so.
+   */
+  let manifestFailure: { readonly error: unknown } | undefined;
+  try {
     /*
      * Replaced by a rename, never written in place. `writeFile` on `manifest.json` follows a link somebody left at that
      * path and writes the manifest wherever it points; a temporary file created exclusively beside it and renamed over
      * it replaces the link itself.
      */
     await writeFileAtomic(manifestPath, `${JSON.stringify({ at: context.now().toISOString(), ...result }, null, 2)}\n`);
+  } catch (error) {
+    manifestFailure = { error };
+  }
+  let auditFailure: { readonly error: unknown } | undefined;
+  try {
     // The first Slack read that is audited: it leaves files on this machine, and the record says which and how many.
     await context.core.audit.append({
       inboxId: session.accountId,
       alias: workspace,
       operation: 'files.download',
-      outcome,
+      outcome: stopped === undefined && manifestFailure === undefined ? 'ok' : 'failed',
       surface: context.surface,
       ids: {
         fileIds: files.map((file) => file.fileId),
@@ -671,15 +695,74 @@ export async function downloadFiles(
         ...(plan.selection.kind === 'files' ? {} : { channel: plan.selection.channel }),
         ...(plan.selection.kind === 'message' ? { ts: plan.selection.ts } : {}),
       },
-      reason: `${files.length} file(s), ${totalBytes} bytes; ${skipped.length} skipped`,
+      reason: `${files.length} file(s), ${totalBytes} bytes; ${skipped.length} skipped${
+        manifestFailure === undefined ? '' : '; manifest.json not written'
+      }`,
     });
-  };
-  if (failure !== undefined) {
-    await keepRecords('failed').catch(() => undefined);
-    throw failure;
+  } catch (error) {
+    auditFailure = { error };
   }
-  await keepRecords('ok');
-  return result;
+
+  if (stopped === undefined && manifestFailure === undefined && auditFailure === undefined) return result;
+  throw unfinished({ stopped, manifestFailure, auditFailure, files, manifestPath });
+}
+
+/** A failure's message, whatever was thrown. */
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * The error a run ends with once files may be on disk: what went wrong, and what was saved and where it is listed.
+ *
+ * A bare filesystem error — `ENOTDIR`, `EISDIR` — told the caller only that the call failed. An agent told that runs
+ * it again, and every file saved the first time is saved a second time beside itself as `-2`. So the error says how
+ * many were saved and which record lists them, and carries their ids and paths in `details` for when neither record
+ * could be written. A refusal the run stopped on keeps its own code and hint; anything else is `CONFIG`, as another
+ * file this machine could not write is.
+ */
+function unfinished(state: {
+  readonly stopped: { readonly error: unknown } | undefined;
+  readonly manifestFailure: { readonly error: unknown } | undefined;
+  readonly auditFailure: { readonly error: unknown } | undefined;
+  readonly files: readonly SavedSlackFile[];
+  readonly manifestPath: string;
+}): CommsError {
+  const { stopped, manifestFailure, auditFailure, files, manifestPath } = state;
+  const cause = (stopped ?? manifestFailure ?? auditFailure)?.error;
+  const own = cause instanceof CommsError ? cause : undefined;
+  const count = files.length;
+  const them = count === 1 ? 'it' : 'them';
+  const listed =
+    manifestFailure === undefined
+      ? `manifest.json lists ${them}`
+      : auditFailure === undefined
+        ? 'the audit log records which'
+        : `\`savedFiles\` in this error lists ${them}`;
+
+  let message: string;
+  if (stopped !== undefined) message = `the download stopped part-way: ${messageOf(stopped.error)}`;
+  else if (manifestFailure !== undefined) {
+    message = `${count > 0 ? 'the files were saved, but ' : ''}manifest.json could not be written: ${messageOf(manifestFailure.error)}`;
+  } else {
+    message = `the files were saved and manifest.json lists ${them}, but the audit log could not be written: ${messageOf(auditFailure?.error)}`;
+  }
+  const saved =
+    count === 0
+      ? 'Nothing was saved.'
+      : `${count === 1 ? '1 file was' : `${count} files were`} saved${stopped === undefined ? '' : ' before it stopped'}, and ${listed}. Running it again saves each of ${them} again, as a second copy, so ask only for what is missing.`;
+
+  return new CommsError(own?.code ?? 'CONFIG', message, {
+    hint: own?.hint === undefined ? saved : `${own.hint} ${saved}`,
+    details: {
+      ...(own?.details ?? {}),
+      saved: count,
+      savedFiles: files.map((file) => ({ fileId: file.fileId, path: file.path })),
+      manifestPath: manifestFailure === undefined ? manifestPath : null,
+      audited: auditFailure === undefined,
+    },
+    cause,
+  });
 }
 
 /**

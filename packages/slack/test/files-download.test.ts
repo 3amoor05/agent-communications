@@ -669,14 +669,108 @@ test('a file that cannot be written stops the run, and what was saved before it 
   await mkdir(join(root, 'acme'), { recursive: true });
   await writeFile(join(root, 'acme', `2023-11-14_C0BBB1-${TS}`), 'in the way');
 
-  await assert.rejects(run({ fileIds: ['F0A', 'F0B'] }, { download: transport({ F0A: 'a', F0B: 'b' }).download }));
+  const manifestPath = join(root, 'acme', 'manifest.json');
+  const savedPath = join(root, 'acme', 'undated_F0A', 'F0A.pdf');
+  await assert.rejects(
+    run({ fileIds: ['F0A', 'F0B'] }, { download: transport({ F0A: 'a', F0B: 'b' }).download }),
+    (error: unknown) => {
+      // Not the bare filesystem error: a caller told only that it failed would run it again and save F0A twice.
+      assert.ok(error instanceof CommsError, 'a CommsError, not the raw Node error');
+      assert.equal(error.code, 'CONFIG');
+      assert.match(error.message, /^the download stopped part-way: /);
+      assert.deepEqual(error.details, {
+        saved: 1,
+        savedFiles: [{ fileId: 'F0A', path: savedPath }],
+        manifestPath,
+        audited: true,
+      });
+      assert.match(error.hint ?? '', /1 file was saved before it stopped, and manifest\.json lists it/);
+      return true;
+    },
+  );
 
-  const manifest = JSON.parse(await readFile(join(root, 'acme', 'manifest.json'), 'utf8')) as FileDownloadResult;
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as FileDownloadResult;
   assert.deepEqual(
     manifest.files.map((file) => file.fileId),
     ['F0A'],
   );
   const [record] = await audited(harness);
   assert.equal(record?.outcome, 'failed');
+  assert.deepEqual(record?.ids?.fileIds, ['F0A']);
+});
+
+test('the audit record is written for what was saved even when the manifest cannot be, and the error says so', async () => {
+  const records = {
+    F0A: fileRecord('F0A', { shares: {} }),
+    F0B: fileRecord('F0B', { shares: { public: { C0BBB1: [{ ts: TS }] } } }),
+  };
+  // Once when the run finished, once when it stopped part-way: neither may lose the audit with the manifest.
+  for (const stopped of [false, true]) {
+    const { harness, root, run } = await setup({ 'files.info': filesInfo(records) });
+    // Where the manifest goes there is a folder, so it cannot be replaced.
+    await mkdir(join(root, 'acme', 'manifest.json'), { recursive: true });
+    if (stopped) await writeFile(join(root, 'acme', `2023-11-14_C0BBB1-${TS}`), 'in the way');
+    const savedPath = join(root, 'acme', 'undated_F0A', 'F0A.pdf');
+
+    await assert.rejects(
+      run({ fileIds: stopped ? ['F0A', 'F0B'] : ['F0A'] }, { download: transport({ F0A: 'a', F0B: 'b' }).download }),
+      (error: unknown) => {
+        assert.ok(error instanceof CommsError, `${stopped}: a CommsError, not the raw Node error`);
+        assert.equal(error.code, 'CONFIG');
+        assert.match(
+          error.message,
+          stopped
+            ? /^the download stopped part-way: /
+            : /^the files were saved, but manifest\.json could not be written/,
+        );
+        assert.deepEqual(error.details, {
+          saved: 1,
+          savedFiles: [{ fileId: 'F0A', path: savedPath }],
+          manifestPath: null,
+          audited: true,
+        });
+        assert.match(error.hint ?? '', /the audit log records which/);
+        return true;
+      },
+    );
+
+    assert.equal(await readFile(savedPath, 'utf8'), 'a', 'the file saved before it is still there');
+    const [record] = await audited(harness);
+    assert.equal(record?.outcome, 'failed', `${stopped}: the audit record was written`);
+    assert.deepEqual(record?.ids?.fileIds, ['F0A']);
+    assert.match(record?.reason ?? '', /; manifest\.json not written$/);
+  }
+});
+
+test('a file whose write fails part-way is removed, not left cut short beside the files the manifest lists', async () => {
+  const records = { F0A: fileRecord('F0A', { shares: {} }), F0B: fileRecord('F0B', { shares: {} }) };
+  const { harness, root, run } = await setup({ 'files.info': filesInfo(records) });
+  const download: FileDownloader = async (_call, request) => {
+    if (request.fileId === 'F0A') return { bytes: Buffer.from('whole'), contentType: null };
+    // Bytes that fail while they are written, as a full disk does: the first piece reaches the file, then the write
+    // throws. `writeFile` takes an iterable as it takes a buffer, which is what lets a test fail it half-way.
+    const failing = {
+      byteLength: 7,
+      async *[Symbol.asyncIterator]() {
+        yield Buffer.from('partial');
+        throw Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' });
+      },
+    };
+    return { bytes: failing as unknown as Buffer, contentType: null };
+  };
+
+  await assert.rejects(
+    run({ fileIds: ['F0A', 'F0B'] }, { download }),
+    (error: CommsError) => error.code === 'CONFIG' && error.details?.saved === 1,
+  );
+
+  assert.deepEqual(await readdir(join(root, 'acme', 'undated_F0B')), [], 'no file cut short is left behind');
+  assert.equal(await readFile(join(root, 'acme', 'undated_F0A', 'F0A.pdf'), 'utf8'), 'whole');
+  const manifest = JSON.parse(await readFile(join(root, 'acme', 'manifest.json'), 'utf8')) as FileDownloadResult;
+  assert.deepEqual(
+    manifest.files.map((file) => file.fileId),
+    ['F0A'],
+  );
+  const [record] = await audited(harness);
   assert.deepEqual(record?.ids?.fileIds, ['F0A']);
 });
