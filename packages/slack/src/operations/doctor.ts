@@ -649,10 +649,18 @@ function registrationChecks(input: DoctorInput): Check[] {
     }))
     .filter((entry): entry is { server: RegisteredServer; version: string } => Boolean(entry.version))
     .filter((entry) => entry.version !== VERSION);
+  /*
+   * A scan that found none of ours is a finding, not a pass. It was `ok` with "not registered with any MCP client"
+   * beside it — green, over a machine where no client could reach the server — and green is read as "checked, and
+   * fine". So it warns, with the command that registers it: something to look at rather than a fault, since a
+   * plugin or an extension can start the server where this scan of config files cannot see, and a machine used only
+   * from the command line needs no registration. A scan that never ran is `unknown` above, not this.
+   */
+  const none = ours.length === 0;
   checks.push({
     id: 'registered-server-version',
     title: 'Registered server version',
-    status: stale.length > 0 ? 'warn' : 'ok',
+    status: stale.length > 0 || none ? 'warn' : 'ok',
     detail:
       stale.length > 0
         ? stale
@@ -661,10 +669,15 @@ function registrationChecks(input: DoctorInput): Check[] {
                 `${entry.server.client} runs ${entry.version} as "${entry.server.name}"; this release is ${VERSION}`,
             )
             .join('; ')
-        : ours.length > 0
-          ? `this release, ${VERSION}`
-          : 'not registered with any MCP client; `agent-slack mcp install --client <client>` does that',
-    fix: stale.length > 0 ? stale.map((entry) => repairCommand(entry.server)).join(' && ') : null,
+        : none
+          ? "none registered: no MCP client's config file starts this server (one a plugin or an extension starts is not visible from here)"
+          : `this release, ${VERSION}`,
+    fix:
+      stale.length > 0
+        ? stale.map((entry) => repairCommand(entry.server)).join(' && ')
+        : none
+          ? 'agent-slack mcp install --client <client>'
+          : null,
     workspace: null,
   });
 

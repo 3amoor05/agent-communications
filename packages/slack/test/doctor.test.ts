@@ -375,6 +375,32 @@ test('a registered Slack server older than this release is reported, with a repa
   assert.equal(find(current, 'registered-server-version')?.fix, null);
 });
 
+test('a scan that finds none of our servers says so, as something to look at — not as this release', () => {
+  /*
+   * With nothing of ours registered nothing was stale, and the check was `ok` — green, over a machine where no client
+   * could reach the server, which people read as "it is registered". Another product's Slack server is not ours.
+   */
+  const other = server({
+    name: 'team-chat',
+    command: 'npx',
+    args: ['-y', '@modelcontextprotocol/server-slack'],
+    packageName: '@modelcontextprotocol/server-slack',
+  });
+  for (const registeredServers of [[], [other]]) {
+    const result = doctor({
+      config: config({ acme: account() }),
+      now: NOW,
+      bundles: new Map([['acme', bundle()]]),
+      registeredServers,
+    });
+    const check = find(result, 'registered-server-version');
+    assert.equal(check?.status, 'warn', check?.detail);
+    assert.match(check?.detail ?? '', /^none registered: /);
+    assert.doesNotMatch(check?.detail ?? '', /this release/);
+    assert.equal(check?.fix, 'agent-slack mcp install --client <client>');
+  }
+});
+
 test('a registered entry whose runtime is gone is a failure with the command that reinstalls it', () => {
   const gone = server({ name: 'slack', args: [managedRuntimeEntry('/data', '@agentcomms/slack', VERSION), 'mcp'] });
   const result = doctor({
