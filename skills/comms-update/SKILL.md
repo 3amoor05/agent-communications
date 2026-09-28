@@ -1,6 +1,6 @@
 ---
 name: comms-update
-description: "Bring agent-communications on this computer up to the latest release from chat: see what is behind, update the servers, their runtimes and any global commands in one approved step, then restart and clear out the old versions. Symptoms: 'update my comms', 'update agentcomms', 'upgrade Gmail and Slack', 'is there a new version', 'my Gmail tools are out of date'. Not for first-time setup — comms-onboarding does that — nor for one account's settings."
+description: "Bring agent-communications on this computer up to the latest release from chat: see what is behind, update the servers, their runtimes and any global commands in one approved step, then restart and clear out the old versions. Symptoms: 'update my comms', 'update agentcomms', 'upgrade Gmail and Slack', 'is there a new version', 'my Gmail tools are out of date', a tool answering 'Hang on a minute, there's an update. Let's update first.' (UPDATE_REQUIRED), 'not now', 'stop asking me to update'. Not for first-time setup — comms-onboarding does that — nor for one account's settings."
 license: MIT
 compatibility: "@agentcomms/core@0.7.2"
 metadata:
@@ -14,6 +14,31 @@ One update, done from the conversation: every registered server moved to the lat
 name and pins exactly as they were, the runtimes it needs installed, and the global commands updated
 if they are installed. The person approves it once, restarts once, and the old versions are removed
 after.
+
+## When a tool says "Hang on a minute, there's an update"
+
+Once a day this computer asks npm whether a newer release is out. When one is, every server stops:
+a tool answers `UPDATE_REQUIRED`, opening "Hang on a minute, there's an update. Let's update first.",
+with the version running and the latest — and does nothing else. Stop what you were doing, tell the
+person, and ask which they want:
+
+- **Update now** — steps 1 to 3 below. The stop ends once the update is applied; a server that was
+  running before it then says "the update is installed … Restart the client first" instead, until
+  the client is restarted.
+- **Not now** — call `comms_update` with `later: true`. It is a change like any other: show the
+  preview ("Skip the update to X until tomorrow") and wait for the person's yes (under `confirm`,
+  their `agentcomms approve <id>`), then call again with the `approvalId`. Nothing stops again until
+  midnight, local time, on this computer; the first request after it asks again. Never put it off on
+  your own: the stop exists so the person decides.
+
+A call that claims an approval the person already gave — its arguments carry `approvalId` — is never
+stopped, and neither are `comms_update`, `comms_doctor`, `comms_paths` or a channel's doctor. The
+same stop meets every command at a terminal: a person there is asked "Update now, later today, or
+cancel?"; anything else — you, a script — gets exit `11` with the same two ways on.
+
+To turn the check off for this computer, `comms_update` with `auto: "off"` — a change the person
+approves; `auto: "on"` turns it back on at once. `comms_doctor` shows it on one line: on or off, when
+it last checked, the latest release, and the one running.
 
 ## Before anything: a core that can update
 
@@ -71,6 +96,8 @@ uses, so a window that was not restarted keeps its old one until it is.
 | What is behind | `agentcomms update --check` |
 | Update | `agentcomms update` — at a terminal it shows the plan and asks `yes`; anywhere else it exits `10` with the preview and an approval id, then `agentcomms update --approval <id>` |
 | Clear out old versions | `agentcomms mcp prune`, `agent-gmail mcp prune`, `agent-slack mcp prune` |
+| Not now | `agentcomms update --later` — approved like any change; nothing stops until midnight |
+| The daily check off, or on | `agentcomms update --auto off` (approved like any change), `--auto on` (at once) |
 
 Where `agentcomms` is not installed, use `npx -y @agentcomms/core@latest` in its place.
 
@@ -86,3 +113,7 @@ Where `agentcomms` is not installed, use `npx -y @agentcomms/core@latest` in its
   it after.
 - **Renaming or changing policies here.** An update changes versions only. Renaming old account names
   is `comms_names_migrate`; approvals are `comms_change_policy`.
+- **Putting the update off, or turning the check off, without asking.** Both are the person's to
+  decide: show the preview and wait for their yes, as for any change.
+- **Working around the stop.** Retrying the tool, or reaching for another one, does nothing but stop
+  again. Ask the person: update, or not now.
