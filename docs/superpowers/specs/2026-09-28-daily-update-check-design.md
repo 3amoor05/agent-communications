@@ -107,4 +107,28 @@ Rejected:
 
 ## Implementing
 
-Sections 1–4 are implemented as written, on the branch `feat/daily-update-check`.
+Sections 1–4 are implemented as written, on the branch `feat/daily-update-check`. What the implementation had to
+settle beyond them, after review:
+
+- **"Restart" only on a positive finding (§1).** The file records, channel by channel, where this machine is known to
+  run the latest release (`current`): a server whose every registration the check read names it — at least one, none
+  pinning nothing, no client configuration left unread — or a command whose package is installed globally at it. Only
+  then does a stop say "restart" rather than "update". A server nothing here registers — the Claude Code plugin's, the
+  Gemini extension's, one started from a checkout, an entry written by hand with no version — is told to update:
+  restarting would start the same old code.
+- **The terminal stops for "installed, not yet running" too** (Decision 2): an older copy of a command whose release is
+  installed globally is stopped, and its "now" says to run the command from the installed release.
+- **A claimed approval is an id this machine's approval store holds (§2)**; an empty or unknown `approvalId` claims
+  nothing. The terminal follows the same rule, for parity: a command carrying such an id — `--approval`, Gmail's
+  `--mcp-approval` — is not stopped.
+- **Exempt at a terminal besides §3's list:** `mcp` on its own only (the server; `mcp install` and `mcp prune` are
+  stopped), the listeners a sign-in starts (`agent-gmail oauth-listen`, `agent-slack sign-in-listen` — children of a
+  command already let through, which a stop would break part-way), and WhatsApp's `status`, its doctor. Over MCP the
+  list stays §2's: `comms_approvals_list` is stopped, while at a terminal `approve` and `approvals` are a person's own
+  acts on a change already in flight.
+- **The terminal's three seconds bound the wait, not the check**: the ask finishes beside the command. A check is
+  claimed with a short lease (`checking`) and the day's `lastChecked` written when the ask is over, so an ask cut
+  short does not use up the day.
+- **"Updated. Run your command again." only when the update brought this command to the latest release**; otherwise
+  the terminal says what is left, and ends non-zero. Both ways on are also named in their npx form, for a machine with
+  no `agentcomms` installed.

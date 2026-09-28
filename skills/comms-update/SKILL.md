@@ -22,19 +22,25 @@ a tool answers `UPDATE_REQUIRED`, opening "Hang on a minute, there's an update. 
 with the version running and the latest — and does nothing else. Stop what you were doing, tell the
 person, and ask which they want:
 
-- **Update now** — steps 1 to 3 below. The stop ends once the update is applied; a server that was
-  running before it then says "the update is installed … Restart the client first" instead, until
-  the client is restarted.
+- **Update now** — steps 1 to 3 below. The stop ends once the update is applied; a server whose
+  registrations the update moved, and that was running before it, then says "the update is
+  installed … Restart the client first" instead, until the client is restarted. A server nothing on
+  this computer registers — the Claude Code plugin's Gmail server, the Gemini extension, one started
+  from a checkout — keeps saying "update": `comms_update` cannot reach it, so tell the person to
+  update it where it was installed (the plugin or the extension), or to put the stop off.
 - **Not now** — call `comms_update` with `later: true`. It is a change like any other: show the
   preview ("Skip the update to X until tomorrow") and wait for the person's yes (under `confirm`,
   their `agentcomms approve <id>`), then call again with the `approvalId`. Nothing stops again until
   midnight, local time, on this computer; the first request after it asks again. Never put it off on
-  your own: the stop exists so the person decides.
+  your own: the stop exists so the person decides. Where the core server is not connected — only a
+  plugin's server is — the person runs `npx -y @agentcomms/core@latest update --later` at a terminal.
 
-A call that claims an approval the person already gave — its arguments carry `approvalId` — is never
-stopped, and neither are `comms_update`, `comms_doctor`, `comms_paths` or a channel's doctor. The
-same stop meets every command at a terminal: a person there is asked "Update now, later today, or
-cancel?"; anything else — you, a script — gets exit `11` with the same two ways on.
+A call carrying the `approvalId` of an approval the person already gave on this computer is never
+stopped — an empty or made-up id does not count — and neither are `comms_update`, `comms_doctor`,
+`comms_paths` or a channel's doctor. The same stop meets every command at a terminal: a person there
+is asked "Update now, later today, or cancel?"; anything else — you, a script — gets exit `11` with the
+same two ways on. A command carrying `--approval` with an approval already given goes ahead, as the
+same call does here.
 
 To turn the check off for this computer, `comms_update` with `auto: "off"` — a change the person
 approves; `auto: "on"` turns it back on at once. `comms_doctor` shows it on one line: on or off, when

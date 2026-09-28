@@ -99,8 +99,11 @@ a server it registers appears only once the client is restarted.
 **It keeps itself up to date.** Once a day the machine asks npm whether a newer release is out; when one is, every
 server and command stops first — "Hang on a minute, there's an update. Let's update first." — and your agent asks
 whether to update now (`comms_update`) or not until tomorrow (`comms_update` with `later`, which you approve). At a
-terminal: `agentcomms update`, or `agentcomms update --later`. `agentcomms update --auto off` turns the check off for
-one machine; `CI`, and `AGENT_COMMS_UPDATE_CHECK=off`, skip it.
+terminal: `agentcomms update`, or `agentcomms update --later` (`npx -y @agentcomms/core@latest update --later` where
+`agentcomms` is not installed). A server this machine does not register itself — the Claude Code plugin's, the
+Gemini extension's — is updated where it was installed. `agentcomms update --auto off` turns the check off for one
+machine; `CI`, and `AGENT_COMMS_UPDATE_CHECK=off`, skip it. [Upgrading](docs/upgrading.md#the-daily-check) has the
+details.
 
 **Every change is shown to you before it happens.** The tool returns a preview and an approval id. Under the default
 `chat` change policy your yes in the conversation approves it; under `confirm` you run `agentcomms approve <id>` in

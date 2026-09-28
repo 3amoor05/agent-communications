@@ -28,9 +28,10 @@ npx @agentcomms/core update --auto off  # no daily update check on this machine 
 stops before doing anything — "Hang on a minute, there's an update. Let's update first." — until it is updated or put
 off until midnight. At a terminal you are asked "Update now, later today, or cancel?"; anything without a terminal
 exits `11` (`UPDATE_REQUIRED`), naming `agentcomms update` and `agentcomms update --later`. `update`, `doctor`,
-`paths`, `approve`, `approvals` and `mcp` (the server stops each call itself) are never stopped, and neither is a
-call that claims an approval already given. A registry that cannot be reached stops nothing. The check is skipped
-when `CI` is set, or `AGENT_COMMS_UPDATE_CHECK=off`; `doctor` shows it on one line.
+`paths`, `approve`, `approvals` and `mcp` on its own (the server, which stops each call itself — `mcp install` and
+`mcp prune` are stopped) are never stopped, and neither is a call or a command carrying the id of an approval already
+given on this machine. A registry that cannot be reached stops nothing. The check is skipped when `CI` is set, or
+`AGENT_COMMS_UPDATE_CHECK=off`; `doctor` shows it on one line.
 
 Every command takes `--json` and prints `{ "ok": true, "schemaVersion": 1, "data": … }` or
 `{ "ok": false, "schemaVersion": 1, "error": { "code", "message", "hint" } }`.
