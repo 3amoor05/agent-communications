@@ -1474,6 +1474,24 @@ test('at a terminal, a command claiming an approval this machine holds runs, as 
   assert.equal(kind.error?.code, 'UPDATE_REQUIRED');
 });
 
+test("at a terminal, a command claiming an approval still starts the day's check", async () => {
+  // Over MCP the server starts the check before it looks at a call; a command that goes ahead on an approval is
+  // still the day's first command, and starts it too.
+  const m = machine();
+  const approvalId = await preparedFor(m, updateLaterChange(m.core));
+  const { asked, latestVersion } = registry();
+  const claimed = await gateAt(
+    m,
+    [],
+    { output: { json: true, color: false }, approvals: [approvalId] },
+    deps(latestVersion),
+  );
+  assert.equal(claimed.error, null, String(claimed.error));
+  assert.equal(claimed.value, null, 'the command runs');
+  assert.deepEqual(asked, [CORE], "the day's check was not started");
+  assert.equal((await readUpdateCheck(m.stateDir)).latest, LATEST);
+});
+
 test('agentcomms: an approval a command claims is one still waiting, prepared as a change, and only a command that takes one carries it', async () => {
   const m = machine();
   const spent = await spentApprovals(m);

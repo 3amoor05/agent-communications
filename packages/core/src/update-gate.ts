@@ -293,7 +293,8 @@ export async function updateGateAtTerminal(options: TerminalGateOptions): Promis
   const { core, env, streams, output } = options;
   const now = options.now ?? (() => new Date());
   if (!(await updateCheckEnabled(core, env)).on) return null;
-  for (const id of options.approvals ?? []) if (await claimsApproval(core, id, options.approvalClaim)) return null;
+  // The day's check first, and only then the approvals a command claims: a command that goes ahead on one is still a
+  // command the day's check would have started from. Over MCP the server starts it before it looks at the call.
   if (options.check && updateCheckDue(await readUpdateCheck(core.paths.stateDir), now())) {
     // Stops waiting, and goes on: the check itself is not cut short, and finishes beside the command. A timer that
     // keeps the process alive, so the wait is the wait, whatever the check is waiting on.
@@ -307,6 +308,7 @@ export async function updateGateAtTerminal(options: TerminalGateOptions): Promis
       clearTimeout(timer);
     }
   }
+  for (const id of options.approvals ?? []) if (await claimsApproval(core, id, options.approvalClaim)) return null;
   const where = { channel: options.channel, surface: 'command' as const };
   const pending = await pendingUpdate({ core, env, running: options.running, now, ...where });
   if (pending === null) return null;
