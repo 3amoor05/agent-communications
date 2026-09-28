@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
+import { join, relative } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { EXIT_CODES, gatedChange, UPDATE_FIRST, updateCheckPath, updateLaterChange } from '@agentcomms/core';
@@ -199,9 +200,25 @@ function fileTransport() {
   return { download, asked };
 }
 
-/** Everything under the downloads root, as paths below it: empty when nothing was ever written there. */
-function saved(harness: Harness): string[] {
-  const root = harness.core.paths.downloadsDir;
+/**
+ * A harness with a workspace, and a downloads folder of its own in the config.
+ *
+ * Not `core.paths.downloadsDir`: on Windows that is under USERPROFILE, which the harness does not set, so it is the
+ * runner's own Downloads folder — shared with every other test file running beside this one, and never emptied — and
+ * "nothing was saved" would read their files.
+ */
+async function downloadHarness(): Promise<{ harness: Harness; root: string }> {
+  const harness = await newHarness();
+  await harness.addWorkspace({ alias: 'acme' });
+  const root = join(harness.configDir, 'downloads');
+  await harness.core.config.update((config) => ({ ...config, defaults: { ...config.defaults, downloadsDir: root } }), {
+    consent: { kind: 'loosening-consent', paths: ['defaults.downloadsDir'] },
+  });
+  return { harness, root };
+}
+
+/** Everything under a downloads root, as paths below it: empty when nothing was ever written there. */
+function saved(root: string): string[] {
   return existsSync(root) ? (readdirSync(root, { recursive: true }) as string[]).sort() : [];
 }
 
@@ -335,8 +352,7 @@ async function downloadAtCommand(harness: Harness, extra: string[] = [], options
 }
 
 test('slack_file_download: an update that is out answers "Hang on a minute" and saves nothing — no Slack, no transport, no disk', async () => {
-  const harness = await newHarness();
-  await harness.addWorkspace({ alias: 'acme' });
+  const { harness, root } = await downloadHarness();
   updateOut(harness);
   const { result, slack, transport } = await downloadOverMcp(harness);
   assert.equal(result.isError, true, JSON.stringify(result.structuredContent));
@@ -350,15 +366,14 @@ test('slack_file_download: an update that is out answers "Hang on a minute" and 
   assert.equal(error.details.server, 'agent-slack');
   assert.deepEqual(slack, [], 'Slack was asked about the file');
   assert.deepEqual(transport, [], 'the file was fetched');
-  assert.deepEqual(saved(harness), [], 'something was written under the downloads root');
+  assert.deepEqual(saved(root), [], 'something was written under the downloads root');
   assert.equal(await downloadAudits(harness), 0, 'a download was audited');
 });
 
 test('agent-slack files download: with no terminal an update that is out exits 11 and writes nothing', async () => {
   for (const json of [true, false]) {
     const label = json ? '--json' : 'plain';
-    const harness = await newHarness();
-    await harness.addWorkspace({ alias: 'acme' });
+    const { harness, root } = await downloadHarness();
     updateOut(harness);
     const stopped = await downloadAtCommand(harness, [], { json });
     assert.equal(stopped.exit, EXIT_CODES.UPDATE, `${label}: ${stopped.stdout}${stopped.stderr}`);
@@ -375,43 +390,49 @@ test('agent-slack files download: with no terminal an update that is out exits 1
     }
     assert.deepEqual(stopped.slack, [], `${label}: Slack was asked about the file`);
     assert.deepEqual(stopped.transport, [], `${label}: the file was fetched`);
-    assert.deepEqual(saved(harness), [], `${label}: something was written under the downloads root`);
+    assert.deepEqual(saved(root), [], `${label}: something was written under the downloads root`);
     assert.equal(await downloadAudits(harness), 0, `${label}: a download was audited`);
   }
 });
+
+/** Whether a saved file is on disk, inside this harness's downloads root. */
+function savedInside(root: string, path: string | undefined): boolean {
+  if (path === undefined || !existsSync(path)) return false;
+  const below = relative(root, path);
+  return below !== '' && !below.startsWith('..') && !below.includes(':');
+}
 
 test('the download goes ahead when the update is put off, switched off, turned off, in CI or offline — over MCP and at the command', async () => {
   for (const { label, apply } of WAYS_PAST) {
     // Over MCP. The same call is stopped first, so what lets it through is the way past and nothing else; offline
     // has no update out to be stopped for.
-    const tool = await newHarness();
-    await tool.addWorkspace({ alias: 'acme' });
+    const tool = await downloadHarness();
     if (label !== 'offline') {
-      updateOut(tool);
-      const control = await downloadOverMcp(tool);
+      updateOut(tool.harness);
+      const control = await downloadOverMcp(tool.harness);
       assert.equal(code(control.result), 'UPDATE_REQUIRED', `${label}: the control call was not stopped`);
     }
-    await apply(tool);
-    const passed = await downloadOverMcp(tool);
+    await apply(tool.harness);
+    const passed = await downloadOverMcp(tool.harness);
     assert.notEqual(passed.result.isError, true, `${label}: ${JSON.stringify(passed.result.structuredContent)}`);
     const result = passed.result.structuredContent as unknown as FileDownloadResult;
     assert.equal(result.files.length, 1, `${label}: ${JSON.stringify(result)}`);
-    assert.ok(existsSync(result.files[0]?.path ?? ''), `${label}: the saved file is not on disk`);
+    assert.ok(savedInside(tool.root, result.files[0]?.path), `${label}: the saved file is not on disk`);
     assert.deepEqual(passed.transport, [FILE_ID], `${label}: the file was not fetched over MCP`);
 
     // At the command, with no terminal: exit 0 and the file on disk, where the same command was stopped first.
-    const command = await newHarness();
-    await command.addWorkspace({ alias: 'acme' });
+    const command = await downloadHarness();
     if (label !== 'offline') {
-      updateOut(command);
-      assert.equal((await downloadAtCommand(command)).exit, 11, `${label}: the control command was not stopped`);
+      updateOut(command.harness);
+      const control = await downloadAtCommand(command.harness);
+      assert.equal(control.exit, 11, `${label}: the control command was not stopped`);
     }
-    await apply(command);
-    const ran = await downloadAtCommand(command);
+    await apply(command.harness);
+    const ran = await downloadAtCommand(command.harness);
     assert.equal(ran.exit, EXIT_CODES.OK, `${label}: ${ran.stdout}${ran.stderr}`);
     const data = (JSON.parse(ran.stdout) as { data: FileDownloadResult }).data;
     assert.equal(data.files.length, 1, `${label}: ${ran.stdout}`);
-    assert.ok(existsSync(data.files[0]?.path ?? ''), `${label}: the saved file is not on disk`);
+    assert.ok(savedInside(command.root, data.files[0]?.path), `${label}: the saved file is not on disk`);
     assert.deepEqual(ran.transport, [FILE_ID], `${label}: the file was not fetched at the command`);
   }
 });
@@ -420,8 +441,7 @@ test('the download takes no approval, so one it claims is refused as usage and c
   // The stop lets through a call carrying an approval this machine holds (§2). A download needs no approval and
   // declares none: `approvalId` on the tool, or `--approval` on the command, is refused before the gate is asked — so
   // even a real one opens nothing here, and the download stays stopped until the update or "not now".
-  const harness = await newHarness();
-  await harness.addWorkspace({ alias: 'acme' });
+  const { harness, root } = await downloadHarness();
   const approvalId = await heldApproval(harness);
   updateOut(harness);
 
@@ -434,6 +454,6 @@ test('the download takes no approval, so one it claims is refused as usage and c
   assert.equal(command.exit, EXIT_CODES.USAGE, `${command.stdout}${command.stderr}`);
   assert.deepEqual([...command.slack, ...command.transport], [], 'the claimed approval reached Slack or the transport');
 
-  assert.deepEqual(saved(harness), [], 'something was written under the downloads root');
+  assert.deepEqual(saved(root), [], 'something was written under the downloads root');
   assert.equal(await downloadAudits(harness), 0, 'a download was audited');
 });
