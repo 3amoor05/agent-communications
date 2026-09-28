@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import { chmodSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
-import { basename, dirname, join } from 'node:path';
+import { basename, delimiter, dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { pathToFileURL } from 'node:url';
 import { ERROR_REGISTRY, EXIT_CODES } from '../src/errors.ts';
 import { knownClientConfigs } from '../src/mcp-clients.ts';
 import {
+  clientCliDirectories,
   handedOutRuntimesPath,
   type InstallContext,
   installExitStatus,
@@ -491,6 +492,28 @@ test(
       nowhere.notApplied,
       `claude was not found on PATH or in ${join(home, '.local', 'bin')}, so nothing was registered`,
     );
+  },
+);
+
+test(
+  "a client's command is looked for only in absolute directories, so where the server started cannot choose it",
+  NOT_ON_WINDOWS,
+  () => {
+    /*
+     * A relative directory is read against the directory the server happened to start in: a `claude` found there, and
+     * run, would be chosen by that, not by where the person installed it. A relative HOME, and a relative entry in the
+     * list that stands in for the system directories, are both left out; absolute ones are kept, in order.
+     */
+    assert.deepEqual(
+      clientCliDirectories({
+        HOME: 'relative-home',
+        AGENT_COMMS_CLIENT_CLI_DIRS: ['bin', '/abs/one', './two', '/abs/three'].join(delimiter),
+      }),
+      ['/abs/one', '/abs/three'],
+    );
+    assert.deepEqual(clientCliDirectories({ HOME: '/home/sam', AGENT_COMMS_CLIENT_CLI_DIRS: '' }), [
+      join('/home/sam', '.local', 'bin'),
+    ]);
   },
 );
 

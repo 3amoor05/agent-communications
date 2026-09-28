@@ -190,16 +190,21 @@ export async function whichExecutable(name: string, env: NodeJS.ProcessEnv): Pro
  * in. `AGENT_COMMS_CLIENT_CLI_DIRS` replaces the two system directories — a list, separated as PATH is, and empty for
  * none — which is how the tests keep every lookup inside their own directories: a `claude` or `codex` really
  * installed on the machine running them would otherwise be found, and run, by a test that meant to have none.
+ *
+ * Only absolute directories are looked in. A relative one would be read against whatever directory the server was
+ * started from, so the command found — and run — would depend on where that was. And none on Windows: a client there
+ * is a `.cmd` shim, which this cannot start without a shell, so a fallback could only find something it cannot run.
  */
 export function clientCliDirectories(env: NodeJS.ProcessEnv): string[] {
-  const home = env.HOME || env.USERPROFILE;
+  if (process.platform === 'win32') return [];
+  const home = env.HOME;
   const system =
     env.AGENT_COMMS_CLIENT_CLI_DIRS !== undefined
       ? env.AGENT_COMMS_CLIENT_CLI_DIRS.split(delimiter)
-      : process.platform === 'win32'
-        ? []
-        : ['/opt/homebrew/bin', '/usr/local/bin'];
-  return [...(home ? [join(home, '.local', 'bin')] : []), ...system].filter(Boolean);
+      : ['/opt/homebrew/bin', '/usr/local/bin'];
+  return [...(home ? [join(home, '.local', 'bin')] : []), ...system].filter(
+    (directory) => directory !== '' && isAbsolute(directory),
+  );
 }
 
 /**
