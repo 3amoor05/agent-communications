@@ -71,6 +71,63 @@ const FILE_CEILING = 100 * 1024 * 1024;
  */
 const DOWNLOAD_TIMEOUT_MS = 120_000;
 
+interface Deadline {
+  /** Handed to `fetch`, so the connection is closed when the time is up — when `fetch` is still listening. */
+  readonly signal: AbortSignal;
+  /** `work`, or a rejection the moment the time is up or the caller gives up, whichever comes first. */
+  within<T>(work: Promise<T>): Promise<T>;
+  timedOut(): boolean;
+  /** Lets the timer go. Called however the download ends. */
+  end(): void;
+}
+
+/**
+ * A deadline that is kept even after garbage collection has run over a stalled download.
+ *
+ * Measured, not argued. The first version handed an `AbortSignal.timeout` to `fetch` and trusted `fetch` to fail the
+ * read when it fired — Resend's download has the same shape. With a body stalled and garbage collection forced while
+ * it waited, a three-second limit was still waiting ten seconds later, and inside the test runner the same stall held a
+ * test for the full two minutes the runner allows: the abort handed to `fetch` no longer reached the waiting read. A
+ * stronger timer alone did not help; it was tried, and it hung the same way.
+ *
+ * What fixed it is here: every wait — for the answer, and for each piece of the body — is raced against a promise the
+ * deadline itself rejects, so the code waiting is woken by the deadline rather than by whatever `fetch` still holds.
+ * The signal still goes to `fetch` as well, so that when `fetch` is listening the connection is closed too. The timer
+ * is a plain `setTimeout`, cleared when the download ends, and a caller's own signal is forwarded into the same place,
+ * so what keeps the deadline alive is explicit rather than a matter of how the runtime holds `AbortSignal.timeout` or
+ * `AbortSignal.any`.
+ */
+function deadline(ms: number, outer: AbortSignal | undefined): Deadline {
+  const controller = new AbortController();
+  let expired = false;
+  let give: (reason: unknown) => void = () => undefined;
+  const up = new Promise<never>((_, reject) => {
+    give = reject;
+  });
+  // Marked handled once, here: it may be rejected before any race has subscribed to it, or after the last one.
+  up.catch(() => undefined);
+  const stop = (reason: unknown): void => {
+    controller.abort(reason);
+    give(reason);
+  };
+  const timer = setTimeout(() => {
+    expired = true;
+    stop(new DOMException('the download took longer than it is allowed', 'TimeoutError'));
+  }, ms);
+  const forward = (): void => stop(outer?.reason);
+  if (outer?.aborted) forward();
+  else outer?.addEventListener('abort', forward, { once: true });
+  return {
+    signal: controller.signal,
+    within: (work) => Promise.race([work, up]),
+    timedOut: () => expired,
+    end: () => {
+      clearTimeout(timer);
+      outer?.removeEventListener('abort', forward);
+    },
+  };
+}
+
 /** The hosts that are Slack's own, for telling a link to the wrong part of Slack from a link away from Slack. */
 function isSlackHost(hostname: string): boolean {
   return hostname === 'slack.com' || hostname.endsWith('.slack.com');
@@ -158,8 +215,9 @@ function mediaTypeOf(header: string | null): string | null {
  * Downloads one file's bytes, or throws a `CommsError` carrying `details.reason`.
  *
  * `context` is the one `callSlack` takes: its token goes in the `Authorization` header, as Slack requires for both
- * of its file links, and its injected `fetch` is the inner one the guard wraps. Its permit is not used — the grant
- * is opened on a permit of this call's own, so two downloads at once never share one.
+ * of its file links, and its injected `fetch` is the inner one the guard wraps. Its permit is not used. The grant is
+ * opened on a permit of this call's own, because the context's may be open for something else — a post the gate is
+ * about to send — and a download, which is a read, must neither be refused for that nor touch it.
  */
 export async function slackFileDownload(context: SlackCall, request: SlackFileRequest): Promise<SlackFileBody> {
   // A cap that is not a number allows nothing, rather than everything.
@@ -169,14 +227,13 @@ export async function slackFileDownload(context: SlackCall, request: SlackFileRe
 
   const permit = closedPermit();
   const send = guardSlackRequests(context.fetch ?? (fetch as FetchLike), permit);
-  const timeout = AbortSignal.timeout(context.timeoutMs ?? DOWNLOAD_TIMEOUT_MS);
-  const signal = context.signal ? AbortSignal.any([context.signal, timeout]) : timeout;
+  const clock = deadline(context.timeoutMs ?? DOWNLOAD_TIMEOUT_MS, context.signal);
   // Which of the two it was is worth saying: a timeout on a large file is a different fix from a dropped network.
   const lost = (message: string): CommsError =>
     refusal(
       'network',
       'TRANSIENT',
-      timeout.aborted ? `the download from ${SLACK_FILES_ORIGIN} took longer than it is allowed` : message,
+      clock.timedOut() ? `the download from ${SLACK_FILES_ORIGIN} took longer than it is allowed` : message,
       'Check the network, then try again.',
     );
   const redirected = (): CommsError =>
@@ -191,100 +248,107 @@ export async function slackFileDownload(context: SlackCall, request: SlackFileRe
       maxBytes: cap,
     });
 
-  return downloadWith(permit, { teamId: request.teamId, fileId: request.fileId }, async () => {
-    let response: Response;
-    try {
-      response = await send(url, {
-        method: 'GET',
-        headers: { authorization: `Bearer ${context.token}` },
-        signal,
-      });
-    } catch (error) {
-      /*
-       * The guard's own refusal, as it is. It cannot happen for a URL `checkedFileUrl` built — the two read the path
-       * with the same function — and if the two ever disagree, the guard's files-host refusals carry a reason of
-       * their own, so what reaches the caller still says which.
-       */
-      if (error instanceof CommsError) throw error;
-      if (isRefusedRedirect(error)) throw redirected();
-      throw lost(`could not reach ${SLACK_FILES_ORIGIN}`);
-    }
-
-    /*
-     * Everything that refuses an answer cancels its body first, so a refused file is not read — and a connection is
-     * not left holding one open.
-     */
-    const discard = async (): Promise<void> => {
-      await response.body?.cancel().catch(() => undefined);
-    };
-
-    // A runtime that followed a redirect regardless, or an answer that is one: either way, not the file asked for.
-    if (response.redirected || (response.status >= 300 && response.status < 400)) {
-      await discard();
-      throw redirected();
-    }
-    if (!response.ok) {
-      await discard();
-      throw refusal(
-        'http-error',
-        codeForStatus(response.status),
-        `${SLACK_FILES_ORIGIN} answered ${response.status}`,
-        response.status === 429 || response.status >= 500 ? 'Try again shortly.' : 'Nothing was downloaded.',
-        { status: response.status },
-      );
-    }
-    const contentType = mediaTypeOf(response.headers.get('content-type'));
-    /*
-     * Slack's sign-in page, not the file.
-     *
-     * What the host sends a token it will not serve this file to is a web page, and saving that as the file would put
-     * a login form on disk under the file's name and report success. Checked before the size, because the page is
-     * small and the question it answers is the one the person needs.
-     */
-    if (contentType === 'text/html') {
-      await discard();
-      throw refusal(
-        'sign-in-page',
-        'SCOPE_MISSING',
-        `${SLACK_FILES_ORIGIN} answered with a web page rather than the file: the token cannot read it`,
-        'Check that this account can open the file in Slack, and that the workspace was granted files:read.',
-      );
-    }
-
-    // What the host declares first, so a file plainly too large is not read at all.
-    const declared = response.headers.get('content-length');
-    if (declared !== null && Number(declared) > cap) {
-      await discard();
-      throw tooLarge();
-    }
-
-    /*
-     * Then what actually arrives, counted as it arrives.
-     *
-     * A declared length is the host's claim, and not always present: a chunked answer has none, and a compressed one
-     * declares the compressed size while the body decodes to more. The running total is the only count that is about
-     * the bytes this would keep, and it stops reading the moment they pass the cap.
-     */
-    const chunks: Uint8Array[] = [];
-    let total = 0;
-    const reader = response.body?.getReader();
-    if (reader !== undefined) {
+  try {
+    return await downloadWith(permit, { teamId: request.teamId, fileId: request.fileId }, async () => {
+      let response: Response;
       try {
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          total += value.byteLength;
-          if (total > cap) {
-            await reader.cancel().catch(() => undefined);
-            throw tooLarge();
-          }
-          chunks.push(value);
-        }
+        response = await clock.within(
+          send(url, {
+            method: 'GET',
+            headers: { authorization: `Bearer ${context.token}` },
+            signal: clock.signal,
+          }),
+        );
       } catch (error) {
+        /*
+         * The guard's own refusal, as it is. It cannot happen for a URL `checkedFileUrl` built — the two read the
+         * path with the same function — and if the two ever disagree, the guard's files-host refusals carry a reason
+         * of their own, so what reaches the caller still says which.
+         */
         if (error instanceof CommsError) throw error;
-        throw lost(`the connection to ${SLACK_FILES_ORIGIN} failed while the file was arriving`);
+        if (isRefusedRedirect(error)) throw redirected();
+        throw lost(`could not reach ${SLACK_FILES_ORIGIN}`);
       }
-    }
-    return { bytes: Buffer.concat(chunks, total), contentType };
-  });
+
+      /*
+       * Everything that refuses an answer cancels its body first, so a refused file is not read — and a connection
+       * is not left holding one open. Not awaited: a refusal is already decided, and it must not wait on a host that
+       * has stopped answering.
+       */
+      const discard = (): void => {
+        response.body?.cancel().catch(() => undefined);
+      };
+
+      // A runtime that followed a redirect regardless, or an answer that is one: either way, not the file asked for.
+      if (response.redirected || (response.status >= 300 && response.status < 400)) {
+        discard();
+        throw redirected();
+      }
+      if (!response.ok) {
+        discard();
+        throw refusal(
+          'http-error',
+          codeForStatus(response.status),
+          `${SLACK_FILES_ORIGIN} answered ${response.status}`,
+          response.status === 429 || response.status >= 500 ? 'Try again shortly.' : 'Nothing was downloaded.',
+          { status: response.status },
+        );
+      }
+      const contentType = mediaTypeOf(response.headers.get('content-type'));
+      /*
+       * Slack's sign-in page, not the file.
+       *
+       * What the host sends a token it will not serve this file to is a web page, and saving that as the file would
+       * put a login form on disk under the file's name and report success. Checked before the size, because the page
+       * is small and the question it answers is the one the person needs.
+       */
+      if (contentType === 'text/html') {
+        discard();
+        throw refusal(
+          'sign-in-page',
+          'SCOPE_MISSING',
+          `${SLACK_FILES_ORIGIN} answered with a web page rather than the file: the token cannot read it`,
+          'Check that this account can open the file in Slack, and that the workspace was granted files:read.',
+        );
+      }
+
+      // What the host declares first, so a file plainly too large is not read at all.
+      const declared = response.headers.get('content-length');
+      if (declared !== null && Number(declared) > cap) {
+        discard();
+        throw tooLarge();
+      }
+
+      /*
+       * Then what actually arrives, counted as it arrives.
+       *
+       * A declared length is the host's claim, and not always present: a chunked answer has none, and a compressed
+       * one declares the compressed size while the body decodes to more. The running total is the only count that is
+       * about the bytes this would keep, and it stops reading the moment they pass the cap.
+       */
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      const reader = response.body?.getReader();
+      if (reader !== undefined) {
+        try {
+          for (;;) {
+            const { done, value } = await clock.within(reader.read());
+            if (done) break;
+            total += value.byteLength;
+            if (total > cap) throw tooLarge();
+            chunks.push(value);
+          }
+        } catch (error) {
+          // Whatever stopped the reading, the rest of the body is not wanted.
+          reader.cancel().catch(() => undefined);
+          if (error instanceof CommsError) throw error;
+          throw lost(`the connection to ${SLACK_FILES_ORIGIN} failed while the file was arriving`);
+        }
+      }
+      return { bytes: Buffer.concat(chunks, total), contentType };
+    });
+  } finally {
+    // However it ended, the deadline is let go: a finished download leaves no timer behind.
+    clock.end();
+  }
 }

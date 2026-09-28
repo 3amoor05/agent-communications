@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
+import { setFlagsFromString } from 'node:v8';
+import { runInNewContext } from 'node:vm';
 import { gzipSync } from 'node:zlib';
 import { CommsError } from '@agentcomms/core';
 import { callSlack, type SlackCall } from '../src/api/call.ts';
@@ -246,7 +248,7 @@ test('a declared length over the cap is refused before any of the body is read',
   // The host declares a gigabyte and sends one byte. Waiting for the rest would time out; the declaration is enough.
   const fake = await slack({ stall: true, headers: { 'content-length': String(1024 * 1024 * 1024) } });
   await refused(
-    slackFileDownload(context(fake, { timeoutMs: 20_000 }), request({ maxBytes: 1000 })),
+    slackFileDownload(context(fake, { timeoutMs: 5_000 }), request({ maxBytes: 1000 })),
     'too-large',
     (error) => {
       assert.equal(error.details?.maxBytes, 1000);
@@ -277,7 +279,7 @@ test('no single file is read past 100 MiB, whatever cap is passed in', async () 
   const ceiling = 100 * 1024 * 1024;
   const fake = await slack({ stall: true, headers: { 'content-length': String(ceiling + 1) } });
   await refused(
-    slackFileDownload(context(fake, { timeoutMs: 20_000 }), request({ maxBytes: 10 * ceiling })),
+    slackFileDownload(context(fake, { timeoutMs: 5_000 }), request({ maxBytes: 10 * ceiling })),
     'too-large',
     (error) => assert.equal(error.details?.maxBytes, ceiling),
   );
@@ -313,6 +315,26 @@ test('a host that stops sending is given up on when the time runs out', { timeou
   assert.ok(Date.now() - started < 20_000, 'the timeout did not bound the body');
 });
 
+test('the time limit holds even when garbage is collected while the body stalls', { timeout: 30_000 }, async () => {
+  /*
+   * The first version handed a timeout signal to `fetch` and trusted `fetch` to fail the read — Resend's shape. With
+   * garbage collection running mid-stall the abort no longer reached the waiting read, and the download waited until
+   * the test runner gave up two minutes later. Collection is forced here while the body stalls, so a deadline that
+   * wakes the download only through `fetch` fails this by name instead of hanging the file.
+   */
+  setFlagsFromString('--expose-gc');
+  const collect = runInNewContext('gc') as () => void;
+  const fake = await slack({ stall: true, headers: { 'content-length': '1000' } });
+  const every = setInterval(collect, 50);
+  try {
+    await refused(slackFileDownload(context(fake, { timeoutMs: 1_000 }), request()), 'network', (error) => {
+      assert.match(error.message, /took longer than it is allowed/);
+    });
+  } finally {
+    clearInterval(every);
+  }
+});
+
 test('a caller’s signal stops a download too', async () => {
   const fake = await slack({ body: PDF });
   const controller = new AbortController();
@@ -320,17 +342,23 @@ test('a caller’s signal stops a download too', async () => {
   await refused(slackFileDownload(context(fake, { signal: controller.signal }), request()), 'network');
 });
 
-test('two downloads at once each get a grant of their own, whatever permit the context carries', async () => {
+test('a download opens its grant on a permit of its own, and leaves the context’s alone', async () => {
   /*
-   * The grant is opened on a permit of the download's own. On the context's, the second of two concurrent downloads
-   * would find the first one's grant open and be refused — a batch that fetched in parallel would lose files to it.
+   * The context is the one reads go out on, and its permit can be open for something else — a post the gate is about
+   * to send. A download is a read: it is not refused because that permit is open, and it neither spends nor closes
+   * it. Opened on the context's permit, the grant would be refused as nesting inside the post's.
    */
   const fake = await slack({ body: PDF });
-  const shared = context(fake, { permit: closedPermit() });
+  const open = { ...closedPermit(), approvalId: 'ap_1', method: 'chat.postMessage' };
+  const shared = context(fake, { permit: open });
   const both = await Promise.all([slackFileDownload(shared, request()), slackFileDownload(shared, request())]);
   assert.deepEqual(
     both.map((body) => body.bytes.byteLength),
     [PDF.byteLength, PDF.byteLength],
   );
-  assert.deepEqual(shared.permit, closedPermit());
+  assert.deepEqual(
+    open,
+    { ...closedPermit(), approvalId: 'ap_1', method: 'chat.postMessage' },
+    'the post’s permit moved',
+  );
 });
