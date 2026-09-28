@@ -1,3 +1,4 @@
+import { type ApprovalKind, approvalKind } from './approvals.ts';
 import { gatedChangeAtTerminal } from './change-flow.ts';
 import { agentMarker, canPrompt, type OutputOptions, paint, type Streams } from './cli-runtime.ts';
 import type { Core } from './core.ts';
@@ -24,18 +25,57 @@ import {
  */
 
 /**
- * Whether a call claims an approval the person already gave (§2): an approval id this machine's approval store holds
- * — pending, approved or used; every channel keeps its approvals there. Only then does the call go past the stop.
+ * What the approval id a call carries is to that call: what the stop holds it to before letting the call through.
+ */
+export interface ApprovalClaim {
+  /**
+   * The kind of approval the call takes — a send, or a change — where the surface knows it. Left out, either: the
+   * tool's own claim refuses the other kind, and the stop holds the id to its state alone.
+   */
+  kind?: ApprovalKind | undefined;
+  /**
+   * The call looks the approval up rather than claiming it: Resend's send status, asked about a send by the approval
+   * it went under — used, failed, or with an outcome nobody knows. Held to its kind only, because what the call reads
+   * is that very send, the tail of something the person already said yes to, and nothing it can do is anything more.
+   */
+  lookup?: boolean | undefined;
+}
+
+/** A call that looks a send up by its approval: Resend's `resend_send_status`, and `agent-resend send status`. */
+export const SEND_LOOKUP: Readonly<ApprovalClaim> = Object.freeze({ kind: 'send', lookup: true });
+
+/** A call that claims a change: every core command and tool that takes an approval. */
+export const CHANGE_CLAIM: Readonly<ApprovalClaim> = Object.freeze({ kind: 'change' });
+
+/**
+ * Whether a call claims an approval the person already gave (§2): an approval this machine's approval store holds —
+ * every channel keeps its approvals there — that is still waiting to be used, pending or approved, and of the kind the
+ * call takes where the surface says which. Only then does the call go past the stop.
  *
  * The key alone is not a claim. An empty `approvalId`, or an id nobody prepared, claims nothing, and let past it
  * would run the tool's first-call path with an update out — a preview, or a tightening applied at once. Each tool
  * refuses an approval it does not know anyway; the stop must not be what an unknown one walks around. The store
  * refuses anything that is not an approval id before it looks, so that is not checked twice.
+ *
+ * Nor is every id the store holds. Records stay in it after they are used, revoked or expired, and one of those let
+ * any call past the stop for as long as it was kept: an old "not now" the person turned down walked `agentcomms
+ * channels` straight through. Such a record claims nothing any more — there is nothing left of it for the person to
+ * lose by waiting — except to a look-up (`lookup`), which only reads it.
+ *
+ * What is not checked here is that the approval was prepared for this very call. The store binds a change to its
+ * digest, and a send to its draft, which only the tool can compute; it does, when it claims the approval, and refuses
+ * any other. A change that needs no approval claims none, and refuses one it is handed (`gatedChange`), so an approval
+ * prepared for another change gets a call past the stop only to that refusal.
  */
-export async function claimsApproval(core: Core, id: unknown): Promise<boolean> {
+export async function claimsApproval(core: Core, id: unknown, claim: ApprovalClaim = {}): Promise<boolean> {
   // No id at all, the usual call: nothing to look up.
   if (typeof id !== 'string') return false;
-  return (await core.approvals.get(id).catch(() => null)) !== null;
+  const record = await core.approvals.get(id).catch(() => null);
+  if (record === null) return false;
+  if (claim.kind !== undefined && approvalKind(record) !== claim.kind) return false;
+  if (claim.lookup === true) return true;
+  // The store reads an approval past its deadline as `expired`, so a pending one here is one that can still be used.
+  return record.state === 'pending' || record.state === 'approved';
 }
 
 // ── A server: every tool call ─────────────────────────────────────────────────────────────────────────────────
@@ -57,6 +97,11 @@ export interface UpdateToolGateOptions {
   running: string;
   /** Tools never stopped: the update's own, and what a person needs to see what is wrong — each doctor, the paths. */
   exempt: readonly string[];
+  /**
+   * What each tool's `approvalId` is to it, where the server knows: the kind it claims, or a look-up. A tool not named
+   * here is held to the approval's state alone, and its own claim checks the kind.
+   */
+  approvals?: Readonly<Record<string, Readonly<ApprovalClaim>>> | undefined;
   /**
    * The check, run in the background — never awaited by a call — whenever a call arrives and none is running. Absent
    * for WhatsApp, which reads the file as whatever else on the machine last left it.
@@ -90,7 +135,8 @@ export function updateToolGate(options: UpdateToolGateOptions): ToolGate {
     }
     if (exempt.has(tool)) return null;
     const pending = await pendingUpdate({ ...options, surface: 'server' });
-    if (pending === null || (await claimsApproval(options.core, args.approvalId))) return null;
+    if (pending === null) return null;
+    if (await claimsApproval(options.core, args.approvalId, options.approvals?.[tool])) return null;
     return stoppedCall(pending, { server: options.server, tool });
   };
 }
@@ -214,6 +260,8 @@ export interface TerminalGateOptions extends TerminalUpdateHooks {
    * the command run, as a tool call carrying it does over MCP (§2): the person said yes to exactly that.
    */
   approvals?: readonly unknown[] | undefined;
+  /** What those ids are to the command, as a tool's `approvals` entry says it over MCP: the kind, or a look-up. */
+  approvalClaim?: Readonly<ApprovalClaim> | undefined;
   now?: (() => Date) | undefined;
   /** How long the command waits for the check before it goes on without it. About three seconds. */
   waitMs?: number | undefined;
@@ -245,7 +293,7 @@ export async function updateGateAtTerminal(options: TerminalGateOptions): Promis
   const { core, env, streams, output } = options;
   const now = options.now ?? (() => new Date());
   if (!(await updateCheckEnabled(core, env)).on) return null;
-  for (const id of options.approvals ?? []) if (await claimsApproval(core, id)) return null;
+  for (const id of options.approvals ?? []) if (await claimsApproval(core, id, options.approvalClaim)) return null;
   if (options.check && updateCheckDue(await readUpdateCheck(core.paths.stateDir), now())) {
     // Stops waiting, and goes on: the check itself is not cut short, and finishes beside the command. A timer that
     // keeps the process alive, so the wait is the wait, whatever the check is waiting on.

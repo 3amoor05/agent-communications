@@ -4,6 +4,7 @@ import {
   checkForUpdates,
   type GatedChange,
   gatedChange,
+  SEND_LOOKUP,
   strictToolArguments,
   toCommsError,
   updateToolGate,
@@ -157,6 +158,9 @@ export async function createResendMcpServer(options: ResendMcpOptions = {}): Pro
       channel: 'resend',
       running: VERSION,
       exempt: ['resend_doctor'],
+      // The status of a send is asked by the approval it went under, used or failed as it may be: a look-up of that
+      // send, which goes past the stop as the send itself did — and only with a send's approval.
+      approvals: { resend_send_status: SEND_LOOKUP },
       refresh: () => checkForUpdates(context.core, context.env),
     }),
   );

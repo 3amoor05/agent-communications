@@ -28,6 +28,35 @@ async function heldApproval(harness: Harness): Promise<string> {
   return (prepared as { prepared: { approvalId: string } }).prepared.approvalId;
 }
 
+/**
+ * A send approval of the account's, as `resend_send_prepare` leaves one — or, `used`, as a send that went out leaves
+ * it: claimed and completed through the store, the way `resend_send_execute` does. Nothing here reaches Resend.
+ */
+async function sendApproval(harness: Harness, accountId: string, used = false): Promise<string> {
+  const expect = { to: ['someone@example.test'], cc: [], bcc: [], subject: 'Hello' };
+  const draft = { draftMessageId: 'revision_one', digest: 'a'.repeat(64) };
+  const record = await harness.core.approvals.create({
+    inboxId: accountId,
+    draftId: 'draft_one',
+    ...draft,
+    policy: 'chat',
+    requiredPolicy: 'chat',
+    riskFlags: [],
+    expect,
+  });
+  if (used) {
+    await harness.core.approvals.claimForSend(record.approvalId, {
+      inboxId: accountId,
+      ...draft,
+      policy: 'chat',
+      expect,
+    });
+    await harness.core.approvals.complete(record.approvalId, { sentMessageId: 'email_one' });
+    assert.equal((await harness.core.approvals.get(record.approvalId))?.state, 'used');
+  }
+  return record.approvalId;
+}
+
 const code = (result: ToolResult) =>
   (result.structuredContent as { error?: { code?: string } } | undefined)?.error?.code;
 const text = (result: ToolResult) =>
@@ -37,8 +66,10 @@ const text = (result: ToolResult) =>
 test('an update that is out stops every Resend tool but the doctor, and a call claiming an approval goes ahead', async () => {
   const harness = await newHarness();
   try {
-    await harness.addAccount({ name: 'acme/resend' });
-    const approvalId = await heldApproval(harness);
+    const account = await harness.addAccount({ name: 'acme/resend' });
+    const pending = await sendApproval(harness, account.id);
+    const sent = await sendApproval(harness, account.id, true);
+    const change = await heldApproval(harness);
     updateOut(harness);
     const { call, close } = await harness.mcp();
     try {
@@ -47,10 +78,23 @@ test('an update that is out stops every Resend tool but the doctor, and a call c
       assert.ok(text(listed).startsWith(UPDATE_FIRST), text(listed));
       assert.match(text(listed), /This is agent-resend /);
       assert.notEqual(code(await call('resend_doctor', {})), 'UPDATE_REQUIRED');
-      const status = await call('resend_send_status', { account: 'acme/resend', approvalId });
-      assert.notEqual(code(status), 'UPDATE_REQUIRED', 'a call claiming an approval is not stopped');
-      // The key alone claims nothing: an empty id, or one nobody here prepared, is stopped like any new call.
-      for (const claimed of ['', `ap_${'0'.repeat(26)}`]) {
+      // The status of a send is looked up by the approval it went under — waiting, or used once it went — and goes
+      // past the stop as the send did.
+      for (const approvalId of [pending, sent]) {
+        const status = await call('resend_send_status', { account: 'acme/resend', approvalId });
+        assert.notEqual(code(status), 'UPDATE_REQUIRED', 'a look-up of a send is not stopped');
+        assert.equal(status.isError, undefined, JSON.stringify(status.structuredContent));
+      }
+      // A used approval claims nothing else: sending under it again is stopped, not merely refused past the stop.
+      const again = await call('resend_send_execute', {
+        account: 'acme/resend',
+        approvalId: sent,
+        expect: { to: ['someone@example.test'], cc: [], bcc: [], subject: 'Hello' },
+      });
+      assert.equal(code(again), 'UPDATE_REQUIRED', JSON.stringify(again.structuredContent));
+      // The key alone claims nothing: an empty id, one nobody here prepared, or a change's — "not now", which an
+      // agent can have prepared while stopped — is stopped like any new call.
+      for (const claimed of ['', `ap_${'0'.repeat(26)}`, change]) {
         const refused = await call('resend_send_status', { account: 'acme/resend', approvalId: claimed });
         assert.equal(code(refused), 'UPDATE_REQUIRED', JSON.stringify(claimed));
       }
@@ -71,16 +115,20 @@ test('an update that is out stops every Resend tool but the doctor, and a call c
 test('agent-resend: with nobody to ask a command exits 11 naming both ways on, and the doctor still runs', async () => {
   const harness = await newHarness();
   try {
-    await harness.addAccount({ name: 'acme/resend' });
-    const approvalId = await heldApproval(harness);
+    const account = await harness.addAccount({ name: 'acme/resend' });
+    const sent = await sendApproval(harness, account.id, true);
+    const change = await heldApproval(harness);
     updateOut(harness);
-    // A command carrying an approval this machine holds goes past the stop, as `resend_send_status` does over MCP —
-    // by its argument here — to the command's own answer; one nobody here prepared does not.
-    const held = await harness.cli(['--json', 'send', 'status', approvalId, '--account', 'acme/resend']);
-    assert.notEqual(held.code, 11, held.stdout + held.stderr);
+    // `send status` looks a send up by its approval, used as it is, and goes past the stop as `resend_send_status`
+    // does over MCP — by its argument here — to the command's own answer. One nobody here prepared, or a change's,
+    // does not.
+    const held = await harness.cli(['--json', 'send', 'status', sent, '--account', 'acme/resend']);
+    assert.equal(held.code, 0, held.stdout + held.stderr);
     assert.doesNotMatch(held.stdout, /UPDATE_REQUIRED/);
-    const unknown = await harness.cli(['--json', 'send', 'status', `ap_${'0'.repeat(26)}`, '--account', 'acme/resend']);
-    assert.equal(unknown.code, 11, unknown.stdout + unknown.stderr);
+    for (const claimed of [`ap_${'0'.repeat(26)}`, change]) {
+      const refused = await harness.cli(['--json', 'send', 'status', claimed, '--account', 'acme/resend']);
+      assert.equal(refused.code, 11, refused.stdout + refused.stderr);
+    }
     const listed = await harness.cli(['--json', 'account', 'list']);
     assert.equal(listed.code, 11, listed.stdout + listed.stderr);
     const error = (listed.json() as { error: { code: string; message: string } }).error;

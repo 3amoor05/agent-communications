@@ -18,6 +18,7 @@ import {
   renderInstall,
   renderPrune,
   runCommand,
+  SEND_LOOKUP,
   type Streams,
   type SupportedClient,
   serverInstallChange,
@@ -193,6 +194,8 @@ is out: update first, or put it off (agentcomms update, agentcomms update --late
           streams,
           approveCommand: 'agent-resend approve',
           approvals: approvalsOf(command),
+          // `send status` looks a send up by its approval, as `resend_send_status` does over MCP.
+          approvalClaim: path.join(' ') === 'send status' ? SEND_LOOKUP : undefined,
           ...terminalUpdateHooks(core, env, { output: output(), streams, approveCommand: 'agent-resend approve' }),
         });
       },

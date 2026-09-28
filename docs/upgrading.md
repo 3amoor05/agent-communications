@@ -54,8 +54,9 @@ check as `update --check`, and records what it found in `update-check.json` in t
 release is out:
 
 - **every MCP tool call stops** — except `comms_update`, `comms_doctor`, `comms_paths`, each channel's doctor, and a
-  call carrying the `approvalId` of an approval this machine holds (one the person already gave; an empty or made-up
-  id does not count) — and answers "Hang on a minute, there's an update. Let's update first.", with the running and
+  call carrying the `approvalId` of an approval the person already gave that is still waiting to be used (an empty or
+  made-up id does not count, nor one already used, revoked or expired; Resend's send status, which looks a send up by
+  its approval, counts the send's whatever became of it) — and answers "Hang on a minute, there's an update. Let's update first.", with the running and
   latest versions and the two ways on. When every registration of that server on this machine already names the
   latest release, and only the running server is old, it says to restart the client instead. A server nothing here
   registers — the Claude Code plugin's, the Gemini extension's, one started from a checkout, or an entry written by
@@ -64,7 +65,8 @@ release is out:
 - **every command stops** — except `update`, `doctor`, `paths`, `approve`, `approvals`, `mcp` on its own (the server,
   which stops each call itself; `mcp install` and `mcp prune` are stopped like any other command), the listener a
   sign-in starts (`agent-gmail oauth-listen`, `agent-slack sign-in-listen`), WhatsApp's `status`, and a command
-  carrying `--approval` with an approval this machine holds — and at a terminal asks "Update now, later today, or
+  that takes `--approval` carrying one still waiting to be used (a command that takes none refuses it) — and at a
+  terminal asks "Update now, later today, or
   cancel?". Now runs `update`, with its own preview, and says "Updated. Run your command again." only when it
   brought this command to the latest release; otherwise it says what is left and exits non-zero. Later puts it off;
   cancel does nothing. Anything without a terminal — a script, an agent, `--json` — exits `11` (`UPDATE_REQUIRED`),

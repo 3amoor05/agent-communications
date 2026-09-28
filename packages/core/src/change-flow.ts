@@ -42,7 +42,11 @@ export type GatedOutcome<T> =
  * it on the second call, with its id.
  *
  * A change that loosens no setting and does nothing irreversible is applied directly: asking a person to agree to
- * something that needs no agreement teaches them to agree without reading.
+ * something that needs no agreement teaches them to agree without reading. It refuses an approval id, as a report
+ * refuses one (`refuseApprovalWithoutChange`), rather than applying and dropping it: the update check's stop lets a
+ * call claiming an approval through (design 2026-09-28 §2), and one that is then never claimed would carry any
+ * approval the store holds — one an agent had just had prepared for "not now", say — past the stop, to a tightening
+ * or a cancellation made where the call itself was stopped.
  */
 export async function gatedChange<T>(
   core: Core,
@@ -52,7 +56,19 @@ export async function gatedChange<T>(
   const request = await change.plan(await core.config.load());
   const loosens = classifyChange(request.before, request.after).loosened.length > 0;
   const acts = (request.effects ?? []).length > 0;
-  if (!loosens && !acts) return { status: 'applied', result: await change.apply(undefined, request) };
+  if (!loosens && !acts) {
+    if (options.approvalId) {
+      throw new CommsError(
+        'USAGE',
+        'nothing was changed: as things stand this change needs no approval, so it takes none',
+        {
+          hint: 'Make the same call again without the approval: it applies at once and asks nobody. An approval is spent only on the change it was prepared for.',
+          details: { approvalId: options.approvalId },
+        },
+      );
+    }
+    return { status: 'applied', result: await change.apply(undefined, request) };
+  }
   if (!options.approvalId) {
     return {
       status: 'approval-required',

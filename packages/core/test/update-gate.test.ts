@@ -9,12 +9,14 @@ import { test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
+import { ApprovalStore } from '../src/approvals.ts';
 import { type GatedChange, gatedChange } from '../src/change-flow.ts';
 import { CHANNEL_SERVERS } from '../src/channel-servers.ts';
 import type { Streams } from '../src/cli-runtime.ts';
 import { type Core, openCore } from '../src/core.ts';
 import { CommsError } from '../src/errors.ts';
 import { type CoreMcpOptions, createCoreMcpServer } from '../src/mcp/server.ts';
+import { changePolicyChange } from '../src/operations/change-policy.ts';
 import {
   type RegistrationItem,
   type UpdateDeps,
@@ -29,6 +31,7 @@ import {
   approvalsOf,
   claimsApproval,
   exemptFromUpdateGate,
+  SEND_LOOKUP,
   updateGateAtTerminal,
   updateToolGate,
 } from '../src/update-gate.ts';
@@ -495,6 +498,121 @@ test('a call that claims an approval this machine holds goes ahead; an empty or 
   } finally {
     await close();
   }
+});
+
+/** An approval prepared for `change`, as its first call leaves it: pending. */
+async function preparedFor<T>(m: Machine, change: GatedChange<T>): Promise<string> {
+  const outcome = await gatedChange(m.core, change, { surface: 'mcp' });
+  assert.equal(outcome.status, 'approval-required');
+  return (outcome as { prepared: { approvalId: string } }).prepared.approvalId;
+}
+
+/**
+ * Approvals the store holds that are no longer waiting to be used — revoked, used, expired — and a send's, still
+ * waiting: none of them is a claim to a change now. Made through the store's own transitions, before the update is
+ * found; "used" snoozes the check on its way, so the caller seeds the file after.
+ */
+async function spentApprovals(m: Machine): Promise<Record<'revoked' | 'used' | 'expired' | 'a send', string>> {
+  const revoked = await preparedFor(m, updateLaterChange(m.core));
+  await m.core.approvals.revoke(revoked, 'the person said no');
+  const used = await preparedFor(m, updateLaterChange(m.core));
+  const claimed = await gatedChange(m.core, updateLaterChange(m.core), { surface: 'mcp', approvalId: used });
+  assert.equal(claimed.status, 'applied');
+  const anHourAgo = new ApprovalStore(m.stateDir, { now: () => new Date(Date.now() - 3_600_000) });
+  const expired = (
+    await anHourAgo.createChange({
+      change: { summary: 'An hour ago', target: null, loosened: [], effects: ['did something an hour ago'] },
+      policy: 'chat',
+    })
+  ).approvalId;
+  const send = (
+    await m.core.approvals.create({
+      inboxId: 'inbox_one',
+      draftId: 'draft_one',
+      draftMessageId: 'revision_one',
+      digest: 'a'.repeat(64),
+      policy: 'chat',
+      requiredPolicy: 'chat',
+      riskFlags: [],
+      expect: { to: ['someone@example.test'], cc: [], bcc: [], subject: 'Hello' },
+    })
+  ).approvalId;
+  const ids = [revoked, used, expired, send];
+  const states = await Promise.all(ids.map(async (id) => (await m.core.approvals.get(id))?.state));
+  assert.deepEqual(states, ['revoked', 'used', 'expired', 'pending']);
+  return { revoked, used, expired, 'a send': send };
+}
+
+test("a used, revoked or expired approval claims nothing, nor a send's for a change; one prepared for another change reaches only a refusal", async () => {
+  const m = machine();
+  const spent = await spentApprovals(m);
+  seed(m, { latest: LATEST, behind: true });
+  const { call, close } = await connect(m);
+  try {
+    // Records stay in the store after they are spent; one of those let any call past the stop for as long as it
+    // was kept. And every core tool that takes an approval claims a change, so a send's claims nothing here.
+    for (const [label, approvalId] of Object.entries(spent)) {
+      const result = await call('comms_change_policy', { set: 'confirm', approvalId });
+      assert.ok(stopped(result), `${label}: ${JSON.stringify(result.structuredContent)}`);
+    }
+    assert.equal((await m.core.config.load()).defaults.changePolicy, undefined, 'the policy was changed');
+
+    // Stopped, an agent can still have "not now" prepared — the update's own tools are never stopped — and hand
+    // its id on. It is waiting and a change, so it goes past the stop; but a tightening needs no approval and claims
+    // none, and refuses one rather than being applied where the call itself was stopped.
+    const later = (await call('comms_update', { later: true })).structuredContent as { approvalId: string };
+    const borrowed = await call('comms_change_policy', { set: 'confirm', approvalId: later.approvalId });
+    assert.ok(!stopped(borrowed));
+    assert.equal(codeOf(borrowed), 'USAGE', JSON.stringify(borrowed.structuredContent));
+    assert.match(textOf(borrowed), /needs no approval/);
+    assert.equal((await m.core.config.load()).defaults.changePolicy, undefined, 'the tightening was applied');
+    assert.equal((await m.core.approvals.get(later.approvalId))?.state, 'pending', 'the person can still say not now');
+
+    // Revoking takes either kind: a person's no to a send reaches it past the stop.
+    const revoke = await call('comms_approval_revoke', { approvalId: spent['a send'] });
+    assert.ok(!stopped(revoke), JSON.stringify(revoke.structuredContent));
+    assert.equal((await m.core.approvals.get(spent['a send']))?.state, 'revoked');
+  } finally {
+    await close();
+  }
+});
+
+test("a look-up of a send goes past the stop by the approval it went under, used or not, and only with a send's", async () => {
+  const m = machine();
+  const spent = await spentApprovals(m);
+  const send = spent['a send'];
+  // After the update is found, as an agent that was stopped can have "not now" prepared.
+  seed(m, { latest: LATEST, behind: true });
+  const later = await preparedFor(m, updateLaterChange(m.core));
+  // The store's own path for a send that went: claimed, then completed.
+  await m.core.approvals.claimForSend(send, {
+    inboxId: 'inbox_one',
+    draftMessageId: 'revision_one',
+    digest: 'a'.repeat(64),
+    policy: 'chat',
+    expect: { to: ['someone@example.test'], cc: [], bcc: [], subject: 'Hello' },
+  });
+  await m.core.approvals.complete(send, { sentMessageId: 'email_one' });
+  assert.equal((await m.core.approvals.get(send))?.state, 'used');
+
+  assert.equal(await claimsApproval(m.core, send, SEND_LOOKUP), true, 'a used send, looked up');
+  assert.equal(await claimsApproval(m.core, send), false, 'a used send, claimed');
+  assert.equal(await claimsApproval(m.core, spent.revoked, SEND_LOOKUP), false, "a change's, looked up as a send");
+  assert.equal(await claimsApproval(m.core, later, SEND_LOOKUP), false, "a change's, waiting, looked up as a send");
+  assert.equal(await claimsApproval(m.core, later), true, 'waiting, and no kind asked for');
+
+  const gate = updateToolGate({
+    core: m.core,
+    env: m.env,
+    server: 'agent-resend',
+    channel: 'resend',
+    running: VERSION,
+    exempt: [],
+    approvals: { resend_send_status: SEND_LOOKUP },
+  });
+  assert.equal(await gate('resend_send_status', { approvalId: send }), null);
+  assert.notEqual(await gate('resend_send_status', { approvalId: later }), null);
+  assert.notEqual(await gate('resend_send_execute', { approvalId: send }), null, 'a used approval claims nothing');
 });
 
 // ── "Restart", only where restarting starts the latest ─────────────────────────────────────────────────────────
@@ -1337,9 +1455,7 @@ test('now, at a terminal: "Updated" only when this command is at the latest rele
 
 test('at a terminal, a command claiming an approval this machine holds runs, as the same call over MCP does', async () => {
   const m = machine();
-  const prepared = await gatedChange(m.core, updateLaterChange(m.core), { surface: 'mcp' });
-  assert.equal(prepared.status, 'approval-required');
-  const approvalId = (prepared as { prepared: { approvalId: string } }).prepared.approvalId;
+  const approvalId = await preparedFor(m, updateLaterChange(m.core));
   assert.match(approvalId, /^ap_/);
   seed(m, { latest: LATEST, behind: true });
   const claimed = await gateAt(m, [], { output: { json: true, color: false }, approvals: [undefined, approvalId] });
@@ -1349,15 +1465,57 @@ test('at a terminal, a command claiming an approval this machine holds runs, as 
     const refused = await gateAt(m, [], { output: { json: true, color: false }, approvals });
     assert.equal(refused.error?.code, 'UPDATE_REQUIRED', JSON.stringify(approvals));
   }
-  // And through the command itself: `--approval` with a held id goes past the stop — to the command's own answer —
-  // and one nobody prepared does not.
+  // Held to the kind the command claims, where it says: a change's is no send.
+  const kind = await gateAt(m, [], {
+    output: { json: true, color: false },
+    approvals: [approvalId],
+    approvalClaim: { kind: 'send' },
+  });
+  assert.equal(kind.error?.code, 'UPDATE_REQUIRED');
+});
+
+test('agentcomms: an approval a command claims is one still waiting, prepared as a change, and only a command that takes one carries it', async () => {
+  const m = machine();
+  const spent = await spentApprovals(m);
+  // `confirm`, so that `policy chat` is a loosening, and its approval waits for a person at a terminal.
+  const tightened = await gatedChange(m.core, changePolicyChange(m.core, {}, 'confirm'), { surface: 'cli' });
+  assert.equal(tightened.status, 'applied');
+  const forThis = await preparedFor(m, changePolicyChange(m.core, {}, 'chat'));
+  seed(m, { latest: LATEST, behind: true });
   const run = (args: string[]) =>
     spawnSync(process.execPath, [...NODE_FLAGS, CLI, ...args], { encoding: 'utf8', env: m.env });
-  const held = run(['policy', 'chat', '--approval', approvalId, '--json']);
-  assert.notEqual(held.status, 11, held.stdout + held.stderr);
-  assert.doesNotMatch(held.stdout, /UPDATE_REQUIRED/);
-  const unknown = run(['policy', 'chat', '--approval', `ap_${'0'.repeat(26)}`, '--json']);
-  assert.equal(unknown.status, 11, unknown.stdout + unknown.stderr);
+  const errorOf = (result: ReturnType<typeof run>) =>
+    (JSON.parse(result.stdout) as { error: { code: string; message: string } }).error;
+
+  // Prepared for this very change: past the stop, to the command's own answer — the person has not typed the code.
+  const held = run(['policy', 'chat', '--approval', forThis, '--json']);
+  assert.equal(errorOf(held).code, 'APPROVAL_PENDING', held.stdout + held.stderr);
+  // Spent, or a send's: stopped, like the command without it.
+  for (const [label, approvalId] of Object.entries(spent)) {
+    const stoppedHere = run(['policy', 'chat', '--approval', approvalId, '--json']);
+    assert.equal(stoppedHere.status, 11, `${label}: ${stoppedHere.stdout}${stoppedHere.stderr}`);
+  }
+
+  // A command that takes no approval is refused one as usage, before anything runs — the stop included — as every
+  // channel's command is refused an option it does not take, and a tool an argument it does not declare. It used to
+  // be handed to the stop, and a held id walked `channels` and `audit tail` straight past it.
+  for (const args of [
+    ['channels'],
+    ['audit', 'tail'],
+    ['paths'],
+    ['doctor'],
+    ['approvals', 'list'],
+    ['approve', forThis],
+    ['policy'],
+    ['mcp'],
+  ]) {
+    const refused = run([...args, '--json', '--approval', forThis]);
+    assert.equal(refused.status, 64, `${args.join(' ')}: ${refused.stdout}${refused.stderr}`);
+    assert.equal(errorOf(refused).code, 'USAGE', args.join(' '));
+    assert.match(errorOf(refused).message, /takes no --approval|an approval goes with a policy to set/);
+  }
+  assert.equal(run(['channels', '--json']).status, 11, 'without it, the command is stopped as before');
+  assert.equal((await m.core.approvals.get(forThis))?.state, 'pending', 'nothing claimed or approved it');
 });
 
 // ── The doctor ────────────────────────────────────────────────────────────────────────────────────────────────

@@ -35,8 +35,9 @@ person, and ask which they want:
   your own: the stop exists so the person decides. Where the core server is not connected — only a
   plugin's server is — the person runs `npx -y @agentcomms/core@latest update --later` at a terminal.
 
-A call carrying the `approvalId` of an approval the person already gave on this computer is never
-stopped — an empty or made-up id does not count — and neither are `comms_update`, `comms_doctor`,
+A call carrying the `approvalId` of an approval the person already gave on this computer, still
+waiting to be used, is never stopped — an empty or made-up id does not count, nor one already used,
+revoked or expired — and neither are `comms_update`, `comms_doctor`,
 `comms_paths` or a channel's doctor. The same stop meets every command at a terminal: a person there
 is asked "Update now, later today, or cancel?"; anything else — you, a script — gets exit `11` with the
 same two ways on. A command carrying `--approval` with an approval already given goes ahead, as the

@@ -39,7 +39,7 @@ import {
 } from './operations/update-settings.ts';
 import { renderDoctor, renderInstall, renderPrune, renderUpdate, renderUpdateCheck } from './render.ts';
 import { terminalUpdateHooks } from './update-check.ts';
-import { exemptFromUpdateGate, updateGateAtTerminal } from './update-gate.ts';
+import { CHANGE_CLAIM, exemptFromUpdateGate, updateGateAtTerminal } from './update-gate.ts';
 import { VERSION } from './version.ts';
 
 /**
@@ -153,6 +153,45 @@ function parse(argv: string[]) {
 
 const CLIENT_NAMES = ['claude-code', 'claude-desktop', 'codex', 'cursor', 'gemini', 'vscode', 'json'];
 
+/**
+ * Whether a command takes `--approval`: one that makes a change a person approves — `policy` with a policy to set,
+ * `mcp install`, `mcp prune`, `names migrate`, `secrets migrate` and `update` — where it is how the second run claims
+ * that change. Every one of them is a change, so what it claims is a change approval.
+ */
+function takesApproval(command: string | undefined, sub: string | undefined): boolean {
+  switch (command) {
+    case 'policy':
+      return sub !== undefined;
+    case 'mcp':
+      return sub === 'install' || sub === 'prune';
+    case 'names':
+    case 'secrets':
+      return sub === 'migrate';
+    case 'update':
+      return true;
+    default:
+      return false;
+  }
+}
+
+/**
+ * Refuses `--approval` on a command that takes none, as USAGE.
+ *
+ * Parsed as one option for every command, it was carried to the update check's stop whatever the command, and the
+ * stop lets a command claiming an approval through (§2): `agentcomms channels --approval <id>`, with an old "not now"
+ * the person had turned down, ran past it. Over MCP the same calls are refused an `approvalId` their tools do not
+ * declare, and every channel's command is refused an option it does not take, before anything runs. So is this one.
+ */
+function refuseApprovalNotTaken(command: string | undefined, sub: string | undefined, approvalId: unknown): void {
+  if (approvalId === undefined || takesApproval(command, sub)) return;
+  // Reporting the policy takes none, in the words `comms_change_policy` refuses it with.
+  if (command === 'policy') refuseApprovalWithoutChange(String(approvalId));
+  const typed = ['agentcomms', command, sub].filter((word) => word !== undefined).join(' ');
+  throw new CommsError('USAGE', `\`${typed}\` takes no --approval: it makes no change a person approves`, {
+    hint: 'An approval goes with the change it was prepared for — policy chat|confirm, mcp install, mcp prune, names migrate, secrets migrate or update — run again exactly as the preview named it. Nothing was run.',
+  });
+}
+
 export async function main(
   argv: string[] = process.argv.slice(2),
   env: NodeJS.ProcessEnv = process.env,
@@ -177,8 +216,13 @@ export async function main(
     process.stdout.write(HELP);
     return 0;
   }
-  const core = openCore({ env });
   const [command, sub, arg] = positionals;
+  try {
+    refuseApprovalNotTaken(command, sub, values.approval);
+  } catch (error) {
+    return writeError(error as CommsError, output);
+  }
+  const core = openCore({ env });
   const approval = { approvalId: values.approval, env, output };
   /** An exit status for a command that printed its result and still did not do what was asked. */
   let softExit: number = EXIT_CODES.OK;
@@ -193,7 +237,8 @@ export async function main(
 
   // The daily update check (design 2026-09-28 §3): before any command but the exempt ones, an update that is out
   // stops it — a person is asked, anything else ends with UPDATE_REQUIRED. One carrying an approval the person
-  // already gave goes ahead, as the same call over MCP does.
+  // already gave goes ahead, as the same call over MCP does: only a command that takes one carries it, and every one
+  // of those claims a change.
   if (!exemptFromUpdateGate(positionals.slice(0, 2))) {
     let ended: number | null = null;
     const gated = await runCommand(output, async () => {
@@ -205,7 +250,8 @@ export async function main(
         running: VERSION,
         output,
         streams: defaultStreams,
-        approvals: [values.approval],
+        approvals: takesApproval(command, sub) ? [values.approval] : [],
+        approvalClaim: CHANGE_CLAIM,
         ...terminalUpdateHooks(core, env, { output, streams: defaultStreams }),
       });
     });
@@ -279,7 +325,7 @@ export async function main(
           throw usage('usage: agentcomms policy [--account <name> | --inbox <name>] [chat|confirm]');
         const scope = { inbox: values.inbox, account: values.account };
         if (sub === undefined) {
-          refuseApprovalWithoutChange(values.approval);
+          // Reporting takes no --approval: refused with the rest, before the update check's stop.
           writeResult(changePolicyReport(await core.config.load(), scope), output, renderPolicy);
           return;
         }

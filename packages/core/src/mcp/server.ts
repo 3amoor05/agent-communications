@@ -27,7 +27,7 @@ import { updateAutoChange, updateLaterChange } from '../operations/update-settin
 import type { KeyringModule, SecretStore } from '../secrets.ts';
 import { strictToolArguments } from '../tool-arguments.ts';
 import { checkForUpdates } from '../update-check.ts';
-import { updateToolGate } from '../update-gate.ts';
+import { CHANGE_CLAIM, updateToolGate } from '../update-gate.ts';
 import { VERSION } from '../version.ts';
 
 /**
@@ -164,6 +164,15 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
       channel: 'core',
       running: VERSION,
       exempt: ['comms_update', 'comms_doctor', 'comms_paths'],
+      // Every tool here that takes an approval claims a change with it, as the same command does at a terminal.
+      // `comms_approval_revoke` takes either kind: it is how a person's no reaches a send or a change.
+      approvals: {
+        comms_change_policy: CHANGE_CLAIM,
+        comms_server_install: CHANGE_CLAIM,
+        comms_server_prune: CHANGE_CLAIM,
+        comms_names_migrate: CHANGE_CLAIM,
+        comms_secrets_migrate: CHANGE_CLAIM,
+      },
       refresh: () => checkForUpdates(core, env, { deps: options.update, now: options.update?.now }),
       now: options.update?.now,
     }),
