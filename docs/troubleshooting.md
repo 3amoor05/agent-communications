@@ -34,7 +34,8 @@ agent-gmail inbox reauth <alias> --client desktop --start
 
 ### The browser never comes back
 
-`--start` returns immediately and prints a `--finish` command; the listener runs in a detached process. If it is
+`--start` returns as soon as its listener is ready — normally about a second, at most thirty — and prints a
+`--finish` command; the listener runs in a detached process. If it is
 not being caught:
 
 - **A blocked port.** The listener binds a loopback port; a firewall or VPN can stop the redirect reaching it.

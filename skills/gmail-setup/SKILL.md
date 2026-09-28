@@ -410,7 +410,8 @@ https://accounts.google.com/o/oauth2/v2/auth?client_id=…
 Without `--start`, the command asks the shell what it is. With stdin and stdout both terminals — and no
 `--json`, and not CI — it keeps the listener in-process and waits up to ten minutes for the redirect,
 which is what happened here. Anywhere else, most agent shells included, it detaches the listener and
-returns the link and the `--finish` command in about a second, exactly as `--start` would. So the same
+returns the link and the `--finish` command as soon as its listener is ready — normally about a second, at most
+thirty — exactly as `--start` would. So the same
 line either finishes immediately or outlives the agent's 120-second shell and leaves a flow nobody
 finished, and nothing in the command itself says which. `--start` decides it instead.
 

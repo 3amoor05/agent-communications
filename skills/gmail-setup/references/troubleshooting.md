@@ -147,7 +147,8 @@ the loopback port open for up to ten minutes itself, and an agent's shell is kil
 (Claude Code's Bash tool gives up at 120 seconds). But the command only takes that path when stdin and
 stdout are both terminals, and never under `--json` or in CI. Anywhere else — most agent shells
 included — it pushes the listener into a background process and returns the link, the flow id and the
-`--finish` command in about a second, exactly as `--start` would. So this is a real fault on a
+`--finish` command as soon as its listener is ready — normally about a second, at most thirty — exactly as
+`--start` would. So this is a real fault on a
 terminal and rarely the fault in an agent, and a user reporting a bare `inbox add` has not thereby
 told you what went wrong. Ask where the command ran before believing it.
 

@@ -384,7 +384,12 @@ test('a piped `--start` returns immediately: the listener does not hold the call
   // command was going to print has already been printed either way, so only EOF distinguishes the two.
   const eof = new Promise<'eof'>((resolve) => child.stderr.once('end', () => resolve('eof')));
   // Longer than the thirty seconds `--start` may wait for its listener, so a slow start is not read as a held pipe.
-  const raced = await Promise.race([eof, new Promise<'held'>((resolve) => setTimeout(() => resolve('held'), 45_000))]);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const held = new Promise<'held'>((resolve) => {
+    timer = setTimeout(() => resolve('held'), 45_000);
+  });
+  const raced = await Promise.race([eof, held]);
+  clearTimeout(timer);
   assert.equal(raced, 'eof', `stderr was still open after 45s; it printed: ${stdout}${stderr}`);
 
   const exit = await new Promise<number | null>((resolve) => child.once('close', (code) => resolve(code)));
