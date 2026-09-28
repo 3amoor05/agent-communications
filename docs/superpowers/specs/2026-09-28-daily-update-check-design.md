@@ -135,7 +135,12 @@ settle beyond them, after review:
   acts on a change already in flight.
 - **The terminal's three seconds bound the wait, not the check**: the ask finishes beside the command. A check is
   claimed with a short lease (`checking`) and the day's `lastChecked` written when the ask is over, so an ask cut
-  short does not use up the day.
+  short does not use up the day. The process therefore exits only when the check has: measured with an eight-second
+  loopback registry, `agentcomms channels --json` printed at 3.3 s and exited at 11.8 s, and the whole check may take
+  the registry's ten-second timeout plus `npm ls`'s sixty. Anything that waits for the exit — an agent's shell tool,
+  `$(…)`, `| jq` — waits for the check, once a day. **Accepted as is for 0.9.0 by the owner** (review of the first fix
+  round, 2026-09-29), over handing the check to a detached child or unref'ing its handles and leaving the next process
+  to retry once the lease runs out; `docs/upgrading.md` says so to the person.
 - **"Updated. Run your command again." only when the update brought this command to the latest release**; otherwise
   the terminal says what is left, and ends non-zero. Both ways on are also named in their npx form, for a machine with
   no `agentcomms` installed.
