@@ -5,11 +5,13 @@
   "mcpServers": {
     "gmail": {
       "command": "npx",
-      "args": ["-y", "@agentcomms/gmail-mcp@0.7.2"]
+      "args": ["-y", "@agentcomms/gmail-mcp@0.7.2"],
+      "env": { "AGENT_COMMS_STARTED_BY": "gemini-extension" }
     },
     "slack": {
       "command": "npx",
-      "args": ["-y", "@agentcomms/slack@0.7.2", "mcp"]
+      "args": ["-y", "@agentcomms/slack@0.7.2", "mcp"],
+      "env": { "AGENT_COMMS_STARTED_BY": "gemini-extension" }
     }
   }
 }

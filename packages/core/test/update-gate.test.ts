@@ -43,6 +43,7 @@ import {
   UPDATE_CHECK_FILE,
   UPDATE_CHECK_LEASE_MS,
   UPDATE_FIRST,
+  UPDATE_STARTED_BY_ENV,
   type UpdateCheckRecord,
   updateCheckPath,
   updateVerdict,
@@ -739,6 +740,44 @@ test('"restart" is never said for a server the check did not find registered at 
   cursorWith(pinned, { gmail: npxEntry('gmail', LATEST) });
   await checkForUpdates(pinned.core, pinned.env, { deps: deps(latestVersion, {}) });
   assert.deepEqual((await readUpdateCheck(pinned.stateDir)).current, { registered: ['gmail'], global: [] });
+});
+
+test('a server a plugin or an extension started is told to update, even where the registrations say restart', async () => {
+  /*
+   * "Restart" is decided per channel, from its registrations. The Claude Code plugin's Gmail server and the Gemini
+   * extension's servers are none of them: each pins its own release, which `comms_update` never moves. Beside a
+   * registration of the same channel the update moved, such a server was told to restart every day, and restarting
+   * started the release the plugin pins. Its launcher, or its manifest, says so in its environment.
+   */
+  const m = machine();
+  seed(m, { latest: LATEST, behind: false, current: { registered: ['gmail'], global: ['gmail'] } });
+  const verdict = async (surface: 'server' | 'command', startedBy?: string) =>
+    (
+      await pendingUpdate({
+        core: m.core,
+        env: startedBy === undefined ? m.env : { ...m.env, [UPDATE_STARTED_BY_ENV]: startedBy },
+        running: VERSION,
+        channel: 'gmail',
+        surface,
+      })
+    )?.kind;
+  assert.equal(await verdict('server'), 'restart', 'a registration of it names the latest');
+  assert.equal(await verdict('server', 'claude-code-plugin'), 'update');
+  assert.equal(await verdict('server', 'gemini-extension'), 'update');
+  assert.equal(await verdict('server', ' '), 'restart', 'an empty marker says nothing');
+  // A command is run from where it is installed, which the marker is not about.
+  assert.equal(await verdict('command', 'claude-code-plugin'), 'restart');
+  // And it is the stop a call meets.
+  const gate = updateToolGate({
+    core: m.core,
+    env: { ...m.env, [UPDATE_STARTED_BY_ENV]: 'claude-code-plugin' },
+    server: 'agent-gmail',
+    channel: 'gmail',
+    running: VERSION,
+    exempt: [],
+  });
+  const stop = (await gate('gmail_search', {})) as { content: { text: string }[] } | null;
+  assert.ok(stop?.content[0]?.text.startsWith(UPDATE_FIRST), JSON.stringify(stop));
 });
 
 /** One client's registration of `channel`'s server, as a report lists it. */

@@ -24,10 +24,10 @@ person, and ask which they want:
 
 - **Update now** — steps 1 to 3 below. The stop ends once the update is applied; a server whose
   registrations the update moved, and that was running before it, then says "the update is
-  installed … Restart the client first" instead, until the client is restarted. A server nothing on
-  this computer registers — the Claude Code plugin's Gmail server, the Gemini extension, one started
-  from a checkout — keeps saying "update": `comms_update` cannot reach it, so tell the person to
-  update it where it was installed (the plugin or the extension), or to put the stop off.
+  installed … Restart the client first" instead, until the client is restarted. A server the update
+  does not move — the Claude Code plugin's Gmail server, the Gemini extension's servers, one a
+  registration starts from a checkout — keeps saying "update": `comms_update` cannot reach it, so tell
+  the person to update it where it was installed (the plugin or the extension), or to put the stop off.
 - **Not now** — call `comms_update` with `later: true`. It is a change like any other: show the
   preview ("Skip the update to X until tomorrow") and wait for the person's yes (under `confirm`,
   their `agentcomms approve <id>`), then call again with the `approvalId`. Nothing stops again until

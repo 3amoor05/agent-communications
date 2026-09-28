@@ -27,6 +27,14 @@ export const UPDATE_CHECK_FILE = 'update-check.json';
  */
 export const UPDATE_CHECK_ENV: 'AGENT_COMMS_UPDATE_CHECK' = 'AGENT_COMMS_UPDATE_CHECK';
 
+/**
+ * Set by what starts a server from a release it pins itself — the Claude Code plugin's launcher, the Gemini
+ * extension's manifest — to say so: `claude-code-plugin`, `gemini-extension`. No registration here names that server,
+ * and `comms_update` never moves it; it changes when the plugin or the extension is updated. So its stop always says
+ * "update", whatever the channel's registrations say: restarting would start the release the plugin pins.
+ */
+export const UPDATE_STARTED_BY_ENV: 'AGENT_COMMS_STARTED_BY' = 'AGENT_COMMS_STARTED_BY';
+
 /** How long a check is good for: the registry is asked at most once in this long, by the whole machine. */
 export const UPDATE_CHECK_INTERVAL_MS: number = 24 * 60 * 60 * 1000;
 
@@ -272,6 +280,10 @@ export function updateVerdict(record: UpdateCheckRecord, running: string, where:
 /**
  * The update that stops this process now, from the file as it is — or null: switched off, snoozed, or nothing newer.
  * Reads two files and asks nobody.
+ *
+ * "Restart" is decided per channel, from its registrations, and a server a plugin or an extension started is not one
+ * of them (`UPDATE_STARTED_BY_ENV`): beside a registration the update moved, it was told to restart every day, and
+ * restarting started the release the plugin pins. It is told to update.
  */
 export async function pendingUpdate(
   options: UpdateSurface & {
@@ -284,7 +296,10 @@ export async function pendingUpdate(
   if (!(await updateCheckEnabled(options.core, options.env)).on) return null;
   const record = await readUpdateCheck(options.core.paths.stateDir);
   if (updateSnoozed(record, (options.now ?? (() => new Date()))())) return null;
-  return updateVerdict(record, options.running, options);
+  const verdict = updateVerdict(record, options.running, options);
+  const startedBy = options.env[UPDATE_STARTED_BY_ENV]?.trim();
+  if (verdict?.kind === 'restart' && options.surface === 'server' && startedBy) return { ...verdict, kind: 'update' };
+  return verdict;
 }
 
 /**

@@ -88,5 +88,11 @@ fi
 PATH="$NODE_DIR:$PATH"
 export PATH
 
+# The daily update check says "restart the client" only for a server every registration of which names the latest
+# release. This server is no registration: the plugin pins the release below, and it changes only when the plugin is
+# updated — restarting starts the same one. Said to the server, so that its stop always says to update.
+AGENT_COMMS_STARTED_BY="claude-code-plugin"
+export AGENT_COMMS_STARTED_BY
+
 # `npx -y` with an exact version: the same server every time, and no prompt in a context with no terminal.
 exec "$NODE_DIR/npx" -y "@agentcomms/gmail-mcp@$VERSION" "$@"

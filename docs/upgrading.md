@@ -56,12 +56,14 @@ release is out:
 - **every MCP tool call stops** — except `comms_update`, `comms_doctor`, `comms_paths`, each channel's doctor, and a
   call carrying the `approvalId` of an approval the person already gave that is still waiting to be used (an empty or
   made-up id does not count, nor one already used, revoked or expired; Resend's send status, which looks a send up by
-  its approval, counts the send's whatever became of it) — and answers "Hang on a minute, there's an update. Let's update first.", with the running and
-  latest versions and the two ways on. When every registration of that server on this machine already names the
-  latest release, and only the running server is old, it says to restart the client instead. A server nothing here
-  registers — the Claude Code plugin's, the Gemini extension's, one started from a checkout, or an entry written by
-  hand with no version — is always told to update: restarting would start the same old code, so update it where it
-  was installed, or put it off;
+  its approval, counts the send's whatever became of it) — and answers "Hang on a minute, there's an update. Let's
+  update first.", with the running and latest versions and the two ways on. When every registration of that server on
+  this machine already names the latest release, and only the running server is old, it says to restart the client
+  instead. The Claude Code plugin's Gmail server and the Gemini extension's servers are always told to update — each
+  says, as it starts, that the plugin or the extension started it — because they run the release it pins, which
+  restarting starts again: update them where they were installed, or put it off. So is a server of a channel with a
+  registration that pins no release — a checkout's own, or an entry written by hand. A server started from a client
+  configuration the check does not read goes by its channel's registrations;
 - **every command stops** — except `update`, `doctor`, `paths`, `approve`, `approvals`, `mcp` on its own (the server,
   which stops each call itself; `mcp install` and `mcp prune` are stopped like any other command), the listener a
   sign-in starts (`agent-gmail oauth-listen`, `agent-slack sign-in-listen`), WhatsApp's `status`, and a command

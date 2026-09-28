@@ -113,9 +113,11 @@ settle beyond them, after review:
 - **"Restart" only on a positive finding (§1).** The file records, channel by channel, where this machine is known to
   run the latest release (`current`): a server whose every registration the check read names it — at least one, none
   pinning nothing, no client configuration left unread — or a command whose package is installed globally at it. Only
-  then does a stop say "restart" rather than "update". A server nothing here registers — the Claude Code plugin's, the
-  Gemini extension's, one started from a checkout, an entry written by hand with no version — is told to update:
-  restarting would start the same old code.
+  then does a stop say "restart" rather than "update". A server of a channel with a registration that pins nothing —
+  a checkout's own, an entry written by hand with no version — is told to update: restarting may start the same old
+  code. "Restart" is decided per channel, so a server beside the registrations, one they do not start, would be told to
+  restart with them: the Claude Code plugin's launcher and the Gemini extension's manifest set
+  `AGENT_COMMS_STARTED_BY` for the servers they start, and such a server is always told to update.
 - **The terminal stops for "installed, not yet running" too** (Decision 2): an older copy of a command whose release is
   installed globally is stopped, and its "now" says to run the command from the installed release.
 - **A claimed approval is one this machine's approval store holds and that is still waiting to be used — pending or

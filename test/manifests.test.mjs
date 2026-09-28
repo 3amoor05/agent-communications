@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { access, constants, cp, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, constants, cp, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -120,6 +120,59 @@ test('the launcher prints the whole message when it finds no Node, and nothing e
     result.stderr.includes(`npx -y @agentcomms/gmail@${root.version} mcp install --client <your client>`),
     `the way out, at the version this launcher runs:\n${result.stderr}`,
   );
+});
+
+/** The name of the variable the core reads to tell a plugin's or an extension's server apart, from its source. */
+async function startedByVariable() {
+  const source = await readFile(join(ROOT, 'packages', 'core', 'src', 'update-state.ts'), 'utf8');
+  const [, name] = source.match(/UPDATE_STARTED_BY_ENV: '(\w+)' = '\1'/) ?? [];
+  assert.ok(name, 'the core names the variable');
+  return name;
+}
+
+test('the launcher tells the server the plugin started it, so its update stop never says restart', async (t) => {
+  if (process.platform === 'win32') return t.skip('no /bin/sh');
+  /*
+   * The daily update check says "restart the client" for a channel every registration of which names the latest
+   * release. The plugin's server is no registration: it runs the release the plugin pins, whatever the update moved,
+   * and restarting starts that one again. The launcher says so in the environment the server starts with.
+   *
+   * Run with a `node` and an `npx` of this test's own, first on PATH, so the launcher finds them and `exec`s the
+   * stand-in, which prints what it was handed.
+   */
+  const variable = await startedByVariable();
+  const directory = await mkdtemp(join(tmpdir(), 'launcher-'));
+  try {
+    for (const [name, body] of [
+      ['node', '#!/bin/sh\nexit 0\n'],
+      ['npx', `#!/bin/sh\nprintf '%s\\n' "started-by=$${variable}" "$@"\n`],
+    ]) {
+      await writeFile(join(directory, name), body);
+      await chmod(join(directory, name), 0o755);
+    }
+    const root = JSON.parse(await readFile(join(ROOT, 'package.json'), 'utf8'));
+    const { stdout } = await run('/bin/sh', [join(ROOT, 'bin', 'agent-gmail-launch')], {
+      env: { PATH: `${directory}:/usr/bin:/bin`, HOME: directory },
+    });
+    assert.deepEqual(stdout.trim().split('\n'), [
+      'started-by=claude-code-plugin',
+      '-y',
+      `@agentcomms/gmail-mcp@${root.version}`,
+    ]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('every server the Gemini extension starts is told the extension started it', async () => {
+  // As for the plugin: the extension pins its own release, which no update here moves, so its stop says to update.
+  const variable = await startedByVariable();
+  const extension = JSON.parse(await readFile(join(ROOT, 'gemini-extension.json'), 'utf8'));
+  const servers = Object.entries(extension.mcpServers);
+  assert.ok(servers.length > 0);
+  for (const [name, server] of servers) {
+    assert.deepEqual(server.env, { [variable]: 'gemini-extension' }, name);
+  }
 });
 
 test('the Gemini extension launches the version it declares', async () => {
