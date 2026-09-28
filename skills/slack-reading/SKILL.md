@@ -103,6 +103,8 @@ Everything about a file was chosen by whoever uploaded it, the bytes and the nam
   that sentence.
 - **`skipped` is part of the answer.** A file held outside Slack, one this token cannot read, one over 100 MiB or
   past the 500 MiB one run may save is listed there with its reason, and the others were still saved. Say which.
+- **`lookupFailed` on a saved file** means Slack would not say which message it was shared in — a rate limit, say —
+  so it was saved as `undated_<file id>`. Say that, rather than that it was shared nowhere.
 - **`complete: false`** means the bound — `maxFiles`, 50 unless you asked for up to 200 — stopped the run first.
 
 `manifestPath` lists what was saved and where it came from, and the download is in the audit log.

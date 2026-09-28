@@ -246,6 +246,15 @@ export interface SavedSlackFile {
   readonly size: number;
   readonly sha256: string;
   readonly riskFlags: readonly string[];
+  /**
+   * Why the file's own record could not be looked up, when it could not — or null.
+   *
+   * Only a conversation's files have it: listed without the message each was shared in, each is looked up by id for
+   * that, and one whose lookup failed is saved from the listing's record as `undated_<file id>`. Undated then says
+   * nothing about the file — Slack may well know its message — so the result says why rather than let it pass for a
+   * file shared nowhere.
+   */
+  readonly lookupFailed: string | null;
 }
 
 export interface SkippedSlackFile {
@@ -533,7 +542,15 @@ interface Saved {
   readonly record: Raw;
   readonly size: number;
   readonly sha256: string;
+  readonly lookupFailed: string | undefined;
 }
+
+/**
+ * The failures of a lookup that every later lookup in the run would meet too: Slack's rate limit or an outage, a token
+ * it no longer takes, a scope the workspace was not granted. One file Slack will not describe is `NOT_FOUND`, and is
+ * one file.
+ */
+const RUN_WIDE_FAILURES: ReadonlySet<string> = new Set(['TRANSIENT', 'AUTH_REQUIRED', 'SCOPE_MISSING']);
 
 /**
  * Saves the files a request names under the downloads root, and reports each one saved or skipped.
@@ -576,6 +593,31 @@ export async function downloadFiles(
   const seen = new Set<string>();
   let reached = 0;
 
+  /*
+   * One file's own record, by id — until a lookup fails in a way every later one would.
+   *
+   * Slack's rate limit, a token it no longer takes, a scope the workspace lacks: after one of those, each further
+   * `files.info` fails the same way, and a conversation's two hundred files would be two hundred more calls against a
+   * rate limit the person's other work shares. They used to be made all the same, and every file after the first
+   * saved as undated with nothing saying why. So the lookups stop there for the rest of the run, and each file after
+   * it carries the reason it was not looked up.
+   */
+  let lookupsStopped: string | undefined;
+  const lookUp = async (fileId: string): Promise<{ readonly record?: Raw } | { readonly failed: string }> => {
+    if (lookupsStopped !== undefined) return { failed: lookupsStopped };
+    try {
+      const response = await callSlack(call, 'files.info', { file: fileId });
+      const own = response.file;
+      return typeof own === 'object' && own !== null ? { record: own as Raw } : {};
+    } catch (error) {
+      const why = messageOf(error);
+      if (error instanceof CommsError && RUN_WIDE_FAILURES.has(error.code)) {
+        lookupsStopped = `not looked up, because an earlier lookup in this download failed: ${why}`;
+      }
+      return { failed: why };
+    }
+  };
+
   try {
     for (const candidate of found.candidates) {
       const { fileId } = candidate;
@@ -593,31 +635,27 @@ export async function downloadFiles(
       }
 
       let record = candidate.record;
+      let lookupFailed: string | undefined;
       /*
        * A listing names the conversations a file is in, not the message: Slack documents `files.list` records with
        * `channels`, `groups` and `ims` and no `shares`, which `files.info` has, with each message's timestamp. Without
        * one the file would be saved as `undated_<id>` although it was shared in the very conversation asked about, so
        * it is looked up by id — as a message's files are, and as `--file` already pays for. Should the lookup fail,
-       * the listing's own record still says where the bytes are, and the file is saved as undated.
+       * the listing's own record still says where the bytes are, and the file is saved as undated, saying why.
        */
       if (record !== undefined && firstShare(record) === undefined) {
-        try {
-          const response = await callSlack(call, 'files.info', { file: fileId });
-          const own = response.file;
-          if (typeof own === 'object' && own !== null) record = own as Raw;
-        } catch {
-          // Kept as listed.
-        }
+        const looked = await lookUp(fileId);
+        if ('failed' in looked) lookupFailed = looked.failed;
+        else if (looked.record !== undefined) record = looked.record;
       }
       if (record === undefined) {
-        try {
-          const response = await callSlack(call, 'files.info', { file: fileId });
-          record = (response.file as Raw | undefined) ?? {};
-        } catch (error) {
+        const looked = await lookUp(fileId);
+        if ('failed' in looked) {
           // One file Slack will not describe — gone, or in a conversation this account is not in — is one file.
-          skip(fileId, { cause: 'lookup', reason: error instanceof Error ? error.message : String(error) });
+          skip(fileId, { cause: 'lookup', reason: looked.failed });
           continue;
         }
+        record = looked.record ?? {};
       }
       const refused = unfetchable(record, fileId);
       if (refused) {
@@ -678,6 +716,7 @@ export async function downloadFiles(
         record,
         size: body.bytes.byteLength,
         sha256: createHash('sha256').update(body.bytes).digest('hex'),
+        lookupFailed,
       });
     }
   } catch (error) {
@@ -817,7 +856,7 @@ async function describe(call: SlackCall, workspace: string, saved: readonly Save
   const uploaders = saved.map(({ record }) => str(record.user)).filter((id) => id !== undefined && USER_ID.test(id));
   await book.learnPeople(call, new Set(uploaders as string[]));
 
-  return saved.map(({ fileId, path, message, record, size, sha256 }) => {
+  return saved.map(({ fileId, path, message, record, size, sha256, lookupFailed }) => {
     const rawName = str(record.name);
     const rawTitle = str(record.title);
     const rawType = str(record.mimetype)?.trim();
@@ -847,6 +886,8 @@ async function describe(call: SlackCall, workspace: string, saved: readonly Save
       sha256,
       // Judged on the name as the uploader gave it: the extension rules clean it first, the bidi rule needs it raw.
       riskFlags: fileRisks(rawName ?? '', rawType ?? ''),
+      // This package's words, or Slack's error mapped into them: never the uploader's.
+      lookupFailed: lookupFailed ?? null,
     };
   });
 }

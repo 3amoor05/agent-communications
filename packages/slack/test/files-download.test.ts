@@ -45,6 +45,8 @@ function slackApi(script: Record<string, Reply>) {
     asked.push({ method, params });
     const entry = script[method];
     const answer = typeof entry === 'function' ? (entry as (params: URLSearchParams) => unknown)(params) : entry;
+    // A reply given whole — a 429 with its `Retry-After` — goes out as it is.
+    if (answer instanceof Response) return answer;
     return new Response(JSON.stringify(answer ?? { ok: false, error: 'unknown_method' }));
   };
   return { fetch, asked, methods: () => asked.map((call) => call.method) };
@@ -486,11 +488,21 @@ test('a conversation’s files, listed as Slack lists them — without their sha
   const { slack, root, run } = await setup({
     'files.list': {
       ok: true,
-      files: [listed('F0L1'), listed('F0L2')],
+      files: [listed('F0L2'), listed('F0L1')],
       paging: { count: 2, total: 2, page: 1, pages: 1 },
     },
-    // F0L2 cannot be looked up: the listing's own record is still enough to save it, as undated.
-    'files.info': filesInfo({ F0L1: fileRecord('F0L1') }),
+    /*
+     * F0L1's own record gives another address, of another team, than the listing did: the file's own record is the
+     * one used — its shares, and the address the transport checks — not the listing's with the shares copied over.
+     * F0L2 cannot be looked up: the listing's own record is still enough to save it, as undated, saying why. It
+     * comes first, so that F0L1 shows one file Slack will not describe does not stop the lookups of the rest.
+     */
+    'files.info': filesInfo({
+      F0L1: fileRecord('F0L1', {
+        user_team: 'T0002',
+        url_private_download: 'https://files.slack.com/files-pri/T0002-F0L1/download/its-own.pdf',
+      }),
+    }),
   });
   const bytes = transport({ F0L1: 'one', F0L2: 'two' });
 
@@ -498,15 +510,91 @@ test('a conversation’s files, listed as Slack lists them — without their sha
 
   assert.deepEqual(
     result.files.map((file) => where(root, file.path)),
-    [`acme/2023-11-14_C0AAA1-${TS}/F0L1.pdf`, 'acme/undated_F0L2/F0L2.pdf'],
+    ['acme/undated_F0L2/F0L2.pdf', `acme/2023-11-14_C0AAA1-${TS}/F0L1.pdf`],
   );
   assert.deepEqual(result.skipped, []);
+  // One file Slack will not describe is one file: the next is still looked up.
   assert.deepEqual(slack.methods(), ['files.list', 'files.info', 'files.info', 'users.info']);
   assert.deepEqual(
-    bytes.asked.map((request) => request.url),
+    bytes.asked.map((request) => [request.url, request.teamId]),
     [
-      'https://files.slack.com/files-pri/T0001-F0L1/download/numbers.pdf',
-      'https://files.slack.com/files-pri/T0001-F0L2/download/numbers.pdf',
+      ['https://files.slack.com/files-pri/T0001-F0L2/download/numbers.pdf', 'T0001'],
+      ['https://files.slack.com/files-pri/T0002-F0L1/download/its-own.pdf', 'T0002'],
+    ],
+  );
+  assert.deepEqual(
+    result.files.map((file) => [file.fileId, file.lookupFailed]),
+    [
+      ['F0L2', 'no such file, or this account cannot see it'],
+      ['F0L1', null],
+    ],
+    'undated because its lookup failed, and the result says so',
+  );
+});
+
+test('after a lookup Slack rate-limits, the rest of the run is not looked up, and each file says why', async () => {
+  /*
+   * A rate limit, a token Slack no longer takes, a missing scope: every later lookup would fail the same way. They
+   * used to be made all the same — one per file, up to two hundred against a limit the person's other work shares —
+   * and every file saved as undated with nothing saying why.
+   */
+  const listed = (id: string): Record<string, unknown> => {
+    const { shares: _shares, ...rest } = fileRecord(id);
+    return { ...rest, channels: ['C0AAA1'] };
+  };
+  const limited = () => new Response('', { status: 429, headers: { 'retry-after': '30' } });
+  const conversation = await setup({
+    'files.list': {
+      ok: true,
+      files: [listed('F0L1'), listed('F0L2'), listed('F0L3')],
+      paging: { count: 3, total: 3, page: 1, pages: 1 },
+    },
+    'files.info': limited,
+  });
+  const bytes = transport({ F0L1: 'one', F0L2: 'two', F0L3: 'three' });
+
+  const result = await conversation.run({ channel: 'C0AAA1' }, { download: bytes.download });
+
+  assert.deepEqual(conversation.slack.methods(), ['files.list', 'files.info', 'users.info'], 'one lookup, not three');
+  assert.deepEqual(
+    result.files.map((file) => where(conversation.root, file.path)),
+    ['acme/undated_F0L1/F0L1.pdf', 'acme/undated_F0L2/F0L2.pdf', 'acme/undated_F0L3/F0L3.pdf'],
+    'still saved, from the listing’s own records',
+  );
+  assert.deepEqual(
+    result.files.map((file) => file.lookupFailed),
+    [
+      'Slack is rate-limiting this workspace',
+      'not looked up, because an earlier lookup in this download failed: Slack is rate-limiting this workspace',
+      'not looked up, because an earlier lookup in this download failed: Slack is rate-limiting this workspace',
+    ],
+  );
+  const manifest = JSON.parse(await readFile(result.manifestPath, 'utf8')) as FileDownloadResult;
+  assert.deepEqual(
+    manifest.files.map((file) => file.lookupFailed),
+    result.files.map((file) => file.lookupFailed),
+    'the manifest says it too',
+  );
+
+  // Files named by id cannot be saved without their record: each after the first is skipped unasked, saying why.
+  const byId = await setup({ 'files.info': limited });
+  const skipped = await byId.run({ fileIds: ['F0A', 'F0B', 'F0C'] }, { download: transport({}).download });
+  assert.deepEqual(byId.slack.methods(), ['files.info']);
+  assert.deepEqual(skipped.files, []);
+  assert.deepEqual(
+    skipped.skipped.map((entry) => [entry.fileId, entry.cause, entry.reason]),
+    [
+      ['F0A', 'lookup', 'Slack is rate-limiting this workspace'],
+      [
+        'F0B',
+        'lookup',
+        'not looked up, because an earlier lookup in this download failed: Slack is rate-limiting this workspace',
+      ],
+      [
+        'F0C',
+        'lookup',
+        'not looked up, because an earlier lookup in this download failed: Slack is rate-limiting this workspace',
+      ],
     ],
   );
 });

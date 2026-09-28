@@ -358,6 +358,28 @@ test('a person reading the command sees each path, the wrapped name beside it, w
   assert.match(stdout, /^Nothing was opened or run\.$/m);
 });
 
+test('a person reading the command is told when a file is undated because its message could not be looked up', async () => {
+  // Listed without its shares, as `files.list` lists a file, and then Slack rate-limits the lookup for its message.
+  const harness = await newHarness();
+  await harness.addWorkspace({ alias: 'acme' });
+  const { shares: _shares, ...listed } = fileRecord('F0L1');
+  const { code, stdout } = await cli(harness, ['files', 'download', '--workspace', 'acme', '--channel', 'C0AAA1'], {
+    read: slackApi({
+      ...script(),
+      'files.list': { ok: true, files: [listed], paging: { page: 1, pages: 1 } },
+      'files.info': { ok: false, error: 'ratelimited' },
+    }).fetch,
+    download: transport(BYTES).download,
+    json: false,
+  });
+  assert.equal(code, EXIT_CODES.OK, stdout);
+  assert.match(stdout, /^saved .*undated_F0L1.F0L1\.pdf$/m);
+  assert.match(
+    stdout,
+    /^undated: the message it was shared in could not be looked up: Slack is rate-limiting this workspace$/m,
+  );
+});
+
 test('a pinned server downloads for its own workspace, with or without naming it, and refuses another', async () => {
   const harness = await newHarness();
   await harness.addWorkspace({ alias: 'acme' });

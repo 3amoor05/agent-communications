@@ -574,6 +574,12 @@ export function renderFileDownload(result: FileDownloadResult, color: boolean): 
       `saved ${file.path}${file.riskFlags.length ? paint(color, 'yellow', `  [${file.riskFlags.join(', ')}]`) : ''}`,
       file.name,
     );
+    // Undated because its message could not be learnt, not because it has none: said, so it is not read as the latter.
+    if (file.lookupFailed !== null) {
+      lines.push(
+        paint(color, 'yellow', `undated: the message it was shared in could not be looked up: ${file.lookupFailed}`),
+      );
+    }
   }
   for (const skip of result.skipped) lines.push(paint(color, 'yellow', `skipped ${skip.fileId}: ${skip.reason}`));
   if (!result.complete) {
