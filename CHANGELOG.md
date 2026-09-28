@@ -3,6 +3,37 @@
 All notable changes to this project are recorded here, newest first. Every package in this repository is released
 together under one version.
 
+## 0.8.0
+
+**Slack files can be downloaded.** `agent-slack files download`, and `slack_file_download` from chat, save a file an
+agent can see to disk, without a person fetching it by hand:
+- `--file <id>…` for files by id; `--message <channel> <ts>` for every file on one message; `--channel <id>
+  [--since <ts>]` for the files in a conversation, uploaded at or after a time. Public and private channels, DMs and
+  group DMs, as far as your Slack account can see them.
+- Saved under your downloads folder at `<workspace>/<out>/<date>_<channel>-<ts>/<file id>[.ext]`, one folder per
+  message (`undated_<file id>` when no message is known). `--out` is a folder inside it, never an absolute path, and
+  nothing is overwritten.
+- What the sender chose (the file's name, title and uploader) comes back marked as untrusted, with risk flags such as
+  an archive or an executable; the file on disk has a neutral name.
+- A file that cannot be fetched is listed with the reason, and the rest are saved. Every run writes a manifest and an
+  audit record, and says what it saved even when one of those cannot be written. This is the first Slack read that is
+  audited.
+- Up to 50 files a run by default (`--max-files`, at most 200), 100 MiB a file and 500 MiB a run, two minutes a file.
+- It is a read: it works in read mode and asks for no approval, as Gmail's download does.
+
+Why: an agent could list a Slack file and see its link, but fetching it needs your Slack token, which an agent must
+never hold. It had to stop and ask a person to download two zips by hand.
+
+How the token is kept safe: it now goes to one more place, `https://files.slack.com`, Slack's own file host, which
+Slack requires for a file's bytes, and only for one `GET` of the path of one file just looked up. A link Slack returns
+is checked against that path and rebuilt, never followed as given. A file stored outside Slack (Google Drive, Dropbox
+and the like) is refused, redirects are refused, and a Slack sign-in page returned instead of the file is reported as
+a file the token cannot read. For a file that is itself HTML, the two cannot be told apart, and the reason says so.
+
+What it means for you: a minor release; nothing that worked changes. A workspace connected in read mode already has
+the `files:read` scope this needs. To get 0.8.0, run `agentcomms update` (or say "update my comms" in chat), then
+restart your client.
+
 ## 0.7.2
 
 **Installing a server from chat works where Homebrew put Claude Code, and says so when it does not.** An MCP server
