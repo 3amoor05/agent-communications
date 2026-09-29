@@ -197,6 +197,32 @@ test('scope drift is a failure, in both directions', () => {
   assert.match(find(second, 'scopes')?.detail ?? '', /missing search:read/);
 });
 
+test('whether each workspace can send files: off by choice in read mode, and a send grant without files:write fails', () => {
+  const run = (over: Partial<AccountConfig>) =>
+    find(
+      doctor({ config: config({ acme: account(over) }), now: NOW, bundles: new Map([['acme', bundle()]]) }),
+      'files',
+    );
+  // A read install that cannot send files is working as chosen: nothing is wrong, and nothing needs fixing.
+  const read = run({});
+  assert.equal(read?.status, 'ok');
+  assert.match(read?.detail ?? '', /read mode: it cannot post or send files/);
+  assert.equal(read?.fix, null);
+
+  const send = run({ mode: 'send', tier: 'send', grantedScopes: scopesForMode('send') });
+  assert.equal(send?.status, 'ok');
+  assert.match(send?.detail ?? '', /can send files/);
+
+  const noFiles = run({
+    mode: 'send',
+    tier: 'send',
+    grantedScopes: scopesForMode('send').filter((scope) => scope !== 'files:write'),
+  });
+  assert.equal(noFiles?.status, 'fail');
+  assert.match(noFiles?.detail ?? '', /files:write/);
+  assert.equal(noFiles?.fix, 'agent-slack workspace reauth acme --mode send');
+});
+
 test('a stored credential that cannot be read is a different finding from one that is not there', () => {
   /*
    * Both are failures and both are fixed by `reauth`, but they are not the same sentence. Saying "no stored

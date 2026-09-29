@@ -397,6 +397,41 @@ export function doctor(input: DoctorInput): DoctorResult {
         workspace: workspace.alias,
       });
     }
+
+    /*
+     * Whether a file can be posted, from the same scopes as above. A read install that cannot is working as the
+     * person chose, so it is `ok` and says so in words — a warning there would warn on every healthy read install.
+     * A send install without `files:write` can post words but not files, and only a sign-in brings the scope back.
+     */
+    const scopes = observed ?? workspace.grantedScopes;
+    checks.push(
+      mode === 'read'
+        ? {
+            id: 'files',
+            title: `Sending files from ${workspace.alias}`,
+            status: 'ok',
+            detail: 'read mode: it cannot post or send files, by choice',
+            fix: null,
+            workspace: workspace.alias,
+          }
+        : scopes.includes('files:write')
+          ? {
+              id: 'files',
+              title: `Sending files from ${workspace.alias}`,
+              status: 'ok',
+              detail: 'can send files: send mode, and files:write is granted',
+              fix: null,
+              workspace: workspace.alias,
+            }
+          : {
+              id: 'files',
+              title: `Sending files from ${workspace.alias}`,
+              status: 'fail',
+              detail: 'send mode, but files:write is not granted: it can post words and cannot send files',
+              fix: `agent-slack workspace reauth ${workspace.alias} --mode send`,
+              workspace: workspace.alias,
+            },
+    );
   }
 
   /*
