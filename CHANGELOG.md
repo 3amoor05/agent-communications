@@ -48,8 +48,9 @@ Windows — before a byte of it is written, so Gatekeeper, SmartScreen and Offic
   network paths, and any folder written by its Windows short name (`PROGRA~1`);
 - from WSL, on a Windows drive wherever and however it is mounted, a bind of one of its folders included: the same
   folders, refused by name wherever they sit on the drive. A folder of your own there named `Windows` or `AppData` is
-  refused with them, and the reason says why. A disk that is not a Windows drive — `/mnt/c` on an ordinary Linux, or a
-  Linux disk mounted inside `/mnt/c` — is left alone.
+  refused with them, and the reason says why. A Windows drive whose mount does not say plainly which folder it shows
+  is refused whole. A disk that is not a Windows drive — `/mnt/c` on an ordinary Linux, or a Linux disk mounted inside
+  `/mnt/c` — is left alone.
 
 A folder that cannot be written in is refused before your answer is used, and a choice that is not available is shown
 as unavailable. A folder that loads every file whatever its name — a shell's completions folder, say — is still yours
