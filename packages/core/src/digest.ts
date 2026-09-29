@@ -198,14 +198,18 @@ function channelDigest(message: CanonicalChannelMessage): string {
         estimated: exactCount(message.notifies.estimated, 'the number of people notified'),
         unmeasured: message.notifies.unmeasured === true ? true : undefined,
       },
-      attachments: [...message.attachments]
-        .map((a) => ({
-          filename: a.filename,
-          mimeType: a.mimeType.toLowerCase(),
-          size: exactCount(a.size, `the size of ${a.filename}`),
-          sha256: a.sha256,
-        }))
-        .sort((a, b) => (a.sha256 + a.filename < b.sha256 + b.filename ? -1 : 1)),
+      /*
+       * In the order given, not sorted as mail's are. A mail client shows attachments however it likes; a channel post
+       * shows its files in the order they were uploaded, which is the order the preview listed. Sorted, a draft whose
+       * files were reordered by hand hashed the same, and posted in an order nobody was shown. A post of text alone has
+       * none, so its digest is the one it always was.
+       */
+      attachments: message.attachments.map((a) => ({
+        filename: a.filename,
+        mimeType: a.mimeType.toLowerCase(),
+        size: exactCount(a.size, `the size of ${a.filename}`),
+        sha256: a.sha256,
+      })),
     }),
   );
 }

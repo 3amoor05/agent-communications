@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdirSync, realpathSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { type TestContext, test } from 'node:test';
 import { CommsError, renderChannelPreview } from '@agentcomms/core';
@@ -547,4 +547,41 @@ test('the audit records a file post by its ids, names, sizes and hashes — neve
   });
   const everything = JSON.stringify(await w.context.core.audit.tail());
   assert.equal(everything.includes(secret), false, 'the audit holds the file’s contents');
+});
+
+// ── Review round 1 ───────────────────────────────────────────────────────────────────────────────────────────
+
+/** The draft file as the store keeps it, for a test that changes it the way anything with a shell could. */
+function draftPath(w: World, draftId: string): string {
+  return join(w.harness.core.paths.stateDir, 'slack', 'drafts', `${draftId}.json`);
+}
+
+test('the order of the files is part of what is approved: reordering them on disk voids the approval', async (t) => {
+  /*
+   * The preview lists the files in order and they are posted in that order, so a different order is a different post.
+   * The digest used to sort them before hashing, and a draft whose files were reordered by hand — its revision left as
+   * it was — posted in an order nobody was shown.
+   */
+  const w = await world(t);
+  const draft = await createDraft(w.context, 'acme', {
+    channel: 'C1',
+    text: 'first the summary, then the detail',
+    files: [file(w.docs, 'summary.pdf', 'the summary'), file(w.docs, 'detail.pdf', 'the detail')],
+  });
+  const { prepared, send } = await prepareAndSend(w, draft.draftId);
+  const stored = JSON.parse(readFileSync(draftPath(w, draft.draftId), 'utf8')) as {
+    files: unknown[];
+    revision: string;
+  };
+  writeFileSync(
+    draftPath(w, draft.draftId),
+    `${JSON.stringify({ ...stored, files: [...stored.files].reverse() }, null, 2)}\n`,
+  );
+
+  const error = await refusal(send());
+  assert.equal(error.code, 'APPROVAL_VOID');
+  assert.equal(w.uploads.issued.length, 0, 'an upload URL was asked for, for files in an order nobody was shown');
+  assert.deepEqual(w.uploads.received, {});
+  assert.deepEqual(w.uploads.completed, []);
+  assert.notEqual((await w.context.core.approvals.get(prepared.approvalId))?.state, 'used');
 });

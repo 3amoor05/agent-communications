@@ -261,6 +261,18 @@ test('a channel digest covers who gets notified, which is the part with no mail 
 
   // A channel digest can never be mistaken for a mail one.
   assert.notEqual(messageDigest(post), messageDigest(base));
+
+  /*
+   * The files are posted in the order the preview lists them, so the order is part of what was approved. Mail sorts
+   * its attachments, because a mail client shows them however it likes; a channel post does not.
+   */
+  const first = { filename: 'summary.pdf', mimeType: 'application/pdf', size: 1, sha256: 'a1' };
+  const second = { filename: 'detail.pdf', mimeType: 'application/pdf', size: 2, sha256: 'b2' };
+  assert.notEqual(
+    messageDigest({ ...post, attachments: [first, second] }),
+    messageDigest({ ...post, attachments: [second, first] }),
+    'two files posted in the other order were bound to the same approval',
+  );
 });
 
 test('a channel digest tells a reach nobody measured from a room measured at nobody', () => {
