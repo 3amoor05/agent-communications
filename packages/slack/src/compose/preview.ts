@@ -1,7 +1,8 @@
-import { analyseLink, type ChannelPreview, type PreviewNotifies } from '@agentcomms/core';
+import { analyseLink, type ChannelPreview, type PreviewAttachment, type PreviewNotifies } from '@agentcomms/core';
 import type { Channel, NameBook } from '../operations/people.ts';
 import { decodeSlackText } from '../text/decode.ts';
 import type { SlackDraft } from './drafts.ts';
+import { type SlackDraftFile, showsInline, WARN_FILE_BYTES } from './files.ts';
 
 /**
  * What a person is shown before anything is posted.
@@ -133,8 +134,47 @@ function warningsOf(text: string): string[] {
   return warnings;
 }
 
+/**
+ * The files, each as it will leave: the name Slack shows, its size and type, the hash the approval is bound to, and the
+ * real path it is read from — every one of them, so a person can tell exactly which file on their machine this is.
+ */
+function attachmentsOf(files: readonly SlackDraftFile[]): PreviewAttachment[] {
+  return files.map((file) => ({
+    filename: file.name,
+    size: file.size,
+    mimeType: file.mimeType,
+    sha256: file.sha256,
+    path: file.path,
+  }));
+}
+
+/**
+ * What about the files a reader should notice before saying yes: flags, never refusals.
+ *
+ * A large file, because a size is easy to read past and a 90 MiB export is rarely what somebody meant to put in a room.
+ * And a file Slack shows in the channel itself — an image, a PDF, any kind of text — because a person may think of it
+ * as "a file I am sending" when what everyone in the room will see is what is in it.
+ */
+function fileWarnings(files: readonly SlackDraftFile[]): string[] {
+  const warnings: string[] = [];
+  for (const file of files) {
+    if (showsInline(file.mimeType)) {
+      warnings.push(
+        `Slack shows ${file.name} in the channel itself: everyone who reads the channel sees what is in it, not only its name`,
+      );
+    }
+    if (file.size > WARN_FILE_BYTES) {
+      warnings.push(
+        `${file.name} is over 10 MiB (${file.size.toLocaleString('en-US')} bytes): check that it is the file you mean to share with the whole channel`,
+      );
+    }
+  }
+  return warnings;
+}
+
 export function previewOf(input: PreviewInput): ChannelPreview {
   const payload = input.draft.payload;
+  const files = input.draft.files ?? [];
   // Decoded, because that is what the recipient reads — see this module's own note.
   const body = decodeSlackText(payload.text, input.book.names()).text;
   const channelName = input.channel?.isIm
@@ -148,6 +188,8 @@ export function previewOf(input: PreviewInput): ChannelPreview {
     ...(payload.thread_ts ? { thread: `a reply in the thread at ${payload.thread_ts}` } : {}),
     body,
     notifies: notifiesOf(payload, input.book, input.memberCount, input.countUnknown),
+    // Only when there are files, so a post of text alone is the preview it always was.
+    ...(files.length > 0 ? { attachments: attachmentsOf(files) } : {}),
     context: {
       workspace: input.workspace,
       draftId: input.draft.draftId,
@@ -156,6 +198,6 @@ export function previewOf(input: PreviewInput): ChannelPreview {
     },
     links: linksOf(payload.text),
     ...(input.policy ? { policy: input.policy } : {}),
-    warnings: warningsOf(payload.text),
+    warnings: [...warningsOf(payload.text), ...fileWarnings(files)],
   };
 }

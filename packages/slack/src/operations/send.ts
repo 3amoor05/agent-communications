@@ -1,5 +1,6 @@
 import {
   type ApprovalRecord,
+  type AttachPolicy,
   type CanonicalChannelMessage,
   type ChannelPreview,
   type ClaimOptions,
@@ -15,6 +16,7 @@ import { callSlack, type SlackCall } from '../api/call.ts';
 import { spendOn, type WritePermit } from '../api/guard.ts';
 import { type ComposedPayload, payloadOf } from '../compose/blocks.ts';
 import type { SlackDraft } from '../compose/drafts.ts';
+import { rereadFile } from '../compose/files.ts';
 import { mentionedUserIds, previewOf } from '../compose/preview.ts';
 import { decodeSlackText } from '../text/decode.ts';
 import { type Channel, channelOf, type NameBook } from './people.ts';
@@ -92,6 +94,14 @@ export interface PrepareDeps {
   /** The user id this posts as. In the digest: two accounts in one workspace are two different people speaking. */
   readonly postingAs: string;
   readonly policy: SendPolicy;
+  /**
+   * What the workspace was connected as, and what Slack granted it — for a post with files, which needs both `send` and
+   * `files:write`. Read from the configuration by `gateDepsFor`; a post of text alone does not look at them.
+   */
+  readonly mode?: string | undefined;
+  readonly grantedScopes?: readonly string[] | undefined;
+  /** Which local files may be sent: the attachment jail's folders, as `attachPolicyOf` reads them. */
+  readonly attachPolicy?: AttachPolicy | undefined;
   readonly approvals: {
     create(input: {
       inboxId: string;
@@ -136,12 +146,17 @@ async function roomOf(
  */
 export const REACH_UNKNOWN = 'reach-unknown';
 
+/** The flag on a post's approval that carries files: what the approval screen and the audit can tell a file post by. */
+export const CONTAINS_FILES = 'contains-files';
+
 /** Anything about this post a person should look at twice. Flags, never refusals. */
 function risksOf(
   payload: { text: string },
   notifies: { channel: boolean; here: boolean; estimated: number; unknown?: string | undefined },
+  files: number,
 ): string[] {
   const flags: string[] = [];
+  if (files > 0) flags.push(CONTAINS_FILES);
   if (notifies.channel) flags.push('notifies-channel');
   if (notifies.here) flags.push('notifies-here');
   if (notifies.unknown !== undefined) flags.push(REACH_UNKNOWN);
@@ -254,16 +269,86 @@ export async function viewPost(
       // A reach nobody could count is bound as that, not as the `0` that stands in for it — see `roomOf`.
       unmeasured: preview.notifies.unknown !== undefined,
     },
-    attachments: [],
+    /*
+     * Each file as it will leave — the name Slack shows, its type, its size and its hash — so a file whose bytes change
+     * is a different post, and its approval is void. Empty for a post of text alone, which is the digest it always was.
+     */
+    attachments: (draft.files ?? []).map((file) => ({
+      filename: file.name,
+      mimeType: file.mimeType,
+      size: file.size,
+      sha256: file.sha256,
+    })),
   };
   return { preview, digest: messageDigest(canonical), roomUnread: why, payload };
+}
+
+/**
+ * Refuses a post with files from a workspace that cannot send one: connected to read, or not granted `files:write`.
+ *
+ * Checked at prepare, so nobody is shown a preview they could never post, and again at send, because the grant can
+ * narrow in between. Slack would refuse it anyway — a `read` token holds no posting scope — but only after the bytes had
+ * gone to it, and in words that do not say what to do. A post of text alone never comes here.
+ */
+export function requireFileSending(deps: Pick<PrepareDeps, 'mode' | 'grantedScopes' | 'workspaceName'>): void {
+  const alias = deps.workspaceName;
+  if (deps.mode !== 'send') {
+    throw new CommsError('SCOPE_MISSING', `"${alias}" is connected to read, and cannot send files`, {
+      hint: `Nothing was sent. Moving it to send takes a person: \`agent-slack workspace mode ${alias}\` shows the steps, as slack_mode does from a chat.`,
+      details: { mode: deps.mode ?? null },
+    });
+  }
+  if (!(deps.grantedScopes ?? []).includes('files:write')) {
+    const command = `agent-slack workspace reauth ${alias} --mode send`;
+    throw new CommsError('SCOPE_MISSING', `"${alias}" was not granted files:write, which sending a file needs`, {
+      hint: `Nothing was sent. Sign in again to grant it: \`${command}\`. If the app itself does not offer files:write, update it with \`agent-slack manifest --mode send\` first.`,
+      details: { scope: 'files:write', command },
+    });
+  }
+}
+
+/** The jail's folders, which every file post needs — and which only a caller that built its deps by hand could lack. */
+function attachPolicyFor(deps: Pick<PrepareDeps, 'attachPolicy'>): AttachPolicy {
+  if (deps.attachPolicy === undefined) {
+    throw new CommsError('SEND_REFUSED', 'a post with files was prepared without the folders files may come from', {
+      hint: 'This is a bug — please report it.',
+    });
+  }
+  return deps.attachPolicy;
+}
+
+/**
+ * Reads every file of a draft again, and refuses the post if any is no longer the file the draft recorded.
+ *
+ * Before anyone is shown anything: the preview lists each file's hash, and a person must never be asked to approve
+ * bytes other than the ones listed. The draft's record is what the digest binds, so a file that changed since is
+ * refused here rather than shown as its old self.
+ */
+async function filesAsRecorded(deps: Pick<PrepareDeps, 'attachPolicy'>, draft: SlackDraft): Promise<void> {
+  const files = draft.files ?? [];
+  if (files.length === 0) return;
+  const policy = attachPolicyFor(deps);
+  for (const file of files) {
+    const check = await rereadFile(file, policy);
+    if (!check.ok) {
+      throw new CommsError(
+        'BAD_DATA',
+        `nothing was prepared: ${file.name} is not the file the draft recorded — ${check.why}`,
+        {
+          hint: `Put the files on the draft again with \`agent-slack draft update ${draft.draftId} --file <path…>\` (every one: --file replaces the list) or slack_draft_update, then prepare it again.`,
+          details: { draftId: draft.draftId, file: file.name, path: file.path, reason: 'file-changed' },
+        },
+      );
+    }
+  }
 }
 
 /**
  * Prepares one post, and shows what it will be.
  *
  * Nothing is posted here and nothing can be: the permit stays closed, and the only Slack call made is a read of
- * the channel so the reach can be counted.
+ * the channel so the reach can be counted. A post with files is checked first — the workspace can send them, and each
+ * is still the file the draft recorded — so a refusal asks Slack nothing.
  */
 export async function preparePost(deps: PrepareDeps, draft: SlackDraft, book: NameBook): Promise<PreparedPost> {
   if (deps.policy === 'never') {
@@ -271,9 +356,14 @@ export async function preparePost(deps: PrepareDeps, draft: SlackDraft, book: Na
       hint: 'The preview below is pasteable — send it yourself in Slack, or change the policy at a terminal.',
     });
   }
+  const files = draft.files ?? [];
+  if (files.length > 0) {
+    requireFileSending(deps);
+    await filesAsRecorded(deps, draft);
+  }
   const { preview, digest, payload } = await viewPost(deps, draft, book);
 
-  const riskFlags = risksOf(payload, preview.notifies);
+  const riskFlags = risksOf(payload, preview.notifies, files.length);
   /*
    * A broadcast raises the ceremony by itself.
    *

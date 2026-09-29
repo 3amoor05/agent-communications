@@ -66,6 +66,13 @@ export interface PreviewAttachment {
   filename: string;
   size: number;
   mimeType: string;
+  /**
+   * The SHA-256 of the bytes that will leave, when the approval is bound to it. A channel preview sets it for every
+   * file: the hash is what makes "these files" one set of bytes rather than whatever carries these names at send time.
+   */
+  sha256?: string | undefined;
+  /** Where the file is read from on this machine, when it is a local file, so the person can see which one it is. */
+  path?: string | undefined;
 }
 
 export interface MessagePreview {
@@ -285,6 +292,18 @@ export function describeNotifies(notifies: PreviewNotifies): string {
 }
 
 /**
+ * A file's size as a person checks it: exact under a kibibyte, and above that a rounded figure with the exact count
+ * beside it — `47 bytes`, `10.0 MiB (10,485,761 bytes)`. Grouped the same way on every machine, whatever its locale.
+ */
+export function describeSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} ${bytes === 1 ? 'byte' : 'bytes'}`;
+  const exact = bytes.toLocaleString('en-US');
+  const rounded =
+    bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KiB` : `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+  return `${rounded} (${exact} bytes)`;
+}
+
+/**
  * The channel equivalent of `renderMessagePreview`, and deliberately the same shape: a person approving a post
  * should not have to learn a second layout.
  *
@@ -311,13 +330,20 @@ export function renderChannelPreview(preview: ChannelPreview): string {
   if (preview.thread) lines.push(line('Thread:', truncateDisplay(preview.thread, 120)));
   lines.push(line('Notifies:', describeNotifies(preview.notifies)));
 
+  /*
+   * Each file on three lines: what Slack will show — name, size, type — then the hash the approval is bound to, then
+   * where it is read from. The size is exact, because a person matching this to a file they know is matching bytes,
+   * and every part is escaped: the name is a file's, and a draft file can be edited by anything with a shell.
+   */
   for (const attachment of preview.attachments ?? []) {
     lines.push(
       line(
         'Attach:',
-        `${truncateDisplay(attachment.filename, 80)} · ${Math.round(attachment.size / 1024)} KB · ${attachment.mimeType}`,
+        `${truncateDisplay(attachment.filename, 80)} · ${describeSize(attachment.size)} · ${truncateDisplay(attachment.mimeType, 80)}`,
       ),
     );
+    if (attachment.sha256 !== undefined) lines.push(line('', `sha256 ${truncateDisplay(attachment.sha256, 80)}`));
+    if (attachment.path !== undefined) lines.push(line('', `from ${truncateDisplay(attachment.path, 200)}`));
   }
   for (const url of preview.links ?? []) lines.push(line('Link:', truncateDisplay(url, 160)));
 

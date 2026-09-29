@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
-import { type FileHandle, lstat, open } from 'node:fs/promises';
+import { type FileHandle, lstat, open, realpath } from 'node:fs/promises';
 import { basename, extname, resolve } from 'node:path';
 import { type AttachPolicy, CommsError, checkAttachable, expandHome } from '@agentcomms/core';
 
@@ -36,6 +36,9 @@ export const MAX_FILES: number = 10;
 
 /** The most bytes one file may have: 100 MiB. */
 export const MAX_FILE_BYTES: number = 100 * 1024 * 1024;
+
+/** Above this a file is still sent, and the preview says how large it is: 10 MiB. */
+export const WARN_FILE_BYTES: number = 10 * 1024 * 1024;
 
 /*
  * A file is opened without following a link at its own name, and without waiting on one that is not a file: a FIFO
@@ -265,4 +268,52 @@ export async function recordFiles(
   const recorded: SlackDraftFile[] = [];
   for (const path of paths) recorded.push(await recordFile(path, policy));
   return recorded;
+}
+
+/** A recorded file read again: its bytes, when it is still the file recorded — or why it is not. */
+export type FileCheck = { readonly ok: true; readonly bytes: Buffer } | { readonly ok: false; readonly why: string };
+
+/**
+ * Reads a recorded file again, and hands back its bytes only if it is still, in every way the draft recorded, that
+ * file.
+ *
+ * The same checks as recording it, from the record's side: the name and type are the ones its path gives; the path is
+ * not a link, is a regular file, and is still its own real path — so no folder above it was swapped for a link to
+ * somewhere else; core's jail still admits it; and opened without following a link, it is the recorded size and has
+ * the recorded hash. What comes back is the bytes that were just hashed, never a copy kept from before.
+ *
+ * The answer is a value rather than a throw, because the gate says it differently at each step: at prepare nothing has
+ * been approved yet, and at send the approval it voids is named.
+ */
+export async function rereadFile(file: SlackDraftFile, policy: AttachPolicy): Promise<FileCheck> {
+  const not = (why: string): FileCheck => ({ ok: false, why });
+  // Nothing but agent-slack writes these, and it writes them from the path: a record saying otherwise was edited.
+  if (file.name !== basename(file.path) || file.mimeType !== mimeTypeOf(file.name)) {
+    return not('its record was changed outside agent-slack');
+  }
+  let info: Awaited<ReturnType<typeof lstat>>;
+  let real: string;
+  try {
+    info = await lstat(file.path);
+    real = await realpath(file.path);
+  } catch {
+    return not('it is no longer there');
+  }
+  if (info.isSymbolicLink()) return not('a link has been put in its place');
+  if (!info.isFile()) return not('it is no longer a regular file');
+  if (real !== file.path) return not('its path now leads somewhere else');
+  try {
+    if ((await checkAttachable(file.path, policy)) !== file.path) return not('its path now leads somewhere else');
+  } catch (error) {
+    return not(`it may no longer be sent: ${(error as Error).message}`);
+  }
+  let measured: { size: number; sha256: string; bytes: Buffer | undefined };
+  try {
+    measured = await measure(file.path, file.name, true);
+  } catch (error) {
+    return not((error as Error).message);
+  }
+  if (measured.size !== file.size) return not(`it is ${measured.size} bytes now, not the ${file.size} recorded`);
+  if (measured.sha256 !== file.sha256 || measured.bytes === undefined) return not('its contents have changed');
+  return { ok: true, bytes: measured.bytes };
 }

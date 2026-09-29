@@ -1,6 +1,7 @@
 import { effectiveAccountSendPolicy } from '@agentcomms/core';
 import { closedPermit, type WritePermit } from '../api/guard.ts';
 import type { SlackContext } from '../context.ts';
+import { attachPolicyOf } from './drafts.ts';
 import type { PostDeps, PrepareDeps } from './send.ts';
 import { openWorkspace, type SessionDeps } from './session.ts';
 import { requireWorkspace } from './workspaces.ts';
@@ -34,6 +35,10 @@ export async function gateDepsFor(context: SlackContext, alias: string, deps: Se
     workspaceName: name,
     postingAs: account.userId,
     policy: effectiveAccountSendPolicy(config, name),
+    // What a post with files is checked against, at prepare and again at send: the mode, the grant, and the folders.
+    mode: account.mode ?? account.tier,
+    grantedScopes: account.grantedScopes,
+    attachPolicy: await attachPolicyOf(context),
     approvals: context.core.approvals,
     audit: context.core.audit,
     surface: context.surface,
