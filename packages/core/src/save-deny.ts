@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, readlinkSync } from 'node:fs';
 import { lstat, readdir, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { CommsError } from './errors.ts';
@@ -62,10 +62,10 @@ export interface SaveDenyInput {
    */
   knownDocuments?: (() => string | undefined) | undefined;
   /**
-   * Where this Linux has Windows's drives mounted — WSL's `/mnt/c`, or wherever its `wsl.conf` puts them. Read from
-   * the kernel's mount table when left out, never from the environment: see {@link windowsDriveMounts}.
+   * This Linux's mounts, for finding Windows's drives under WSL wherever and however they are mounted. Read from the
+   * kernel's mount table when left out, never from the environment: see {@link parseMounts}.
    */
-  windowsDrives?: (() => readonly string[]) | undefined;
+  mounts?: (() => readonly Mount[]) | undefined;
 }
 
 /** One place a download is never written, and why, in words the person reads. */
@@ -140,22 +140,30 @@ const HOMES_MAY_BE_IN = ['/root', '/var', '/opt', '/private/var'];
 const PACKAGE_FOLDERS = new Set(['node_modules', 'site-packages', 'dist-packages', '__pycache__']);
 
 /*
- * Windows's own folders, as a Linux under WSL reaches them: each drive at `/mnt/<letter>`. A process there is a Linux
- * one, so none of the Windows rules above applies to it, and it writes into `%USERPROFILE%\AppData` as readily as
- * into its own home — where Excel opens what is in `XLSTART` at every start, and Windows runs what is in `Startup` at
- * every sign-in. So the same folders are refused here, by the same names in any case, since the drive underneath is
- * Windows's and opens `appdata` as `AppData`. The pattern is fixed, never read from `/etc/wsl.conf`: what an agent can
- * set is not what decides where Windows is.
+ * Windows's own folders, as a Linux under WSL reaches them. A process there is a Linux one, so none of the Windows
+ * rules above applies to it, and it writes into `%USERPROFILE%\AppData` as readily as into its own home — where Excel
+ * opens what is in `XLSTART` at every start, and Windows runs what is in `Startup` at every sign-in.
+ *
+ * Which Windows folder a Linux path is comes from the kernel's mount table, never from the environment, which an agent
+ * can set: the mount that holds the path, whatever its type, and — when that is one of Windows's drives — the Windows
+ * folder it shows (see {@link parseMounts}). So a drive is found wherever `wsl.conf` puts it, a bind of
+ * `/mnt/c/Profiles/sam` at `/win/profile` is still `C:\Profiles\sam`, and a Linux disk mounted inside `/mnt/c` is
+ * Linux's.
+ *
+ * The folders are then refused by name at any depth, not only where Windows usually puts them, since a profile, a
+ * program or a redirected Documents can sit anywhere: a folder of the person's named `Windows` or `AppData` on a
+ * Windows drive is refused with them, and the reason says why. Names are compared in any case, as the drive does.
  */
-const WSL_PROGRAM_FOLDERS = new Map([
-  ['windows', 'it is the Windows folder'],
-  ['program files', 'it is inside Program Files, where programs are installed'],
-  ['program files (x86)', 'it is inside Program Files, where programs are installed'],
-  ['program files (arm)', 'it is inside Program Files, where programs are installed'],
+const WINDOWS_FOLDER_NAMES = new Map([
+  ['windows', 'it is inside a folder named Windows — the Windows folder, or one this cannot tell from it'],
   ['programdata', 'it is inside ProgramData, where programs keep what they load for every user'],
+  ['appdata', 'it is inside an AppData folder, where Windows and its programs keep what they load on their own'],
 ]);
-// Documents where Windows keeps it, and where OneDrive moves it to: `OneDrive`, or `OneDrive - <organisation>`.
-const WSL_DOCUMENTS = /^(?:onedrive(?: - [^/]+)?\/)?documents\/(powershell|windowspowershell)(?:\/|$)/;
+const PROGRAM_FILES = /^program files(?: \((?:x86|arm)\))?$/;
+const POWERSHELL_FOLDERS = new Map([
+  ['powershell', 'PowerShell'],
+  ['windowspowershell', 'WindowsPowerShell'],
+]);
 
 /*
  * A folder named by its Windows short name — `PROGRA~1` for `Program Files`, `APPDAT~1` for `AppData`. NTFS answers to
@@ -173,69 +181,137 @@ function shortNameIn(segments: readonly string[]): string | null {
     : `it names a folder by its Windows short name (${short}), which can stand for a folder that is refused`;
 }
 
+/** A mount on this Linux, and the Windows folder it shows when it is one of Windows's drives. */
+export interface Mount {
+  /** Where it is mounted, as this Linux sees it. */
+  point: string;
+  /** The Windows folder at its mount point — `C:\`, `D:\Projects\acme` — or null when it is not Windows's. */
+  windows: string | null;
+}
+
+/** A path as the kernel writes it in the mount table, with a space, a tab or a backslash as an octal escape. */
+function unescapeMountPath(text: string): string {
+  return text.replace(/\\([0-7]{3})/g, (_, octal: string) => String.fromCharCode(Number.parseInt(octal, 8)));
+}
+
+const VIRTIOFS_LINKS = '/run/wsl/virtiofs';
+const GUID = /^\{?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}?$/i;
+
+/** Where WSL links a `virtiofs` tag to the Windows folder it shares — or null when it keeps no such link. */
+function virtiofsLink(tag: string): string | null {
+  try {
+    return readlinkSync(`${VIRTIOFS_LINKS}/${tag}`);
+  } catch {
+    return null;
+  }
+}
+
+/** A Windows folder with a Linux mount's root added to it: `D:\` and `/Projects/acme` are `D:\Projects\acme`. */
+function windowsBelow(folder: string, root: string): string {
+  const below = root.split('/').filter((segment) => segment !== '');
+  return below.length === 0 ? folder : `${folder.replace(/[\\/]+$/, '')}\\${below.join('\\')}`;
+}
+
 /*
- * Where Windows's drives are mounted on this Linux, from the kernel's own mount table: WSL mounts each as `drvfs` (WSL
- * 1), or as `9p` with `aname=drvfs` (WSL 2). Nothing else is — not a disk a person mounted at `/mnt/c` on an ordinary
- * Linux, and not a container that shares WSL's kernel but has no Windows drive in it. Read on every check, since a
- * drive can be mounted at any time, and never from the environment, which an agent can set. Where `wsl.conf` moves the
- * drives (`/c`, `/win/c`), the rules follow them.
+ * The Windows folder a mount shows, read the way WSL itself writes it:
+ * - `drvfs` (WSL 1), and `9p` with `aname=drvfs` (WSL 2): the source is the Windows folder — `C:\`, or the folder a
+ *   drive was mounted from — with `path=` in the options as its second copy;
+ * - `virtiofs` (newer WSL 2): the source is a tag, or a shared tag with the folder's own as the first part of the root,
+ *   and WSL links each to its Windows folder in `/run/wsl/virtiofs`. A share with no link there is not Windows's — a
+ *   virtual machine's shared folder, say — and is left alone.
+ * The root is the part of that folder the mount shows, as a bind of a subfolder has, and is added to it.
  */
-export function parseWindowsDriveMounts(mountinfo: string): string[] {
-  const mounts: string[] = [];
+function windowsFolder(
+  fstype: string,
+  source: string,
+  root: string,
+  options: string,
+  link: (tag: string) => string | null,
+): string | null {
+  if (fstype === 'drvfs') return windowsBelow(source, root);
+  if (fstype === '9p' || fstype === 'v9fs') {
+    if (!/(?:^|[,;])aname=drvfs(?:[,;]|$)/.test(options)) return null;
+    const named = /^(?:[A-Za-z]:|\\\\|unc\\)/i.test(source) ? source : /(?:^|;)path=([^;,]*)/.exec(options)?.[1];
+    return windowsBelow(named ?? source, root);
+  }
+  if (fstype !== 'virtiofs') return null;
+  const [first = '', ...rest] = root.split('/').filter((segment) => segment !== '');
+  const shared = GUID.test(source) ? link(source) : null;
+  if (shared !== null) return windowsBelow(shared, root);
+  const own = GUID.test(first) ? link(first) : null;
+  return own === null ? null : windowsBelow(own, rest.join('/'));
+}
+
+/** Every mount in a `/proc/<pid>/mountinfo` text: the root is the fourth field, the mount point the fifth. */
+export function parseMounts(mountinfo: string, link: (tag: string) => string | null = virtiofsLink): Mount[] {
+  const mounts: Mount[] = [];
   for (const line of mountinfo.split('\n')) {
     const split = line.indexOf(' - ');
     if (split < 0) continue;
-    const before = line.slice(0, split).split(' ');
-    const [fstype = '', , options = ''] = line.slice(split + 3).split(' ');
-    const drvfs =
-      fstype === 'drvfs' || ((fstype === '9p' || fstype === 'v9fs') && /(?:^|[,;])aname=drvfs(?:[,;]|$)/.test(options));
-    const point = before[4];
-    if (drvfs && point)
-      mounts.push(point.replace(/\\([0-7]{3})/g, (_, octal: string) => String.fromCharCode(Number.parseInt(octal, 8))));
+    const [, , , root, point] = line.slice(0, split).split(' ');
+    const [fstype = '', source = '', options = ''] = line.slice(split + 3).split(' ');
+    if (root === undefined || point === undefined) continue;
+    mounts.push({
+      point: unescapeMountPath(point),
+      windows: windowsFolder(fstype, unescapeMountPath(source), unescapeMountPath(root), options, link),
+    });
   }
   return mounts;
 }
 
-export function windowsDriveMounts(): string[] {
+/** This process's mounts, from the kernel — none where there is no `/proc`. */
+export function mountTable(): Mount[] {
   try {
-    return parseWindowsDriveMounts(readFileSync('/proc/self/mountinfo', 'utf8'));
+    return parseMounts(readFileSync('/proc/self/mountinfo', 'utf8'));
   } catch {
     return [];
   }
 }
 
-/** Where Windows's drives are, when the rules for them apply: only on Linux — or where a test says. */
-function drivesFor(input: SaveDenyInput, platform: NodeJS.Platform): readonly string[] {
+/** The mounts the WSL rules read: only on Linux — or what a test says. */
+function mountsFor(input: SaveDenyInput, platform: NodeJS.Platform): readonly Mount[] {
   if (platform !== 'linux') return [];
-  if (input.windowsDrives) return input.windowsDrives();
-  return process.platform === 'linux' ? windowsDriveMounts() : [];
+  if (input.mounts) return input.mounts();
+  return process.platform === 'linux' ? mountTable() : [];
 }
 
-/** Why a Linux path is one of Windows's own folders, reached through WSL's `/mnt/<letter>` — or null. */
-function windowsThroughWsl(folder: string, drives: readonly string[]): string | null {
-  const drive = drives
-    .filter((mount) => folder === mount || folder.startsWith(`${mount.replace(/\/$/, '')}/`))
-    .sort((a, b) => b.length - a.length)[0];
-  if (drive === undefined) return null;
-  const through = `reached through ${drive}`;
-  const segments = folder
-    .slice(drive.length)
-    .split('/')
-    .filter((segment) => segment !== '');
-  if (segments.length === 0) return `it is the root of a Windows drive, ${through}`;
+/** A mount point without a trailing slash, so that `/` stays `/`. */
+function trimmed(point: string): string {
+  return point === '/' ? '/' : point.replace(/\/+$/, '');
+}
+
+/** The mount a folder is on: the one with the longest mount point that holds it, and the last of those stacked there. */
+function owningMount(folder: string, mounts: readonly Mount[]): Mount | undefined {
+  let owner: Mount | undefined;
+  for (const mount of mounts) {
+    const point = trimmed(mount.point);
+    const holds = point === '/' || folder === point || folder.startsWith(`${point}/`);
+    if (holds && (owner === undefined || point.length >= trimmed(owner.point).length)) owner = mount;
+  }
+  return owner;
+}
+
+/** Why a Linux path is one of Windows's own folders, on a Windows drive WSL mounted — or null. */
+function windowsThroughWsl(folder: string, mounts: readonly Mount[]): string | null {
+  const mount = owningMount(folder, mounts);
+  if (mount === undefined || mount.windows === null) return null;
+  const through = `reached through ${trimmed(mount.point)}`;
+  const drive = /^([A-Za-z]):(?:[\\/]|$)/.exec(mount.windows);
+  if (drive === null) return `it is on a network share or a Windows device with no drive letter, ${through}`;
+  const below = folder.slice(trimmed(mount.point).length);
+  const segments = [...mount.windows.slice(2).split(/[\\/]/), ...below.split('/')].filter((segment) => segment !== '');
+  if (segments.length === 0) return `it is the root of a Windows drive (${drive[1]?.toUpperCase()}:), ${through}`;
   const short = shortNameIn(segments);
   if (short !== null) return `${short}, ${through}`;
-  const [top = '', user, ...inProfile] = segments.map((segment) => segment.toLowerCase());
-  const program = WSL_PROGRAM_FOLDERS.get(top);
-  if (program !== undefined) return `${program}, ${through}`;
-  if (top !== 'users' || user === undefined) return null;
-  if (inProfile[0] === 'appdata') {
-    return `it is inside an AppData folder, where Windows and its programs keep what they load on their own, ${through}`;
-  }
-  const shell = WSL_DOCUMENTS.exec(inProfile.join('/'));
-  if (shell !== null) {
-    const name = shell[1] === 'powershell' ? 'PowerShell' : 'WindowsPowerShell';
-    return `it is inside Documents\\${name}, whose profile scripts PowerShell runs at every start, ${through}`;
+  const lower = segments.map((segment) => segment.toLowerCase());
+  for (const [index, name] of lower.entries()) {
+    const known = WINDOWS_FOLDER_NAMES.get(name);
+    if (known !== undefined) return `${known}, ${through}`;
+    if (PROGRAM_FILES.test(name)) return `it is inside Program Files, where programs are installed, ${through}`;
+    const shell = name === 'documents' ? POWERSHELL_FOLDERS.get(lower[index + 1] ?? '') : undefined;
+    if (shell !== undefined) {
+      return `it is inside Documents\\${shell}, whose profile scripts PowerShell runs at every start, ${through}`;
+    }
   }
   return null;
 }
@@ -404,7 +480,7 @@ function breaks(
   list: readonly DeniedFolder[],
   homes: readonly string[],
   platform: NodeJS.Platform,
-  drives: readonly string[],
+  mounts: readonly Mount[],
 ): string | null {
   const paths = pathsFor(platform);
   const blind = caseBlind(platform);
@@ -417,7 +493,7 @@ function breaks(
     if (paths.parse(folder).root === folder) return 'it is the root of a drive';
   }
   if (platform === 'linux') {
-    const windows = windowsThroughWsl(folder, drives);
+    const windows = windowsThroughWsl(folder, mounts);
     if (windows !== null) return windows;
   }
   for (const entry of list) {
@@ -462,7 +538,7 @@ export function refusedSaveFolder(folder: string, input: SaveDenyInput): string 
     if (form) return form;
   }
   const home = paths.resolve(homeOf(input.env, platform));
-  return breaks(paths.resolve(folder), saveDenyList(input), [home], platform, drivesFor(input, platform));
+  return breaks(paths.resolve(folder), saveDenyList(input), [home], platform, mountsFor(input, platform));
 }
 
 /** The real path of `target`, through whatever part of it exists; the rest kept as written. */
@@ -577,7 +653,7 @@ export async function saveFolderRefusal(folder: string, input: SaveDenyInput): P
   const homes = [home, await realpathOfExisting(home)];
   const candidates = [paths.resolve(folder), await realpathOfExisting(folder)];
   for (const candidate of candidates) {
-    const why = breaks(candidate, [...list, ...real], homes, platform, drivesFor(input, platform));
+    const why = breaks(candidate, [...list, ...real], homes, platform, mountsFor(input, platform));
     if (why !== null) return why;
   }
   for (const candidate of candidates) {

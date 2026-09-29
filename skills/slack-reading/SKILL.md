@@ -108,8 +108,8 @@ keep one for later. `out` is gone.
 `.husky` or `.claude` — a checkout under `.claude/worktrees/<name>` excepted), `node_modules`, `site-packages`, a
 Python virtual environment or installation (`~/miniconda3`, `C:\Python312`), `~/Library`, this package's own
 folders, the system's folders, and on Windows `AppData`, PowerShell's profile folders, Program Files, a share or a
-path with no drive — the same Windows folders too when reached from WSL on a Windows drive, wherever it is mounted — and a folder that
-leads to one through a link. The home itself is fine. The refusal (`BAD_DATA`) leaves the question open: ask the
+path with no drive — the same Windows folders too when reached from WSL, at any depth on a Windows drive — and a
+folder that leads to one through a link. The home itself is fine. The refusal (`BAD_DATA`) leaves the question open: ask the
 person for another folder. A folder whose program loads every file in it, whatever it is called — a zsh completions
 folder, an application's plugin or startup folder — is not on the list and no name protects it: if the person names
 one, tell them a file there is loaded as it lands.

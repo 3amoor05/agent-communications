@@ -36,8 +36,8 @@ This project reads and writes people's email and Slack workspaces. In scope, amo
 - **Path traversal** — attachment downloads or exports writing outside their directory, a download written into a
   folder its deny list refuses (a hidden folder anywhere outside `.claude/worktrees/<name>`, a package folder, a Python
   installation or virtual environment, `~/Library`, PowerShell's profile folders, this package's own folders, a system
-  folder, or Windows's own folders reached from WSL on a Windows drive (drvfs), wherever it is mounted), or attachments being read from outside
-  the allowed roots.
+  folder, or Windows's own folders reached from WSL on a Windows drive, wherever and however it is mounted), or
+  attachments being read from outside the allowed roots.
 - **A saved file that runs** — a Gmail or Slack download saved with an extension outside its inert list (documents,
   images, sound and video, archives, calendar, contact and mail files, Apple documents) instead of with `.download`
   after its name, a name a tool reads by name saved without the suffix, a `.doc`, `.xls`, `.ppt` or OpenDocument file

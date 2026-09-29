@@ -75,8 +75,8 @@ here:
   `.husky` or `.claude` — a checkout under `.claude/worktrees/<name>` excepted), `node_modules`, `site-packages`, a
   Python virtual environment or installation (`~/miniconda3`, `C:\Python312`), `~/Library`, this package's own
   folders, the system's folders, and on Windows `AppData`, PowerShell's profile folders, Program Files, a share or a
-  path with no drive — the same Windows folders too when reached from WSL on a Windows drive, wherever it is mounted. The home itself is
-  fine. The refusal is the answer; ask for another folder.
+  path with no drive — the same Windows folders too when reached from WSL, at any depth on a Windows drive. The home
+  itself is fine. The refusal is the answer; ask for another folder.
 - **A file that could run is saved under a name nothing runs it by.** Only a document, image, sound, video, archive,
   calendar, contact, mail or Apple file keeps its extension; anything else is saved with `.download` after its whole
   name (`setup.exe.download`) and flagged `saved-as-download`. The question and the result each say which — show

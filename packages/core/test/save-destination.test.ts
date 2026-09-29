@@ -22,7 +22,7 @@ import { type Core, openCore } from '../src/core.ts';
 import { CommsError } from '../src/errors.ts';
 import {
   checkSaveFolder,
-  parseWindowsDriveMounts,
+  parseMounts,
   refusedSaveFolder,
   type SaveDenyInput,
   saveFolderRefusal,
@@ -1009,7 +1009,7 @@ test('on Windows: AppData, ProgramData, the Windows folder, Program Files, Power
   assert.equal(refusedSaveFolder('D:\\OneDrive\\Documents', deny), null);
 });
 
-test('on Linux, Windows’s own folders reached through WSL’s /mnt/<letter> are refused as on Windows, in any case', () => {
+test('on Linux, Windows’s own folders on a drive WSL mounted are refused as on Windows, at any depth and in any case', () => {
   const deny: SaveDenyInput = {
     paths: {
       configDir: '/srv/sam/.config/ac',
@@ -1019,13 +1019,18 @@ test('on Linux, Windows’s own folders reached through WSL’s /mnt/<letter> ar
     },
     env: { HOME: '/srv/sam' },
     platform: 'linux',
-    windowsDrives: () => ['/mnt/c', '/mnt/d', '/mnt/e'],
+    mounts: () => [
+      { point: '/', windows: null },
+      { point: '/mnt/c', windows: 'C:\\' },
+      { point: '/mnt/d', windows: 'D:\\' },
+      { point: '/mnt/e', windows: 'E:\\' },
+    ],
   };
   for (const [folder, why] of [
-    ['/mnt/c', /the root of a Windows drive, reached through \/mnt\/c$/],
-    ['/mnt/d/', /the root of a Windows drive, reached through \/mnt\/d$/],
-    ['/mnt/c/Windows/System32', /the Windows folder, reached through \/mnt\/c$/],
-    ['/mnt/c/WINDOWS', /the Windows folder/],
+    ['/mnt/c', /the root of a Windows drive \(C:\), reached through \/mnt\/c$/],
+    ['/mnt/d/', /the root of a Windows drive \(D:\), reached through \/mnt\/d$/],
+    ['/mnt/c/Windows/System32', /a folder named Windows.*, reached through \/mnt\/c$/],
+    ['/mnt/c/WINDOWS', /a folder named Windows/],
     ['/mnt/c/Program Files/App', /inside Program Files, where programs are installed, reached/],
     ['/mnt/c/program files (x86)/App', /inside Program Files/],
     ['/mnt/c/Program Files (Arm)/Vendor/Plugins', /inside Program Files/],
@@ -1041,6 +1046,12 @@ test('on Linux, Windows’s own folders reached through WSL’s /mnt/<letter> ar
     ['/mnt/c/Users/jo/documents/windowspowershell/Modules', /Documents\\WindowsPowerShell/],
     ['/mnt/c/Users/jo/OneDrive/Documents/PowerShell', /Documents\\PowerShell/],
     ['/mnt/c/Users/jo/OneDrive - Acme/Documents/WindowsPowerShell', /Documents\\WindowsPowerShell/],
+    // At any depth: a profile or a program can sit anywhere, so a folder of the person's with one of these names goes
+    // with them, and says why.
+    ['/mnt/d/Profiles/jo/AppData/Roaming', /inside an AppData folder, .*reached through \/mnt\/d$/],
+    ['/mnt/d/Apps/Program Files/Vendor', /inside Program Files/],
+    ['/mnt/c/Users/jo/Desktop/AppData', /inside an AppData folder/],
+    ['/mnt/c/src/Windows', /a folder named Windows/],
   ] as const) {
     assert.match(String(refusedSaveFolder(folder, deny)), why, folder);
   }
@@ -1051,8 +1062,7 @@ test('on Linux, Windows’s own folders reached through WSL’s /mnt/<letter> ar
     '/mnt/c/Users/jo/Downloads',
     '/mnt/c/Users/jo/Documents',
     '/mnt/c/Users/jo/Documents/PowerShell Scripts',
-    '/mnt/c/Users/jo/Desktop/AppData',
-    '/mnt/c/src/Windows',
+    '/mnt/c/src/Windows Tools',
     '/mnt/d/Invoices',
     '/mnt/wsl',
     '/mnt/cdrom',
@@ -1062,7 +1072,13 @@ test('on Linux, Windows’s own folders reached through WSL’s /mnt/<letter> ar
   // Only on Linux: a Mac has no WSL, and its /mnt is its own.
   assert.equal(refusedSaveFolder('/mnt/c/Windows', { ...deny, platform: 'darwin' }), null);
   // Only where Windows's drives are mounted: on any other Linux, /mnt/c is a disk the person mounted, theirs.
-  const plainLinux: SaveDenyInput = { ...deny, windowsDrives: () => [] };
+  const plainLinux: SaveDenyInput = {
+    ...deny,
+    mounts: () => [
+      { point: '/', windows: null },
+      { point: '/mnt/c', windows: null },
+    ],
+  };
   for (const folder of [
     '/mnt/c',
     '/mnt/c/Windows',
@@ -1074,19 +1090,59 @@ test('on Linux, Windows’s own folders reached through WSL’s /mnt/<letter> ar
   }
 });
 
-test('Windows drives are found in the kernel’s mount table, as WSL mounts them and wherever wsl.conf puts them', () => {
+test('Windows drives are read from the kernel’s mount table, with the Windows folder each one shows', () => {
+  const shared = '0e0f5a4b-1c2d-4e3f-8a9b-0c1d2e3f4a5b';
+  const ownTag = '5b4a1b35-7d6c-4b0e-9f1a-1f2d3c4b5a69';
+  const links = new Map([
+    [ownTag, 'G:\\'],
+    [shared, 'H:\\'],
+  ]);
   const mountinfo = [
-    // WSL 2: drvfs over 9p, named in the options.
-    '97 95 0:52 / /mnt/c rw,noatime - 9p C:\\134 rw,dirsync,aname=drvfs;path=C:\\;uid=1000;gid=1000,trans=fd',
-    // WSL 1: drvfs by name, at a root wsl.conf moved, with a space written the way the kernel writes it.
-    '45 24 0:40 / /win\\040drives/d rw,noatime - drvfs D:\\ rw',
-    // Not Windows's: an ordinary disk, a container's root, WSL's own /mnt/wsl, a 9p share that is not drvfs.
-    '31 1 8:1 / /mnt/e rw,relatime - ext4 /dev/sda1 rw',
+    // Not Windows's: a container's root, WSL's own /mnt/wsl, an ordinary disk.
     '600 590 0:120 / / rw,relatime - overlay overlay rw,lowerdir=/x',
-    '52 24 0:45 / /mnt/wsl rw,relatime - tmpfs none rw',
-    '53 24 0:46 / /mnt/f rw - 9p f rw,aname=other;path=x',
+    '52 600 0:45 / /mnt/wsl rw,relatime - tmpfs none rw',
+    '31 600 8:1 / /mnt/e rw,relatime - ext4 /dev/sda1 rw',
+    // WSL 2: drvfs over 9p, the folder in the source as the kernel writes a backslash.
+    '97 600 0:52 / /mnt/c rw,noatime - 9p C:\\134 rw,dirsync,aname=drvfs;path=C:\\;uid=1000;gid=1000,trans=fd',
+    // WSL 1: drvfs by name, at a root wsl.conf moved, with a space written the way the kernel writes it.
+    '45 600 0:40 / /win\\040drives/d rw,noatime - drvfs D:\\ rw',
+    // A bind of a profile kept outside Users: the same drive, with the part it shows as its root.
+    '120 600 0:52 /Profiles/jo /win/profile rw - 9p C:\\134 rw,aname=drvfs;path=C:\\;uid=1000',
+    // A drive mounted from a folder inside AppData.
+    '130 600 0:60 / /work rw - 9p C:\\134Users\\134jo\\134AppData rw,aname=drvfs;path=C:\\Users\\jo\\AppData',
+    // A 9p source WSL did not write, with the folder in the options.
+    '131 600 0:61 / /mnt/k rw - 9p drvfs rw,aname=drvfs;path=K:\\;uid=1000',
+    // virtiofs: a tag of its own, and a shared tag whose root names the drive's link first.
+    `140 600 0:70 / /mnt/g rw - virtiofs ${ownTag} rw`,
+    `141 600 0:71 /${shared}/Users/jo /mnt/h rw - virtiofs drvfs rw`,
+    // A virtiofs share WSL keeps no link for — a virtual machine's shared folder — and a 9p share that is not drvfs.
+    '150 600 0:80 / /shared rw - virtiofs mount0 rw',
+    '53 600 0:46 / /mnt/f rw - 9p f rw,aname=other;path=x',
+    // A Linux disk mounted inside a Windows drive, and a tmpfs stacked over another drive.
+    '160 97 8:2 / /mnt/c/linuxdisk rw - ext4 /dev/sdb1 rw',
+    '170 600 0:90 / /mnt/z rw - drvfs Z:\\134 rw',
+    '171 170 0:91 / /mnt/z rw - tmpfs none rw',
+    // A network share.
+    '180 600 0:95 / /mnt/share rw - 9p unc\\134server\\134share rw,aname=drvfs;path=UNC\\server\\share',
   ].join('\n');
-  assert.deepEqual(parseWindowsDriveMounts(mountinfo), ['/mnt/c', '/win drives/d']);
+  const mounts = parseMounts(mountinfo, (tag) => links.get(tag) ?? null);
+  assert.deepEqual(Object.fromEntries(mounts.map((mount) => [mount.point, mount.windows])), {
+    '/': null,
+    '/mnt/wsl': null,
+    '/mnt/e': null,
+    '/mnt/c': 'C:\\',
+    '/win drives/d': 'D:\\',
+    '/win/profile': 'C:\\Profiles\\jo',
+    '/work': 'C:\\Users\\jo\\AppData',
+    '/mnt/k': 'K:\\',
+    '/mnt/g': 'G:\\',
+    '/mnt/h': 'H:\\Users\\jo',
+    '/shared': null,
+    '/mnt/f': null,
+    '/mnt/c/linuxdisk': null,
+    '/mnt/z': null,
+    '/mnt/share': 'unc\\server\\share',
+  });
   const deny: SaveDenyInput = {
     paths: {
       configDir: '/srv/sam/.config/ac',
@@ -1096,19 +1152,33 @@ test('Windows drives are found in the kernel’s mount table, as WSL mounts them
     },
     env: { HOME: '/srv/sam' },
     platform: 'linux',
-    windowsDrives: () => parseWindowsDriveMounts(mountinfo),
+    mounts: () => mounts,
   };
-  assert.match(
-    String(refusedSaveFolder('/win drives/d/Program Files/App', deny)),
-    /inside Program Files, .*reached through \/win drives\/d$/,
-  );
-  assert.match(String(refusedSaveFolder('/mnt/c/Users/jo/AppData', deny)), /inside an AppData folder/);
-  // A folder whose name only begins like a drive's mount is not inside it: /mnt/cWindows is not /mnt/c's Windows.
+  for (const [folder, why] of [
+    ['/win drives/d/Program Files/App', /inside Program Files, .*reached through \/win drives\/d$/],
+    ['/mnt/c/Users/jo/AppData', /inside an AppData folder/],
+    ['/win/profile/AppData/Roaming', /inside an AppData folder, .*reached through \/win\/profile$/],
+    ['/work', /inside an AppData folder, .*reached through \/work$/],
+    ['/work/Roaming/Microsoft/Excel/XLSTART', /inside an AppData folder/],
+    ['/mnt/k', /the root of a Windows drive \(K:\)/],
+    ['/mnt/g/Windows', /a folder named Windows.*, reached through \/mnt\/g$/],
+    ['/mnt/h/AppData', /inside an AppData folder, .*reached through \/mnt\/h$/],
+    ['/mnt/share/tools', /on a network share or a Windows device with no drive letter, reached through \/mnt\/share$/],
+  ] as const) {
+    assert.match(String(refusedSaveFolder(folder, deny)), why, folder);
+  }
+  // Only the mount that holds a folder counts, and a folder whose name only begins like a mount's is not inside it.
   for (const folder of [
+    '/win/profile',
+    '/win/profile/Downloads',
+    '/mnt/h/Downloads',
     '/mnt/e/Windows',
-    '/mnt/e',
     '/mnt/wsl/x',
     '/mnt/f/Program Files',
+    '/shared/Windows',
+    '/mnt/c/linuxdisk',
+    '/mnt/c/linuxdisk/Windows',
+    '/mnt/z/Windows',
     '/mnt/cdrive/Windows',
     '/mnt/cWindows',
   ]) {
