@@ -3,6 +3,59 @@
 All notable changes to this project are recorded here, newest first. Every package in this repository is released
 together under one version.
 
+## 0.9.0
+
+**Every server and command stops for an update, once a day.** When a newer release is out, a request is not carried
+out. It gets "Hang on a minute, there's an update. Let's update first.", the version running and the one that is out,
+and the two ways on: update, or not now.
+- The machine asks npm at most once a day, for every server and command on it, and only about the packages it uses.
+  A server asks in the background and never slows a call. A command waits about three seconds at most and then goes
+  on. Offline, or when npm does not answer, nothing is stopped, and a prerelease never counts as an update.
+- Update from chat with `comms_update` (say "update my comms"), or at a terminal with `agentcomms update`
+  (`npx -y @agentcomms/core@latest update` where `agentcomms` is not installed).
+- Not now is your decision, not the agent's: `comms_update` with `later: true`, or `agentcomms update --later`, is a
+  change you approve like any other. It lasts until midnight, for the whole machine, and the next day it asks again.
+- At a terminal with you at it, a command asks: update now, later today, or cancel. Without a terminal (a script, an
+  agent's shell, `--json`) it does nothing and exits 11 (`UPDATE_REQUIRED`), naming both commands.
+- Never stopped: updating itself, doctor, `paths`, `approve` and `approvals`, the listener a sign-in starts, and a
+  call that uses an approval you already gave that is still waiting — something you approved is finished first.
+- When the update is installed but the client still runs the old server, the reply says to restart the client
+  instead. The Claude Code plugin's Gmail server and the Gemini extension's servers are always told to update where
+  they were installed, because restarting them starts the release they pin.
+- WhatsApp still makes no network request: its server and command stop once any other server or command on the
+  machine has found an update.
+
+**On by default; one switch per machine.** `agentcomms update --auto off` (or `comms_update` with `auto: "off"`)
+turns the check off for this machine and needs your yes; `--auto on` turns it back on at once. `agentcomms doctor`
+shows the check on one line: on or off, when it last asked, the latest release and the one running. It is skipped
+whenever `CI` is set, and `AGENT_COMMS_UPDATE_CHECK=off` switches it off for a process.
+
+Why: a second Mac sat a release behind with a bug that made installs from chat register nothing while saying they
+had, and nobody knew it was behind.
+
+**Also in this release**
+- **An approval id is refused where it would not be used.** A command or tool that takes `--approval` (or
+  `approvalId`) only to claim a change now refuses one on a path that claims nothing — a report, a dry run, a
+  `--finish`, and any command that takes no approval at all — instead of ignoring it.
+- **Slack file downloads say more when they stop.** A `--channel` download stops looking up where files were shared
+  at Slack's first rate limit or permission error, and says why a file was saved as undated. A run that stops
+  part-way says `complete: false` and names every file it did not save, including a part-written file it could not
+  remove. An HTML file is never downloaded: it is reported as indistinguishable from Slack's sign-in page.
+
+What it means for you: a minor release, and a behaviour change — a request can now be answered with "update first"
+instead of being done.
+- A script that runs these commands without a terminal exits 11 on its first run after a release until the machine
+  is updated or the update is put off for the day. Set `AGENT_COMMS_UPDATE_CHECK=off` for it, or turn the check off
+  with `--auto off`.
+- On the day's first run, a command's output can appear after about three seconds while its process lives up to ten
+  seconds more, until npm answers. Anything that waits for the command to exit — `$(…)`, a pipe, an agent's shell
+  tool — waits that long too, once a day.
+- A command given `--approval` where it takes none, or on a path that uses none (a report, a dry run, a `--finish`),
+  now fails with a usage error instead of ignoring it. `agent-gmail setup --mcp-approval` now also needs
+  `--mcp-client`.
+- To get 0.9.0, run `agentcomms update` (or say "update my comms" in chat), then restart your client. From 0.9.0 on,
+  the next release will tell you itself.
+
 ## 0.8.0
 
 **Slack files can be downloaded.** `agent-slack files download`, and `slack_file_download` from chat, save a file an
