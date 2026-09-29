@@ -732,8 +732,8 @@ export async function saveFolderRefusal(folder: string, input: SaveDenyInput): P
   const written = paths.resolve(folder);
   const resolved = await realpathOfExisting(folder);
   const candidates = [written, resolved];
-  // On Windows the real path names every folder that exists by its long name — `C:\Users\RUNNER~1` comes back as
-  // `C:\Users\runneradmin`, `C:\PROGRA~1` as `C:\Program Files` — so short names are judged there alone. The form as
+  // On Windows the real path names every folder that exists by its long name — a profile's `RUNNER~1` comes back as
+  // `runneradmin`, `C:\PROGRA~1` as `C:\Program Files` — so short names are judged there alone. The form as
   // written would refuse a folder of the person's reached by its short name, as `%TEMP%` often is; and a part that
   // does not exist yet keeps its written name in the real path, where one that looks short is still refused.
   for (const candidate of candidates) {
