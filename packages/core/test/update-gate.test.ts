@@ -627,6 +627,7 @@ test('a download’s answer goes past the stop by its question’s choiceId; the
       operation: 'attachments.download',
       request: { targets: [{ messageId: 'm1', partId: null, filename: null }], maxFiles: 50 },
       files: ['m1/1'],
+      names: ['invoice.pdf'],
       folders: { downloads: join(m.home, 'Downloads'), current: m.home },
     },
     policy: 'chat',
@@ -676,6 +677,7 @@ test('a download’s answer goes past the stop by its question’s choiceId; the
     operation: 'attachments.download',
     request: { targets: [{ messageId: 'm1', partId: null, filename: null }], maxFiles: 50 },
     files: ['m1/1'],
+    names: ['invoice.pdf'],
   });
   assert.notEqual(await gate(tool, { ...answer, choiceId: question.approvalId }), null, 'a used question went through');
 });

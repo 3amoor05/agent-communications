@@ -5,7 +5,7 @@ import {
   askWhereToSave,
   CommsError,
   checkDownloadAnswer,
-  createUniqueFile,
+  createSavedFile,
   type DestinationQuestion,
   type DownloadAnswer,
   type DownloadRequest,
@@ -14,16 +14,22 @@ import {
   effectiveChangePolicy,
   ensurePrivateDir,
   expandHome,
+  fileWarnings,
   homeDirectory,
+  type InternetMark,
+  type InternetMarkKind,
   isPlainFileName,
+  markFromInternet,
   newBoundary,
   parseAddressList,
+  type RenameReason,
   type SaveChoice,
-  savedFileName,
+  savedName,
   saveFailure,
   saveFolders,
   settleDestination,
   slug,
+  type WarnedFile,
   writeFileAtomic,
 } from '@agentcomms/core';
 import type { GmailContext } from '../context.ts';
@@ -47,9 +53,10 @@ import { resolveInboxes } from './search.ts';
  * strangers: a name can contain path separators, a right-to-left override that makes `exe` look like `pdf`, a leading
  * dot that makes it a project's configuration, the name of a file already there — or a sentence. So a download asks
  * first (core's `save-destination.ts`), and saves only into the folder the person chose, under the name the sender
- * gave the file made safe by `savedFileName`; the write is `O_EXCL` and refuses to follow a link. What the sender
- * called the file comes back beside the path, wrapped as untrusted content, and so do the subject and the type they
- * declared — and the saved name and path too, unless the name is plainly a file name.
+ * gave the file made safe by `savedName` — with `.download` after it unless its extension is one that is only ever
+ * opened — and marks it as downloaded from the internet; the write is `O_EXCL` and refuses to follow a link. What the
+ * sender called the file comes back beside the path, wrapped as untrusted content, and so do the subject and the type
+ * they declared — and the saved name and path too, unless the name is plainly a file name.
  */
 
 export interface AttachmentRow {
@@ -255,6 +262,11 @@ export interface DownloadedFile {
    */
   duplicate: boolean;
   riskFlags: string[];
+  /**
+   * The mark the saved file carries as downloaded from the internet — macOS's quarantine attribute, Windows's
+   * `Zone.Identifier` — or null: on a system with no such mark, or when it could not be written, which `warnings` says.
+   */
+  marked: InternetMarkKind | null;
 }
 
 export interface DownloadSkip {
@@ -281,6 +293,12 @@ export interface DownloadResult {
    */
   manifestPath: string | null;
   totalBytes: number;
+  /**
+   * What the person should know about the files saved, one line each: a file saved with `.download` after its name
+   * and why, a file with a risk flag, a file that could not be marked as downloaded from the internet. Plain file names
+   * are named; any other is called by its place in `files`.
+   */
+  warnings: string[];
 }
 
 /** What a download answers before anything is saved: the question for the person, with the files it would save. */
@@ -300,6 +318,11 @@ export interface DownloadOptions extends DownloadAnswer {
    * surface passes it; a test does, to fail a write part-way as a full disk would, which no fake mailbox can.
    */
   write?: ((handle: FileHandle, bytes: Buffer) => Promise<void>) | undefined;
+  /**
+   * How a saved file is marked as downloaded from the internet: core's `markFromInternet` when left out. Neither surface
+   * passes it; a test does, to fail the mark as a disk without extended attributes would.
+   */
+  mark?: ((path: string) => Promise<InternetMark>) | undefined;
 }
 
 export const DEFAULT_MAX_FILES = 50;
@@ -334,8 +357,12 @@ interface Planned {
   readonly messageId: string;
   readonly part: DecodedPart & { attachmentId: string };
   readonly listed: AttachmentToSave;
-  /** The name it would be saved under: the sender's, made safe, and `download-<name>` for one tools read themselves. */
+  /** The name it would be saved under: the sender's, made safe, with `.download` after it unless it is inert. */
   readonly name: string;
+  /** The sender's name made safe, before any `.download`: what the warnings call it. */
+  readonly given: string;
+  /** Why `.download` is after its name, when it is. */
+  readonly renamed: RenameReason | undefined;
 }
 
 /** The command that answers a download's question at a person's own terminal, under a `confirm` change policy. */
@@ -430,14 +457,17 @@ export async function downloadAttachments(
         });
         continue;
       }
+      // Under the sender's name, made safe; the part's own id when nothing of the name is left.
+      const saved = savedName(
+        decodeHeaderWords(part.filename ?? ''),
+        `${slug(target.messageId, 64, 'message')}-part-${slug(part.partId, 32, 'root')}`,
+      );
       planned.push({
         messageId: target.messageId,
         part: part as DecodedPart & { attachmentId: string },
-        // Under the sender's name, made safe; the part's own id when nothing of the name is left.
-        name: savedFileName(
-          decodeHeaderWords(part.filename ?? ''),
-          `${slug(target.messageId, 64, 'message')}-part-${slug(part.partId, 32, 'root')}`,
-        ),
+        name: saved.name,
+        given: saved.given,
+        renamed: saved.renamed,
         listed: {
           messageId: target.messageId,
           partId: part.partId,
@@ -466,6 +496,7 @@ export async function downloadAttachments(
       maxFiles,
     },
     files: planned.map((entry) => `${entry.messageId}/${entry.part.partId}`),
+    names: planned.map((entry) => entry.name),
   };
 
   const config = await context.config();
@@ -485,7 +516,8 @@ export async function downloadAttachments(
       listing: planned.map((entry) => ({
         name: entry.name,
         size: entry.part.size,
-        renamed: entry.listed.riskFlags.includes('auto-read'),
+        renamed: entry.renamed,
+        flags: entry.listed.riskFlags,
       })),
       policy,
       approveCommand: APPROVE_COMMAND,
@@ -517,7 +549,10 @@ export async function downloadAttachments(
   // The same file twice — the same name and the same bytes — is written once. The same bytes under another name are
   // written under that name as well: the person asked for each file by its name, and `report-copy.pdf` pointing at
   // `report.pdf` is a file they were told was saved and cannot find.
-  const writtenAs = new Map<string, { path: string; savedAs: string }>();
+  const writtenAs = new Map<string, { path: string; savedAs: string; marked: InternetMarkKind | null }>();
+  // What the result warns about each file written: its rename, its flags, a mark that could not be made.
+  const warned: WarnedFile[] = [];
+  const unmarked: string[] = [];
   let totalBytes = 0;
   // Boxed, so that even something thrown as `undefined` still counts as the download having stopped.
   let stopped: { readonly error: unknown } | undefined;
@@ -527,7 +562,7 @@ export async function downloadAttachments(
   let at = 0;
   try {
     for (; at < planned.length; at += 1) {
-      const { messageId, part, listed, name } = planned[at] as Planned;
+      const { messageId, part, listed, name, given, renamed } = planned[at] as Planned;
       const fileId = `${messageId}/${part.partId}`;
       if (totalBytes + part.size > maxBytes) {
         skipped.push({ messageId, partId: part.partId, reason: `more than ${maxBytes} bytes in one batch` });
@@ -542,11 +577,9 @@ export async function downloadAttachments(
         continue;
       }
 
-      // Created here, exclusively: an error from the file system names the folder and the part, never the sender's
-      // name, which its own message would carry in the path.
-      const created = await createUniqueFile(destination.folder, name).catch((error: unknown) => {
-        throw saveFailure(error, { folder: destination.folder, fileId });
-      });
+      // Created here, exclusively, and proved to be in the folder that was checked: an error from the file system
+      // names the folder and the part, never the sender's name, which its own message would carry in the path.
+      const created = await createSavedFile(destination, name, { fileId });
       try {
         await (options.write ?? ((handle, data) => handle.writeFile(data)))(created.handle, bytes);
         await created.handle.close();
@@ -563,10 +596,19 @@ export async function downloadAttachments(
         });
         throw saveFailure(error, { folder: destination.folder, fileId });
       }
-      const shown = savedNameFields(created.path, envelope);
+      const marking = await (options.mark ?? markFromInternet)(created.path);
+      const shown = { ...savedNameFields(created.path, envelope), marked: marking.mark };
       writtenAs.set(`${name}\u0000${sha256}`, shown);
       totalBytes += bytes.byteLength;
       files.push({ ...savedFields(listed, shown), size: bytes.byteLength, sha256, duplicate: false });
+      const position = files.length;
+      const savedAs = basename(created.path);
+      warned.push({ given, savedAs, renamed, flags: listed.riskFlags, position });
+      if (marking.failure !== undefined) {
+        unmarked.push(
+          `${isPlainFileName(savedAs) ? savedAs : `file ${position}`} is not marked as downloaded from the internet: ${marking.failure}`,
+        );
+      }
     }
   } catch (error) {
     // A part Gmail would not hand over, or a file this machine could not write, stops the download. What was saved
@@ -606,6 +648,7 @@ export async function downloadAttachments(
     skipped,
     manifestPath,
     totalBytes,
+    warnings: [...fileWarnings(warned, 'result'), ...unmarked],
   };
 
   // The manifest and the audit record, each written whatever became of the other: see Slack's `downloadFiles`.
@@ -767,13 +810,14 @@ function nothingToSave(skipped: DownloadSkip[]): DownloadResult {
     skipped,
     manifestPath: null,
     totalBytes: 0,
+    warnings: [],
   };
 }
 
 /** A listed attachment as saved: what the question said of it, with where it went. */
 function savedFields(
   listed: AttachmentToSave,
-  saved: { path: string; savedAs: string },
+  saved: { path: string; savedAs: string; marked: InternetMarkKind | null },
 ): Omit<DownloadedFile, 'size' | 'sha256' | 'duplicate'> {
   return {
     filename: listed.filename,
@@ -786,6 +830,7 @@ function savedFields(
     subject: listed.subject,
     date: listed.date,
     riskFlags: listed.riskFlags,
+    marked: saved.marked,
   };
 }
 

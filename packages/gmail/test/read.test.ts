@@ -232,11 +232,13 @@ test('reading needs the permission to read, checked before Google is called', as
 
 test('attachment risks name what a file could do, including the extension trick', () => {
   assert.deepEqual(attachmentRisks('invoice.pdf', 'application/pdf'), []);
-  assert.deepEqual(attachmentRisks('setup.exe', 'application/octet-stream'), ['executable']);
+  // Each also says it would be saved with `.download` after its name: none of these is a type that is only opened.
+  assert.deepEqual(attachmentRisks('setup.exe', 'application/octet-stream'), ['executable', 'saved-as-download']);
   assert.deepEqual(attachmentRisks('report.docm', 'application/vnd.ms-word.document.macroEnabled.12'), [
     'macro-enabled',
+    'saved-as-download',
   ]);
-  assert.deepEqual(attachmentRisks('page.svg', 'image/svg+xml'), ['markup']);
+  assert.deepEqual(attachmentRisks('page.svg', 'image/svg+xml'), ['markup', 'saved-as-download']);
   assert.ok(attachmentRisks('invoice.pdf.exe', 'application/octet-stream').includes('double-extension'));
   assert.ok(attachmentRisks('photo.png', 'image/png').length === 0);
 });
@@ -371,7 +373,7 @@ test('a sender cannot put instructions in a field that travels outside the envel
 test('an attachment is flagged on the name it is saved under', async () => {
   // `invoice.exe ` is written as `invoice.exe`, and the `$`-anchored extension checks did not match the trailing
   // space — so the executable landed on disk with no flag raised.
-  assert.deepEqual(attachmentRisks('invoice.exe', 'application/octet-stream'), ['executable']);
+  assert.deepEqual(attachmentRisks('invoice.exe', 'application/octet-stream'), ['executable', 'saved-as-download']);
   const { context } = await inboxWith({
     m1: {
       id: 'm1',
@@ -399,5 +401,9 @@ test('an attachment is flagged on the name it is saved under', async () => {
     },
   });
   const read = await readMessage(context, 'work', 'm1');
-  assert.deepEqual(read.attachments[0]?.riskFlags, ['executable'], 'flagged on the saved name, not the sent one');
+  assert.deepEqual(
+    read.attachments[0]?.riskFlags,
+    ['executable', 'saved-as-download'],
+    'flagged on the saved name, not the sent one',
+  );
 });

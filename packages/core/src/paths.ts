@@ -1,4 +1,4 @@
-import { homedir } from 'node:os';
+import { homedir, userInfo } from 'node:os';
 import { join, resolve } from 'node:path';
 
 export const APP_DIR_NAME = 'agent-communications';
@@ -73,10 +73,32 @@ export function resolvePaths(options: PathEnvironment = {}): ResolvedPaths {
  * backups of fixture entries in the maintainer's own data directory.
  *
  * Its own function since a download asks where to save: the person's Downloads folder is `<this>/Downloads`, and a
- * folder they type as `~/…` is expanded from it — the same home every other path here is resolved from.
+ * folder they type as `~/…` is expanded from it — the same home every other path here is resolved from. When the
+ * environment names none, the account's own home is taken ({@link accountHome}); `account` is for a test to say what
+ * that is.
  */
-export function homeOf(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string {
-  return (platform === 'win32' ? env.USERPROFILE : env.HOME) || homedir();
+export function homeOf(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+  account: () => string = accountHome,
+): string {
+  return (platform === 'win32' ? env.USERPROFILE : env.HOME) || account();
+}
+
+/**
+ * The home the account itself has, for when the environment names none: the password database's (`os.userInfo()`),
+ * which no variable moves, rather than `homedir()`, which reads `HOME` first — from this process's environment, not the
+ * one the caller passed, and so from somewhere the caller did not say. Only when there is no such entry — some
+ * containers run as an id with none — is `homedir()` asked instead.
+ */
+export function accountHome(): string {
+  try {
+    const home = userInfo().homedir;
+    if (home) return home;
+  } catch {
+    // An account with no entry in the database.
+  }
+  return homedir();
 }
 
 /** Expands a leading `~` to the home directory. Nothing else is expanded. */

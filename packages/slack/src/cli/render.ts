@@ -616,6 +616,8 @@ export function renderFileDownload(result: FileDownloadResult, color: boolean): 
     }
   }
   for (const skip of result.skipped) lines.push(paint(color, 'yellow', `skipped ${skip.fileId}: ${skip.reason}`));
+  // What the person should know before opening any of them: a rename, a flag, a mark that could not be made.
+  for (const warning of result.warnings) lines.push(paint(color, 'yellow', `! ${warning}`));
   if (!result.complete) {
     lines.push(paint(color, 'yellow', 'More files remained than --max-files allowed; not every file was saved.'));
   }

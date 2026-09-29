@@ -683,22 +683,24 @@ test('a hidden folder, one reached through a link, and this package’s own are 
   }
 });
 
-test('a server started in the home does not offer it: option 2 is shown as unavailable, with the reason', async () => {
+test('a server started in a hidden folder does not offer it; one started in the home does, the home being the person’s own', async () => {
   const { harness, home, downloads } = await mailbox();
-  const { call, close } = await connect({ core: harness.core, env: harness.env, cwd: home });
+  const hidden = join(home, 'app', '.claude');
+  mkdirSync(hidden, { recursive: true });
+  const { call, close } = await connect({ core: harness.core, env: harness.env, cwd: hidden });
   try {
     const asked = wire(await call('gmail_attachment_download', { inbox: 'work', messageIds: ['m1'] }));
     assert.deepEqual(asked.options, [
       { choice: 'downloads', path: downloads, default: true },
       {
         choice: 'current',
-        path: home,
+        path: hidden,
         unavailable:
-          'it is your home folder itself, whose top level is where programs look for their settings — choose a folder inside it',
+          'it is inside ~/app/.claude, a hidden folder: hidden folders hold settings, hooks and keys that programs read on their own',
       },
       { choice: 'other' },
     ]);
-    assert.match(String(asked.question), /2\. The current folder — .* — not available: it is your home folder itself/);
+    assert.match(String(asked.question), /2\. The current folder — .* — not available: it is inside ~\/app\/\.claude/);
     const refused = toolError(
       await call('gmail_attachment_download', {
         inbox: 'work',
@@ -711,9 +713,16 @@ test('a server started in the home does not offer it: option 2 is shown as unava
   } finally {
     await close();
   }
+  const inHome = await connect({ core: harness.core, env: harness.env, cwd: home });
+  try {
+    const asked = wire(await inHome.call('gmail_attachment_download', { inbox: 'work', messageIds: ['m1'] }));
+    assert.deepEqual((asked.options as unknown[])[1], { choice: 'current', path: home });
+  } finally {
+    await inHome.close();
+  }
 });
 
-test('a file tools read on their own is named in the question before anyone answers, and saved as download-<name>', async () => {
+test('a file that could run is named in the question and in `next`, saved with .download after it, and marked as downloaded', async () => {
   const claude: FakeMessage = {
     ...MESSAGE,
     payload: {
@@ -732,12 +741,24 @@ test('a file tools read on their own is named in the question before anyone answ
           headers: [{ name: 'Content-Disposition', value: 'attachment; filename="CLAUDE.md"' }],
           body: { size: 12, attachmentId: 'a1' },
         },
+        {
+          partId: '2',
+          mimeType: 'application/octet-stream',
+          filename: 'setup.exe',
+          headers: [{ name: 'Content-Disposition', value: 'attachment; filename="setup.exe"' }],
+          body: { size: 2, attachmentId: 'a2' },
+        },
       ],
     },
   };
   const harness = await newHarness({
     accounts: [
-      { sub: 'sub-1', email: 'jo@example.test', messages: { m1: claude }, attachments: { a1: 'instructions' } },
+      {
+        sub: 'sub-1',
+        email: 'jo@example.test',
+        messages: { m1: claude },
+        attachments: { a1: 'instructions', a2: 'MZ' },
+      },
     ],
   });
   await harness.connectInbox({ alias: 'work', email: 'jo@example.test', sub: 'sub-1' });
@@ -748,8 +769,19 @@ test('a file tools read on their own is named in the question before anyone answ
   const { call, close } = await connect({ core: harness.core, env: harness.env, cwd });
   try {
     const asked = wire(await call('gmail_attachment_download', { inbox: 'work', messageIds: ['m1'] }));
-    assert.match(String(asked.question), /! a file tools may read on their own: saved as download-CLAUDE\.md/);
-    assert.ok((asked.files as Array<{ riskFlags: string[] }>)[0]?.riskFlags.includes('auto-read'));
+    const warnings = [
+      'CLAUDE.md will be saved as CLAUDE.md.download — a file tools read or run on their own; rename it yourself if you trust it',
+      'setup.exe (executable) will be saved as setup.exe.download — a type that could run; rename it yourself if you trust it',
+    ];
+    for (const warning of warnings) {
+      assert.ok(String(asked.question).includes(`! ${warning}`), String(asked.question));
+      assert.ok(String(asked.next).includes(warning), String(asked.next));
+    }
+    const flags = (asked.files as Array<{ riskFlags: string[] }>).map((file) => file.riskFlags);
+    assert.deepEqual(flags, [
+      ['auto-read', 'saved-as-download'],
+      ['executable', 'saved-as-download'],
+    ]);
     const saved = wire(
       await call('gmail_attachment_download', {
         inbox: 'work',
@@ -758,8 +790,30 @@ test('a file tools read on their own is named in the question before anyone answ
         choiceId: asked.choiceId,
       }),
     );
-    assert.equal((saved.files as Array<{ savedAs: string }>)[0]?.savedAs, 'download-CLAUDE.md');
-    assert.deepEqual(await listing(cwd), ['download-CLAUDE.md']);
+    const files = saved.files as Array<{ savedAs: string; path: string; marked: string | null }>;
+    assert.deepEqual(
+      files.map((file) => file.savedAs),
+      ['CLAUDE.md.download', 'setup.exe.download'],
+    );
+    assert.deepEqual(await listing(cwd), ['CLAUDE.md.download', 'setup.exe.download']);
+    assert.deepEqual(
+      saved.warnings,
+      warnings.map((warning) => warning.replace('will be saved', 'was saved')),
+    );
+    // Marked as downloaded from the internet, as a browser marks what it saves — where the system has such a mark.
+    const expected =
+      process.platform === 'darwin' ? 'com.apple.quarantine' : process.platform === 'win32' ? 'Zone.Identifier' : null;
+    assert.deepEqual(
+      files.map((file) => file.marked),
+      [expected, expected],
+    );
+    if (process.platform === 'darwin') {
+      const { execFileSync } = await import('node:child_process');
+      for (const file of files) {
+        const value = execFileSync('/usr/bin/xattr', ['-p', 'com.apple.quarantine', file.path], { encoding: 'utf8' });
+        assert.match(value, /^0081;[0-9a-f]+;agentcomms;/, file.savedAs);
+      }
+    }
   } finally {
     await close();
   }

@@ -6,20 +6,25 @@ import {
   type CheckedAnswer,
   CommsError,
   checkDownloadAnswer,
-  createUniqueFile,
+  createSavedFile,
   type DestinationQuestion,
   type DownloadAnswer,
   type DownloadRequest,
   downloadRecordPath,
   effectiveChangePolicy,
   fileRisks,
+  fileWarnings,
+  type InternetMark,
+  type InternetMarkKind,
   isPlainFileName,
+  markFromInternet,
   newBoundary,
   type SaveChoice,
-  savedFileName,
+  savedName,
   saveFailure,
   saveFolders,
   settleDestination,
+  type WarnedFile,
   wrapUntrusted,
   writeFileAtomic,
 } from '@agentcomms/core';
@@ -41,8 +46,9 @@ import type { WorkspaceSession } from './session.ts';
  * others and saves them. The question is held to the workspace's change policy: under `confirm` the answer is the one
  * the person gave at their own terminal (`agent-slack approve`), never one in the arguments. No answer saves into a
  * folder on core's deny list (`save-deny.ts`). Each file is saved in the chosen folder under the name its uploader gave
- * it, made safe by core's `savedFileName`; the write is exclusive and refuses to follow a link, and nothing else is
- * written in that folder. A file-system error names the folder and the file's id, never the uploader's name.
+ * it, made safe by core's `savedName` — with `.download` after it unless its extension is one that is only ever
+ * opened — the name the question showed, and marked as downloaded from the internet; the write is exclusive and
+ * refuses to follow a link, and nothing else is written in that folder. A file-system error names the folder and the file's id, never the uploader's name.
  * The name, title, uploader and type — which the uploader chose — come back beside the path, each inside the
  * untrusted-content envelope, and the saved name and path too unless the name is plainly a file name.
  *
@@ -65,6 +71,8 @@ export interface FileDownloadDeps {
    * {@link MAX_FILE_BYTES} or {@link MAX_RUN_BYTES} is not used, so nothing can raise either cap through this.
    */
   caps?: { perFile?: number | undefined; perRun?: number | undefined } | undefined;
+  /** How a saved file is marked as downloaded from the internet: core's `markFromInternet` unless a test says. */
+  mark?: ((path: string) => Promise<InternetMark>) | undefined;
 }
 
 interface Caps {
@@ -280,6 +288,11 @@ export interface SavedSlackFile extends Omit<SlackFileToSave, 'size'> {
   /** The bytes written. */
   readonly size: number;
   readonly sha256: string;
+  /**
+   * The mark the saved file carries as downloaded from the internet — macOS's quarantine attribute, Windows's
+   * `Zone.Identifier` — or null: on a system with no such mark, or when it could not be written, which `warnings` says.
+   */
+  readonly marked: InternetMarkKind | null;
 }
 
 export interface SkippedSlackFile {
@@ -311,6 +324,12 @@ export interface FileDownloadResult {
    */
   readonly manifestPath: string | null;
   readonly totalBytes: number;
+  /**
+   * What the person should know about the files saved, one line each: a file saved with `.download` after its name
+   * and why, a file with a risk flag, a file that could not be marked as downloaded from the internet. Plain file names
+   * are named; any other is called by its place in `files`.
+   */
+  readonly warnings: readonly string[];
   /**
    * False when not every file named was tried: the most files a run may save left some unread — skipped as
    * `max-files`, or never listed — or the run stopped part-way, and the files it stopped before are skipped as
@@ -701,11 +720,16 @@ export async function downloadFiles(
   // What to save is found before anything is asked: a message that does not exist, or has no files, asks nothing.
   const { planned, skipped, complete: listedAll } = await planFiles(call, plan, caps);
   const described = await describe(call, workspace, planned);
+  // Under the uploader's name, made safe; the file's own id when nothing of the name is left. Worked out once, from the
+  // records as they are now, and bound into the question: a file renamed on Slack after the question was asked would
+  // otherwise be saved under a name the person never saw, so a claim with other names is refused.
+  const names = planned.map(({ fileId, record }) => savedName(str(record.name) ?? '', fileId));
   const binding: DownloadRequest = {
     target: { kind: 'account', name: workspace, id: session.accountId },
     operation: 'files.download',
     request: { selection: plan.selection, maxFiles: plan.maxFiles },
     files: planned.map((entry) => entry.fileId),
+    names: names.map((name) => name.name),
   };
   const config = await context.config();
   const folders = () => saveFolders({ configured: config.defaults.downloadsDir, env: context.env, cwd: context.cwd });
@@ -722,10 +746,11 @@ export async function downloadFiles(
       configured: Boolean(config.defaults.downloadsDir),
       count: planned.length,
       bytes: declared,
-      listing: planned.map(({ fileId, record }, index) => ({
-        name: savedFileName(str(record.name) ?? '', fileId),
+      listing: planned.map((_, index) => ({
+        name: names[index]?.name ?? '',
         size: described.files[index]?.size ?? null,
-        renamed: described.files[index]?.riskFlags.includes('auto-read') === true,
+        renamed: names[index]?.renamed,
+        flags: [...(described.files[index]?.riskFlags ?? [])],
       })),
       policy,
       approveCommand: APPROVE_COMMAND,
@@ -759,6 +784,9 @@ export async function downloadFiles(
   });
 
   const saved: SavedSlackFile[] = [];
+  // What the result warns about each file written: its rename, its flags, a mark that could not be made.
+  const warned: WarnedFile[] = [];
+  const unmarked: string[] = [];
   let complete = listedAll;
   let totalBytes = 0;
   // Boxed, so that even something thrown as `undefined` still counts as the run having stopped.
@@ -797,12 +825,11 @@ export async function downloadFiles(
         continue;
       }
 
-      // Under the uploader's name, made safe; the file's own id when nothing of the name is left. An error from the file
-      // system names the folder and the file's id, never that name, which its own message would carry in the path.
-      const name = savedFileName(str(record.name) ?? '', fileId);
-      const { path, handle } = await createUniqueFile(destination.folder, name).catch((error: unknown) => {
-        throw saveFailure(error, { folder: destination.folder, fileId });
-      });
+      // The name the question showed, which the claim held the record to. Created in the folder that was checked, and
+      // proved to be there; an error from the file system names the folder and the file's id, never the name, which
+      // its own message would carry in the path.
+      const { name, given, renamed } = names[at] as ReturnType<typeof savedName>;
+      const { path, handle } = await createSavedFile(destination, name, { fileId });
       try {
         await handle.writeFile(body.bytes);
         await handle.close();
@@ -824,13 +851,23 @@ export async function downloadFiles(
         throw saveFailure(error, { folder: destination.folder, fileId });
       }
       totalBytes += body.bytes.byteLength;
+      const marking = await (deps.mark ?? markFromInternet)(path);
       const { size: _declared, ...rest } = listed;
       saved.push({
         ...rest,
         ...savedNameFields(path, described.wrap, fileId),
         size: body.bytes.byteLength,
         sha256: createHash('sha256').update(body.bytes).digest('hex'),
+        marked: marking.mark,
       });
+      const position = saved.length;
+      const savedAs = basename(path);
+      warned.push({ given, savedAs, renamed, flags: listed.riskFlags, position });
+      if (marking.failure !== undefined) {
+        unmarked.push(
+          `${isPlainFileName(savedAs) ? savedAs : `file ${position}`} is not marked as downloaded from the internet: ${marking.failure}`,
+        );
+      }
     }
   } catch (error) {
     // A file that could not be written is this machine's problem and stops the run. What was saved before it is
@@ -873,6 +910,7 @@ export async function downloadFiles(
     skipped,
     manifestPath,
     totalBytes,
+    warnings: [...fileWarnings(warned, 'result'), ...unmarked],
     complete,
   };
 
@@ -952,6 +990,7 @@ function nothingToSave(
     skipped,
     manifestPath: null,
     totalBytes: 0,
+    warnings: [],
     complete,
   };
 }

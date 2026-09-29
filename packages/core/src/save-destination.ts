@@ -1,13 +1,13 @@
-import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { constants, readFileSync } from 'node:fs';
-import { access, mkdir, open, realpath, stat, unlink } from 'node:fs/promises';
+import { access, type FileHandle, lstat, mkdir, open, realpath, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import {
   approvalKind,
   type DownloadBinding,
   type DownloadRequest,
   downloadClaimRefusal,
+  type ListedFile,
   type RecordedSaveAnswer,
 } from './approvals.ts';
 import { agentMarker, canPrompt, defaultStreams, paint, type Streams } from './cli-runtime.ts';
@@ -15,6 +15,8 @@ import type { ChangePolicy } from './config.ts';
 import type { Core } from './core.ts';
 import { CommsError } from './errors.ts';
 import { APPROVAL_ID_PATTERN } from './ids.ts';
+import { createUniqueFile } from './jail.ts';
+import { DOWNLOADS_KNOWN_FOLDER, knownFolder } from './known-folders.ts';
 import { expandHome, homeOf } from './paths.ts';
 import { truncateDisplay } from './render.ts';
 import {
@@ -24,7 +26,7 @@ import {
   saveFolderRefusal,
   windowsPathProblem,
 } from './save-deny.ts';
-import { isPlainFileName, RENAMED_PREFIX } from './saved-files.ts';
+import { DOWNLOAD_SUFFIX, fileWarnings } from './saved-files.ts';
 
 /**
  * Where a download is saved: the person's to say, every time.
@@ -166,8 +168,8 @@ export function saveFolders(input: SaveFoldersInput): OfferedFolders {
  *   folder in it — `~/Téléchargements`, `~/Descargas` — and `~/Downloads` is then a folder nobody looks in. A value of
  *   `$HOME` alone means the person turned it off, and is not taken.
  * - On Windows, the Downloads known folder, which a person or a domain can move to another drive: its entry under
- *   `User Shell Folders` in the registry, read only when the home named is the running user's own profile, since the
- *   registry says nothing about any other.
+ *   `User Shell Folders` in the registry (`known-folders.ts`), read only when the home named is the running user's own
+ *   profile, since the registry says nothing about any other.
  * - Anywhere else, and whenever those say nothing usable, `<home>/Downloads`.
  */
 export function downloadsFolder(
@@ -179,7 +181,7 @@ export function downloadsFolder(
   const home = homeOf(env, platform);
   const fallback = paths.resolve(home, 'Downloads');
   if (platform === 'win32') {
-    const known = (knownDownloads ?? (() => registryDownloads(env)))();
+    const known = (knownDownloads ?? (() => knownFolder(env, DOWNLOADS_KNOWN_FOLDER)))();
     return known !== undefined && path.win32.isAbsolute(known) && windowsPathProblem(known) === null
       ? path.win32.resolve(known)
       : fallback;
@@ -220,49 +222,6 @@ function xdgDownloads(env: NodeJS.ProcessEnv, home: string): string | undefined 
     if (match) return expand((match[1] ?? '').replace(/\\(.)/g, '$1'));
   }
   return undefined;
-}
-
-/** The Downloads known folder's own id, under which `User Shell Folders` keeps where it is. */
-const DOWNLOADS_KNOWN_FOLDER = '{374DE290-123F-4565-9164-39C4925E467B}';
-
-/**
- * Where the registry says the running user's Downloads folder is — only on Windows, only when the environment names
- * that user's own profile, and never for longer than two seconds. `%USERPROFILE%` and the like in it are expanded from
- * the environment.
- */
-function registryDownloads(env: NodeJS.ProcessEnv): string | undefined {
-  if (process.platform !== 'win32') return undefined;
-  const own = process.env.USERPROFILE;
-  if (
-    !own ||
-    !env.USERPROFILE ||
-    path.win32.resolve(own).toLowerCase() !== path.win32.resolve(env.USERPROFILE).toLowerCase()
-  ) {
-    return undefined;
-  }
-  let output: string;
-  try {
-    output = execFileSync(
-      'reg',
-      [
-        'query',
-        'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders',
-        '/v',
-        DOWNLOADS_KNOWN_FOLDER,
-      ],
-      { encoding: 'utf8', timeout: 2000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] },
-    );
-  } catch {
-    return undefined;
-  }
-  const line = output.split(/\r?\n/).find((entry) => entry.includes(DOWNLOADS_KNOWN_FOLDER));
-  const value = /REG_(?:EXPAND_)?SZ\s+(.+?)\s*$/.exec(line ?? '')?.[1];
-  if (value === undefined) return undefined;
-  const expanded = value.replace(/%([^%]+)%/g, (whole, name: string) => {
-    const found = Object.entries(env).find(([key]) => key.toLowerCase() === name.toLowerCase())?.[1];
-    return found ?? whole;
-  });
-  return expanded.includes('%') ? undefined : expanded;
 }
 
 // ── The answer ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -470,19 +429,31 @@ export async function checkWritable(folder: string): Promise<void> {
   await unlink(probe).catch(() => undefined);
 }
 
+/** Which folder on which disk: the two numbers that stay with a folder whatever its path is made to point to. */
+export interface FolderIdentity {
+  readonly dev: bigint;
+  readonly ino: bigint;
+}
+
 /**
  * The folder to save into, made when it is missing — private, as every folder this package makes is — and resolved.
  *
  * Resolved through its links: the person named it, so a link in it goes where they meant. What is not followed is
  * anything at a file's own name inside it, which `createUniqueFile` refuses to open through. What comes back is the
- * real path, which is where each file is then created — and which the deny list is held to again, by the caller.
+ * real path, which is where each file is then created — and which the deny list is held to again, by the caller — and
+ * the folder's identity, which each file created is held to (`createSavedFile`).
  */
 export async function openFolder(folder: string): Promise<string> {
+  return (await openFolderWithIdentity(folder)).path;
+}
+
+async function openFolderWithIdentity(folder: string): Promise<{ path: string; identity: FolderIdentity }> {
   try {
     await mkdir(folder, { recursive: true, mode: 0o700 });
     const real = await realpath(folder);
-    if (!(await stat(real)).isDirectory()) throw notAFolder(folder, 'it is a file');
-    return real;
+    const info = await stat(real, { bigint: true });
+    if (!info.isDirectory()) throw notAFolder(folder, 'it is a file');
+    return { path: real, identity: { dev: info.dev, ino: info.ino } };
   } catch (error) {
     if (error instanceof CommsError) throw error;
     const code = (error as NodeJS.ErrnoException).code;
@@ -588,10 +559,10 @@ export interface AskInput {
   count: number;
   bytes: number;
   /**
-   * The files by the names they would be saved under, their sizes, and whether each is one tools read on their own and
-   * so saved as `download-<name>` — kept for a terminal or a form to show again, and the renames said in the question.
+   * The files by the names they would be saved under, their sizes, why a name has `.download` after it, and their
+   * risk flags — kept for a terminal or a form to show again, and each rename and flag said in the question.
    */
-  listing: Array<{ name: string; size: number | null; renamed?: boolean | undefined }>;
+  listing: ListedFile[];
   /** The change policy of the mailbox or workspace the files come from, as it stands now. */
   policy: ChangePolicy;
   /** The channel's command that answers the question at a terminal: `agent-gmail approve`. */
@@ -655,14 +626,14 @@ async function offered(
   return { downloads, current, other: { choice: 'other' } };
 }
 
-/** The question's words: the files, the three places — each offered or said to be unavailable — and any renames. */
+/** The question's words: the files, the three places — each offered or said to be unavailable — and its warnings. */
 function questionText(input: {
   count: number;
   bytes: number;
   account: string;
   configured: boolean;
   options: readonly SaveOption[];
-  renamed: readonly string[];
+  warnings: readonly string[];
   policy: ChangePolicy;
   approveCommand: string;
   choiceId: string;
@@ -679,8 +650,7 @@ function questionText(input: {
     line(2, 'The current folder', current),
     '  3. Another folder — one you name, absolute or starting with ~',
   ];
-  const notice = renamedNotice(input.renamed);
-  if (notice !== null) lines.push(notice);
+  for (const warning of input.warnings) lines.push(`  ! ${warning}`);
   if (input.policy !== 'chat') {
     lines.push(
       `The change policy of ${input.account} is confirm: answer this yourself, at your own terminal — \`${input.approveCommand} ${input.choiceId}\` — or in the form your client shows you.`,
@@ -690,19 +660,25 @@ function questionText(input: {
 }
 
 /**
- * The line a question gets when some of its files are ones tools read on their own, and so are saved as
- * `download-<name>`: the names shown when each is plainly a file name, and counted when it is anything more — a
- * question is shown to the person as it is, and a name is the sender's words.
+ * What a question warns about the files it lists: each one saved with `.download` after its name, and why, and each
+ * other one with a risk flag — see core's `fileWarnings`. Said in the question itself, before the person answers, and
+ * again in what the agent is told to do, so that a person who is shown only the question still reads them.
  */
-export function renamedNotice(renamed: readonly string[]): string | null {
-  if (renamed.length === 0) return null;
-  const plain = renamed.filter(isPlainFileName);
-  const others = renamed.length - plain.length;
-  const named = [...plain, ...(others === 0 ? [] : [`${others} more with ${RENAMED_PREFIX} before its name`])].join(
-    ', ',
+export function listingWarnings(listing: readonly ListedFile[]): string[] {
+  return fileWarnings(
+    listing.map((file, index) => ({
+      // The sender's name made safe is the saved name without the suffix the rename put after it.
+      given:
+        file.renamed !== undefined && file.name.endsWith(DOWNLOAD_SUFFIX)
+          ? file.name.slice(0, -DOWNLOAD_SUFFIX.length)
+          : file.name,
+      savedAs: file.name,
+      renamed: file.renamed,
+      flags: file.flags ?? [],
+      position: index + 1,
+    })),
+    'question',
   );
-  const one = renamed.length === 1;
-  return `  ! ${one ? 'a file' : `${renamed.length} files`} tools may read on their own: saved as ${named}`;
 }
 
 /**
@@ -724,13 +700,14 @@ export async function askWhereToSave(core: Core, input: AskInput): Promise<Desti
   const record = await core.approvals.createDownload({ download: binding, policy: input.policy });
   const choiceId = record.approvalId;
   const options = [downloads, current, other];
+  const warnings = listingWarnings(input.listing);
   const question = questionText({
     count: input.count,
     bytes: input.bytes,
     account,
     configured: input.configured,
     options,
-    renamed: input.listing.filter((file) => file.renamed === true).map((file) => file.name),
+    warnings,
     policy: record.requiredPolicy === 'chat' ? 'chat' : 'confirm',
     approveCommand: input.approveCommand,
     choiceId,
@@ -743,14 +720,19 @@ export async function askWhereToSave(core: Core, input: AskInput): Promise<Desti
     input.surface === 'mcp' ? 'the folder they name (absolute, or starting with ~)' : '--to <the folder they name>',
   ];
   const policy: ChangePolicy = record.requiredPolicy === 'chat' ? 'chat' : 'confirm';
+  // The warnings again, in what the agent is told to do: a question relayed in a sentence of its own loses them.
+  const warned =
+    warnings.length === 0
+      ? ''
+      : ` Tell them what the question warns about — ${warnings.join('; ')} — and never open or rename a file for them.`;
   const next =
     policy === 'chat'
       ? input.surface === 'mcp'
-        ? `Nothing has been saved. Show the person this question and the files — each name and size — and wait for their answer; never choose for them. Then call ${input.tool} again with the same arguments, choiceId "${choiceId}", and saveTo: ${answers.join(', ')}.`
-        : `Nothing has been saved. Show the person this question and the files, and wait for their answer; never choose for them. Then run the same command again with --choice ${choiceId} and ${answers.join(', ')}.`
+        ? `Nothing has been saved. Show the person this question and the files — each name and size — and wait for their answer; never choose for them.${warned} Then call ${input.tool} again with the same arguments, choiceId "${choiceId}", and saveTo: ${answers.join(', ')}.`
+        : `Nothing has been saved. Show the person this question and the files, and wait for their answer; never choose for them.${warned} Then run the same command again with --choice ${choiceId} and ${answers.join(', ')}.`
       : input.surface === 'mcp'
-        ? `Nothing has been saved. The change policy of ${account} is confirm, so the person answers this themselves — you cannot answer it for them, and a saveTo you pass is refused. Show them the question and the files, and ask them to run \`${input.approveCommand} ${choiceId}\` in their own terminal. Then call ${input.tool} again with the same arguments and choiceId "${choiceId}" alone. A client trusted to show approval forms asks them in a form on that call instead.`
-        : `Nothing has been saved. The change policy of ${account} is confirm, so the person answers this themselves: ask them to run \`${input.approveCommand} ${choiceId}\` in their own terminal. Then run the same command again with --choice ${choiceId} alone.`;
+        ? `Nothing has been saved. The change policy of ${account} is confirm, so the person answers this themselves — you cannot answer it for them, and a saveTo you pass is refused. Show them the question and the files, and ask them to run \`${input.approveCommand} ${choiceId}\` in their own terminal.${warned} Then call ${input.tool} again with the same arguments and choiceId "${choiceId}" alone. A client trusted to show approval forms asks them in a form on that call instead.`
+        : `Nothing has been saved. The change policy of ${account} is confirm, so the person answers this themselves: ask them to run \`${input.approveCommand} ${choiceId}\` in their own terminal.${warned} Then run the same command again with --choice ${choiceId} alone.`;
   return {
     destinationRequired: true,
     choiceId,
@@ -773,6 +755,8 @@ export function sizeOf(bytes: number): string {
 export interface SaveDestination {
   /** The real path of the folder, where every file is created. */
   folder: string;
+  /** The folder as it was opened and checked: every file created is held to it (`createSavedFile`). */
+  identity: FolderIdentity;
   choice: SaveChoice;
   /** The question the answer was to, or null when a person decided by flag. */
   choiceId: string | null;
@@ -842,9 +826,15 @@ export async function settleDestination(core: Core, input: SettleInput): Promise
     await checkSaveFolder(folder, deny, 'Nothing was saved. Name another folder.');
     await checkFolder(folder);
     await checkWritable(folder);
-    const opened = await openFolder(folder);
-    await checkSaveFolder(opened, deny, 'Nothing was saved. Name another folder.');
-    return { folder: opened, choice: answer.answer.choice, choiceId: null, answeredVia: 'flag' };
+    const opened = await openFolderWithIdentity(folder);
+    await checkSaveFolder(opened.path, deny, 'Nothing was saved. Name another folder.');
+    return {
+      folder: opened.path,
+      identity: opened.identity,
+      choice: answer.answer.choice,
+      choiceId: null,
+      answeredVia: 'flag',
+    };
   }
 
   const { saveTo, choiceId: choiceWord } = words(input.surface);
@@ -902,10 +892,65 @@ export async function settleDestination(core: Core, input: SettleInput): Promise
    * created in, so a link put in its place at any moment up to this one is refused; the most such a race can leave is
    * an empty folder made on the way, never a file.
    */
-  const opened = await openFolder(folder);
-  await checkSaveFolder(opened, deny, spent);
+  const opened = await openFolderWithIdentity(folder);
+  await checkSaveFolder(opened.path, deny, spent);
   const via = claimed.download.answer === undefined ? 'chat' : (claimed.approvedVia ?? 'terminal');
-  return { folder: opened, choice: chosen.choice, choiceId: answer.choiceId, answeredVia: via };
+  return {
+    folder: opened.path,
+    identity: opened.identity,
+    choice: chosen.choice,
+    choiceId: answer.choiceId,
+    answeredVia: via,
+  };
+}
+
+/**
+ * A file created for a download in the folder it was answered with — and proved, once created, to be in that folder.
+ *
+ * The folder was checked against the deny list as it was opened, by its real path; each file is then created by that
+ * path, exclusively and never through a link at its own name. What that cannot see is the folder itself being swapped
+ * for a link to another — `~/.ssh` — between the check and a create, which takes a process on this machine working in
+ * that folder, but no more. So once each file is made, the folder at that path is looked at again, without following
+ * a link, and has to be the very folder that was opened and checked — the same disk, the same inode — and the file at
+ * the new path has to be the one just opened. A file made anywhere else is removed, when it is still the file this
+ * made, and the download stops: nothing more is written until the folder is asked about again.
+ */
+export async function createSavedFile(
+  destination: Pick<SaveDestination, 'folder' | 'identity'>,
+  name: string,
+  where: { fileId: string },
+): Promise<{ path: string; handle: FileHandle }> {
+  const created = await createUniqueFile(destination.folder, name).catch((error: unknown) => {
+    throw saveFailure(error, { folder: destination.folder, fileId: where.fileId });
+  });
+  let moved: string | null = null;
+  try {
+    const folder = await lstat(destination.folder, { bigint: true });
+    const opened = await created.handle.stat({ bigint: true });
+    const atPath = await lstat(created.path, { bigint: true });
+    if (!folder.isDirectory() || folder.isSymbolicLink()) moved = 'it is no longer a folder but a link';
+    else if (folder.dev !== destination.identity.dev || folder.ino !== destination.identity.ino) {
+      moved = 'it is no longer the folder that was checked';
+    } else if (atPath.dev !== opened.dev || atPath.ino !== opened.ino) {
+      moved = 'the file made is not the one at its path';
+    }
+    if (moved !== null) {
+      // Removed only while the path still names the file this made: never whatever else a swap put there.
+      if (atPath.dev === opened.dev && atPath.ino === opened.ino) await unlink(created.path).catch(() => undefined);
+    }
+  } catch (error) {
+    moved = `it could not be looked at again: ${fileSystemReason(error)}`;
+  }
+  if (moved === null) return created;
+  await created.handle.close().catch(() => undefined);
+  throw new CommsError(
+    'BAD_DATA',
+    `stopped saving into ${destination.folder}: ${moved} while the files were being saved`,
+    {
+      hint: 'Something changed the folder while the download was writing into it. Nothing more was saved; make the download again, and look at the folder first.',
+      details: { folder: destination.folder, fileId: where.fileId },
+    },
+  );
 }
 
 // ── At a terminal ──────────────────────────────────────────────────────────────────────────────────────────────
@@ -1154,7 +1199,7 @@ async function storedQuestion(
   const record = await core.approvals.get(choiceId);
   if (!record || approvalKind(record) !== 'download' || record.download === undefined) {
     throw new CommsError('NOT_FOUND', `no question ${choiceId} about where to save files`, {
-      hint: 'Make the download again; a question expires ten minutes after it is asked.',
+      hint: 'Make the download again; a question expires thirty minutes after it is asked.',
     });
   }
   if (record.state !== 'pending') {
@@ -1185,7 +1230,7 @@ async function storedQuestion(
       account: download.target.name,
       configured: false,
       options: [downloads, current, other],
-      renamed: listing.filter((file) => file.renamed === true).map((file) => file.name),
+      warnings: listingWarnings(listing),
       // Shown where the person answers it, the line about where to answer would only repeat itself.
       policy: 'chat',
       approveCommand: '',

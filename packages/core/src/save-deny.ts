@@ -1,33 +1,44 @@
-import { realpath } from 'node:fs/promises';
+import { lstat, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { CommsError } from './errors.ts';
+import { DOCUMENTS_KNOWN_FOLDER, knownFolder } from './known-folders.ts';
 import { homeOf, type ResolvedPaths } from './paths.ts';
 
 /**
  * Where a download may never be written, whoever answers the question — a person in the chat, a person at a terminal,
  * or an agent relaying either.
  *
- * A download saves a stranger's file under the name the stranger gave it. Into the right folder that name is a piece
- * of configuration: `authorized_keys` in `~/.ssh` lets someone log in, a `.plist` in `~/Library/LaunchAgents` runs at
- * the next login, an `ap_….json` in this package's own approvals folder is an approval nobody gave. The person asked
- * for a file to read, not for any of that, and no answer — least of all one an agent passed on — should be able to
- * turn a download into it. So these folders are refused as the attach deny list (`defaultAttachDeny`) refuses them
- * as a source, and for the same reasons, whatever the question was answered with:
+ * A download saves a stranger's file under the name the stranger gave it, and a name alone can be made harmless: it
+ * keeps its extension only when that is one nothing runs or loads (`saved-files.ts`), and anything else is saved with
+ * `.download` after it. What a name cannot be made is harmless in every folder. Some folders are read, whole, by a
+ * program that runs what it finds, whatever each file is called — a hooks folder, a package folder, a folder of
+ * approvals — and some hold what the person's own tools trust. The person asked for a file to read, not for any of
+ * that, and no answer — least of all one an agent passed on — should be able to turn a download into it. So these are
+ * refused, whatever the question was answered with:
  *
  * - this package's own folders: its configuration, its state (approvals, the audit log, the download records), its
  *   data, and the file secret store;
- * - the home folder itself, whose top level is where programs look for their settings — a folder inside it is fine;
- * - any hidden folder anywhere below the home, at any depth: `~/.ssh`, `~/.config`, `~/.aws`, `~/.local`, a
- *   project's `.git` or `.github` — and a `.git` folder wherever it is;
+ * - any hidden folder, anywhere, at any depth — `~/.ssh`, `~/.config`, a project's `.git`, `.github`, `.husky`,
+ *   `.vscode` or `.claude`, `/srv/app/.github/workflows` — since a folder whose name starts with a dot is one kept for
+ *   programs, not for a person's files. The one exception is a checkout under `.claude/worktrees/<name>`, which is a
+ *   project like any other: a folder inside it is allowed, unless it is itself inside a hidden folder there;
+ * - a folder programs load packages from, wherever it is: `node_modules`, `site-packages`, `dist-packages`,
+ *   `__pycache__`, and any folder inside a Python virtual environment — one with `pyvenv.cfg` in it or above it — whose
+ *   interpreter runs what is put in its package folders at every start;
  * - `~/Library`, where macOS and its apps keep what they load on their own;
  * - on Windows, the profile's `AppData` (`%APPDATA%`, `%LOCALAPPDATA%`), `%PROGRAMDATA%`, the Windows folder and
- *   Program Files, and the root of a drive; and a network share (`\\host\share`), a device path (`\\.\`, `\\?\`) or a
+ *   Program Files, the PowerShell profile folders (`Documents\PowerShell`, `Documents\WindowsPowerShell`, wherever
+ *   Documents is), and the root of a drive; and a network share (`\\host\share`), a device path (`\\.\`, `\\?\`) or a
  *   path relative to a drive (`\folder`, `C:folder`), each of which is not the folder it looks like;
  * - the system's own folders: the root, `/etc`, `/usr`, `/bin`, `/sbin`, `/var`, `/System`, `/private/etc` and the
- *   like — the per-user temporary folders under `/var` excepted, since they are the person's own.
+ *   like — except macOS's per-user temporary folder under `/var`, and a home that is inside one (`/root`, a service
+ *   account's `/var/lib/<name>`), which is the person's own.
  *
- * Checked on the path as given and again after its links are followed, so a folder that is a link to `~/.ssh` is
- * `~/.ssh`; and case-blind on macOS and Windows, whose disks open `~/library` as `~/Library`.
+ * The home folder itself is allowed: a folder of the person's own, whose hidden folders stay refused.
+ *
+ * Checked on the path as given and again after its links are followed, so a folder that is a link to `~/.ssh`, or a
+ * `hooks` link to `.husky`, is refused as what it points to; and case-blind on macOS and Windows, whose disks open
+ * `~/library` as `~/Library`.
  */
 
 /** This package's own folders, which a download is never written into. */
@@ -37,15 +48,20 @@ export interface SaveDenyInput {
   paths: OwnFolders;
   env: NodeJS.ProcessEnv;
   platform?: NodeJS.Platform | undefined;
+  /**
+   * Where Windows says the person's Documents folder is, for the PowerShell profile folders inside it. Read from the
+   * registry when left out — on Windows, and only for the profile of the user running this (`known-folders.ts`).
+   */
+  knownDocuments?: (() => string | undefined) | undefined;
 }
 
 /** One place a download is never written, and why, in words the person reads. */
 export interface DeniedFolder {
   folder: string;
   why: string;
-  /** Only the folder itself, not what is inside it: the home, the root of the disk. */
+  /** Only the folder itself, not what is inside it: the root of the disk. */
   exact?: boolean;
-  /** A system folder, which the per-user temporary folders inside `/var` are let out of. */
+  /** A system folder, which the per-user temporary folders and a home inside it are let out of. */
   system?: boolean;
 }
 
@@ -69,9 +85,9 @@ function envValue(env: NodeJS.ProcessEnv, name: string): string | undefined {
 
 /*
  * The system's own folders. `/var` is the one a person is ever asked to save into — macOS keeps each user's
- * temporary folder at `/var/folders/<xx>/<id>/T` — so that folder and `/var/tmp` are let out of it; nothing else in
- * `/var` is. The pattern is fixed, never read from `TMPDIR`: an environment an agent sets would otherwise decide what
- * is a system folder.
+ * temporary folder at `/var/folders/<xx>/<id>/T` — so that folder is let out of it; nothing else in `/var` is, but a
+ * home inside it. The pattern is fixed, never read from `TMPDIR`: an environment an agent sets would otherwise decide
+ * what is a system folder.
  */
 const POSIX_SYSTEM = [
   '/etc',
@@ -98,12 +114,22 @@ const POSIX_SYSTEM = [
   '/private/var',
   '/cores',
 ];
-const PER_USER_TEMPORARY = /^\/(?:private\/)?var\/(?:tmp|folders\/[^/]+\/[^/]+\/T)(?:\/|$)/;
+const PER_USER_TEMPORARY = /^\/(?:private\/)?var\/folders\/[^/]+\/[^/]+\/T(?:\/|$)/;
+
+/*
+ * The system folders a home may be inside and still be the person's: `/root` is root's, `/var/root` is root's on
+ * macOS, and a service account's home is often `/var/lib/<name>` or `/opt/<name>`. A home anywhere else among the
+ * system folders — `/usr`, `/etc`, `/` — is not taken as a reason to let a download into it.
+ */
+const HOMES_MAY_BE_IN = ['/root', '/var', '/opt', '/private/var'];
+
+/** Folder names programs load packages from, wherever they are: whatever is put in them is loaded by name. */
+const PACKAGE_FOLDERS = new Set(['node_modules', 'site-packages', 'dist-packages', '__pycache__']);
 
 /**
- * Every folder a download is refused, as data: this package's, the home's, the platform's. The hidden folders below
- * the home and a `.git` folder anywhere are rules rather than folders, and `refusedSaveFolder` applies them beside
- * this list.
+ * Every folder a download is refused, as data: this package's, the home's, the platform's. The hidden folders, the
+ * package folders and the virtual environments are rules rather than folders, and `refusedSaveFolder` and
+ * `saveFolderRefusal` apply them beside this list.
  */
 export function saveDenyList(input: SaveDenyInput): DeniedFolder[] {
   const platform = input.platform ?? process.platform;
@@ -122,11 +148,6 @@ export function saveDenyList(input: SaveDenyInput): DeniedFolder[] {
     { folder: own.secretsDir, why: 'it is where agent-communications keeps credentials' },
     { folder: own.configDir, why: 'it is agent-communications’ own configuration folder' },
     { folder: own.dataDir, why: 'it is agent-communications’ own data folder' },
-    {
-      folder: home,
-      exact: true,
-      why: 'it is your home folder itself, whose top level is where programs look for their settings — choose a folder inside it',
-    },
   ];
   if (platform === 'win32') {
     const drive = paths.parse(home).root || 'C:\\';
@@ -155,6 +176,20 @@ export function saveDenyList(input: SaveDenyInput): DeniedFolder[] {
       .filter((folder): folder is string => folder !== undefined);
     for (const folder of [...programs, paths.join(drive, 'Program Files'), paths.join(drive, 'Program Files (x86)')]) {
       list.push({ folder, why: 'it is inside Program Files, where programs are installed', system: true });
+    }
+    // PowerShell runs `profile.ps1` from these at every start. Documents is where Windows says, and the profile's too.
+    const known = (input.knownDocuments ?? (() => knownFolder(input.env, DOCUMENTS_KNOWN_FOLDER)))();
+    const documents = [
+      paths.join(home, 'Documents'),
+      ...(known !== undefined && /^[A-Za-z]:[\\/]/.test(known) ? [known] : []),
+    ];
+    for (const folder of documents) {
+      for (const shell of ['PowerShell', 'WindowsPowerShell']) {
+        list.push({
+          folder: paths.join(folder, shell),
+          why: `it is inside Documents\\${shell}, whose profile scripts PowerShell runs at every start`,
+        });
+      }
     }
     return list;
   }
@@ -202,6 +237,50 @@ function same(paths: path.PlatformPath, blind: boolean, one: string, other: stri
   return fold(paths.resolve(one)) === fold(paths.resolve(other));
 }
 
+/**
+ * Whether `folder` is inside a home that is itself inside a system folder and still the person's: see
+ * {@link HOMES_MAY_BE_IN}. Only on the Unixes: a Windows home under the Windows folder is a service's, not a person's.
+ */
+function inOwnHome(folder: string, homes: readonly string[], platform: NodeJS.Platform): boolean {
+  if (platform === 'win32') return false;
+  const blind = caseBlind(platform);
+  return homes.some(
+    (home) =>
+      home !== '/' &&
+      HOMES_MAY_BE_IN.some(
+        (root) => within(path.posix, blind, home, root) && !(root !== '/root' && same(path.posix, blind, home, root)),
+      ) &&
+      within(path.posix, blind, folder, home),
+  );
+}
+
+/**
+ * The first hidden segment of a path — one whose name starts with a dot — by its index, or -1.
+ *
+ * `.claude/worktrees/<name>` is passed over: a checkout the owner's agents work in, and a project like any other. What
+ * is inside it is judged as any folder is, so its own `.git`, `.husky` or `.claude` is still hidden.
+ */
+function hiddenSegment(segments: readonly string[], blind: boolean): number {
+  const fold = (value: string) => (blind ? value.toLowerCase() : value);
+  for (let index = 0; index < segments.length; index += 1) {
+    const segment = segments[index] as string;
+    if (!segment.startsWith('.')) continue;
+    const name = segments[index + 2];
+    if (
+      fold(segment) === '.claude' &&
+      fold(segments[index + 1] ?? '') === 'worktrees' &&
+      name !== undefined &&
+      name !== '' &&
+      !name.startsWith('.')
+    ) {
+      index += 2;
+      continue;
+    }
+    return index;
+  }
+  return -1;
+}
+
 /** The first rule a resolved folder breaks, against these forms of the list and of the home — or null. */
 function breaks(
   folder: string,
@@ -220,31 +299,36 @@ function breaks(
   for (const entry of list) {
     const hit = entry.exact ? same(paths, blind, folder, entry.folder) : within(paths, blind, folder, entry.folder);
     if (!hit) continue;
-    // Only a system folder lets the per-user temporary folders out, and only by a pattern no environment can move.
-    if (entry.system && platform !== 'win32' && new RegExp(PER_USER_TEMPORARY.source, blind ? 'i' : '').test(folder)) {
-      continue;
+    if (entry.system && platform !== 'win32') {
+      // Let out by a pattern no environment can move, or by being inside a home that is the person's.
+      if (new RegExp(PER_USER_TEMPORARY.source, blind ? 'i' : '').test(folder)) continue;
+      if (inOwnHome(folder, homes, platform)) continue;
     }
     return entry.why;
   }
-  for (const home of homes) {
-    const relative = below(paths, blind, folder, home);
-    if (relative === null) continue;
-    const segments = relative.split(/[\\/]+/);
-    const hidden = segments.findIndex((segment) => segment.startsWith('.'));
-    if (hidden >= 0) {
-      const shown = ['~', ...segments.slice(0, hidden + 1)].join(paths.sep);
-      return `it is inside ${shown}, a hidden folder: hidden folders hold settings and keys that programs read on their own`;
-    }
+  const segments = folder.split(/[\\/]+/);
+  const hidden = hiddenSegment(segments, blind);
+  if (hidden >= 0) {
+    const shown = segments.slice(0, hidden + 1).join(paths.sep);
+    // Below a home it is said from `~`, in the case it was written in: `~/.ssh`, not the whole path.
+    const home = homes.find((candidate) => below(paths, blind, shown, candidate) !== null);
+    const relative = home === undefined ? null : paths.relative(home, shown);
+    const where =
+      relative === null || relative === '' || relative.startsWith('..') || paths.isAbsolute(relative)
+        ? shown
+        : paths.join('~', relative);
+    return `it is inside ${where}, a hidden folder: hidden folders hold settings, hooks and keys that programs read on their own`;
   }
-  if (folder.split(/[\\/]+/).some((segment) => segment.toLowerCase() === '.git')) {
-    return 'it is inside a .git folder, whose files git reads and runs on its own';
+  const loaded = segments.find((segment) => PACKAGE_FOLDERS.has(blind ? segment.toLowerCase() : segment));
+  if (loaded !== undefined) {
+    return `it is inside a ${loaded} folder, whose files programs load by name`;
   }
   return null;
 }
 
 /**
  * Why a folder may never be saved into, judged on the path as written and resolved — or null. No file is looked at:
- * see {@link checkSaveFolder} for the check that also follows links.
+ * see {@link saveFolderRefusal} for the check that also follows links and finds virtual environments.
  */
 export function refusedSaveFolder(folder: string, input: SaveDenyInput): string | null {
   const platform = input.platform ?? process.platform;
@@ -276,17 +360,44 @@ export async function realpathOfExisting(target: string): Promise<string> {
 }
 
 /**
+ * The Python virtual environment a folder is inside — the nearest folder at or above it with a `pyvenv.cfg` in it —
+ * or null. Whatever is saved in its `site-packages` runs at every start of its interpreter, and a `bin` or `Scripts`
+ * folder in it is on the `PATH` of whoever activates it; the environment can be called anything, so it is known by
+ * the file every one of them has, not by its name.
+ */
+async function virtualEnvironment(folder: string): Promise<string | null> {
+  let current = path.resolve(folder);
+  for (;;) {
+    try {
+      await lstat(path.join(current, 'pyvenv.cfg'));
+      return current;
+    } catch {
+      // Not here: one folder up.
+    }
+    const parent = path.dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+
+/**
  * Why a folder may never be saved into, after its links are followed — or null.
  *
  * The path as written, and its real path through whatever part of it exists, each against the list as written and as
- * its own links resolve: a folder that is a link to `~/.ssh` is refused as `~/.ssh` is, and so is a home or a state
- * folder reached through a link (`/var` → `/private/var` on macOS). Links are followed only on the platform this runs
- * on; a path for another is judged as written.
+ * its own links resolve: a folder that is a link to `~/.ssh` is refused as `~/.ssh` is, a `hooks` link to `.husky` as
+ * `.husky` is, and so is a home or a state folder reached through a link (`/var` → `/private/var` on macOS). Then
+ * each, and every folder above it, is looked in for `pyvenv.cfg`. Links are followed, and folders looked in, only on
+ * the platform this runs on; a path for another is judged as written.
  */
 export async function saveFolderRefusal(folder: string, input: SaveDenyInput): Promise<string | null> {
   const platform = input.platform ?? process.platform;
-  const lexical = refusedSaveFolder(folder, input);
-  if (lexical !== null || platform !== process.platform) return lexical;
+  if (platform !== process.platform) return refusedSaveFolder(folder, input);
+  if (platform === 'win32') {
+    const form = windowsPathProblem(folder);
+    if (form) return form;
+  }
+  // Everything `refusedSaveFolder` judges is judged here too, with the real paths beside the written ones — so that a
+  // reason is given in the words of the home however it was reached.
   const paths = pathsFor(platform);
   const list = saveDenyList(input);
   const real = await Promise.all(
@@ -298,6 +409,12 @@ export async function saveFolderRefusal(folder: string, input: SaveDenyInput): P
   for (const candidate of candidates) {
     const why = breaks(candidate, [...list, ...real], homes, platform);
     if (why !== null) return why;
+  }
+  for (const candidate of candidates) {
+    const environment = await virtualEnvironment(candidate);
+    if (environment !== null) {
+      return `it is inside ${environment}, a Python virtual environment, whose interpreter runs what is put in its package folders at every start`;
+    }
   }
   return null;
 }
@@ -317,7 +434,7 @@ export async function checkSaveFolder(
 
 export function refusedFolder(folder: string, why: string, hint: string): CommsError {
   return new CommsError('BAD_DATA', `cannot save into ${folder}: ${why}`, {
-    hint: `${hint} A download is never saved into a hidden folder, ~/Library, a system folder or agent-communications’ own.`,
+    hint: `${hint} A download is never saved into a hidden folder, a package or virtual-environment folder, ~/Library, a system folder or agent-communications’ own.`,
     details: { folder, refused: why },
   });
 }

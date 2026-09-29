@@ -488,6 +488,8 @@ export function renderDownloads(result: DownloadResult, color: boolean): string 
     );
   }
   for (const skip of result.skipped) lines.push(paint(color, 'yellow', `skipped ${skip.messageId}: ${skip.reason}`));
+  // What the person should know before opening any of them: a rename, a flag, a mark that could not be made.
+  for (const warning of result.warnings) lines.push(paint(color, 'yellow', `! ${warning}`));
   const saved = result.files.filter((file) => !file.duplicate).length;
   lines.push(
     '',

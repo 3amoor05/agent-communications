@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
-import { expandHome, homeDirectory, resolvePaths } from '../src/paths.ts';
+import { accountHome, expandHome, homeDirectory, homeOf, resolvePaths } from '../src/paths.ts';
 
 const home = join('/', 'h', 'jo');
 
@@ -101,4 +101,16 @@ test('homeDirectory falls back the way Windows needs, and never yields an empty 
 
   // And the whole point: `~` never expands to something `resolve` turns into the cwd.
   assert.notEqual(expandHome('~', homeDirectory({} as NodeJS.ProcessEnv)), '');
+});
+
+test('the home is the environment’s, and the account’s own — never another variable’s — when the environment names none', () => {
+  const account = () => '/srv/account';
+  assert.equal(homeOf({ HOME: '/tmp/test-home' }, 'darwin', account), '/tmp/test-home');
+  assert.equal(homeOf({ USERPROFILE: 'C:\\Users\\sam', HOME: '/c/Users/sam' }, 'win32', account), 'C:\\Users\\sam');
+  // No HOME: the account's home from the password database, which no variable of this process moves.
+  assert.equal(homeOf({}, 'darwin', account), '/srv/account');
+  assert.equal(homeOf({ HOME: '' }, 'linux', account), '/srv/account');
+  assert.equal(homeOf({ HOME: '/c/Users/sam' }, 'win32', account), '/srv/account');
+  // And the account's home is a real, absolute one on this machine.
+  assert.ok(accountHome().length > 1);
 });

@@ -14,6 +14,7 @@ import { CommsError, type ErrorCode } from './errors.ts';
 import { ensurePrivateDir, writeFileAtomic } from './fs.ts';
 import { APPROVAL_ID_PATTERN, challengeMatches, hashChallenge, newApprovalId, newChallenge } from './ids.ts';
 import { withFileLock } from './lock.ts';
+import type { RenameReason } from './saved-files.ts';
 
 /**
  * Approval records bind a send to exactly one draft version. States:
@@ -85,9 +86,11 @@ export interface ChangeBinding {
  *
  * The files are the ones the question listed, by the platform's own ids — `<message id>/<part id>` for Gmail, the file
  * id for Slack — in the order they were listed: a claim for any other set is a claim for a download the person was
- * not asked about. The folders are the two the question showed, as absolute paths. They are not part of the digest,
- * because they are what the answer *means* rather than what it is for: `downloads` in the answer is the path the
- * person read, even when an agent runs the download again from another folder.
+ * not asked about. So are the names they would be saved under, in the same order: a Slack file renamed between the
+ * question and the answer would otherwise be saved under a name the person was never shown. The folders are the two
+ * the question showed, as absolute paths. They are not part of the digest, because they are what the answer *means*
+ * rather than what it is for: `downloads` in the answer is the path the person read, even when an agent runs the
+ * download again from another folder.
  */
 export interface DownloadBinding {
   /** One line about the download, for a listing: "where to save 2 files from acme/gmail". Not part of the digest. */
@@ -100,15 +103,29 @@ export interface DownloadBinding {
   request: Record<string, unknown>;
   /** The files the question listed, by the platform's ids, in order. */
   files: string[];
+  /** The names those files would be saved under, as the question listed them, in the same order. */
+  names: string[];
   /** The two folders the question offered, as absolute paths. */
   folders: { downloads: string; current: string };
   /**
-   * The files as the question listed them to the person — the names they would be saved under, made safe, and their
-   * sizes — so a terminal or a form can show the question again. Not part of the digest: the ids above are.
+   * The files as the question listed them to the person — the names they would be saved under, their sizes, why a
+   * name has `.download` after it, and their risk flags — so a terminal or a form can show the question, and its
+   * warnings, again. Not part of the digest: the ids and names above are.
    */
-  listing?: Array<{ name: string; size: number | null; renamed?: boolean | undefined }> | undefined;
+  listing?: ListedFile[] | undefined;
   /** The person's answer, when they gave it where an agent cannot: at a terminal, or in a trusted client's form. */
   answer?: RecordedSaveAnswer | undefined;
+}
+
+/** One file as a question lists it. */
+export interface ListedFile {
+  /** The name it would be saved under: the sender's made safe, with `.download` after it unless it is inert. */
+  name: string;
+  size: number | null;
+  /** Why `.download` is after its name; absent when the name is the sender's, made safe. */
+  renamed?: RenameReason | undefined;
+  /** Its risk flags, as the file's own listing gives them. */
+  flags?: string[] | undefined;
 }
 
 /**
@@ -120,13 +137,14 @@ export type RecordedSaveAnswer =
   | { readonly choice: 'other'; readonly folder: string };
 
 /** What a claim of a download's question is held to: all of the binding but its summary and the folders it offered. */
-export type DownloadRequest = Pick<DownloadBinding, 'target' | 'operation' | 'request' | 'files'>;
+export type DownloadRequest = Pick<DownloadBinding, 'target' | 'operation' | 'request' | 'files' | 'names'>;
 
 /**
- * The digest a download's question is bound to: the account, the download, the request and the files it listed.
+ * The digest a download's question is bound to: the account, the download, the request, the files it listed and the
+ * names it showed them under.
  *
- * The files keep their order, since the question showed them in it; the request is canonical JSON, so the same
- * arguments digest the same however an object happened to list its keys.
+ * The files and names keep their order, since the question showed them in it; the request is canonical JSON, so the
+ * same arguments digest the same however an object happened to list its keys.
  */
 export function downloadDigest(download: DownloadRequest): string {
   return sha256Hex(
@@ -136,6 +154,7 @@ export function downloadDigest(download: DownloadRequest): string {
       operation: download.operation,
       request: download.request,
       files: [...download.files],
+      names: [...download.names],
     }),
   );
 }
@@ -153,6 +172,11 @@ export function downloadDrift(asked: DownloadRequest, now: DownloadRequest): str
     return 'the question was asked about a different request: other messages, other files or another limit';
   }
   if (canonicalJson(asked.files) !== canonicalJson(now.files)) return 'the files are not the ones the question listed';
+  // By its id, never by either name: a name is the sender's words, and this is the tool's sentence.
+  const renamed = asked.files.find((_, index) => asked.names[index] !== now.names[index]);
+  if (renamed !== undefined) {
+    return `${renamed} would now be saved under another name than the one the question showed: it was renamed since`;
+  }
   return 'the download is not the one the question was asked for';
 }
 
@@ -342,6 +366,12 @@ export const DOWNLOAD_ANSWER_HINT =
   'It is answered, not approved with a code: the person says where in the chat, or — under a confirm change policy — at their own terminal, with the `approve` command of the channel the files come from and this id. The download that asked is then made again with this id.';
 
 export const APPROVAL_TTL_MS: number = 10 * 60 * 1000;
+/**
+ * How long a download's question stays open: longer than an approval, because it waits on a person to decide where
+ * files go — look in a folder, ask somebody — rather than to read a preview and say yes, and a question that has
+ * expired is asked again from the start.
+ */
+export const DOWNLOAD_QUESTION_TTL_MS: number = 30 * 60 * 1000;
 /** A record left in `sending` this long belongs to a process that died mid-send: the outcome is unknown. */
 export const SENDING_STALE_MS: number = 5 * 60 * 1000;
 export const MAX_CHALLENGE_ATTEMPTS = 3;
@@ -398,11 +428,13 @@ export class ApprovalStore {
   readonly directory: string;
   readonly #now: () => Date;
   readonly #ttlMs: number;
+  readonly #downloadTtlMs: number;
 
-  constructor(stateDir: string, options: { now?: () => Date; ttlMs?: number } = {}) {
+  constructor(stateDir: string, options: { now?: () => Date; ttlMs?: number; downloadTtlMs?: number } = {}) {
     this.directory = join(stateDir, 'approvals');
     this.#now = options.now ?? (() => new Date());
     this.#ttlMs = options.ttlMs ?? APPROVAL_TTL_MS;
+    this.#downloadTtlMs = options.downloadTtlMs ?? DOWNLOAD_QUESTION_TTL_MS;
   }
 
   #path(approvalId: string, suffix = '.json'): string {
@@ -827,6 +859,7 @@ export class ApprovalStore {
       operation: input.download.operation,
       request: JSON.parse(canonicalJson(input.download.request)) as Record<string, unknown>,
       files: [...input.download.files],
+      names: [...input.download.names],
       folders: { downloads: input.download.folders.downloads, current: input.download.folders.current },
       ...(input.download.listing === undefined
         ? {}
@@ -834,7 +867,8 @@ export class ApprovalStore {
             listing: input.download.listing.map((file) => ({
               name: file.name,
               size: file.size,
-              ...(file.renamed === true ? { renamed: true } : {}),
+              ...(file.renamed === undefined ? {} : { renamed: file.renamed }),
+              ...(file.flags === undefined || file.flags.length === 0 ? {} : { flags: [...file.flags] }),
             })),
           }),
     };
@@ -857,7 +891,7 @@ export class ApprovalStore {
       challengeAttempts: 0,
       state: 'pending' as const,
       createdAt: now.toISOString(),
-      expiresAt: new Date(now.getTime() + this.#ttlMs).toISOString(),
+      expiresAt: new Date(now.getTime() + this.#downloadTtlMs).toISOString(),
       updatedAt: now.toISOString(),
       download,
     };
@@ -904,8 +938,10 @@ export class ApprovalStore {
    * folders it offered, so that `downloads` and `current` in the answer mean the paths the person read, and with the
    * answer the person recorded, when they recorded one.
    *
-   * `live` is the download as the caller computes it now: the same account, the same request and the same files, or
-   * the question is voided and has to be asked again — the person answered for those files and no others.
+   * `live` is the download as the caller computes it now: the same account, the same request, the same files under
+   * the same names — the person answered for those files and no others. Any other is refused, and the question left
+   * open, as it was: a second call that got an argument wrong is the agent's slip, not the person's, and voiding the
+   * question for it would make the person answer again for nothing. It still expires, and is claimed once.
    *
    * `options.policy` is the change policy of that account now, and the stricter of it and the one the question was
    * asked under decides. Under `chat`, a pending question is claimed with the answer the caller carries: the person
@@ -931,7 +967,14 @@ export class ApprovalStore {
       if (!current.download || downloadDigest(current.download) !== current.digest) {
         return voidWith('the question does not describe the download it is bound to');
       }
-      if (digest !== current.digest) return voidWith(downloadDrift(current.download, live));
+      if (digest !== current.digest) {
+        throw refuseDownload(
+          'USAGE',
+          `${downloadDrift(current.download, live)}; the question is still open`,
+          current,
+          'Call again with the same arguments the question was asked with, and its choice id. If the files themselves changed, make the download again without an answer, and show the person the new question.',
+        );
+      }
       const refusal = downloadClaimRefusal(current, options.policy ?? 'chat', options.pendingHint);
       if (refusal !== null) throw refusal;
       return { ...current, state: 'used' };

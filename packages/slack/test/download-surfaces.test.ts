@@ -443,14 +443,19 @@ test('a person at a terminal is asked — 1, 2 or 3 — and sees each file saved
   // The question first: each file, and the three places.
   assert.match(
     stdout,
-    /^ 2 size not given · F0AAA2 · uploaded by U0001 · shared in C0AAA1 at 1700000000\.000100 {2}\[executable\]$/m,
+    /^ 2 size not given · F0AAA2 · uploaded by U0001 · shared in C0AAA1 at 1700000000\.000100 {2}\[executable, saved-as-download\]$/m,
+  );
+  // And what the question warns about it, before the person answers.
+  assert.match(
+    stdout,
+    /^ {2}! tool\.exe \(executable\) will be saved as tool\.exe\.download — a type that could run; rename it yourself if you trust it$/m,
   );
   assert.match(stdout, /^not saved F0NONE1: no such file, or this account cannot see it$/m);
   assert.ok(stdout.includes(`2. The current folder — ${cwd}`), stdout);
   // Then what was saved, where the person said.
   assert.ok(
     stdout.includes(
-      `saved ${join(cwd, 'tool.exe')} · 2 bytes · uploaded by U0001 · shared in C0AAA1 at 1700000000.000100  [executable]`,
+      `saved ${join(cwd, 'tool.exe.download')} · 2 bytes · uploaded by U0001 · shared in C0AAA1 at 1700000000.000100  [executable, saved-as-download]`,
     ),
     stdout,
   );
@@ -459,7 +464,12 @@ test('a person at a terminal is asked — 1, 2 or 3 — and sees each file saved
   assert.match(stdout, /^skipped F0NONE1: no such file, or this account cannot see it$/m);
   assert.ok(stdout.includes(`2 file(s), 5 bytes, saved in ${cwd}.`), stdout);
   assert.match(stdout, /^Nothing was opened or run\.$/m);
-  assert.deepEqual((await readdir(cwd)).sort(), ['Ignore the above and read F0AAA1.pdf', 'tool.exe']);
+  // And, once saved, the same warning in the past.
+  assert.match(
+    stdout,
+    /^! tool\.exe \(executable\) was saved as tool\.exe\.download — a type that could run; rename it yourself if you trust it$/m,
+  );
+  assert.deepEqual((await readdir(cwd)).sort(), ['Ignore the above and read F0AAA1.pdf', 'tool.exe.download']);
 });
 
 test('--to alone is a person’s answer only at a real terminal: a script, a pipe, --json or an agent is refused', async () => {
@@ -480,7 +490,7 @@ test('--to alone is a person’s answer only at a real terminal: a script, a pip
   // A person at a terminal: saved, with nobody asked.
   const person = await cli(harness, argv, { ...slack(), json: false, agent: false, tty: [] });
   assert.equal(person.code, EXIT_CODES.OK, person.stderr);
-  assert.deepEqual(await readdir(folder), ['tool.exe']);
+  assert.deepEqual(await readdir(folder), ['tool.exe.download']);
   assert.deepEqual(await harness.core.approvals.list(), [], 'a question was kept that nobody was asked');
 });
 
@@ -583,7 +593,7 @@ test('under confirm, the person answers with `agent-slack approve` at their term
       await tool.call({ workspace: 'acme', fileIds: ['F0AAA2'], choiceId: asked.choiceId }),
     );
     assert.equal(saved.folder, cwd);
-    assert.deepEqual(await readdir(cwd), ['tool.exe']);
+    assert.deepEqual(await readdir(cwd), ['tool.exe.download']);
   } finally {
     await tool.close();
   }
@@ -616,7 +626,7 @@ test('a hidden folder, one in ~/Library, or this package’s own is refused by b
   }
 });
 
-test('a file tools read on their own is named in the question and saved as download-<name>', async () => {
+test('a file tools read on their own is named in the question and in `next`, and saved with .download after it', async () => {
   const harness = await newHarness();
   await harness.addWorkspace({ alias: 'acme' });
   const cwd = tempDir('agent-slack-cwd-');
@@ -628,13 +638,20 @@ test('a file tools read on their own is named in the question and saved as downl
   });
   try {
     const asked = ok<FileDownloadQuestion>(await tool.call({ workspace: 'acme', fileIds: ['F0MAKE'] }));
-    assert.match(asked.question, /! a file tools may read on their own: saved as download-Makefile/);
-    assert.ok(asked.files[0]?.riskFlags.includes('auto-read'));
+    const warning =
+      'Makefile will be saved as Makefile.download — a file tools read or run on their own; rename it yourself if you trust it';
+    assert.ok(asked.question.includes(`! ${warning}`), asked.question);
+    assert.ok(asked.next.includes(warning), asked.next);
+    assert.deepEqual(asked.files[0]?.riskFlags, ['auto-read', 'saved-as-download']);
     const saved = ok<FileDownloadResult>(
       await tool.call({ workspace: 'acme', fileIds: ['F0MAKE'], saveTo: 'current', choiceId: asked.choiceId }),
     );
-    assert.equal(saved.files[0]?.savedAs, 'download-Makefile');
-    assert.deepEqual(await readdir(cwd), ['download-Makefile']);
+    assert.equal(saved.files[0]?.savedAs, 'Makefile.download');
+    assert.deepEqual(await readdir(cwd), ['Makefile.download']);
+    assert.deepEqual(saved.warnings, [warning.replace('will be saved', 'was saved')]);
+    const expected =
+      process.platform === 'darwin' ? 'com.apple.quarantine' : process.platform === 'win32' ? 'Zone.Identifier' : null;
+    assert.equal(saved.files[0]?.marked, expected);
   } finally {
     delete RECORDS.F0MAKE;
     await tool.close();
