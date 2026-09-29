@@ -270,8 +270,11 @@ export async function recordFiles(
   return recorded;
 }
 
-/** A recorded file read again: its bytes, when it is still the file recorded — or why it is not. */
-export type FileCheck = { readonly ok: true; readonly bytes: Buffer } | { readonly ok: false; readonly why: string };
+/** A recorded file read again: whether it is still the file recorded, and why not when it is not. */
+export type FileCheck = { readonly ok: true } | { readonly ok: false; readonly why: string };
+
+/** A recorded file read again for sending: its bytes, when it is still the file recorded — or why it is not. */
+export type FileRead = { readonly ok: true; readonly bytes: Buffer } | { readonly ok: false; readonly why: string };
 
 /**
  * Reads a recorded file again, and hands back its bytes only if it is still, in every way the draft recorded, that
@@ -285,8 +288,25 @@ export type FileCheck = { readonly ok: true; readonly bytes: Buffer } | { readon
  * The answer is a value rather than a throw, because the gate says it differently at each step: at prepare nothing has
  * been approved yet, and at send the approval it voids is named.
  */
-export async function rereadFile(file: SlackDraftFile, policy: AttachPolicy): Promise<FileCheck> {
-  const not = (why: string): FileCheck => ({ ok: false, why });
+export async function rereadFile(file: SlackDraftFile, policy: AttachPolicy): Promise<FileRead> {
+  return recheck(file, policy, true) as Promise<FileRead>;
+}
+
+/**
+ * The same checks as {@link rereadFile}, keeping nothing: for when every file has to be checked before any is sent, and
+ * ten files of 100 MiB each are not all to be held in memory at once to do it.
+ */
+export async function checkRecordedFile(file: SlackDraftFile, policy: AttachPolicy): Promise<FileCheck> {
+  const check = await recheck(file, policy, false);
+  return check.ok ? { ok: true } : check;
+}
+
+async function recheck(
+  file: SlackDraftFile,
+  policy: AttachPolicy,
+  keep: boolean,
+): Promise<FileRead | { readonly ok: true; readonly bytes: undefined }> {
+  const not = (why: string): { ok: false; why: string } => ({ ok: false, why });
   // Nothing but agent-slack writes these, and it writes them from the path: a record saying otherwise was edited.
   if (file.name !== basename(file.path) || file.mimeType !== mimeTypeOf(file.name)) {
     return not('its record was changed outside agent-slack');
@@ -309,11 +329,13 @@ export async function rereadFile(file: SlackDraftFile, policy: AttachPolicy): Pr
   }
   let measured: { size: number; sha256: string; bytes: Buffer | undefined };
   try {
-    measured = await measure(file.path, file.name, true);
+    measured = await measure(file.path, file.name, keep);
   } catch (error) {
     return not((error as Error).message);
   }
   if (measured.size !== file.size) return not(`it is ${measured.size} bytes now, not the ${file.size} recorded`);
-  if (measured.sha256 !== file.sha256 || measured.bytes === undefined) return not('its contents have changed');
+  if (measured.sha256 !== file.sha256) return not('its contents have changed');
+  if (!keep) return { ok: true, bytes: undefined };
+  if (measured.bytes === undefined) return not('it could not be read');
   return { ok: true, bytes: measured.bytes };
 }

@@ -5,6 +5,7 @@ import { type DraftInput, draftPayload, ownDraft } from './drafts.ts';
 import { gateDepsFor } from './gate.ts';
 import { NameBook } from './people.ts';
 import {
+  type PostedFiles,
   type PostedMessage,
   type PreparedPost,
   postPrepared,
@@ -105,13 +106,18 @@ export interface SendPostInput {
   readonly expectChannel: string;
 }
 
-/** Posts one prepared draft of this workspace, once, if its approval allows it now. */
+/**
+ * Posts one prepared draft of this workspace, once, if its approval allows it now.
+ *
+ * A post of text alone comes back as the message it made. A post with files comes back with their ids in Slack, and
+ * the message's ts when Slack had attached them to one — `null`, and a note saying so, when it had not.
+ */
 export async function sendPost(
   context: SlackContext,
   alias: string,
   input: SendPostInput,
   slack: SessionDeps = {},
-): Promise<PostedMessage> {
+): Promise<PostedMessage | PostedFiles> {
   const gate = await gateDepsFor(context, alias, slack);
   const store = openDraftStore(context.core.paths.stateDir, context.now);
   // Another workspace's draft is absent here: drafts share one directory, and the id alone proves nothing.

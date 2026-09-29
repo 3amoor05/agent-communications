@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdirSync, realpathSync, truncateSync, writeFileSync } from 'node:fs';
+import { mkdirSync, realpathSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { type TestContext, test } from 'node:test';
 import { CommsError, renderChannelPreview } from '@agentcomms/core';
 import { SlackContext } from '../src/context.ts';
 import { scopesForMode } from '../src/manifest.ts';
 import { createDraft } from '../src/operations/drafts.ts';
-import { prepareDraftPost } from '../src/operations/post.ts';
+import { prepareDraftPost, sendPost } from '../src/operations/post.ts';
 import { type FakeSlack, type FakeUploads, startFakeSlack } from './support/fake-slack.ts';
 import { type Harness, newHarness } from './support/harness.ts';
 
@@ -268,4 +268,283 @@ test('a post of text alone is previewed and bound exactly as it was before files
       'say yes and it posts',
     ].join('\n'),
   );
+});
+
+// ── Sending: every file read again, then uploaded, then one post that names the channel ───────────────────────
+
+/**
+ * Prepares a draft, and hands back the send to make when the test is ready: under `chat`, the person's yes in the
+ * conversation is the approval. Not started here, so what a test changes between the two happens before the send.
+ */
+async function prepareAndSend(w: World, draftId: string) {
+  const prepared = await prepareDraftPost(w.context, 'acme', { draftId }, w.slack);
+  const send = () =>
+    sendPost(w.context, 'acme', { draftId, approvalId: prepared.approvalId, expectChannel: 'C1' }, w.slack);
+  return { prepared, send };
+}
+
+/** What happened at Slack after the preview: the send's own requests, without the room it read again. */
+function sending(fake: FakeSlack, from: number): string[] {
+  return asked(fake)
+    .slice(from)
+    .filter((method) => method !== 'conversations.info');
+}
+
+test('a file post goes up file by file, then one call names the channel, and the message’s ts comes back', async (t) => {
+  const w = await world(t);
+  const chart = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 255, 128]);
+  const csv = 'region,total\nnorth,12\nsouth,7\n';
+  const one = file(w.docs, 'chart.png', chart);
+  const two = file(w.docs, 'totals.csv', csv);
+  const draft = await createDraft(w.context, 'acme', {
+    channel: 'C1',
+    text: 'the numbers & the chart',
+    mentionUsers: ['U024BE7LH'],
+    files: [one, two],
+  });
+
+  const { prepared, send } = await prepareAndSend(w, draft.draftId);
+  const before = w.fake.requests.length;
+  const posted = await send();
+
+  const [first, second] = w.uploads.issued;
+  assert.ok(first && second, 'two upload URLs were asked for');
+  // One URL per file, asked for with the name Slack will show and the exact length; each POSTed its own bytes.
+  assert.deepEqual(
+    w.uploads.issued.map((issued) => [issued.filename, issued.length]),
+    [
+      ['chart.png', chart.length],
+      ['totals.csv', Buffer.byteLength(csv)],
+    ],
+  );
+  assert.deepEqual(w.uploads.received[first.fileId], chart, 'the upload host received other bytes than the file’s');
+  assert.deepEqual(w.uploads.received[second.fileId], Buffer.from(csv));
+  assert.deepEqual(sending(w.fake, before), [
+    'files.getUploadURLExternal',
+    `files:${new URL(first.url).pathname}`,
+    'files.getUploadURLExternal',
+    `files:${new URL(second.url).pathname}`,
+    'files.completeUploadExternal',
+    'files.info',
+  ]);
+
+  // One call makes both visible, in the channel, with the words as the files' message: one post.
+  assert.deepEqual(w.uploads.completed, [
+    {
+      channelId: 'C1',
+      initialComment: '<@U024BE7LH> the numbers &amp; the chart',
+      threadTs: null,
+      files: [
+        { id: first.fileId, title: 'chart.png' },
+        { id: second.fileId, title: 'totals.csv' },
+      ],
+    },
+  ]);
+  // The token went to Slack's two hosts in its header, and nowhere else in any request.
+  for (const request of w.fake.requests) {
+    assert.equal(request.authorization, 'Bearer fake-user-token-0', `${request.host} ${request.path}`);
+    assert.equal(request.raw.split('fake-user-token-0').length, 2, `${request.host} ${request.path}`);
+  }
+  assert.equal(
+    w.fake.requests.some((request) => request.method === 'chat.postMessage'),
+    false,
+    'the words went out a second time as a message of their own',
+  );
+
+  assert.deepEqual(posted, {
+    approvalId: prepared.approvalId,
+    channel: 'C1',
+    ts: '1700000000.000200',
+    files: [
+      { id: first.fileId, name: 'chart.png', size: chart.length, sha256: sha256(chart) },
+      { id: second.fileId, name: 'totals.csv', size: Buffer.byteLength(csv), sha256: sha256(csv) },
+    ],
+  });
+  assert.equal((await w.context.core.approvals.get(prepared.approvalId))?.state, 'used');
+});
+
+test('a file post in a thread goes into the thread', async (t) => {
+  const w = await world(t);
+  const draft = await createDraft(w.context, 'acme', {
+    channel: 'C1',
+    threadTs: '1700000000.000100',
+    files: [file(w.docs, 'fix.diff', '- old\n+ new\n')],
+  });
+  const { send } = await prepareAndSend(w, draft.draftId);
+  const posted = await send();
+  assert.equal(w.uploads.completed.length, 1);
+  assert.equal(w.uploads.completed[0]?.threadTs, '1700000000.000100', 'the reply went to the channel, not the thread');
+  // No words, so no message of its own: the files are the post.
+  assert.equal(w.uploads.completed[0]?.initialComment, null);
+  assert.equal(posted.ts, '1700000000.000200');
+});
+
+test('a file edited after prepare is refused at send: nothing is uploaded, and the approval is spent', async (t) => {
+  const w = await world(t);
+  const kept = file(w.docs, 'a.txt', 'aaaa');
+  const edited = file(w.docs, 'b.txt', 'bbbb');
+  const draft = await createDraft(w.context, 'acme', { channel: 'C1', text: 'two files', files: [kept, edited] });
+  const { prepared, send } = await prepareAndSend(w, draft.draftId);
+  // The same size, other bytes: only the hash can tell. And the second file, so a check made file by file as each is
+  // uploaded would already have sent the first.
+  writeFileSync(edited, 'BBBB');
+  const before = w.fake.requests.length;
+
+  const error = await refusal(send());
+  assert.equal(error.code, 'APPROVAL_VOID');
+  assert.match(error.message, /nothing was sent: b\.txt is not the file that was approved — its contents have changed/);
+  assert.equal(error.details?.file, 'b.txt');
+  assert.deepEqual(sending(w.fake, before), [], 'something went to Slack for a post that was refused');
+  assert.deepEqual(w.uploads.received, {});
+  assert.equal((await w.context.core.approvals.get(prepared.approvalId))?.state, 'failed');
+
+  // Spent: sending again, even with the file put back, sends nothing.
+  writeFileSync(edited, 'bbbb');
+  await refusal(
+    sendPost(
+      w.context,
+      'acme',
+      { draftId: draft.draftId, approvalId: prepared.approvalId, expectChannel: 'C1' },
+      w.slack,
+    ),
+  );
+  assert.deepEqual(w.uploads.issued, []);
+});
+
+test('a file replaced by a link after prepare is refused at send, even a link to the same bytes', async (t) => {
+  const w = await world(t);
+  const real = file(w.docs, 'plan.md', '# the plan');
+  const twin = file(w.docs, 'twin.md', '# the plan');
+  const draft = await createDraft(w.context, 'acme', { channel: 'C1', files: [real] });
+  const { send } = await prepareAndSend(w, draft.draftId);
+  rmSync(real);
+  try {
+    symlinkSync(twin, real);
+  } catch (error) {
+    // Windows without the privilege to make links: nothing to test there.
+    if ((error as NodeJS.ErrnoException).code === 'EPERM') return t.skip('links cannot be made here');
+    throw error;
+  }
+  const error = await refusal(send());
+  assert.equal(error.code, 'APPROVAL_VOID');
+  assert.match(error.message, /plan\.md is not the file that was approved — a link has been put in its place/);
+  assert.deepEqual(w.uploads.issued, []);
+  assert.deepEqual(w.uploads.received, {});
+});
+
+test('under confirm, a file post waits for the person, and nothing is uploaded meanwhile', async (t) => {
+  const w = await world(t, { sendPolicy: 'confirm' });
+  const draft = await createDraft(w.context, 'acme', { channel: 'C1', files: [file(w.docs, 'a.pdf', '%PDF')] });
+  const { prepared, send } = await prepareAndSend(w, draft.draftId);
+  const error = await refusal(send());
+  assert.equal(error.code, 'APPROVAL_PENDING');
+  assert.equal(error.details?.command, `agent-slack approve ${prepared.approvalId}`);
+  assert.deepEqual(w.uploads.issued, [], 'an upload URL was asked for before the person approved');
+  assert.deepEqual(w.uploads.received, {});
+  assert.deepEqual(w.uploads.completed, []);
+  assert.equal((await w.context.core.approvals.get(prepared.approvalId))?.state, 'pending', 'the wait spent it');
+});
+
+test('a grant narrowed after prepare refuses the send, before anything is uploaded or claimed', async (t) => {
+  const w = await world(t);
+  const draft = await createDraft(w.context, 'acme', { channel: 'C1', files: [file(w.docs, 'a.txt', 'a')] });
+  const { prepared, send } = await prepareAndSend(w, draft.draftId);
+  await w.context.core.config.update((config) => ({
+    ...config,
+    accounts: Object.fromEntries(
+      Object.entries(config.accounts).map(([name, account]) => [
+        name,
+        { ...account, grantedScopes: account.grantedScopes.filter((scope) => scope !== 'files:write') },
+      ]),
+    ),
+  }));
+  const error = await refusal(send());
+  assert.equal(error.code, 'SCOPE_MISSING');
+  assert.match(error.hint ?? '', /agent-slack workspace reauth acme --mode send/);
+  assert.deepEqual(w.uploads.issued, []);
+  assert.equal((await w.context.core.approvals.get(prepared.approvalId))?.state, 'pending');
+});
+
+test('a failure at the call that posts is a failed post, and is recorded as one', async (t) => {
+  const w = await world(t);
+  w.uploads = w.fake.acceptUploads({ completeError: 'channel_not_found' });
+  const draft = await createDraft(w.context, 'acme', { channel: 'C1', text: 'x', files: [file(w.docs, 'a.txt', 'a')] });
+  const { prepared, send } = await prepareAndSend(w, draft.draftId);
+
+  const error = await refusal(send());
+  assert.equal(error.code, 'NOT_FOUND');
+  assert.equal(error.details?.stage, 'complete');
+  assert.equal((await w.context.core.approvals.get(prepared.approvalId))?.state, 'failed');
+  const [record] = (await w.context.core.audit.tail({ limit: 1 })).filter((entry) => entry.operation === 'slack.post');
+  assert.equal(record?.outcome, 'failed');
+  assert.equal(record?.approvalId, prepared.approvalId);
+});
+
+test('a failure before the post names the files already uploaded, which Slack discards, and posts nothing', async (t) => {
+  const w = await world(t);
+  let uploads = 0;
+  w.fake.uploadAnswer = () => {
+    uploads += 1;
+    return uploads === 1 ? { status: 200, body: 'OK' } : { status: 500, body: 'no' };
+  };
+  const draft = await createDraft(w.context, 'acme', {
+    channel: 'C1',
+    files: [file(w.docs, 'a.txt', 'a'), file(w.docs, 'b.txt', 'b'), file(w.docs, 'c.txt', 'c')],
+  });
+  const { prepared, send } = await prepareAndSend(w, draft.draftId);
+
+  const error = await refusal(send());
+  assert.equal(error.code, 'TRANSIENT');
+  assert.match(error.message, /nothing was posted/);
+  assert.deepEqual(error.details?.uploaded, [{ id: w.uploads.issued[0]?.fileId, name: 'a.txt' }]);
+  assert.match(error.hint ?? '', /a\.txt was uploaded and never shared; Slack discards it/);
+  assert.deepEqual(w.uploads.completed, [], 'the files were shared after an upload failed');
+  assert.equal(w.uploads.issued.length, 2, 'the third file was asked for after the second failed');
+  assert.equal((await w.context.core.approvals.get(prepared.approvalId))?.state, 'failed');
+});
+
+test('when Slack has not attached the files to a message yet, the ts is null and the result says so', async (t) => {
+  const w = await world(t);
+  w.uploads = w.fake.acceptUploads({ ts: null });
+  const draft = await createDraft(w.context, 'acme', { channel: 'C1', files: [file(w.docs, 'a.txt', 'a')] });
+  const { send } = await prepareAndSend(w, draft.draftId);
+  const started = Date.now();
+  const posted = await send();
+
+  assert.equal(posted.ts, null, 'a ts was reported that Slack never gave');
+  assert.match('note' in posted ? (posted.note ?? '') : '', /Slack had not attached the files to a message yet/);
+  assert.deepEqual(
+    'files' in posted ? posted.files.map((f) => f.id) : [],
+    w.uploads.issued.map((issued) => issued.fileId),
+    'the file ids are returned whatever happened to the ts',
+  );
+  // Asked a few times, over a few seconds, and then no more.
+  const infos = w.fake.requests.filter((request) => request.method === 'files.info').length;
+  assert.ok(infos >= 2 && infos <= 5, `files.info was asked ${infos} times`);
+  assert.ok(Date.now() - started < 10_000);
+});
+
+test('the audit records a file post by its ids, names, sizes and hashes — never by its contents', async (t) => {
+  const w = await world(t);
+  const secret = 'the contents of the file, which no log should hold';
+  const real = file(w.docs, 'memo.txt', secret);
+  const draft = await createDraft(w.context, 'acme', { channel: 'C1', text: 'the memo', files: [real] });
+  const { prepared, send } = await prepareAndSend(w, draft.draftId);
+  const posted = await send();
+
+  const records = (await w.context.core.audit.tail()).filter((entry) => entry.operation === 'slack.post');
+  assert.equal(records.length, 1);
+  const [record] = records;
+  assert.equal(record?.outcome, 'ok');
+  assert.equal(record?.approvalId, prepared.approvalId);
+  assert.deepEqual(record?.ids, {
+    channel: 'C1',
+    ts: '1700000000.000200',
+    files: ['files' in posted ? (posted.files[0]?.id ?? '') : ''],
+    fileNames: ['memo.txt'],
+    fileSizes: [String(Buffer.byteLength(secret))],
+    fileSha256: [sha256(secret)],
+  });
+  const everything = JSON.stringify(await w.context.core.audit.tail());
+  assert.equal(everything.includes(secret), false, 'the audit holds the file’s contents');
 });

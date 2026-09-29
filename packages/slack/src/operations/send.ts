@@ -1,3 +1,4 @@
+import { setTimeout as sleep } from 'node:timers/promises';
 import {
   type ApprovalRecord,
   type AttachPolicy,
@@ -11,12 +12,14 @@ import {
   type SendPolicy,
   sha256Hex,
   stricterPolicy,
+  truncateDisplay,
 } from '@agentcomms/core';
 import { callSlack, type SlackCall } from '../api/call.ts';
 import { spendOn, type WritePermit } from '../api/guard.ts';
+import { slackFileUpload } from '../api/upload.ts';
 import { type ComposedPayload, payloadOf } from '../compose/blocks.ts';
 import type { SlackDraft } from '../compose/drafts.ts';
-import { rereadFile } from '../compose/files.ts';
+import { checkRecordedFile, rereadFile, type SlackDraftFile } from '../compose/files.ts';
 import { mentionedUserIds, previewOf } from '../compose/preview.ts';
 import { decodeSlackText } from '../text/decode.ts';
 import { type Channel, channelOf, type NameBook } from './people.ts';
@@ -329,7 +332,7 @@ async function filesAsRecorded(deps: Pick<PrepareDeps, 'attachPolicy'>, draft: S
   if (files.length === 0) return;
   const policy = attachPolicyFor(deps);
   for (const file of files) {
-    const check = await rereadFile(file, policy);
+    const check = await checkRecordedFile(file, policy);
     if (!check.ok) {
       throw new CommsError(
         'BAD_DATA',
@@ -453,6 +456,29 @@ export interface PostedMessage {
   readonly ts: string;
 }
 
+/** One file of a post, as Slack now has it: its id there, and what was sent. */
+export interface PostedFile {
+  readonly id: string;
+  readonly name: string;
+  readonly size: number;
+  readonly sha256: string;
+}
+
+/**
+ * A post with files, once posted.
+ *
+ * `ts` is the message the files were posted in, when Slack had attached them to one by the time it was asked — and
+ * `null` otherwise, with `note` saying so. Never a guess: `files.completeUploadExternal` returns no message at all, and
+ * a ts made up to fill the gap would send whoever replies to it to the wrong message. The file ids are always here.
+ */
+export interface PostedFiles {
+  readonly approvalId: string;
+  readonly channel: string;
+  readonly ts: string | null;
+  readonly files: readonly PostedFile[];
+  readonly note?: string | undefined;
+}
+
 /** The command a person runs to approve at their own terminal. The same whichever surface asked. */
 export function approveCommand(approvalId: string): string {
   return `agent-slack approve ${approvalId}`;
@@ -519,7 +545,7 @@ export async function postPrepared(
   approvalId: string,
   expectChannel: string,
   book: NameBook,
-): Promise<PostedMessage> {
+): Promise<PostedMessage | PostedFiles> {
   /*
    * The caller restates the destination; this builds the rest.
    *
@@ -538,6 +564,13 @@ export async function postPrepared(
       },
     );
   }
+  /*
+   * A post with files, asked again whether this workspace may send one: the grant can narrow between prepare and send.
+   * Before the claim, so a refusal here spends nothing, and the approval is there to use once the grant is mended.
+   */
+  const files = draft.files ?? [];
+  const policy = files.length > 0 ? attachPolicyFor(deps) : undefined;
+  if (files.length > 0) requireFileSending(deps);
   // The payload sent below is this one: checked against the file, previewed, and the one the digest is taken over.
   const { preview, digest, payload } = await viewPost(deps, draft, book);
 
@@ -555,6 +588,8 @@ export async function postPrepared(
     },
     waitingHint('post', deps.surface, approvalId),
   );
+
+  if (policy !== undefined) return postFiles(deps, approvalId, payload, files, policy);
 
   try {
     const response = await spendOn(deps.permit, approvalId, 'chat.postMessage', () =>
@@ -594,6 +629,203 @@ export async function postPrepared(
     });
     throw error;
   }
+}
+
+/** The call that makes uploaded files visible, and so the one a file post's permit is opened for. */
+const PUBLISH_FILES = 'files.completeUploadExternal';
+
+/**
+ * How long to wait, before each look, for Slack to attach the posted files to a message: four looks over three seconds.
+ *
+ * Bounded because the post has already happened and the person is waiting on an answer that is only a courtesy. Slack
+ * attaches the message a moment after the call that shares the files returns, and until it has there is no ts to give.
+ */
+const SHARE_WAITS_MS: readonly number[] = [0, 250, 750, 2000];
+
+/** Who uploaded what, in words: for a failure after some files had gone up and before any was shared. */
+function discarded(uploaded: readonly { name: string }[]): string {
+  if (uploaded.length === 0) return '';
+  const names = uploaded.map((file) => truncateDisplay(file.name, 60));
+  return uploaded.length === 1
+    ? `${names[0]} was uploaded and never shared; Slack discards it.`
+    : `${names.join(', ')} were uploaded and never shared; Slack discards them.`;
+}
+
+/** The refusal for a file that is not the one approved: nothing more is sent, and the approval is spent. */
+function notApproved(file: SlackDraftFile, why: string, uploaded: readonly { id: string; name: string }[]): CommsError {
+  return new CommsError(
+    'APPROVAL_VOID',
+    `${uploaded.length === 0 ? 'nothing was sent' : 'nothing was posted'}: ${file.name} is not the file that was approved — ${why}`,
+    {
+      hint: [
+        discarded(uploaded),
+        'Put the files on the draft again with `agent-slack draft update <draftId> --file <path…>` or slack_draft_update, prepare it, and approve the new preview.',
+      ]
+        .filter(Boolean)
+        .join(' '),
+      details: { file: file.name, path: file.path, reason: 'file-changed', uploaded: [...uploaded] },
+    },
+  );
+}
+
+/** The ts of the message a posted file is in, in this channel, from `files.info`'s shares — or undefined. */
+function shareTs(file: unknown, channel: string): string | undefined {
+  const shares = (file as { shares?: Record<string, unknown> } | null | undefined)?.shares;
+  for (const kind of ['public', 'private']) {
+    const entries = (shares?.[kind] as Record<string, unknown> | undefined)?.[channel];
+    if (!Array.isArray(entries)) continue;
+    for (const entry of entries) {
+      const ts = (entry as { ts?: unknown } | null)?.ts;
+      if (typeof ts === 'string' && /^\d+\.\d+$/.test(ts)) return ts;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The message a file post landed in, if Slack will say: a few looks at the first file's shares, and then an honest gap.
+ *
+ * A read, after the post, with no permit: nothing here can post again. A failure to ask is reported as the gap it is,
+ * not as a failed post — the files are posted either way.
+ */
+async function messageTsOf(
+  call: SlackCall,
+  fileId: string,
+  channel: string,
+): Promise<{ ts: string | null; note?: string }> {
+  let why = 'Slack had not attached the files to a message yet';
+  for (const wait of SHARE_WAITS_MS) {
+    if (wait > 0) await sleep(wait);
+    try {
+      const ts = shareTs((await callSlack(call, 'files.info', { file: fileId })).file, channel);
+      if (ts !== undefined) return { ts };
+    } catch (error) {
+      why = `Slack could not be asked which message holds them (${(error as Error).message})`;
+    }
+  }
+  return { ts: null, note: `${why}, so the message's ts is not known; the files are posted, and their ids are below` };
+}
+
+/**
+ * Posts the files of one prepared post, once — after the approval has been claimed.
+ *
+ * Inside one permit, for the one call that shares the files, and in this order:
+ *
+ * 1. Every file is read again and matched to what was approved — not a link, a regular file, its own real path, still
+ *    admitted by the jail, the approved size and hash — all of them before anything is uploaded. One that is not voids
+ *    the approval, and nothing at all has left the machine.
+ * 2. Then file by file: Slack is asked where to put it, the file is read and hashed again, and the bytes just hashed go
+ *    to that URL. Never bytes kept from an earlier reading: what is hashed is what is sent.
+ * 3. Then one call names the channel, the thread and the words, and makes every file visible as one post.
+ *
+ * A failure before the last step posts nothing, and says which files had been uploaded — Slack discards a file that
+ * is never shared. A failure at it is a failed post. Afterwards, a few looks at `files.info` for the message's ts.
+ */
+async function postFiles(
+  deps: PostDeps,
+  approvalId: string,
+  payload: ComposedPayload,
+  files: readonly SlackDraftFile[],
+  policy: AttachPolicy,
+): Promise<PostedFiles> {
+  const uploaded: { id: string; name: string }[] = [];
+  const posted: PostedFile[] = [];
+  const call: SlackCall = { ...deps.call, permit: deps.permit };
+  let stage: 'check' | 'upload' | 'complete' = 'check';
+  try {
+    await spendOn(deps.permit, approvalId, PUBLISH_FILES, async () => {
+      for (const file of files) {
+        const check = await checkRecordedFile(file, policy);
+        if (!check.ok) throw notApproved(file, check.why, uploaded);
+      }
+      stage = 'upload';
+      for (const file of files) {
+        const place = await callSlack(call, 'files.getUploadURLExternal', { filename: file.name, length: file.size });
+        if (typeof place.upload_url !== 'string' || typeof place.file_id !== 'string') {
+          throw new CommsError('PROVIDER_UNAVAILABLE', 'Slack’s answer held no upload URL for the file', {
+            hint: 'Try again shortly.',
+          });
+        }
+        const read = await rereadFile(file, policy);
+        if (!read.ok) throw notApproved(file, read.why, uploaded);
+        await slackFileUpload(call, { url: place.upload_url, bytes: read.bytes });
+        uploaded.push({ id: place.file_id, name: file.name });
+        posted.push({ id: place.file_id, name: file.name, size: file.size, sha256: file.sha256 });
+      }
+      stage = 'complete';
+      await callSlack(call, PUBLISH_FILES, {
+        files: JSON.stringify(posted.map((file) => ({ id: file.id, title: file.name }))),
+        channel_id: payload.channel,
+        // The words, when there are any, as the files' own message: one post, not a message and then some files.
+        initial_comment: payload.text === '' ? undefined : payload.text,
+        thread_ts: payload.thread_ts,
+      });
+    });
+  } catch (error) {
+    const reported = reportFailure(error, stage, uploaded);
+    const message = reported instanceof Error ? reported.message : String(reported);
+    // Recorded before it is rethrown: an approval left in `sending` is one whose outcome nobody knows.
+    await deps.approvals.complete(approvalId, { error: message });
+    await deps.audit?.append({
+      inboxId: deps.accountId,
+      alias: deps.workspaceName,
+      operation: 'slack.post',
+      outcome: stage === 'check' ? 'refused' : 'failed',
+      ids: { channel: payload.channel, ...(uploaded.length > 0 ? { files: uploaded.map((file) => file.id) } : {}) },
+      approvalId,
+      reason: message,
+      ...(deps.surface ? { surface: deps.surface } : {}),
+    });
+    throw reported;
+  }
+
+  const first = posted[0]?.id ?? '';
+  const { ts, note } = await messageTsOf(deps.call, first, payload.channel);
+  await deps.approvals.complete(approvalId, { sentMessageId: ts ?? posted.map((file) => file.id).join(',') });
+  await deps.audit?.append({
+    inboxId: deps.accountId,
+    alias: deps.workspaceName,
+    operation: 'slack.post',
+    outcome: 'ok',
+    // What was posted, by what it is: ids, names, sizes and hashes. Never a byte of it.
+    ids: {
+      channel: payload.channel,
+      ...(ts === null ? {} : { ts }),
+      files: posted.map((file) => file.id),
+      fileNames: posted.map((file) => file.name),
+      fileSizes: posted.map((file) => String(file.size)),
+      fileSha256: posted.map((file) => file.sha256),
+    },
+    approvalId,
+    ...(deps.surface ? { surface: deps.surface } : {}),
+  });
+  return { approvalId, channel: payload.channel, ts, files: posted, ...(note === undefined ? {} : { note }) };
+}
+
+/**
+ * A file post's failure, in words that say what did and did not happen.
+ *
+ * A refusal of a changed file is already worded for itself. Anything else before the files were shared posts nothing,
+ * and names the files that had gone up; a failure at the call that shares them is a failed post.
+ */
+function reportFailure(
+  error: unknown,
+  stage: 'check' | 'upload' | 'complete',
+  uploaded: readonly { id: string; name: string }[],
+): unknown {
+  if (!(error instanceof CommsError) || error.code === 'APPROVAL_VOID') return error;
+  if (stage === 'complete') {
+    return new CommsError(error.code, `the post failed: ${error.message}`, {
+      hint: [error.hint, 'The files were uploaded; if Slack did not share them, it discards them.']
+        .filter(Boolean)
+        .join(' '),
+      details: { ...error.details, stage, uploaded: [...uploaded] },
+    });
+  }
+  return new CommsError(error.code, `nothing was posted: ${error.message}`, {
+    hint: [discarded(uploaded), error.hint].filter(Boolean).join(' '),
+    details: { ...error.details, stage, uploaded: [...uploaded] },
+  });
 }
 
 /**
