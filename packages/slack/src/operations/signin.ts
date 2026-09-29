@@ -7,6 +7,7 @@ import {
   type AccountConfig,
   CommsError,
   type Config,
+  childEnvironment,
   findById,
   type LooseningConsent,
   newAccountId,
@@ -264,7 +265,8 @@ async function startDetached(
         detached: true,
         // An IPC channel only for the "ready" message; nothing else passes between the two processes.
         stdio: ['ignore', 'ignore', log.fd, 'ipc'],
-        env: { ...process.env, ...listenerEnv(context) },
+        // On Windows the listener is also told never to take a program from its current folder.
+        env: childEnvironment({ ...process.env, ...listenerEnv(context) }),
       });
       // Attached before the next `await`, not after it: `spawn` reports a missing command on the following tick,
       // and an 'error' event with no listener is thrown by Node past every catch here.

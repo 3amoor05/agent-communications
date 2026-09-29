@@ -11,6 +11,7 @@ import {
   type RegisteredServer,
   scanRegisteredServers,
 } from './mcp-clients.ts';
+import { absoluteSearchPath, childEnvironment } from './system-programs.ts';
 
 /*
  * Registering the server with an MCP client. Two failures seen in the wild shape this:
@@ -228,13 +229,18 @@ export function clientCliSearch(env: NodeJS.ProcessEnv): string {
 /**
  * The first of `directories` that holds an executable `name`. PATH is read by the caller, once: a test that counts
  * how often the installer looks at PATH counts exactly the looks it means.
+ *
+ * Only absolute directories are looked in, whoever the caller. An empty entry of PATH is the current folder to a
+ * shell, and a relative one is read against it: the `node`, `npx` or `claude` found there — and then run, or written
+ * into a client's config to be run — would be whatever is in the folder this was started from, which is where a
+ * download may have saved a stranger's file.
  */
 async function executableIn(
   name: string,
   directories: readonly string[],
   env: NodeJS.ProcessEnv,
 ): Promise<string | null> {
-  const paths = directories.filter(Boolean);
+  const paths = absoluteSearchPath(directories);
   const extensions = process.platform === 'win32' ? (env.PATHEXT ?? '.EXE;.CMD;.BAT').split(';') : [''];
   for (const directory of paths) {
     for (const extension of extensions) {
@@ -484,9 +490,13 @@ export async function findNpmCli(): Promise<string> {
   });
 }
 
+/**
+ * A command run to its end. Its environment is this process's, and on Windows also tells it never to take a program
+ * from its current folder: `npm` and a client's command both start programs of their own by name.
+ */
 function run(command: string, args: string[]): Promise<void> {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(command, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    const child = spawn(command, args, { stdio: ['ignore', 'ignore', 'pipe'], env: childEnvironment(process.env) });
     let stderr = '';
     child.stderr?.on('data', (chunk) => {
       stderr += String(chunk);
@@ -725,10 +735,13 @@ function installCommand(product: McpProduct, options: InstallOptions, name: stri
   return words.map((word) => (/^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replace(/'/g, `'\\''`)}'`)).join(' ');
 }
 
-/** A command's exit status and what it printed, kept here and never shown: codex prints an entry's env. */
+/**
+ * A command's exit status and what it printed, kept here and never shown: codex prints an entry's env. Started as
+ * `run` starts one, so that on Windows it takes no program from its current folder either.
+ */
 function capture(command: string, args: string[]): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], env: childEnvironment(process.env) });
     let stdout = '';
     let stderr = '';
     child.stdout?.on('data', (chunk) => {
@@ -1437,12 +1450,35 @@ export interface PruneResult {
   refused?: string | undefined;
 }
 
-/** Every running process's command line, or null when they cannot be listed. */
-export async function runningCommandLines(): Promise<string[] | null> {
+/** Where `ps` is looked for, in order: the system's own directories, never PATH. */
+const PS_DIRECTORIES = ['/bin', '/usr/bin'] as const;
+
+/**
+ * Every running process's command line, or null when they cannot be listed.
+ *
+ * `ps` is started by its full path, `/bin/ps` or else `/usr/bin/ps`, never by its bare name: a name is looked up, and
+ * a lookup can reach the folder this was started from — where a download may have saved a stranger's `ps`, which would
+ * then run, and whose answer would decide what is deleted. With neither there, the processes cannot be listed.
+ *
+ * `directories` and `list` are for tests: where to look for `ps`, and what runs the one found.
+ */
+export async function runningCommandLines(
+  options: {
+    directories?: readonly string[] | undefined;
+    list?: ((ps: string) => Promise<string[] | null>) | undefined;
+  } = {},
+): Promise<string[] | null> {
   // No `ps` on Windows, and a guess is not good enough for a decision to delete: null keeps everything.
   if (process.platform === 'win32') return null;
+  const ps = await executableIn('ps', options.directories ?? PS_DIRECTORIES, process.env);
+  if (ps === null) return null;
+  return (options.list ?? commandLinesFrom)(ps);
+}
+
+/** What `ps` at this path says is running: one command line per process, or null when it fails. */
+function commandLinesFrom(ps: string): Promise<string[] | null> {
   return new Promise((resolvePromise) => {
-    execFile('ps', ['-A', '-o', 'args='], { maxBuffer: 32 * 1024 * 1024 }, (error, stdout) => {
+    execFile(ps, ['-A', '-o', 'args='], { maxBuffer: 32 * 1024 * 1024 }, (error, stdout) => {
       resolvePromise(error ? null : stdout.split('\n').filter(Boolean));
     });
   });

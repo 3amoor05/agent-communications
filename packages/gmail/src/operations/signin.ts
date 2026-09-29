@@ -5,6 +5,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   CommsError,
+  childEnvironment,
   findById,
   type GatedChange,
   lookupName,
@@ -284,7 +285,8 @@ async function startDetached(
         detached: true,
         // An IPC channel only for the "ready" message: nothing else passes between the processes.
         stdio: ['ignore', 'ignore', log.fd, 'ipc'],
-        env: { ...process.env, ...listenerEnv(context, port) },
+        // On Windows the listener is also told never to take a program from its current folder.
+        env: childEnvironment({ ...process.env, ...listenerEnv(context, port) }),
       });
       // Attached before the next `await`, not after it. `spawn` reports a missing or unexecutable command on the
       // following tick, which lands in the middle of `log.close()` — and an 'error' event with no listener is

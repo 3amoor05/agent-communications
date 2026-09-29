@@ -1,7 +1,16 @@
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { stat } from 'node:fs/promises';
-import { basename, delimiter, dirname, join } from 'node:path';
+import { basename, delimiter, dirname, join, relative } from 'node:path';
 import { test } from 'node:test';
 import { pathToFileURL } from 'node:url';
 import { ERROR_REGISTRY, EXIT_CODES } from '../src/errors.ts';
@@ -22,6 +31,8 @@ import {
   pinnedVersion,
   pruneManagedRuntimes,
   reusableRuntime,
+  runningCommandLines,
+  whichExecutable,
 } from '../src/mcp-install.ts';
 import { renderInstall } from '../src/render.ts';
 import { tempDir } from './helpers/temp.ts';
@@ -514,6 +525,70 @@ test(
     assert.deepEqual(clientCliDirectories({ HOME: '/abs/home', AGENT_COMMS_CLIENT_CLI_DIRS: '' }), [
       join('/abs/home', '.local', 'bin'),
     ]);
+  },
+);
+
+/** An executable file `name` in `directory`, which is where it is found. */
+function executable(directory: string, name: string): string {
+  const file = join(directory, name);
+  writeFileSync(file, '#!/bin/sh\nexit 0\n');
+  chmodSync(file, 0o755);
+  return file;
+}
+
+test(
+  'a command on PATH is looked for only in absolute directories: an empty, `.` or relative entry is where this started',
+  NOT_ON_WINDOWS,
+  async () => {
+    /*
+     * The `tool` a relative entry names really is there, reached from this test's own current folder — so a search
+     * that took relative entries would find it, and return it first. The one installed in an absolute directory is
+     * the only one that may be found.
+     */
+    const cwdDecoy = relative(process.cwd(), tempDir());
+    executable(cwdDecoy, 'tool');
+    const installed = tempDir();
+    const tool = executable(installed, 'tool');
+    assert.equal(
+      await whichExecutable('tool', { PATH: ['', '.', cwdDecoy, installed].join(delimiter) }),
+      tool,
+      'the tool in the absolute directory is found, never the one a relative entry reaches',
+    );
+    assert.equal(
+      await whichExecutable('tool', { PATH: ['', '.', cwdDecoy].join(delimiter) }),
+      null,
+      'with only relative entries nothing is found, though a relative entry holds one',
+    );
+  },
+);
+
+test(
+  'the running processes are listed by `ps` at its full path, never a `ps` looked up by name',
+  NOT_ON_WINDOWS,
+  async () => {
+    const ran: string[] = [];
+    const list = async (ps: string) => {
+      ran.push(ps);
+      return ['node server.mjs'];
+    };
+    // The machine's own: /bin/ps, or else /usr/bin/ps.
+    const system = ['/bin/ps', '/usr/bin/ps'].filter((file) => existsSync(file));
+    const lines = await runningCommandLines({ list });
+    assert.deepEqual(ran, system.slice(0, 1), 'ps is run by its full path under /bin or /usr/bin');
+    assert.deepEqual(lines, system.length > 0 ? ['node server.mjs'] : null);
+
+    // The first directory that holds one, in order.
+    ran.length = 0;
+    const empty = tempDir();
+    const holds = tempDir();
+    const ps = executable(holds, 'ps');
+    await runningCommandLines({ directories: [empty, holds], list });
+    assert.deepEqual(ran, [ps], 'the first directory holding a ps is the one run');
+
+    // None there: the processes cannot be listed, and nothing is started to find out.
+    ran.length = 0;
+    assert.equal(await runningCommandLines({ directories: [empty], list }), null);
+    assert.deepEqual(ran, [], 'with no ps in the directories nothing is run');
   },
 );
 

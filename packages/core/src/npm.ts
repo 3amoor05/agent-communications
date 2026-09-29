@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { displayUrl } from './mcp-clients.ts';
 import { findNpmCli } from './mcp-install.ts';
+import { childEnvironment } from './system-programs.ts';
 import { isVersion } from './versions.ts';
 
 /**
@@ -86,14 +87,17 @@ export async function npmLatestVersion(
   return latest;
 }
 
-/** A command's exit status and output, given up on after `timeoutMs`. */
+/**
+ * A command's exit status and output, given up on after `timeoutMs`. npm starts programs of its own by name — scripts,
+ * `node-gyp`, a shell — so on Windows it is told never to take one from its current folder.
+ */
 function capture(
   args: string[],
   env: NodeJS.ProcessEnv,
   timeoutMs: number,
 ): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, args, { env: childEnvironment(env), stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     const timer = setTimeout(() => {
