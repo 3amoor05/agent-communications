@@ -194,9 +194,13 @@ function renameReason(safe: string): RenameReason | undefined {
  * Most of these end in an extension that is not inert, or in none, and would be saved with the suffix anyway; they are
  * listed so that the question can say why in plainer words than "a type that could run", and so the flag is
  * `auto-read`. A few end in an inert one and are listed because of that: `CMakeLists.txt` is what `cmake` runs,
- * `requirements.txt` and `constraints.txt` are what `pip install -r` installs from, `compile_flags.txt` is what clangd
- * compiles every file in the folder with, and `python312.zip` is on a Python's import path ahead of its standard
- * library — the modules in it are what every program that Python runs imports.
+ * `requirements.txt` and `constraints.txt` — and `dev-requirements.txt`, `requirements-test.txt` and the rest of the
+ * names a project gives them — are what `pip install -r` installs from, `conanfile.txt` is what `conan install` does,
+ * `meson_options.txt` is what `meson` configures a build with, `compile_flags.txt` is what clangd compiles every file
+ * in the folder with, `apt.txt` and `runtime.txt` are what Binder and Heroku install a machine from, and
+ * `python312.zip` is on a Python's import path ahead of its standard library — the modules in it are what every
+ * program that Python runs imports. `Aptfile`, `environment.yml` and `meson.options` would be saved with the suffix
+ * anyway, and are listed for the plainer reason.
  *
  * A download's "current folder" is usually the folder an agent works in: a project. There a file is not only read by
  * the person who asked for it. An agent loads `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules` or
@@ -265,6 +269,13 @@ const READ_ON_THEIR_OWN = new Set([
   'pom.xml',
   'cmakelists.txt',
   'compile_flags.txt',
+  'conanfile.txt',
+  'meson_options.txt',
+  'meson.options',
+  'apt.txt',
+  'runtime.txt',
+  'aptfile',
+  'environment.yml',
   'flake.nix',
   'shell.nix',
   'default.nix',
@@ -285,7 +296,8 @@ const READ_ON_THEIR_OWN = new Set([
 const READ_ON_THEIR_OWN_PATTERNS: readonly RegExp[] = [
   // `vite.config.ts`, `eslint.config.mjs`, `tailwind.config.js`, `jest.config.cjs`: a tool's own configuration, run.
   /\.config\.(?:[cm]?[jt]s|json)$/,
-  /^(?:requirements|constraints)(?:[-_.][^.]*)?\.txt$/,
+  // `requirements.txt`, `requirements-dev.txt`, `dev-requirements.txt`, `test_constraints.txt`: what `pip -r` installs.
+  /(?:^|[-_.])(?:requirements|constraints)(?:[-_.][^.]*)?\.txt$/i,
   /^id_(?:rsa|dsa|ecdsa|ed25519)/,
   /\.(?:plist|desktop|service|pth|lnk|url|webloc|scf|library-ms|searchconnector-ms)$/,
   // A Python's own, beside its interpreter or in its `lib`: the zip of its standard library, and the `._pth` that sets

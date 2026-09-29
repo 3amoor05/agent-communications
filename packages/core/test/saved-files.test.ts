@@ -307,6 +307,61 @@ test('the corpus: every dangerous name is saved ending in .download or an inert 
   assert.ok(fileRisks('invoice.exe.pdf', 'application/pdf').includes('double-extension'));
 });
 
+/*
+ * The names a tool reads by name: most end in `.txt` or `.zip`, which are inert, so only the name says what they are.
+ * pip installs from a requirements or constraints file whatever a project calls it, conan and meson build from theirs,
+ * Binder and Heroku install a machine from `apt.txt`, `runtime.txt`, `Aptfile` and `environment.yml`.
+ */
+const READ_BY_NAME = [
+  'requirements.txt',
+  'constraints.txt',
+  'requirements-dev.txt',
+  'requirements_test.txt',
+  'requirements.in.txt',
+  'dev-requirements.txt',
+  'test-requirements.txt',
+  'test_requirements.txt',
+  'ci.requirements.txt',
+  'dev-constraints.txt',
+  'Requirements-Dev.TXT',
+  'conanfile.txt',
+  'meson_options.txt',
+  'meson.options',
+  'apt.txt',
+  'runtime.txt',
+  'Aptfile',
+  'environment.yml',
+  'CMakeLists.txt',
+  'compile_flags.txt',
+  'python312.zip',
+  'python312._pth',
+];
+
+/** Names that only look like one of those, and are a person's documents. */
+const LOOK_ALIKES = [
+  'myrequirements.txt',
+  'Project requirements.txt',
+  'requirements-review.pdf',
+  'runtime-notes.txt',
+  'apt.txt.pdf',
+  'conanfile-notes.txt',
+  'environment.pdf',
+];
+
+test('the corpus of names read by name: each is saved with .download after it and flagged auto-read, whatever it ends in', () => {
+  for (const given of READ_BY_NAME) {
+    assert.deepEqual(
+      savedName(given, 'F1'),
+      { name: `${given}${DOWNLOAD_SUFFIX}`, given, renamed: 'auto-read' },
+      given,
+    );
+    assert.ok(fileRisks(given, 'text/plain').includes('auto-read'), given);
+  }
+  for (const given of LOOK_ALIKES) {
+    assert.equal(savedFileName(given, 'F1'), given, given);
+  }
+});
+
 test('Windows: reserved device names, and the trailing dots and spaces it drops', () => {
   assert.equal(savedFileName('con.pdf', 'F1'), '_con.pdf');
   assert.equal(savedFileName('NUL', 'F1'), '_NUL.download');
