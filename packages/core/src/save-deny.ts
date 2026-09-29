@@ -216,15 +216,29 @@ function windowsBelow(folder: string, root: string): string {
 }
 
 /*
- * `path=` as 9p writes it: as it was given, so a space, a comma or a semicolon in the folder is left in it. It ends only
- * where the next option begins — `;cache=` or `;uid=` inside the aname, `,mmap` or `,trans=` after it.
+ * `path=` as 9p writes it: as it was given, so a space, a comma or a semicolon in the folder is left in it. It ends at
+ * the first place from which everything left reads as options and nothing else — the aname's own (`;metadata`,
+ * `;uid=1000`, `;symlinkroot=/mnt/`), then 9p's (`,mmap`, `,trans=fd`). An option has no backslash, so what that leaves
+ * off is at most the end of the last folder's name; and no name refused here has a comma or a semicolon in it, so
+ * leaving that off never lets one through.
  */
-const PATH_OPTION = /(?:^|[,;])path=(.*?)(?=;[A-Za-z_]+=|,[A-Za-z_]+(?:=|,|$)|$)/;
+const REST_OF_OPTIONS = /^(?:;[\w.-]+(?:=[^;,\\]*)?)*(?:,[\w.-]+(?:=[^,\\]*)?)*$/;
+
+/** The folder in a 9p mount's `path=` option, or undefined when it has none. */
+function pathOption(options: string): string | undefined {
+  const start = /(?:^|[,;])path=/.exec(options);
+  if (start === null) return undefined;
+  const rest = options.slice(start.index + start[0].length);
+  for (let end = 0; end < rest.length; end++) {
+    if ((rest[end] === ';' || rest[end] === ',') && REST_OF_OPTIONS.test(rest.slice(end))) return rest.slice(0, end);
+  }
+  return rest;
+}
 
 /*
  * The Windows folder a mount shows, read the way WSL itself writes it:
  * - `drvfs` (WSL 1), and `9p` with `aname=drvfs` (WSL 2): the source is the Windows folder — `C:\`, or the folder a
- *   drive was mounted from — with `path=` in the options as its second copy;
+ *   drive was mounted from — or, over virtio-9p, only `drvfs` or `drvfsa`, and then `path=` in the options names it;
  * - `virtiofs` (newer WSL 2): the source is a tag, or a shared tag with the folder's own as the first part of the root,
  *   and WSL links each to its Windows folder in `/run/wsl/virtiofs`. A share with no link there is not Windows's — a
  *   virtual machine's shared folder, say — and is left alone.
@@ -240,7 +254,7 @@ function windowsFolder(
   if (fstype === 'drvfs') return windowsBelow(source, root);
   if (fstype === '9p' || fstype === 'v9fs') {
     if (!/(?:^|[,;])aname=drvfs(?:[,;]|$)/.test(options)) return null;
-    const named = /^(?:[A-Za-z]:|\\\\|unc\\)/i.test(source) ? source : PATH_OPTION.exec(options)?.[1];
+    const named = /^(?:[A-Za-z]:|\\\\|unc\\)/i.test(source) ? source : pathOption(options);
     return windowsBelow(named ?? source, root);
   }
   if (fstype !== 'virtiofs') return null;
