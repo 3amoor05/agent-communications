@@ -1671,6 +1671,32 @@ test('stopped, an agent that has "not now" prepared and hands its id to a dry ru
    * and ran, and "not now" was the agent's decision after all. Each such path refuses the id now.
    */
   const m = machine();
+  // A mailbox by its old name, so the dry run has a mapping to show: what the call would have answered.
+  const configFile = join(m.core.paths.configDir, 'config.json');
+  writeFileSync(
+    configFile,
+    `${JSON.stringify({
+      version: 1,
+      secrets: { store: 'file' },
+      inboxes: {
+        work: {
+          id: 'ibx_AAAAAAAAAAAAAAAA',
+          provider: 'gmail',
+          email: 'jo@example.com',
+          identity: 'oidc',
+          sub: 'sub-one',
+          client: 'desktop',
+          tier: 'read',
+          contacts: false,
+          grantedScopes: [],
+          secretRef: 'gmail:refresh:ibx_AAAAAAAAAAAAAAAA',
+          internalDomains: ['example.com'],
+          createdAt: '2026-09-22T00:00:00.000Z',
+        },
+      },
+    })}\n`,
+  );
+  const before = readFileSync(configFile, 'utf8');
   seed(m, { latest: LATEST, behind: true });
   const { call, close } = await connect(m);
   let later = '';
@@ -1705,7 +1731,8 @@ test('stopped, an agent that has "not now" prepared and hands its id to a dry ru
   assert.equal(dry.status, 64, dry.stdout + dry.stderr);
   assert.equal((JSON.parse(dry.stdout) as { error: { code: string } }).error.code, 'USAGE');
 
-  // Nothing was put off: both still wait for the person, and every other call is stopped as before.
+  // Nothing was renamed or put off: both still wait for the person, and every other call is stopped as before.
+  assert.equal(readFileSync(configFile, 'utf8'), before, 'the configuration was changed');
   for (const each of [later, id]) assert.equal((await m.core.approvals.get(each))?.state, 'pending', each);
   assert.equal((await readUpdateCheck(m.stateDir)).snoozedUntil, null);
   assert.equal(run(['channels', '--json']).status, 11, 'the stop stands');

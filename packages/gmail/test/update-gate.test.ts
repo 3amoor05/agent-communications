@@ -106,7 +106,11 @@ test('agent-gmail: an approval the stop let through is refused by a finish, and 
   updateOut(harness);
   const before = JSON.stringify(await harness.core.config.load());
   for (const [argv, words] of [
-    [['inbox', 'reauth', 'work', '--finish', 'gfl_none', '--approval', later], /--finish collects a sign-in already/],
+    // A flow id of the right shape that nothing started: without the refusal, the finish looks it up.
+    [
+      ['inbox', 'reauth', 'work', '--finish', `fl_${'0'.repeat(22)}`, '--approval', later],
+      /--finish collects a sign-in/,
+    ],
     // A client is registered already: no step of this run registers one.
     [['setup', '--approval', later], /already registered, so this run registers none and takes no --approval/],
     // No client named: nothing claims the registration's approval, whatever the run reaches.
