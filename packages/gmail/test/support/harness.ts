@@ -23,8 +23,9 @@ export const TEST_CLIENT_ID = 'test-client.apps.googleusercontent.com';
 export const TEST_CLIENT_SECRET = 'test-client-secret-not-a-real-credential';
 
 export function tempDir(prefix = 'agent-gmail-'): string {
-  // realpath: on macOS the temp directory is a symlink, and path jails compare resolved paths.
-  return realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+  // realpath: on macOS the temp directory is a symlink, and path jails compare resolved paths. The native one, as the
+  // code's own is: on Windows it gives a short name in the temp path (`RUNNER~1`) its long one, as saved paths have.
+  return realpathSync.native(mkdtempSync(join(tmpdir(), prefix)));
 }
 
 export interface Harness {

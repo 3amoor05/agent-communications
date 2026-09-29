@@ -19,8 +19,9 @@ const DAY = 24 * HOUR;
 export const TEST_CLIENT_ID = '1234567890.1234567890';
 
 export function tempDir(prefix = 'agent-slack-'): string {
-  // realpath: on macOS the temp directory is a symlink, and path jails compare resolved paths.
-  return realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+  // realpath: on macOS the temp directory is a symlink, and path jails compare resolved paths. The native one, as the
+  // code's own is: on Windows it gives a short name in the temp path (`RUNNER~1`) its long one, as saved paths have.
+  return realpathSync.native(mkdtempSync(join(tmpdir(), prefix)));
 }
 
 export interface ExchangeCall {

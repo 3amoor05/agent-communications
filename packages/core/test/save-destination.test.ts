@@ -94,7 +94,7 @@ function refusal(pattern: RegExp, code: string) {
 
 /** A home and a core of their own, the home under both names core reads it by. */
 function machine(): { home: string; env: NodeJS.ProcessEnv; core: Core } {
-  const home = realpathSync(tempDir('comms-save-'));
+  const home = realpathSync.native(tempDir('comms-save-'));
   const env: NodeJS.ProcessEnv = {
     HOME: home,
     USERPROFILE: home,
@@ -341,7 +341,7 @@ test('`out` and `--out` are refused with what replaced them', () => {
 });
 
 test('a folder is made when missing, private, and resolved through its links; a file where it should be is refused', async () => {
-  const root = realpathSync(tempDir());
+  const root = realpathSync.native(tempDir());
   const made = join(root, 'new', 'deeper');
   await checkFolder(made);
   assert.equal(existsSync(made), false, 'checking made the folder');
@@ -694,7 +694,7 @@ test('this package’s own folders are never saved into: configuration, state, r
   await refusedFor(core.paths.secretsDir, deny, /keeps credentials/);
   await refusedFor(join(core.paths.dataDir, 'runtime'), deny, /own data folder/);
   // Named apart from the configuration, as AGENT_COMMS_STATE_DIR and AGENT_COMMS_DATA_DIR may, each is still its own.
-  const elsewhere = realpathSync(tempDir('comms-elsewhere-'));
+  const elsewhere = realpathSync.native(tempDir('comms-elsewhere-'));
   const moved = {
     ...deny,
     paths: { ...deny.paths, stateDir: join(elsewhere, 'state'), dataDir: join(elsewhere, 'data') },
@@ -721,7 +721,7 @@ test('every hidden folder is refused, anywhere and at any depth; the home itself
     await refusedFor(join(home, ...hidden), deny, /it is inside ~.*\.[a-z]+, a hidden folder/, hidden.join('/'));
   }
   // Outside the home just the same: a project anywhere has hooks and settings its tools run.
-  const base = realpathSync(tempDir('comms-anywhere-'));
+  const base = realpathSync.native(tempDir('comms-anywhere-'));
   for (const hidden of [
     ['workspaces', 'app', '.husky'],
     ['workspaces', 'app', '.claude'],
@@ -752,7 +752,7 @@ test('every hidden folder is refused, anywhere and at any depth; the home itself
 test('a checkout under .claude/worktrees/<name> is a project like any other; a hidden folder inside it is still hidden', async () => {
   const { core, env } = machine();
   const deny = denyInputOf(core, env);
-  const repo = realpathSync(tempDir('comms-worktrees-'));
+  const repo = realpathSync.native(tempDir('comms-worktrees-'));
   const checkout = join(repo, '.claude', 'worktrees', 'agent-1');
   mkdirSync(join(checkout, 'src'), { recursive: true });
   assert.equal(await saveFolderRefusal(checkout, deny), null);
@@ -782,7 +782,7 @@ test('a checkout under .claude/worktrees/<name> is a project like any other; a h
 test('folders programs load packages from are refused wherever they are, and so is a Python virtual environment', async () => {
   const { core, env } = machine();
   const deny = denyInputOf(core, env);
-  const base = realpathSync(tempDir('comms-packages-'));
+  const base = realpathSync.native(tempDir('comms-packages-'));
   for (const folder of [
     ['app', 'node_modules', 'left-pad'],
     ['app', 'lib', 'python3.12', 'site-packages'],
@@ -823,7 +823,7 @@ test('folders programs load packages from are refused wherever they are, and so 
 test('a Python installation is refused, whatever it is called: conda’s, a Unix one, a Windows one — and any folder in it', async () => {
   const { core, env, home } = machine();
   const deny = denyInputOf(core, env);
-  const base = realpathSync(tempDir('comms-pythons-'));
+  const base = realpathSync.native(tempDir('comms-pythons-'));
   // Fake installations, each with only what it is known by: nothing in them is ever run.
   const conda = join(base, 'miniconda3');
   mkdirSync(join(conda, 'conda-meta'), { recursive: true });
@@ -1292,7 +1292,7 @@ test('a link to a refused folder is the refused folder: ~/.ssh through a link, a
   const deny = denyInputOf(core, env);
   mkdirSync(join(home, '.ssh'), { recursive: true });
   mkdirSync(join(home, '.config'), { recursive: true });
-  const elsewhere = realpathSync(tempDir('comms-links-'));
+  const elsewhere = realpathSync.native(tempDir('comms-links-'));
   symlinkSync(join(home, '.ssh'), join(elsewhere, 'innocent'));
   symlinkSync(join(home, '.config'), join(elsewhere, 'settings'));
   await refusedFor(join(elsewhere, 'innocent'), deny, /it is inside ~\/\.ssh, a hidden folder/);
@@ -1305,7 +1305,7 @@ test('a link to a refused folder is the refused folder: ~/.ssh through a link, a
 });
 
 test('the list’s own folders, and the home, are also held to their real paths: a folder named by where a link leads', async () => {
-  const base = realpathSync(tempDir('comms-real-'));
+  const base = realpathSync.native(tempDir('comms-real-'));
   // This package's state named through a link, and a folder in it named by where the link leads.
   mkdirSync(join(base, 'state-real', 'approvals'), { recursive: true });
   symlinkSync(join(base, 'state-real'), join(base, 'state-link'));
@@ -1679,7 +1679,7 @@ test('each renamed or flagged file is named in the question and in what the agen
 // ── Where Downloads is ─────────────────────────────────────────────────────────────────────────────────────────
 
 test('on Linux, Downloads is where the XDG user directories say, from the environment or user-dirs.dirs', () => {
-  const home = realpathSync(tempDir('comms-xdg-'));
+  const home = realpathSync.native(tempDir('comms-xdg-'));
   const base = { HOME: home };
   assert.equal(downloadsFolder(base, 'linux'), join(home, 'Downloads'), 'with nothing said');
   mkdirSync(join(home, '.config'));
@@ -1697,7 +1697,7 @@ test('on Linux, Downloads is where the XDG user directories say, from the enviro
   writeFileSync(join(home, '.config', 'user-dirs.dirs'), 'XDG_DOWNLOAD_DIR="Downloads"\n');
   assert.equal(downloadsFolder(base, 'linux'), join(home, 'Downloads'));
   // XDG_CONFIG_HOME, when the environment names one.
-  const elsewhere = realpathSync(tempDir('comms-xdg-config-'));
+  const elsewhere = realpathSync.native(tempDir('comms-xdg-config-'));
   writeFileSync(join(elsewhere, 'user-dirs.dirs'), 'XDG_DOWNLOAD_DIR="/mnt/in"\n');
   assert.equal(downloadsFolder({ ...base, XDG_CONFIG_HOME: elsewhere }, 'linux'), '/mnt/in');
   // macOS has no user directories file: its Downloads is the home's.
