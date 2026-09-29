@@ -6,8 +6,8 @@ import path from 'node:path';
  * A bare name is looked up, and on Windows the lookup starts in the current folder: libuv tries it before `PATH`, and
  * so does every program that looks a name up with `SearchPath` or `CreateProcess`. The current folder is where a
  * command was run or a server was started — and, since a download asks where to save, one of the three places a
- * stranger's file may be saved into. A `reg.exe` or `cmd.exe` saved there would then be what runs the next time this
- * package reads the registry or opens a browser. So a Windows program is named by its full path, under the Windows
+ * stranger's file may be saved into. A `reg.exe` or `rundll32.exe` saved there would then be what runs the next time
+ * this package reads the registry or opens a browser. So a Windows program is named by its full path, under the Windows
  * folder, and every process started on Windows is told, by `NoDefaultCurrentDirectoryInExePath`, not to look in its
  * own current folder for the programs it starts in turn.
  */
@@ -41,9 +41,9 @@ export function windowsSystemProgram(name: string, env: NodeJS.ProcessEnv = proc
 
 /**
  * The environment a child process is started with: `env` as it is, and on Windows also
- * `NoDefaultCurrentDirectoryInExePath=1`, so that the child — `cmd.exe`, a Node started again — never takes a program
- * from its current folder either. Elsewhere nothing is added: a Unix shell looks in the current folder only when
- * `PATH` says to.
+ * `NoDefaultCurrentDirectoryInExePath=1`, so that the child — `rundll32.exe`, a Node started again — never takes a
+ * program from its current folder either. Elsewhere nothing is added: a Unix shell looks in the current folder only
+ * when `PATH` says to.
  */
 export function childEnvironment(
   env: NodeJS.ProcessEnv = process.env,

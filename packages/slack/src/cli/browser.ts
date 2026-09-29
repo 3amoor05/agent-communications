@@ -17,10 +17,13 @@ export interface BrowserDeps {
  * is identical and two different answers to "how do I open a URL" would be two things to maintain.
  *
  * The program that opens it is named by its full path, never looked up by a bare name. On Windows the lookup starts in
- * the current folder, and a download may have saved a stranger's `cmd.exe` there: it would be what ran. So it is the
- * `cmd.exe` under the Windows folder, started with `NoDefaultCurrentDirectoryInExePath` so that `start` does not look
- * there either; `/usr/bin/open` on macOS; and elsewhere the `xdg-open` in the first absolute directory of `PATH` that
- * holds one. When there is none, nothing is started and the link is left for somebody to open.
+ * the current folder, and a download may have saved a stranger's program there: it would be what ran. So it is the
+ * `rundll32.exe` under the Windows folder, started with `NoDefaultCurrentDirectoryInExePath`, handing the link to
+ * `url.dll`'s `FileProtocolHandler` — which opens it as a double-click would, and which no shell stands in front of.
+ * `cmd.exe /c start` did, and read the link as a command line: every `&` in it ended the command there, so the browser
+ * got the link cut short and what followed was run as a command of its own. `/usr/bin/open` on macOS; and elsewhere the
+ * `xdg-open` in the first absolute directory of `PATH` that holds one. When there is none, nothing is started and the
+ * link is left for somebody to open.
  */
 export function openInBrowser(
   url: string,
@@ -30,8 +33,8 @@ export function openInBrowser(
   const env = deps.env ?? process.env;
   const command = browserOpener(platform, env);
   if (command === null) return false;
-  // `start` is a shell builtin, and the empty string is the window title `start` expects first.
-  const args = platform === 'win32' ? ['/c', 'start', '', url] : [url];
+  // The link is one argument, whole: nothing between here and the handler reads it as anything but a link.
+  const args = platform === 'win32' ? ['url.dll,FileProtocolHandler', url] : [url];
   try {
     const child = (deps.spawn ?? spawn)(command, args, {
       stdio: 'ignore',
@@ -48,7 +51,7 @@ export function openInBrowser(
 
 /** The opener's full path, or null when there is none that can be named without looking in the current folder. */
 function browserOpener(platform: NodeJS.Platform, env: NodeJS.ProcessEnv): string | null {
-  if (platform === 'win32') return windowsSystemProgram('cmd.exe', env);
+  if (platform === 'win32') return windowsSystemProgram('rundll32.exe', env);
   if (platform === 'darwin') return '/usr/bin/open';
   // An empty or relative entry of PATH is the current folder by another name, so only absolute ones are looked in.
   for (const directory of absoluteSearchPath((env.PATH ?? '').split(delimiter), platform)) {

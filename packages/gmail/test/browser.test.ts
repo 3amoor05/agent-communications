@@ -8,7 +8,7 @@ import { openInBrowser } from '../src/cli/browser.ts';
 
 /*
  * The consent link is opened by a program named by its full path. A bare name is looked up, on Windows first in the
- * current folder — where a download may have saved a stranger's `cmd.exe` — and on Unix in whatever an empty or
+ * current folder — where a download may have saved a stranger's program — and on Unix in whatever an empty or
  * relative entry of PATH reaches from there. Nothing here opens a browser: `spawn` is a stand-in that records what it
  * was asked to start, and an `xdg-open` is a file these tests write into a temporary directory.
  */
@@ -48,13 +48,22 @@ function xdgOpen(directory: string): string {
   return file;
 }
 
-test('on Windows the link is opened by cmd.exe under the Windows folder, told not to look in its current folder', () => {
+test('on Windows the link is handed to rundll32.exe under the Windows folder, whole, and no shell reads it', () => {
   const { started, spawn } = recorder();
   assert.equal(openInBrowser(LINK, 'win32', { spawn, env: { SystemRoot: 'C:\\Windows', PATH: 'C:\\Tools' } }), true);
   assert.equal(started.length, 1);
   const [run] = started;
-  assert.equal(run?.command, 'C:\\Windows\\System32\\cmd.exe', 'cmd.exe by its full path, never the bare name');
-  assert.deepEqual(run?.args, ['/c', 'start', '', LINK]);
+  assert.equal(
+    run?.command,
+    'C:\\Windows\\System32\\rundll32.exe',
+    'rundll32.exe by its full path, never the bare name, and never cmd.exe',
+  );
+  assert.deepEqual(run?.args, ['url.dll,FileProtocolHandler', LINK]);
+  // The link arrives as one argument, every `&` and `=` in it: nothing cut it at the first `&`.
+  assert.equal(run?.args.at(-1), LINK);
+  assert.equal(run?.args.at(-1)?.split('&').length, LINK.split('&').length);
+  assert.ok(LINK.includes('&') && LINK.includes('='));
+  assert.notEqual(run?.options.shell, true, 'no shell between the program and the link');
   assert.equal(
     run?.options.env?.NoDefaultCurrentDirectoryInExePath,
     '1',
@@ -63,7 +72,25 @@ test('on Windows the link is opened by cmd.exe under the Windows folder, told no
   assert.equal(run?.options.env?.PATH, 'C:\\Tools', 'the rest of the environment is passed on');
   // The Windows folder is the one the environment names.
   openInBrowser(LINK, 'win32', { spawn, env: { SystemRoot: 'D:\\Win' } });
-  assert.equal(started[1]?.command, 'D:\\Win\\System32\\cmd.exe');
+  assert.equal(started[1]?.command, 'D:\\Win\\System32\\rundll32.exe');
+});
+
+test('on Windows a link with every character cmd.exe acts on — & | ^ % ( ) — still arrives whole, as one argument', () => {
+  const { started, spawn } = recorder();
+  const link = 'https://accounts.google.com/o/oauth2/v2/auth?client_id=a&b=1|whoami^&c=%PATH%&d=(x)&e=calc)';
+  assert.equal(openInBrowser(link, 'win32', { spawn, env: { SystemRoot: 'C:\\Windows' } }), true);
+  assert.equal(started.length, 1, 'one program started, and only one');
+  assert.equal(started[0]?.command, 'C:\\Windows\\System32\\rundll32.exe');
+  assert.deepEqual(started[0]?.args, ['url.dll,FileProtocolHandler', link]);
+  for (const character of ['&', '|', '^', '%', '(', ')']) {
+    assert.ok(started[0]?.args[1]?.includes(character), `the link still holds ${character}`);
+  }
+  assert.ok(!started[0]?.args.some((arg) => /^\/[cCkK]$/.test(arg)), 'nothing asks a shell to run the rest');
+  assert.notEqual(
+    started[0]?.options.windowsVerbatimArguments,
+    true,
+    'the link is passed as an argument, never spliced into the command line',
+  );
 });
 
 test('on macOS it is /usr/bin/open, with the environment as it is', () => {
