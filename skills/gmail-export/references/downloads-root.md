@@ -7,8 +7,9 @@ when an export was refused a location, or when the destination is inconvenient a
 reasonable.
 
 Attachments are not saved here. A download asks the person where to save — their Downloads folder, the folder the
-server or command was started in, or one they name — and saves only there (`gmail-attachments`). Setting
-`defaults.downloadsDir` makes that folder the Downloads choice in the question too.
+server or command was started in, or one they name — and saves only there, never into a folder on its deny list
+(`gmail-attachments`). Setting `defaults.downloadsDir` makes that folder the Downloads choice in the question too;
+left unset, that choice is the Downloads folder the system keeps, which on Linux follows the XDG user directories.
 
 ## Where it is
 

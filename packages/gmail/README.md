@@ -88,21 +88,42 @@ agent-gmail attachments download 18f2c7a9e03b41d6 --inbox acme/gmail --part 1
 ```
 
 **You say where they go.** Nothing is saved until you have: the command lists the files — each name, size and
-sender — and asks whether to save them in `1` your Downloads folder (`~/Downloads`, or `defaults.downloadsDir` when you
-set one), `2` the folder you ran it in, or `3` a folder you name (absolute, or starting with `~`; it is made if
-missing). Both folders are shown by their exact paths. In a script, say it with `--to downloads`, `--to current` or
-`--to <folder>`. Run by an agent, or with no terminal, the command saves nothing: it prints the question with a
-choice id and exits `10`, and the agent runs it again with your answer as `--to <answer> --choice <id>` — an agent's
-`--to` without `--choice` is refused. Over MCP `gmail_attachment_download` asks the same way: its first call answers
-`destinationRequired: true` with the question and a `choiceId`, and the second passes your answer as `saveTo` with
-that `choiceId`. A choice is for those attachments only, is used once, and expires.
+sender — and asks whether to save them in `1` your Downloads folder, `2` the folder you ran it in, or `3` a folder you
+name (absolute, or starting with `~`; it is made if missing). Both folders are shown by their exact paths. Downloads is
+`defaults.downloadsDir` when you set one; otherwise the folder your system keeps — on Linux the XDG one
+(`XDG_DOWNLOAD_DIR`, or `~/.config/user-dirs.dirs`, so `~/Téléchargements` on a French desktop), on Windows the
+Downloads known folder wherever it was moved, else `~/Downloads`. At your own terminal you may also say it with
+`--to downloads`, `--to current` or `--to <folder>` — only there: with no terminal, with `--json`, through a pipe, or
+run by an agent, the command saves nothing, prints the question with a choice id and exits `10`, and `--to` needs the
+question's `--choice` beside it. Over MCP `gmail_attachment_download` asks the same way: its first call answers
+`destinationRequired: true` with the question and a `choiceId`. A choice is for those attachments only, is used once,
+and expires.
+
+**Your answer follows the mailbox's change policy.** Under `chat` (the default), the agent passes your answer back —
+`saveTo` with the `choiceId`, or `--to <answer> --choice <id>`. Under `confirm` you answer it yourself, where an agent
+cannot: at your own terminal with `agent-gmail approve <choiceId>`, which shows the question again and asks `1`, `2`
+or `3`, or in the form a client you trusted with `confirm-clients add` shows you. The agent then calls again with the
+`choiceId` alone; an answer it passes in the arguments is refused, and the question is left open for you.
+
+**Some folders are never saved into, whoever answers.** A hidden folder anywhere in your home (`~/.ssh`, `~/.config`,
+`~/.aws`, a project's `.git` or `.github`), a `.git` folder anywhere, `~/Library`, your home folder itself, this
+package's own configuration, state, data and credentials folders, the system's folders (`/`, `/etc`, `/usr`, `/bin`,
+`/var`, `/System`, …) and on Windows `AppData`, `%PROGRAMDATA%`, the Windows folder, Program Files, a drive's root, a
+network share and a path with no drive. A folder that leads to one through a link is refused as that folder. A file
+there would be something a program reads on its own — a key, a login item, an approval — rather than a file you read.
+When the folder you ran the command in is one of these, option `2` is shown as unavailable, with the reason. A folder
+that cannot be written in is refused too, before your answer is used up.
 
 Each file is saved under the name its sender gave it, made safe — no path in it, no leading dot (`.npmrc` is saved as
 `npmrc`), no control or bidi characters, no Windows device name — and never over a file already there: the new one is
-saved beside it as `-2`. Nothing else is written in the folder; the download is recorded in the audit log and in a
-manifest under this package's own state directory. What the sender called the file comes back inside the
-untrusted-content envelope, and so does the name it was saved under, and its path, unless that name is plainly a file
-name. Nothing is ever opened or run.
+saved beside it as `-2`. A name that tools read on their own — `CLAUDE.md`, `AGENTS.md`, `Makefile`, `package.json`,
+`pyproject.toml`, `.envrc`, `authorized_keys`, a `.plist` or a `.desktop` file, and the like — is saved as
+`download-<name>`, flagged `auto-read`, and the question says so before you answer. The same file sent twice — the same
+name and the same bytes — is written once; the same bytes under two names are two files. Nothing else is written in
+the folder; the download is recorded in the audit log and in a manifest under this package's own state directory. A
+download that stops part-way records what it saved, removes a file it wrote only part of, and says what was saved and
+what was not. What the sender called the file comes back inside the untrusted-content envelope, and so does the name it
+was saved under, and its path, unless that name is plainly a file name. Nothing is ever opened or run.
 
 ### Changes that need your approval
 

@@ -41,6 +41,7 @@ Extension matches are case-insensitive and anchored at the end of the cleaned na
 | `disk-image` | `.iso` `.img` `.vhd` `.vmdk` | A mountable volume. On Windows and macOS it mounts on open, which is how a file that looks like one download becomes a folder of executables. | That it is bootable or that it contains anything in particular. |
 | `double-extension` | The name ends in two dotted groups of two to five alphanumeric characters | The name is shaped like `invoice.pdf.exe`, which clients that hide known extensions display as `invoice.pdf`. | That the file is disguised. This one has real false positives — see below. |
 | `bidi-filename` | The name contains a character in the ranges U+202A–U+202E or U+2066–U+2069 | The name contains bidirectional formatting controls, so it does not read as it looks. `invoice` + a right-to-left override + `fdp.exe` displays as `invoiceexe.pdf`. | Anything about the contents. It is a statement about the name, and it is a strong one: ordinary file names do not contain bidi overrides. |
+| `auto-read` | The cleaned name, without case, is one tools load on their own: `CLAUDE.md` `AGENTS.md` `GEMINI.md` `CONVENTIONS.md` `.cursorrules` `copilot-instructions.md` `Makefile` `GNUmakefile` `Dockerfile` `docker-compose.yml` `compose.yaml` `package.json` `package-lock.json` `pnpm-workspace.yaml` `pyproject.toml` `setup.py` `setup.cfg` `conftest.py` `requirements.txt` `Gemfile` `Rakefile` `Cargo.toml` `go.mod` `build.gradle` `pom.xml` `tsconfig.json` `jsconfig.json` `vite.config.*` `next.config.*` `webpack.config.*` `.env` `.envrc` `authorized_keys` `known_hosts` `id_rsa*` `id_ed25519*`; or it ends `.plist` `.desktop` `.service` `.pth` `.lnk` `.url` `.webloc` | A file an agent, a build tool, `ssh`, a login or Python loads without anyone opening it — instructions for an agent working in the folder, a build step, a trusted key, a login item. It is **saved as `download-<name>`**, so nothing loads it by accident, and the question says so before the person answers. | That it is hostile. A colleague's `package.json` is ordinary; the rename only means it is a file to read, not one the folder's tools act on. The saved name is the one to report. |
 
 ### Flags that arrive together
 
@@ -67,7 +68,8 @@ Only two ranges are tested: the bidi embeddings and overrides (U+202A–U+202E) 
 (U+2066–U+2069). Other invisible characters — the Arabic letter mark, the left-to-right and right-to-left
 marks, zero-width spaces, variation selectors — are **stripped from the reported name**, inside its
 envelope, but they do not raise this flag. A name that was quietly cleaned therefore looks ordinary in the
-result. The name never reaches the disk either way: a download is saved by its part id.
+result. On disk the name is the cleaned one — which is why a download reports `savedAs`, the name it was saved
+under, beside `filename`, the one the sender gave.
 
 ## What the flags do not look at
 

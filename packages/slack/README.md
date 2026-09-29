@@ -110,18 +110,36 @@ By id, the files of one message, or a conversation's files — a channel, a DM o
 timestamp on (`--since` goes by upload time, to the second: a file uploaded earlier and shared later is left out).
 
 **You say where they go.** Nothing is saved until you have: the command lists the files — each name, size, who
-uploaded it and where — and asks whether to save them in `1` your Downloads folder (`~/Downloads`, or
-`defaults.downloadsDir` when you set one), `2` the folder you ran it in, or `3` a folder you name (absolute, or
-starting with `~`; it is made if missing). Both folders are shown by their exact paths. In a script, say it with
-`--to downloads`, `--to current` or `--to <folder>`. Run by an agent, or with no terminal, the command saves nothing:
-it prints the question with a choice id and exits `10`, and the agent runs it again with your answer as
-`--to <answer> --choice <id>` — an agent's `--to` without `--choice` is refused. Over MCP `slack_file_download` asks
-the same way: its first call answers `destinationRequired: true` with the question and a `choiceId`, and the second
-passes your answer as `saveTo` with that `choiceId`. A choice is for those files only, is used once, and expires.
+uploaded it and where — and asks whether to save them in `1` your Downloads folder, `2` the folder you ran it in, or
+`3` a folder you name (absolute, or starting with `~`; it is made if missing). Both folders are shown by their exact
+paths. Downloads is `defaults.downloadsDir` when you set one; otherwise the folder your system keeps — on Linux the XDG
+one (`XDG_DOWNLOAD_DIR`, or `~/.config/user-dirs.dirs`), on Windows the Downloads known folder wherever it was moved,
+else `~/Downloads`. At your own terminal you may also say it with `--to downloads`, `--to current` or `--to <folder>`
+— only there: with no terminal, with `--json`, through a pipe, or run by an agent, the command saves nothing, prints
+the question with a choice id and exits `10`, and `--to` needs the question's `--choice` beside it. Over MCP
+`slack_file_download` asks the same way: its first call answers `destinationRequired: true` with the question and a
+`choiceId`. A choice is for those files only, is used once, and expires.
 
-Each file is saved under the name its uploader gave it, made safe — no path in it, no leading dot (`.envrc` is saved
-as `envrc`), no control or bidi characters, no Windows device name — and never over a file already there: the new one
-is saved beside it as `-2`. Nothing else is written in the folder. The name, the title and the uploader's name come
+**Your answer follows the workspace's change policy.** Under `chat` (the default), the agent passes your answer back
+— `saveTo` with the `choiceId`, or `--to <answer> --choice <id>`. Under `confirm` you answer it yourself, at your own
+terminal: `agent-slack approve <choiceId>` shows the question again and asks `1`, `2` or `3`. The agent then calls
+again with the `choiceId` alone; an answer it passes in the arguments is refused, and the question is left open for
+you.
+
+**Some folders are never saved into, whoever answers.** A hidden folder anywhere in your home (`~/.ssh`, `~/.config`,
+`~/.aws`, a project's `.git` or `.github`), a `.git` folder anywhere, `~/Library`, your home folder itself, this
+package's own configuration, state, data and credentials folders, the system's folders (`/`, `/etc`, `/usr`, `/bin`,
+`/var`, `/System`, …) and on Windows `AppData`, `%PROGRAMDATA%`, the Windows folder, Program Files, a drive's root, a
+network share and a path with no drive — and a folder that leads to one through a link. A file there would be
+something a program reads on its own, not a file you read. When the folder you ran the command in is one of these,
+option `2` is shown as unavailable, with the reason. A folder that cannot be written in is refused too, before your
+answer is used up.
+
+Each file is saved under the name its uploader gave it, made safe — no path in it, no leading dot, no control or bidi
+characters, no Windows device name — and never over a file already there: the new one is saved beside it as `-2`. A
+name that tools read on their own — `CLAUDE.md`, `AGENTS.md`, `Makefile`, `package.json`, `.envrc`,
+`authorized_keys`, a `.plist` or a `.desktop` file, and the like — is saved as `download-<name>`, flagged `auto-read`,
+and the question says so before you answer. Nothing else is written in the folder. The name, the title and the uploader's name come
 back inside the untrusted-content envelope, and so does the name the file was saved under, and its path, unless that
 name is plainly a file name. The type comes back inside it too, unless it is a plain MIME type such as
 `application/pdf`, and any risk flags beside it. Nothing is opened or run.

@@ -33,8 +33,9 @@ This project reads and writes people's email and Slack workspaces. In scope, amo
   files with loose permissions, or model context.
 - **Prompt injection through email content** — a crafted message that escapes the untrusted-content envelope, hides
   text from the sanitiser, or makes a tool act on instructions found in mail.
-- **Path traversal** — attachment downloads or exports writing outside their directory, or attachments being read
-  from outside the allowed roots.
+- **Path traversal** — attachment downloads or exports writing outside their directory, a download written into a
+  folder its deny list refuses (a hidden folder in the home, `~/Library`, this package's own folders, a system
+  folder), or attachments being read from outside the allowed roots.
 - **Installation and supply chain** — unsafe installation instructions, CI compromise, or published packages that do
   not match the repository.
 

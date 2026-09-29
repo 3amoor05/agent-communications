@@ -31,8 +31,10 @@ It gives agents access to people's email. The failures that matter most are sile
 - **Untrusted content escaping its envelope** — sender-controlled text reaching a result outside the envelope or
   before the HTML sanitiser.
 - **Files outside their jail** — exports written outside the downloads root; a download saved anywhere the person did
-  not choose, or before they chose, or through a link at a file's name; attachments read from
-  outside the allowed roots or from the deny list.
+  not choose, or before they chose, or through a link at a file's name, or into a folder on the download deny list
+  (`save-deny.ts`), or under a name tools load on their own without `download-` before it; a download question
+  claimed under the `confirm` change policy with an answer an agent passed; attachments read from outside the allowed
+  roots or from the deny list.
 - **Secrets leaking** — tokens or client secrets in logs, errors, results or files with loose permissions.
 
 When reviewing any new pattern, list or phrase match, ask: **what turns red when the thing it describes changes?**

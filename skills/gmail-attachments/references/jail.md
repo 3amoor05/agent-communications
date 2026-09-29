@@ -151,10 +151,26 @@ Attaching is one direction. The other — attachment downloads — has no root a
 stranger's file lands is the person's to say. A download asks first (`destinationRequired: true`, with a question and
 a `choiceId`), and saves only into the folder the person answered with:
 
-- `downloads` — their Downloads folder, `<home>/Downloads`, or `defaults.downloadsDir` when they set one;
+- `downloads` — their Downloads folder: `defaults.downloadsDir` when they set one, else the one their system keeps
+  (the XDG one on Linux, the Downloads known folder on Windows), else `<home>/Downloads`;
 - `current` — the folder the server or the command was started in;
 - a folder they name, absolute or starting with `~`. A relative one is refused with `USAGE` before the question is
-  spent; one that is missing is made (`0700`); one that is a file is refused with `BAD_DATA`.
+  spent; one that is missing is made (`0700`); one that is a file, or one nothing can be written in, is refused with
+  `BAD_DATA`, still before the question is spent.
+
+It has a deny list of its own, the counterpart of the one above, checked whoever answered and after links are
+followed: this package's own configuration, state (approvals, the audit log, download records), data and credential
+folders; the home itself, and any hidden folder at any depth below it — `~/.ssh`, `~/.config`, `~/.aws`, `~/.local`,
+a project's `.git` or `.github` — and a `.git` folder anywhere; `~/Library`; on Windows the profile's `AppData`,
+`%APPDATA%`, `%LOCALAPPDATA%`, `%PROGRAMDATA%`, the Windows folder, Program Files, a drive's root, a network share, a
+device path and a path with no drive; and the system's folders — `/`, `/etc`, `/usr`, `/bin`, `/sbin`, `/lib`, `/var`
+(but not the per-user temporary folders in it), `/opt`, `/System`, `/Library`, `/Applications`, `/private/etc`,
+`/private/var`. A folder on it is refused with `BAD_DATA`, and a default folder on it — a server started in the home —
+is shown in the question as unavailable, with the reason, rather than offered.
+
+Under the mailbox's `confirm` change policy the answer has to come from the person where an agent cannot give it — at
+their own terminal (`agent-gmail approve <choiceId>`) or in a trusted client's form — and a `saveTo` in the arguments
+is refused with `APPROVAL_PENDING`.
 
 The folder is resolved through its links — the person named it, so a link in it goes where they meant. What is
 never followed is anything at a file's own name inside it: each file is created with `O_EXCL` and no-follow, so a

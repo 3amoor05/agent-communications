@@ -91,19 +91,29 @@ file uploaded earlier and shared into the conversation later is not among them, 
 
 **Where it is saved is the person's to say.** The first call saves nothing: it answers `destinationRequired: true`
 with the `files` — each name, size, uploader and the message it came from — anything it would not save in `skipped`,
-a `question`, the `options` with the exact paths of their Downloads folder and of the current folder, and a
-`choiceId`. Show them the question and the files, and wait. Their answer is `downloads` (the default), `current`, or
-a folder they name — absolute or starting with `~`, made if missing; a relative one is refused. Then call again with
-the same arguments, `saveTo` set to their answer, and the `choiceId`. The command does the same when you run it: it
-exits `10` with the question, and you run it again with `--to <answer> --choice <id>`; `--to` alone is refused from
-an agent. A `choiceId` is for those files only, is used once, and expires after ten minutes; never answer it
-yourself, and never keep one for later. `out` is gone.
+a `question`, the `options` with the exact paths of their Downloads folder and of the current folder (either marked
+`unavailable`, with the reason, when no download may be saved there), a `policy`, and a `choiceId`. Show them the
+question and the files, and wait. Their answer is `downloads` (the default), `current`, or a folder they name —
+absolute or starting with `~`, made if missing; a relative one is refused. Under the workspace's `chat` change policy,
+call again with the same arguments, `saveTo` set to their answer, and the `choiceId`. Under `confirm` they answer it
+themselves with `agent-slack approve <choiceId>` in their own terminal, and you call again with the `choiceId` alone;
+a `saveTo` of yours is refused. The command does the same when you run it: it exits `10` with the question, and you
+run it again with `--to <answer> --choice <id>` (or `--choice <id>` alone under `confirm`); `--to` without
+`--choice` is a person's at their own terminal, and from you it is refused. A `choiceId` is for those files only, is
+used once, and expires after ten minutes; never answer it yourself, and never keep one for later. `out` is gone.
+
+**Some folders are never saved into**, whoever answers: a hidden folder anywhere in the home (`~/.ssh`, `~/.config`,
+a project's `.git`), `~/Library`, the home itself, this package's own folders, the system's folders, and on Windows
+`AppData`, Program Files, a share or a path with no drive — and a folder that leads to one through a link. The refusal
+(`BAD_DATA`) leaves the question open: ask the person for another folder.
 
 Everything about a file was chosen by whoever uploaded it, the bytes and the name alike. So:
 
 - **It is saved under its uploader's name, made safe**, in the folder the person chose and nowhere else: no path in
-  it, no leading dot (`.envrc` becomes `envrc`), no control or bidi characters, no Windows device name, and never
-  over a file already there — the new one is `-2`. Nothing else is written in the folder.
+  it, no leading dot, no control or bidi characters, no Windows device name, and never over a file already there —
+  the new one is `-2`. A name tools load on their own — `CLAUDE.md`, `Makefile`, `package.json`, `.envrc`,
+  `authorized_keys`, a `.plist` — is saved as `download-<name>` and flagged `auto-read`, and the question names it
+  before the person answers. Nothing else is written in the folder.
 - **The name, the title and the uploader's name come back inside `<untrusted-content>`**, and so does the type
   unless it is a plain MIME type such as `application/pdf`. The uploader's client chose all four, a bare type
   included. The name it was saved under, `savedAs`, and its `path` come back inside it too unless that name is
