@@ -31,6 +31,11 @@ export interface GmailContextOptions {
   now?: () => Date;
   /** Which surface is calling: for the audit log, and for refusals that name the next step as that surface takes it. */
   surface?: 'cli' | 'mcp';
+  /**
+   * The folder the process was started in: what a download offers as "the current folder". The process's own when
+   * left out; a test names a temporary one, since a test process cannot change its own without changing every test's.
+   */
+  cwd?: string | undefined;
   /** Replaced in tests by a fake; the default builds the real Google transport. */
   createTransport?: (request: TransportRequest) => GmailTransport;
 }
@@ -47,6 +52,7 @@ export class GmailContext {
   readonly flows: FlowStore;
   readonly now: () => Date;
   readonly surface: 'cli' | 'mcp';
+  readonly cwd: string;
   readonly #createTransport: (request: TransportRequest) => GmailTransport;
   readonly #transports = new Map<string, GmailTransport>();
 
@@ -56,6 +62,7 @@ export class GmailContext {
     this.endpoints = resolveEndpoints(this.env);
     this.now = options.now ?? (() => new Date());
     this.surface = options.surface ?? 'cli';
+    this.cwd = options.cwd ?? process.cwd();
     this.flows = new FlowStore(this.core.paths.stateDir, this.now, this.surface);
     this.#createTransport = options.createTransport ?? defaultTransport;
   }

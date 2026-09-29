@@ -7,6 +7,8 @@ import {
   canPrompt,
   colorEnabled,
   commandPathOf,
+  DOWNLOAD_CLAIM,
+  downloadAtTerminal,
   EXIT_CODES,
   exemptFromUpdateGate,
   type GatedChange,
@@ -15,6 +17,7 @@ import {
   type OutputOptions,
   openCore,
   paint,
+  refuseRetiredOut,
   refuseUnclaimedApproval,
   renderChannelPreview,
   renderPrune,
@@ -50,7 +53,13 @@ import {
 } from '../operations/changes.ts';
 import { runDoctor } from '../operations/doctor.ts';
 import { createDraft, deleteOwnDraft, listDrafts, showDraft } from '../operations/drafts.ts';
-import { downloadFiles, downloadSelection, type FileDownloader } from '../operations/files.ts';
+import {
+  downloadFiles,
+  downloadSelection,
+  type FileDownloader,
+  type FileDownloadQuestion,
+  type FileDownloadResult,
+} from '../operations/files.ts';
 import type { ProbeFetch } from '../operations/identity.ts';
 import { checkedPort, manifestFor } from '../operations/manifest.ts';
 import { prepareDraftPost, react, sendPost } from '../operations/post.ts';
@@ -82,6 +91,7 @@ import {
   renderDraft,
   renderDrafts,
   renderFileDownload,
+  renderFileDownloadQuestion,
   renderFiles,
   renderHistory,
   renderInstall,
@@ -259,6 +269,8 @@ configuration problem.`,
           streams,
           approveCommand: 'agent-slack approve',
           approvals: approvalsOf(command),
+          // A download's `--choice` is the question the person just answered: held to that kind, as the tool's is.
+          approvalClaim: path.join(' ') === 'files download' ? DOWNLOAD_CLAIM : undefined,
           ...terminalUpdateHooks(core, env, { output: output(), streams, approveCommand: 'agent-slack approve' }),
         });
       },
@@ -841,17 +853,23 @@ configuration problem.`,
 
   files
     .command('download')
-    .description('save files to the downloads folder: by id, from one message, or from a conversation. Opens nothing')
+    .description(
+      'save files where you say — Downloads, the current folder, or a folder you name: by id, from one message, or from a conversation. Opens nothing',
+    )
     .option('--workspace <name>', 'which workspace, as `organisation/slack`')
     .option('--file <id...>', 'these files, by Slack file id')
     .addOption(messageOption)
     .option('--channel <id>', 'the files shared in this conversation — a channel, a DM or a group DM — newest first')
     // Uploaded, not shared: `files.list` filters on when a file was created, in whole seconds.
     .option('--since <ts>', 'with --channel: only files uploaded at or after this Slack timestamp, to the second')
-    .option('--out <folder>', 'a folder inside the downloads root')
     .option('--max-files <n>', 'stop after this many files: 1 to 200 (default 50)')
+    .option('--to <where>', 'save without asking: downloads, current, or a folder (absolute, or starting with ~)')
+    .option('--choice <id>', 'with --to: the choice id the question came with, when an agent asked it')
+    // Removed: the person chooses the folder now. Kept only to say so, rather than as Commander's "unknown option".
+    .addOption(new Option('--out <folder>').hideHelp())
     .action(
       act(async (context, options, flags: Options) => {
+        refuseRetiredOut(flags.out, 'cli');
         /*
          * `files` takes `--workspace` and `--channel` too, and Commander gives a name both declare to the parent — so
          * the subcommand's own is always undefined, as `mcp install` found with `--workspace`. Either counts.
@@ -885,15 +903,41 @@ configuration problem.`,
           channel: message?.[0] ?? channel,
           ts: message?.[1],
           since: flags.since as string | undefined,
-          out: flags.out as string | undefined,
           maxFiles: flags.maxFiles,
           surface: context.surface,
         };
-        // Checked before the workspace is opened, as `slack_file_download` checks it: see `downloadSelection`.
-        downloadSelection(request);
+        const to = flags.to === undefined ? undefined : String(flags.to);
+        const choice = flags.choice === undefined ? undefined : String(flags.choice);
+        // Checked before the workspace is opened, as `slack_file_download` checks it: see `downloadSelection`. The
+        // answer is checked with it, in the form the command will pass it.
+        downloadSelection({
+          ...request,
+          saveTo: to,
+          choiceId: choice,
+          personChose: choice === undefined && agentMarker(env) === null,
+        });
         const opened = await session(context, workspace);
-        const result = await downloadFiles(context, opened, request, { download: deps.fileDownload });
-        writeResult(result, output(), (data) => renderFileDownload(data, options.color), streams);
+        const result = await downloadAtTerminal<FileDownloadQuestion>({
+          core: context.core,
+          download: (answer) =>
+            downloadFiles(context, opened, { ...request, ...answer }, { download: deps.fileDownload }),
+          to,
+          choice,
+          env,
+          output: output(),
+          command: [
+            'agent-slack files download',
+            `--workspace ${workspace}`,
+            ...(request.fileIds === undefined ? [] : [`--file ${request.fileIds.join(' ')}`]),
+            ...(message === undefined ? [] : [`--message ${message.join(' ')}`]),
+            ...(message === undefined && channel !== undefined ? [`--channel ${channel}`] : []),
+            ...(request.since === undefined ? [] : [`--since ${request.since}`]),
+            ...(request.maxFiles === undefined ? [] : [`--max-files ${String(request.maxFiles)}`]),
+          ].join(' '),
+          render: (question) => renderFileDownloadQuestion(question, options.color),
+          streams,
+        });
+        writeResult(result as FileDownloadResult, output(), (data) => renderFileDownload(data, options.color), streams);
       }),
     );
 

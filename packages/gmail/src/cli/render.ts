@@ -1,7 +1,7 @@
-import { type InstallResult, paint, renderInstall, type ServerInstallResult } from '@agentcomms/core';
+import { type InstallResult, paint, renderInstall, type ServerInstallResult, sizeOf } from '@agentcomms/core';
 import type { RegistrationIntent } from '../auth/flows.ts';
 import type { LabelSummary, SendAsSummary } from '../operations/analyse.ts';
-import type { DownloadResult, FindAttachmentsResult } from '../operations/attachments.ts';
+import type { DownloadQuestion, DownloadResult, FindAttachmentsResult } from '../operations/attachments.ts';
 import type { ClientAddResult, ClientView } from '../operations/clients.ts';
 import type { ConsentResult } from '../operations/consent.ts';
 import type { ContactsResult, FollowUpsResult } from '../operations/contacts.ts';
@@ -448,20 +448,52 @@ export function renderAttachments(result: FindAttachmentsResult, color: boolean)
   return lines.join('\n');
 }
 
+/**
+ * The question a download asks before it saves anything: each file — its size, where it came from, and the name the
+ * sender gave it, wrapped — and then the three places, the first two by their paths.
+ */
+export function renderDownloadQuestion(question: DownloadQuestion, color: boolean): string {
+  const lines: string[] = [];
+  for (const [index, file] of question.files.entries()) {
+    lines.push(
+      `${paint(color, 'dim', String(index + 1).padStart(2))} ${sizeOf(file.size)} · message ${file.messageId} · part ${file.partId} · from ${file.from ?? 'unknown'}${
+        file.riskFlags.length ? paint(color, 'yellow', `  [${file.riskFlags.join(', ')}]`) : ''
+      }`,
+      file.filename,
+    );
+  }
+  for (const skip of question.skipped) {
+    lines.push(paint(color, 'yellow', `not saved ${skip.messageId}: ${skip.reason}`));
+  }
+  lines.push('', question.question);
+  return lines.join('\n');
+}
+
+/** A field a result carries inside the untrusted-content envelope, rather than bare. */
+function isWrapped(value: string): boolean {
+  return value.startsWith('<untrusted-content');
+}
+
 export function renderDownloads(result: DownloadResult, color: boolean): string {
   const lines: string[] = [];
   for (const file of result.files) {
-    // The path is the package's own; what the sender called the file follows it, wrapped.
+    // Where it went, and how big it is; then the name the sender gave it, wrapped. A path that ends in the sender's
+    // words is wrapped too, and gets lines of its own rather than sitting inside one of the tool's.
+    const wrapped = isWrapped(file.path);
     lines.push(
-      `${file.duplicate ? paint(color, 'dim', 'same as') : 'saved '} ${file.path}` +
+      `${file.duplicate ? paint(color, 'dim', 'same as') : 'saved '} ${wrapped ? `in ${result.folder}` : file.path} · ${sizeOf(file.size)} · from ${file.from ?? 'unknown'}` +
         (file.riskFlags.length ? paint(color, 'yellow', `  [${file.riskFlags.join(', ')}]`) : ''),
+      ...(wrapped ? [file.path] : []),
       file.filename,
     );
   }
   for (const skip of result.skipped) lines.push(paint(color, 'yellow', `skipped ${skip.messageId}: ${skip.reason}`));
+  const saved = result.files.filter((file) => !file.duplicate).length;
   lines.push(
     '',
-    `${result.files.filter((file) => !file.duplicate).length} file(s), ${Math.round(result.totalBytes / 1024)} KB, listed in ${result.manifestPath}`,
+    result.folder === null
+      ? 'Nothing was saved.'
+      : `${saved} file(s), ${sizeOf(result.totalBytes)}, saved in ${result.folder}.`,
     paint(color, 'dim', 'Nothing was opened or run.'),
   );
   return lines.join('\n');

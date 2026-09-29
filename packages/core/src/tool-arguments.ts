@@ -28,6 +28,16 @@ import type { ToolGate } from './update-gate.ts';
 /** What a server answers a refused call with: its own error envelope, the same as for every other refusal. */
 export type RefuseToolCall = (error: CommsError) => unknown;
 
+/**
+ * Arguments a tool took once and takes no longer, by tool and then by argument, each with what to do instead:
+ * `{ gmail_attachment_download: { out: 'Leave out `out` …' } }`.
+ *
+ * Such a key is refused as any key the schema does not declare is — it is not in the published schema, and it reaches
+ * nothing — but the refusal says it was removed and gives this hint, rather than the list of what the tool takes: an
+ * agent that learned the old argument is told what replaced it, not left to guess from a list.
+ */
+export type RetiredArguments = Readonly<Record<string, Readonly<Record<string, string>>>>;
+
 type Handler = (...args: unknown[]) => unknown;
 
 /** A zod object schema, told apart without `instanceof`: a server and core may each hold their own copy of zod. */
@@ -70,7 +80,12 @@ const TARGET = 'draft-2020-12';
  * in, because what it asks the registry with is each server's own — and WhatsApp's is nothing at all. A call it
  * answers reaches nothing, as a refused one does.
  */
-export function strictToolArguments(server: object, refuse: RefuseToolCall, gate?: ToolGate): void {
+export function strictToolArguments(
+  server: object,
+  refuse: RefuseToolCall,
+  gate?: ToolGate,
+  retired: RetiredArguments = {},
+): void {
   const target = server as { registerTool?: unknown; [APPLIED]?: true };
   if (typeof target.registerTool !== 'function') {
     throw new Error('strictToolArguments needs an MCP server: this has no registerTool');
@@ -87,7 +102,7 @@ export function strictToolArguments(server: object, refuse: RefuseToolCall, gate
     const published = schema['~standard'].jsonSchema.input({ target: TARGET }) as JsonSchema;
     return register(name, { ...config, inputSchema: passThrough(schema) }, async (input: unknown, context: unknown) => {
       const parsed = await schema.safeParseAsync(input ?? {});
-      if (!parsed.success) return refuse(refusal(name, published, input, parsed.error.issues));
+      if (!parsed.success) return refuse(refusal(name, published, input, parsed.error.issues, retired[name] ?? {}));
       const stopped = gate ? await gate(name, parsed.data as Record<string, unknown>) : null;
       if (stopped !== null) return stopped;
       return declared ? handler(parsed.data, context) : handler(context);
@@ -156,7 +171,13 @@ function passThrough(schema: ObjectSchema): object {
 // ── The refusal ─────────────────────────────────────────────────────────────────────────────────────────────────
 
 /** A USAGE refusal naming what was wrong and what the tool takes. */
-function refusal(tool: string, published: JsonSchema, input: unknown, issues: readonly z.core.$ZodIssue[]): CommsError {
+function refusal(
+  tool: string,
+  published: JsonSchema,
+  input: unknown,
+  issues: readonly z.core.$ZodIssue[],
+  retired: Readonly<Record<string, string>>,
+): CommsError {
   const properties = published.properties ?? {};
   const takes = Object.keys(properties);
   const required = new Set(published.required ?? []);
@@ -171,6 +192,21 @@ function refusal(tool: string, published: JsonSchema, input: unknown, issues: re
   const unknown = issues.flatMap((issue) =>
     issue.code === 'unrecognized_keys' && issue.path.length === 0 ? issue.keys : [],
   );
+  // A key the tool took once: said so, with what replaced it, before anything else about the call.
+  const removed = unknown.filter((key) => Object.hasOwn(retired, key));
+  if (removed.length > 0) {
+    return new CommsError(
+      'USAGE',
+      `${tool} no longer takes ${spoken(
+        removed.map((key) => `\`${key}\``),
+        'or',
+      )}`,
+      {
+        hint: removed.map((key) => retired[key]).join(' '),
+        details: { tool, retired: removed, unknown, takes },
+      },
+    );
+  }
   if (unknown.length > 0) {
     return new CommsError(
       'USAGE',

@@ -5,7 +5,12 @@ import { isDangerous } from './chars.ts';
 import { CommsError } from './errors.ts';
 import { expandHome } from './paths.ts';
 
-const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])$/i;
+/*
+ * The device names Windows opens instead of a file of that name: the old four, the numbered ports — the superscript
+ * digits too, which Windows reads as `1`, `2` and `3` — and the two console handles. A file saved as `con.pdf` or
+ * `COM¹.txt` is a write to a device there, not a file.
+ */
+const WINDOWS_RESERVED = /^(con|prn|aux|nul|conin\$|conout\$|com[0-9¹²³]|lpt[0-9¹²³])$/i;
 // Path separators, C0 control characters, DEL, and characters Windows refuses in file names.
 // biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are exactly what this strips
 const UNSAFE_FILENAME_CHARS = /[/\\\u0000-\u001f\u007f<>:"|?*]/g;
@@ -39,8 +44,9 @@ export function safeFilename(name: string, maxBytes = 255, fallback = 'attachmen
   if (cleaned === '') cleaned = fallback;
   const extension = extname(cleaned);
   // Windows resolves the segment before the **first** dot, not the last: `con.tar.gz` is still `CON`, and
-  // `extname` only strips `.gz`. Checked against the first segment for that reason.
-  if (WINDOWS_RESERVED.test(cleaned.split('.')[0] ?? cleaned)) cleaned = `_${cleaned}`;
+  // `extname` only strips `.gz`. Checked against the first segment for that reason — without the spaces that end it,
+  // which Windows drops before it compares: `con .txt` is `CON` too.
+  if (WINDOWS_RESERVED.test((cleaned.split('.')[0] ?? cleaned).trimEnd())) cleaned = `_${cleaned}`;
   if (Buffer.byteLength(cleaned, 'utf8') <= maxBytes) return cleaned;
   const keptExtension = Buffer.byteLength(extension, 'utf8') < maxBytes / 2 ? extension : '';
   const keptStem = keptExtension ? cleaned.slice(0, -keptExtension.length) : cleaned;

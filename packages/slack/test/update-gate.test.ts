@@ -8,7 +8,7 @@ import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { run } from '../src/cli/program.ts';
 import { createSlackMcpServer } from '../src/mcp/server.ts';
-import type { FileDownloader, FileDownloadResult } from '../src/operations/files.ts';
+import type { FileDownloader, FileDownloadQuestion, FileDownloadResult } from '../src/operations/files.ts';
 import { type Harness, newHarness } from './support/harness.ts';
 
 /*
@@ -489,22 +489,29 @@ test('the download goes ahead when the update is put off, switched off, turned o
       assert.equal(code(control.result), 'UPDATE_REQUIRED', `${label}: the control call was not stopped`);
     }
     await apply(tool.harness);
-    const passed = await downloadOverMcp(tool.harness);
+    // Asked first — nothing fetched — then answered, as the person would.
+    const asked = await downloadOverMcp(tool.harness);
+    assert.notEqual(asked.result.isError, true, `${label}: ${JSON.stringify(asked.result.structuredContent)}`);
+    const question = asked.result.structuredContent as unknown as FileDownloadQuestion;
+    assert.equal(question.destinationRequired, true, `${label}: ${JSON.stringify(question)}`);
+    assert.deepEqual(asked.transport, [], `${label}: fetched before the person answered`);
+    const passed = await downloadOverMcp(tool.harness, { saveTo: 'downloads', choiceId: question.choiceId });
     assert.notEqual(passed.result.isError, true, `${label}: ${JSON.stringify(passed.result.structuredContent)}`);
     const result = passed.result.structuredContent as unknown as FileDownloadResult;
     assert.equal(result.files.length, 1, `${label}: ${JSON.stringify(result)}`);
     assert.ok(savedInside(tool.root, result.files[0]?.path), `${label}: the saved file is not on disk`);
     assert.deepEqual(passed.transport, [FILE_ID], `${label}: the file was not fetched over MCP`);
 
-    // At the command, with no terminal: exit 0 and the file on disk, where the same command was stopped first.
+    // At the command, with no terminal, as a person's script runs it — saying where by `--to`: exit 0 and the file on
+    // disk, where the same command was stopped first.
     const command = await downloadHarness();
     if (label !== 'offline') {
       updateOut(command.harness);
-      const control = await downloadAtCommand(command.harness);
+      const control = await downloadAtCommand(command.harness, ['--to', 'downloads']);
       assert.equal(control.exit, 11, `${label}: the control command was not stopped`);
     }
     await apply(command.harness);
-    const ran = await downloadAtCommand(command.harness);
+    const ran = await downloadAtCommand(command.harness, ['--to', 'downloads']);
     assert.equal(ran.exit, EXIT_CODES.OK, `${label}: ${ran.stdout}${ran.stderr}`);
     const data = (JSON.parse(ran.stdout) as { data: FileDownloadResult }).data;
     assert.equal(data.files.length, 1, `${label}: ${ran.stdout}`);
@@ -513,13 +520,20 @@ test('the download goes ahead when the update is put off, switched off, turned o
   }
 });
 
-test('the download takes no approval, so one it claims is refused as usage and cannot walk it past the stop', async () => {
-  // The stop lets through a call carrying an approval this machine holds (§2). A download needs no approval and
-  // declares none: `approvalId` on the tool, or `--approval` on the command, is refused before the gate is asked — so
-  // even a real one opens nothing here, and the download stays stopped until the update or "not now".
+test('the download claims only its own question, so another approval cannot walk it past the stop', async () => {
+  // The stop lets through a call carrying an approval this machine holds (§2). A download takes no approval but its
+  // own question's `choiceId`: `approvalId` on the tool, or `--approval` on the command, is refused before the gate is
+  // asked, and a change's approval passed as the question's id claims nothing — so even a real one opens nothing
+  // here, and the download stays stopped until the update or "not now".
   const { harness, root } = await downloadHarness();
   const approvalId = await heldApproval(harness);
   updateOut(harness);
+
+  const borrowed = await downloadOverMcp(harness, { saveTo: 'downloads', choiceId: approvalId });
+  assert.equal(code(borrowed.result), 'UPDATE_REQUIRED', JSON.stringify(borrowed.result.structuredContent));
+  const borrowedAtCommand = await downloadAtCommand(harness, ['--to', 'downloads', '--choice', approvalId]);
+  assert.equal(borrowedAtCommand.exit, EXIT_CODES.UPDATE, `${borrowedAtCommand.stdout}${borrowedAtCommand.stderr}`);
+  assert.equal((await harness.core.approvals.get(approvalId))?.state, 'pending', 'the change’s approval was spent');
 
   const tool = await downloadOverMcp(harness, { approvalId });
   assert.equal(code(tool.result), 'USAGE', JSON.stringify(tool.result.structuredContent));
@@ -532,4 +546,34 @@ test('the download takes no approval, so one it claims is refused as usage and c
 
   assert.deepEqual(saved(root), [], 'something was written under the downloads root');
   assert.equal(await downloadAudits(harness), 0, 'a download was audited');
+});
+
+test('the person’s answer goes past the stop by its question’s choice id; the answer alone does not', async () => {
+  const { harness, root } = await downloadHarness();
+  // Asked before the update was found, as a question answered moments before the check landed.
+  const asked = await downloadOverMcp(harness);
+  const question = asked.result.structuredContent as unknown as FileDownloadQuestion;
+  assert.equal(question.destinationRequired, true, JSON.stringify(question));
+  const again = await downloadOverMcp(harness);
+  const second = again.result.structuredContent as unknown as FileDownloadQuestion;
+  updateOut(harness);
+
+  // A new request, and an answer to no question, are stopped like any new call; nothing reaches Slack.
+  for (const args of [{}, { saveTo: 'downloads' }]) {
+    const stopped = await downloadOverMcp(harness, args);
+    assert.equal(code(stopped.result), 'UPDATE_REQUIRED', JSON.stringify(args));
+    assert.deepEqual([...stopped.slack, ...stopped.transport], [], JSON.stringify(args));
+  }
+  const bare = await downloadAtCommand(harness, ['--to', 'downloads']);
+  assert.equal(bare.exit, EXIT_CODES.UPDATE, `${bare.stdout}${bare.stderr}`);
+  assert.deepEqual(saved(root), [], 'something was saved past the stop');
+
+  // The answer to the question the person was asked goes through, over MCP and at the command.
+  const answered = await downloadOverMcp(harness, { saveTo: 'downloads', choiceId: question.choiceId });
+  assert.notEqual(answered.result.isError, true, JSON.stringify(answered.result.structuredContent));
+  assert.deepEqual(answered.transport, [FILE_ID]);
+  const atCommand = await downloadAtCommand(harness, ['--to', 'downloads', '--choice', second.choiceId]);
+  assert.equal(atCommand.exit, EXIT_CODES.OK, `${atCommand.stdout}${atCommand.stderr}`);
+  assert.deepEqual(saved(root), ['numbers-2.pdf', 'numbers.pdf']);
+  assert.equal(await downloadAudits(harness), 2);
 });

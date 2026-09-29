@@ -1,10 +1,10 @@
-import { escapeForDisplay, paint, stripInvisible, truncateDisplay } from '@agentcomms/core';
+import { escapeForDisplay, paint, sizeOf, stripInvisible, truncateDisplay } from '@agentcomms/core';
 import { renderManifest } from '../manifest.ts';
 import type { AppCreated, AppUpdated } from '../operations/app.ts';
 import type { AppUpdateNeeded, PolicyResult } from '../operations/changes.ts';
 import type { DoctorResult } from '../operations/doctor.ts';
 import type { DeletedDraft, DraftView } from '../operations/drafts.ts';
-import type { FileDownloadResult } from '../operations/files.ts';
+import type { FileDownloadQuestion, FileDownloadResult } from '../operations/files.ts';
 import type { ModeReport } from '../operations/mode.ts';
 import type {
   ChannelsResult,
@@ -563,22 +563,56 @@ export function renderFiles(result: FilesResult, color: boolean): string {
   return lines.join('\n');
 }
 
+/** Where a file came from, in Slack's ids: the message it was shared in, or why that is not known. */
+function sharedIn(file: { channel: string | null; ts: string | null; lookupFailed: string | null }): string {
+  if (file.channel !== null && file.ts !== null) return `shared in ${file.channel} at ${file.ts}`;
+  return file.lookupFailed === null ? 'shared in no message Slack lists' : 'its message could not be looked up';
+}
+
 /**
- * A download, as Gmail's is shown: each path — this package's own — then the name the uploader gave the file, still in
- * its envelope; what was skipped and why; and where the manifest is.
+ * The question a download asks before it saves anything, as Gmail's is shown: each file — its size, who uploaded it
+ * and where, the name they gave it and the name they go by, both wrapped — then the three places, the first two by
+ * their paths.
+ */
+export function renderFileDownloadQuestion(question: FileDownloadQuestion, color: boolean): string {
+  const lines: string[] = [];
+  for (const [index, file] of question.files.entries()) {
+    const size = file.size === null ? 'size not given' : sizeOf(file.size);
+    lines.push(
+      `${paint(color, 'dim', String(index + 1).padStart(2))} ${size} · ${file.fileId} · uploaded by ${file.uploader.id ?? 'unknown'} · ${sharedIn(file)}${
+        file.riskFlags.length ? paint(color, 'yellow', `  [${file.riskFlags.join(', ')}]`) : ''
+      }`,
+      file.name,
+    );
+    if (file.uploader.name !== null) lines.push(file.uploader.name);
+  }
+  for (const skip of question.skipped) lines.push(paint(color, 'yellow', `not saved ${skip.fileId}: ${skip.reason}`));
+  if (!question.complete) {
+    lines.push(paint(color, 'yellow', 'More files remained than --max-files allows; not every file is listed.'));
+  }
+  lines.push('', question.question);
+  return lines.join('\n');
+}
+
+/**
+ * A download, as Gmail's is shown: each path, its size, who uploaded it and where, then the name the uploader gave the
+ * file, still in its envelope; what was skipped and why; and the folder it was all saved in.
  */
 export function renderFileDownload(result: FileDownloadResult, color: boolean): string {
   const lines: string[] = [];
   for (const file of result.files) {
+    // A path that ends in the uploader's words is wrapped, and gets lines of its own rather than sitting in the tool's.
+    const wrapped = file.path.startsWith('<untrusted-content');
     lines.push(
-      `saved ${file.path}${file.riskFlags.length ? paint(color, 'yellow', `  [${file.riskFlags.join(', ')}]`) : ''}`,
+      `saved ${wrapped ? `in ${result.folder}` : file.path} · ${sizeOf(file.size)} · uploaded by ${file.uploader.id ?? 'unknown'} · ${sharedIn(file)}${
+        file.riskFlags.length ? paint(color, 'yellow', `  [${file.riskFlags.join(', ')}]`) : ''
+      }`,
+      ...(wrapped ? [file.path] : []),
       file.name,
     );
-    // Undated because its message could not be learnt, not because it has none: said, so it is not read as the latter.
+    // Without a message because it could not be learnt, not because it has none: said, so it is not read as the latter.
     if (file.lookupFailed !== null) {
-      lines.push(
-        paint(color, 'yellow', `undated: the message it was shared in could not be looked up: ${file.lookupFailed}`),
-      );
+      lines.push(paint(color, 'yellow', `the message it was shared in could not be looked up: ${file.lookupFailed}`));
     }
   }
   for (const skip of result.skipped) lines.push(paint(color, 'yellow', `skipped ${skip.fileId}: ${skip.reason}`));
@@ -587,7 +621,9 @@ export function renderFileDownload(result: FileDownloadResult, color: boolean): 
   }
   lines.push(
     '',
-    `${result.files.length} file(s), ${Math.round(result.totalBytes / 1024)} KB, listed in ${result.manifestPath}`,
+    result.folder === null
+      ? 'Nothing was saved.'
+      : `${result.files.length} file(s), ${sizeOf(result.totalBytes)}, saved in ${result.folder}.`,
     paint(color, 'dim', 'Nothing was opened or run.'),
   );
   return lines.join('\n');

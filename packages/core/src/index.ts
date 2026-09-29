@@ -48,6 +48,7 @@ export * from './plans.ts';
 export * from './reconcile.ts';
 export * from './render.ts';
 export * from './sanitize.ts';
+export * from './save-destination.ts';
 export * from './saved-files.ts';
 export * from './secrets.ts';
 export * from './state.ts';

@@ -8,6 +8,8 @@ import {
   canPrompt,
   colorEnabled,
   commandPathOf,
+  DOWNLOAD_CLAIM,
+  downloadAtTerminal,
   EXIT_CODES,
   exemptFromUpdateGate,
   type GatedChange,
@@ -17,6 +19,7 @@ import {
   type OutputOptions,
   openCore,
   paint,
+  refuseRetiredOut,
   refuseUnclaimedApproval,
   runCommand,
   type ServerInstallResult,
@@ -34,7 +37,12 @@ import { TIERS } from '../auth/scopes.ts';
 import { GmailContext, type GmailContextOptions } from '../context.ts';
 import type { Launcher, SupportedClient } from '../mcp/install.ts';
 import { listLabels, listSendAs, threadTimeline } from '../operations/analyse.ts';
-import { downloadAttachments, findAttachments } from '../operations/attachments.ts';
+import {
+  type DownloadQuestion,
+  type DownloadResult,
+  downloadAttachments,
+  findAttachments,
+} from '../operations/attachments.ts';
 import { clientAddChange, clientList, clientRemoveChange, STORE_KINDS } from '../operations/clients.ts';
 import { confirmClientAddChange, listConfirmClients, removeConfirmClient } from '../operations/confirm-clients.ts';
 import { CONTACT_SOURCES, FOLLOW_UP_DIRECTIONS, followUps, searchContacts } from '../operations/contacts.ts';
@@ -91,6 +99,7 @@ import {
   renderClients,
   renderContacts,
   renderDoctor,
+  renderDownloadQuestion,
   renderDownloads,
   renderDraft,
   renderDrafts,
@@ -207,6 +216,8 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
           streams,
           approveCommand: 'agent-gmail approve',
           approvals: approvalsOf(command),
+          // A download's `--choice` is the question the person just answered: held to that kind, as the tool's is.
+          approvalClaim: path.join(' ') === 'attachments download' ? DOWNLOAD_CLAIM : undefined,
           ...terminalUpdateHooks(core, env, { output: output(), streams, approveCommand: 'agent-gmail approve' }),
         });
       },
@@ -940,24 +951,45 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
   attachments
     .command('download <messageId...>')
     .description(
-      'download the attachments of one or more messages under the downloads folder, each saved by its part id',
+      'save the attachments of one or more messages where you say: Downloads, the current folder, or a folder you name',
     )
     .requiredOption('--inbox <alias>', 'which mailbox')
     .option('--part <partId>', 'one specific attachment')
-    .option('--out <subpath>', 'a folder inside the downloads root')
     .option('--max-files <number>', 'stop after this many files: 1 to 200 (default 50)')
+    .option('--to <where>', 'save without asking: downloads, current, or a folder (absolute, or starting with ~)')
+    .option('--choice <id>', 'with --to: the choice id the question came with, when an agent asked it')
+    // Removed: the person chooses the folder now. Kept only to say so, rather than as Commander's "unknown option".
+    .addOption(new Option('--out <subpath>').hideHelp())
     .action(
       act(async (context, globalOptions, messageIds: string[], options: Options) => {
-        const result = await downloadAttachments(
-          context,
-          String(options.inbox),
-          messageIds.map((messageId) => ({ messageId, partId: options.part ? String(options.part) : undefined })),
-          {
-            out: options.out ? String(options.out) : undefined,
-            maxFiles: options.maxFiles,
-          },
-        );
-        writeResult(result, output(), (data) => renderDownloads(data, globalOptions.color), streams);
+        refuseRetiredOut(options.out, 'cli');
+        const inbox = String(options.inbox);
+        const part = options.part ? String(options.part) : undefined;
+        const result = await downloadAtTerminal<DownloadQuestion>({
+          core: context.core,
+          download: (answer) =>
+            downloadAttachments(
+              context,
+              inbox,
+              messageIds.map((messageId) => ({ messageId, partId: part })),
+              { maxFiles: options.maxFiles, ...answer },
+            ),
+          to: options.to === undefined ? undefined : String(options.to),
+          choice: options.choice === undefined ? undefined : String(options.choice),
+          env,
+          output: output(),
+          noInput: globalOptions.noInput,
+          command: [
+            'agent-gmail attachments download',
+            ...messageIds,
+            `--inbox ${inbox}`,
+            ...(part === undefined ? [] : [`--part ${part}`]),
+            ...(options.maxFiles === undefined ? [] : [`--max-files ${String(options.maxFiles)}`]),
+          ].join(' '),
+          render: (question) => renderDownloadQuestion(question, globalOptions.color),
+          streams,
+        });
+        writeResult(result as DownloadResult, output(), (data) => renderDownloads(data, globalOptions.color), streams);
       }),
     );
 

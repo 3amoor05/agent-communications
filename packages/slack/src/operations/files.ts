@@ -1,17 +1,23 @@
 import { createHash } from 'node:crypto';
-import { mkdir, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { rm } from 'node:fs/promises';
+import { basename } from 'node:path';
 import {
+  askWhereToSave,
+  type CheckedAnswer,
   CommsError,
+  checkDownloadAnswer,
   createUniqueFile,
-  ensurePrivateDir,
-  expandHome,
+  type DestinationQuestion,
+  type DownloadAnswer,
+  type DownloadRequest,
+  downloadRecordPath,
   fileRisks,
-  homeDirectory,
-  keptExtension,
+  isPlainFileName,
   newBoundary,
-  relativeSubpath,
-  resolveInsideRoot,
+  type SaveChoice,
+  savedFileName,
+  saveFolders,
+  settleDestination,
   wrapUntrusted,
   writeFileAtomic,
 } from '@agentcomms/core';
@@ -24,20 +30,22 @@ import { NameBook } from './people.ts';
 import type { WorkspaceSession } from './session.ts';
 
 /**
- * Saving files from Slack to disk: by id, from one message, or from a conversation.
+ * Saving files from Slack to disk: by id, from one message, or from a conversation — where the person says.
  *
  * Gmail's attachment download is the model, with its weak spots fixed. Nothing is ever opened or run, and nothing is
- * written outside the downloads root. No part of a saved path is anybody's words: a file is saved as
- * `<date>_<channel>-<ts>/<file id>[.ext]`, every part of it Slack's own ids and times, checked against a pattern before
- * it is joined to anything. The write is exclusive and refuses to follow a link, the manifest is replaced by a rename
- * rather than written through whatever is at its path, and the name, title, uploader and type — which the uploader
- * chose — come back beside the path, each inside the untrusted-content envelope.
+ * saved until the person has said where: the first call looks the files up and answers with the question — the files
+ * by name and size, and three places to save them, the first two by their exact paths (core's `save-destination.ts`)
+ * — and the second, carrying the person's answer and the question's id, claims the question for these files and no
+ * others and saves them. Each is saved in the chosen folder under the name its uploader gave it, made safe by core's
+ * `savedFileName`; the write is exclusive and refuses to follow a link, and nothing else is written in that folder.
+ * The name, title, uploader and type — which the uploader chose — come back beside the path, each inside the
+ * untrusted-content envelope, and the saved name and path too unless the name is plainly a file name.
  *
  * The bytes come through the guarded transport (`api/download.ts`), which is the only thing here that sends the token
  * anywhere but the Slack Web API. This module never decides whether an address is safe to follow: it hands the
  * transport the address Slack gave and the file it was looked up as, and turns each refusal into a sentence. One file
- * that cannot be fetched is skipped with its reason and the rest carry on; the manifest and the audit record are
- * written for whatever was saved, however the run ends.
+ * that cannot be fetched is skipped with its reason and the rest carry on; the manifest — under this package's own
+ * state directory — and the audit record are written for whatever was saved, however the run ends.
  */
 
 type Raw = Record<string, unknown>;
@@ -78,10 +86,10 @@ export const MAX_RUN_BYTES: number = 500 * MIB;
 /*
  * Slack's ids, as patterns.
  *
- * Each of these becomes part of a path on disk or of the address the transport checks, so each is held to the shape
- * Slack gives it — capital letters and digits after a one-letter kind — before it is used. A conversation is a public
- * or private channel (`C`), a group DM or an older private channel (`G`), or a DM (`D`). A message timestamp is
- * seconds, a dot and a fraction; `since` may leave the fraction out.
+ * Each of these becomes part of the address the transport checks, or of the question a download is bound to, so each
+ * is held to the shape Slack gives it — capital letters and digits after a one-letter kind — before it is used. A
+ * conversation is a public or private channel (`C`), a group DM or an older private channel (`G`), or a DM (`D`). A
+ * message timestamp is seconds, a dot and a fraction; `since` may leave the fraction out.
  */
 const FILE_ID = /^F[A-Z0-9]{1,40}$/;
 const CONVERSATION_ID = /^[CDG][A-Z0-9]{1,40}$/;
@@ -95,7 +103,7 @@ const MIME_TYPE =
 
 // ── Which files ────────────────────────────────────────────────────────────────────────────────────────────────────
 
-export interface FileDownloadRequest {
+export interface FileDownloadRequest extends DownloadAnswer {
   /** These files, by Slack file id. */
   fileIds?: readonly string[] | undefined;
   /** With `ts`, one message's conversation; alone, the conversation whose files to save. */
@@ -109,8 +117,6 @@ export interface FileDownloadRequest {
    * the conversation after `since` is left out.
    */
   since?: string | undefined;
-  /** A folder inside the workspace's own downloads folder. Never absolute, never climbing out. */
-  out?: string | undefined;
   /** How many files at most, as given; checked against {@link MAX_FILES}. Fifty when left out. */
   maxFiles?: unknown;
   /** Which surface asked, so a refusal names the argument as that surface spells it. */
@@ -124,9 +130,9 @@ export type FileSelection =
 
 export interface FileDownloadPlan {
   readonly selection: FileSelection;
-  /** `out`, checked: a relative subpath, `''` when none was given. */
-  readonly out: string;
   readonly maxFiles: number;
+  /** The person's answer and the question's id, checked for their form: none yet, or one to save with. */
+  readonly answer: CheckedAnswer;
 }
 
 /** How each surface spells the ways of naming files, so a refusal reads as the caller wrote the call. */
@@ -157,12 +163,13 @@ function quoted(value: string): string {
 }
 
 /**
- * Which files a download names, how many it may save and where: checked, or the USAGE refusal.
+ * Which files a download names, how many it may save, and the answer it carries: checked, or the USAGE refusal.
  *
  * Exactly one way of naming files — ids; a conversation and a message timestamp; or a conversation alone, from a
  * timestamp on — because two at once is a caller who meant one of them, and guessing which would save files nobody
- * asked for. Each id is held to Slack's shape here, before anything is read: every one of them becomes part of a path
- * or of the address the transport checks.
+ * asked for. Each id is held to Slack's shape here, before anything is read: every one of them becomes part of the
+ * address the transport checks, or of the question the person answers. An answer without the question it answers is
+ * refused here too (core's `checkDownloadAnswer`).
  *
  * Its own function so that each surface can call it before it opens the workspace, as `searchPaging` is — opening it
  * reads the credential from the secret store and may renew a token with Slack, and a refusal that needs nothing but
@@ -174,7 +181,7 @@ export function downloadSelection(request: FileDownloadRequest): FileDownloadPla
     throw new CommsError('USAGE', message, { hint });
   };
   const maxFiles = numberOption(request.surface, request.maxFiles, MAX_FILES) ?? DEFAULT_MAX_FILES;
-  const out = relativeSubpath(request.out);
+  const answer = checkDownloadAnswer(request, request.surface ?? 'cli');
   const { channel, ts, since } = request;
 
   if (request.fileIds !== undefined) {
@@ -192,7 +199,7 @@ export function downloadSelection(request: FileDownloadRequest): FileDownloadPla
         );
       }
     }
-    return { selection: { kind: 'files', fileIds }, out, maxFiles };
+    return { selection: { kind: 'files', fileIds }, maxFiles, answer };
   }
 
   if (channel === undefined) {
@@ -212,29 +219,28 @@ export function downloadSelection(request: FileDownloadRequest): FileDownloadPla
     if (!MESSAGE_TS.test(ts)) {
       refuse(`${quoted(ts)} is not a Slack message timestamp`, 'A timestamp looks like 1700000000.000100.');
     }
-    return { selection: { kind: 'message', channel: conversation, ts }, out, maxFiles };
+    return { selection: { kind: 'message', channel: conversation, ts }, maxFiles, answer };
   }
   if (since !== undefined && !SINCE_TS.test(since)) {
     refuse(`${quoted(since)} is not a Slack timestamp`, 'A timestamp looks like 1700000000 or 1700000000.000100.');
   }
   return {
     selection: { kind: 'channel', channel: conversation, ...(since === undefined ? {} : { since }) },
-    out,
     maxFiles,
+    answer,
   };
 }
 
 // ── What comes back ────────────────────────────────────────────────────────────────────────────────────────────────
 
-export interface SavedSlackFile {
-  /** Slack's id for the file, which also names the saved file. */
+/** A file a download names, as its question lists it: what it is and where it came from, before any byte. */
+export interface SlackFileToSave {
+  /** Slack's id for the file. */
   readonly fileId: string;
-  /** Where it was saved. Every part of it is this package's own — workspace, date, ids — and none of it the uploader's. */
-  readonly path: string;
-  /** The conversation and message it was saved under, or null for `undated_<file id>`: Slack's ids, never words. */
+  /** The conversation and message it was shared in, or null when none is known: Slack's ids, never words. */
   readonly channel: string | null;
   readonly ts: string | null;
-  /** Wrapped: the name the uploader gave it. The file is not saved under it. `(unnamed)` when there was none. */
+  /** Wrapped: the name the uploader gave it. `(unnamed)` when there was none. */
   readonly name: string;
   /** Wrapped, or null when it has none. */
   readonly title: string | null;
@@ -242,19 +248,30 @@ export interface SavedSlackFile {
   readonly uploader: { readonly id: string | null; readonly name: string | null };
   /** What the uploader's client declared: a bare MIME type, wrapped when it is anything more, or null. */
   readonly mimetype: string | null;
-  /** The bytes written. */
-  readonly size: number;
-  readonly sha256: string;
+  /** The size Slack reports, or null when it gives none. The bytes saved are counted again as they arrive. */
+  readonly size: number | null;
   readonly riskFlags: readonly string[];
   /**
    * Why the file's own record could not be looked up, when it could not — or null.
    *
    * Only a conversation's files have it: listed without the message each was shared in, each is looked up by id for
-   * that, and one whose lookup failed is saved from the listing's record as `undated_<file id>`. Undated then says
-   * nothing about the file — Slack may well know its message — so the result says why rather than let it pass for a
-   * file shared nowhere.
+   * that, and one whose lookup failed is listed from the listing's record, with no message. That says nothing about the
+   * file — Slack may well know its message — so the result says why rather than let it pass for a file shared nowhere.
    */
   readonly lookupFailed: string | null;
+}
+
+export interface SavedSlackFile extends Omit<SlackFileToSave, 'size'> {
+  /**
+   * The name it was saved under: the uploader's, made safe by core's `savedFileName` and never over a file already
+   * there. Bare while it is plainly a file name, and wrapped otherwise — see `isPlainFileName`.
+   */
+  readonly savedAs: string;
+  /** Where it was saved: the folder the person chose, and `savedAs`. Wrapped whenever `savedAs` is. */
+  readonly path: string;
+  /** The bytes written. */
+  readonly size: number;
+  readonly sha256: string;
 }
 
 export interface SkippedSlackFile {
@@ -270,19 +287,40 @@ export interface SkippedSlackFile {
 }
 
 export interface FileDownloadResult {
+  /** False: this is what was saved, not a question. */
+  readonly destinationRequired: false;
   readonly workspace: string;
   readonly selection: FileSelection;
-  /** The workspace's folder, with `out`: where the manifest is. */
-  readonly directory: string;
+  /** The folder the files were saved in, as its real path; null when there was nothing to save. */
+  readonly folder: string | null;
+  /** How the folder was chosen: the answer the person gave, or null when there was nothing to save. */
+  readonly chosen: SaveChoice | null;
   readonly files: readonly SavedSlackFile[];
   readonly skipped: readonly SkippedSlackFile[];
-  readonly manifestPath: string;
+  /**
+   * This package's own record of the download, under its state directory — never in the person's folder, where
+   * nothing is written but the files. Null when there was nothing to save.
+   */
+  readonly manifestPath: string | null;
   readonly totalBytes: number;
   /**
    * False when not every file named was tried: the most files a run may save left some unread — skipped as
    * `max-files`, or never listed — or the run stopped part-way, and the files it stopped before are skipped as
    * `stopped`. Only the manifest can say the second: a run that stopped ends in an error, not in a result.
    */
+  readonly complete: boolean;
+}
+
+/** What a download answers before anything is saved: the question for the person, with the files it would save. */
+export interface FileDownloadQuestion extends DestinationQuestion {
+  readonly workspace: string;
+  readonly selection: FileSelection;
+  readonly files: readonly SlackFileToSave[];
+  /** What would not be saved, and why: known before any byte is fetched. */
+  readonly skipped: readonly SkippedSlackFile[];
+  /** What the files declare, together; a file whose size Slack does not give counts nothing. */
+  readonly totalBytes: number;
+  /** False when the most files a run may save left some of the conversation's out. */
   readonly complete: boolean;
 }
 
@@ -294,23 +332,6 @@ function list(value: unknown): Raw[] {
 
 function str(value: unknown): string | undefined {
   return typeof value === 'string' && value !== '' ? value : undefined;
-}
-
-/** The downloads root: `~/Downloads/agent-communications` unless the config says otherwise — Gmail's root, too. */
-async function downloadsRoot(context: SlackContext): Promise<string> {
-  const config = await context.config();
-  const configured = config.defaults.downloadsDir;
-  const root = configured ? expandHome(configured, homeDirectory(context.env)) : context.core.paths.downloadsDir;
-  await ensurePrivateDir(root);
-  return root;
-}
-
-/** A Slack timestamp's day, `YYYY-MM-DD` in UTC, for a folder name — or `undated`. Only ever a date or nothing. */
-function dayOf(ts: string): string {
-  const time = new Date(Number(ts.split('.')[0]) * 1000);
-  if (Number.isNaN(time.getTime())) return 'undated';
-  const day = time.toISOString().slice(0, 10);
-  return /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : 'undated';
 }
 
 /** Orders two Slack timestamps: seconds, then the fraction as written — never as a float, which rounds the micros. */
@@ -326,7 +347,7 @@ function compareTs(a: string, b: string): number {
  * The message a file was first shared in: the earliest share Slack lists, in `preferred` when it lists one there.
  *
  * Slack keeps a file's shares by conversation, public and private (a DM's are private), each with the timestamp of
- * the message that carried it. Only well-formed ids and timestamps count, since both become a folder name.
+ * the message that carried it. Only well-formed ids and timestamps count, since both are reported as Slack's own.
  */
 function firstShare(record: Raw, preferred?: string): { channel: string; ts: string } | undefined {
   const shares = (record.shares as Raw | undefined) ?? {};
@@ -346,13 +367,6 @@ function firstShare(record: Raw, preferred?: string): { channel: string; ts: str
     ? found.filter((share) => share.channel === preferred)
     : found;
   return pool.sort((a, b) => compareTs(a.ts, b.ts) || a.channel.localeCompare(b.channel))[0];
-}
-
-/**
- * The message a file is saved under, as a folder: `<day>_<channel>-<ts>`, or `undated_<file id>` when none is known.
- */
-function folderOf(fileId: string, message: { channel: string; ts: string } | undefined): string {
-  return message ? `${dayOf(message.ts)}_${message.channel}-${message.ts}` : `undated_${fileId}`;
 }
 
 /** Something to save: an id, and — when a listing or a message already says — where it was shared. */
@@ -438,7 +452,7 @@ async function candidatesFor(
     case 'message': {
       const message = await findMessage(call, selection.channel, selection.ts);
       const files = list(message.files);
-      // Refused before a folder is made: a message with nothing to save would otherwise leave a manifest of nothing.
+      // Refused before anything is asked: a message with nothing to save has no question to put to anybody.
       if (files.length === 0) {
         throw new CommsError('NOT_FOUND', `message ${selection.ts} in ${selection.channel} has no files`, {
           hint: 'A link in the text is not a file; only what was uploaded to the message can be saved.',
@@ -538,14 +552,11 @@ function refusalOf(error: unknown, record: Raw, maxBytes: number, caps: Caps): {
   }
 }
 
-/** A file that was saved, as the run kept it, before its fields are made safe to hand back. */
-interface Saved {
+/** A file the request names and a download would save: its own record, and where it was shared. */
+interface Planned {
   readonly fileId: string;
-  readonly path: string;
-  readonly message: { channel: string; ts: string } | undefined;
   readonly record: Raw;
-  readonly size: number;
-  readonly sha256: string;
+  readonly message: { channel: string; ts: string } | undefined;
   readonly lookupFailed: string | undefined;
 }
 
@@ -557,45 +568,21 @@ interface Saved {
 const RUN_WIDE_FAILURES: ReadonlySet<string> = new Set(['TRANSIENT', 'AUTH_REQUIRED', 'SCOPE_MISSING']);
 
 /**
- * Saves the files a request names under the downloads root, and reports each one saved or skipped.
- *
- * Each is saved as `<downloads>/<workspace>/<out>/<date>_<channel>-<ts>/<file id>[.ext]`, in the message it was
- * shared in — the one named, or the file's first share, or `undated_<file id>` when Slack lists none. The extension is
- * kept only for a common document or image type (core's `keptExtension`). `<out>` is refused if it is absolute or
- * climbs out, before anything is joined to it, and every folder is resolved inside the root after links are followed.
- *
- * No file may be more than 100 MiB and no run more than 500 MiB: the transport is handed the smaller of the file's cap
- * and what is left of the run's, and holds the bytes it receives to it.
+ * The files a download would save, each with its own record, and those it would not, each with the reason — found
+ * before anything is asked or fetched, so the question lists exactly what the answer saves.
  */
-export async function downloadFiles(
-  context: SlackContext,
-  session: WorkspaceSession,
-  request: FileDownloadRequest,
-  deps: FileDownloadDeps = {},
-): Promise<FileDownloadResult> {
-  const plan = downloadSelection({ ...request, surface: request.surface ?? context.surface });
-  const download = deps.download ?? slackFileDownload;
-  const caps = capsOf(deps);
-  const { call, name: workspace } = session;
-
-  // What to save is found before a folder is made: a message that does not exist, or has no files, makes nothing.
+async function planFiles(
+  call: SlackCall,
+  plan: FileDownloadPlan,
+  caps: Caps,
+): Promise<{ planned: Planned[]; skipped: SkippedSlackFile[]; complete: boolean }> {
   const found = await candidatesFor(call, plan);
-
-  const root = await downloadsRoot(context);
-  const directory = await resolveInsideRoot(root, join(workspace, plan.out));
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-
-  const saved: Saved[] = [];
+  const planned: Planned[] = [];
   const skipped: SkippedSlackFile[] = [];
   const skip = (fileId: string, refusal: { cause: string; reason: string }) => {
     skipped.push({ fileId, reason: refusal.reason, cause: refusal.cause });
   };
   let complete = found.complete;
-  let totalBytes = 0;
-  // Boxed, so that even something thrown as `undefined` still counts as the run having stopped.
-  let stopped: { readonly error: unknown } | undefined;
-  // A file whose write failed and whose part-written copy could not be removed either: see below.
-  let leftBehind: { readonly fileId: string; readonly path: string } | undefined;
   const seen = new Set<string>();
   let reached = 0;
 
@@ -624,60 +611,150 @@ export async function downloadFiles(
     }
   };
 
+  for (const candidate of found.candidates) {
+    const { fileId } = candidate;
+    if (seen.has(fileId)) continue;
+    seen.add(fileId);
+    if (reached >= plan.maxFiles) {
+      complete = false;
+      skip(fileId, { cause: 'max-files', reason: `more than ${plan.maxFiles} files` });
+      continue;
+    }
+    reached += 1;
+    if (!FILE_ID.test(fileId)) {
+      skip(fileId, { cause: 'bad-id', reason: 'Slack listed it with an id that is not a file id' });
+      continue;
+    }
+
+    let record = candidate.record;
+    let lookupFailed: string | undefined;
+    /*
+     * A listing names the conversations a file is in, not the message: Slack documents `files.list` records with
+     * `channels`, `groups` and `ims` and no `shares`, which `files.info` has, with each message's timestamp. Without
+     * one the file would be listed with no message although it was shared in the very conversation asked about, so it
+     * is looked up by id — as a message's files are, and as `--file` already pays for. Should the lookup fail, the
+     * listing's own record still says where the bytes are, and the file is listed with no message, saying why.
+     */
+    if (record !== undefined && firstShare(record) === undefined) {
+      const looked = await lookUp(fileId);
+      if ('failed' in looked) lookupFailed = looked.failed;
+      else if (looked.record !== undefined) record = looked.record;
+    }
+    if (record === undefined) {
+      const looked = await lookUp(fileId);
+      if ('failed' in looked) {
+        // One file Slack will not describe — gone, or in a conversation this account is not in — is one file.
+        skip(fileId, { cause: 'lookup', reason: looked.failed });
+        continue;
+      }
+      record = looked.record ?? {};
+    }
+    const refused = unfetchable(record, fileId);
+    if (refused) {
+      skip(fileId, refused);
+      continue;
+    }
+    // Slack's own figure, when it gives one, spares asking about a file that could only be refused. The bytes
+    // received are still what the cap is held to: this is a shortcut, never the check.
+    const declared = typeof record.size === 'number' ? record.size : undefined;
+    if (declared !== undefined && declared > caps.perFile) {
+      skip(fileId, { cause: 'too-large', reason: tooLarge(caps.perFile, caps) });
+      continue;
+    }
+    const message =
+      candidate.message ?? firstShare(record, plan.selection.kind === 'channel' ? plan.selection.channel : undefined);
+    planned.push({ fileId, record, message, lookupFailed });
+  }
+  return { planned, skipped, complete };
+}
+
+/**
+ * Saves the files a request names — once the person has said where — and reports each one saved or skipped.
+ *
+ * Without an answer nothing is saved: the files are looked up, and what comes back is the question, with the files by
+ * name and size and anything that would not be saved with its reason. With the person's answer and the question's
+ * `choiceId`, the question is claimed — for this workspace, this selection and these files only — and each file is
+ * fetched and saved in the chosen folder under its uploader's name, made safe.
+ *
+ * No file may be more than 100 MiB and no run more than 500 MiB: the transport is handed the smaller of the file's cap
+ * and what is left of the run's, and holds the bytes it receives to it.
+ */
+export async function downloadFiles(
+  context: SlackContext,
+  session: WorkspaceSession,
+  request: FileDownloadRequest,
+  deps: FileDownloadDeps = {},
+): Promise<FileDownloadQuestion | FileDownloadResult> {
+  const plan = downloadSelection({ ...request, surface: request.surface ?? context.surface });
+  const download = deps.download ?? slackFileDownload;
+  const caps = capsOf(deps);
+  const { call, name: workspace } = session;
+
+  // What to save is found before anything is asked: a message that does not exist, or has no files, asks nothing.
+  const { planned, skipped, complete: listedAll } = await planFiles(call, plan, caps);
+  const described = await describe(call, workspace, planned);
+  const binding: DownloadRequest = {
+    target: { kind: 'account', name: workspace, id: session.accountId },
+    operation: 'files.download',
+    request: { selection: plan.selection, maxFiles: plan.maxFiles },
+    files: planned.map((entry) => entry.fileId),
+  };
+  const config = await context.config();
+  const folders = () => saveFolders({ configured: config.defaults.downloadsDir, env: context.env, cwd: context.cwd });
+  const { answer } = plan;
+
+  if (answer.kind === 'none') {
+    if (planned.length === 0) return nothingToSave(workspace, plan.selection, skipped, listedAll);
+    const declared = described.files.reduce((sum, file) => sum + (file.size ?? 0), 0);
+    const question = await askWhereToSave(context.core, {
+      request: binding,
+      folders: folders(),
+      configured: Boolean(config.defaults.downloadsDir),
+      count: planned.length,
+      bytes: declared,
+      surface: context.surface,
+      tool: 'slack_file_download',
+    });
+    return {
+      ...question,
+      workspace,
+      selection: plan.selection,
+      files: described.files,
+      skipped,
+      totalBytes: declared,
+      complete: listedAll,
+    };
+  }
+  // A person's own `--to` with nothing to save has nothing to decide; an answer to a question is claimed whatever the
+  // request holds now, so that one asked about other files is refused rather than answered with nothing.
+  if (answer.kind === 'person' && planned.length === 0) {
+    return nothingToSave(workspace, plan.selection, skipped, listedAll);
+  }
+  const destination = await settleDestination(context.core, {
+    answer,
+    request: binding,
+    folders,
+    env: context.env,
+  });
+
+  const saved: SavedSlackFile[] = [];
+  let complete = listedAll;
+  let totalBytes = 0;
+  // Boxed, so that even something thrown as `undefined` still counts as the run having stopped.
+  let stopped: { readonly error: unknown } | undefined;
+  // A file whose write failed and whose part-written copy could not be removed either: see below.
+  let leftBehind: { readonly fileId: string; readonly path: string } | undefined;
+
   let at = 0;
   try {
-    for (; at < found.candidates.length; at += 1) {
-      const candidate = found.candidates[at] as Candidate;
-      const { fileId } = candidate;
-      if (seen.has(fileId)) continue;
-      seen.add(fileId);
-      if (reached >= plan.maxFiles) {
-        complete = false;
-        skip(fileId, { cause: 'max-files', reason: `more than ${plan.maxFiles} files` });
-        continue;
-      }
-      reached += 1;
-      if (!FILE_ID.test(fileId)) {
-        skip(fileId, { cause: 'bad-id', reason: 'Slack listed it with an id that is not a file id' });
-        continue;
-      }
-
-      let record = candidate.record;
-      let lookupFailed: string | undefined;
-      /*
-       * A listing names the conversations a file is in, not the message: Slack documents `files.list` records with
-       * `channels`, `groups` and `ims` and no `shares`, which `files.info` has, with each message's timestamp. Without
-       * one the file would be saved as `undated_<id>` although it was shared in the very conversation asked about, so
-       * it is looked up by id — as a message's files are, and as `--file` already pays for. Should the lookup fail,
-       * the listing's own record still says where the bytes are, and the file is saved as undated, saying why.
-       */
-      if (record !== undefined && firstShare(record) === undefined) {
-        const looked = await lookUp(fileId);
-        if ('failed' in looked) lookupFailed = looked.failed;
-        else if (looked.record !== undefined) record = looked.record;
-      }
-      if (record === undefined) {
-        const looked = await lookUp(fileId);
-        if ('failed' in looked) {
-          // One file Slack will not describe — gone, or in a conversation this account is not in — is one file.
-          skip(fileId, { cause: 'lookup', reason: looked.failed });
-          continue;
-        }
-        record = looked.record ?? {};
-      }
-      const refused = unfetchable(record, fileId);
-      if (refused) {
-        skip(fileId, refused);
-        continue;
-      }
-
+    for (; at < planned.length; at += 1) {
+      const { fileId, record } = planned[at] as Planned;
+      const listed = described.files[at] as SlackFileToSave;
       const left = caps.perRun - totalBytes;
       const maxBytes = Math.min(caps.perFile, left);
-      // Slack's own figure, when it gives one, spares a fetch that could only be refused. The bytes received are
-      // still what the cap is held to: this is a shortcut, never the check.
       const declared = typeof record.size === 'number' ? record.size : undefined;
       if (maxBytes <= 0 || (declared !== undefined && declared > maxBytes)) {
-        skip(fileId, { cause: 'too-large', reason: tooLarge(maxBytes, caps) });
+        skipped.push({ fileId, cause: 'too-large', reason: tooLarge(maxBytes, caps) });
         continue;
       }
 
@@ -688,21 +765,20 @@ export async function downloadFiles(
       try {
         body = await download(call, { url, teamId, fileId, maxBytes });
       } catch (error) {
-        skip(fileId, refusalOf(error, record, maxBytes, caps));
+        const refusal = refusalOf(error, record, maxBytes, caps);
+        skipped.push({ fileId, reason: refusal.reason, cause: refusal.cause });
         continue;
       }
       // The transport holds the bytes to the cap. Checked again before anything is written, because a cap that holds
       // only while one other module is right is a cap on that module, not on the disk.
       if (body.bytes.byteLength > maxBytes) {
-        skip(fileId, { cause: 'too-large', reason: tooLarge(maxBytes, caps) });
+        skipped.push({ fileId, cause: 'too-large', reason: tooLarge(maxBytes, caps) });
         continue;
       }
 
-      const message =
-        candidate.message ?? firstShare(record, plan.selection.kind === 'channel' ? plan.selection.channel : undefined);
-      const folder = await resolveInsideRoot(root, join(workspace, plan.out, folderOf(fileId, message)));
-      await mkdir(folder, { recursive: true, mode: 0o700 });
-      const { path, handle } = await createUniqueFile(folder, `${fileId}${keptExtension(str(record.name) ?? '')}`);
+      // Under the uploader's name, made safe; the file's own id when nothing of the name is left.
+      const name = savedFileName(str(record.name) ?? '', fileId);
+      const { path, handle } = await createUniqueFile(destination.folder, name);
       try {
         await handle.writeFile(body.bytes);
         await handle.close();
@@ -723,19 +799,17 @@ export async function downloadFiles(
         throw error;
       }
       totalBytes += body.bytes.byteLength;
+      const { size: _declared, ...rest } = listed;
       saved.push({
-        fileId,
-        path,
-        message,
-        record,
+        ...rest,
+        ...savedNameFields(path, described.wrap, fileId),
         size: body.bytes.byteLength,
         sha256: createHash('sha256').update(body.bytes).digest('hex'),
-        lookupFailed,
       });
     }
   } catch (error) {
-    // A file that could not be written, or a folder that could not be made, is this machine's problem and stops the
-    // run. What was saved before it is still recorded, below, before the failure is reported.
+    // A file that could not be written is this machine's problem and stops the run. What was saved before it is
+    // still recorded, below, before the failure is reported.
     stopped = { error };
   }
 
@@ -749,12 +823,10 @@ export async function downloadFiles(
   const stoppedBefore: string[] = [];
   if (stopped !== undefined) {
     complete = false;
-    const current = found.candidates[at]?.fileId;
-    for (const { fileId } of found.candidates.slice(at)) {
-      if (fileId !== current && seen.has(fileId)) continue;
-      if (stoppedBefore.includes(fileId)) continue;
+    for (const { fileId } of planned.slice(at)) {
       stoppedBefore.push(fileId);
-      skip(fileId, {
+      skipped.push({
+        fileId,
         cause: 'stopped',
         reason:
           leftBehind?.fileId === fileId
@@ -764,13 +836,15 @@ export async function downloadFiles(
     }
   }
 
-  const files = await describe(call, workspace, saved);
-  const manifestPath = join(directory, 'manifest.json');
+  const now = context.now();
+  const manifestPath = downloadRecordPath(context.core, now, destination.choiceId);
   const result: FileDownloadResult = {
+    destinationRequired: false,
     workspace,
     selection: plan.selection,
-    directory,
-    files,
+    folder: destination.folder,
+    chosen: destination.choice,
+    files: saved,
     skipped,
     manifestPath,
     totalBytes,
@@ -787,18 +861,18 @@ export async function downloadFiles(
    */
   let manifestFailure: { readonly error: unknown } | undefined;
   try {
-    /*
-     * Replaced by a rename, never written in place. `writeFile` on `manifest.json` follows a link somebody left at that
-     * path and writes the manifest wherever it points; a temporary file created exclusively beside it and renamed over
-     * it replaces the link itself.
-     */
-    await writeFileAtomic(manifestPath, `${JSON.stringify({ at: context.now().toISOString(), ...result }, null, 2)}\n`);
+    // This package's own file, under its state directory: never in the folder the person chose.
+    await writeFileAtomic(
+      manifestPath,
+      `${JSON.stringify({ at: now.toISOString(), choiceId: destination.choiceId, ...result }, null, 2)}\n`,
+    );
   } catch (error) {
     manifestFailure = { error };
   }
   let auditFailure: { readonly error: unknown } | undefined;
   try {
-    // The first Slack read that is audited: it leaves files on this machine, and the record says which and how many.
+    // The first Slack read that is audited: it leaves files on this machine, and the record says which, how many
+    // and in which folder.
     await context.core.audit.append({
       inboxId: session.accountId,
       alias: workspace,
@@ -806,13 +880,14 @@ export async function downloadFiles(
       outcome: stopped === undefined && manifestFailure === undefined ? 'ok' : 'failed',
       surface: context.surface,
       ids: {
-        fileIds: files.map((file) => file.fileId),
+        fileIds: saved.map((file) => file.fileId),
         skippedFileIds: skipped.map((entry) => entry.fileId),
         ...(plan.selection.kind === 'files' ? {} : { channel: plan.selection.channel }),
         ...(plan.selection.kind === 'message' ? { ts: plan.selection.ts } : {}),
       },
-      reason: `${files.length} file(s), ${totalBytes} bytes; ${skipped.length} skipped${
-        manifestFailure === undefined ? '' : '; manifest.json not written'
+      ...(destination.choiceId ? { approvalId: destination.choiceId } : {}),
+      reason: `${saved.length} file(s), ${totalBytes} bytes, saved to ${destination.folder} (${destination.choice}); ${skipped.length} skipped${
+        manifestFailure === undefined ? '' : '; the manifest not written'
       }${leftBehind === undefined ? '' : `; part of ${leftBehind.fileId} could not be removed: ${leftBehind.path}`}`,
     });
   } catch (error) {
@@ -820,7 +895,37 @@ export async function downloadFiles(
   }
 
   if (stopped === undefined && manifestFailure === undefined && auditFailure === undefined) return result;
-  throw unfinished({ stopped, manifestFailure, auditFailure, files, manifestPath, stoppedBefore, leftBehind });
+  throw unfinished({
+    stopped,
+    manifestFailure,
+    auditFailure,
+    files: saved,
+    folder: destination.folder,
+    manifestPath,
+    stoppedBefore,
+    leftBehind,
+  });
+}
+
+/** A download with nothing in it to save: said, with each reason, and nothing asked, made or written. */
+function nothingToSave(
+  workspace: string,
+  selection: FileSelection,
+  skipped: readonly SkippedSlackFile[],
+  complete: boolean,
+): FileDownloadResult {
+  return {
+    destinationRequired: false,
+    workspace,
+    selection,
+    folder: null,
+    chosen: null,
+    files: [],
+    skipped,
+    manifestPath: null,
+    totalBytes: 0,
+    complete,
+  };
 }
 
 /** A failure's message, whatever was thrown. */
@@ -837,21 +942,22 @@ function messageOf(error: unknown): string {
  * remove, and carries the same in `details`. A refusal the run stopped on keeps its own code and hint; anything else is
  * `CONFIG`, as another file this machine could not write is.
  *
- * When neither the manifest nor the audit record could be written, the hint names the files itself. `details` has
- * them too, but the command line prints `details` only with `--json`, and a person reading the hint had nowhere else
- * to find what was on their disk. Every one of those paths and ids is this package's own — dates and Slack's ids —
- * so none of it is anybody's words.
+ * When neither the manifest nor the audit record could be written, the hint names the files itself — by Slack's ids,
+ * and the folder they are in: a saved name is the uploader's words, and a hint is the tool's. `details` has them too,
+ * but the command line prints `details` only with `--json`, and a person reading the hint had nowhere else to find
+ * what was on their disk.
  */
 function unfinished(state: {
   readonly stopped: { readonly error: unknown } | undefined;
   readonly manifestFailure: { readonly error: unknown } | undefined;
   readonly auditFailure: { readonly error: unknown } | undefined;
   readonly files: readonly SavedSlackFile[];
+  readonly folder: string;
   readonly manifestPath: string;
   readonly stoppedBefore: readonly string[];
   readonly leftBehind: { readonly fileId: string; readonly path: string } | undefined;
 }): CommsError {
-  const { stopped, manifestFailure, auditFailure, files, manifestPath, stoppedBefore, leftBehind } = state;
+  const { stopped, manifestFailure, auditFailure, files, folder, manifestPath, stoppedBefore, leftBehind } = state;
   const cause = (stopped ?? manifestFailure ?? auditFailure)?.error;
   const own = cause instanceof CommsError ? cause : undefined;
   const count = files.length;
@@ -862,9 +968,9 @@ function unfinished(state: {
   let message: string;
   if (stopped !== undefined) message = `the download stopped part-way: ${messageOf(stopped.error)}`;
   else if (manifestFailure !== undefined) {
-    message = `${savedSoFar === '' ? '' : `${savedSoFar}, but `}manifest.json could not be written: ${messageOf(manifestFailure.error)}`;
+    message = `${savedSoFar === '' ? '' : `${savedSoFar}, but `}the manifest could not be written: ${messageOf(manifestFailure.error)}`;
   } else {
-    message = `${savedSoFar === '' ? '' : `${savedSoFar} and manifest.json lists ${them}, but `}the audit log could not be written: ${messageOf(auditFailure?.error)}`;
+    message = `${savedSoFar === '' ? '' : `${savedSoFar} and the manifest lists ${them}, but `}the audit log could not be written: ${messageOf(auditFailure?.error)}`;
   }
 
   const hint: string[] = [];
@@ -873,10 +979,10 @@ function unfinished(state: {
   else {
     const listed =
       manifestFailure === undefined
-        ? `, and manifest.json lists ${them}`
+        ? `, and the manifest at ${manifestPath} lists ${them}`
         : auditFailure === undefined
           ? ', and the audit log records which'
-          : `, and nothing else records ${count === 1 ? 'it' : 'which'}: ${files.map((file) => file.path).join(', ')}`;
+          : `, and nothing else records ${count === 1 ? 'it' : 'which'}: ${files.map((file) => file.fileId).join(', ')}, in ${folder}`;
     hint.push(
       `${count === 1 ? '1 file was' : `${count} files were`} saved${stopped === undefined ? '' : ' before it stopped'}${listed}.`,
       `Running the download again saves ${count === 1 ? 'that file' : 'each of those files'} a second time, so ask only for what is missing.`,
@@ -889,7 +995,7 @@ function unfinished(state: {
         : `The ${stoppedBefore.length} files it stopped before are`;
     hint.push(
       manifestFailure === undefined
-        ? `${which} in manifest.json under \`skipped\`, as \`stopped\`.`
+        ? `${which} in the manifest under \`skipped\`, as \`stopped\`.`
         : auditFailure === undefined
           ? `${which} in the audit log, among the skipped.`
           : `${which} ${stoppedBefore.join(', ')}.`,
@@ -916,19 +1022,26 @@ function unfinished(state: {
   });
 }
 
+type Wrap = (text: string, field: string, fileId: string) => string;
+
 /**
- * The saved files as they are handed back: every field the uploader chose inside the envelope, one boundary for the
- * whole result, and the uploader's name looked up once per person — bounded, and an id when it cannot be had.
+ * The files as they are handed back: every field the uploader chose inside the envelope, one boundary for the whole
+ * result, and the uploader's name looked up once per person — bounded, and an id when it cannot be had. The wrapper is
+ * returned too, so the names the files are saved under go into the same envelope.
  */
-async function describe(call: SlackCall, workspace: string, saved: readonly Saved[]): Promise<SavedSlackFile[]> {
+async function describe(
+  call: SlackCall,
+  workspace: string,
+  planned: readonly Planned[],
+): Promise<{ files: SlackFileToSave[]; wrap: Wrap }> {
   const boundary = newBoundary();
-  const wrap = (text: string, field: string, fileId: string) =>
-    wrapUntrusted(text, { field, inbox: workspace, id: fileId }, boundary);
+  const wrap: Wrap = (text, field, fileId) => wrapUntrusted(text, { field, inbox: workspace, id: fileId }, boundary);
+  if (planned.length === 0) return { files: [], wrap };
   const book = new NameBook();
-  const uploaders = saved.map(({ record }) => str(record.user)).filter((id) => id !== undefined && USER_ID.test(id));
+  const uploaders = planned.map(({ record }) => str(record.user)).filter((id) => id !== undefined && USER_ID.test(id));
   await book.learnPeople(call, new Set(uploaders as string[]));
 
-  return saved.map(({ fileId, path, message, record, size, sha256, lookupFailed }) => {
+  const files = planned.map(({ fileId, message, record, lookupFailed }) => {
     const rawName = str(record.name);
     const rawTitle = str(record.title);
     const rawType = str(record.mimetype)?.trim();
@@ -939,7 +1052,6 @@ async function describe(call: SlackCall, workspace: string, saved: readonly Save
     const uploaderName = person?.displayName?.text ?? person?.realName?.text ?? senderField(str(record.username))?.text;
     return {
       fileId,
-      path,
       channel: message?.channel ?? null,
       ts: message?.ts ?? null,
       name: rawName === undefined ? '(unnamed)' : wrap(senderField(rawName).text, 'filename', fileId),
@@ -954,12 +1066,23 @@ async function describe(call: SlackCall, workspace: string, saved: readonly Save
           : MIME_TYPE.test(rawType)
             ? rawType.toLowerCase()
             : wrap(rawType.slice(0, 500), 'mime-type', fileId),
-      size,
-      sha256,
+      size:
+        typeof record.size === 'number' && Number.isSafeInteger(record.size) && record.size >= 0 ? record.size : null,
       // Judged on the name as the uploader gave it: the extension rules clean it first, the bidi rule needs it raw.
       riskFlags: fileRisks(rawName ?? '', rawType ?? ''),
       // This package's words, or Slack's error mapped into them: never the uploader's.
       lookupFailed: lookupFailed ?? null,
     };
   });
+  return { files, wrap };
+}
+
+/**
+ * The saved name and path as a result carries them: bare while the name is plainly a file name, and otherwise inside
+ * the envelope — the name is the uploader's, and `Ignore previous instructions.txt` is still a sentence on disk.
+ */
+function savedNameFields(path: string, wrap: Wrap, fileId: string): { savedAs: string; path: string } {
+  const savedAs = basename(path);
+  if (isPlainFileName(savedAs)) return { savedAs, path };
+  return { savedAs: wrap(savedAs, 'saved-as', fileId), path: wrap(path, 'saved-path', fileId) };
 }

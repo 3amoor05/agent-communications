@@ -310,7 +310,21 @@
       "cli": "attachments download",
       "mcp": "gmail_attachment_download",
       "status": "both",
-      "operation": "downloadAttachments"
+      "operation": "downloadAttachments",
+      "expect": { "options.saveTo": null, "options.choiceId": null },
+      "reason": "The first call of a download: it saves nothing, and answers with the question where to save — Downloads, the current folder, or a folder the person names — and a choice id. The command, run by an agent or with no terminal, exits 10 with the same question."
+    },
+    {
+      "id": "gmail.attachments.download.answer",
+      "package": "gmail",
+      "cli": "attachments download",
+      "mcp": "gmail_attachment_download",
+      "status": "both",
+      "operation": "downloadAttachments",
+      "argv": ["--to", "current", "--choice", "ap_00000000000000000000000000"],
+      "args": { "saveTo": "current", "choiceId": "ap_00000000000000000000000000" },
+      "expect": { "options.saveTo": "current", "options.choiceId": "ap_00000000000000000000000000" },
+      "reason": "The same download, answered: the person's answer and the question's id — `--to` and `--choice` on the command, `saveTo` and `choiceId` on the tool — reach the operation alike, which claims the question and saves."
     },
     {
       "id": "gmail.contacts.search",
@@ -975,7 +989,21 @@
       "cli": "files download",
       "mcp": "slack_file_download",
       "status": "both",
-      "operation": "downloadFiles"
+      "operation": "downloadFiles",
+      "expect": { "request.saveTo": null, "request.choiceId": null },
+      "reason": "The first call of a download: it saves nothing, and answers with the question where to save — Downloads, the current folder, or a folder the person names — and a choice id. The command, run by an agent or with no terminal, exits 10 with the same question."
+    },
+    {
+      "id": "slack.files.download.answer",
+      "package": "slack",
+      "cli": "files download",
+      "mcp": "slack_file_download",
+      "status": "both",
+      "operation": "downloadFiles",
+      "argv": ["--to", "current", "--choice", "ap_00000000000000000000000000"],
+      "args": { "saveTo": "current", "choiceId": "ap_00000000000000000000000000" },
+      "expect": { "request.saveTo": "current", "request.choiceId": "ap_00000000000000000000000000" },
+      "reason": "The same download, answered: the person's answer and the question's id — `--to` and `--choice` on the command, `saveTo` and `choiceId` on the tool — reach the operation alike, which claims the question and saves."
     },
     {
       "id": "slack.people",

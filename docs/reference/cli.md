@@ -319,7 +319,7 @@ agent-gmail attachments find [options]
 
 ### `agent-gmail attachments download`
 
-download the attachments of one or more messages under the downloads folder, each saved by its part id
+save the attachments of one or more messages where you say: Downloads, the current folder, or a folder you name
 
 ```
 agent-gmail attachments download [options] <messageId...>
@@ -329,8 +329,9 @@ agent-gmail attachments download [options] <messageId...>
 |---|---|---|
 | `--inbox <alias>` | which mailbox | — |
 | `--part <partId>` | one specific attachment | — |
-| `--out <subpath>` | a folder inside the downloads root | — |
 | `--max-files <number>` | stop after this many files: 1 to 200 (default 50) | — |
+| `--to <where>` | save without asking: downloads, current, or a folder (absolute, or starting with ~) | — |
+| `--choice <id>` | with --to: the choice id the question came with, when an agent asked it | — |
 
 ### `agent-gmail contacts`
 

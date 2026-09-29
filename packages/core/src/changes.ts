@@ -298,6 +298,12 @@ async function changeRecord(core: Core, approvalId: string): Promise<ApprovalRec
       hint: 'Prepare the change again; an approval expires ten minutes after it is made.',
     });
   }
+  // A download's question is answered where it was asked, never approved: there is no code for a person to type.
+  if (approvalKind(record) === 'download') {
+    throw new CommsError('USAGE', `${approvalId} is a question about where to save files, not a configuration change`, {
+      hint: 'Nobody approves it: the person answers it, and the download that asked is made again with their answer and this id.',
+    });
+  }
   if (approvalKind(record) !== 'change') {
     throw new CommsError('USAGE', `approval ${approvalId} is for a send, not a configuration change`, {
       hint: `Approve it with the command that prepared it: ${channelApproveCommands({ sending: true })}.`,

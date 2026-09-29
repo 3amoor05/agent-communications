@@ -31,6 +31,7 @@ import { checkForUpdates, terminalUpdateHooks } from '../src/update-check.ts';
 import {
   approvalsOf,
   claimsApproval,
+  DOWNLOAD_CLAIM,
   exemptFromUpdateGate,
   SEND_LOOKUP,
   updateGateAtTerminal,
@@ -617,6 +618,67 @@ test("a look-up of a send goes past the stop by the approval it went under, used
   assert.notEqual(await gate('resend_send_execute', { approvalId: send }), null, 'a used approval claims nothing');
 });
 
+test('a download’s answer goes past the stop by its question’s choiceId; the answer alone, or another kind’s id, does not', async () => {
+  const m = machine();
+  const question = await m.core.approvals.createDownload({
+    download: {
+      summary: 'where to save 1 file from acme/gmail',
+      target: { kind: 'inbox', name: 'acme/gmail', id: 'ibx_AAAAAAAAAAAAAAAA' },
+      operation: 'attachments.download',
+      request: { targets: [{ messageId: 'm1', partId: null, filename: null }], maxFiles: 50 },
+      files: ['m1/1'],
+      folders: { downloads: join(m.home, 'Downloads'), current: m.home },
+    },
+  });
+  seed(m, { latest: LATEST, behind: true });
+  const later = await preparedFor(m, updateLaterChange(m.core));
+
+  const gate = updateToolGate({
+    core: m.core,
+    env: m.env,
+    server: 'agent-gmail',
+    channel: 'gmail',
+    running: VERSION,
+    exempt: [],
+    approvals: { gmail_attachment_download: DOWNLOAD_CLAIM },
+  });
+  const tool = 'gmail_attachment_download';
+  const answer = { inbox: 'acme/gmail', messageIds: ['m1'], saveTo: 'downloads' };
+  assert.equal(await gate(tool, { ...answer, choiceId: question.approvalId }), null, 'the answer was stopped');
+  assert.notEqual(await gate(tool, { inbox: 'acme/gmail', messageIds: ['m1'] }), null, 'a new request went through');
+  assert.notEqual(await gate(tool, answer), null, 'a bare saveTo went through');
+  assert.notEqual(await gate(tool, { ...answer, choiceId: later }), null, "a change's id went through as a question");
+  // Carried where the tool does not read it, it claims nothing.
+  assert.notEqual(await gate(tool, { ...answer, approvalId: question.approvalId }), null, 'approvalId was read');
+
+  // The command's `--choice`, the same way.
+  const command = { opts: () => ({ choice: question.approvalId, to: 'downloads' }) };
+  const terminalGate = (approvals: unknown[]) =>
+    updateGateAtTerminal({
+      core: m.core,
+      env: m.env,
+      binary: 'agent-gmail',
+      channel: 'gmail',
+      running: VERSION,
+      output: { json: true, color: false },
+      streams: { stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough() },
+      approvals,
+      approvalClaim: DOWNLOAD_CLAIM,
+    });
+  assert.equal(await terminalGate(approvalsOf(command)), null);
+  await assert.rejects(terminalGate(approvalsOf({ opts: () => ({ to: 'downloads' }) })), /UPDATE_REQUIRED|update/i);
+  await assert.rejects(terminalGate([later]), /update/i);
+
+  // Once answered it claims nothing more: a used question is not a way past the stop.
+  await m.core.approvals.claimForDownload(question.approvalId, {
+    target: { kind: 'inbox', name: 'acme/gmail', id: 'ibx_AAAAAAAAAAAAAAAA' },
+    operation: 'attachments.download',
+    request: { targets: [{ messageId: 'm1', partId: null, filename: null }], maxFiles: 50 },
+    files: ['m1/1'],
+  });
+  assert.notEqual(await gate(tool, { ...answer, choiceId: question.approvalId }), null, 'a used question went through');
+});
+
 // ── "Restart", only where restarting starts the latest ─────────────────────────────────────────────────────────
 
 test('an update installed but not yet loaded says to restart the client, not to update', async () => {
@@ -1167,15 +1229,22 @@ test('which commands are never stopped: update, doctor, paths, approve, approval
   assert.equal(exemptFromUpdateGate(['status'], ['status']), true, 'a channel adds its own doctor');
 });
 
-test('the approvals a command claims: --approval, --mcp-approval, and an argument named approvalId', () => {
+test('the approvals a command claims: --approval, --mcp-approval, --choice, and an argument named approvalId', () => {
   // As Commander hands a `preAction` hook the command: its options, and its arguments as read.
   const command = {
-    opts: () => ({ approval: 'ap_one', mcpApproval: 'ap_two', account: 'acme/resend' }),
+    opts: () => ({
+      approval: 'ap_one',
+      mcpApproval: 'ap_two',
+      choice: 'ap_four',
+      to: 'current',
+      account: 'acme/resend',
+    }),
     registeredArguments: [{ name: () => 'inbox' }, { name: () => 'approvalId' }],
     processedArgs: ['work', 'ap_three'],
   };
-  assert.deepEqual(approvalsOf(command), ['ap_one', 'ap_two', 'ap_three']);
-  assert.deepEqual(approvalsOf({ opts: () => ({}) }), [undefined, undefined]);
+  // `--choice` is a download's question; `--to`, the answer beside it, is not an approval and is not read.
+  assert.deepEqual(approvalsOf(command), ['ap_one', 'ap_two', 'ap_four', 'ap_three']);
+  assert.deepEqual(approvalsOf({ opts: () => ({}) }), [undefined, undefined, undefined]);
 });
 
 /** A terminal a person answers: each prompt on stderr gets the next answer, and every answer is used. */

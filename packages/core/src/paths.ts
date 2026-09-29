@@ -18,7 +18,10 @@ export interface ResolvedPaths {
   secretsDir: string;
   /** Managed runtime installs for MCP clients. */
   dataDir: string;
-  /** Default root for attachment downloads and exports. */
+  /**
+   * Default root for exports and for the files Resend's received mail carries. A Gmail attachment or a Slack file is
+   * not saved here: those downloads ask the person where to save (`save-destination.ts`).
+   */
   downloadsDir: string;
 }
 
@@ -34,13 +37,7 @@ export interface ResolvedPaths {
 export function resolvePaths(options: PathEnvironment = {}): ResolvedPaths {
   const env = options.env ?? process.env;
   const platform = options.platform ?? process.platform;
-  /*
-   * The home the environment names, which is where Node's own `homedir()` looks for the running process — `HOME`, or
-   * `USERPROFILE` on Windows. Asking `homedir()` directly ignored an environment passed in, so every test that gave
-   * the harness a temporary HOME still had its data and downloads resolved to the real ones: one day of test runs
-   * left 748 backups of fixture entries in the maintainer's own data directory.
-   */
-  const home = options.home ?? ((platform === 'win32' ? env.USERPROFILE : env.HOME) || homedir());
+  const home = options.home ?? homeOf(env, platform);
 
   const configDir = resolve(
     env.AGENT_COMMS_CONFIG_DIR ||
@@ -67,6 +64,19 @@ export function resolvePaths(options: PathEnvironment = {}): ResolvedPaths {
   );
   const downloadsDir = resolve(join(home, 'Downloads', APP_DIR_NAME));
   return { configDir, stateDir, secretsDir, dataDir, downloadsDir };
+}
+
+/**
+ * The home the environment names, which is where Node's own `homedir()` looks for the running process — `HOME`, or
+ * `USERPROFILE` on Windows. Asking `homedir()` directly ignored an environment passed in, so every test that gave the
+ * harness a temporary HOME still had its data and downloads resolved to the real ones: one day of test runs left 748
+ * backups of fixture entries in the maintainer's own data directory.
+ *
+ * Its own function since a download asks where to save: the person's Downloads folder is `<this>/Downloads`, and a
+ * folder they type as `~/…` is expanded from it — the same home every other path here is resolved from.
+ */
+export function homeOf(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string {
+  return (platform === 'win32' ? env.USERPROFILE : env.HOME) || homedir();
 }
 
 /** Expands a leading `~` to the home directory. Nothing else is expanded. */

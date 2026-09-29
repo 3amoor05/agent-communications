@@ -77,6 +77,8 @@ export async function cli(
     endStdin?: boolean;
     env?: NodeJS.ProcessEnv;
     replies?: ReadonlyArray<readonly [RegExp, string]>;
+    /** The folder the command runs in: what a download offers as the current folder. A temporary one, always. */
+    cwd?: string;
   } = {},
 ): Promise<CliRun> {
   let stdout = '';
@@ -113,6 +115,7 @@ export async function cli(
   const tty = options.tty ?? false;
   const code = await run(argv, {
     core: harness.core,
+    ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
     env: { ...harness.env, ...options.env },
     streams: {
       stdout: Object.assign(out, { isTTY: tty }),

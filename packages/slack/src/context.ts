@@ -17,6 +17,11 @@ export interface SlackContextOptions {
   env?: NodeJS.ProcessEnv;
   now?: () => Date;
   surface?: 'cli' | 'mcp';
+  /**
+   * The folder the process was started in: what a download offers as "the current folder". The process's own when
+   * left out; a test names a temporary one, since a test process cannot change its own without changing every test's.
+   */
+  cwd?: string | undefined;
   /** Exchanges an authorisation code. Injected so a test never reaches Slack. */
   exchange?: (params: Record<string, string>) => Promise<unknown>;
   /**
@@ -89,6 +94,7 @@ export class SlackContext {
   readonly env: NodeJS.ProcessEnv;
   readonly now: () => Date;
   readonly surface: 'cli' | 'mcp';
+  readonly cwd: string;
   readonly flows: FlowStore;
   readonly exchange: (params: Record<string, string>) => Promise<unknown>;
   readonly persist: PersistPolicy | undefined;
@@ -98,6 +104,7 @@ export class SlackContext {
     this.core = options.core ?? openCore({ env: this.env });
     this.now = options.now ?? (() => new Date());
     this.surface = options.surface ?? 'cli';
+    this.cwd = options.cwd ?? process.cwd();
     this.flows = openFlowStore(this.core.paths.stateDir, this.now);
     this.exchange = options.exchange ?? postExchange;
     this.persist = options.persist;

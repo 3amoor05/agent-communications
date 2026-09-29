@@ -131,6 +131,41 @@ test('a key a tool does not declare is refused as USAGE before its handler runs,
   }
 });
 
+test('a key a tool took once is refused as removed, with what replaced it — and only on that tool', async () => {
+  const server = new McpServer({ name: 'test', version: '0' });
+  strictToolArguments(server, (error) => envelope(toCommsError(error)), undefined, {
+    download: { out: 'Leave out `out`; pass `saveTo` with the `choiceId`.' },
+  });
+  const seen: unknown[][] = [];
+  for (const name of ['download', 'other']) {
+    server.registerTool(name, { inputSchema: { saveTo: z.string().optional() } }, (args: unknown) => {
+      seen.push([name, args]);
+      return done(args);
+    });
+  }
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'test', version: '0' });
+  await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+  try {
+    const call = async (name: string, args: Record<string, unknown>) =>
+      (await client.callTool({ name, arguments: args })) as ToolResult;
+    const removed = refused(await call('download', { out: 'reports', saveTo: 'current' }));
+    assert.equal(removed.code, 'USAGE');
+    assert.equal(removed.message, 'download no longer takes `out`');
+    assert.equal(removed.hint, 'Leave out `out`; pass `saveTo` with the `choiceId`.');
+    // Anywhere else it is only a key the tool does not take.
+    const unknown = refused(await call('other', { out: 'reports' }));
+    assert.equal(unknown.message, 'other does not take `out`');
+    assert.match(unknown.hint ?? '', /takes `saveTo`/);
+    // And it is not published: a client is never told it may pass it.
+    const listed = (await client.listTools()).tools.find((tool) => tool.name === 'download');
+    assert.deepEqual(Object.keys(listed?.inputSchema.properties ?? {}), ['saveTo']);
+    assert.deepEqual(seen, [], 'a handler ran');
+  } finally {
+    await Promise.all([client.close(), server.close()]);
+  }
+});
+
 test('arguments that fail the schema are refused as USAGE naming the argument and what it takes, not the SDK’s text', async () => {
   const { call, seen, close } = await bare((server, seen) => registerThree(server, seen));
   try {

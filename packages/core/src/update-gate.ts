@@ -39,6 +39,11 @@ export interface ApprovalClaim {
    * is that very send, the tail of something the person already said yes to, and nothing it can do is anything more.
    */
   lookup?: boolean | undefined;
+  /**
+   * The tool argument that carries the id, when it is not `approvalId`: a download carries its question's as
+   * `choiceId`, beside the person's answer. Over MCP only; a command's ids are read by `approvalsOf`.
+   */
+  argument?: string | undefined;
 }
 
 /** A call that looks a send up by its approval: Resend's `resend_send_status`, and `agent-resend send status`. */
@@ -46,6 +51,14 @@ export const SEND_LOOKUP: Readonly<ApprovalClaim> = Object.freeze({ kind: 'send'
 
 /** A call that claims a change: every core command and tool that takes an approval. */
 export const CHANGE_CLAIM: Readonly<ApprovalClaim> = Object.freeze({ kind: 'change' });
+
+/**
+ * A call that answers a download's question: `gmail_attachment_download` and `slack_file_download` with `choiceId`,
+ * `agent-gmail attachments download` and `agent-slack files download` with `--choice`. The person answered where to
+ * save moments ago, so the call goes past the stop as a claimed approval does (§2). The answer alone — `saveTo`,
+ * `--to` — claims nothing, and is stopped like any new request.
+ */
+export const DOWNLOAD_CLAIM: Readonly<ApprovalClaim> = Object.freeze({ kind: 'download', argument: 'choiceId' });
 
 /**
  * Whether a call claims an approval the person already gave (§2): an approval this machine's approval store holds —
@@ -136,7 +149,8 @@ export function updateToolGate(options: UpdateToolGateOptions): ToolGate {
     if (exempt.has(tool)) return null;
     const pending = await pendingUpdate({ ...options, surface: 'server' });
     if (pending === null) return null;
-    if (await claimsApproval(options.core, args.approvalId, options.approvals?.[tool])) return null;
+    const claim = options.approvals?.[tool];
+    if (await claimsApproval(options.core, args[claim?.argument ?? 'approvalId'], claim)) return null;
     return stoppedCall(pending, { server: options.server, tool });
   };
 }
@@ -206,9 +220,10 @@ export function commandPathOf(command: CommandLike): string[] {
 
 /**
  * The approvals a Commander command claims: its `--approval`, the `--mcp-approval` Gmail's `setup` carries beside it,
- * and an argument named `approvalId` — `agent-gmail send cancel <approvalId>`, `agent-resend send execute
- * <approvalId>`, the commands whose tools take it as `approvalId`. What the gate hands `claimsApproval`, as a tool
- * call's `approvalId` is handed it. Commander has read the arguments by the time a `preAction` hook runs.
+ * the `--choice` a download carries its question's id in, and an argument named `approvalId` — `agent-gmail send
+ * cancel <approvalId>`, `agent-resend send execute <approvalId>`, the commands whose tools take it as `approvalId`.
+ * What the gate hands `claimsApproval`, as a tool call's `approvalId` is handed it. Commander has read the arguments
+ * by the time a `preAction` hook runs.
  */
 export function approvalsOf(command: {
   opts(): Record<string, unknown>;
@@ -219,7 +234,7 @@ export function approvalsOf(command: {
   const named = (command.registeredArguments ?? []).flatMap((argument, index) =>
     argument.name() === 'approvalId' ? [command.processedArgs?.[index]] : [],
   );
-  return [options.approval, options.mcpApproval, ...named];
+  return [options.approval, options.mcpApproval, options.choice, ...named];
 }
 
 /**

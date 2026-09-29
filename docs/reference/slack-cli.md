@@ -292,7 +292,7 @@ agent-slack files [options] [command]
 
 ### `agent-slack files download`
 
-save files to the downloads folder: by id, from one message, or from a conversation. Opens nothing
+save files where you say — Downloads, the current folder, or a folder you name: by id, from one message, or from a conversation. Opens nothing
 
 ```
 agent-slack files download [options]
@@ -305,8 +305,9 @@ agent-slack files download [options]
 | `--message <channel> <ts>` | the files of one message: its conversation and its ts | — |
 | `--channel <id>` | the files shared in this conversation — a channel, a DM or a group DM — newest first | — |
 | `--since <ts>` | with --channel: only files uploaded at or after this Slack timestamp, to the second | — |
-| `--out <folder>` | a folder inside the downloads root | — |
 | `--max-files <n>` | stop after this many files: 1 to 200 (default 50) | — |
+| `--to <where>` | save without asking: downloads, current, or a folder (absolute, or starting with ~) | — |
+| `--choice <id>` | with --to: the choice id the question came with, when an agent asked it | — |
 
 ### `agent-slack people`
 

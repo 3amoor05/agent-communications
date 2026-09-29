@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import { readFile, stat } from 'node:fs/promises';
-import { relative, sep } from 'node:path';
+import { readdir, readFile, stat } from 'node:fs/promises';
+import { join, relative, sep } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, test } from 'node:test';
 import { EXIT_CODES } from '@agentcomms/core';
@@ -202,7 +202,7 @@ async function world(mode: 'read' | 'send' = 'read'): Promise<World> {
 }
 
 /** The command, as an agent runs it: `--json`, no terminal, the production transport. */
-async function viaCommand(place: World, argv: string[]): Promise<FileDownloadResult> {
+async function command(place: World, argv: string[]): Promise<{ code: number; envelope: Record<string, unknown> }> {
   let stdout = '';
   const out = new PassThrough();
   out.on('data', (chunk) => {
@@ -220,14 +220,32 @@ async function viaCommand(place: World, argv: string[]): Promise<FileDownloadRes
     openBrowser: () => undefined,
     read: place.inner,
   });
-  assert.equal(code, EXIT_CODES.OK, stdout);
-  const envelope = JSON.parse(stdout) as { ok: boolean; schemaVersion: number; data: FileDownloadResult };
-  assert.equal(envelope.ok, true);
+  const envelope = JSON.parse(stdout) as Record<string, unknown>;
   assert.equal(envelope.schemaVersion, 1);
-  return envelope.data;
+  return { code, envelope };
 }
 
-/** The tool, over MCP, with the production transport. */
+/**
+ * The command, as an agent runs it and then runs it again: first the question and its choice id (exit 10), nothing
+ * saved; then, with the person's answer — their Downloads folder — the files.
+ */
+async function viaCommand(place: World, argv: string[]): Promise<FileDownloadResult> {
+  const asked = await command(place, argv);
+  assert.equal(asked.code, EXIT_CODES.APPROVAL, JSON.stringify(asked.envelope));
+  const error = asked.envelope.error as { code: string; details: { choiceId: string } };
+  assert.equal(error.code, 'APPROVAL_PENDING');
+  assert.deepEqual(
+    place.fake.requests.filter((seen) => seen.host === 'files'),
+    [],
+    'fetched before the answer',
+  );
+  const answered = await command(place, [...argv, '--to', 'downloads', '--choice', error.details.choiceId]);
+  assert.equal(answered.code, EXIT_CODES.OK, JSON.stringify(answered.envelope));
+  assert.equal(answered.envelope.ok, true);
+  return answered.envelope.data as FileDownloadResult;
+}
+
+/** The tool, over MCP, with the production transport: asked first, then answered with the person's Downloads. */
 async function viaTool(place: World, args: Record<string, unknown>): Promise<FileDownloadResult> {
   const { server } = await createSlackMcpServer({
     core: place.harness.core,
@@ -237,29 +255,47 @@ async function viaTool(place: World, args: Record<string, unknown>): Promise<Fil
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: 'test', version: '0' });
   await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
-  try {
+  const call = async (extra: Record<string, unknown>) => {
     const result = (await client.callTool({
       name: 'slack_file_download',
-      arguments: { workspace: 'acme', ...args },
+      arguments: { workspace: 'acme', ...args, ...extra },
     })) as { isError?: boolean; structuredContent?: unknown; content?: unknown };
     assert.notEqual(result.isError, true, JSON.stringify(result.structuredContent ?? result.content));
-    return result.structuredContent as FileDownloadResult;
+    return result.structuredContent as Record<string, unknown>;
+  };
+  try {
+    const asked = await call({});
+    assert.equal(asked.destinationRequired, true);
+    assert.deepEqual(
+      place.fake.requests.filter((seen) => seen.host === 'files'),
+      [],
+      'fetched before the answer',
+    );
+    return (await call({ saveTo: 'downloads', choiceId: asked.choiceId })) as unknown as FileDownloadResult;
   } finally {
     await Promise.all([client.close(), server.close()]);
   }
 }
 
-/** A path under the downloads root, with `/` whatever the platform. */
-function inside(place: World, path: string): string {
-  return relative(place.harness.core.paths.downloadsDir, path).split(sep).join('/');
+/** The person's own Downloads folder, under the world's home: where each answer saved. */
+function downloadsOf(place: World): string {
+  return join(place.harness.configDir, 'Downloads');
 }
 
-/** A result with what must differ between two runs taken out: the root each saved under, and the envelope's boundary. */
+/** A path in the person's Downloads folder, with `/` whatever the platform. */
+function inside(place: World, path: string): string {
+  return relative(downloadsOf(place), path).split(sep).join('/');
+}
+
+/**
+ * A result with what must differ between two runs taken out: the home each saved under, the record each kept there,
+ * and the envelope's boundary.
+ */
 function comparable(place: World, result: FileDownloadResult): unknown {
   const text = JSON.stringify({
     ...result,
-    directory: inside(place, result.directory),
-    manifestPath: inside(place, result.manifestPath),
+    folder: inside(place, result.folder ?? ''),
+    manifestPath: null,
     files: result.files.map((file) => ({ ...file, path: inside(place, file.path) })),
   });
   return JSON.parse(text.replace(/boundary=\\"[^"\\]+\\"/g, 'boundary=\\"B\\"'));
@@ -309,7 +345,7 @@ async function savedAsServed(result: FileDownloadResult, bytes: Record<string, B
     assert.match(file.name, /^<untrusted-content /, `${file.fileId}: the uploader's name for it is wrapped`);
     assert.match(file.title ?? '', /^<untrusted-content /, `${file.fileId}: and its title`);
   }
-  const manifest = JSON.parse(await readFile(result.manifestPath, 'utf8')) as FileDownloadResult;
+  const manifest = JSON.parse(await readFile(result.manifestPath ?? '', 'utf8')) as FileDownloadResult;
   assert.deepEqual(
     manifest.files.map((file) => file.path),
     result.files.map((file) => file.path),
@@ -336,7 +372,10 @@ async function auditedOnce(place: World, surface: 'cli' | 'mcp', result: FileDow
     ids?.skippedFileIds,
     result.skipped.map((entry) => entry.fileId),
   );
-  assert.match(record?.reason ?? '', new RegExp(`^${result.files.length} file\\(s\\), ${result.totalBytes} bytes;`));
+  assert.match(
+    record?.reason ?? '',
+    new RegExp(`^${result.files.length} file\\(s\\), ${result.totalBytes} bytes, saved to .+ \\(downloads\\);`),
+  );
 }
 
 interface Case {
@@ -354,13 +393,16 @@ async function bothWays(label: string, { argv, args, mode }: Case) {
   const byCommand = await world(mode);
   const byTool = await world(mode);
   // Said, not assumed: on Windows the two once shared one downloads folder, and the tool's copy of every file was `-2`.
-  assert.notEqual(
-    byCommand.harness.core.paths.downloadsDir,
-    byTool.harness.core.paths.downloadsDir,
-    `${label}: each surface saves into a folder of its own`,
+  assert.notEqual(downloadsOf(byCommand), downloadsOf(byTool), `${label}: each surface saves into a folder of its own`);
+  const fromCommand = await viaCommand(byCommand, argv);
+  const fromTool = await viaTool(byTool, args);
+  assert.equal(fromTool.folder, downloadsOf(byTool), `${label}: the person's own Downloads folder`);
+  assert.equal(fromCommand.folder, downloadsOf(byCommand), `${label}: the person's own Downloads folder`);
+  assert.deepEqual(
+    await readdir(downloadsOf(byTool)),
+    await readdir(downloadsOf(byCommand)),
+    `${label}: the same files on disk`,
   );
-  const fromCommand = await viaCommand(byCommand, [...argv, '--out', label]);
-  const fromTool = await viaTool(byTool, { ...args, out: label });
 
   assert.deepEqual(comparable(byCommand, fromCommand), comparable(byTool, fromTool), `${label}: the same result`);
   assert.deepEqual(asked(byCommand.fake), asked(byTool.fake), `${label}: the same questions asked of Slack`);
@@ -373,14 +415,15 @@ async function bothWays(label: string, { argv, args, mode }: Case) {
 
 const where = (result: FileDownloadResult, byTool: World) => result.files.map((file) => inside(byTool, file.path));
 
-test('a file in a DM is saved under its message, the same by the command and the tool, in read and in send mode', async () => {
+test('a file in a DM is saved in the person’s Downloads, the same by the command and the tool, in read and in send mode', async () => {
   for (const mode of ['read', 'send'] as const) {
     const { result, fetched, byTool } = await bothWays('dm', {
       argv: ['--message', DM, TS_DM],
       args: { channel: DM, ts: TS_DM },
       mode,
     });
-    assert.deepEqual(where(result, byTool), [`acme/dm/2023-11-14_${DM}-${TS_DM}/F0DM01.pdf`], mode);
+    assert.deepEqual(where(result, byTool), ['minutes.pdf'], mode);
+    assert.deepEqual([result.files[0]?.channel, result.files[0]?.ts], [DM, TS_DM], mode);
     assert.deepEqual(result.skipped, [], mode);
     assert.equal(result.complete, true);
     assert.deepEqual(result.selection, { kind: 'message', channel: DM, ts: TS_DM });
@@ -389,18 +432,22 @@ test('a file in a DM is saved under its message, the same by the command and the
     await savedAsServed(result, { F0DM01: PDF });
     assert.deepEqual(
       asked(byTool.fake).map((seen) => seen.at),
-      ['conversations.history', 'files.info', '/files-pri/T0001-F0DM01/download/minutes.pdf', 'users.info'],
-      'the message, the file looked up by id, its bytes, and its uploader',
+      [
+        ...['conversations.history', 'files.info', 'users.info'],
+        ...['conversations.history', 'files.info', 'users.info', '/files-pri/T0001-F0DM01/download/minutes.pdf'],
+      ],
+      'asked: the message, the file looked up by id, and its uploader; answered: the same again, then its bytes',
     );
   }
 });
 
-test('a file in a group DM is found by listing the conversation, and saved under the message it was shared in', async () => {
+test('a file in a group DM is found by listing the conversation, and said to come from the message it was shared in', async () => {
   const { result, fetched, byTool } = await bothWays('group', {
     argv: ['--channel', GROUP_DM, '--since', '1700000000'],
     args: { channel: GROUP_DM, since: '1700000000' },
   });
-  assert.deepEqual(where(result, byTool), [`acme/group/2023-11-14_${GROUP_DM}-${TS_GROUP}/F0MP01.txt`]);
+  assert.deepEqual(where(result, byTool), ['notes.txt']);
+  assert.deepEqual([result.files[0]?.channel, result.files[0]?.ts], [GROUP_DM, TS_GROUP]);
   assert.deepEqual(result.skipped, []);
   assert.deepEqual(fetched, [`/files-pri/${TEAM}-F0MP01/download/notes.txt`]);
   await savedAsServed(result, { F0MP01: NOTES });
@@ -410,19 +457,17 @@ test('a file in a group DM is found by listing the conversation, and saved under
   // The listing names no message, so the file is looked up by id for the one it was shared in.
   assert.deepEqual(
     byTool.fake.requests.filter((seen) => seen.method === 'files.info').map((seen) => seen.params.get('file')),
-    ['F0MP01'],
+    ['F0MP01', 'F0MP01'],
+    'once for the question, once for the answer',
   );
 });
 
-test('a message with two files saves both in its folder, one of them a Slack Connect guest’s under their own team', async () => {
+test('a message with two files saves both, one of them a Slack Connect guest’s fetched under their own team', async () => {
   const { result, fetched, byTool } = await bothWays('two', {
     argv: ['--message', CHANNEL, TS_TWO],
     args: { channel: CHANNEL, ts: TS_TWO },
   });
-  assert.deepEqual(where(result, byTool), [
-    `acme/two/2023-11-14_${CHANNEL}-${TS_TWO}/F0TWO1.png`,
-    `acme/two/2023-11-14_${CHANNEL}-${TS_TWO}/F0TWO2.csv`,
-  ]);
+  assert.deepEqual(where(result, byTool), ['photo.png', 'sheet.csv']);
   assert.deepEqual(result.skipped, []);
   assert.deepEqual(fetched, [
     `/files-pri/${TEAM}-F0TWO1/download/photo.png`,
@@ -444,16 +489,18 @@ test('files that must not be fetched are skipped with their reasons, the rest ar
   });
 
   // The one file nothing is wrong with is saved, the rest of the batch notwithstanding.
-  assert.deepEqual(where(result, byTool), ['acme/refused/undated_F0OK01/F0OK01.pdf']);
+  assert.deepEqual(where(result, byTool), ['fine.pdf']);
   await savedAsServed(result, { F0OK01: FINE });
 
+  // What its record alone refuses comes first — the question already said so, before any byte — then what the
+  // transport refused, in the order it was asked.
   assert.deepEqual(
     result.skipped.map((entry) => [entry.fileId, entry.cause]),
     [
       ['F0EXT1', 'external'],
+      ['F0BIG1', 'too-large'],
       ['F0EXT2', 'external'],
       ['F0SIGN', 'sign-in-page'],
-      ['F0BIG1', 'too-large'],
       ['F0BIG2', 'too-large'],
       ['F0WRNG', 'wrong-path'],
       ['F0REDR', 'redirect'],
