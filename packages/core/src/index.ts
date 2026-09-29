@@ -53,6 +53,7 @@ export * from './save-destination.ts';
 export * from './saved-files.ts';
 export * from './secrets.ts';
 export * from './state.ts';
+export * from './system-programs.ts';
 export * from './taint.ts';
 export * from './tool-arguments.ts';
 export * from './untrusted.ts';
