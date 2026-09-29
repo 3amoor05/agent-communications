@@ -42,6 +42,7 @@ test('a document, an image, a recording or an archive keeps the name its sender 
     'call.m4a',
     'demo.mov',
     'photos.zip',
+    'python-course.zip',
     'backup.tar.gz',
     'invite.ics',
     'card.vcf',
@@ -74,6 +75,10 @@ test('anything else is saved with .download after its whole name, so no program 
     ['requirements.txt', 'requirements.txt.download', 'auto-read'],
     ['requirements-dev.txt', 'requirements-dev.txt.download', 'auto-read'],
     ['compile_flags.txt', 'compile_flags.txt.download', 'auto-read'],
+    // A Python's own zip of its standard library, and the file that sets its import path.
+    ['python312.zip', 'python312.zip.download', 'auto-read'],
+    ['Python39.ZIP', 'Python39.ZIP.download', 'auto-read'],
+    ['python312._pth', 'python312._pth.download', 'auto-read'],
   ] as const) {
     assert.deepEqual(savedName(given, 'F1'), { name: saved, given, renamed: why }, given);
   }
@@ -233,6 +238,8 @@ const DANGEROUS = [
   'x.service',
   'autorun.inf',
   'pyvenv.cfg',
+  'python312.zip',
+  'python312._pth',
   'id_rsa',
   'id_ed25519.pub',
   'known_hosts',

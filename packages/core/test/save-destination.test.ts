@@ -819,6 +819,61 @@ test('folders programs load packages from are refused wherever they are, and so 
   await refusedFor(join(base, 'plain', 'scripts'), deny, /a Python virtual environment/);
 });
 
+test('a Python installation is refused, whatever it is called: conda’s, a Unix one, a Windows one — and any folder in it', async () => {
+  const { core, env, home } = machine();
+  const deny = denyInputOf(core, env);
+  const base = realpathSync(tempDir('comms-pythons-'));
+  // Fake installations, each with only what it is known by: nothing in them is ever run.
+  const conda = join(base, 'miniconda3');
+  mkdirSync(join(conda, 'conda-meta'), { recursive: true });
+  mkdirSync(join(conda, 'lib', 'python3.12'), { recursive: true });
+  mkdirSync(join(conda, 'envs', 'tool', 'conda-meta'), { recursive: true });
+  const unix = join(base, 'opt-python');
+  mkdirSync(join(unix, 'lib', 'python3.13t'), { recursive: true });
+  writeFileSync(join(unix, 'lib', 'python3.13t', 'os.py'), '');
+  const windows = join(base, 'Python312');
+  mkdirSync(join(windows, 'Lib'), { recursive: true });
+  writeFileSync(join(windows, 'Lib', 'os.py'), '');
+  for (const [folder, top] of [
+    [conda, conda],
+    [join(conda, 'lib'), conda],
+    [join(conda, 'lib', 'python3.12'), conda],
+    [join(conda, 'pkgs', 'not-made-yet'), conda],
+    [join(conda, 'envs', 'tool', 'lib'), join(conda, 'envs', 'tool')],
+    [unix, unix],
+    [join(unix, 'lib'), unix],
+    [join(unix, 'bin'), unix],
+    [windows, windows],
+    [join(windows, 'Scripts'), windows],
+    [join(windows, 'DLLs'), windows],
+  ] as const) {
+    await refusedFor(
+      folder,
+      deny,
+      new RegExp(`inside ${top.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}, a Python installation`),
+    );
+  }
+  // Only what makes one: a `lib/python3.x` with no os.py in it, an empty `Lib`, a Python 2's, a file called conda-meta.
+  mkdirSync(join(base, 'shelf', 'lib', 'python3.12'), { recursive: true });
+  mkdirSync(join(base, 'notes', 'Lib'), { recursive: true });
+  mkdirSync(join(base, 'old', 'lib', 'python2.7'), { recursive: true });
+  writeFileSync(join(base, 'old', 'lib', 'python2.7', 'os.py'), '');
+  mkdirSync(join(base, 'listing'), { recursive: true });
+  writeFileSync(join(base, 'listing', 'conda-meta.txt'), '');
+  for (const folder of ['shelf', 'notes', 'old', 'listing']) {
+    assert.equal(await saveFolderRefusal(join(base, folder), deny), null, folder);
+  }
+  // A folder beside one is not inside it; a link into one is.
+  assert.equal(await saveFolderRefusal(join(base, 'work'), deny), null);
+  symlinkSync(join(conda, 'lib'), join(base, 'work-lib'));
+  await refusedFor(join(base, 'work-lib'), deny, /a Python installation/);
+  // A home a Python was installed into (`--prefix=$HOME`) is still the person's: its Downloads is theirs to save in.
+  mkdirSync(join(home, 'lib', 'python3.12'), { recursive: true });
+  writeFileSync(join(home, 'lib', 'python3.12', 'os.py'), '');
+  assert.equal(await saveFolderRefusal(join(home, 'Downloads'), deny), null);
+  assert.equal(await saveFolderRefusal(home, deny), null);
+});
+
 test('~/Library is refused, case-blind where the disk is', () => {
   const deny = (platform: NodeJS.Platform): SaveDenyInput => ({
     paths: {

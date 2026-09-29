@@ -1,4 +1,4 @@
-import { lstat, realpath } from 'node:fs/promises';
+import { lstat, readdir, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { CommsError } from './errors.ts';
 import { DOCUMENTS_KNOWN_FOLDER, knownFolder } from './known-folders.ts';
@@ -25,6 +25,9 @@ import { homeOf, type ResolvedPaths } from './paths.ts';
  * - a folder programs load packages from, wherever it is: `node_modules`, `site-packages`, `dist-packages`,
  *   `__pycache__`, and any folder inside a Python virtual environment — one with `pyvenv.cfg` in it or above it — whose
  *   interpreter runs what is put in its package folders at every start;
+ * - any folder inside a Python installation — one with `conda-meta`, `Lib/os.py` or `lib/python3.<minor>/os.py` in it
+ *   or above it, such as `~/miniconda3` or `C:\Python312` — whose interpreter loads what it finds in its own folders by
+ *   name: `python312.zip` ahead of the standard library, a `._pth` that rewrites where it looks;
  * - `~/Library`, where macOS and its apps keep what they load on their own;
  * - on Windows, the profile's `AppData` (`%APPDATA%`, `%LOCALAPPDATA%`), `%PROGRAMDATA%`, the Windows folder and
  *   Program Files, the PowerShell profile folders (`Documents\PowerShell`, `Documents\WindowsPowerShell`, wherever
@@ -128,8 +131,8 @@ const PACKAGE_FOLDERS = new Set(['node_modules', 'site-packages', 'dist-packages
 
 /**
  * Every folder a download is refused, as data: this package's, the home's, the platform's. The hidden folders, the
- * package folders and the virtual environments are rules rather than folders, and `refusedSaveFolder` and
- * `saveFolderRefusal` apply them beside this list.
+ * package folders, and the Python environments and installations are rules rather than folders, and
+ * `refusedSaveFolder` and `saveFolderRefusal` apply them beside this list.
  */
 export function saveDenyList(input: SaveDenyInput): DeniedFolder[] {
   const platform = input.platform ?? process.platform;
@@ -328,7 +331,7 @@ function breaks(
 
 /**
  * Why a folder may never be saved into, judged on the path as written and resolved — or null. No file is looked at:
- * see {@link saveFolderRefusal} for the check that also follows links and finds virtual environments.
+ * see {@link saveFolderRefusal} for the check that also follows links and finds Python environments and installations.
  */
 export function refusedSaveFolder(folder: string, input: SaveDenyInput): string | null {
   const platform = input.platform ?? process.platform;
@@ -359,23 +362,69 @@ export async function realpathOfExisting(target: string): Promise<string> {
   }
 }
 
+/** Whether anything is at `file`, without following a link at its own name. */
+async function present(file: string): Promise<boolean> {
+  try {
+    await lstat(file);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
- * The Python virtual environment a folder is inside — the nearest folder at or above it with a `pyvenv.cfg` in it —
- * or null. Whatever is saved in its `site-packages` runs at every start of its interpreter, and a `bin` or `Scripts`
- * folder in it is on the `PATH` of whoever activates it; the environment can be called anything, so it is known by
- * the file every one of them has, not by its name.
+ * Whether `folder` is the top of a Python installation, known by what every one of them has, not by its name:
+ * `conda-meta` in a conda installation or environment (`~/miniconda3`, `~/anaconda3/envs/tool`), `Lib/os.py` in one
+ * for Windows (`C:\Python312`, a Scoop or an Anaconda one), and `lib/python3.<minor>/os.py` in any other.
+ *
+ * Its interpreter loads what it finds in its own folders by name, at every start, before anything the person asked
+ * for: `lib/python312.zip` is on its import path ahead of the standard library, a `._pth` beside it rewrites that path,
+ * and each module folder is searched for the modules every program imports. None of those folders is one a person
+ * reads their files in.
  */
-async function virtualEnvironment(folder: string): Promise<string | null> {
+async function pythonInstallation(folder: string): Promise<boolean> {
+  if ((await present(path.join(folder, 'conda-meta'))) || (await present(path.join(folder, 'Lib', 'os.py')))) {
+    return true;
+  }
+  let names: string[];
+  try {
+    names = await readdir(path.join(folder, 'lib'));
+  } catch {
+    return false;
+  }
+  for (const name of names) {
+    if (name.startsWith('python3.') && (await present(path.join(folder, 'lib', name, 'os.py')))) return true;
+  }
+  return false;
+}
+
+/** The Python a folder is inside, and which kind: the nearest folder at or above it that is one — see below. */
+interface PythonOwner {
+  folder: string;
+  kind: 'virtual environment' | 'installation';
+}
+
+/**
+ * The Python a folder is inside — a virtual environment, the nearest folder at or above it with a `pyvenv.cfg` in it,
+ * or an installation ({@link pythonInstallation}) — or null. Whatever is saved in a virtual environment's
+ * `site-packages` runs at every start of its interpreter, and a `bin` or `Scripts` folder in it is on the `PATH` of
+ * whoever activates it; either can be called anything, so each is known by what every one of them has.
+ *
+ * Two folders are never taken for an installation, though they can look like one. The root of a disk: on a Linux whose
+ * `/lib` is a link to `/usr/lib`, as every current one's is, `/lib/python3.12/os.py` is the system's Python, and taking
+ * `/` for an installation would refuse every folder there is — while `/lib` and `/usr` are refused already, as system
+ * folders. And the home, which the person may have installed a Python into (`--prefix=$HOME`): refusing it would
+ * refuse the person's own folders, Downloads among them, and the files that Python loads by name — its `python312.zip`,
+ * its modules, what is in `site-packages` — are each saved with `.download` after them, or refused, anyway.
+ */
+async function pythonOwner(folder: string, homes: readonly string[], blind: boolean): Promise<PythonOwner | null> {
+  const home = (candidate: string) => homes.some((one) => same(path, blind, one, candidate));
   let current = path.resolve(folder);
   for (;;) {
-    try {
-      await lstat(path.join(current, 'pyvenv.cfg'));
-      return current;
-    } catch {
-      // Not here: one folder up.
-    }
+    if (await present(path.join(current, 'pyvenv.cfg'))) return { folder: current, kind: 'virtual environment' };
     const parent = path.dirname(current);
     if (parent === current) return null;
+    if (!home(current) && (await pythonInstallation(current))) return { folder: current, kind: 'installation' };
     current = parent;
   }
 }
@@ -386,8 +435,8 @@ async function virtualEnvironment(folder: string): Promise<string | null> {
  * The path as written, and its real path through whatever part of it exists, each against the list as written and as
  * its own links resolve: a folder that is a link to `~/.ssh` is refused as `~/.ssh` is, a `hooks` link to `.husky` as
  * `.husky` is, and so is a home or a state folder reached through a link (`/var` → `/private/var` on macOS). Then
- * each, and every folder above it, is looked in for `pyvenv.cfg`. Links are followed, and folders looked in, only on
- * the platform this runs on; a path for another is judged as written.
+ * each, and every folder above it, is looked in for what makes it a Python virtual environment or installation. Links
+ * are followed, and folders looked in, only on the platform this runs on; a path for another is judged as written.
  */
 export async function saveFolderRefusal(folder: string, input: SaveDenyInput): Promise<string | null> {
   const platform = input.platform ?? process.platform;
@@ -411,9 +460,12 @@ export async function saveFolderRefusal(folder: string, input: SaveDenyInput): P
     if (why !== null) return why;
   }
   for (const candidate of candidates) {
-    const environment = await virtualEnvironment(candidate);
-    if (environment !== null) {
-      return `it is inside ${environment}, a Python virtual environment, whose interpreter runs what is put in its package folders at every start`;
+    const owner = await pythonOwner(candidate, homes, caseBlind(platform));
+    if (owner?.kind === 'virtual environment') {
+      return `it is inside ${owner.folder}, a Python virtual environment, whose interpreter runs what is put in its package folders at every start`;
+    }
+    if (owner?.kind === 'installation') {
+      return `it is inside ${owner.folder}, a Python installation, whose interpreter loads what it finds in its own folders by name at every start`;
     }
   }
   return null;
@@ -434,7 +486,7 @@ export async function checkSaveFolder(
 
 export function refusedFolder(folder: string, why: string, hint: string): CommsError {
   return new CommsError('BAD_DATA', `cannot save into ${folder}: ${why}`, {
-    hint: `${hint} A download is never saved into a hidden folder, a package or virtual-environment folder, ~/Library, a system folder or agent-communications’ own.`,
+    hint: `${hint} A download is never saved into a hidden folder, a package folder, a Python installation or virtual environment, ~/Library, a system folder or agent-communications’ own.`,
     details: { folder, refused: why },
   });
 }

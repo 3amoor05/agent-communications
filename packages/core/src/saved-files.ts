@@ -192,7 +192,8 @@ function renameReason(safe: string): RenameReason | undefined {
  * listed so that the question can say why in plainer words than "a type that could run", and so the flag is
  * `auto-read`. A few end in an inert one and are listed because of that: `CMakeLists.txt` is what `cmake` runs,
  * `requirements.txt` and `constraints.txt` are what `pip install -r` installs from, `compile_flags.txt` is what clangd
- * compiles every file in the folder with.
+ * compiles every file in the folder with, and `python312.zip` is on a Python's import path ahead of its standard
+ * library — the modules in it are what every program that Python runs imports.
  *
  * A download's "current folder" is usually the folder an agent works in: a project. There a file is not only read by
  * the person who asked for it. An agent loads `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules` or
@@ -284,6 +285,10 @@ const READ_ON_THEIR_OWN_PATTERNS: readonly RegExp[] = [
   /^(?:requirements|constraints)(?:[-_.][^.]*)?\.txt$/,
   /^id_(?:rsa|dsa|ecdsa|ed25519)/,
   /\.(?:plist|desktop|service|pth|lnk|url|webloc|scf|library-ms|searchconnector-ms)$/,
+  // A Python's own, beside its interpreter or in its `lib`: the zip of its standard library, and the `._pth` that sets
+  // its import path — each read by name at every start, whatever folder the Python is in.
+  /^python\d+\.zip$/i,
+  /\._pth$/i,
 ];
 
 /**
