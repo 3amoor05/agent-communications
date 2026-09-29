@@ -39,7 +39,10 @@ export const DOWNLOAD_SUFFIX = '.download';
  * purpose: anything that runs (`exe`, `app`, `msi`, `sh`, `ps1`, `bat`, `jar`…), is a script or source (`py`, `js`,
  * `rb`…), is loaded by extension (`pth`, `plist`, `desktop`, `lnk`, `url`, `scf`, `library-ms`, `reg`…), is a
  * macro-enabled document (`docm`, `xlsm`, `pptm`), renders active content (`html`, `svg`, `xml`), or is configuration
- * that tools read (`json`, `yaml`, `toml`, `ini`, `cfg`, `conf`, `md`) — and a name with no extension at all.
+ * that tools read (`json`, `yaml`, `toml`, `ini`, `cfg`, `conf`, `md`) — and a name with no extension at all. The older
+ * Office formats and OpenDocument's (`doc`, `xls`, `ppt`, `odt`, `ods`, `odp`) are kept, since a person opens them as
+ * they open a `.docx`, but they can carry macros whatever they are called: each is flagged `macro-capable`, and the
+ * question and the result say so before anyone opens one.
  */
 export const INERT_EXTENSIONS: ReadonlySet<string> = new Set([
   // Documents.
@@ -367,6 +370,11 @@ export function fileWarnings(files: readonly WarnedFile[], when: 'question' | 'r
       lines.push(
         `${called}${flagged} ${saved} ${as} — ${renameWords(file.renamed)}; rename it yourself if you trust it`,
       );
+    } else if (flags.includes('macro-capable')) {
+      // Said as what it means, since the file keeps its name and opens at a double-click: a format that runs macros.
+      const others = flags.filter((flag) => flag !== 'macro-capable');
+      const also = others.length > 0 ? ` (${others.join(', ')})` : '';
+      lines.push(`${called}${also} can hold macros — open it only if you trust the sender`);
     } else if (flags.length > 0) {
       lines.push(`${called} is flagged: ${flags.join(', ')} — look at it before opening it`);
     }
@@ -379,6 +387,13 @@ const RISK_RULES: Array<{ flag: string; extensions?: RegExp; mimeTypes?: RegExp 
   { flag: 'executable', extensions: /\.(exe|msi|bat|cmd|com|scr|pif|app|dmg|pkg|deb|rpm|apk)$/i },
   { flag: 'script', extensions: /\.(js|mjs|vbs|ps1|sh|bash|zsh|py|rb|jar|jse|wsf|hta)$/i },
   { flag: 'macro-enabled', extensions: /\.(docm|xlsm|pptm|dotm|xltm|xlam)$/i },
+  /*
+   * The older Office formats and OpenDocument's, which keep their names — a person opens them as they open a `.docx` —
+   * but, unlike `.docx`, can carry macros whatever they are called. On Windows, Office opens one that carries the mark
+   * it is saved with in Protected View, its macros blocked; the flag is for everything else: another system, another
+   * program, a copy the mark did not follow.
+   */
+  { flag: 'macro-capable', extensions: /\.(doc|xls|ppt|odt|ods|odp)$/i },
   { flag: 'markup', extensions: /\.(html?|svg|xhtml|mht|mhtml)$/i, mimeTypes: /^(text\/html|image\/svg\+xml)$/i },
   { flag: 'archive', extensions: /\.(zip|rar|7z|tar|gz|bz2|xz|iso|cab)$/i },
   { flag: 'disk-image', extensions: /\.(iso|img|vhd|vmdk)$/i },

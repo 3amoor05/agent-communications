@@ -657,3 +657,31 @@ test('a file tools read on their own is named in the question and in `next`, and
     await tool.close();
   }
 });
+
+test('a document that can hold macros keeps its name, and the question, `next` and the result say it can', async () => {
+  const harness = await newHarness();
+  await harness.addWorkspace({ alias: 'acme' });
+  const cwd = tempDir('agent-slack-cwd-');
+  RECORDS.F0XLS = fileRecord('F0XLS', { name: 'report.xls', mimetype: 'application/vnd.ms-excel' });
+  const tool = await connect(harness, {
+    fetch: slackApi(script()).fetch,
+    download: transport({ F0XLS: 'xls!' }).download,
+    cwd,
+  });
+  try {
+    const asked = ok<FileDownloadQuestion>(await tool.call({ workspace: 'acme', fileIds: ['F0XLS'] }));
+    const warning = 'report.xls can hold macros — open it only if you trust the sender';
+    assert.ok(asked.question.includes(`! ${warning}`), asked.question);
+    assert.ok(asked.next.includes(warning), asked.next);
+    assert.deepEqual(asked.files[0]?.riskFlags, ['macro-capable']);
+    const saved = ok<FileDownloadResult>(
+      await tool.call({ workspace: 'acme', fileIds: ['F0XLS'], saveTo: 'current', choiceId: asked.choiceId }),
+    );
+    assert.equal(saved.files[0]?.savedAs, 'report.xls');
+    assert.deepEqual(await readdir(cwd), ['report.xls']);
+    assert.deepEqual(saved.warnings, [warning]);
+  } finally {
+    delete RECORDS.F0XLS;
+    await tool.close();
+  }
+});

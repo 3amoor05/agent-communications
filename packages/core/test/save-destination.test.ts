@@ -1008,6 +1008,55 @@ test('on Windows: AppData, ProgramData, the Windows folder, Program Files, Power
   assert.equal(refusedSaveFolder('D:\\OneDrive\\Documents', deny), null);
 });
 
+test('on Linux, Windows’s own folders reached through WSL’s /mnt/<letter> are refused as on Windows, in any case', () => {
+  const deny: SaveDenyInput = {
+    paths: {
+      configDir: '/srv/sam/.config/ac',
+      stateDir: '/srv/sam/.local/state/ac',
+      dataDir: '/srv/sam/.local/share/ac',
+      secretsDir: '/srv/sam/.config/ac/secrets',
+    },
+    env: { HOME: '/srv/sam' },
+    platform: 'linux',
+  };
+  for (const [folder, why] of [
+    ['/mnt/c', /the root of a Windows drive, reached through \/mnt\/c$/],
+    ['/mnt/d/', /the root of a Windows drive, reached through \/mnt\/d$/],
+    ['/mnt/c/Windows/System32', /the Windows folder, reached through \/mnt\/c$/],
+    ['/mnt/c/WINDOWS', /the Windows folder/],
+    ['/mnt/c/Program Files/App', /inside Program Files, where programs are installed, reached/],
+    ['/mnt/c/program files (x86)/App', /inside Program Files/],
+    ['/mnt/c/ProgramData/Microsoft/Windows/Start Menu/Programs/StartUp', /inside ProgramData/],
+    ['/mnt/c/Users/jo/AppData', /inside an AppData folder/],
+    ['/mnt/c/Users/jo/AppData/Roaming/Microsoft/Excel/XLSTART', /inside an AppData folder/],
+    ['/mnt/c/Users/jo/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup', /inside an AppData folder/],
+    ['/mnt/e/users/Public/appdata/local', /inside an AppData folder, .*reached through \/mnt\/e$/],
+    ['/mnt/c/Users/jo/Documents/PowerShell', /Documents\\PowerShell, whose profile scripts PowerShell runs/],
+    ['/mnt/c/Users/jo/documents/windowspowershell/Modules', /Documents\\WindowsPowerShell/],
+    ['/mnt/c/Users/jo/OneDrive/Documents/PowerShell', /Documents\\PowerShell/],
+    ['/mnt/c/Users/jo/OneDrive - Acme/Documents/WindowsPowerShell', /Documents\\WindowsPowerShell/],
+  ] as const) {
+    assert.match(String(refusedSaveFolder(folder, deny)), why, folder);
+  }
+  // The person's own folders on a Windows drive are theirs, as they are on Windows.
+  for (const folder of [
+    '/mnt/c/Users',
+    '/mnt/c/Users/jo',
+    '/mnt/c/Users/jo/Downloads',
+    '/mnt/c/Users/jo/Documents',
+    '/mnt/c/Users/jo/Documents/PowerShell Scripts',
+    '/mnt/c/Users/jo/Desktop/AppData',
+    '/mnt/c/src/Windows',
+    '/mnt/d/Invoices',
+    '/mnt/wsl',
+    '/mnt/cdrom',
+  ]) {
+    assert.equal(refusedSaveFolder(folder, deny), null, folder);
+  }
+  // Only on Linux: a Mac has no WSL, and its /mnt is its own.
+  assert.equal(refusedSaveFolder('/mnt/c/Windows', { ...deny, platform: 'darwin' }), null);
+});
+
 test('on Windows a share, a device path, and a path with no drive or only a drive’s current folder are refused', () => {
   for (const [text, why] of [
     ['\\\\host\\share\\in', /network share/],
@@ -1399,13 +1448,15 @@ test('each renamed or flagged file is named in the question and in what the agen
         renamed: 'auto-read',
         flags: ['auto-read', 'saved-as-download'],
       },
+      { name: 'report.xls', size: 1, flags: ['macro-capable'] },
     ],
-    count: 4,
+    count: 5,
   });
   const lines = [
     'setup.exe (executable) will be saved as setup.exe.download — a type that could run; rename it yourself if you trust it',
     'bundle.zip is flagged: archive — look at it before opening it',
     'file 4 will be saved as its name with .download after it — a file tools read or run on their own; rename it yourself if you trust it',
+    'report.xls can hold macros — open it only if you trust the sender',
   ];
   for (const line of lines) {
     assert.ok(question.question.includes(`\n  ! ${line}`), `${line}\n---\n${question.question}`);

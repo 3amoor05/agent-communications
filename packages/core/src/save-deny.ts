@@ -33,6 +33,8 @@ import { homeOf, type ResolvedPaths } from './paths.ts';
  *   Program Files, the PowerShell profile folders (`Documents\PowerShell`, `Documents\WindowsPowerShell`, wherever
  *   Documents is), and the root of a drive; and a network share (`\\host\share`), a device path (`\\.\`, `\\?\`) or a
  *   path relative to a drive (`\folder`, `C:folder`), each of which is not the folder it looks like;
+ * - on Linux, the same Windows folders reached through WSL's `/mnt/<letter>`: the drive itself, `Windows`,
+ *   `Program Files`, `ProgramData`, a profile's `AppData` and PowerShell profile folders, in any case;
  * - the system's own folders: the root, `/etc`, `/usr`, `/bin`, `/sbin`, `/var`, `/System`, `/private/etc` and the
  *   like — except macOS's per-user temporary folder under `/var`, and a home that is inside one (`/root`, a service
  *   account's `/var/lib/<name>`), which is the person's own.
@@ -129,10 +131,53 @@ const HOMES_MAY_BE_IN = ['/root', '/var', '/opt', '/private/var'];
 /** Folder names programs load packages from, wherever they are: whatever is put in them is loaded by name. */
 const PACKAGE_FOLDERS = new Set(['node_modules', 'site-packages', 'dist-packages', '__pycache__']);
 
+/*
+ * Windows's own folders, as a Linux under WSL reaches them: each drive at `/mnt/<letter>`. A process there is a Linux
+ * one, so none of the Windows rules above applies to it, and it writes into `%USERPROFILE%\AppData` as readily as
+ * into its own home — where Excel opens what is in `XLSTART` at every start, and Windows runs what is in `Startup` at
+ * every sign-in. So the same folders are refused here, by the same names in any case, since the drive underneath is
+ * Windows's and opens `appdata` as `AppData`. The pattern is fixed, never read from `/etc/wsl.conf`: what an agent can
+ * set is not what decides where Windows is.
+ */
+const WSL_DRIVE = /^\/mnt\/([a-z])(?:\/|$)/i;
+const WSL_PROGRAM_FOLDERS = new Map([
+  ['windows', 'it is the Windows folder'],
+  ['program files', 'it is inside Program Files, where programs are installed'],
+  ['program files (x86)', 'it is inside Program Files, where programs are installed'],
+  ['programdata', 'it is inside ProgramData, where programs keep what they load for every user'],
+]);
+// Documents where Windows keeps it, and where OneDrive moves it to: `OneDrive`, or `OneDrive - <organisation>`.
+const WSL_DOCUMENTS = /^(?:onedrive(?: - [^/]+)?\/)?documents\/(powershell|windowspowershell)(?:\/|$)/;
+
+/** Why a Linux path is one of Windows's own folders, reached through WSL's `/mnt/<letter>` — or null. */
+function windowsThroughWsl(folder: string): string | null {
+  const drive = WSL_DRIVE.exec(folder);
+  if (drive === null) return null;
+  const through = `reached through /mnt/${(drive[1] as string).toLowerCase()}`;
+  const segments = folder
+    .split('/')
+    .slice(3)
+    .filter((segment) => segment !== '');
+  if (segments.length === 0) return `it is the root of a Windows drive, ${through}`;
+  const [top = '', user, ...inProfile] = segments.map((segment) => segment.toLowerCase());
+  const program = WSL_PROGRAM_FOLDERS.get(top);
+  if (program !== undefined) return `${program}, ${through}`;
+  if (top !== 'users' || user === undefined) return null;
+  if (inProfile[0] === 'appdata') {
+    return `it is inside an AppData folder, where Windows and its programs keep what they load on their own, ${through}`;
+  }
+  const shell = WSL_DOCUMENTS.exec(inProfile.join('/'));
+  if (shell !== null) {
+    const name = shell[1] === 'powershell' ? 'PowerShell' : 'WindowsPowerShell';
+    return `it is inside Documents\\${name}, whose profile scripts PowerShell runs at every start, ${through}`;
+  }
+  return null;
+}
+
 /**
  * Every folder a download is refused, as data: this package's, the home's, the platform's. The hidden folders, the
- * package folders, and the Python environments and installations are rules rather than folders, and
- * `refusedSaveFolder` and `saveFolderRefusal` apply them beside this list.
+ * package folders, the Python environments and installations, and Windows's folders seen from WSL are rules rather
+ * than folders, and `refusedSaveFolder` and `saveFolderRefusal` apply them beside this list.
  */
 export function saveDenyList(input: SaveDenyInput): DeniedFolder[] {
   const platform = input.platform ?? process.platform;
@@ -298,6 +343,10 @@ function breaks(
       return windowsPathProblem(folder) ?? 'it is a network share, not a folder on this computer';
     // The root of any drive, not only the one the home is on: `D:\` is as much a disk's top level as `C:\`.
     if (paths.parse(folder).root === folder) return 'it is the root of a drive';
+  }
+  if (platform === 'linux') {
+    const windows = windowsThroughWsl(folder);
+    if (windows !== null) return windows;
   }
   for (const entry of list) {
     const hit = entry.exact ? same(paths, blind, folder, entry.folder) : within(paths, blind, folder, entry.folder);
@@ -486,7 +535,7 @@ export async function checkSaveFolder(
 
 export function refusedFolder(folder: string, why: string, hint: string): CommsError {
   return new CommsError('BAD_DATA', `cannot save into ${folder}: ${why}`, {
-    hint: `${hint} A download is never saved into a hidden folder, a package folder, a Python installation or virtual environment, ~/Library, a system folder or agent-communications’ own.`,
+    hint: `${hint} A download is never saved into a hidden folder, a package folder, a Python installation or virtual environment, ~/Library, a system folder — Windows’s too, seen from WSL — or agent-communications’ own.`,
     details: { folder, refused: why },
   });
 }

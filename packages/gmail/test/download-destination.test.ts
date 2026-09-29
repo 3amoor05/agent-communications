@@ -722,7 +722,7 @@ test('a server started in a hidden folder does not offer it; one started in the 
   }
 });
 
-test('a file that could run is named in the question and in `next`, saved with .download after it, and marked as downloaded', async () => {
+test('a file that could run is named in the question and in `next`, saved with .download after it, one that can hold macros is said to, and each is marked as downloaded', async () => {
   const claude: FakeMessage = {
     ...MESSAGE,
     payload: {
@@ -748,6 +748,13 @@ test('a file that could run is named in the question and in `next`, saved with .
           headers: [{ name: 'Content-Disposition', value: 'attachment; filename="setup.exe"' }],
           body: { size: 2, attachmentId: 'a2' },
         },
+        {
+          partId: '3',
+          mimeType: 'application/vnd.ms-excel',
+          filename: 'report.xls',
+          headers: [{ name: 'Content-Disposition', value: 'attachment; filename="report.xls"' }],
+          body: { size: 4, attachmentId: 'a3' },
+        },
       ],
     },
   };
@@ -757,7 +764,7 @@ test('a file that could run is named in the question and in `next`, saved with .
         sub: 'sub-1',
         email: 'jo@example.test',
         messages: { m1: claude },
-        attachments: { a1: 'instructions', a2: 'MZ' },
+        attachments: { a1: 'instructions', a2: 'MZ', a3: 'xls!' },
       },
     ],
   });
@@ -772,6 +779,8 @@ test('a file that could run is named in the question and in `next`, saved with .
     const warnings = [
       'CLAUDE.md will be saved as CLAUDE.md.download — a file tools read or run on their own; rename it yourself if you trust it',
       'setup.exe (executable) will be saved as setup.exe.download — a type that could run; rename it yourself if you trust it',
+      // Kept as it is — a person opens it as they open a .xlsx — but said, since it can carry macros.
+      'report.xls can hold macros — open it only if you trust the sender',
     ];
     for (const warning of warnings) {
       assert.ok(String(asked.question).includes(`! ${warning}`), String(asked.question));
@@ -781,6 +790,7 @@ test('a file that could run is named in the question and in `next`, saved with .
     assert.deepEqual(flags, [
       ['auto-read', 'saved-as-download'],
       ['executable', 'saved-as-download'],
+      ['macro-capable'],
     ]);
     const saved = wire(
       await call('gmail_attachment_download', {
@@ -793,9 +803,9 @@ test('a file that could run is named in the question and in `next`, saved with .
     const files = saved.files as Array<{ savedAs: string; path: string; marked: string | null }>;
     assert.deepEqual(
       files.map((file) => file.savedAs),
-      ['CLAUDE.md.download', 'setup.exe.download'],
+      ['CLAUDE.md.download', 'setup.exe.download', 'report.xls'],
     );
-    assert.deepEqual(await listing(cwd), ['CLAUDE.md.download', 'setup.exe.download']);
+    assert.deepEqual(await listing(cwd), ['CLAUDE.md.download', 'report.xls', 'setup.exe.download']);
     assert.deepEqual(
       saved.warnings,
       warnings.map((warning) => warning.replace('will be saved', 'was saved')),
@@ -805,7 +815,7 @@ test('a file that could run is named in the question and in `next`, saved with .
       process.platform === 'darwin' ? 'com.apple.quarantine' : process.platform === 'win32' ? 'Zone.Identifier' : null;
     assert.deepEqual(
       files.map((file) => file.marked),
-      [expected, expected],
+      [expected, expected, expected],
     );
     if (process.platform === 'darwin') {
       const { execFileSync } = await import('node:child_process');

@@ -366,6 +366,18 @@ test('the risks of a name are judged on the name as written to disk, and a bidi 
   assert.ok(fileRisks(`invoice${RLO}fdp.exe`, 'application/pdf').includes('bidi-filename'));
 });
 
+test('an older Office document or an OpenDocument one keeps its name, and is flagged macro-capable; its newer form is not', () => {
+  for (const name of ['report.doc', 'report.XLS', 'deck.ppt', 'letter.odt', 'budget.ods', 'slides.odp']) {
+    assert.equal(savedFileName(name, 'F1'), name, name);
+    assert.deepEqual(fileRisks(name, 'application/octet-stream'), ['macro-capable'], name);
+  }
+  for (const name of ['report.docx', 'report.xlsx', 'deck.pptx', 'report.pdf', 'report.rtf']) {
+    assert.deepEqual(fileRisks(name, 'application/octet-stream'), [], name);
+  }
+  // Whatever else is said about it, it is said beside the macros.
+  assert.deepEqual(fileRisks('invoice.pdf.xls', 'application/vnd.ms-excel'), ['macro-capable', 'double-extension']);
+});
+
 test('the warnings name each renamed file and why, each other flagged file and how — and a name only when it is plain', () => {
   const lines = fileWarnings(
     [
@@ -399,6 +411,13 @@ test('the warnings name each renamed file and why, each other flagged file and h
         flags: ['script', 'saved-as-download'],
         position: 6,
       },
+      { given: 'report.xls', savedAs: 'report.xls', flags: ['macro-capable'], position: 7 },
+      {
+        given: 'invoice.pdf.odt',
+        savedAs: 'invoice.pdf.odt',
+        flags: ['macro-capable', 'double-extension'],
+        position: 8,
+      },
     ],
     'question',
   );
@@ -408,6 +427,8 @@ test('the warnings name each renamed file and why, each other flagged file and h
     'CMakeLists.txt will be saved as CMakeLists.txt.download — a file tools read or run on their own; rename it yourself if you trust it',
     'Makefile will be saved as Makefile.download — a name with no type, which could run; rename it yourself if you trust it',
     'file 6 (script) will be saved as its name with .download after it — a type that could run; rename it yourself if you trust it',
+    'report.xls can hold macros — open it only if you trust the sender',
+    'invoice.pdf.odt (double-extension) can hold macros — open it only if you trust the sender',
   ]);
   // Once saved, in the past; and a name that is a sentence is never in the tool's own words.
   const saved = fileWarnings(
