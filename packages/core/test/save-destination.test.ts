@@ -12,7 +12,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { join, posix, win32 } from 'node:path';
+import { join, parse, posix, win32 } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { ApprovalStore, type DownloadBinding, type DownloadRequest, downloadDigest } from '../src/approvals.ts';
@@ -573,7 +573,7 @@ test('at the terminal, a folder no download may use is said so and asked again, 
     render,
     streams: term.streams,
   });
-  assert.match(term.err(), /That cannot be used: cannot save into .*\.ssh: it is inside ~\/\.ssh, a hidden folder/);
+  assert.match(term.err(), /That cannot be used: cannot save into .*\.ssh: it is inside ~[\\/]\.ssh, a hidden folder/);
   assert.deepEqual(result, {
     destinationRequired: false,
     recorded: { choice: 'other', folder: join(home, 'Invoices') },
@@ -1295,8 +1295,8 @@ test('a link to a refused folder is the refused folder: ~/.ssh through a link, a
   const elsewhere = realpathSync.native(tempDir('comms-links-'));
   symlinkSync(join(home, '.ssh'), join(elsewhere, 'innocent'));
   symlinkSync(join(home, '.config'), join(elsewhere, 'settings'));
-  await refusedFor(join(elsewhere, 'innocent'), deny, /it is inside ~\/\.ssh, a hidden folder/);
-  await refusedFor(join(elsewhere, 'settings', 'autostart'), deny, /it is inside ~\/\.config, a hidden folder/);
+  await refusedFor(join(elsewhere, 'innocent'), deny, /it is inside ~[\\/]\.ssh, a hidden folder/);
+  await refusedFor(join(elsewhere, 'settings', 'autostart'), deny, /it is inside ~[\\/]\.config, a hidden folder/);
   // And this package's own state, reached through a link.
   symlinkSync(core.paths.stateDir, join(elsewhere, 'state'), 'dir');
   mkdirSync(core.paths.stateDir, { recursive: true });
@@ -1358,15 +1358,23 @@ test('a refused folder is refused before the question is spent, whoever gave the
   assert.equal(existsSync(join(home, '.ssh')), false, 'a refused folder was made');
 });
 
+/** This machine's disk root — `/`, or a drive's on Windows — and how a folder there is refused. */
+const DISK_ROOT = parse(process.cwd()).root;
+const ROOT_REFUSED = process.platform === 'win32' ? 'the root of a drive' : 'the root of the disk';
+const escaped = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 test('a folder offered by default that is refused is shown as unavailable, with why, and never the default', async () => {
   const { core, env, home } = machine();
   // A server started in a project's hidden folder, or at the root: option 2 is not offered.
-  for (const current of [join(home, 'app', '.claude'), '/']) {
+  for (const current of [join(home, 'app', '.claude'), DISK_ROOT]) {
     const question = await asking(core, env, { folders: { downloads: join(home, 'Downloads'), current } });
     assert.deepEqual(question.options[0], { choice: 'downloads', path: join(home, 'Downloads'), default: true });
     assert.equal(question.options[1]?.choice, 'current');
     assert.equal(question.options[1]?.default, undefined);
-    assert.match(String(question.options[1]?.unavailable), current === '/' ? /root of the disk/ : /hidden folder/);
+    assert.match(
+      String(question.options[1]?.unavailable),
+      current === DISK_ROOT ? new RegExp(ROOT_REFUSED) : /hidden folder/,
+    );
     assert.match(question.question, /2\. The current folder — .* — not available: /);
     assert.doesNotMatch(question.next, /"current"/);
   }
@@ -1377,18 +1385,18 @@ test('a folder offered by default that is refused is shown as unavailable, with 
   assert.match(String(question.options[0]?.unavailable), /hidden folder/);
   assert.equal(question.options[1]?.default, true);
   // And an answer naming the unavailable option is refused before the question is spent.
-  const asked = await asking(core, env, { folders: { downloads: join(home, 'Downloads'), current: '/' } });
+  const asked = await asking(core, env, { folders: { downloads: join(home, 'Downloads'), current: DISK_ROOT } });
   await assert.rejects(
     settleDestination(core, {
       answer: { kind: 'choice', answer: { choice: 'current' }, choiceId: asked.choiceId },
       request: REQUEST,
-      folders: () => ({ downloads: join(home, 'Downloads'), current: '/' }),
+      folders: () => ({ downloads: join(home, 'Downloads'), current: DISK_ROOT }),
       policy: 'chat',
       approveCommand: 'agent-gmail approve',
       surface: 'mcp',
       env,
     }),
-    refusal(/root of the disk/, 'BAD_DATA'),
+    refusal(new RegExp(ROOT_REFUSED), 'BAD_DATA'),
   );
   assert.equal((await core.approvals.get(asked.choiceId))?.state, 'pending');
 });
@@ -1575,7 +1583,7 @@ test('under chat, an id alone with no recorded answer is refused before the ques
 test('`approve` at a terminal shows the question again and records the person’s answer; anything else revokes it', async () => {
   const { core, env, home } = machine();
   const asked = await asking(core, env, {
-    folders: { downloads: join(home, 'Downloads'), current: '/' },
+    folders: { downloads: join(home, 'Downloads'), current: DISK_ROOT },
     policy: 'confirm',
     listing: [
       { name: 'CLAUDE.md.download', size: 12, renamed: 'auto-read', flags: ['auto-read', 'saved-as-download'] },
@@ -1592,13 +1600,16 @@ test('`approve` at a terminal shows the question again and records the person’
   });
   assert.deepEqual(outcome, { state: 'approved', answer: { choice: 'downloads' } });
   assert.match(term.out(), /1 12 bytes · CLAUDE\.md\.download/);
-  assert.match(term.out(), /2\. The current folder — \/ — not available: it is the root of the disk/);
+  assert.match(
+    term.out(),
+    new RegExp(`2\\. The current folder — ${escaped(DISK_ROOT)} — not available: it is ${ROOT_REFUSED}`),
+  );
   // The warning again, where the person answers: a question shown at a terminal is shown whole.
   assert.match(
     term.out(),
     /! CLAUDE\.md will be saved as CLAUDE\.md\.download — a file tools read or run on their own; rename it yourself if you trust it/,
   );
-  assert.match(term.err(), /That cannot be used: it is the root of the disk/);
+  assert.match(term.err(), new RegExp(`That cannot be used: it is ${ROOT_REFUSED}`));
   const record = await core.approvals.get(asked.choiceId);
   assert.equal(record?.state, 'approved');
   assert.equal(record?.approvedVia, 'terminal');
@@ -1678,7 +1689,9 @@ test('each renamed or flagged file is named in the question and in what the agen
 
 // ── Where Downloads is ─────────────────────────────────────────────────────────────────────────────────────────
 
-test('on Linux, Downloads is where the XDG user directories say, from the environment or user-dirs.dirs', () => {
+test('on Linux, Downloads is where the XDG user directories say, from the environment or user-dirs.dirs', {
+  skip: process.platform === 'win32' && 'it reads user-dirs.dirs from real folders, and a Windows one is no Linux home',
+}, () => {
   const home = realpathSync.native(tempDir('comms-xdg-'));
   const base = { HOME: home };
   assert.equal(downloadsFolder(base, 'linux'), join(home, 'Downloads'), 'with nothing said');
