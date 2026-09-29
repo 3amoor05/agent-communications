@@ -183,6 +183,9 @@ function shortNameIn(segments: readonly string[]): string | null {
 
 /** A mount on this Linux, and the Windows folder it shows when it is one of Windows's drives. */
 export interface Mount {
+  /** The kernel's id for it, and the id of the mount it sits on. */
+  id: string;
+  parent: string;
   /** Where it is mounted, as this Linux sees it. */
   point: string;
   /** The Windows folder at its mount point — `C:\`, `D:\Projects\acme` — or null when it is not Windows's. */
@@ -213,6 +216,12 @@ function windowsBelow(folder: string, root: string): string {
 }
 
 /*
+ * `path=` as 9p writes it: as it was given, so a space, a comma or a semicolon in the folder is left in it. It ends only
+ * where the next option begins — `;cache=` or `;uid=` inside the aname, `,mmap` or `,trans=` after it.
+ */
+const PATH_OPTION = /(?:^|[,;])path=(.*?)(?=;[A-Za-z_]+=|,[A-Za-z_]+(?:=|,|$)|$)/;
+
+/*
  * The Windows folder a mount shows, read the way WSL itself writes it:
  * - `drvfs` (WSL 1), and `9p` with `aname=drvfs` (WSL 2): the source is the Windows folder — `C:\`, or the folder a
  *   drive was mounted from — with `path=` in the options as its second copy;
@@ -231,7 +240,7 @@ function windowsFolder(
   if (fstype === 'drvfs') return windowsBelow(source, root);
   if (fstype === '9p' || fstype === 'v9fs') {
     if (!/(?:^|[,;])aname=drvfs(?:[,;]|$)/.test(options)) return null;
-    const named = /^(?:[A-Za-z]:|\\\\|unc\\)/i.test(source) ? source : /(?:^|;)path=([^;,]*)/.exec(options)?.[1];
+    const named = /^(?:[A-Za-z]:|\\\\|unc\\)/i.test(source) ? source : PATH_OPTION.exec(options)?.[1];
     return windowsBelow(named ?? source, root);
   }
   if (fstype !== 'virtiofs') return null;
@@ -242,16 +251,23 @@ function windowsFolder(
   return own === null ? null : windowsBelow(own, rest.join('/'));
 }
 
-/** Every mount in a `/proc/<pid>/mountinfo` text: the root is the fourth field, the mount point the fifth. */
+/*
+ * Every mount in a `/proc/<pid>/mountinfo` text. Before ` - ` the kernel escapes a space in a path, so those fields
+ * split on spaces: the mount's id, its parent's, the device, the root and the mount point. After it come the type and
+ * the source, escaped the same way, and then the options — which 9p writes as they were given, spaces and all, so
+ * everything after the source is the options.
+ */
 export function parseMounts(mountinfo: string, link: (tag: string) => string | null = virtiofsLink): Mount[] {
   const mounts: Mount[] = [];
   for (const line of mountinfo.split('\n')) {
     const split = line.indexOf(' - ');
     if (split < 0) continue;
-    const [, , , root, point] = line.slice(0, split).split(' ');
-    const [fstype = '', source = '', options = ''] = line.slice(split + 3).split(' ');
-    if (root === undefined || point === undefined) continue;
+    const [id, parent, , root, point] = line.slice(0, split).split(' ');
+    const [, fstype = '', source = '', options = ''] = /^(\S*) (\S*)(?: (.*))?$/.exec(line.slice(split + 3)) ?? [];
+    if (id === undefined || parent === undefined || root === undefined || point === undefined) continue;
     mounts.push({
+      id,
+      parent,
       point: unescapeMountPath(point),
       windows: windowsFolder(fstype, unescapeMountPath(source), unescapeMountPath(root), options, link),
     });
@@ -280,13 +296,34 @@ function trimmed(point: string): string {
   return point === '/' ? '/' : point.replace(/\/+$/, '');
 }
 
-/** The mount a folder is on: the one with the longest mount point that holds it, and the last of those stacked there. */
+/** Whether a mount point holds a folder: is it, or is one of its parents — `/mnt/c` holds `/mnt/c/x`, not `/mnt/cx`. */
+function holds(point: string, folder: string): boolean {
+  return point === '/' || folder === point || folder.startsWith(`${point}/`);
+}
+
+/*
+ * The mount a folder is on, found the way the kernel finds it: from the root mount, down into the first mount met on
+ * the way to the folder — of those sitting on the current one, the one with the shortest mount point — until none
+ * holds it. A mount stacked on another at the same place sits on it, so the top of a stack is the one reached; and a
+ * mount the kernel still lists but a later one covers — a disk at `/win/sub` before a drive was mounted at `/win` — is
+ * never reached, here as there.
+ */
 function owningMount(folder: string, mounts: readonly Mount[]): Mount | undefined {
-  let owner: Mount | undefined;
-  for (const mount of mounts) {
-    const point = trimmed(mount.point);
-    const holds = point === '/' || folder === point || folder.startsWith(`${point}/`);
-    if (holds && (owner === undefined || point.length >= trimmed(owner.point).length)) owner = mount;
+  const ids = new Set(mounts.map((mount) => mount.id));
+  const roots = mounts.filter(
+    (mount) => trimmed(mount.point) === '/' && (mount.parent === mount.id || !ids.has(mount.parent)),
+  );
+  let owner = roots.at(-1) ?? mounts.find((mount) => trimmed(mount.point) === '/');
+  const passed = new Set<Mount>();
+  while (owner !== undefined && !passed.has(owner)) {
+    passed.add(owner);
+    let next: Mount | undefined;
+    for (const mount of mounts) {
+      if (mount === owner || mount.parent !== owner.id || !holds(trimmed(mount.point), folder)) continue;
+      if (next === undefined || trimmed(mount.point).length <= trimmed(next.point).length) next = mount;
+    }
+    if (next === undefined) break;
+    owner = next;
   }
   return owner;
 }

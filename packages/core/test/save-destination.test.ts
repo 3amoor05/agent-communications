@@ -1020,10 +1020,10 @@ test('on Linux, Windows’s own folders on a drive WSL mounted are refused as on
     env: { HOME: '/srv/sam' },
     platform: 'linux',
     mounts: () => [
-      { point: '/', windows: null },
-      { point: '/mnt/c', windows: 'C:\\' },
-      { point: '/mnt/d', windows: 'D:\\' },
-      { point: '/mnt/e', windows: 'E:\\' },
+      { id: '1', parent: '0', point: '/', windows: null },
+      { id: '2', parent: '1', point: '/mnt/c', windows: 'C:\\' },
+      { id: '3', parent: '1', point: '/mnt/d', windows: 'D:\\' },
+      { id: '4', parent: '1', point: '/mnt/e', windows: 'E:\\' },
     ],
   };
   for (const [folder, why] of [
@@ -1075,8 +1075,8 @@ test('on Linux, Windows’s own folders on a drive WSL mounted are refused as on
   const plainLinux: SaveDenyInput = {
     ...deny,
     mounts: () => [
-      { point: '/', windows: null },
-      { point: '/mnt/c', windows: null },
+      { id: '1', parent: '0', point: '/', windows: null },
+      { id: '2', parent: '1', point: '/mnt/c', windows: null },
     ],
   };
   for (const folder of [
@@ -1124,6 +1124,12 @@ test('Windows drives are read from the kernel’s mount table, with the Windows 
     '171 170 0:91 / /mnt/z rw - tmpfs none rw',
     // A network share.
     '180 600 0:95 / /mnt/share rw - 9p unc\\134server\\134share rw,aname=drvfs;path=UNC\\server\\share',
+    // path= as 9p writes it, unescaped: a space in the folder, and a comma, a semicolon and " - " in another.
+    '190 600 0:97 / /mnt/sp rw - 9p drvfs rw,aname=drvfs;path=C:\\Profiles\\Sam Lee\\AppData;cache=mmap;uid=1000,mmap,trans=fd',
+    '191 600 0:98 / /mnt/odd rw - 9p drvfs rw,aname=drvfs;path=D:\\OneDrive - Acme\\a,b;c\\Tools;uid=1000,access=client',
+    // A disk mounted at /hide/sub, then covered when a drive was mounted at /hide: still listed, never reached.
+    '200 600 8:3 / /hide/sub rw - ext4 /dev/sdc1 rw',
+    '201 600 0:99 / /hide rw - drvfs Y:\\134 rw',
   ].join('\n');
   const mounts = parseMounts(mountinfo, (tag) => links.get(tag) ?? null);
   assert.deepEqual(Object.fromEntries(mounts.map((mount) => [mount.point, mount.windows])), {
@@ -1142,6 +1148,10 @@ test('Windows drives are read from the kernel’s mount table, with the Windows 
     '/mnt/c/linuxdisk': null,
     '/mnt/z': null,
     '/mnt/share': 'unc\\server\\share',
+    '/mnt/sp': 'C:\\Profiles\\Sam Lee\\AppData',
+    '/mnt/odd': 'D:\\OneDrive - Acme\\a,b;c\\Tools',
+    '/hide/sub': null,
+    '/hide': 'Y:\\',
   });
   const deny: SaveDenyInput = {
     paths: {
@@ -1164,6 +1174,9 @@ test('Windows drives are read from the kernel’s mount table, with the Windows 
     ['/mnt/g/Windows', /a folder named Windows.*, reached through \/mnt\/g$/],
     ['/mnt/h/AppData', /inside an AppData folder, .*reached through \/mnt\/h$/],
     ['/mnt/share/tools', /on a network share or a Windows device with no drive letter, reached through \/mnt\/share$/],
+    ['/mnt/sp', /inside an AppData folder, .*reached through \/mnt\/sp$/],
+    ['/mnt/odd/AppData', /inside an AppData folder/],
+    ['/hide/sub/AppData', /inside an AppData folder, .*reached through \/hide$/],
   ] as const) {
     assert.match(String(refusedSaveFolder(folder, deny)), why, folder);
   }
@@ -1172,6 +1185,8 @@ test('Windows drives are read from the kernel’s mount table, with the Windows 
     '/win/profile',
     '/win/profile/Downloads',
     '/mnt/h/Downloads',
+    '/mnt/odd',
+    '/hide/sub/Downloads',
     '/mnt/e/Windows',
     '/mnt/wsl/x',
     '/mnt/f/Program Files',
