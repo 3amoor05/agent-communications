@@ -3,6 +3,86 @@
 All notable changes to this project are recorded here, newest first. Every package in this repository is released
 together under one version.
 
+## 0.10.0
+
+**A download asks you where to save, and saves under the files' own names.** A Gmail attachment
+(`gmail_attachment_download`, `agent-gmail attachments download`) or a Slack file (`slack_file_download`,
+`agent-slack files download`) is no longer saved into a folder the tool chose. The first call saves nothing: it lists
+the files, each with its name and size, and asks where to put them:
+1. your Downloads folder: `~/Downloads`, or the one your system names (Linux's user folders, a redirected Windows
+   Downloads), or the folder you set as your downloads folder. This is the default.
+2. the current folder: the one your client was started in, which for Claude Code is your project.
+3. another folder you name, absolute or starting with `~`. It is created if it does not exist.
+
+The question shows the exact path of each. Files are saved there under the names their senders gave them, made safe:
+- no folders, `..`, or invisible characters;
+- no leading dot or hyphen;
+- no names Windows reserves.
+
+Nothing is overwritten: a name that is taken gets `-2`. Nothing else is written into your folder. The record of the
+download stays with agentcomms, and the result says where each file went.
+
+**A file that could run is saved so that nothing runs it.** A file keeps its extension only when it is a type that is
+opened, never run:
+- documents (PDF, Word, Excel, PowerPoint, OpenDocument, Pages, Numbers, Keynote, text, CSV);
+- images, audio and video;
+- archives, calendar files, contacts and mail.
+
+Anything else gets `.download` added — `setup.exe` is saved as `setup.exe.download`, `evil.pth` as `evil.pth.download`
+— and so does a file named like one that tools read on their own (`CLAUDE.md`, `Makefile`, `package.json`,
+`requirements.txt` and the like). The question tells you before you answer, and so do these flags:
+- **Macros:** it warns that a Word, Excel or PowerPoint file in the older formats, or an OpenDocument file, can hold
+  macros.
+- **Rename to use it:** if you trust a `.download` file, rename it yourself.
+
+Every saved file is also marked as downloaded from the internet — the quarantine mark on macOS, `Zone.Identifier` on
+Windows — before a byte of it is written, so Gatekeeper, SmartScreen and Office's own protections still apply.
+
+**Some places are never saved into, whoever answers:**
+- hidden folders, anywhere (a Claude Code worktree is still allowed);
+- `node_modules`, Python's `site-packages` and virtual environments, and Python installations (conda and the like);
+- `~/Library`;
+- agentcomms' own folders;
+- system folders;
+- on Windows, and from WSL under `/mnt/<drive>/`: AppData, Program Files, ProgramData, the drive root, the
+  PowerShell profile folders, and network paths.
+
+A folder that cannot be written in is refused before your answer is used, and a choice that is not available is shown
+as unavailable. A folder that loads every file whatever its name — a shell's completions folder, say — is still yours
+to choose: `.download` stops what loads by extension or by a known name, not that.
+
+**Who answers:**
+- **With your change policy at `chat` (the default)**, your reply in chat is the answer, as for every other approval
+  here. The agent must show you the question and wait: saving needs that question's `choiceId`, which works once, for
+  those files, for thirty minutes. A mistake in the agent's second call is refused and leaves the question open.
+- **With `confirm`**, the answer has to come from you where the agent cannot answer: at your terminal
+  (`agent-gmail approve <id>` / `agent-slack approve <id>`), or in the form a trusted client shows you.
+- **At a terminal**, the command asks you: Enter or 1, 2 or 3.
+- **A script you run** at your terminal can pass `--to downloads|current|<folder>`. Without a terminal, the command
+  prints the question, exits 10, and takes `--to <answer> --choice <id>` on the next run.
+
+Why: you could not tell what was downloaded or where it went — files landed in
+`~/Downloads/agent-communications/<account>/<date>_<id>/` under neutral names — and the tool, not you, chose the
+place.
+
+**Also**
+- **A Gmail download that stops part-way** now records what it saved and removes a partly written file, as Slack's
+  does.
+- **Two files with the same contents but different names** are each saved under their own name.
+- **Windows: a Google sign-in or WhatsApp draft link is opened whole.** It went through `cmd`, which cut it at its
+  first `&` and tried the rest as commands. Every program agentcomms starts on Windows is now started by its full
+  path.
+
+What it means for you: a minor release that changes how downloads behave.
+- `out` / `--out` are gone. A call that passes them is refused with a hint naming `saveTo` / `--to`.
+- Every download now takes two steps: the question, then your answer.
+- `--to` without the question's `--choice` works only when you are at the terminal.
+- A file's name on disk is now the sender's, made safe, and may end in `.download`. A result shows a name as plain
+  text only when it is plainly a file name; otherwise it comes back marked as untrusted, like everything else a sender
+  wrote.
+- To get 0.10.0: your servers will say an update is out (from 0.9.0 on); run `agentcomms update` (or say "update my
+  comms"), then restart your client.
+
 ## 0.9.0
 
 **Every server and command stops for an update, once a day.** When a newer release is out, a request is not carried
