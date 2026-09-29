@@ -87,7 +87,7 @@ export async function prepareDraftPost(
   slack: SessionDeps = {},
 ): Promise<PreparedPost> {
   const writing = draftToWrite(request);
-  const composed = writing === undefined ? undefined : { payload: draftPayload(writing), source: writing.text };
+  const composed = writing === undefined ? undefined : { payload: draftPayload(writing), source: writing.text ?? '' };
   const gate = await gateDepsFor(context, alias, slack);
   const store = openDraftStore(context.core.paths.stateDir, context.now);
   const draft =

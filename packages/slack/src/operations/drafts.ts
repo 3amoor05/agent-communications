@@ -1,6 +1,14 @@
-import { CommsError } from '@agentcomms/core';
-import { type Broadcast, type ComposedPayload, compose, composedFrom, type Mention } from '../compose/blocks.ts';
+import { type AttachPolicy, CommsError, defaultAttachDeny, expandHome, homeDirectory } from '@agentcomms/core';
+import {
+  type Broadcast,
+  type ComposedPayload,
+  compose,
+  composedFrom,
+  escapeForSlack,
+  type Mention,
+} from '../compose/blocks.ts';
 import { type DraftStore, isUnreadableDraft, openDraftStore, type SlackDraft } from '../compose/drafts.ts';
+import { checkFileCount, recordFiles } from '../compose/files.ts';
 import type { SlackContext } from '../context.ts';
 import { decodeSlackText } from '../text/decode.ts';
 import { changedOutsideHint, postedPayload } from './send.ts';
@@ -9,7 +17,11 @@ import { requireWorkspace } from './workspaces.ts';
 /** A message to write as a draft: what `draft create` takes, and `slack_post_prepare` when it is given no draft. */
 export interface DraftInput {
   readonly channel: string;
-  readonly text: string;
+  /**
+   * What it says. Needed for a post of text alone; with files it may be left out, and when given it is posted as the
+   * files' message, so the two arrive as one post.
+   */
+  readonly text?: string | undefined;
   readonly threadTs?: string | undefined;
   /** People to mention, by user id. Each is checked to be one: see `renderMention`. */
   readonly mentionUsers?: readonly string[] | undefined;
@@ -21,6 +33,11 @@ export interface DraftInput {
    * surface's own parser refuses what it can; this refuses it for all of them.
    */
   readonly broadcast?: unknown;
+  /**
+   * Local files to post, by path, in the order they should appear. Each is checked, measured, hashed and typed when the
+   * draft is written — see `recordFiles` — and at most ten go on one draft.
+   */
+  readonly files?: readonly string[] | undefined;
 }
 
 /**
@@ -34,14 +51,131 @@ export function draftPayload(input: DraftInput): ComposedPayload {
     ...(input.mentionUsers ?? []).map((id) => ({ kind: 'user' as const, id })),
     ...(input.broadcast === undefined ? [] : [{ kind: 'broadcast' as const, who: input.broadcast as Broadcast }]),
   ];
-  return compose({ channel: input.channel, text: input.text, threadTs: input.threadTs, mentions });
+  return compose({ channel: input.channel, text: input.text ?? '', threadTs: input.threadTs, mentions });
 }
 
-/** Writes a draft for this workspace: `agent-slack draft create`. Nothing reaches Slack. */
+/**
+ * Which local files may go on a draft: exactly the folders Gmail attaches from, read from the same configuration.
+ *
+ * The same home the rest of this process uses, and not the account's real one — without it the jail would judge the
+ * rule that never sends from a hidden folder against the wrong home.
+ */
+export async function attachPolicyOf(context: SlackContext): Promise<AttachPolicy> {
+  const config = await context.config();
+  const home = homeDirectory(context.env);
+  return {
+    roots: config.defaults.attachRoots.map((root) => expandHome(root, home)),
+    deny: [...defaultAttachDeny(context.core.paths.configDir, context.env), ...config.defaults.attachDeny],
+    home,
+  };
+}
+
+/** The refusal for a draft that would post nothing: no words and no files. */
+function nothingToPost(): CommsError {
+  return new CommsError('USAGE', 'a draft needs something to post: text, files or both', {
+    hint: 'Give the text, or one or more files, or both.',
+  });
+}
+
+/**
+ * Writes a draft for this workspace: `agent-slack draft create`. Nothing reaches Slack.
+ *
+ * The message is composed first, so a mention that is refused is refused before any file is read; then the files are
+ * checked and recorded, and the draft is written only once every one of them has been.
+ */
 export async function createDraft(context: SlackContext, alias: string, input: DraftInput): Promise<SlackDraft> {
   const { account } = requireWorkspace(await context.config(), alias);
+  const paths = input.files ?? [];
+  if (input.text === undefined && paths.length === 0) throw nothingToPost();
   const payload = draftPayload(input);
-  return openDraftStore(context.core.paths.stateDir, context.now).create(account.id, payload, input.text);
+  checkFileCount(paths.length);
+  const files = paths.length === 0 ? [] : await recordFiles(paths, await attachPolicyOf(context));
+  return openDraftStore(context.core.paths.stateDir, context.now).create(account.id, payload, input.text ?? '', files);
+}
+
+/**
+ * What an update changes. Each field left out keeps what the draft has; each given replaces it.
+ *
+ * `files` replaces the list of files — an empty list takes them all off — and `addFiles` adds to the end of it. Both
+ * together replace the list and then add, in that order.
+ */
+export interface DraftChange {
+  readonly channel?: string | undefined;
+  readonly text?: string | undefined;
+  readonly threadTs?: string | undefined;
+  readonly mentionUsers?: readonly string[] | undefined;
+  readonly broadcast?: unknown;
+  readonly files?: readonly string[] | undefined;
+  readonly addFiles?: readonly string[] | undefined;
+}
+
+/**
+ * The mentions a draft's text starts with, read back as what `draftPayload` wrote them from: user ids and a broadcast.
+ *
+ * A draft keeps its mentions only as the spans written in front of the author's words, so keeping them across an edit
+ * of the words means reading them back. What `draftPayload` writes is user mentions and one broadcast; anything else
+ * standing there was not written by it, and the draft is refused as the gate refuses a draft changed by hand.
+ */
+function mentionsOf(draft: SlackDraft, text: string): { users: string[]; broadcast: string | undefined } {
+  const body = escapeForSlack(draft.source);
+  const changed = (): CommsError =>
+    new CommsError('BAD_DATA', `draft "${draft.draftId}" is not what its source composes to, so it cannot be edited`, {
+      hint: changedOutsideHint(draft.draftId),
+      details: { draftId: draft.draftId, reason: 'source-differs' },
+    });
+  if (!composedFrom(draft.source, text)) throw changed();
+  if (text === body) return { users: [], broadcast: undefined };
+  const users: string[] = [];
+  let broadcast: string | undefined;
+  for (const span of text.slice(0, text.length - body.length - 1).split(' ')) {
+    const user = /^<@([^<>]+)>$/.exec(span);
+    const room = /^<!([^<>]+)>$/.exec(span);
+    if (user?.[1] !== undefined) users.push(user[1]);
+    else if (room?.[1] !== undefined && broadcast === undefined) broadcast = room[1];
+    else throw changed();
+  }
+  return { users, broadcast };
+}
+
+/**
+ * Changes a draft of this workspace: `agent-slack draft update` and `slack_draft_update`. Nothing reaches Slack.
+ *
+ * Every update is a new revision, whatever it changed — even nothing — and an approval is bound to the revision it was
+ * prepared for, so an update voids any approval the draft had: what was approved is no longer what would post. The new
+ * version is composed and every added file recorded before anything is saved, so a refused update leaves the draft
+ * exactly as it was. Files kept from before keep what was recorded about them; if one has changed on disk since, the
+ * gate says so when the draft is prepared.
+ */
+export async function updateDraft(
+  context: SlackContext,
+  alias: string,
+  draftId: string,
+  change: DraftChange,
+): Promise<SlackDraft> {
+  const { account } = requireWorkspace(await context.config(), alias);
+  const store = openDraftStore(context.core.paths.stateDir, context.now);
+  const draft = await ownDraft(store, account.id, draftId);
+  // As the gate would post it, or its refusal: a draft changed outside agent-slack is composed again, not edited.
+  const posted = postedPayload(draft);
+  const kept = mentionsOf(draft, posted.text);
+  const next: DraftInput = {
+    channel: change.channel ?? posted.channel,
+    text: change.text ?? draft.source,
+    threadTs: change.threadTs ?? posted.thread_ts,
+    mentionUsers: change.mentionUsers ?? kept.users,
+    broadcast: change.broadcast ?? kept.broadcast,
+  };
+  const payload = draftPayload(next);
+
+  const staying = change.files === undefined ? (draft.files ?? []) : [];
+  const adding = [...(change.files ?? []), ...(change.addFiles ?? [])];
+  checkFileCount(staying.length + adding.length);
+  const files = [
+    ...staying,
+    ...(adding.length === 0 ? [] : await recordFiles(adding, await attachPolicyOf(context), staying.length)),
+  ];
+  if (payload.text.trim() === '' && files.length === 0) throw nothingToPost();
+  return store.update(draft.draftId, payload, next.text ?? '', files);
 }
 
 /**

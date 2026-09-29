@@ -179,8 +179,13 @@ export async function checkAttachable(path: string, policy: AttachPolicy): Promi
 
   const roots = await Promise.all(policy.roots.map((root) => realOrResolved(expandHome(root, home))));
   if (!roots.some((root) => isInside(real, root))) {
+    /*
+     * What a person can do about it, and nothing they cannot. This named a CLI command for widening the allowed
+     * folders, and there has never been one. The folders are the home folder unless someone edited the configuration
+     * by hand, so the step that always works is a copy under it — the same step for a Gmail attachment and a Slack file.
+     */
     throw new CommsError('BAD_DATA', `attachments must come from an allowed folder; ${path} is outside them`, {
-      hint: 'Move the file into an allowed folder, or add its folder to defaults.attachRoots with the CLI.',
+      hint: 'Copy the file under your home folder — not into one of its hidden folders — and name the copy instead.',
     });
   }
   const name = basename(real);

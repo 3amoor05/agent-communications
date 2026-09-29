@@ -3,6 +3,7 @@ import { readdir, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { CommsError, writeFileAtomic } from '@agentcomms/core';
 import type { ComposedPayload } from './blocks.ts';
+import type { SlackDraftFile } from './files.ts';
 
 /**
  * A Slack draft, which lives here rather than in Slack.
@@ -20,6 +21,10 @@ import type { ComposedPayload } from './blocks.ts';
  *
  * The approval digest covers the stored payload, so "approve this" and "post this" are the same bytes. That is
  * the whole reason the payload is stored composed rather than as the input that produced it.
+ *
+ * Files are the one part of a post kept beside the payload rather than in it: the payload stays exactly what
+ * `chat.postMessage` takes, and a file is recorded by what it is — path, name, size, hash, type — and read again from
+ * its path when it is prepared and when it is sent (see `compose/files.ts`).
  */
 
 export interface SlackDraft {
@@ -37,6 +42,11 @@ export interface SlackDraft {
   readonly payload: ComposedPayload;
   /** What the author typed, kept so an edit starts from their words rather than from the escaped form. */
   readonly source: string;
+  /**
+   * The local files this post carries, in the order they were named. Absent on a post of text alone, which is written
+   * exactly as it was before files existed.
+   */
+  readonly files?: readonly SlackDraftFile[] | undefined;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -79,10 +89,24 @@ function pathFor(stateDir: string, draftId: string): string {
 }
 
 export interface DraftStore {
-  create(accountId: string, payload: ComposedPayload, source: string): Promise<SlackDraft>;
+  create(
+    accountId: string,
+    payload: ComposedPayload,
+    source: string,
+    files?: readonly SlackDraftFile[] | undefined,
+  ): Promise<SlackDraft>;
   get(draftId: string): Promise<SlackDraft>;
   list(accountId?: string): Promise<SlackDraft[]>;
-  update(draftId: string, payload: ComposedPayload, source: string): Promise<SlackDraft>;
+  /**
+   * Saves a new version of a draft, as a new revision whatever changed. `files`, when given, replaces the list the
+   * draft had — an empty one takes them all off; left out, the draft keeps the files it has.
+   */
+  update(
+    draftId: string,
+    payload: ComposedPayload,
+    source: string,
+    files?: readonly SlackDraftFile[] | undefined,
+  ): Promise<SlackDraft>;
   remove(draftId: string): Promise<void>;
   /**
    * The account a draft `get` cannot read still names, or `undefined` when it names none.
@@ -93,12 +117,24 @@ export interface DraftStore {
   ownerOf(draftId: string): Promise<string | undefined>;
 }
 
+/** Whether one entry of a draft's `files` is a whole record: every field present, of the type the gate reads it as. */
+function isFileShaped(entry: unknown): entry is SlackDraftFile {
+  if (typeof entry !== 'object' || entry === null) return false;
+  const file = entry as Record<string, unknown>;
+  return (
+    ['path', 'name', 'sha256', 'mimeType'].every((field) => typeof file[field] === 'string') &&
+    typeof file.size === 'number'
+  );
+}
+
 /** Whether what a draft file parsed to has every field something reading a draft goes on to use. */
 function isDraftShaped(parsed: unknown): parsed is SlackDraft {
   if (typeof parsed !== 'object' || parsed === null) return false;
   const draft = parsed as Record<string, unknown>;
   const text = ['draftId', 'accountId', 'revision', 'source', 'createdAt', 'updatedAt'];
   if (!text.every((field) => typeof draft[field] === 'string')) return false;
+  // A damaged file list is a damaged draft: the gate reads every entry, and one it could not would fail mid-post.
+  if (draft.files !== undefined && !(Array.isArray(draft.files) && draft.files.every(isFileShaped))) return false;
   const payload = draft.payload as Record<string, unknown> | null | undefined;
   return (
     typeof payload === 'object' &&
@@ -106,6 +142,11 @@ function isDraftShaped(parsed: unknown): parsed is SlackDraft {
     typeof payload.channel === 'string' &&
     typeof payload.text === 'string'
   );
+}
+
+/** A draft's `files` as it is written: present only when there are some, so a text post's file is what it always was. */
+function filesField(files: readonly SlackDraftFile[] | undefined): { files?: readonly SlackDraftFile[] } {
+  return files === undefined || files.length === 0 ? {} : { files: [...files] };
 }
 
 /** Whether an error is `get` saying a draft file exists but is not a draft. */
@@ -162,7 +203,7 @@ export function openDraftStore(stateDir: string, now: () => Date): DraftStore {
   };
 
   return {
-    async create(accountId, payload, source) {
+    async create(accountId, payload, source, files) {
       const at = now().toISOString();
       return write({
         draftId: newDraftId(),
@@ -170,6 +211,7 @@ export function openDraftStore(stateDir: string, now: () => Date): DraftStore {
         revision: newRevision(),
         payload,
         source,
+        ...filesField(files),
         createdAt: at,
         updatedAt: at,
       });
@@ -194,12 +236,13 @@ export function openDraftStore(stateDir: string, now: () => Date): DraftStore {
       }
       return drafts.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     },
-    async update(draftId, payload, source) {
-      const existing = await read(draftId);
+    async update(draftId, payload, source, files) {
+      const { files: had, ...existing } = await read(draftId);
       return write({
         ...existing,
         payload,
         source,
+        ...filesField(files ?? had),
         // A new revision on every save, even when the content is identical — see the field's own note.
         revision: newRevision(),
         updatedAt: now().toISOString(),
