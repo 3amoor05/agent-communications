@@ -1620,6 +1620,97 @@ test('agentcomms: an approval a command claims is one still waiting, prepared as
   assert.equal((await m.core.approvals.get(forThis))?.state, 'pending', 'nothing claimed or approved it');
 });
 
+test('a dry run, or a migration with nothing to rename, takes no approval: the id is refused as usage, and nothing is shown or claimed', async () => {
+  // The daily check off: the refusal is the path's own, whatever the stop would have done.
+  const m = machine({ AGENT_COMMS_UPDATE_CHECK: 'off' });
+  const later = await preparedFor(m, updateLaterChange(m.core));
+  const configFile = join(m.core.paths.configDir, 'config.json');
+  const before = readFileSync(configFile, 'utf8');
+  const { call, close } = await connect(m);
+  try {
+    const dry = await call('comms_names_migrate', { dryRun: true, approvalId: later });
+    assert.equal(codeOf(dry), 'USAGE', JSON.stringify(dry.structuredContent));
+    assert.match(textOf(dry), /`dryRun` only shows the mapping, so it takes no approvalId/);
+    assert.equal((dry.structuredContent as { status?: string }).status, undefined, 'the mapping was shown');
+    // Without the id it is the dry run it always was.
+    const plain = await call('comms_names_migrate', { dryRun: true });
+    assert.equal((plain.structuredContent as { status?: string }).status, 'already-migrated');
+    // With nothing to rename, the migration itself refuses one: it needs no approval (`gatedChange`).
+    const nothing = await call('comms_names_migrate', { approvalId: later });
+    assert.equal(codeOf(nothing), 'USAGE', JSON.stringify(nothing.structuredContent));
+    assert.match(textOf(nothing), /needs no approval, so it takes none/);
+  } finally {
+    await close();
+  }
+
+  const run = (args: string[]) =>
+    spawnSync(process.execPath, [...NODE_FLAGS, CLI, ...args], { encoding: 'utf8', env: m.env });
+  const errorOf = (result: ReturnType<typeof run>) =>
+    (JSON.parse(result.stdout) as { error: { code: string; message: string } }).error;
+  const dry = run(['names', 'migrate', '--dry-run', '--approval', later, '--json']);
+  assert.equal(dry.status, 64, dry.stdout + dry.stderr);
+  assert.equal(errorOf(dry).code, 'USAGE');
+  assert.match(errorOf(dry).message, /--dry-run only shows the mapping, so it takes no --approval/);
+  // Nothing to rename was reported whatever came with it, dropping the approval: now it is refused in the tool's words.
+  const nothing = run(['names', 'migrate', '--approval', later, '--json']);
+  assert.equal(nothing.status, 64, nothing.stdout + nothing.stderr);
+  assert.match(errorOf(nothing).message, /needs no approval, so it takes none/);
+  const reported = run(['names', 'migrate', '--json']);
+  assert.equal(reported.status, 0, reported.stdout + reported.stderr);
+  assert.equal((JSON.parse(reported.stdout) as { data: { status: string } }).data.status, 'already-migrated');
+
+  assert.equal(readFileSync(configFile, 'utf8'), before, 'the configuration was changed');
+  assert.equal((await m.core.approvals.get(later))?.state, 'pending', 'the approval was claimed');
+});
+
+test('stopped, an agent that has "not now" prepared and hands its id to a dry run is refused, and the stop stands', async () => {
+  /*
+   * The way past the stop, end to end. `comms_update` is never stopped, so an agent that was can have "not now"
+   * prepared without the person: a change approval, waiting, which the stop lets a call through on. Handed to a path
+   * that took an approval id and claimed none — a report, a dry run, a sign-in's finish — the call went past the stop
+   * and ran, and "not now" was the agent's decision after all. Each such path refuses the id now.
+   */
+  const m = machine();
+  seed(m, { latest: LATEST, behind: true });
+  const { call, close } = await connect(m);
+  let later = '';
+  try {
+    assert.ok(stopped(await call('comms_names_migrate', { dryRun: true })), 'the dry run is stopped on its own');
+    const prepared = (await call('comms_update', { later: true })).structuredContent as {
+      approvalRequired?: boolean;
+      approvalId: string;
+    };
+    assert.equal(prepared.approvalRequired, true, JSON.stringify(prepared));
+    later = prepared.approvalId;
+    for (const [tool, args] of [
+      ['comms_names_migrate', { dryRun: true }],
+      ['comms_change_policy', {}],
+    ] as const) {
+      const result = await call(tool, { ...args, approvalId: later });
+      // The stop lets it through — the approval is waiting, and a change — and the tool refuses what it would drop.
+      assert.ok(!stopped(result), `${tool} was stopped`);
+      assert.equal(codeOf(result), 'USAGE', `${tool}: ${JSON.stringify(result.structuredContent)}`);
+    }
+  } finally {
+    await close();
+  }
+
+  // At a terminal: `update --later` hands an agent the id (exit 10), and the dry run it is carried to refuses it.
+  const run = (args: string[]) =>
+    spawnSync(process.execPath, [...NODE_FLAGS, CLI, ...args], { encoding: 'utf8', env: m.env });
+  const asked = run(['update', '--later', '--json']);
+  assert.equal(asked.status, 10, asked.stdout + asked.stderr);
+  const id = (JSON.parse(asked.stdout) as { error: { details: { approvalId: string } } }).error.details.approvalId;
+  const dry = run(['names', 'migrate', '--dry-run', '--approval', id, '--json']);
+  assert.equal(dry.status, 64, dry.stdout + dry.stderr);
+  assert.equal((JSON.parse(dry.stdout) as { error: { code: string } }).error.code, 'USAGE');
+
+  // Nothing was put off: both still wait for the person, and every other call is stopped as before.
+  for (const each of [later, id]) assert.equal((await m.core.approvals.get(each))?.state, 'pending', each);
+  assert.equal((await readUpdateCheck(m.stateDir)).snoozedUntil, null);
+  assert.equal(run(['channels', '--json']).status, 11, 'the stop stands');
+});
+
 // ── The doctor ────────────────────────────────────────────────────────────────────────────────────────────────
 
 test('the doctor gives the check one line: on or off, when last checked, the latest, and what is running', async () => {

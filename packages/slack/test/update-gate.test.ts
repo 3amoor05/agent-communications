@@ -152,6 +152,82 @@ test('agent-slack: with nobody to ask a command exits 11 naming both ways on, an
   assert.doesNotMatch(listener.stdout, /UPDATE_REQUIRED/);
 });
 
+test('an approval the stop let through is refused by a report, the steps, the app step and a finish: nothing is shown or collected', async () => {
+  /*
+   * "Not now" — waiting, a change — lets a call past the stop, and an agent that was stopped can have it prepared
+   * without the person. Each of these took the id and claimed none: they answered as though it were not there, past
+   * the stop. Now each refuses it as usage, on both surfaces, before it reads or collects anything.
+   */
+  const harness = await newHarness();
+  // `read`, and its app never asked for posting; and one that posts. Each with the port it last signed in with.
+  await harness.addWorkspace({ alias: 'acme', redirectPort: 51234 });
+  await harness.addWorkspace({ alias: 'beta', mode: 'send', workspaceId: 'T0002', redirectPort: 51235 });
+  const later = await heldApproval(harness);
+  updateOut(harness);
+  const before = JSON.stringify(await harness.core.config.load());
+
+  const { server } = await createSlackMcpServer({
+    core: harness.core,
+    env: harness.env,
+    fetch: refuseEverything,
+    probe: (input, init) => harness.probe(input, init),
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'test', version: '0' });
+  await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+  const call = async (name: string, args: Record<string, unknown>) =>
+    (await client.callTool({ name, arguments: args })) as ToolResult;
+  try {
+    for (const [what, tool, args, words] of [
+      ['the report', 'slack_mode_set', { workspace: 'acme', mode: 'read' }, /only reports acme's mode/],
+      ['the steps to read', 'slack_mode_set', { workspace: 'beta', mode: 'read' }, /changes nothing here/],
+      ['the app step', 'slack_mode_set', { workspace: 'acme', mode: 'send' }, /has to ask for the send scopes first/],
+      ['the policy report', 'slack_workspace_policy', { workspace: 'acme' }, /an approval goes with a policy to set/],
+    ] as const) {
+      const result = await call(tool, { ...args, approvalId: later });
+      assert.equal(code(result), 'USAGE', `${what}: ${JSON.stringify(result.structuredContent)}`);
+      assert.match(text(result), words, what);
+      assert.doesNotMatch(text(result), /"manifest"|"steps"|"sendPolicy"/, `${what} was answered`);
+    }
+  } finally {
+    await Promise.all([client.close(), server.close()]);
+  }
+
+  const command = async (argv: string[]) => {
+    let stdout = '';
+    const out = new PassThrough();
+    out.on('data', (chunk) => {
+      stdout += String(chunk);
+    });
+    const exit = await run([...argv, '--approval', later, '--json'], {
+      core: harness.core,
+      env: harness.env,
+      streams: { stdout: out, stderr: new PassThrough(), stdin: new PassThrough() },
+      openBrowser: () => undefined,
+      probe: (input, init) => harness.probe(input, init),
+      read: refuseEverything,
+    });
+    return { exit, stdout };
+  };
+  for (const [argv, words] of [
+    [['workspace', 'mode', 'acme'], /only reports acme's mode/],
+    [['workspace', 'mode', 'beta', 'read'], /changes nothing here/],
+    [['workspace', 'mode', 'acme', 'send'], /has to ask for the send scopes first/],
+    [['workspace', 'policy', 'acme'], /an approval goes with a policy to set/],
+    [['workspace', 'add', '--finish', 'sfl_none'], /--finish collects a sign-in already started/],
+    [['workspace', 'reauth', 'acme', '--finish', 'sfl_none'], /--finish collects a sign-in already started/],
+  ] as const) {
+    const refused = await command([...argv]);
+    assert.equal(refused.exit, EXIT_CODES.USAGE, `${argv.join(' ')}: ${refused.stdout}`);
+    const error = (JSON.parse(refused.stdout) as { error: { code: string; message: string } }).error;
+    assert.equal(error.code, 'USAGE', argv.join(' '));
+    assert.match(error.message, words, argv.join(' '));
+  }
+
+  assert.equal(JSON.stringify(await harness.core.config.load()), before, 'a workspace was changed');
+  assert.equal((await harness.core.approvals.get(later))?.state, 'pending', 'the approval was claimed');
+});
+
 // ── Saving files: `slack_file_download` and `agent-slack files download` ─────────────────────────────────────────
 
 /*

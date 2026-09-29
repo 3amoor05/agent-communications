@@ -56,7 +56,8 @@ release is out:
 - **every MCP tool call stops** — except `comms_update`, `comms_doctor`, `comms_paths`, each channel's doctor, and a
   call carrying the `approvalId` of an approval the person already gave that is still waiting to be used (an empty or
   made-up id does not count, nor one already used, revoked or expired; Resend's send status, which looks a send up by
-  its approval, counts the send's whatever became of it) — and answers "Hang on a minute, there's an update. Let's
+  its approval, counts the send's whatever became of it; and a call that takes one but would not use it — a report, a
+  dry run — refuses it) — and answers "Hang on a minute, there's an update. Let's
   update first.", with the running and latest versions and the two ways on. When every registration of that server on
   this machine already names the latest release, and only the running server is old, it says to restart the client
   instead. The Claude Code plugin's Gmail server and the Gemini extension's servers are always told to update — each
@@ -67,7 +68,8 @@ release is out:
 - **every command stops** — except `update`, `doctor`, `paths`, `approve`, `approvals`, `mcp` on its own (the server,
   which stops each call itself; `mcp install` and `mcp prune` are stopped like any other command), the listener a
   sign-in starts (`agent-gmail oauth-listen`, `agent-slack sign-in-listen`), WhatsApp's `status`, and a command
-  that takes `--approval` carrying one still waiting to be used (a command that takes none refuses it) — and at a
+  that takes `--approval` carrying one still waiting to be used (a command that takes none refuses it, and so does
+  one that would not use it: a report, a dry run, a `--finish`) — and at a
   terminal asks "Update now, later today, or
   cancel?". Now runs `update`, with its own preview, and says "Updated. Run your command again." only when it
   brought this command to the latest release; otherwise it says what is left and exits non-zero. Later puts it off;

@@ -412,6 +412,24 @@ export async function policyReport(context: ResendContext, name: string): Promis
 }
 
 /**
+ * Why a policy report refuses the approval it is handed, in the words of the surface it came from, as core's
+ * `comms_change_policy` refuses one without `set`: only a policy to set claims it, and the report would drop it past
+ * the update check's stop. See core's `refuseUnclaimedApproval`.
+ */
+export function policyApprovalRefusal(surface: 'cli' | 'mcp'): { message: string; hint: string } {
+  return surface === 'cli'
+    ? {
+        message: 'an approval goes with a policy to set; without --send, --mode or --change this only reports',
+        hint: 'Pass what the approval was prepared for — --send, --mode, --change — with it.',
+      }
+    : {
+        message:
+          'an approval goes with a policy to set; without `sendPolicy`, `mode` or `changePolicy` this only reports',
+        hint: 'Pass what the approval was prepared for — `sendPolicy`, `mode`, `changePolicy` — with it.',
+      };
+}
+
+/**
  * Setting an account's send policy, mode or change policy. Tightening applies at once; loosening — a send policy
  * towards `chat`, `read → send`, a change policy `confirm → chat` — is a change approval, bound to the exact values
  * and decided by the change policy in force before it, so a policy cannot be used to approve its own relaxation.

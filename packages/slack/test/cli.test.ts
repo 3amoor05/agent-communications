@@ -4,7 +4,7 @@ import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, test } from 'node:test';
-import { EXIT_CODES, withCredentialsLock } from '@agentcomms/core';
+import { EXIT_CODES, gatedChange, updateLaterChange, withCredentialsLock } from '@agentcomms/core';
 import { parseBundle } from '../src/auth/bundle.ts';
 import { openFlowStore } from '../src/auth/flow.ts';
 import { run } from '../src/cli/program.ts';
@@ -762,6 +762,50 @@ test('--finish before the browser has answered says so and leaves the sign-in al
   await redirect(start.authUrl);
   const finished = await cli(harness, ['workspace', 'add', '--finish', start.flowId, '--wait', '20']);
   assert.equal(finished.code, EXIT_CODES.OK, finished.stderr);
+});
+
+test('--finish takes no --approval: it is refused, and the sign-in is left to be finished without it', async () => {
+  /*
+   * An approval is claimed where a sign-in starts; the finish claims none, and dropped one it was handed — after the
+   * update check's stop had let the command through on it. Refused now, before the flow is even read: the browser has
+   * answered, and still nothing is recorded until the finish is run as it should be.
+   */
+  const harness = await newHarness();
+  const port = await freePort();
+  const start = await startDetached(harness, [
+    'workspace',
+    'add',
+    'acme',
+    '--client-id',
+    TEST_CLIENT_ID,
+    '--port',
+    String(port),
+  ]);
+  const later = (await gatedChange(harness.core, updateLaterChange(harness.core), { surface: 'cli' })) as {
+    prepared: { approvalId: string };
+  };
+  await redirect(start.authUrl);
+
+  const refused = await cli(harness, [
+    '--json',
+    'workspace',
+    'add',
+    '--finish',
+    start.flowId,
+    '--wait',
+    '20',
+    '--approval',
+    later.prepared.approvalId,
+  ]);
+  assert.equal(refused.code, EXIT_CODES.USAGE, refused.stdout);
+  assert.match(refused.json<Envelope<never>>().error?.message ?? '', /--finish collects a sign-in already started/);
+  assert.equal((await harness.core.config.load()).accounts.acme, undefined, 'the sign-in was collected');
+  assert.equal(harness.calls.length, 0, 'the code was exchanged');
+
+  const finished = await cli(harness, ['workspace', 'add', '--finish', start.flowId, '--wait', '20']);
+  assert.equal(finished.code, EXIT_CODES.OK, finished.stderr);
+  assert.equal((await harness.core.config.load()).accounts.acme?.workspace, 'T0001');
+  assert.equal((await harness.core.approvals.get(later.prepared.approvalId))?.state, 'pending');
 });
 
 test('a reauth sign-in cannot be finished as an add', async () => {

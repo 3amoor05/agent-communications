@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
-import { approveChangeAtTerminal, gatedChangeAtTerminal } from './change-flow.ts';
+import { approveChangeAtTerminal, gatedChangeAtTerminal, refuseUnclaimedApproval } from './change-flow.ts';
 import {
   colorEnabled,
   defaultStreams,
@@ -451,12 +451,25 @@ export async function main(
           );
         }
         const renames = values.rename ?? [];
+        // A dry run claims nothing, so an approval here is refused rather than dropped: see `refuseUnclaimedApproval`.
+        if (values['dry-run']) {
+          refuseUnclaimedApproval(values.approval, {
+            message: '--dry-run only shows the mapping, so it takes no --approval',
+            hint: 'Leave out --dry-run to rename; anything without a terminal gets the preview and the approval id to run it again with.',
+          });
+        }
         const dry = namesDryRun(await core.config.load(), renames);
         if (dry.status === 'already-migrated') {
-          writeResult(dry, output, () => 'Names are already organisation/platform.');
-          return;
-        }
-        if (values['dry-run']) {
+          /*
+           * Nothing to rename is reported — unless an approval came with the command. That goes on to the change,
+           * which refuses an approval on a change that needs none (`gatedChange`), as `comms_names_migrate` does in
+           * the same words: reporting here dropped it, and the command had been let past the update check's stop on it.
+           */
+          if (values.approval === undefined) {
+            writeResult(dry, output, () => 'Names are already organisation/platform.');
+            return;
+          }
+        } else if (values['dry-run']) {
           writeResult(
             dry,
             output,
@@ -464,15 +477,16 @@ export async function main(
               `${renderMapping(data.rows, data.notApplicable)}\n\nNothing was changed. Run the same command without --dry-run to apply it.`,
           );
           return;
+        } else {
+          /*
+           * The mapping is shown before anything is written, whoever is running it.
+           *
+           * A person reads it above the question; an agent's transcript carries it — which is the only record of what
+           * the old names were once the file no longer holds them. It goes to stderr so `--json` keeps its one
+           * envelope on stdout.
+           */
+          defaultStreams.stderr.write(`${renderMapping(dry.rows, dry.notApplicable)}\n`);
         }
-        /*
-         * The mapping is shown before anything is written, whoever is running it.
-         *
-         * A person reads it above the question; an agent's transcript carries it — which is the only record of what
-         * the old names were once the file no longer holds them. It goes to stderr so `--json` keeps its one envelope
-         * on stdout.
-         */
-        defaultStreams.stderr.write(`${renderMapping(dry.rows, dry.notApplicable)}\n`);
         const result = await gatedChangeAtTerminal(core, namesMigration(core, renames), {
           ...approval,
           command: shellCommand([

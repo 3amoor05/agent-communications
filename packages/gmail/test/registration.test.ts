@@ -275,11 +275,19 @@ test('`setup --mcp-client` stops for approval without registering, and only `--m
   assert.deepEqual(report?.did, []);
   assert.equal(existsSync(cursor), false, 'nothing was registered');
 
-  // `--approval` is the OAuth client's: handed the registration's id, it registers nothing, and asks again.
+  // `--approval` is the OAuth client's, and this machine has one: handed the registration's id, it is refused, and
+  // nothing is registered or asked. It used to be dropped, and the run went on to ask again — past the update check's
+  // stop, which had let it through on that id.
   const wrongFlag = await cli(harness, [...argv, '--approval', String(report?.blocked.approvalId)], { env });
-  assert.equal(wrongFlag.code, 10, wrongFlag.stdout);
-  const asked = wrongFlag.envelope<{ blocked: { approvalId: string } }>().data?.blocked.approvalId;
-  assert.notEqual(asked, report?.blocked.approvalId, 'a new approval, for the change the flag did not carry');
+  assert.equal(wrongFlag.code, 64, wrongFlag.stdout);
+  const refusal = wrongFlag.envelope<unknown>().error as { code: string; message: string };
+  assert.equal(refusal.code, 'USAGE');
+  assert.match(refusal.message, /already registered, so this run registers none and takes no --approval/);
+  assert.deepEqual(
+    (await harness.core.approvals.list()).map((record) => record.approvalId),
+    [report?.blocked.approvalId],
+    'no new approval was prepared',
+  );
   assert.equal(existsSync(cursor), false);
 
   const done = await cli(harness, [...argv, '--mcp-approval', String(report?.blocked.approvalId)], { env });
@@ -361,6 +369,35 @@ test('an interactive setup that asked "Connect this to an agent?" takes the yes 
   const typed = await cli(confirmed.harness, argv, { env: confirmed.env, tty: true, replies: answers, answer: true });
   assert.equal(typed.code, 0, `${typed.stdout}${typed.stderr}`);
   assert.ok(existsSync(join(confirmed.home, '.cursor', 'mcp.json')));
+});
+
+test('an agent at a terminal that picked the client from the list is told to run setup again naming it', async () => {
+  /*
+   * `--mcp-approval` is claimed only for a client named with `--mcp-client`: one picked from the list may be declined,
+   * and an approval the run then never claimed would have been dropped past the update check's stop. So the command
+   * an agent is told to run again carries the client it picked, and that command registers it.
+   */
+  const argv = ['setup', '--launcher', 'local', '--no-browser', '--no-tui'];
+  const { harness, home, env } = await machine();
+  const agentEnv = { ...env, CLAUDECODE: '1' };
+  const asked = await cli(harness, argv, {
+    env: agentEnv,
+    tty: true,
+    replies: [
+      [/which one\?/, '1'],
+      [/Connect this to an agent\?/, 'y'],
+      [/which one\?/, '4'],
+    ],
+  });
+  assert.equal(asked.code, 10, `${asked.stdout}${asked.stderr}`);
+  const rerun = /`(agent-gmail setup [^`]*--mcp-client cursor --mcp-approval (ap_[\w-]+))`/.exec(asked.stderr);
+  assert.ok(rerun, `the command to run again names the client picked: ${asked.stderr}`);
+  assert.equal(existsSync(join(home, '.cursor', 'mcp.json')), false);
+
+  const again = (rerun?.[1] ?? '').split(' ').slice(1);
+  const claimed = await cli(harness, again, { env: agentEnv, tty: true });
+  assert.equal(claimed.code, 0, `${claimed.stdout}${claimed.stderr}`);
+  assert.ok(existsSync(join(home, '.cursor', 'mcp.json')));
 });
 
 test(

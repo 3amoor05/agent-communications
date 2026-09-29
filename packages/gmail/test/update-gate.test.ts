@@ -92,3 +92,41 @@ test('agent-gmail: with nobody to ask a command exits 11 naming both ways on, an
   assert.equal(older.code, 11, older.stdout);
   assert.match((older.envelope<unknown>().error as { message: string }).message, /isn't running it yet/);
 });
+
+test('agent-gmail: an approval the stop let through is refused by a finish, and by a setup that would not claim it', async () => {
+  /*
+   * "Not now" — waiting, a change — lets a command past the stop, and an agent that was stopped can have it prepared
+   * without the person. `inbox reauth --finish` took `--approval` and claimed none; `setup` claimed each of its two
+   * only at the step that uses it, and a run that never got there dropped it after doing the steps before — a sign-in
+   * started, a preview prepared — past the stop. Each refuses it now, before anything is done.
+   */
+  const harness = await newHarness();
+  await harness.addInbox({ alias: 'work', email: 'jo@example.test', refreshToken: 'fake-refresh-token' });
+  const later = await heldApproval(harness);
+  updateOut(harness);
+  const before = JSON.stringify(await harness.core.config.load());
+  for (const [argv, words] of [
+    [['inbox', 'reauth', 'work', '--finish', 'gfl_none', '--approval', later], /--finish collects a sign-in already/],
+    // A client is registered already: no step of this run registers one.
+    [['setup', '--approval', later], /already registered, so this run registers none and takes no --approval/],
+    // No client named: nothing claims the registration's approval, whatever the run reaches.
+    [['setup', '--mcp-approval', later], /names no client with --mcp-client/],
+    // A mailbox to sign in first: the run stops at its browser, before the registration.
+    [
+      ['setup', '--mcp-client', 'cursor', '--inbox', 'home', '--mcp-approval', later],
+      /signs a mailbox in first, and that waits for a browser/,
+    ],
+  ] as const) {
+    const refused = await cli(harness, [...argv, '--json']);
+    assert.equal(refused.code, 64, `${argv.join(' ')}: ${refused.stdout}${refused.stderr}`);
+    const error = refused.envelope<unknown>().error as { code: string; message: string };
+    assert.equal(error.code, 'USAGE', argv.join(' '));
+    assert.match(error.message, words, argv.join(' '));
+  }
+  assert.equal(JSON.stringify(await harness.core.config.load()), before, 'a mailbox or a client was changed');
+  assert.deepEqual(
+    (await harness.core.approvals.list()).map((record) => [record.approvalId, record.state]),
+    [[later, 'pending']],
+    'an approval was claimed, or another prepared',
+  );
+});

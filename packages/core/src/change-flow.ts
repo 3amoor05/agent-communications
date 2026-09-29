@@ -86,6 +86,24 @@ export async function gatedChange<T>(
 }
 
 /**
+ * Refuses an approval id, as USAGE, on a call that takes one and would not claim it: a report, a dry run, a list of
+ * steps, the end of a sign-in already started — what a tool or command that changes things does on the calls that
+ * change nothing.
+ *
+ * The update check's stop lets a call claiming an approval through (design 2026-09-28 §2), because a claimed approval
+ * is the person's earlier yes. A path that took the id and then only read dropped it, so any approval the store holds
+ * got that path past the stop — "not now" among them, which an agent that was stopped can have prepared without the
+ * person, since the update's own tool is never stopped. That undid the rule that "not now" is the person's decision.
+ * So such a path refuses the id before it does anything, as `gatedChange` refuses one on a change that needs none, and
+ * a report of the change policy refuses one (`refuseApprovalWithoutChange`). `message` and `hint` are the surface's
+ * own words — its flag or its argument, and the call that does take the approval.
+ */
+export function refuseUnclaimedApproval(approvalId: unknown, refusal: { message: string; hint: string }): void {
+  if (approvalId === undefined) return;
+  throw new CommsError('USAGE', refusal.message, { hint: refusal.hint });
+}
+
+/**
  * The same, as an MCP tool returns it.
  *
  * `approvalRequired` with the preview and what to do next, or the result. The agent shows the preview in full and

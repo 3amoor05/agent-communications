@@ -4,6 +4,7 @@ import {
   checkForUpdates,
   type GatedChange,
   gatedChange,
+  refuseUnclaimedApproval,
   strictToolArguments,
   toCommsError,
   updateToolGate,
@@ -20,6 +21,7 @@ import {
   CHANGE_POLICIES,
   connectWorkspace,
   planModeSet,
+  policyApprovalRefusal,
   policyChange,
   policyReport,
   policyWanted,
@@ -1217,6 +1219,8 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
           port: args.port,
           appUpdated: args.appUpdated === true,
           ...detached,
+          // Claimed by the widening; refused by the report, the steps and the app step, in `planModeSet` itself.
+          approvalId: args.approvalId,
         });
         switch (planned.kind) {
           case 'report':
@@ -1254,6 +1258,7 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
         const name = await resolve(args.workspace);
         const wanted = policyWanted({ send: args.sendPolicy, change: args.changePolicy });
         if (wanted.send === undefined && wanted.change === undefined) {
+          refuseUnclaimedApproval(args.approvalId, policyApprovalRefusal('mcp'));
           return reply(policyReport(await context.config(), name));
         }
         return reply(await runChange(policyChange(context, name, wanted), args.approvalId, name));

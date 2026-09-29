@@ -15,6 +15,7 @@ import {
   type OutputOptions,
   openCore,
   paint,
+  refuseUnclaimedApproval,
   renderChannelPreview,
   renderPrune,
   runCommand,
@@ -39,6 +40,7 @@ import { beginApproval, finishApproval, revokeApproval, workspaceForApproval } f
 import {
   connectWorkspace,
   planModeSet,
+  policyApprovalRefusal,
   policyChange,
   policyReport,
   policyWanted,
@@ -152,6 +154,16 @@ type Options = Record<string, unknown>;
 function withoutOptionValues(text: string): string {
   return text.replace(/'(-{1,2}[^'=\s]+)=[^']*'/g, "'$1=…'");
 }
+
+/**
+ * `--finish` collects a sign-in already started, and claims nothing: the approval a widening needs is claimed where
+ * the sign-in starts, before its link exists. One given with it is refused rather than dropped — the update check's
+ * stop had let the command past on it — as core's `refuseUnclaimedApproval` says.
+ */
+const FINISH_TAKES_NO_APPROVAL = {
+  message: '--finish collects a sign-in already started, so it takes no --approval',
+  hint: 'An approval is claimed where the sign-in starts, and finishing it needs none: run the same command again without --approval.',
+} as const;
 
 export async function run(argv: readonly string[], deps: CliDeps = {}): Promise<number> {
   const streams: Streams = deps.streams ?? { stdout: process.stdout, stderr: process.stderr, stdin: process.stdin };
@@ -472,6 +484,7 @@ configuration problem.`,
   ).action(
     act(async (context, options, alias: string | undefined, flags: Options) => {
       if (flags.finish) {
+        refuseUnclaimedApproval(flags.approval, FINISH_TAKES_NO_APPROVAL);
         const view = await finishSignIn(context, {
           flowId: String(flags.finish),
           only: 'add',
@@ -552,6 +565,8 @@ configuration problem.`,
         appUpdated: flags.appUpdated === true,
         detached: flags.start === true,
         listenerCommand: deps.listenerCommand,
+        // Claimed by the widening; refused by the report, the steps and the app step, in `planModeSet` itself.
+        approvalId: flags.approval,
       });
       switch (planned.kind) {
         case 'report':
@@ -623,6 +638,7 @@ configuration problem.`,
   ).action(
     act(async (context, options, alias: string, flags: Options) => {
       if (flags.finish) {
+        refuseUnclaimedApproval(flags.approval, FINISH_TAKES_NO_APPROVAL);
         const view = await finishSignIn(context, {
           flowId: String(flags.finish),
           only: 'reauth',
@@ -673,17 +689,18 @@ configuration problem.`,
     act(async (context, options, alias: string, flags: Options) => {
       // The same operation as `slack_workspace_policy`, checks and all.
       const wanted = policyWanted({ send: flags.send, change: flags.change });
-      const result =
-        wanted.send === undefined && wanted.change === undefined
-          ? policyReport(await context.config(), alias)
-          : await changeAt(
-              context,
-              policyChange(context, alias, wanted),
-              flags,
-              `agent-slack workspace policy ${alias}${wanted.send ? ` --send ${wanted.send}` : ''}${
-                wanted.change ? ` --change ${wanted.change}` : ''
-              }`,
-            );
+      const reporting = wanted.send === undefined && wanted.change === undefined;
+      if (reporting) refuseUnclaimedApproval(flags.approval, policyApprovalRefusal('cli'));
+      const result = reporting
+        ? policyReport(await context.config(), alias)
+        : await changeAt(
+            context,
+            policyChange(context, alias, wanted),
+            flags,
+            `agent-slack workspace policy ${alias}${wanted.send ? ` --send ${wanted.send}` : ''}${
+              wanted.change ? ` --change ${wanted.change}` : ''
+            }`,
+          );
       writeResult(result, output(), () => renderPolicies(result, options.color), streams);
     }),
   );

@@ -148,3 +148,40 @@ test('agent-resend: with nobody to ask a command exits 11 naming both ways on, a
     await harness.close();
   }
 });
+
+test('an approval the stop let through is refused by the policy report, over MCP and at the terminal: nothing is reported', async () => {
+  /*
+   * "Not now" — waiting, a change — lets a call past the stop, and an agent that was stopped can have it prepared
+   * without the person. The report took the id and claimed none, answering past the stop as though it were not there.
+   * It refuses it now, as `comms_change_policy` does without `set`.
+   */
+  const harness = await newHarness();
+  try {
+    await harness.addAccount({ name: 'acme/resend' });
+    const later = await heldApproval(harness);
+    updateOut(harness);
+    const before = JSON.stringify(await harness.core.config.load());
+    const { call, close } = await harness.mcp();
+    try {
+      const report = await call('resend_account_policy', { account: 'acme/resend', approvalId: later });
+      assert.equal(code(report), 'USAGE', JSON.stringify(report.structuredContent));
+      assert.match(
+        text(report),
+        /an approval goes with a policy to set; without `sendPolicy`, `mode` or `changePolicy`/,
+      );
+      assert.doesNotMatch(text(report), /"sendPolicyFrom"/, 'the policy was reported');
+    } finally {
+      await close();
+    }
+    const refused = await harness.cli(['--json', 'account', 'policy', 'acme/resend', '--approval', later]);
+    assert.equal(refused.code, 64, refused.stdout + refused.stderr);
+    const error = (refused.json() as { error: { code: string; message: string } }).error;
+    assert.equal(error.code, 'USAGE');
+    assert.match(error.message, /an approval goes with a policy to set; without --send, --mode or --change/);
+
+    assert.equal(JSON.stringify(await harness.core.config.load()), before, 'the account was changed');
+    assert.equal((await harness.core.approvals.get(later))?.state, 'pending', 'the approval was claimed');
+  } finally {
+    await harness.close();
+  }
+});

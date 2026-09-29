@@ -6,6 +6,7 @@ import {
   defaultChangePolicy,
   findById,
   type GatedChange,
+  refuseUnclaimedApproval,
   type SendPolicy,
   withCredentialsLock,
 } from '@agentcomms/core';
@@ -293,6 +294,11 @@ export interface ModeSetOptions extends SignInSurface {
    * and come back as `read` again.
    */
   readonly appUpdated?: boolean | undefined;
+  /**
+   * The approval the call carries — `--approval`, `approvalId` — when it carries one. Only the widening claims it; any
+   * other plan refuses it here, in the words of the surface that asked (`modeApprovalRefusal`).
+   */
+  readonly approvalId?: unknown;
 }
 
 /**
@@ -304,8 +310,24 @@ export interface ModeSetOptions extends SignInSurface {
  * - `send` from `read`, while the recorded grant cannot show the app offers posting and the person has not said it
  *   does: the manifest and the link to the app's page, and nothing started. A sign-in now would grant `read` again.
  * - `send` from `read` otherwise: the widening, as a change approved before its sign-in starts.
+ *
+ * Only the widening claims an approval, so every other plan refuses one it is handed, here, where both surfaces meet
+ * it: dropped, it had got the call past the update check's stop (core's `refuseUnclaimedApproval`).
  */
 export async function planModeSet(
+  context: SlackContext,
+  alias: string,
+  wanted: unknown,
+  options: ModeSetOptions,
+): Promise<ModeSetPlan> {
+  const planned = await modeSetPlan(context, alias, wanted, options);
+  if (planned.kind !== 'change') {
+    refuseUnclaimedApproval(options.approvalId, modeApprovalRefusal(planned, context.surface));
+  }
+  return planned;
+}
+
+async function modeSetPlan(
   context: SlackContext,
   alias: string,
   wanted: unknown,
@@ -362,6 +384,36 @@ export async function planModeSet(
       steps: wideningSteps(found.alias, port, found.account.appId),
     },
   };
+}
+
+/** Why a `mode` that changes nothing refuses the approval it is handed, in the words of the surface it came from. */
+function modeApprovalRefusal(
+  planned: Exclude<ModeSetPlan, { kind: 'change' }>,
+  surface: 'cli' | 'mcp',
+): { message: string; hint: string } {
+  const alias = planned.kind === 'report' ? planned.report.alias : planned.result.alias;
+  const flag = surface === 'cli' ? '--approval' : 'approvalId';
+  const widen =
+    surface === 'cli'
+      ? `\`agent-slack workspace mode ${alias} send --app-updated\``
+      : 'slack_mode_set with `mode: "send"` and `appUpdated: true`';
+  switch (planned.kind) {
+    case 'report':
+      return {
+        message: `this only reports ${alias}'s mode, so it takes no ${flag}`,
+        hint: `An approval goes with the move to send it was prepared for: ${widen}, with it.`,
+      };
+    case 'steps':
+      return {
+        message: `moving ${alias} to read changes nothing here, so it takes no ${flag}: Slack cannot take posting away from a token`,
+        hint: `Leave out ${flag} for the steps; removing the app's installation in Slack is the person's own.`,
+      };
+    case 'app-update-needed':
+      return {
+        message: `${alias}'s app has to ask for the send scopes first, so this starts nothing and takes no ${flag}`,
+        hint: `Once the person says its manifest does, ${widen} — with ${flag} if they have already approved the move.`,
+      };
+  }
 }
 
 // ── Removing ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -459,6 +511,23 @@ export function policyReport(config: Config, alias: string): PolicyResult {
   const found = requireWorkspace(config, alias);
   const now = policiesOf(config, found.alias, found.account);
   return { ...now, changed: false, previous: { sendPolicy: now.sendPolicy, changePolicy: now.changePolicy } };
+}
+
+/**
+ * Why a policy report refuses the approval it is handed, in the words of the surface it came from, as core's
+ * `comms_change_policy` refuses one without `set`: only a policy to set claims it, and the report would drop it past
+ * the update check's stop. See core's `refuseUnclaimedApproval`.
+ */
+export function policyApprovalRefusal(surface: 'cli' | 'mcp'): { message: string; hint: string } {
+  return surface === 'cli'
+    ? {
+        message: 'an approval goes with a policy to set; without --send or --change this only reports',
+        hint: 'Pass the policy the approval was prepared for — --send, --change or both — with it.',
+      }
+    : {
+        message: 'an approval goes with a policy to set; without `sendPolicy` or `changePolicy` this only reports',
+        hint: 'Pass the policy the approval was prepared for — `sendPolicy`, `changePolicy` or both — with it.',
+      };
 }
 
 function oneOf<T extends string>(value: unknown, allowed: readonly T[], what: string): T {

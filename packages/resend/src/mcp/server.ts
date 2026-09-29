@@ -4,6 +4,7 @@ import {
   checkForUpdates,
   type GatedChange,
   gatedChange,
+  refuseUnclaimedApproval,
   SEND_LOOKUP,
   strictToolArguments,
   toCommsError,
@@ -15,6 +16,7 @@ import { CHANGE_POLICIES, MODES, SEND_POLICIES } from '../accounts.ts';
 import { ResendContext, type ResendContextOptions } from '../context.ts';
 import {
   listAccounts,
+  policyApprovalRefusal,
   policyChange,
   policyReport,
   policyWanted,
@@ -286,8 +288,10 @@ export async function createResendMcpServer(options: ResendMcpOptions = {}): Pro
       }) => {
         const name = await resolve(args.account);
         const wanted = policyWanted({ send: args.sendPolicy, mode: args.mode, change: args.changePolicy });
-        if (wanted.send === undefined && wanted.mode === undefined && wanted.change === undefined)
+        if (wanted.send === undefined && wanted.mode === undefined && wanted.change === undefined) {
+          refuseUnclaimedApproval(args.approvalId, policyApprovalRefusal('mcp'));
           return policyReport(context, name);
+        }
         return runChange(policyChange(context, name, wanted), args.approvalId);
       },
     ),

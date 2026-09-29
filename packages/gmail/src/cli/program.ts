@@ -17,6 +17,7 @@ import {
   type OutputOptions,
   openCore,
   paint,
+  refuseUnclaimedApproval,
   runCommand,
   type ServerInstallResult,
   type Streams,
@@ -600,6 +601,15 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
     const waitSeconds = checkedWait(options.wait, context.surface);
     const port = checkedPort(options.port, context.surface);
     if (options.finish) {
+      /*
+       * `--finish` collects a sign-in already started, and claims nothing: the approval a wider re-authorisation needs
+       * is claimed where the sign-in starts, before its link exists. One given with it is refused rather than dropped
+       * — the update check's stop had let the command past on it — as core's `refuseUnclaimedApproval` says.
+       */
+      refuseUnclaimedApproval(options.approval, {
+        message: '--finish collects a sign-in already started, so it takes no --approval',
+        hint: 'An approval is claimed where the sign-in starts, and finishing it needs none: run the same command again without --approval.',
+      });
       const result = await finishSignIn(context, {
         flowId: String(options.finish),
         onlyMode: mode,
@@ -1682,6 +1692,53 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
         });
         let state = await setupState(context);
 
+        /*
+         * Each approval this run carries is refused before anything is done, unless the run reaches the step that
+         * claims it: `--approval` the OAuth client's registration, `--mcp-approval` the server's.
+         *
+         * The update check's stop lets the run through on either (design 2026-09-28 §2). One the run never reached was
+         * dropped, and the steps before it — a sign-in started, a preview prepared — ran past the stop on an approval
+         * nobody claimed: see core's `refuseUnclaimedApproval`. Which steps a run reaches is known from here. The
+         * client step runs only while no client is registered, and with nobody to ask only with `--client-json`. The
+         * registration comes last: with nobody to ask it is reached only past a mailbox already connected, with no
+         * `--inbox` to sign in first — the mailbox step waits for a browser — and, where there is no client yet, with
+         * the client's approval to register one on the way. At a terminal every step runs, and the registration claims
+         * the approval only for a client named with `--mcp-client`: one picked from the list may be declined.
+         */
+        const headless = mode === 'none';
+        const clientStep = state.next === 'client';
+        if (!clientStep || (headless && !options.clientJson)) {
+          refuseUnclaimedApproval(
+            options.approval,
+            clientStep
+              ? {
+                  message: '--approval goes with --client-json: without it this run registers no OAuth client',
+                  hint: 'Run it again with --client-json <path> as well, as the preview named it. Nothing was done.',
+                }
+              : {
+                  message: 'an OAuth client is already registered, so this run registers none and takes no --approval',
+                  hint: 'Leave out --approval; `agent-gmail client add` registers another. Nothing was done.',
+                },
+          );
+        }
+        const stopsBefore = !options.mcpClient
+          ? 'it names no client with --mcp-client'
+          : !headless
+            ? null
+            : options.inbox
+              ? 'it signs a mailbox in first, and that waits for a browser'
+              : state.inboxes.length === 0
+                ? 'no mailbox is connected yet, and connecting one waits for a browser'
+                : clientStep && !(options.clientJson && options.approval !== undefined)
+                  ? 'the OAuth client comes first, and this run does not register it'
+                  : null;
+        if (stopsBefore !== null) {
+          refuseUnclaimedApproval(options.mcpApproval, {
+            message: `this run does not reach the server's registration — ${stopsBefore} — so it takes no --mcp-approval`,
+            hint: 'Carry it on the run that registers the server, as the preview named it. Nothing was done.',
+          });
+        }
+
         if (mode === 'none') {
           /*
            * Nobody is here to answer a question — but that is not the same as nobody wanting anything done.
@@ -2089,7 +2146,9 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
               approvalId: mcpApproval,
               env,
               output: { json: globalOptions.json || globalOptions.noInput, color: globalOptions.color },
-              command: againForMcp(),
+              // The client picked from the list is named in the command to run again: `--mcp-approval` is claimed
+              // only for a client named with `--mcp-client`, and refused without one.
+              command: named ? againForMcp() : `${againForMcp()} --mcp-client ${which}`,
               approvalFlag: '--mcp-approval',
               approveCommand: 'agent-gmail approve',
               answered: named === '',

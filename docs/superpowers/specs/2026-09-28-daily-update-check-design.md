@@ -126,8 +126,11 @@ settle beyond them, after review:
   Resend's send status is asked by the approval a send went under, used or not, and is let through with a send's.
   That the approval was prepared for this very call is not checked at the stop — only the tool can compute the digest
   it is bound to — but by the tool's own claim, and a change that needs no approval refuses one rather than dropping
-  it. The terminal follows the same rule, for parity: a command carrying such an id — `--approval`, Gmail's
-  `--mcp-approval` — is not stopped, and a core command that takes no approval refuses `--approval` as usage.
+  it. So does every call that takes an approval and would claim none — a report, a dry run, a list of steps, a
+  sign-in's finish, a `setup` run that does not reach the step its approval is for: "not now" is an approval an
+  agent that was stopped can have prepared, and one dropped by such a path took it past the stop. The terminal
+  follows the same rule, for parity: a command carrying such an id — `--approval`, Gmail's `--mcp-approval` — is not
+  stopped, and a core command that takes no approval refuses `--approval` as usage.
 - **Exempt at a terminal besides §3's list:** `mcp` on its own only (the server; `mcp install` and `mcp prune` are
   stopped), the listeners a sign-in starts (`agent-gmail oauth-listen`, `agent-slack sign-in-listen` — children of a
   command already let through, which a stop would break part-way), and WhatsApp's `status`, its doctor. Over MCP the

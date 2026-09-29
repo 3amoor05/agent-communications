@@ -15,6 +15,7 @@ import {
   type OutputOptions,
   openCore,
   paint,
+  refuseUnclaimedApproval,
   renderInstall,
   renderPrune,
   runCommand,
@@ -36,6 +37,7 @@ import {
   inspectKey,
   listAccounts,
   modeOf,
+  policyApprovalRefusal,
   policyChange,
   policyReport,
   policyWanted,
@@ -335,17 +337,18 @@ is out: update first, or put it off (agentcomms update, agentcomms update --late
   ).action(
     act(async (context, _options, name: string, flags: Options) => {
       const wanted = policyWanted({ send: flags.send, mode: flags.mode, change: flags.change });
-      const result =
-        wanted.send === undefined && wanted.mode === undefined && wanted.change === undefined
-          ? await policyReport(context, name)
-          : await changeAt(
-              context,
-              policyChange(context, name, wanted),
-              flags,
-              `agent-resend account policy ${name}${wanted.send ? ` --send ${wanted.send}` : ''}${
-                wanted.mode ? ` --mode ${wanted.mode}` : ''
-              }${wanted.change ? ` --change ${wanted.change}` : ''}`,
-            );
+      const reporting = wanted.send === undefined && wanted.mode === undefined && wanted.change === undefined;
+      if (reporting) refuseUnclaimedApproval(flags.approval, policyApprovalRefusal('cli'));
+      const result = reporting
+        ? await policyReport(context, name)
+        : await changeAt(
+            context,
+            policyChange(context, name, wanted),
+            flags,
+            `agent-resend account policy ${name}${wanted.send ? ` --send ${wanted.send}` : ''}${
+              wanted.mode ? ` --mode ${wanted.mode}` : ''
+            }${wanted.change ? ` --change ${wanted.change}` : ''}`,
+          );
       writeResult(result, output(), renderPolicy, streams);
     }),
   );

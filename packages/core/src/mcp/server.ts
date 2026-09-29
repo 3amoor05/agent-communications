@@ -1,6 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
-import { changeToolResult, type GatedChange, gatedChange } from '../change-flow.ts';
+import { changeToolResult, type GatedChange, gatedChange, refuseUnclaimedApproval } from '../change-flow.ts';
 import { CHANNELS } from '../channel-servers.ts';
 import { accountChannels, listed, narrowingOwner } from '../channel-words.ts';
 import { type Core, openCore } from '../core.ts';
@@ -510,7 +510,16 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
     },
     async (args) => {
-      if (args.dryRun) return read(async () => namesDryRun(await core.config.load(), args.renames ?? []));
+      if (args.dryRun) {
+        return read(async () => {
+          // A dry run claims nothing, so an approval here is refused rather than dropped: see `refuseUnclaimedApproval`.
+          refuseUnclaimedApproval(args.approvalId, {
+            message: '`dryRun` only shows the mapping, so it takes no approvalId',
+            hint: 'Leave out `dryRun` to rename; the first call returns the preview and the approvalId to call with.',
+          });
+          return namesDryRun(await core.config.load(), args.renames ?? []);
+        });
+      }
       return change(() => namesMigration(core, args.renames ?? []), args.approvalId);
     },
   );
