@@ -225,7 +225,9 @@ function windowsBelow(folder: string, root: string): string {
  * always, last, `;symlinkroot=<automount root>`, whose value is `wsl.conf`'s and can hold anything but a semicolon; 9p's
  * own options (`,cache=mmap`, `,trans=fd`) follow. So the folder ends at the first semicolon from which what is left
  * reads as options ending in that `;symlinkroot=`. No other option's value has a backslash, so what that leaves off is
- * at most the end of the last folder's name — and no name refused here has a comma or a semicolon in it.
+ * at most the end of the last folder's name — and no name refused here has a comma or a semicolon in it. A folder whose
+ * own name reads like options, `;symlinkroot=` included, could end at more than one such place: where a backslash lies
+ * between them, which one is the folder cannot be told, and it is not read.
  *
  * An aname WSL did not build, with no `;symlinkroot=`, is read only when it is plain: the folder has no comma or
  * semicolon, and what follows it reads as options. Anything else is a Windows folder that cannot be read (`''`), and
@@ -240,8 +242,14 @@ function pathOption(options: string): string | undefined {
   if (start === null) return undefined;
   const rest = options.slice(start.index + start[0].length);
   if (rest.includes(';symlinkroot=')) {
+    const ends: number[] = [];
     for (let end = 0; end < rest.length; end++) {
-      if (rest[end] === ';' && WSL_ANAME_TAIL.test(rest.slice(end))) return rest.slice(0, end);
+      if (rest[end] === ';' && WSL_ANAME_TAIL.test(rest.slice(end))) ends.push(end);
+    }
+    const [first] = ends;
+    const last = ends.at(-1);
+    if (first !== undefined && last !== undefined) {
+      return rest.slice(first, last).includes('\\') ? '' : rest.slice(0, first);
     }
   }
   const end = rest.search(/[;,]/);

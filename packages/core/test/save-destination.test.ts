@@ -1137,6 +1137,8 @@ test('Windows drives are read from the kernel’s mount table, with the Windows 
     '196 600 0:104 / /mnt/s rw - 9p drvfs rw,aname=drvfs;path=C:\\Profiles\\jo\\AppData;uid=1000;symlinkroot=/mnt\\odd/,cache=0x4',
     // An aname WSL did not build, whose folder cannot be told from its options.
     '197 600 0:105 / /mnt/u rw - 9p drvfs rw,aname=drvfs;path=U:\\x;weird=a\\b,mmap',
+    // A folder whose own name reads like WSL's options: it could end before its \AppData, or after.
+    '198 600 0:106 / /mnt/v rw - 9p drvfs rw,aname=drvfs;path=C:\\safe;symlinkroot=x\\AppData;symlinkroot=/mnt/,cache=0x4',
     // A disk mounted at /hide/sub, then covered when a drive was mounted at /hide: still listed, never reached.
     '200 600 8:3 / /hide/sub rw - ext4 /dev/sdc1 rw',
     '201 600 0:99 / /hide rw - drvfs Y:\\134 rw',
@@ -1166,6 +1168,7 @@ test('Windows drives are read from the kernel’s mount table, with the Windows 
     '/mnt/r': 'R:\\',
     '/mnt/s': 'C:\\Profiles\\jo\\AppData',
     '/mnt/u': '',
+    '/mnt/v': '',
     '/hide/sub': null,
     '/hide': 'Y:\\',
   });
@@ -1198,6 +1201,7 @@ test('Windows drives are read from the kernel’s mount table, with the Windows 
     ['/mnt/r', /the root of a Windows drive \(R:\), reached through \/mnt\/r$/],
     ['/mnt/s/Roaming', /inside an AppData folder, .*reached through \/mnt\/s$/],
     ['/mnt/u/Downloads', /a Windows drive whose folder its mount does not say plainly, reached through \/mnt\/u$/],
+    ['/mnt/v', /a Windows drive whose folder its mount does not say plainly, reached through \/mnt\/v$/],
     ['/hide/sub/AppData', /inside an AppData folder, .*reached through \/hide$/],
   ] as const) {
     assert.match(String(refusedSaveFolder(folder, deny)), why, folder);
