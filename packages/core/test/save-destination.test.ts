@@ -1028,6 +1028,15 @@ test('under confirm, the answer the person gave at their terminal or in a truste
     const offered = { downloads: join(home, `Downloads-${via}`), current: join(home, 'work') };
     const { approvalId } = await core.approvals.createDownload({ download: binding(offered), policy: 'confirm' });
     await core.approvals.answerDownload(approvalId, via, { choice: 'other', folder: join(home, `Invoices-${via}`) });
+    // Answered once: a second answer, while the first waits to be used, is refused and changes nothing.
+    await assert.rejects(
+      core.approvals.answerDownload(approvalId, 'terminal', { choice: 'downloads' }),
+      refusal(/answered already, and it is answered once/, 'APPROVAL_VOID'),
+    );
+    assert.deepEqual((await core.approvals.get(approvalId))?.download?.answer, {
+      choice: 'other',
+      folder: join(home, `Invoices-${via}`),
+    });
     // A relayed answer that is not theirs is refused, and leaves the question as it was.
     await assert.rejects(
       settling(core, env, home, { kind: 'choice', answer: { choice: 'downloads' }, choiceId: approvalId }, 'confirm'),

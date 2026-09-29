@@ -896,7 +896,12 @@ export async function settleDestination(core: Core, input: SettleInput): Promise
     });
   }
   const folder = folderFor(chosen, claimed.download.folders, env, platform);
-  await checkSaveFolder(folder, deny, spent);
+  /*
+   * Checked again as it is opened — made, and resolved through its links — because the checks before the claim were
+   * of a path, and a path can become a link between then and now. This one is of the real folder every file is then
+   * created in, so a link put in its place at any moment up to this one is refused; the most such a race can leave is
+   * an empty folder made on the way, never a file.
+   */
   const opened = await openFolder(folder);
   await checkSaveFolder(opened, deny, spent);
   const via = claimed.download.answer === undefined ? 'chat' : (claimed.approvedVia ?? 'terminal');
