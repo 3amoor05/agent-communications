@@ -1,5 +1,5 @@
 {
   "kind": "requestOnly",
   "group": "communications",
-  "useWhen": "Read a Slack workspace — channels, threads, search, people and files — save the files people shared, and report what was read without overstating it."
+  "useWhen": "Read a Slack workspace — channels, threads, search, people and files — save the files people shared where the person says, and report what was read without overstating it."
 }

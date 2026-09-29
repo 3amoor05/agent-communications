@@ -1,10 +1,14 @@
 # The downloads root
 
-Everything this package writes from a mailbox — exported messages and threads, downloaded attachments, the
-manifest that records them — lands under one directory. This file is where that directory is, how a path is
-proved to stay inside it, what the layout looks like, why the setting is a safety boundary rather than a
-preference, and what moving it actually takes. Open it when an export or download was refused a location, or
-when the destination is inconvenient and moving it starts to look reasonable.
+Every export this package writes from a mailbox — messages and threads, as Markdown, JSON or `.eml` — lands under
+one directory. This file is where that directory is, how a path is proved to stay inside it, what the layout looks
+like, why the setting is a safety boundary rather than a preference, and what moving it actually takes. Open it
+when an export was refused a location, or when the destination is inconvenient and moving it starts to look
+reasonable.
+
+Attachments are not saved here. A download asks the person where to save — their Downloads folder, the folder the
+server or command was started in, or one they name — and saves only there (`gmail-attachments`). Setting
+`defaults.downloadsDir` makes that folder the Downloads choice in the question too.
 
 ## Where it is
 
@@ -35,9 +39,7 @@ starts with `~`; then check the mailbox and `out` segments in the layout below.
 ```text
 <root>/<organisation>/<platform>/exports/<date>_message-<id>.md     an export, by default
 <root>/<organisation>/<platform>/<out>/<date>_thread-<id>.json      an export with out, of a thread
-<root>/<organisation>/<platform>/<out>/manifest.json               one per download call
-<root>/<organisation>/<platform>/<out>/<date>_<message id>/        one folder per downloaded message
-<root>/<organisation>/<platform>/<out>/<date>_<message id>/part-1.pdf   one attachment, by its part id
+<root>/<organisation>/<platform>/exports/<id>.eml                   an export as it arrived
 ```
 
 Points worth knowing:
@@ -45,14 +47,8 @@ Points worth knowing:
 - **The mailbox name is always the first two segments** — it is `organisation/platform`, so `acme/gmail`
   becomes `acme/gmail/…` — and they are added for you. `out` never replaces them, so
   files from two mailboxes never mix.
-- **Exports default to an `exports` subfolder**; downloads default to the mailbox's folder itself.
-- **A download makes one folder per message**, named from Gmail's facts about it: the day it arrived and its
-  id — `undated` when there is no day. Each file in it is `part-<part id>`, with an extension only for a common
-  document or image type. Nothing in a path is the sender's: not the address, not the subject, not the name
-  they gave the file, which comes back beside the path, inside `<untrusted-content>`.
-- **`manifest.json` sits at the call's directory**, not in the per-message folders. It records the time, the
-  inbox, every file with its hash and source message, everything skipped, and the total bytes. A second
-  download into the same `out` **rewrites** it, so use a different subfolder when the record matters.
+- **Exports default to an `exports` subfolder.** Each is named from Gmail's facts about it: the day it arrived and
+  its id — `undated` when there is no day. Nothing in a path is the sender's: not the address, not the subject.
 - **Nothing is ever overwritten.** Files are created with an exclusive open that refuses to follow a symlink
   at the final component, so a name already taken becomes `name-2.ext` and a planted link writes nothing.
 
@@ -87,12 +83,13 @@ user's decision to put the file elsewhere themselves.
 
 Not tidiness. Four reasons, and they compound:
 
-- **One known place for files from strangers.** Attachments arrive from senders nobody vetted, with names the
-  sender chose. Keeping every one of them under a single root is what makes "what has this thing written to my
-  disk" a question with an answer.
-- **It keeps mail out of everything else.** If an agent could choose the destination, "save that attachment to
-  my project folder" would be one sentence away from writing a sender-controlled file into a source tree, a
-  startup directory, or anywhere a later process reads without thinking.
+- **One known place for what a tool writes on its own.** An export is written because an agent asked for it.
+  Keeping every one under a single root is what makes "what has this thing written to my disk" a question with an
+  answer.
+- **It keeps mail out of everything else.** If an agent could choose the destination, "save that thread to my
+  project folder" would be one sentence away from writing a sender's words into a source tree, a startup
+  directory, or anywhere a later process reads without thinking. That is also why an attachment is saved only
+  where the person answers — the choice is theirs, asked each time, never an agent's.
 - **It is the counterpart to the attachment jail.** Outbound, the jail decides which local files may leave as
   mail. Inbound, this root decides where files from mail may land. Either boundary is much weaker without the
   other: a writable destination anywhere on disk would be a way to place a file and then attach it.

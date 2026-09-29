@@ -145,27 +145,25 @@ compared against, so it will not show you this. If a file plainly inside the use
 outside every root, the environment the process inherited is the thing to check before assuming the file is
 the problem.
 
-## The other jail: where downloads land
+## The other direction: where downloads land
 
-Attaching is one direction. The other — attachment downloads and exports — has its own check,
-`resolveInsideRoot`, applied to the `out` subpath rather than to a file:
+Attaching is one direction. The other — attachment downloads — has no root at all any more, because where a
+stranger's file lands is the person's to say. A download asks first (`destinationRequired: true`, with a question and
+a `choiceId`), and saves only into the folder the person answered with:
 
-- `out` is checked **before** it is joined to anything, by `relativeSubpath`. An absolute path fails with
-  `BAD_DATA`: `out must be a relative subpath: it is an absolute path`; a `../` fails with
-  `out must be a relative subpath: it climbs out with ".."`. Both refusals happen here rather than in the
-  containment test below, and that is the point — `join('acme/gmail', '../../personal/gmail')` is `'personal/gmail'`,
-  which still resolves *inside* the root, so the containment test would have allowed one mailbox's files into
-  another's folder. `join('acme/gmail', '/etc/x')` is `'acme/gmail/etc/x'`, an absolute path quietly accepted
-  under another name.
-- What remains is a relative, `..`-free subpath under the mailbox's folder. That is resolved against the downloads
-  root and the lexical result must be inside it.
-- The real path of the nearest existing ancestor is then resolved, and must still be inside the real root. A
-  subfolder that is a symlink pointing elsewhere fails with `refusing to write through a link that leaves
-  <root>`.
-- The mailbox's own folder is added for you: a download lands under `<root>/<organisation>/<platform>/<out>`.
+- `downloads` — their Downloads folder, `<home>/Downloads`, or `defaults.downloadsDir` when they set one;
+- `current` — the folder the server or the command was started in;
+- a folder they name, absolute or starting with `~`. A relative one is refused with `USAGE` before the question is
+  spent; one that is missing is made (`0700`); one that is a file is refused with `BAD_DATA`.
 
-Same principle, opposite direction: outbound, the jail decides what may leave the machine; inbound, it decides
-where files from strangers may land.
+The folder is resolved through its links — the person named it, so a link in it goes where they meant. What is
+never followed is anything at a file's own name inside it: each file is created with `O_EXCL` and no-follow, so a
+planted symlink, or a file already there, makes the new one `-2` rather than being written through or over. The
+question is bound to the mailbox, the messages and parts, and the files it listed; a claim for anything else is
+refused and voids it.
+
+Exports still land under the downloads root, `<root>/<organisation>/<platform>/<out>`, with `out` held to a relative,
+`..`-free subpath and the real path proved inside the root — that is `gmail-export`'s, and its reference says how.
 
 ## Changing the policy
 

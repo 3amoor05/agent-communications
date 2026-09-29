@@ -103,15 +103,27 @@ channel.
 ```sh
 agent-slack files download --workspace acme/slack --file F07ABCDE123
 agent-slack files download --workspace acme/slack --message C024BE7LR 1700000000.000100
-agent-slack files download --workspace acme/slack --channel D024BE7LR --since 1700000000 --out invoices
+agent-slack files download --workspace acme/slack --channel D024BE7LR --since 1700000000 --to ~/Invoices
 ```
 
 By id, the files of one message, or a conversation's files — a channel, a DM or a group DM — uploaded from a
 timestamp on (`--since` goes by upload time, to the second: a file uploaded earlier and shared later is left out).
-Each is saved under your downloads folder (`~/Downloads/agent-communications`, or `defaults.downloadsDir`) as
-`<workspace>/<out>/<date>_<channel>-<ts>/<file id>`, keeping its extension only for a common document or image type:
-never under the name the uploader gave it, which comes back beside the path inside the untrusted-content envelope,
-with the title and the uploader's name. The type comes back inside it too, unless it is a plain MIME type such as
+
+**You say where they go.** Nothing is saved until you have: the command lists the files — each name, size, who
+uploaded it and where — and asks whether to save them in `1` your Downloads folder (`~/Downloads`, or
+`defaults.downloadsDir` when you set one), `2` the folder you ran it in, or `3` a folder you name (absolute, or
+starting with `~`; it is made if missing). Both folders are shown by their exact paths. In a script, say it with
+`--to downloads`, `--to current` or `--to <folder>`. Run by an agent, or with no terminal, the command saves nothing:
+it prints the question with a choice id and exits `10`, and the agent runs it again with your answer as
+`--to <answer> --choice <id>` — an agent's `--to` without `--choice` is refused. Over MCP `slack_file_download` asks
+the same way: its first call answers `destinationRequired: true` with the question and a `choiceId`, and the second
+passes your answer as `saveTo` with that `choiceId`. A choice is for those files only, is used once, and expires.
+
+Each file is saved under the name its uploader gave it, made safe — no path in it, no leading dot (`.envrc` is saved
+as `envrc`), no control or bidi characters, no Windows device name — and never over a file already there: the new one
+is saved beside it as `-2`. Nothing else is written in the folder. The name, the title and the uploader's name come
+back inside the untrusted-content envelope, and so does the name the file was saved under, and its path, unless that
+name is plainly a file name. The type comes back inside it too, unless it is a plain MIME type such as
 `application/pdf`, and any risk flags beside it. Nothing is opened or run.
 
 The bytes come from `files.slack.com` alone, with the workspace's token, and only at the address of the file just
@@ -119,10 +131,11 @@ looked up: a file held outside Slack, a redirect or Slack's sign-in page is refu
 or a run over 500 MiB. An HTML file is refused too, always: Slack answers with a web page when the token cannot read a
 file, and an HTML file is a web page, so the two cannot be told apart. It is listed under `skipped` as
 indistinguishable from the sign-in page; open it in Slack instead. A file that cannot be fetched is listed under
-`skipped` with the reason while the rest are saved; `manifest.json` lists what was saved, and the download goes in the
-audit log. A run that stops part-way — a disk that fills, a folder it cannot make — ends in an error that says what
-was saved, and its manifest lists the files it stopped before under `skipped`, as `stopped`. It is a read, so it works
-in `read` mode and needs nobody's approval.
+`skipped` with the reason while the rest are saved; a manifest under this package's own state directory — never in
+your folder — lists what was saved, and the download goes in the audit log, naming the folder. A run that stops
+part-way — a disk that fills — ends in an error that says what was saved, and its manifest lists the files it stopped
+before under `skipped`, as `stopped`. It is a read, so it works in `read` mode; where it saves is yours to say, and
+nothing else about it needs approving.
 
 Everything a sender controls arrives inside an `<untrusted-content>` envelope — the message, the notification
 half when it disagrees, attachments, and anything Slack unfurled, each labelled with what it is and whose page it
@@ -182,7 +195,7 @@ on stdio directly.
 | `slack_doctor` | what `agent-slack doctor` checks, as the same JSON |
 | `slack_manifest` | the app manifest, and for a connected workspace the link to its own app's manifest page — changes nothing |
 | `slack_channels`, `slack_read`, `slack_thread`, `slack_search`, `slack_people`, `slack_files` | read, bounded |
-| `slack_file_download` | save files under the downloads folder — by id, from one message, or from a conversation; opens nothing |
+| `slack_file_download` | save files where the person says — asks first; by id, from one message, or from a conversation; opens nothing |
 | `slack_post_prepare` | compose a draft and return the preview a person must approve — posts nothing |
 | `slack_post_send` | post a prepared draft once its approval allows it — the operation `agent-slack post send` runs |
 | `slack_react`, `slack_react_send` | add or remove a reaction through the same gate — `agent-slack react` |

@@ -197,9 +197,9 @@ only) and so is the file. Names come from the day and the id, never the subject 
 as a plain field, and a subject is the sender's words; a `.eml` is named from the id alone. Nothing is
 ever overwritten.
 
-That one root is where everything from strangers lands — attachments and exports alike — and keeping
-it in one place is what makes it possible to say what arrived from mail and what did not. So it is a
-**safety setting**, not a preference:
+That one root is where every export lands, and keeping it in one place is what makes it possible to say
+what an agent wrote from mail and what it did not. (Attachments are the person's to place: a download asks
+them where, each time — that is `gmail-attachments`.) So the root is a **safety setting**, not a preference:
 
 - `out` is a **subpath inside the root**, on both surfaces. It is resolved against the root and the
   result is proved to still be inside it, after following symlinks in any folder that already exists.

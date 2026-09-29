@@ -306,8 +306,8 @@ Supported clients are `claude-code`, `claude-desktop`, `codex`, `cursor`, `gemin
 `json` to print the snippet for anything else. Add `--inbox <alias>` to pin the server to one
 mailbox, and `--read-only` to leave out every tool that changes the mailbox. It gates the mailbox and
 not the disk: `gmail_attachment_download` and `gmail_export` are registered either way, so a
-read-only server can still write files — attachments from strangers among them — under the downloads
-root.
+read-only server can still write files — exports under the downloads root, and attachments from strangers
+wherever the person answers that a download should go.
 
 **Then, the usual causes.**
 

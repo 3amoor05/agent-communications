@@ -308,7 +308,8 @@ send policy?" either: `gmail_inboxes_list` answers that in one call.
    the server to one mailbox, `--read-only` to leave out every tool that changes the mailbox, and
    `--print` to see what would be written without writing it. `--read-only` gates the mailbox and not the
    disk — `gmail_attachment_download` and `gmail_export` are registered either way — so say it can write
-   files, including attachments from strangers, under the downloads root. The command starts the server
+   files: exports under the downloads root, and attachments from strangers wherever the person answers that a
+   download should go. The command starts the server
    through the entry it just wrote and completes a handshake, so a registration that looks right but does
    not run is caught here. Tell the user to restart the client afterwards. Re-registering a newer version
    leaves the old runtime on disk; once the client is restarted, `agent-gmail mcp prune` removes those it

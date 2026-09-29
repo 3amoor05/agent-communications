@@ -33,7 +33,7 @@ Each family of skills shares one contract, copied into every skill as `reference
 |---|---|
 | [`comms-onboarding`](#comms-onboarding) | Set a person up with agent-communications from chat: which channels and accounts, which mode each account should have, the servers registered, every sign-in started, and the steps only they can take named. |
 | [`comms-update`](#comms-update) | Bring agent-communications on this computer up to the latest release from chat: see what is behind, update the servers, their runtimes and any global commands in one approved step, then restart and clear out the old versions. |
-| [`gmail-attachments`](#gmail-attachments) | Find files people sent, save them to disk with a manifest of what came from where, and attach a local file to a draft. |
+| [`gmail-attachments`](#gmail-attachments) | Find files people sent, save them where the person says — Downloads, the current folder, or a folder they name — and attach a local file to a draft. |
 | [`gmail-compose`](#gmail-compose) | Write a message into Gmail Drafts — new, reply, reply-all or forward — and hand the draft id to gmail-send. |
 | [`gmail-contacts`](#gmail-contacts) | Find somebody's address and who they are, across saved contacts, people written to before, and past mail — showing every candidate with where it came from so the user chooses. |
 | [`gmail-export`](#gmail-export) | Write a message or a whole thread to a file — Markdown, JSON, or the original .eml — instead of pulling it through the conversation. |
@@ -48,7 +48,7 @@ Each family of skills shares one contract, copied into every skill as `reference
 | [`resend-reading`](#resend-reading) | Read a Resend team — its domains, the sent emails and what happened to each, received email, delivery metrics and the suppression list — and report what was read without overstating it. |
 | [`resend-sending`](#resend-sending) | Send email through Resend: prepare it, show the person the whole preview, and send it once they approve — then check what happened, and see or cancel what is scheduled. |
 | [`slack-posting`](#slack-posting) | Draft a Slack message and take it through the approval gate, including how many people a post would interrupt. |
-| [`slack-reading`](#slack-reading) | Read a Slack workspace — channels, threads, search, people and files — save the files people shared, and report what was read without overstating it. |
+| [`slack-reading`](#slack-reading) | Read a Slack workspace — channels, threads, search, people and files — save the files people shared where the person says, and report what was read without overstating it. |
 | [`slack-setup`](#slack-setup) | Connect a Slack workspace to agent-slack: the app manifest, the PKCE sign-in, read and send modes, and what doctor reports. |
 | [`whatsapp-reading`](#whatsapp-reading) | Read WhatsApp on this Mac, read-only: sync, list chats, read, search, and draft a reply as a link the person sends. |
 
@@ -74,7 +74,7 @@ Bring agent-communications on this computer up to the latest release from chat: 
 
 ### `gmail-attachments`
 
-Find files people sent, save them to disk with a manifest of what came from where, and attach a local file to a draft.
+Find files people sent, save them where the person says — Downloads, the current folder, or a folder they name — and attach a local file to a draft.
 
 **Reach for it when:** 'find the invoice Sam sent', 'download the attachments from that thread', 'save those PDFs', 'attach the contract to that draft', 'why won't it attach that file'
 
@@ -224,7 +224,7 @@ Draft a Slack message and take it through the approval gate, including how many 
 
 ### `slack-reading`
 
-Read a Slack workspace — channels, threads, search, people and files — save the files people shared, and report what was read without overstating it.
+Read a Slack workspace — channels, threads, search, people and files — save the files people shared where the person says, and report what was read without overstating it.
 
 **Reach for it when:** 'what did they say in #engineering', 'catch me up on that thread', 'search Slack for the invoice', 'who is in this channel', 'download the file Sam shared'
 

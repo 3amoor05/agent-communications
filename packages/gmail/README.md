@@ -80,6 +80,30 @@ Every command takes `--json` and prints `{"ok":true,"schemaVersion":1,"data":…
 `{"ok":false,"schemaVersion":1,"error":{"code","message","hint"}}` — with a documented exit code (`--help` lists
 them). Data goes to stdout, messages to stderr.
 
+### Saving attachments
+
+```sh
+agent-gmail attachments find --inbox acme/gmail --from sam@partner.test --filename pdf
+agent-gmail attachments download 18f2c7a9e03b41d6 --inbox acme/gmail --part 1
+```
+
+**You say where they go.** Nothing is saved until you have: the command lists the files — each name, size and
+sender — and asks whether to save them in `1` your Downloads folder (`~/Downloads`, or `defaults.downloadsDir` when you
+set one), `2` the folder you ran it in, or `3` a folder you name (absolute, or starting with `~`; it is made if
+missing). Both folders are shown by their exact paths. In a script, say it with `--to downloads`, `--to current` or
+`--to <folder>`. Run by an agent, or with no terminal, the command saves nothing: it prints the question with a
+choice id and exits `10`, and the agent runs it again with your answer as `--to <answer> --choice <id>` — an agent's
+`--to` without `--choice` is refused. Over MCP `gmail_attachment_download` asks the same way: its first call answers
+`destinationRequired: true` with the question and a `choiceId`, and the second passes your answer as `saveTo` with
+that `choiceId`. A choice is for those attachments only, is used once, and expires.
+
+Each file is saved under the name its sender gave it, made safe — no path in it, no leading dot (`.npmrc` is saved as
+`npmrc`), no control or bidi characters, no Windows device name — and never over a file already there: the new one is
+saved beside it as `-2`. Nothing else is written in the folder; the download is recorded in the audit log and in a
+manifest under this package's own state directory. What the sender called the file comes back inside the
+untrusted-content envelope, and so does the name it was saved under, and its path, unless that name is plainly a file
+name. Nothing is ever opened or run.
+
 ### Changes that need your approval
 
 `client add` and `client remove`, `inbox import` and `inbox remove`, `confirm-clients add`, a looser
@@ -144,6 +168,8 @@ machine; the file never passes through the conversation, and no tool returns its
 | Configuration | `$XDG_CONFIG_HOME/agent-communications`, else `~/.config/agent-communications` (`%APPDATA%` on Windows) |
 | Tokens and client secrets | the system keychain, or owner-only files (`--store file`) |
 | Approvals, audit log, state | `<config>/state` |
+| Attachments you save | where you say each time: Downloads, the folder you ran the command in, or one you name |
+| Exports | `~/Downloads/agent-communications`, or `defaults.downloadsDir` |
 
 No secret is ever written to `config.json`, printed by a command, or put in a result.
 

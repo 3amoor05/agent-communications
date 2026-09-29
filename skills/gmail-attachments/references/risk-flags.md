@@ -22,7 +22,7 @@ removes the override it is looking for.
 |---|---|
 | `gmail_attachments_find` (CLI: `agent-gmail attachments find`) | `riskFlags` on each row |
 | `gmail_message_get` (CLI: `agent-gmail read`) | `riskFlags` on each entry of `attachments` |
-| `gmail_attachment_download` (CLI: `agent-gmail attachments download`) | `riskFlags` on each entry of `files`, and the same in `manifest.json` |
+| `gmail_attachment_download` (CLI: `agent-gmail attachments download`) | `riskFlags` on each entry of `files` — in the question, before anything is saved, and in what was saved — and the same in the manifest |
 | `gmail_export` in Markdown | appended in brackets after each attachment line |
 
 The same function produces all of them, so a flag seen at find time is the flag seen after the download.

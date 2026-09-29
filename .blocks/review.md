@@ -30,7 +30,8 @@ It gives agents access to people's email. The failures that matter most are sile
   with an approval record whose digest matches the live draft. Any new path, or any check relaxed, is a finding.
 - **Untrusted content escaping its envelope** — sender-controlled text reaching a result outside the envelope or
   before the HTML sanitiser.
-- **Files outside their jail** — downloads or exports written outside the downloads root; attachments read from
+- **Files outside their jail** — exports written outside the downloads root; a download saved anywhere the person did
+  not choose, or before they chose, or through a link at a file's name; attachments read from
   outside the allowed roots or from the deny list.
 - **Secrets leaking** — tokens or client secrets in logs, errors, results or files with loose permissions.
 
