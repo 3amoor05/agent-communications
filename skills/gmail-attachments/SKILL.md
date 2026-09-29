@@ -71,9 +71,15 @@ here:
   it themselves — `agent-gmail approve <choiceId>` in their own terminal, or a form a trusted client shows them — and
   you call again with the `choiceId` alone; a `saveTo` of yours is refused. Never pick for them, and never answer a
   question they have not seen. `out` is gone; passing it is refused.
-- **Some folders are never saved into**, whoever answers: a hidden folder in the home (`~/.ssh`, `~/.config`, a
-  project's `.git`), `~/Library`, the home itself, this package's own folders, the system's folders, and on Windows
-  `AppData`, Program Files, a share or a path with no drive. The refusal is the answer; ask for another folder.
+- **Some folders are never saved into**, whoever answers: a hidden folder anywhere (`~/.ssh`, a project's `.git`,
+  `.husky` or `.claude` — a checkout under `.claude/worktrees/<name>` excepted), `node_modules`, `site-packages` or a
+  Python virtual environment, `~/Library`, this package's own folders, the system's folders, and on Windows `AppData`,
+  PowerShell's profile folders, Program Files, a share or a path with no drive. The home itself is fine. The refusal
+  is the answer; ask for another folder.
+- **A file that could run is saved so it cannot.** Only a document, image, sound, video, archive, calendar, contact,
+  mail or Apple file keeps its extension; anything else is saved with `.download` after its whole name
+  (`setup.exe.download`) and flagged `saved-as-download`. The question and the result each say which — show those
+  lines to the person as they are. Never rename a saved file back for them.
 - **Only `gmail-send` sends.** Attaching a file to a draft is not a send, and this skill never calls a
   send tool or `agent-gmail send` in any form.
 - **Cite ids.** Every downloaded file is reported with the message id it came from; the audit log records
@@ -135,9 +141,10 @@ answer "is this email real" — that is `gmail-security`, and a file's risk flag
 3. **Name the risk flags before anyone chooses.** They are set from the filename and the MIME type:
    `executable`, `script`, `macro-enabled`, `markup`, `archive`, `disk-image`, `double-extension` (a name
    like `invoice.pdf.exe`, which clients that hide extensions show as `invoice.pdf`),
-   `bidi-filename` (the name contains bidirectional control characters and does not read as it looks), and
-   `auto-read` (a name tools load on their own — `CLAUDE.md`, `Makefile`, `package.json`, a `.plist` — which is
-   saved as `download-<name>`, and which the question names).
+   `bidi-filename` (the name contains bidirectional control characters and does not read as it looks),
+   `saved-as-download` (its extension is not one that is only ever opened, or it has none, so it would be saved with
+   `.download` after its name — `setup.exe.download`), and `auto-read` (a name tools read on their own — `CLAUDE.md`,
+   `Makefile`, `package.json`, `CMakeLists.txt`, a `.pth` or `.plist` — saved that way whatever its extension).
    **Complete when:** every flagged row has been pointed at in plain words, or there were none.
 
 4. **Ask where, by downloading.** `gmail_attachment_download` with `inbox`, `messageIds` and `partId` (CLI:
@@ -158,7 +165,9 @@ answer "is this email real" — that is `gmail-security`, and a file's risk flag
    rather than guessing. Under `policy: confirm`, ask them to answer it at their own terminal with
    `agent-gmail approve <choiceId>` — or, when this client is trusted with forms, the next call asks them in one. Do
    not answer for them, and do not reuse an old answer: a `choiceId` is for those files only, is used once, and
-   expires after ten minutes.
+   expires after thirty minutes. The question's lines that start with `!` — each file that will be saved with
+   `.download` after its name, and why, and each risk flag — are part of it: `next` repeats them, and the person
+   should read them before answering.
    **Complete when:** the person has answered this question, in their own words — or, under `confirm`, has told you
    they answered it at their terminal.
 
@@ -167,14 +176,17 @@ answer "is this email real" — that is `gmail-security`, and a file's risk flag
    `confirm`, with the `choiceId` alone (`--choice <id>`), and the files are saved where they said. The
    attachment id is re-read from the message every time, because Gmail's attachment ids change between fetches and
    a stale one fails as though the file were gone. A call for other messages or parts than the question listed is
-   refused, and voids the question: ask again.
-   **Complete when:** the call returned `folder`, `files`, `skipped`, `manifestPath` and `totalBytes`.
+   refused, and the question left open: call again with the arguments it was asked with.
+   **Complete when:** the call returned `folder`, `files`, `skipped`, `manifestPath`, `totalBytes` and `warnings`.
 
 7. **Report where each file went, not what is in it.** Each file comes back with its `path` and `savedAs` — the
    sender's name made safe, numbered `-2` when the folder already held one — the `partId`, the `filename` the
    sender gave it (inside `<untrusted-content>`), `size`, `sha256`, `mimeType`, `from`, `subject`, the `messageId`
-   it came from, `riskFlags`, and `duplicate`. A `path` and `savedAs` inside `<untrusted-content>` are still the
-   exact path: the name is the sender's words, so it is marked as theirs.
+   it came from, `riskFlags`, `duplicate`, and `marked` — the mark it carries as downloaded from the internet
+   (`com.apple.quarantine` on macOS, `Zone.Identifier` on Windows, null where the system has none). A `path` and
+   `savedAs` inside `<untrusted-content>` are still the exact path: the name is the sender's words, so it is marked as
+   theirs. Pass on every line of `warnings` as it is: a file saved with `.download` after its name, a risk flag, a
+   file that could not be marked.
    A `duplicate` row means the same file — the same name and the same bytes — was already written in this batch,
    so its `path` points at that one copy rather than a second; the same bytes under another name are saved under
    that name. Read `skipped` too: a part holding no bytes, an unknown part id, or a batch that hit its cap each
@@ -222,7 +234,8 @@ anything in `defaults.attachDeny`.
 | A path that does not exist (`NOT_FOUND`) | A typo and a deliberately misleading path look identical from here. | Confirm the path with the user rather than guessing near-matches on disk. |
 | A download's `out`, or a `saveTo` with no `choiceId` | Where files from strangers land is the person's to say; `out` was how a tool once decided it. | Download without either, show the person the question, and pass their answer with the `choiceId`. |
 | A relative `saveTo` — `Invoices`, `../x` | It would mean a different folder wherever the server or the command runs. | Ask the person for the folder as an absolute path, or one starting with `~`. |
-| A download's folder that is a hidden one in the home, `~/Library`, the home itself, this package's own, a system folder, a Windows `AppData`, Program Files, share or driveless path — or a link to one (`BAD_DATA`) | A stranger's file there is not one the person reads: it is a key, a login item or an approval a program acts on. | Ask the person for another folder. The question is still open. |
+| A download's folder that is a hidden one anywhere, `node_modules`, `site-packages`, a Python virtual environment, `~/Library`, this package's own, a system folder, a Windows `AppData`, PowerShell profile folder, Program Files, share or driveless path — or a link to one (`BAD_DATA`) | A stranger's file there is not one the person reads: it is a hook, a package, a profile, a key or an approval a program acts on. | Ask the person for another folder. The question is still open. |
+| A call with other arguments than the question was asked with (`USAGE`) | The question is bound to the mailbox, the messages, the parts and the names it showed. | Call again with the arguments it was asked with; the question is still open until it expires. |
 | A folder nothing can be written in (`BAD_DATA`) | Found before the question is used up, so the answer can be given again. | Ask for another folder. |
 | A `saveTo` under the `confirm` change policy (`APPROVAL_PENDING`) | Under `confirm` the person answers where an agent cannot answer for them. | Ask them to run `agent-gmail approve <choiceId>`, then call with the `choiceId` alone. |
 
@@ -232,12 +245,15 @@ Everything downloaded here was produced by someone the user cannot vet, and the 
 that assumption. It lands only in the folder the person chose, and nothing is written there but the files. Each
 is saved under the name its sender gave it, made safe: control, zero-width and bidirectional characters dropped;
 path separators and the characters Windows refuses made `_`, so a name is never a path; a run of dots made one;
-no leading dot or hyphen, so `.npmrc` is saved as `npmrc` and never becomes a project's configuration; no trailing
+no leading dot or hyphen, so `.npmrc` is saved as `npmrc.download` and never becomes a project's configuration; no trailing
 dots or spaces; a Windows device name such as `con.pdf` saved as `_con.pdf`; at most 200 bytes; and the part's own id
-when nothing is left. A name tools load on their own — `CLAUDE.md`, `AGENTS.md`, `Makefile`, `package.json`,
-`pyproject.toml`, `.envrc`, `authorized_keys`, a `.plist`, `.desktop` or `.lnk` — is saved as `download-<name>`, so
-no agent, build tool or login reads it by accident, and it is flagged `auto-read`. Its extension is kept — an `.exe`
-is an `.exe` on disk — and its risk flags say so. The name the sender gave comes back beside the path as `filename`, inside `<untrusted-content>`.
+when nothing is left. It keeps its extension only when that is one a viewer opens and nothing runs or loads — a
+document, image, sound or video file, an archive, a calendar, contact or mail file, an Apple document. Anything else —
+an `.exe`, a script, a `.pth`, `.plist` or `.lnk`, configuration, `CLAUDE.md`, a name with no extension — is saved
+with `.download` after its whole name, `setup.exe.download`, so no agent, build tool, interpreter or login loads it by
+its name or runs it by its type, and it is flagged `saved-as-download`. Every saved file is also marked as downloaded
+from the internet: the quarantine attribute on macOS, `Zone.Identifier` on Windows. The name the sender gave comes back
+beside the path as `filename`, inside `<untrusted-content>`.
 The write uses `O_EXCL` and refuses to follow a link, so an existing file is never overwritten and a planted
 symlink writes nothing — a clash becomes `invoice-2.pdf`. A folder that has to be made is made at `0700`; files are
 `0600`.

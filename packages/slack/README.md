@@ -118,7 +118,9 @@ else `~/Downloads`. At your own terminal you may also say it with `--to download
 — only there: with no terminal, with `--json`, through a pipe, or run by an agent, the command saves nothing, prints
 the question with a choice id and exits `10`, and `--to` needs the question's `--choice` beside it. Over MCP
 `slack_file_download` asks the same way: its first call answers `destinationRequired: true` with the question and a
-`choiceId`. A choice is for those files only, is used once, and expires.
+`choiceId`. A choice is for those files, under the names it showed, and no others; it is used once, and expires after
+thirty minutes. A call with other arguments is refused, and the question stays open for the right one; a file renamed
+on Slack after the question is refused rather than saved under a name you were not shown.
 
 **Your answer follows the workspace's change policy.** Under `chat` (the default), the agent passes your answer back
 — `saveTo` with the `choiceId`, or `--to <answer> --choice <id>`. Under `confirm` you answer it yourself, at your own
@@ -126,23 +128,46 @@ terminal: `agent-slack approve <choiceId>` shows the question again and asks `1`
 again with the `choiceId` alone; an answer it passes in the arguments is refused, and the question is left open for
 you.
 
-**Some folders are never saved into, whoever answers.** A hidden folder anywhere in your home (`~/.ssh`, `~/.config`,
-`~/.aws`, a project's `.git` or `.github`), a `.git` folder anywhere, `~/Library`, your home folder itself, this
-package's own configuration, state, data and credentials folders, the system's folders (`/`, `/etc`, `/usr`, `/bin`,
-`/var`, `/System`, …) and on Windows `AppData`, `%PROGRAMDATA%`, the Windows folder, Program Files, a drive's root, a
-network share and a path with no drive — and a folder that leads to one through a link. A file there would be
-something a program reads on its own, not a file you read. When the folder you ran the command in is one of these,
-option `2` is shown as unavailable, with the reason. A folder that cannot be written in is refused too, before your
-answer is used up.
+**Some folders are never saved into, whoever answers.** A hidden folder anywhere, at any depth and on any disk —
+`~/.ssh`, `~/.config`, a project's `.git`, `.github`, `.husky`, `.vscode` or `.claude` — except a checkout under
+`.claude/worktrees/<name>`, which is a project like any other (a hidden folder inside it is still refused); a folder
+programs load packages from, wherever it is — `node_modules`, `site-packages`, `dist-packages`, `__pycache__`, and any
+folder inside a Python virtual environment, one with `pyvenv.cfg` in it or above it; `~/Library`; this package's own
+configuration, state, data and credentials folders; the system's folders (`/`, `/etc`, `/usr`, `/bin`, `/var`,
+`/System`, …), though a home inside one, such as `/root`, is yours; and on Windows `AppData`, `%PROGRAMDATA%`, the
+Windows folder, Program Files, PowerShell's profile folders (`Documents\PowerShell` and `Documents\WindowsPowerShell`,
+wherever Windows says Documents is), a drive's root, a network share and a path with no drive. A folder that leads to
+one through a link is refused as that folder: a `hooks` link to `.husky` is `.husky`. In any of them a file would be
+something a program runs or loads on its own — a hook, a package, a profile, a key, an approval — rather than a file
+you read. Your home folder itself is fine. When the folder you ran the command in is one of these, option `2` is shown
+as unavailable, with the reason. A folder that cannot be written in is refused too, before your answer is used up.
 
 Each file is saved under the name its uploader gave it, made safe — no path in it, no leading dot, no control or bidi
-characters, no Windows device name — and never over a file already there: the new one is saved beside it as `-2`. A
-name that tools read on their own — `CLAUDE.md`, `AGENTS.md`, `Makefile`, `package.json`, `.envrc`,
-`authorized_keys`, a `.plist` or a `.desktop` file, and the like — is saved as `download-<name>`, flagged `auto-read`,
-and the question says so before you answer. Nothing else is written in the folder. The name, the title and the uploader's name come
-back inside the untrusted-content envelope, and so does the name the file was saved under, and its path, unless that
-name is plainly a file name. The type comes back inside it too, unless it is a plain MIME type such as
-`application/pdf`, and any risk flags beside it. Nothing is opened or run.
+characters, no Windows device name — and never over a file already there: the new one is saved beside it as `-2`.
+Nothing else is written in the folder. The name, the title and the uploader's name come back inside the
+untrusted-content envelope, and so does the name the file was saved under, and its path, unless that name is plainly a
+file name. The type comes back inside it too, unless it is a plain MIME type such as `application/pdf`, and any risk
+flags beside it. Nothing is opened or run.
+
+**A file is saved so that it can only be opened.** It keeps its extension only when that is a kind of file a viewer
+opens and nothing runs or loads: a document (`pdf`, `doc`, `docx`, `xls`, `xlsx`, `ppt`, `pptx`, `odt`, `ods`, `odp`,
+`rtf`, `txt`, `csv`, `tsv`), an image (`png`, `jpg`, `jpeg`, `gif`, `webp`, `heic`, `heif`, `bmp`, `tif`, `tiff`), sound
+or video (`mp3`, `m4a`, `wav`, `aac`, `flac`, `ogg`, `mp4`, `mov`, `m4v`, `webm`, `avi`, `mkv`), an archive (`zip`,
+`tar`, `gz`, `tgz`, `bz2`, `xz`, `7z`, `rar`), a calendar, contact or mail file (`ics`, `vcf`, `eml`), or an Apple
+document (`pages`, `numbers`, `key`). Anything else — an executable, a script, configuration (`json`, `yaml`, `toml`,
+`ini`, `md`, …), a macro document, HTML or SVG, a `.pth`, `.plist` or `.lnk`, a name with no extension — and the few
+names a tool reads although their extension is on that list (`CMakeLists.txt`, `requirements.txt`) are saved with
+`.download` after the whole name: `setup.exe` as `setup.exe.download`, `CLAUDE.md` as `CLAUDE.md.download`, `Makefile`
+as `Makefile.download`. No program loads or runs a file by that ending, so a file saved into a project, a package folder
+the list missed, or a folder a tool watches is inert until you rename it yourself. Such a file is flagged
+`saved-as-download` (and `auto-read` when tools read it by name). The question names each one before you answer —
+"setup.exe (executable) will be saved as setup.exe.download — a type that could run; rename it yourself if you trust it"
+— with every other risk flag, and the result says it again, in `warnings`.
+
+**Every saved file is marked as downloaded from the internet**, as a browser marks one: on macOS with the
+`com.apple.quarantine` attribute, so Gatekeeper asks before it first runs, and on Windows with a `Zone.Identifier`
+stream for the Internet zone, so SmartScreen asks and Office opens it in Protected View. Linux keeps no such mark. Each
+file's `marked` says which it carries; a file that could not be marked is still saved, and `warnings` says so.
 
 The bytes come from `files.slack.com` alone, with the workspace's token, and only at the address of the file just
 looked up: a file held outside Slack, a redirect or Slack's sign-in page is refused, and no file may be over 100 MiB

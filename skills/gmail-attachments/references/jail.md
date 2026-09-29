@@ -158,15 +158,25 @@ a `choiceId`), and saves only into the folder the person answered with:
   spent; one that is missing is made (`0700`); one that is a file, or one nothing can be written in, is refused with
   `BAD_DATA`, still before the question is spent.
 
-It has a deny list of its own, the counterpart of the one above, checked whoever answered and after links are
-followed: this package's own configuration, state (approvals, the audit log, download records), data and credential
-folders; the home itself, and any hidden folder at any depth below it — `~/.ssh`, `~/.config`, `~/.aws`, `~/.local`,
-a project's `.git` or `.github` — and a `.git` folder anywhere; `~/Library`; on Windows the profile's `AppData`,
-`%APPDATA%`, `%LOCALAPPDATA%`, `%PROGRAMDATA%`, the Windows folder, Program Files, a drive's root, a network share, a
-device path and a path with no drive; and the system's folders — `/`, `/etc`, `/usr`, `/bin`, `/sbin`, `/lib`, `/var`
-(but not the per-user temporary folders in it), `/opt`, `/System`, `/Library`, `/Applications`, `/private/etc`,
-`/private/var`. A folder on it is refused with `BAD_DATA`, and a default folder on it — a server started in the home —
-is shown in the question as unavailable, with the reason, rather than offered.
+It has a deny list of its own, the counterpart of the one above, checked whoever answered, on the path as written and
+after links are followed: this package's own configuration, state (approvals, the audit log, download records), data
+and credential folders; any hidden folder anywhere, at any depth — `~/.ssh`, `~/.config`, a project's `.git`,
+`.github`, `.husky`, `.vscode` or `.claude`, on any disk — except a checkout under `.claude/worktrees/<name>`, inside
+which a hidden folder is refused again; `node_modules`, `site-packages`, `dist-packages` and `__pycache__` wherever
+they are, and any folder inside a Python virtual environment (a `pyvenv.cfg` in it or above it); `~/Library`; on
+Windows the profile's `AppData`, `%APPDATA%`, `%LOCALAPPDATA%`, `%PROGRAMDATA%`, the Windows folder, Program Files,
+PowerShell's profile folders (`Documents\PowerShell`, `Documents\WindowsPowerShell`, in the profile's Documents and
+wherever the registry says Documents is), a drive's root, a network share, a device path and a path with no drive; and
+the system's folders — `/`, `/etc`, `/usr`, `/bin`, `/sbin`, `/lib`, `/var` (but not macOS's per-user temporary folder
+in it), `/opt`, `/root`, `/System`, `/Library`, `/Applications`, `/private/etc`, `/private/var` — except a home inside
+one, such as `/root` or `/var/lib/<name>`. The home itself is allowed. A folder on the list is refused with
+`BAD_DATA`, and a default folder on it — a server started in a hidden folder — is shown in the question as
+unavailable, with the reason, rather than offered.
+
+Whatever folder it lands in, a file keeps its extension only when that is one a viewer opens and nothing runs or
+loads — see `risk-flags.md`, `saved-as-download` — and anything else is saved with `.download` after its whole name.
+Every saved file is marked as downloaded from the internet: the `com.apple.quarantine` attribute on macOS, a
+`Zone.Identifier` stream on Windows.
 
 Under the mailbox's `confirm` change policy the answer has to come from the person where an agent cannot give it — at
 their own terminal (`agent-gmail approve <choiceId>`) or in a trusted client's form — and a `saveTo` in the arguments
@@ -174,9 +184,11 @@ is refused with `APPROVAL_PENDING`.
 
 The folder is resolved through its links — the person named it, so a link in it goes where they meant. What is
 never followed is anything at a file's own name inside it: each file is created with `O_EXCL` and no-follow, so a
-planted symlink, or a file already there, makes the new one `-2` rather than being written through or over. The
-question is bound to the mailbox, the messages and parts, and the files it listed; a claim for anything else is
-refused and voids it.
+planted symlink, or a file already there, makes the new one `-2` rather than being written through or over. Once
+each file is made, the folder is looked at again without following links, and has to be the folder that was opened
+and checked — the same disk and inode — or the file is removed and the download stops. The question is bound to the
+mailbox, the messages and parts, the files it listed and the names it showed them under; a claim for anything else is
+refused, and the question left open until it expires, thirty minutes after it was asked.
 
 Exports still land under the downloads root, `<root>/<organisation>/<platform>/<out>`, with `out` held to a relative,
 `..`-free subpath and the real path proved inside the root — that is `gmail-export`'s, and its reference says how.

@@ -34,8 +34,14 @@ This project reads and writes people's email and Slack workspaces. In scope, amo
 - **Prompt injection through email content** — a crafted message that escapes the untrusted-content envelope, hides
   text from the sanitiser, or makes a tool act on instructions found in mail.
 - **Path traversal** — attachment downloads or exports writing outside their directory, a download written into a
-  folder its deny list refuses (a hidden folder in the home, `~/Library`, this package's own folders, a system
-  folder), or attachments being read from outside the allowed roots.
+  folder its deny list refuses (a hidden folder anywhere outside `.claude/worktrees/<name>`, a package or Python
+  virtual-environment folder, `~/Library`, PowerShell's profile folders, this package's own folders, a system folder),
+  or attachments being read from outside the allowed roots.
+- **A saved file that runs** — a Gmail or Slack download saved with an extension outside its inert list (documents,
+  images, sound and video, archives, calendar, contact and mail files, Apple documents) instead of with `.download`
+  after its name, a name a tool reads by name saved without the suffix, a saved file left without its internet mark
+  (`com.apple.quarantine` on macOS, `Zone.Identifier` on Windows) without the result saying so, or a Windows program
+  this package starts being taken from the current folder.
 - **Installation and supply chain** — unsafe installation instructions, CI compromise, or published packages that do
   not match the repository.
 
