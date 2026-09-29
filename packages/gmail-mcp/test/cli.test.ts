@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { mkdtempSync, realpathSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -11,6 +14,27 @@ interface Ran {
   stderr: string;
 }
 
+/**
+ * The bin's environment: a directory of the run's own for its configuration and its home, and nothing else from the
+ * machine running the tests but `PATH`.
+ *
+ * The home goes under both of the names core reads it by: `HOME` on macOS and Linux, `USERPROFILE` on Windows, as
+ * Node's own `homedir()` does there. This used to inherit the whole environment — the real home under both names, the
+ * real `%LOCALAPPDATA%` — with one fixed `/tmp` directory shared by every run as its configuration.
+ */
+function binEnv(): NodeJS.ProcessEnv {
+  // realpath: on macOS the temporary directory is a symlink, and core compares resolved paths.
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'agent-gmail-mcp-')));
+  return {
+    PATH: process.env.PATH ?? '',
+    HOME: home,
+    USERPROFILE: home,
+    AGENT_COMMS_CONFIG_DIR: join(home, 'config'),
+    NO_COLOR: '1',
+    AGENT_COMMS_UPDATE_CHECK: 'off',
+  };
+}
+
 /** Starts the bin and closes its stdin, which is how a client ending a session looks to the server. */
 function runBin(args: string[], { closeStdin = true } = {}): Promise<Ran> {
   return new Promise((resolve, reject) => {
@@ -19,7 +43,7 @@ function runBin(args: string[], { closeStdin = true } = {}): Promise<Ran> {
       ['--experimental-strip-types', '--disable-warning=ExperimentalWarning', ENTRY, ...args],
       {
         stdio: ['pipe', 'pipe', 'pipe'],
-        env: { ...process.env, AGENT_COMMS_CONFIG_DIR: '/tmp/agent-gmail-mcp-test', AGENT_COMMS_UPDATE_CHECK: 'off' },
+        env: binEnv(),
       },
     );
     let stdout = '';

@@ -196,7 +196,10 @@ test('a file is attached by path, and only from where attaching is allowed', asy
   await harness.core.config.update((config) => ({ ...config, defaults: { ...config.defaults, attachRoots: [home] } }), {
     consent: { kind: 'loosening-consent', paths: ['defaults.attachRoots'] },
   });
-  const contextWithHome = new GmailContext({ core: harness.core, env: { ...harness.env, HOME: home } });
+  const contextWithHome = new GmailContext({
+    core: harness.core,
+    env: { ...harness.env, HOME: home, USERPROFILE: home },
+  });
 
   const allowed = join(home, 'plan.pdf');
   await writeFile(allowed, '%PDF-1.4 fake');
@@ -347,7 +350,7 @@ test('updating a draft keeps the body and the files that were not restated', asy
   await harness.core.config.update((config) => ({ ...config, defaults: { ...config.defaults, attachRoots: [home] } }), {
     consent: { kind: 'loosening-consent', paths: ['defaults.attachRoots'] },
   });
-  const withHome = new GmailContext({ core: harness.core, env: { ...harness.env, HOME: home } });
+  const withHome = new GmailContext({ core: harness.core, env: { ...harness.env, HOME: home, USERPROFILE: home } });
   const file = join(home, 'plan.pdf');
   await writeFile(file, '%PDF-1.4 fake');
 

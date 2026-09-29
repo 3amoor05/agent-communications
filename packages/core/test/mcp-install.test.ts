@@ -44,7 +44,7 @@ const GMAIL = {
 function context(dataDir: string, home: string): InstallContext {
   // No client command beyond PATH but in this home: a real `claude` or `codex` elsewhere is never found, nor run.
   return {
-    env: { HOME: home, PATH: '', AGENT_COMMS_CLIENT_CLI_DIRS: '' },
+    env: { HOME: home, USERPROFILE: home, PATH: '', AGENT_COMMS_CLIENT_CLI_DIRS: '' },
     core: { paths: { dataDir, configDir: join(home, 'config') } },
   };
 }

@@ -1907,10 +1907,11 @@ test("mcp install names its client, and exits non-zero when that client's CLI is
   const unnamed = await cli(harness, ['--json', 'mcp', 'install', '--launcher', 'local', '--no-verify']);
   assert.equal(unnamed.code, EXIT_CODES.USAGE);
 
+  const home = tempDir();
   const missing = await cli(
     harness,
     ['--json', 'mcp', 'install', '--client', 'claude-code', '--launcher', 'local', '--no-verify'],
-    { env: { HOME: tempDir(), PATH: tempDir() } },
+    { env: { HOME: home, USERPROFILE: home, PATH: tempDir() } },
   );
   assert.equal(missing.code, EXIT_CODES.UNAVAILABLE, missing.stdout);
 });
@@ -1924,7 +1925,8 @@ test(
     const bin = tempDir();
     await writeFile(join(bin, 'npx'), '#!/bin/sh\nexit 3\n');
     await chmod(join(bin, 'npx'), 0o755);
-    const env = { HOME: tempDir(), PATH: bin };
+    const home = tempDir();
+    const env = { HOME: home, USERPROFILE: home, PATH: bin };
     const argv = ['mcp', 'install', '--client', 'json', '--launcher', 'npx'];
 
     const json = await cli(harness, ['--json', ...argv], { env });

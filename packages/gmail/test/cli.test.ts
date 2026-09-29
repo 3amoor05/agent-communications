@@ -312,7 +312,7 @@ test('mcp install writes an entry that really starts the server, once the regist
   const argv = ['mcp', 'install', '--client', 'cursor', '--launcher', 'local', '--json'];
 
   // Registering a server is a change a person approves: an agent gets the preview and an id, and nothing is written.
-  const asked = await cli(harness, argv, { env: { HOME: home } });
+  const asked = await cli(harness, argv, { env: { HOME: home, USERPROFILE: home } });
   assert.equal(asked.code, EXIT_CODES.APPROVAL, asked.stdout);
   const pending = asked.json<Envelope<never>>().error;
   assert.equal(pending?.code, 'APPROVAL_PENDING');
@@ -321,7 +321,7 @@ test('mcp install writes an entry that really starts the server, once the regist
 
   // Once the person has said yes, the same command with the approval registers it.
   const result = await cli(harness, [...argv, '--approval', String(pending?.details?.approvalId)], {
-    env: { HOME: home },
+    env: { HOME: home, USERPROFILE: home },
   });
   assert.equal(result.code, 0, result.stdout);
   const data = dataOf(
@@ -360,7 +360,8 @@ test(
     const bin = tempDir();
     await writeFile(join(bin, 'npx'), '#!/bin/sh\nexit 3\n');
     await chmod(join(bin, 'npx'), 0o755);
-    const env = { HOME: tempDir(), PATH: bin };
+    const home = tempDir();
+    const env = { HOME: home, USERPROFILE: home, PATH: bin };
     const argv = ['mcp', 'install', '--client', 'json', '--launcher', 'npx'];
 
     const json = await cli(harness, [...argv, '--json'], { env });
@@ -389,7 +390,7 @@ test('mcp install warns when another Gmail server is registered with that client
     harness,
     ['mcp', 'install', '--client', 'cursor', '--launcher', 'local', '--no-verify'],
     {
-      env: { HOME: home },
+      env: { HOME: home, USERPROFILE: home },
     },
   );
   const data = dataOf(result.json<Envelope<{ warnings: string[] }>>());
@@ -410,7 +411,7 @@ test('mcp install --print changes nothing and shows the snippet', async () => {
   const result = await cli(
     harness,
     ['mcp', 'install', '--client', 'claude-desktop', '--launcher', 'local', '--no-verify', '--print'],
-    { env: { HOME: home } },
+    { env: { HOME: home, USERPROFILE: home } },
   );
   assert.equal(result.code, 0);
   assert.match(result.stdout, /"mcpServers"/);
@@ -935,10 +936,11 @@ test('every option `mcp` and `mcp install` both define reaches the registered en
 
 test('mcp install exits non-zero when the client CLI is missing and nothing was registered', async () => {
   const harness = await newHarness();
+  const home = tempDir();
   const result = await cli(
     harness,
     ['--json', 'mcp', 'install', '--client', 'claude-code', '--launcher', 'local', '--no-verify'],
-    { env: { HOME: tempDir(), PATH: tempDir() } },
+    { env: { HOME: home, USERPROFILE: home, PATH: tempDir() } },
   );
   assert.equal(result.code, EXIT_CODES.UNAVAILABLE, result.stdout);
   assert.match(JSON.parse(result.stdout).data.notApplied, /claude was not found on PATH/);

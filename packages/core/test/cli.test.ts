@@ -7,6 +7,8 @@ import { fileURLToPath } from 'node:url';
 import type { Streams } from '../src/cli-runtime.ts';
 import { secretsStoreOf } from '../src/config.ts';
 import { CommsError } from '../src/errors.ts';
+import { isInside } from '../src/jail.ts';
+import { resolvePaths } from '../src/paths.ts';
 import { tempDir } from './helpers/temp.ts';
 
 /** A fixed timestamp, so a fixture never depends on when the suite ran. */
@@ -16,22 +18,51 @@ const CLI = fileURLToPath(new URL('../src/cli.ts', import.meta.url));
 // Type stripping is on by default only from Node 22.18; the flag lets the source CLI run on older 22.x too.
 const NODE_FLAGS = ['--experimental-strip-types', '--disable-warning=ExperimentalWarning'];
 
-function run(args: string[], env: Record<string, string> = {}) {
+/**
+ * The environment every command here runs in: a configuration directory and a home of the test's own.
+ *
+ * The home goes under both of the names core reads it by: `HOME` on macOS and Linux, `USERPROFILE` on Windows, as
+ * Node's own `homedir()` does there. With `HOME` alone, a Windows run resolved the data and downloads directories to
+ * the real profile of whoever ran the tests — the gap the 0.8.0 release run found in the Slack harness.
+ */
+function cliEnv(env: Record<string, string> = {}) {
   const config = env.AGENT_COMMS_CONFIG_DIR ?? tempDir();
-  const result = spawnSync(process.execPath, [...NODE_FLAGS, CLI, ...args], {
-    encoding: 'utf8',
+  const home = env.HOME ?? tempDir();
+  return {
+    config,
+    home,
     env: {
       PATH: process.env.PATH ?? '',
-      HOME: tempDir(),
+      HOME: home,
+      USERPROFILE: home,
       AGENT_COMMS_CONFIG_DIR: config,
       NO_COLOR: '1',
       // The daily update check, off: no test here asks the real npm registry (design 2026-09-28).
       AGENT_COMMS_UPDATE_CHECK: 'off',
       ...env,
     },
-  });
+  };
+}
+
+function run(args: string[], env: Record<string, string> = {}) {
+  const { config, env: full } = cliEnv(env);
+  const result = spawnSync(process.execPath, [...NODE_FLAGS, CLI, ...args], { encoding: 'utf8', env: full });
   return { ...result, config };
 }
+
+test('every path a command here resolves is inside the test’s own directories, on macOS, Linux and Windows', () => {
+  /*
+   * Asked of core for each platform, so a gap that only Windows would read — a home under `HOME` alone — fails on a
+   * Mac too. Nothing is written: paths are only resolved and compared.
+   */
+  const { config, home, env } = cliEnv();
+  for (const platform of ['darwin', 'linux', 'win32'] as const) {
+    const outside = Object.entries(resolvePaths({ env, platform })).filter(
+      ([, path]) => !isInside(path, config) && !isInside(path, home),
+    );
+    assert.deepEqual(outside, [], platform);
+  }
+});
 
 test('--version and --help print and exit 0', () => {
   assert.match(run(['--version']).stdout, /^\d+\.\d+\.\d+/);
@@ -293,7 +324,7 @@ function memoryStore(
 async function coreWithTwoSlackTokens() {
   const { openCore } = await import('../src/core.ts');
   const dir = tempDir();
-  const core = openCore({ env: { AGENT_COMMS_CONFIG_DIR: dir, HOME: dir } });
+  const core = openCore({ env: { AGENT_COMMS_CONFIG_DIR: dir, HOME: dir, USERPROFILE: dir } });
   const account = (id: string) => ({
     id,
     platform: 'slack',
@@ -895,7 +926,7 @@ test('approve is refused to an agent and to anything without a terminal, touches
   const { openCore } = await import('../src/core.ts');
   const { prepareChange } = await import('../src/changes.ts');
   const config = tempDir();
-  const core = openCore({ env: { AGENT_COMMS_CONFIG_DIR: config, HOME: config } });
+  const core = openCore({ env: { AGENT_COMMS_CONFIG_DIR: config, HOME: config, USERPROFILE: config } });
   const before = await core.config.load();
   const after = structuredClone(before);
   after.defaults.riskEscalation = false;

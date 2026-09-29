@@ -103,6 +103,7 @@ async function installFlags(cli) {
       env: {
         PATH: process.env.PATH ?? '',
         HOME: home,
+        USERPROFILE: home,
         AGENT_COMMS_CONFIG_DIR: join(home, 'config'),
         NO_COLOR: '1',
         AGENT_COMMS_UPDATE_CHECK: 'off',

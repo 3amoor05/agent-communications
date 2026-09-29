@@ -178,7 +178,7 @@ test('a loosening refused by the store names both ways to approve it: from a cha
   // chat. A hint that names one route sends an agent to a terminal it may not have, for a change it could have asked
   // for in the conversation.
   const dir = configDirWith({ defaults: { changePolicy: 'confirm' }, accounts: { 'acme/slack': account() } });
-  const core = openCore({ env: { AGENT_COMMS_CONFIG_DIR: dir, HOME: dir } });
+  const core = openCore({ env: { AGENT_COMMS_CONFIG_DIR: dir, HOME: dir, USERPROFILE: dir } });
   await assert.rejects(
     core.config.update((config) => {
       config.defaults.changePolicy = 'chat';

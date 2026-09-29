@@ -38,7 +38,7 @@ function coreWith(sendPolicy: SendPolicy, changePolicy?: 'chat' | 'confirm') {
     accounts: { 'acme/slack': account({ sendPolicy }) },
   };
   writeFileSync(join(dir, 'config.json'), `${JSON.stringify(body, null, 2)}\n`);
-  return openCore({ env: { AGENT_COMMS_CONFIG_DIR: dir, HOME: dir } });
+  return openCore({ env: { AGENT_COMMS_CONFIG_DIR: dir, HOME: dir, USERPROFILE: dir } });
 }
 
 /** Moves acme/slack's send policy to `to`, through the store, with whatever consent the flow hands over. */
@@ -240,7 +240,7 @@ test('importing core never starts the agentcomms CLI, whatever the running progr
   const { stdout, stderr } = await promisify(execFile)(
     process.execPath,
     ['--experimental-strip-types', '--disable-warning=ExperimentalWarning', script],
-    { env: { ...process.env, AGENT_COMMS_CONFIG_DIR: dir, HOME: dir } },
+    { env: { ...process.env, AGENT_COMMS_CONFIG_DIR: dir, HOME: dir, USERPROFILE: dir } },
   );
   assert.equal(stdout, 'imported\n', `something ran on import:\n${stdout}${stderr}`);
 });

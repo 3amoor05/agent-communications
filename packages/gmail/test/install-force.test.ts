@@ -98,7 +98,7 @@ test('--force restores the previous entry, with its env, when the replacement fa
 
   const context = new GmailContext({
     core: harness.core,
-    env: { ...harness.env, HOME: harness.configDir, PATH: fake.dir },
+    env: { ...harness.env, HOME: harness.configDir, USERPROFILE: harness.configDir, PATH: fake.dir },
   });
 
   await assert.rejects(
@@ -131,7 +131,7 @@ test('--force says so plainly when the restore fails too, rather than claiming i
 
   const context = new GmailContext({
     core: harness.core,
-    env: { ...harness.env, HOME: harness.configDir, PATH: fake.dir },
+    env: { ...harness.env, HOME: harness.configDir, USERPROFILE: harness.configDir, PATH: fake.dir },
   });
 
   await assert.rejects(
@@ -150,7 +150,7 @@ test('--force does not swallow a removal failure that is not "no such server"', 
 
   const context = new GmailContext({
     core: harness.core,
-    env: { ...harness.env, HOME: harness.configDir, PATH: fake.dir },
+    env: { ...harness.env, HOME: harness.configDir, USERPROFILE: harness.configDir, PATH: fake.dir },
   });
 
   // Proceeding would add beside an entry we failed to remove.
@@ -168,7 +168,7 @@ test('--force with nothing registered is one plain add', NOT_ON_WINDOWS, async (
 
   const context = new GmailContext({
     core: harness.core,
-    env: { ...harness.env, HOME: harness.configDir, PATH: fake.dir },
+    env: { ...harness.env, HOME: harness.configDir, USERPROFILE: harness.configDir, PATH: fake.dir },
   });
 
   const result = await mcpInstall(context, {

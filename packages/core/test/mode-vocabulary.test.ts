@@ -135,7 +135,7 @@ test('a preview says an unknown mode cannot be judged, and keeps the sentence fo
     JSON.stringify({ version: 2, accounts: { 'acme/slack': account('acc_AAAAAAAAAAAAAAAA', { mode: 'read' }) } }),
   );
   const core = openCore({
-    env: { AGENT_COMMS_CONFIG_DIR: dir, HOME: dir },
+    env: { AGENT_COMMS_CONFIG_DIR: dir, HOME: dir, USERPROFILE: dir },
     now: () => new Date('2026-09-26T10:00:00Z'),
   });
   const to = async (mode: string) => {

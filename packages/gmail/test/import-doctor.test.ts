@@ -252,7 +252,10 @@ test('doctor reports what is missing with the command that fixes it, and finds u
     JSON.stringify({ mcpServers: { old: { command: 'npx', args: ['@artymclabin/gmail-mcp'] } } }),
   );
   const scanned = await doctor(
-    new GmailContext({ core: harness.core, env: { ...harness.env, HOME: harness.configDir } }),
+    new GmailContext({
+      core: harness.core,
+      env: { ...harness.env, HOME: harness.configDir, USERPROFILE: harness.configDir },
+    }),
   );
   const others = byId(scanned.checks, 'other-gmail-servers');
   assert.equal(others?.status, 'fail');
@@ -262,7 +265,7 @@ test('doctor reports what is missing with the command that fixes it, and finds u
 
 test('doctor says when the registered MCP server is an older version than this one', async () => {
   const harness = await newHarness({ accounts: [] });
-  const env = { ...harness.env, HOME: harness.configDir };
+  const env = { ...harness.env, HOME: harness.configDir, USERPROFILE: harness.configDir };
   const byId = <T extends { id: string }>(checks: readonly T[], id: string) => checks.find((check) => check.id === id);
 
   // `mcp install` pins an exact version into the path, so that upgrading the package elsewhere cannot change what
@@ -332,7 +335,7 @@ test('doctor with nothing registered says so, as something to look at — not as
    * registered".
    */
   const harness = await newHarness({ accounts: [] });
-  const env = { ...harness.env, HOME: harness.configDir };
+  const env = { ...harness.env, HOME: harness.configDir, USERPROFILE: harness.configDir };
   const byId = <T extends { id: string }>(checks: readonly T[], id: string) => checks.find((check) => check.id === id);
 
   const bare = byId((await doctor(new GmailContext({ core: harness.core, env }))).checks, 'registered-server-version');
@@ -367,7 +370,7 @@ test('doctor says when a registered entry’s runtime is gone, and recognises en
    * that looks right and a client that says only "failed".
    */
   const harness = await newHarness({ accounts: [] });
-  const env = { ...harness.env, HOME: harness.configDir };
+  const env = { ...harness.env, HOME: harness.configDir, USERPROFILE: harness.configDir };
   const gone = managedRuntimeEntry(harness.core.paths.dataDir, '@agentcomms/gmail', VERSION);
   await writeFile(
     join(harness.configDir, '.claude.json'),
@@ -391,7 +394,10 @@ test('doctor’s tests never reach the real keychain: the harness starts on the 
   const harness = await newHarness({ accounts: [] });
   assert.equal(secretsStoreOf(await harness.core.config.load()), 'file', 'the harness must pin the file store');
   const result = await doctor(
-    new GmailContext({ core: harness.core, env: { ...harness.env, HOME: harness.configDir } }),
+    new GmailContext({
+      core: harness.core,
+      env: { ...harness.env, HOME: harness.configDir, USERPROFILE: harness.configDir },
+    }),
   );
   const store = result.checks.find((check) => check.id === 'secret-store');
   assert.equal(store?.detail, 'owner-only files in the config directory');
@@ -399,7 +405,7 @@ test('doctor’s tests never reach the real keychain: the harness starts on the 
 
 test('doctor’s repair for a stale server preserves what that server was, not the defaults', async () => {
   const harness = await newHarness({ accounts: [] });
-  const env = { ...harness.env, HOME: harness.configDir };
+  const env = { ...harness.env, HOME: harness.configDir, USERPROFILE: harness.configDir };
   const byId = <T extends { id: string }>(checks: readonly T[], id: string) => checks.find((check) => check.id === id);
 
   // A server someone deliberately narrowed: its own name, one mailbox, read-only, and pinned through npx rather

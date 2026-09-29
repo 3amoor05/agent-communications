@@ -91,7 +91,7 @@ function coreWith(body: Record<string, unknown>) {
   const write = (next: Record<string, unknown>) =>
     writeFileSync(join(dir, 'config.json'), `${JSON.stringify({ version: 2, ...next }, null, 2)}\n`);
   write(body);
-  const core = openCore({ env: { AGENT_COMMS_CONFIG_DIR: dir, HOME: dir }, now: time.now });
+  const core = openCore({ env: { AGENT_COMMS_CONFIG_DIR: dir, HOME: dir, USERPROFILE: dir }, now: time.now });
   return { core, time, write, dir };
 }
 
