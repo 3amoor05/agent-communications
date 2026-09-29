@@ -1126,12 +1126,17 @@ test('Windows drives are read from the kernel’s mount table, with the Windows 
     '180 600 0:95 / /mnt/share rw - 9p unc\\134server\\134share rw,aname=drvfs;path=UNC\\server\\share',
     // path= as 9p writes it, unescaped: a space in the folder, and a comma, a semicolon and " - " in another.
     '190 600 0:97 / /mnt/sp rw - 9p drvfs rw,aname=drvfs;path=C:\\Profiles\\Sam Lee\\AppData;cache=mmap;uid=1000,mmap,trans=fd',
-    '191 600 0:98 / /mnt/odd rw - 9p drvfs rw,aname=drvfs;path=D:\\OneDrive - Acme\\a,b;c;d\\Tools;uid=1000,access=client',
+    '191 600 0:98 / /mnt/odd rw - 9p drvfs rw,aname=drvfs;path=D:\\OneDrive - Acme\\a,b;c;d\\Tools;uid=1000;symlinkroot=/mnt/,access=client',
     // virtio-9p, as WSL writes it: the source only drvfs or drvfsa, and a bare ;metadata straight after the folder.
     '192 600 0:100 / /mnt/m rw - 9p drvfs rw,aname=drvfs;path=C:\\Profiles\\jo\\AppData;metadata;symlinkroot=/mnt/,mmap,access=client,trans=fd',
     '193 600 0:101 / /mnt/n rw - 9p drvfsa rw,aname=drvfs;path=N:\\;metadata;uid=1000;gid=1000,mmap',
     // A folder named like an option: what follows it has a backslash, so it is still the folder.
-    '194 600 0:102 / /mnt/q rw - 9p drvfs rw,aname=drvfs;path=E:\\Tools;v=2\\AppData;metadata,mmap',
+    '194 600 0:102 / /mnt/q rw - 9p drvfs rw,aname=drvfs;path=E:\\Tools;v=2\\AppData;metadata;symlinkroot=/mnt/,mmap',
+    // wsl.conf's automount root is copied into ;symlinkroot= as it is, a backslash included.
+    '195 600 0:103 / /mnt/r rw - 9p drvfsa rw,aname=drvfs;path=R:\\;metadata;umask=22;fmask=11;dmask=0;case=off;symlinkroot=/mnt\\odd/,cache=0x4,access=client,trans=fd',
+    '196 600 0:104 / /mnt/s rw - 9p drvfs rw,aname=drvfs;path=C:\\Profiles\\jo\\AppData;uid=1000;symlinkroot=/mnt\\odd/,cache=0x4',
+    // An aname WSL did not build, whose folder cannot be told from its options.
+    '197 600 0:105 / /mnt/u rw - 9p drvfs rw,aname=drvfs;path=U:\\x;weird=a\\b,mmap',
     // A disk mounted at /hide/sub, then covered when a drive was mounted at /hide: still listed, never reached.
     '200 600 8:3 / /hide/sub rw - ext4 /dev/sdc1 rw',
     '201 600 0:99 / /hide rw - drvfs Y:\\134 rw',
@@ -1158,6 +1163,9 @@ test('Windows drives are read from the kernel’s mount table, with the Windows 
     '/mnt/m': 'C:\\Profiles\\jo\\AppData',
     '/mnt/n': 'N:\\',
     '/mnt/q': 'E:\\Tools;v=2\\AppData',
+    '/mnt/r': 'R:\\',
+    '/mnt/s': 'C:\\Profiles\\jo\\AppData',
+    '/mnt/u': '',
     '/hide/sub': null,
     '/hide': 'Y:\\',
   });
@@ -1187,6 +1195,9 @@ test('Windows drives are read from the kernel’s mount table, with the Windows 
     ['/mnt/m', /inside an AppData folder, .*reached through \/mnt\/m$/],
     ['/mnt/n', /the root of a Windows drive \(N:\), reached through \/mnt\/n$/],
     ['/mnt/q', /inside an AppData folder, .*reached through \/mnt\/q$/],
+    ['/mnt/r', /the root of a Windows drive \(R:\), reached through \/mnt\/r$/],
+    ['/mnt/s/Roaming', /inside an AppData folder, .*reached through \/mnt\/s$/],
+    ['/mnt/u/Downloads', /a Windows drive whose folder its mount does not say plainly, reached through \/mnt\/u$/],
     ['/hide/sub/AppData', /inside an AppData folder, .*reached through \/hide$/],
   ] as const) {
     assert.match(String(refusedSaveFolder(folder, deny)), why, folder);

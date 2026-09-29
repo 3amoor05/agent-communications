@@ -188,7 +188,10 @@ export interface Mount {
   parent: string;
   /** Where it is mounted, as this Linux sees it. */
   point: string;
-  /** The Windows folder at its mount point — `C:\`, `D:\Projects\acme` — or null when it is not Windows's. */
+  /**
+   * The Windows folder at its mount point — `C:\`, `D:\Projects\acme` — or `''` when it is Windows's but which folder
+   * cannot be read, or null when it is not Windows's.
+   */
   windows: string | null;
 }
 
@@ -216,23 +219,34 @@ function windowsBelow(folder: string, root: string): string {
 }
 
 /*
- * `path=` as 9p writes it: as it was given, so a space, a comma or a semicolon in the folder is left in it. It ends at
- * the first place from which everything left reads as options and nothing else — the aname's own (`;metadata`,
- * `;uid=1000`, `;symlinkroot=/mnt/`), then 9p's (`,mmap`, `,trans=fd`). An option has no backslash, so what that leaves
- * off is at most the end of the last folder's name; and no name refused here has a comma or a semicolon in it, so
- * leaving that off never lets one through.
+ * `path=` as 9p writes it: as it was given, so a space, a comma or a semicolon in the folder is left in it.
+ *
+ * WSL builds the aname as `drvfs;path=<folder>`, then its own options — `;metadata`, `;uid=1000`, `;case=off` — and
+ * always, last, `;symlinkroot=<automount root>`, whose value is `wsl.conf`'s and can hold anything but a semicolon; 9p's
+ * own options (`,cache=mmap`, `,trans=fd`) follow. So the folder ends at the first semicolon from which what is left
+ * reads as options ending in that `;symlinkroot=`. No other option's value has a backslash, so what that leaves off is
+ * at most the end of the last folder's name — and no name refused here has a comma or a semicolon in it.
+ *
+ * An aname WSL did not build, with no `;symlinkroot=`, is read only when it is plain: the folder has no comma or
+ * semicolon, and what follows it reads as options. Anything else is a Windows folder that cannot be read (`''`), and
+ * everything under the mount is refused rather than guessed at.
  */
+const WSL_ANAME_TAIL = /^(?:;[\w.-]+(?:=[^;\\]*)?)*;symlinkroot=/;
 const REST_OF_OPTIONS = /^(?:;[\w.-]+(?:=[^;,\\]*)?)*(?:,[\w.-]+(?:=[^,\\]*)?)*$/;
 
-/** The folder in a 9p mount's `path=` option, or undefined when it has none. */
+/** The folder in a 9p mount's `path=` option — `''` when it cannot be read, undefined when there is none. */
 function pathOption(options: string): string | undefined {
   const start = /(?:^|[,;])path=/.exec(options);
   if (start === null) return undefined;
   const rest = options.slice(start.index + start[0].length);
-  for (let end = 0; end < rest.length; end++) {
-    if ((rest[end] === ';' || rest[end] === ',') && REST_OF_OPTIONS.test(rest.slice(end))) return rest.slice(0, end);
+  if (rest.includes(';symlinkroot=')) {
+    for (let end = 0; end < rest.length; end++) {
+      if (rest[end] === ';' && WSL_ANAME_TAIL.test(rest.slice(end))) return rest.slice(0, end);
+    }
   }
-  return rest;
+  const end = rest.search(/[;,]/);
+  if (end < 0) return rest;
+  return REST_OF_OPTIONS.test(rest.slice(end)) ? rest.slice(0, end) : '';
 }
 
 /*
@@ -255,7 +269,7 @@ function windowsFolder(
   if (fstype === '9p' || fstype === 'v9fs') {
     if (!/(?:^|[,;])aname=drvfs(?:[,;]|$)/.test(options)) return null;
     const named = /^(?:[A-Za-z]:|\\\\|unc\\)/i.test(source) ? source : pathOption(options);
-    return windowsBelow(named ?? source, root);
+    return named === '' ? '' : windowsBelow(named ?? source, root);
   }
   if (fstype !== 'virtiofs') return null;
   const [first = '', ...rest] = root.split('/').filter((segment) => segment !== '');
@@ -347,6 +361,7 @@ function windowsThroughWsl(folder: string, mounts: readonly Mount[]): string | n
   const mount = owningMount(folder, mounts);
   if (mount === undefined || mount.windows === null) return null;
   const through = `reached through ${trimmed(mount.point)}`;
+  if (mount.windows === '') return `it is on a Windows drive whose folder its mount does not say plainly, ${through}`;
   const drive = /^([A-Za-z]):(?:[\\/]|$)/.exec(mount.windows);
   if (drive === null) return `it is on a network share or a Windows device with no drive letter, ${through}`;
   const below = folder.slice(trimmed(mount.point).length);
