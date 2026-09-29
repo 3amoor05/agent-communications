@@ -23,8 +23,8 @@ export const SAVED_NAME_BYTES = 200;
 export const DOWNLOAD_SUFFIX = '.download';
 
 /**
- * The extensions a saved file keeps: kinds of file that a program opens when a person asks it to, and that nothing
- * runs, loads or reads as instructions because of where it lies or what it is called.
+ * The extensions a saved file keeps: kinds of file that a program opens when a person asks it to, and that no program
+ * is known to run, load or read as instructions because of what it is called.
  *
  * Why a list of what is kept, rather than of what is not. A download saves a stranger's file under the stranger's name
  * in a folder the person chose — often the project an agent is working in — and whatever is in that folder is read by
@@ -32,8 +32,14 @@ export const DOWNLOAD_SUFFIX = '.download';
  * login, git runs a hook, an agent loads `CLAUDE.md`, `make` reads `Makefile`, Explorer follows a `.lnk`, a
  * `desktop.ini` or an `.scf`. Two reviews each found another program that does this, and there will be more: a list
  * of dangerous names is always one short. A list of inert ones is short and can be read to the end. Every name not
- * ending in one of these is saved with {@link DOWNLOAD_SUFFIX} after it, which no program loads by name or runs, and
- * which the person can take off themselves once they trust the file.
+ * ending in one of these is saved with {@link DOWNLOAD_SUFFIX} after it, which the person can take off themselves once
+ * they trust the file.
+ *
+ * What the suffix stops is a program that loads a file by its extension or by a name it knows: Python's `.pth`, git's
+ * `pre-commit`, an agent's `CLAUDE.md`, Explorer's `.lnk`. It does not stop one that loads every file in a folder
+ * whatever it is called — a zsh completions folder, a plugin folder whose loader reads each file it finds, a watched
+ * import folder. Those folders are any a program is told to use, so no list here can know them all: the ones every
+ * machine has are refused (`save-deny.ts`), and saving into any other is the person's choice, made when they answer.
  *
  * Documents, images, sound and video, archives, calendar, contact and mail files, and Apple's documents. Not here, on
  * purpose: anything that runs (`exe`, `app`, `msi`, `sh`, `ps1`, `bat`, `jar`…), is a script or source (`py`, `js`,

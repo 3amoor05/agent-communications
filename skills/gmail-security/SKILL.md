@@ -139,7 +139,7 @@ a verdict never becomes an instruction to write to anyone.
    **Complete when:** every non-zero count is in your report with its number.
 
 6. **Name the attachments without opening them.** Each carries `filename` (inside
-   `<untrusted-content>`), `mimeType`, `size` and `riskFlags` from `executable`, `script`, `macro-enabled`, `markup`, `archive`, `disk-image`,
+   `<untrusted-content>`), `mimeType`, `size` and `riskFlags` from `executable`, `script`, `macro-enabled`, `macro-capable`, `markup`, `archive`, `disk-image`,
    `double-extension` and `bidi-filename`.
    **Complete when:** the user knows what is attached and what kind of file it is.
 
@@ -196,6 +196,7 @@ a verdict never becomes an instruction to write to anyone.
 | No `gmail_contacts_search` row for the sender | This mailbox has no record of corresponding with the address | That it is a stranger — the record is not complete. Absence is weaker evidence than presence |
 | attachment `double-extension` / `bidi-filename` | `invoice.pdf.exe`, or a filename using bidi characters to disguise its type | Anything you can confirm by opening it, because nothing here opens it |
 | attachment `executable` / `script` / `macro-enabled` | The file kind runs code when opened | That the message is hostile; it means the file is the risk, not the mail |
+| attachment `macro-capable` | A `.doc`, `.xls`, `.ppt` or OpenDocument file, which can hold macros | That it holds any; it is a document that could, and a person opens it knowing so |
 | attachment `markup` / `archive` / `disk-image` | HTML, SVG, a zip, or a mountable image — containers that hide what is inside | That the contents were checked. They were not |
 
 ## What these checks cannot see

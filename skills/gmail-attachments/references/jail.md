@@ -163,20 +163,28 @@ after links are followed: this package's own configuration, state (approvals, th
 and credential folders; any hidden folder anywhere, at any depth — `~/.ssh`, `~/.config`, a project's `.git`,
 `.github`, `.husky`, `.vscode` or `.claude`, on any disk — except a checkout under `.claude/worktrees/<name>`, inside
 which a hidden folder is refused again; `node_modules`, `site-packages`, `dist-packages` and `__pycache__` wherever
-they are, and any folder inside a Python virtual environment (a `pyvenv.cfg` in it or above it); `~/Library`; on
+they are, and any folder inside a Python virtual environment (a `pyvenv.cfg` in it or above it) or a Python
+installation (`conda-meta`, `Lib/os.py` or `lib/python3.<minor>/os.py` in it or above it — `~/miniconda3`,
+`C:\Python312` — though the home and a disk's root are never taken for one); `~/Library`; on
 Windows the profile's `AppData`, `%APPDATA%`, `%LOCALAPPDATA%`, `%PROGRAMDATA%`, the Windows folder, Program Files,
 PowerShell's profile folders (`Documents\PowerShell`, `Documents\WindowsPowerShell`, in the profile's Documents and
-wherever the registry says Documents is), a drive's root, a network share, a device path and a path with no drive; and
+wherever the registry says Documents is), a drive's root, a network share, a device path and a path with no drive; on
+Linux the same Windows folders reached through WSL's `/mnt/<letter>` — the drive itself, `Windows`, `Program Files`,
+`ProgramData`, a profile's `AppData`, PowerShell's profile folders — in any case; and
 the system's folders — `/`, `/etc`, `/usr`, `/bin`, `/sbin`, `/lib`, `/var` (but not macOS's per-user temporary folder
 in it), `/opt`, `/root`, `/System`, `/Library`, `/Applications`, `/private/etc`, `/private/var` — except a home inside
 one, such as `/root` or `/var/lib/<name>`. The home itself is allowed. A folder on the list is refused with
 `BAD_DATA`, and a default folder on it — a server started in a hidden folder — is shown in the question as
 unavailable, with the reason, rather than offered.
 
-Whatever folder it lands in, a file keeps its extension only when that is one a viewer opens and nothing runs or
-loads — see `risk-flags.md`, `saved-as-download` — and anything else is saved with `.download` after its whole name.
-Every saved file is marked as downloaded from the internet: the `com.apple.quarantine` attribute on macOS, a
-`Zone.Identifier` stream on Windows.
+Whatever folder it lands in, a file keeps its extension only when that is one a viewer opens and no program is known
+to run or load by its name — see `risk-flags.md`, `saved-as-download` — and anything else is saved with `.download`
+after its whole name. That stops a program that goes by a file's extension or a name it knows; it does not stop one
+that loads every file in a folder whatever it is called — a zsh completions folder, an application's plugin or startup
+folder. Those are any folder a program was told to use, so the list above cannot hold them all, and saving into one
+is the person's choice. Every saved file is marked as downloaded from the internet, the moment it is made and before
+its bytes are written: the `com.apple.quarantine` attribute on macOS, a `Zone.Identifier` stream on Windows — none
+under Linux, WSL writing to a Windows drive included.
 
 Under the mailbox's `confirm` change policy the answer has to come from the person where an agent cannot give it — at
 their own terminal (`agent-gmail approve <choiceId>`) or in a trusted client's form — and a `saveTo` in the arguments

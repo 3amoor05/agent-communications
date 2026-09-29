@@ -14,7 +14,9 @@ import { homeOf, type ResolvedPaths } from './paths.ts';
  * program that runs what it finds, whatever each file is called — a hooks folder, a package folder, a folder of
  * approvals — and some hold what the person's own tools trust. The person asked for a file to read, not for any of
  * that, and no answer — least of all one an agent passed on — should be able to turn a download into it. So these are
- * refused, whatever the question was answered with:
+ * refused, whatever the question was answered with. They are the folders every machine of their kind has, or that a
+ * file in them makes plain; a folder a program was told to load whole — a zsh completions folder, an application's
+ * plugin or startup folder — is one no rule here can know, and saving into it stays the person's choice:
  *
  * - this package's own folders: its configuration, its state (approvals, the audit log, the download records), its
  *   data, and the file secret store;

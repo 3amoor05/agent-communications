@@ -132,15 +132,21 @@ you.
 `~/.ssh`, `~/.config`, a project's `.git`, `.github`, `.husky`, `.vscode` or `.claude` — except a checkout under
 `.claude/worktrees/<name>`, which is a project like any other (a hidden folder inside it is still refused); a folder
 programs load packages from, wherever it is — `node_modules`, `site-packages`, `dist-packages`, `__pycache__`, and any
-folder inside a Python virtual environment, one with `pyvenv.cfg` in it or above it; `~/Library`; this package's own
+folder inside a Python virtual environment, one with `pyvenv.cfg` in it or above it; any folder inside a Python
+installation, one with `conda-meta`, `Lib/os.py` or `lib/python3.<minor>/os.py` in it or above it, such as
+`~/miniconda3` or `C:\Python312` (your home and a disk's root are never taken for one); `~/Library`; this package's own
 configuration, state, data and credentials folders; the system's folders (`/`, `/etc`, `/usr`, `/bin`, `/var`,
 `/System`, …), though a home inside one, such as `/root`, is yours; and on Windows `AppData`, `%PROGRAMDATA%`, the
 Windows folder, Program Files, PowerShell's profile folders (`Documents\PowerShell` and `Documents\WindowsPowerShell`,
-wherever Windows says Documents is), a drive's root, a network share and a path with no drive. A folder that leads to
-one through a link is refused as that folder: a `hooks` link to `.husky` is `.husky`. In any of them a file would be
-something a program runs or loads on its own — a hook, a package, a profile, a key, an approval — rather than a file
-you read. Your home folder itself is fine. When the folder you ran the command in is one of these, option `2` is shown
-as unavailable, with the reason. A folder that cannot be written in is refused too, before your answer is used up.
+wherever Windows says Documents is), a drive's root, a network share and a path with no drive — and on Linux the same
+Windows folders reached through WSL's `/mnt/<letter>`: the drive itself, `Windows`, `Program Files`, `ProgramData`, a
+profile's `AppData` and PowerShell's profile folders, in any case. A folder that leads to one through a link is refused
+as that folder: a `hooks` link to `.husky` is `.husky`. In any of them a file would be something a program runs or loads
+on its own — a hook, a package, a profile, a key, an approval — rather than a file you read. These are the folders every
+machine of their kind has, or that a file in them makes plain; a folder a program was told to load whole — a zsh
+completions folder, an application's plugin or startup folder — cannot be known from here, and saving into it is your
+choice. Your home folder itself is fine. When the folder you ran the command in is one of these, option `2` is shown as
+unavailable, with the reason. A folder that cannot be written in is refused too, before your answer is used up.
 
 Each file is saved under the name its uploader gave it, made safe — no path in it, no leading dot, no control or bidi
 characters, no Windows device name — and never over a file already there: the new one is saved beside it as `-2`.
@@ -149,25 +155,33 @@ untrusted-content envelope, and so does the name the file was saved under, and i
 file name. The type comes back inside it too, unless it is a plain MIME type such as `application/pdf`, and any risk
 flags beside it. Nothing is opened or run.
 
-**A file is saved so that it can only be opened.** It keeps its extension only when that is a kind of file a viewer
-opens and nothing runs or loads: a document (`pdf`, `doc`, `docx`, `xls`, `xlsx`, `ppt`, `pptx`, `odt`, `ods`, `odp`,
-`rtf`, `txt`, `csv`, `tsv`), an image (`png`, `jpg`, `jpeg`, `gif`, `webp`, `heic`, `heif`, `bmp`, `tif`, `tiff`), sound
-or video (`mp3`, `m4a`, `wav`, `aac`, `flac`, `ogg`, `mp4`, `mov`, `m4v`, `webm`, `avi`, `mkv`), an archive (`zip`,
-`tar`, `gz`, `tgz`, `bz2`, `xz`, `7z`, `rar`), a calendar, contact or mail file (`ics`, `vcf`, `eml`), or an Apple
-document (`pages`, `numbers`, `key`). Anything else — an executable, a script, configuration (`json`, `yaml`, `toml`,
-`ini`, `md`, …), a macro document, HTML or SVG, a `.pth`, `.plist` or `.lnk`, a name with no extension — and the few
-names a tool reads although their extension is on that list (`CMakeLists.txt`, `requirements.txt`) are saved with
-`.download` after the whole name: `setup.exe` as `setup.exe.download`, `CLAUDE.md` as `CLAUDE.md.download`, `Makefile`
-as `Makefile.download`. No program loads or runs a file by that ending, so a file saved into a project, a package folder
-the list missed, or a folder a tool watches is inert until you rename it yourself. Such a file is flagged
-`saved-as-download` (and `auto-read` when tools read it by name). The question names each one before you answer —
-"setup.exe (executable) will be saved as setup.exe.download — a type that could run; rename it yourself if you trust it"
-— with every other risk flag, and the result says it again, in `warnings`.
+**A file is saved under a name nothing runs it by.** It keeps its extension only when that is a kind of file a viewer
+opens and no program is known to run or load by its name: a document (`pdf`, `doc`, `docx`, `xls`, `xlsx`, `ppt`,
+`pptx`, `odt`, `ods`, `odp`, `rtf`, `txt`, `csv`, `tsv`), an image (`png`, `jpg`, `jpeg`, `gif`, `webp`, `heic`, `heif`,
+`bmp`, `tif`, `tiff`), sound or video (`mp3`, `m4a`, `wav`, `aac`, `flac`, `ogg`, `mp4`, `mov`, `m4v`, `webm`, `avi`,
+`mkv`), an archive (`zip`, `tar`, `gz`, `tgz`, `bz2`, `xz`, `7z`, `rar`), a calendar, contact or mail file (`ics`,
+`vcf`, `eml`), or an Apple document (`pages`, `numbers`, `key`). Anything else — an executable, a script, configuration
+(`json`, `yaml`, `toml`, `ini`, `md`, …), a macro document, HTML or SVG, a `.pth`, `.plist` or `.lnk`, a name with no
+extension — and the few names a tool reads although their extension is on that list (`CMakeLists.txt`,
+`requirements.txt` whatever a project calls it — `dev-requirements.txt` too — `conanfile.txt`, `apt.txt`, `runtime.txt`,
+`python312.zip`) are saved with `.download` after the whole name: `setup.exe` as `setup.exe.download`, `CLAUDE.md` as
+`CLAUDE.md.download`, `Makefile` as `Makefile.download`. A program that loads a file by its extension or by a name it
+knows — Python's `.pth`, git's hooks, an agent's `CLAUDE.md` — passes such a file by until you rename it yourself; one
+that loads every file in a folder whatever it is called is not stopped by a name, which is why the folder is yours to
+choose. Such a file is flagged `saved-as-download` (and `auto-read` when tools read it by name). The question names each
+one before you answer — "setup.exe (executable) will be saved as setup.exe.download — a type that could run; rename it
+yourself if you trust it" — with every other risk flag, and the result says it again, in `warnings`.
 
-**Every saved file is marked as downloaded from the internet**, as a browser marks one: on macOS with the
+`doc`, `xls`, `ppt`, `odt`, `ods` and `odp` keep their names, since you open them as you open a `docx`, but unlike a
+`docx` each can hold macros. Each is flagged `macro-capable`, and the question and the result say so in words:
+"report.xls can hold macros — open it only if you trust the sender".
+
+**Every saved file is marked as downloaded from the internet**, as a browser marks one — the moment it is made,
+before its bytes are written, so nothing watching the folder finds it unmarked: on macOS with the
 `com.apple.quarantine` attribute, so Gatekeeper asks before it first runs, and on Windows with a `Zone.Identifier`
-stream for the Internet zone, so SmartScreen asks and Office opens it in Protected View. Linux keeps no such mark. Each
-file's `marked` says which it carries; a file that could not be marked is still saved, and `warnings` says so.
+stream for the Internet zone, so SmartScreen asks and Office opens it in Protected View. Linux keeps no such mark, and
+neither does a file WSL saves onto a Windows drive. Each file's `marked` says which it carries; a file that could not be
+marked is still saved, and `warnings` says so.
 
 The bytes come from `files.slack.com` alone, with the workspace's token, and only at the address of the file just
 looked up: a file held outside Slack, a redirect or Slack's sign-in page is refused, and no file may be over 100 MiB

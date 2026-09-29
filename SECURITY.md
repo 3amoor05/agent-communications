@@ -34,14 +34,17 @@ This project reads and writes people's email and Slack workspaces. In scope, amo
 - **Prompt injection through email content** — a crafted message that escapes the untrusted-content envelope, hides
   text from the sanitiser, or makes a tool act on instructions found in mail.
 - **Path traversal** — attachment downloads or exports writing outside their directory, a download written into a
-  folder its deny list refuses (a hidden folder anywhere outside `.claude/worktrees/<name>`, a package or Python
-  virtual-environment folder, `~/Library`, PowerShell's profile folders, this package's own folders, a system folder),
-  or attachments being read from outside the allowed roots.
+  folder its deny list refuses (a hidden folder anywhere outside `.claude/worktrees/<name>`, a package folder, a Python
+  installation or virtual environment, `~/Library`, PowerShell's profile folders, this package's own folders, a system
+  folder, or Windows's own folders reached from WSL through `/mnt/<letter>`), or attachments being read from outside
+  the allowed roots.
 - **A saved file that runs** — a Gmail or Slack download saved with an extension outside its inert list (documents,
   images, sound and video, archives, calendar, contact and mail files, Apple documents) instead of with `.download`
-  after its name, a name a tool reads by name saved without the suffix, a saved file left without its internet mark
-  (`com.apple.quarantine` on macOS, `Zone.Identifier` on Windows) without the result saying so, or a Windows program
-  this package starts being taken from the current folder.
+  after its name, a name a tool reads by name saved without the suffix, a `.doc`, `.xls`, `.ppt` or OpenDocument file
+  saved without the question saying it can hold macros, a saved file left without its internet mark
+  (`com.apple.quarantine` on macOS, `Zone.Identifier` on Windows) without the result saying so, or marked only after
+  its bytes are written, a Windows program this package starts being taken from the current folder, or a link a
+  browser opener hands to a shell.
 - **Installation and supply chain** — unsafe installation instructions, CI compromise, or published packages that do
   not match the repository.
 
@@ -63,5 +66,12 @@ The send gate protects against a mistaken or prompt-injected agent that uses thi
   else*; `confirm` covers both.
 - **An MCP client's name is self-reported.** One name (`claude-code`) covers the interactive CLI, SDK-hosted agents
   and Claude Cowork. That is why approval forms are trusted only for clients you have added after a probe.
+- **`.download` is not a guarantee against every folder.** It stops a program that loads a file by its extension or
+  by a name it knows — Python's `.pth`, git's hooks, an agent's `CLAUDE.md`, Explorer's `.lnk`. It does not stop one
+  that loads every file in a folder whatever it is called: a zsh completions folder, an application's plugin or
+  startup folder, a watched import folder. The deny list refuses the folders every machine of its kind has, and those
+  a file in them makes plain (a Python installation, a virtual environment); a folder some program was told to load
+  whole cannot be known from here, and saving into it is the person's choice, made when they answer the question.
+  Under WSL, a file saved onto a Windows drive carries no internet mark.
 
 Reports that restate these documented limits are welcome as documentation improvements, not as vulnerabilities.
