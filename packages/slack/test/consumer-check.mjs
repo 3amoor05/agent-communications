@@ -144,11 +144,12 @@ try {
   assert.deepEqual(names, [
     'slack_channels',
     'slack_doctor',
-    // Local drafts only: none of the four reaches Slack.
+    // Local drafts only: none of the five reaches Slack.
     'slack_draft_create',
     'slack_draft_delete',
     'slack_draft_get',
     'slack_draft_list',
+    'slack_draft_update',
     // Saves files on this machine, under the downloads folder only: a read as far as Slack is concerned.
     'slack_file_download',
     'slack_files',
