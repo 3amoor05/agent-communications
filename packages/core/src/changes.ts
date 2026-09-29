@@ -4,6 +4,7 @@ import {
   type ChangeBinding,
   type ChangeTarget,
   changeDigest,
+  DOWNLOAD_ANSWER_HINT,
   stricterPolicy,
 } from './approvals.ts';
 import type { AuditRecord } from './audit.ts';
@@ -298,10 +299,11 @@ async function changeRecord(core: Core, approvalId: string): Promise<ApprovalRec
       hint: 'Prepare the change again; an approval expires ten minutes after it is made.',
     });
   }
-  // A download's question is answered where it was asked, never approved: there is no code for a person to type.
+  // A download's question is answered, never approved: there is no code for a person to type, and the command that
+  // answers it at a terminal is the approve of the channel the files come from.
   if (approvalKind(record) === 'download') {
     throw new CommsError('USAGE', `${approvalId} is a question about where to save files, not a configuration change`, {
-      hint: 'Nobody approves it: the person answers it, and the download that asked is made again with their answer and this id.',
+      hint: DOWNLOAD_ANSWER_HINT,
     });
   }
   if (approvalKind(record) !== 'change') {

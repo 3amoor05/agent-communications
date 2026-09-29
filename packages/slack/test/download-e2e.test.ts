@@ -279,7 +279,7 @@ async function viaTool(place: World, args: Record<string, unknown>): Promise<Fil
 
 /** The person's own Downloads folder, under the world's home: where each answer saved. */
 function downloadsOf(place: World): string {
-  return join(place.harness.configDir, 'Downloads');
+  return join(place.harness.home, 'Downloads');
 }
 
 /** A path in the person's Downloads folder, with `/` whatever the platform. */
@@ -374,7 +374,9 @@ async function auditedOnce(place: World, surface: 'cli' | 'mcp', result: FileDow
   );
   assert.match(
     record?.reason ?? '',
-    new RegExp(`^${result.files.length} file\\(s\\), ${result.totalBytes} bytes, saved to .+ \\(downloads\\);`),
+    new RegExp(
+      `^${result.files.length} file\\(s\\), ${result.totalBytes} bytes, saved to .+ \\(downloads, answered in chat\\);`,
+    ),
   );
 }
 

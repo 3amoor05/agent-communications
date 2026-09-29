@@ -1,5 +1,6 @@
 import {
   agentMarker,
+  answerDownloadAtTerminal,
   approvalHint,
   approvalKind,
   approvalsOf,
@@ -956,8 +957,14 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
     .requiredOption('--inbox <alias>', 'which mailbox')
     .option('--part <partId>', 'one specific attachment')
     .option('--max-files <number>', 'stop after this many files: 1 to 200 (default 50)')
-    .option('--to <where>', 'save without asking: downloads, current, or a folder (absolute, or starting with ~)')
-    .option('--choice <id>', 'with --to: the choice id the question came with, when an agent asked it')
+    .option(
+      '--to <where>',
+      'where to save: downloads, current, or a folder (absolute, or starting with ~) — alone only at your own terminal',
+    )
+    .option(
+      '--choice <id>',
+      'the choice id the question came with: beside --to, or alone once the person answered it with approve',
+    )
     // Removed: the person chooses the folder now. Kept only to say so, rather than as Commander's "unknown option".
     .addOption(new Option('--out <subpath>').hideHelp())
     .action(
@@ -986,6 +993,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
             ...(part === undefined ? [] : [`--part ${part}`]),
             ...(options.maxFiles === undefined ? [] : [`--max-files ${String(options.maxFiles)}`]),
           ].join(' '),
+          approveCommand: 'agent-gmail approve',
           render: (question) => renderDownloadQuestion(question, globalOptions.color),
           streams,
         });
@@ -1215,7 +1223,9 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
 
   program
     .command('approve <approvalId>')
-    .description('approve a send or a change at this terminal: read it, then type the code back')
+    .description(
+      'approve a send or a change at this terminal: read it, then type the code back — or answer where a download is saved',
+    )
     .action(
       act(async (context, globalOptions, approvalId: string) => {
         // The one command an agent may not run for the user, checked before the id is even looked up, so an agent is
@@ -1252,6 +1262,25 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
             outcome.state === 'approved'
               ? 'Approved. This command approves; the change is applied by the command that prepared it.\n'
               : 'Cancelled. Nothing was changed.\n',
+          );
+          return;
+        }
+        /*
+         * A download's question, answered here: where a stranger's files are saved, said by the person at their own
+         * terminal — the one way to answer it when the mailbox's change policy is `confirm`, since an agent cannot type
+         * into this. The download that asked saves where this says, when it is made again with the choice id alone.
+         */
+        if (pending && approvalKind(pending) === 'download') {
+          const outcome = await answerDownloadAtTerminal(context.core, approvalId, {
+            env,
+            color: globalOptions.color,
+            approveCommand: 'agent-gmail approve',
+            streams,
+          });
+          streams.stdout.write(
+            outcome.state === 'approved'
+              ? `Answered. Nothing is saved yet: the download that asked saves there when it is made again with --choice ${approvalId}, or choiceId "${approvalId}".\n`
+              : 'Cancelled. Nothing was saved.\n',
           );
           return;
         }

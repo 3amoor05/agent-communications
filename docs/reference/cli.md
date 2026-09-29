@@ -47,7 +47,7 @@ Scripts should read these rather than parse output.
 | [`export`](#agent-gmail-export) | write a message or a thread to a file, to read without filling the conversation |
 | [`draft`](#agent-gmail-draft) | write messages into Drafts — never sent from here |
 | [`send`](#agent-gmail-send) | send a draft that has been prepared and approved — never anything else |
-| [`approve`](#agent-gmail-approve) | approve a send or a change at this terminal: read it, then type the code back |
+| [`approve`](#agent-gmail-approve) | approve a send or a change at this terminal: read it, then type the code back — or answer where a download is saved |
 | [`confirm-clients`](#agent-gmail-confirm-clients) | MCP clients whose approval forms are trusted to reach you |
 | [`organise\|organize`](#agent-gmail-organise) | label, archive, star and mark read — every change reversible, and previewable with --dry-run |
 | [`organise-undo\|organize-undo`](#agent-gmail-organise-undo) | put an organising change back, from the `undo` a --json organise returned |
@@ -330,8 +330,8 @@ agent-gmail attachments download [options] <messageId...>
 | `--inbox <alias>` | which mailbox | — |
 | `--part <partId>` | one specific attachment | — |
 | `--max-files <number>` | stop after this many files: 1 to 200 (default 50) | — |
-| `--to <where>` | save without asking: downloads, current, or a folder (absolute, or starting with ~) | — |
-| `--choice <id>` | with --to: the choice id the question came with, when an agent asked it | — |
+| `--to <where>` | where to save: downloads, current, or a folder (absolute, or starting with ~) — alone only at your own terminal | — |
+| `--choice <id>` | the choice id the question came with: beside --to, or alone once the person answered it with approve | — |
 
 ### `agent-gmail contacts`
 
@@ -549,7 +549,7 @@ agent-gmail send cancel [options] <approvalId>
 
 ### `agent-gmail approve`
 
-approve a send or a change at this terminal: read it, then type the code back
+approve a send or a change at this terminal: read it, then type the code back — or answer where a download is saved
 
 ```
 agent-gmail approve [options] <approvalId>

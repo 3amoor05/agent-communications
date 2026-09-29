@@ -127,7 +127,11 @@ export async function createUniqueFile(
       throw error;
     }
   }
-  throw new CommsError('BAD_DATA', `could not find a free file name for ${filename} in ${directory}`);
+  // The folder, and not the name: a download's name is its sender's words, and this message reaches a result bare.
+  throw new CommsError(
+    'BAD_DATA',
+    `could not find a free file name in ${directory}: the name and every numbered one after it are taken`,
+  );
 }
 
 /**

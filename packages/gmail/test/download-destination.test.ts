@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { gatedChange, updateCheckPath, updateLaterChange } from '@agentcomms/core';
+import { Client } from '@modelcontextprotocol/client';
+import { InMemoryTransport } from '@modelcontextprotocol/server';
+import { createGmailMcpServer } from '../src/mcp/server.ts';
 import type { FakeMessage } from './support/fake-google.ts';
 import { type Harness, newHarness, tempDir } from './support/harness.ts';
 import { cli, connect, type ToolResult, toolError, wire } from './support/surfaces.ts';
@@ -52,12 +55,13 @@ async function mailbox(): Promise<{ harness: Harness; home: string; downloads: s
     ],
   });
   await harness.connectInbox({ alias: 'work', email: 'jo@example.test', sub: 'sub-1' });
-  return {
-    harness,
-    home: harness.configDir,
-    downloads: join(harness.configDir, 'Downloads'),
-    cwd: tempDir('agent-gmail-cwd-'),
-  };
+  // A home of its own, apart from the configuration folder the harness otherwise calls home: that is this package's
+  // own folder, which no download is ever saved into (core's `save-deny.ts`). Every server and command below is
+  // started with it, through the harness's environment.
+  const home = tempDir('agent-gmail-home-');
+  harness.env.HOME = home;
+  harness.env.USERPROFILE = home;
+  return { harness, home, downloads: join(home, 'Downloads'), cwd: tempDir('agent-gmail-cwd-') };
 }
 
 async function listing(folder: string): Promise<string[]> {
@@ -226,13 +230,28 @@ test('agent-gmail attachments download: an agent gets the question and a choice 
   assert.match(again.envelope().error?.message ?? '', /answered already/);
 });
 
-test('agent-gmail attachments download --to: a person’s script decides by flag, with nobody to ask', async () => {
+test('agent-gmail attachments download --to alone: only from a person at a terminal, never a pipe or --json', async () => {
   const { harness, downloads, cwd } = await mailbox();
-  const run = await cli(harness, ['attachments', 'download', 'm1', '--inbox', 'work', '--to', 'downloads', '--json'], {
-    cwd,
-  });
-  assert.equal(run.code, 0, run.stdout);
-  assert.equal(run.envelope<{ folder: string }>().data?.folder, downloads);
+  const argv = ['attachments', 'download', 'm1', '--inbox', 'work', '--to', 'downloads'];
+  // No terminal — a script, a pipe, or an agent that set no marker at all: refused, whatever the environment says.
+  for (const [label, extra, tty] of [
+    ['no terminal', [], false],
+    ['--json at a terminal', ['--json'], true],
+    ['an agent at a terminal', [], true],
+  ] as const) {
+    const run = await cli(harness, [...argv, ...extra], {
+      cwd,
+      tty,
+      env: label === 'an agent at a terminal' ? { CLAUDECODE: '1' } : {},
+    });
+    assert.equal(run.code, 64, `${label}: ${run.stdout}${run.stderr}`);
+    assert.match(run.stdout + run.stderr, /`--to` answers the download’s question, and needs its `--choice`/, label);
+  }
+  assert.deepEqual(await listing(downloads), []);
+  // A person at a terminal says where with --to, and nobody is asked: no question is kept.
+  const run = await cli(harness, argv, { cwd, tty: true });
+  assert.equal(run.code, 0, run.stderr);
+  assert.ok(run.stdout.includes(`1 file(s), 13 bytes, saved in ${downloads}.`), run.stdout);
   assert.deepEqual(await listing(downloads), ['invoice.pdf']);
   assert.deepEqual(await harness.core.approvals.list(), [], 'a question was kept that nobody was asked');
 });
@@ -383,4 +402,339 @@ test('the update stop lets the person’s answer through by its choice id, and s
   );
   assert.equal(claimed.code, 0, claimed.stdout);
   assert.deepEqual(await listing(cwd), ['invoice.pdf']);
+});
+
+// ── The change policy ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/** The mailbox's change policy made `confirm`: a tightening, which needs nobody's approval. */
+async function confirmPolicy(harness: Harness): Promise<void> {
+  await harness.core.config.update((config) => {
+    const work = config.inboxes.work;
+    assert.ok(work);
+    return { ...config, inboxes: { ...config.inboxes, work: { ...work, changePolicy: 'confirm' } } };
+  });
+}
+
+test('under chat, the person’s answer relayed in the tool’s arguments saves', async () => {
+  const { harness, cwd } = await mailbox();
+  const { call, close } = await connect({ core: harness.core, env: harness.env, cwd });
+  try {
+    const asked = wire(await call('gmail_attachment_download', { inbox: 'work', messageIds: ['m1'] }));
+    assert.equal(asked.policy, 'chat');
+    const saved = wire(
+      await call('gmail_attachment_download', {
+        inbox: 'work',
+        messageIds: ['m1'],
+        saveTo: 'current',
+        choiceId: asked.choiceId,
+      }),
+    );
+    assert.equal(saved.folder, cwd);
+    assert.deepEqual(await listing(cwd), ['invoice.pdf']);
+  } finally {
+    await close();
+  }
+});
+
+test('under confirm, an answer in the tool’s arguments or the command’s flags is refused, naming the terminal command', async () => {
+  const { harness, downloads, cwd } = await mailbox();
+  await confirmPolicy(harness);
+  const { call, close } = await connect({ core: harness.core, env: harness.env, cwd });
+  try {
+    const asked = wire(await call('gmail_attachment_download', { inbox: 'work', messageIds: ['m1'] }));
+    const choiceId = String(asked.choiceId);
+    assert.equal(asked.policy, 'confirm');
+    assert.ok(String(asked.question).includes(`at your own terminal — \`agent-gmail approve ${choiceId}\``));
+    assert.match(String(asked.next), /you cannot answer it for them, and a saveTo you pass is refused/);
+    for (const saveTo of ['downloads', 'current', undefined]) {
+      const refused = toolError(
+        await call('gmail_attachment_download', {
+          inbox: 'work',
+          messageIds: ['m1'],
+          ...(saveTo === undefined ? {} : { saveTo }),
+          choiceId,
+        }),
+      );
+      assert.equal(refused.code, 'APPROVAL_PENDING', String(saveTo));
+      assert.ok((refused.hint ?? '').includes(`\`agent-gmail approve ${choiceId}\` in their own terminal`));
+    }
+    // The command's flags are arguments too.
+    const flagged = await cli(
+      harness,
+      ['attachments', 'download', 'm1', '--inbox', 'work', '--to', 'current', '--choice', choiceId, '--json'],
+      { cwd, env: { AGENT_COMMS_AGENT: '1' } },
+    );
+    assert.equal(flagged.code, 10, flagged.stdout);
+    assert.equal(flagged.envelope().error?.code, 'APPROVAL_PENDING');
+    assert.equal((await harness.core.approvals.get(choiceId))?.state, 'pending', 'the question was spent');
+    assert.deepEqual(await listing(downloads), []);
+    assert.deepEqual(await listing(cwd), []);
+  } finally {
+    await close();
+  }
+});
+
+test('under confirm, the person answers at their own terminal with `approve`, and the id alone then saves there', async () => {
+  const { harness, downloads, cwd } = await mailbox();
+  await confirmPolicy(harness);
+  const { call, close } = await connect({ core: harness.core, env: harness.env, cwd });
+  try {
+    const asked = wire(await call('gmail_attachment_download', { inbox: 'work', messageIds: ['m1'] }));
+    const choiceId = String(asked.choiceId);
+    // An agent cannot run it.
+    const agent = await cli(harness, ['approve', choiceId], { tty: true, env: { CLAUDECODE: '1' } });
+    assert.equal(agent.code, 10, agent.stderr);
+    const answeredAt = await cli(harness, ['approve', choiceId], { tty: true, replies: [[/Save them to/, '2']] });
+    assert.equal(answeredAt.code, 0, answeredAt.stderr);
+    assert.match(answeredAt.stdout, /invoice\.pdf/);
+    assert.ok(answeredAt.stdout.includes(`2. The current folder — ${cwd}`), answeredAt.stdout);
+    assert.match(answeredAt.stdout, /Answered\. Nothing is saved yet/);
+    // A relayed answer that is not the person's is refused; the id alone saves where they said.
+    const other = toolError(
+      await call('gmail_attachment_download', { inbox: 'work', messageIds: ['m1'], saveTo: 'downloads', choiceId }),
+    );
+    assert.equal(other.code, 'USAGE');
+    assert.match(other.message, /answered this question themselves, with current/);
+    const saved = wire(await call('gmail_attachment_download', { inbox: 'work', messageIds: ['m1'], choiceId }));
+    assert.equal(saved.folder, cwd);
+    assert.deepEqual(await listing(cwd), ['invoice.pdf']);
+    assert.deepEqual(await listing(downloads), []);
+    const audit = (await harness.core.audit.tail({ inbox: 'work' })).filter(
+      (entry) => entry.operation === 'attachments.download',
+    );
+    assert.match(audit.at(-1)?.reason ?? '', /\(current, answered in terminal\)/);
+  } finally {
+    await close();
+  }
+});
+
+test('the command at a person’s own terminal answers under confirm too: the answer is recorded as given there', async () => {
+  const { harness, cwd } = await mailbox();
+  await confirmPolicy(harness);
+  const run = await cli(harness, ['attachments', 'download', 'm1', '--inbox', 'work'], {
+    tty: true,
+    cwd,
+    replies: [[/Save them to/, '2']],
+  });
+  assert.equal(run.code, 0, run.stderr);
+  assert.deepEqual(await listing(cwd), ['invoice.pdf']);
+});
+
+/** A client that raises forms, under a name of its own, answering each form as `answer` says — or declining it. */
+async function formClient(
+  harness: Harness,
+  cwd: string,
+  name: string,
+  answer: (message: string, schema: unknown) => Record<string, unknown> | null,
+) {
+  const built = await createGmailMcpServer({ core: harness.core, env: harness.env, cwd });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name, version: '1.0.0' }, { capabilities: { elicitation: {} } });
+  const asked: string[] = [];
+  client.setRequestHandler('elicitation/create', async (request) => {
+    const params = request.params as { message: string; requestedSchema?: unknown };
+    asked.push(params.message);
+    const content = answer(params.message, params.requestedSchema);
+    return content === null
+      ? { action: 'decline' as const }
+      : { action: 'accept' as const, content: content as Record<string, string> };
+  });
+  await Promise.all([built.server.connect(serverTransport), client.connect(clientTransport)]);
+  return {
+    asked,
+    call: async (args: Record<string, unknown>) =>
+      (await client.callTool({ name: 'gmail_attachment_download', arguments: args })) as ToolResult,
+    close: async () => {
+      await client.close();
+      await built.close();
+    },
+  };
+}
+
+async function trustForms(harness: Harness, client: string): Promise<void> {
+  await harness.core.config.update(
+    (config) => ({
+      ...config,
+      defaults: { ...config.defaults, confirm: { ...config.defaults.confirm, elicitationClients: [client] } },
+    }),
+    { consent: { kind: 'loosening-consent', paths: ['defaults.confirm.elicitationClients'] } },
+  );
+}
+
+test('under confirm, a client trusted to show forms asks the person in one, and saves where they said', async () => {
+  const { harness, cwd } = await mailbox();
+  await confirmPolicy(harness);
+  await trustForms(harness, 'form-client');
+  const chosen = join(tempDir('agent-gmail-form-'), 'From the form');
+  let schema: unknown;
+  const form = await formClient(harness, cwd, 'form-client', (_message, requested) => {
+    schema = requested;
+    return { choice: 'other', folder: chosen };
+  });
+  try {
+    const asked = wire(await form.call({ inbox: 'work', messageIds: ['m1'] }));
+    // The agent's own saveTo is not what saves: the person's answer in the form is.
+    const saved = wire(
+      await form.call({ inbox: 'work', messageIds: ['m1'], saveTo: 'downloads', choiceId: asked.choiceId }),
+    );
+    assert.equal(form.asked.length, 1);
+    assert.match(form.asked[0] ?? '', /Where should the 1 file \(13 bytes\) from work be saved\?/);
+    assert.match(form.asked[0] ?? '', /invoice\.pdf/);
+    assert.deepEqual((schema as { properties: { choice: { enum: string[] } } }).properties.choice.enum, [
+      'downloads',
+      'current',
+      'other',
+    ]);
+    assert.equal(saved.folder, chosen);
+    assert.deepEqual(await listing(chosen), ['invoice.pdf']);
+    const record = await harness.core.approvals.get(String(asked.choiceId));
+    assert.equal(record?.approvedVia, 'elicitation');
+    assert.equal(record?.state, 'used');
+  } finally {
+    await form.close();
+  }
+});
+
+test('under confirm, a declined form saves nothing; a client not trusted with forms is sent to the terminal', async () => {
+  const { harness, downloads, cwd } = await mailbox();
+  await confirmPolicy(harness);
+  await trustForms(harness, 'form-client');
+  const declining = await formClient(harness, cwd, 'form-client', () => null);
+  try {
+    const asked = wire(await declining.call({ inbox: 'work', messageIds: ['m1'] }));
+    const refused = toolError(await declining.call({ inbox: 'work', messageIds: ['m1'], choiceId: asked.choiceId }));
+    assert.equal(refused.code, 'APPROVAL_REQUIRED');
+    assert.match(refused.message, /nothing was saved: the question was declined/);
+  } finally {
+    await declining.close();
+  }
+  const untrusted = await formClient(harness, cwd, 'other-client', () => ({ choice: 'downloads' }));
+  try {
+    const asked = wire(await untrusted.call({ inbox: 'work', messageIds: ['m1'] }));
+    const refused = toolError(await untrusted.call({ inbox: 'work', messageIds: ['m1'], choiceId: asked.choiceId }));
+    assert.equal(untrusted.asked.length, 0, 'an untrusted client was handed a form');
+    assert.equal(refused.code, 'APPROVAL_PENDING');
+    assert.match(refused.hint ?? '', /agent-gmail approve/);
+  } finally {
+    await untrusted.close();
+  }
+  assert.deepEqual(await listing(downloads), []);
+  assert.deepEqual(await listing(cwd), []);
+});
+
+// ── Where a download is never saved ───────────────────────────────────────────────────────────────────────────
+
+test('a hidden folder, one reached through a link, and this package’s own are refused over MCP, and the question kept', async () => {
+  const { harness, home, cwd } = await mailbox();
+  mkdirSync(join(home, '.ssh'), { recursive: true });
+  const elsewhere = tempDir('agent-gmail-link-');
+  symlinkSync(join(home, '.ssh'), join(elsewhere, 'keys'));
+  const { call, close } = await connect({ core: harness.core, env: harness.env, cwd });
+  try {
+    const asked = wire(await call('gmail_attachment_download', { inbox: 'work', messageIds: ['m1'] }));
+    const approvals = join(harness.core.paths.stateDir, 'approvals');
+    for (const saveTo of ['~/.ssh', join(elsewhere, 'keys'), approvals, '~/Library/LaunchAgents']) {
+      const refused = toolError(
+        await call('gmail_attachment_download', {
+          inbox: 'work',
+          messageIds: ['m1'],
+          saveTo,
+          choiceId: asked.choiceId,
+        }),
+      );
+      assert.equal(refused.code, 'BAD_DATA', saveTo);
+      assert.match(refused.message, /^cannot save into /, saveTo);
+    }
+    assert.equal((await harness.core.approvals.get(String(asked.choiceId)))?.state, 'pending');
+    assert.deepEqual(await listing(join(home, '.ssh')), []);
+    assert.deepEqual(
+      (await listing(approvals)).filter((name) => !name.startsWith('ap_')),
+      [],
+      'something but an approval was written with the approvals',
+    );
+  } finally {
+    await close();
+  }
+});
+
+test('a server started in the home does not offer it: option 2 is shown as unavailable, with the reason', async () => {
+  const { harness, home, downloads } = await mailbox();
+  const { call, close } = await connect({ core: harness.core, env: harness.env, cwd: home });
+  try {
+    const asked = wire(await call('gmail_attachment_download', { inbox: 'work', messageIds: ['m1'] }));
+    assert.deepEqual(asked.options, [
+      { choice: 'downloads', path: downloads, default: true },
+      {
+        choice: 'current',
+        path: home,
+        unavailable:
+          'it is your home folder itself, whose top level is where programs look for their settings — choose a folder inside it',
+      },
+      { choice: 'other' },
+    ]);
+    assert.match(String(asked.question), /2\. The current folder — .* — not available: it is your home folder itself/);
+    const refused = toolError(
+      await call('gmail_attachment_download', {
+        inbox: 'work',
+        messageIds: ['m1'],
+        saveTo: 'current',
+        choiceId: asked.choiceId,
+      }),
+    );
+    assert.equal(refused.code, 'BAD_DATA');
+  } finally {
+    await close();
+  }
+});
+
+test('a file tools read on their own is named in the question before anyone answers, and saved as download-<name>', async () => {
+  const claude: FakeMessage = {
+    ...MESSAGE,
+    payload: {
+      partId: '',
+      mimeType: 'multipart/mixed',
+      headers: [
+        { name: 'From', value: 'Sam Lee <sam@partner.test>' },
+        { name: 'Subject', value: 'Notes' },
+      ],
+      parts: [
+        { partId: '0', mimeType: 'text/plain', body: { size: 2, data: base64url('hi') } },
+        {
+          partId: '1',
+          mimeType: 'text/markdown',
+          filename: 'CLAUDE.md',
+          headers: [{ name: 'Content-Disposition', value: 'attachment; filename="CLAUDE.md"' }],
+          body: { size: 12, attachmentId: 'a1' },
+        },
+      ],
+    },
+  };
+  const harness = await newHarness({
+    accounts: [
+      { sub: 'sub-1', email: 'jo@example.test', messages: { m1: claude }, attachments: { a1: 'instructions' } },
+    ],
+  });
+  await harness.connectInbox({ alias: 'work', email: 'jo@example.test', sub: 'sub-1' });
+  const home = tempDir('agent-gmail-home-');
+  harness.env.HOME = home;
+  harness.env.USERPROFILE = home;
+  const cwd = tempDir('agent-gmail-cwd-');
+  const { call, close } = await connect({ core: harness.core, env: harness.env, cwd });
+  try {
+    const asked = wire(await call('gmail_attachment_download', { inbox: 'work', messageIds: ['m1'] }));
+    assert.match(String(asked.question), /! a file tools may read on their own: saved as download-CLAUDE\.md/);
+    assert.ok((asked.files as Array<{ riskFlags: string[] }>)[0]?.riskFlags.includes('auto-read'));
+    const saved = wire(
+      await call('gmail_attachment_download', {
+        inbox: 'work',
+        messageIds: ['m1'],
+        saveTo: 'current',
+        choiceId: asked.choiceId,
+      }),
+    );
+    assert.equal((saved.files as Array<{ savedAs: string }>)[0]?.savedAs, 'download-CLAUDE.md');
+    assert.deepEqual(await listing(cwd), ['download-CLAUDE.md']);
+  } finally {
+    await close();
+  }
 });

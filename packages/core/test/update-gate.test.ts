@@ -629,6 +629,7 @@ test('a download’s answer goes past the stop by its question’s choiceId; the
       files: ['m1/1'],
       folders: { downloads: join(m.home, 'Downloads'), current: m.home },
     },
+    policy: 'chat',
   });
   seed(m, { latest: LATEST, behind: true });
   const later = await preparedFor(m, updateLaterChange(m.core));

@@ -48,7 +48,7 @@ Scripts should read these rather than parse output.
 | [`draft`](#agent-slack-draft) | compose and keep messages locally; nothing reaches Slack |
 | [`post`](#agent-slack-post) | take a draft through the approval gate |
 | [`react`](#agent-slack-react) | add or remove a reaction. Behind the same gate, at lower ceremony |
-| [`approve`](#agent-slack-approve) | approve a post, a reaction or a change at this terminal: read it, then type the code back |
+| [`approve`](#agent-slack-approve) | approve a post, a reaction or a change at this terminal: read it, then type the code back — or answer where a download is saved |
 | [`mcp`](#agent-slack-mcp) | run the MCP server on stdio, for a coding agent to connect to |
 
 ### `agent-slack manifest`
@@ -306,8 +306,8 @@ agent-slack files download [options]
 | `--channel <id>` | the files shared in this conversation — a channel, a DM or a group DM — newest first | — |
 | `--since <ts>` | with --channel: only files uploaded at or after this Slack timestamp, to the second | — |
 | `--max-files <n>` | stop after this many files: 1 to 200 (default 50) | — |
-| `--to <where>` | save without asking: downloads, current, or a folder (absolute, or starting with ~) | — |
-| `--choice <id>` | with --to: the choice id the question came with, when an agent asked it | — |
+| `--to <where>` | where to save: downloads, current, or a folder (absolute, or starting with ~) — alone only at your own terminal | — |
+| `--choice <id>` | the choice id the question came with: beside --to, or alone once the person answered it with approve | — |
 
 ### `agent-slack people`
 
@@ -438,7 +438,7 @@ agent-slack react [options]
 
 ### `agent-slack approve`
 
-approve a post, a reaction or a change at this terminal: read it, then type the code back
+approve a post, a reaction or a change at this terminal: read it, then type the code back — or answer where a download is saved
 
 ```
 agent-slack approve [options] <approvalId>

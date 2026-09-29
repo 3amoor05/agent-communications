@@ -1,4 +1,4 @@
-import { mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { type AccountConfig, type Core, isInside, newAccountId, openCore, type ResolvedPaths } from '@agentcomms/core';
@@ -28,6 +28,12 @@ export interface ExchangeCall {
 }
 
 export interface Harness {
+  /**
+   * The harness's own home, which `HOME` and `USERPROFILE` name: every path core resolves is inside it. The person's
+   * Downloads folder, for a download, is `<home>/Downloads`.
+   */
+  home: string;
+  /** Its configuration folder, `<home>/config`: this package's own, which no download is ever saved into. */
   configDir: string;
   core: Core;
   env: NodeJS.ProcessEnv;
@@ -111,7 +117,14 @@ export function assertInsideHome(paths: ResolvedPaths, home: string): void {
 }
 
 export async function newHarness(): Promise<Harness> {
-  const configDir = tempDir();
+  /*
+   * The configuration inside the home rather than the home itself, as `~/.config/agent-communications` is inside a
+   * person's. A download may never be saved into this package's own configuration folder, and with the two the same
+   * folder, `~/Downloads` would have been inside it.
+   */
+  const home = tempDir();
+  const configDir = join(home, 'config');
+  mkdirSync(configDir);
   const env: NodeJS.ProcessEnv = {
     AGENT_COMMS_CONFIG_DIR: configDir,
     AGENT_COMMS_STATE_DIR: join(configDir, 'state'),
@@ -123,8 +136,8 @@ export async function newHarness(): Promise<Harness> {
      * the tool saved its own, which came back as `-2`, and a folder a test proved was never made had been made by the
      * test before it.
      */
-    HOME: configDir,
-    USERPROFILE: configDir,
+    HOME: home,
+    USERPROFILE: home,
     NO_COLOR: '1',
     // Where a client's own command is looked for beyond PATH: this home, and nowhere else. Left out, /opt/homebrew/bin
     // and /usr/local/bin are searched too, and a real `claude` or `codex` there would be found — and run — by a test
@@ -135,7 +148,7 @@ export async function newHarness(): Promise<Harness> {
     AGENT_COMMS_UPDATE_CHECK: 'off',
   };
   const core = openCore({ env });
-  assertInsideHome(core.paths, configDir);
+  assertInsideHome(core.paths, home);
   /*
    * Version 1, said rather than assumed.
    *
@@ -147,6 +160,7 @@ export async function newHarness(): Promise<Harness> {
   const calls: ExchangeCall[] = [];
 
   const harness: Harness = {
+    home,
     configDir,
     core,
     env,

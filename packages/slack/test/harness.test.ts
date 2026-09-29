@@ -19,7 +19,7 @@ test('every path the harness’s environment resolves to is inside its own home,
   const harness = await newHarness();
   for (const platform of ['darwin', 'linux', 'win32'] as const) {
     const paths = resolvePaths({ env: harness.env, platform });
-    assert.doesNotThrow(() => assertInsideHome(paths, harness.configDir), platform);
+    assert.doesNotThrow(() => assertInsideHome(paths, harness.home), platform);
   }
 });
 
@@ -27,9 +27,9 @@ test('the environment the harness had before — HOME alone — is refused for W
   const harness = await newHarness();
   const { USERPROFILE: _userProfile, ...homeAlone } = harness.env;
   // Still enough on macOS and Linux, which is why nothing but a Windows run noticed.
-  assert.doesNotThrow(() => assertInsideHome(resolvePaths({ env: homeAlone, platform: 'linux' }), harness.configDir));
+  assert.doesNotThrow(() => assertInsideHome(resolvePaths({ env: homeAlone, platform: 'linux' }), harness.home));
   assert.throws(
-    () => assertInsideHome(resolvePaths({ env: homeAlone, platform: 'win32' }), harness.configDir),
+    () => assertInsideHome(resolvePaths({ env: homeAlone, platform: 'win32' }), harness.home),
     /^Error: the harness resolves dataDir to .+ and downloadsDir to .+, outside its own home /,
   );
 });

@@ -11,11 +11,13 @@ import {
   type DownloadAnswer,
   type DownloadRequest,
   downloadRecordPath,
+  effectiveChangePolicy,
   fileRisks,
   isPlainFileName,
   newBoundary,
   type SaveChoice,
   savedFileName,
+  saveFailure,
   saveFolders,
   settleDestination,
   wrapUntrusted,
@@ -36,8 +38,11 @@ import type { WorkspaceSession } from './session.ts';
  * saved until the person has said where: the first call looks the files up and answers with the question — the files
  * by name and size, and three places to save them, the first two by their exact paths (core's `save-destination.ts`)
  * — and the second, carrying the person's answer and the question's id, claims the question for these files and no
- * others and saves them. Each is saved in the chosen folder under the name its uploader gave it, made safe by core's
- * `savedFileName`; the write is exclusive and refuses to follow a link, and nothing else is written in that folder.
+ * others and saves them. The question is held to the workspace's change policy: under `confirm` the answer is the one
+ * the person gave at their own terminal (`agent-slack approve`), never one in the arguments. No answer saves into a
+ * folder on core's deny list (`save-deny.ts`). Each file is saved in the chosen folder under the name its uploader gave
+ * it, made safe by core's `savedFileName`; the write is exclusive and refuses to follow a link, and nothing else is
+ * written in that folder. A file-system error names the folder and the file's id, never the uploader's name.
  * The name, title, uploader and type — which the uploader chose — come back beside the path, each inside the
  * untrusted-content envelope, and the saved name and path too unless the name is plainly a file name.
  *
@@ -72,6 +77,9 @@ function capsOf(deps: FileDownloadDeps): Caps {
     wanted !== undefined && Number.isSafeInteger(wanted) && wanted > 0 ? Math.min(wanted, most) : most;
   return { perFile: lower(deps.caps?.perFile, MAX_FILE_BYTES), perRun: lower(deps.caps?.perRun, MAX_RUN_BYTES) };
 }
+
+/** The command that answers a download's question at a person's own terminal, under a `confirm` change policy. */
+const APPROVE_COMMAND = 'agent-slack approve';
 
 /** How many files one run saves at most: `--max-files` on the command line, `maxFiles` in a tool call. */
 export const MAX_FILES: NumberOption = { flag: '--max-files', arg: 'maxFiles', min: 1, max: 200 };
@@ -701,6 +709,8 @@ export async function downloadFiles(
   };
   const config = await context.config();
   const folders = () => saveFolders({ configured: config.defaults.downloadsDir, env: context.env, cwd: context.cwd });
+  // Where a stranger's files land is a change to this machine, answered as this workspace's other changes are approved.
+  const policy = effectiveChangePolicy(config, { account: workspace });
   const { answer } = plan;
 
   if (answer.kind === 'none') {
@@ -712,8 +722,16 @@ export async function downloadFiles(
       configured: Boolean(config.defaults.downloadsDir),
       count: planned.length,
       bytes: declared,
+      listing: planned.map(({ fileId, record }, index) => ({
+        name: savedFileName(str(record.name) ?? '', fileId),
+        size: described.files[index]?.size ?? null,
+        renamed: described.files[index]?.riskFlags.includes('auto-read') === true,
+      })),
+      policy,
+      approveCommand: APPROVE_COMMAND,
       surface: context.surface,
       tool: 'slack_file_download',
+      env: context.env,
     });
     return {
       ...question,
@@ -734,6 +752,9 @@ export async function downloadFiles(
     answer,
     request: binding,
     folders,
+    policy,
+    approveCommand: APPROVE_COMMAND,
+    surface: context.surface,
     env: context.env,
   });
 
@@ -776,9 +797,12 @@ export async function downloadFiles(
         continue;
       }
 
-      // Under the uploader's name, made safe; the file's own id when nothing of the name is left.
+      // Under the uploader's name, made safe; the file's own id when nothing of the name is left. An error from the file
+      // system names the folder and the file's id, never that name, which its own message would carry in the path.
       const name = savedFileName(str(record.name) ?? '', fileId);
-      const { path, handle } = await createUniqueFile(destination.folder, name);
+      const { path, handle } = await createUniqueFile(destination.folder, name).catch((error: unknown) => {
+        throw saveFailure(error, { folder: destination.folder, fileId });
+      });
       try {
         await handle.writeFile(body.bytes);
         await handle.close();
@@ -794,9 +818,10 @@ export async function downloadFiles(
          */
         await handle.close().catch(() => undefined);
         await rm(path, { force: true }).catch(() => {
-          leftBehind = { fileId, path };
+          // The path ends in the uploader's name: carried as a saved path is, inside the envelope unless plainly a name.
+          leftBehind = { fileId, path: savedNameFields(path, described.wrap, fileId).path };
         });
-        throw error;
+        throw saveFailure(error, { folder: destination.folder, fileId });
       }
       totalBytes += body.bytes.byteLength;
       const { size: _declared, ...rest } = listed;
@@ -864,7 +889,7 @@ export async function downloadFiles(
     // This package's own file, under its state directory: never in the folder the person chose.
     await writeFileAtomic(
       manifestPath,
-      `${JSON.stringify({ at: now.toISOString(), choiceId: destination.choiceId, ...result }, null, 2)}\n`,
+      `${JSON.stringify({ at: now.toISOString(), choiceId: destination.choiceId, answeredVia: destination.answeredVia, ...result }, null, 2)}\n`,
     );
   } catch (error) {
     manifestFailure = { error };
@@ -886,9 +911,12 @@ export async function downloadFiles(
         ...(plan.selection.kind === 'message' ? { ts: plan.selection.ts } : {}),
       },
       ...(destination.choiceId ? { approvalId: destination.choiceId } : {}),
-      reason: `${saved.length} file(s), ${totalBytes} bytes, saved to ${destination.folder} (${destination.choice}); ${skipped.length} skipped${
-        manifestFailure === undefined ? '' : '; the manifest not written'
-      }${leftBehind === undefined ? '' : `; part of ${leftBehind.fileId} could not be removed: ${leftBehind.path}`}`,
+      // The folder and the files' ids, never a saved name: a name is the uploader's words, and the audit log is read back.
+      reason: `${saved.length} file(s), ${totalBytes} bytes, saved to ${destination.folder} (${destination.choice}, answered ${
+        destination.answeredVia === 'flag' ? 'by flag' : `in ${destination.answeredVia}`
+      }); ${skipped.length} skipped${manifestFailure === undefined ? '' : '; the manifest not written'}${
+        leftBehind === undefined ? '' : `; part of ${leftBehind.fileId} could not be removed from ${destination.folder}`
+      }`,
     });
   } catch (error) {
     auditFailure = { error };
@@ -1003,7 +1031,7 @@ function unfinished(state: {
   }
   if (leftBehind !== undefined) {
     hint.push(
-      `Part of ${leftBehind.fileId} was written and could not be removed: delete ${leftBehind.path}, which is not the whole file.`,
+      `Part of ${leftBehind.fileId} was written and could not be removed: delete it — it is not the whole file. It is ${leftBehind.path}`,
     );
   }
 

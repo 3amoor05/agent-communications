@@ -145,7 +145,7 @@ async function assertNoToken(harness: Harness, result: Captured, secrets: readon
   for (const secret of secrets) {
     assert.ok(!result.stdout.includes(secret), `stdout carries ${secret}`);
     assert.ok(!result.stderr.includes(secret), `stderr carries ${secret}`);
-    for (const file of await everyFile(harness.configDir)) {
+    for (const file of await everyFile(harness.home)) {
       assert.ok(!file.text.includes(secret), `${file.path} carries ${secret}`);
     }
   }

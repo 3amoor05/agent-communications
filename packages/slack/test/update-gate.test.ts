@@ -277,7 +277,7 @@ function fileTransport() {
 }
 
 /**
- * A harness with a workspace, and a downloads folder of its own in the config.
+ * A harness with a workspace, and a downloads folder of its own in its home.
  *
  * Not `core.paths.downloadsDir`: on Windows that is under USERPROFILE, which the harness does not set, so it is the
  * runner's own Downloads folder — shared with every other test file running beside this one, and never emptied — and
@@ -286,7 +286,7 @@ function fileTransport() {
 async function downloadHarness(): Promise<{ harness: Harness; root: string }> {
   const harness = await newHarness();
   await harness.addWorkspace({ alias: 'acme' });
-  const root = join(harness.configDir, 'downloads');
+  const root = join(harness.home, 'downloads');
   await harness.core.config.update((config) => ({ ...config, defaults: { ...config.defaults, downloadsDir: root } }), {
     consent: { kind: 'loosening-consent', paths: ['defaults.downloadsDir'] },
   });
@@ -502,16 +502,22 @@ test('the download goes ahead when the update is put off, switched off, turned o
     assert.ok(savedInside(tool.root, result.files[0]?.path), `${label}: the saved file is not on disk`);
     assert.deepEqual(passed.transport, [FILE_ID], `${label}: the file was not fetched over MCP`);
 
-    // At the command, with no terminal, as a person's script runs it — saying where by `--to`: exit 0 and the file on
-    // disk, where the same command was stopped first.
+    // At the command, with no terminal, as an agent runs it — asked first, then answered with `--to` and the
+    // question's `--choice` (a bare `--to` is a person's at a terminal, and there is none here): exit 0 and the file
+    // on disk, where the same command was stopped first.
     const command = await downloadHarness();
     if (label !== 'offline') {
       updateOut(command.harness);
-      const control = await downloadAtCommand(command.harness, ['--to', 'downloads']);
+      const control = await downloadAtCommand(command.harness);
       assert.equal(control.exit, 11, `${label}: the control command was not stopped`);
     }
     await apply(command.harness);
-    const ran = await downloadAtCommand(command.harness, ['--to', 'downloads']);
+    const askedAt = await downloadAtCommand(command.harness);
+    assert.equal(askedAt.exit, 10, `${label}: ${askedAt.stdout}${askedAt.stderr}`);
+    const choiceId = String(
+      (JSON.parse(askedAt.stdout) as { error: { details: { choiceId: string } } }).error.details.choiceId,
+    );
+    const ran = await downloadAtCommand(command.harness, ['--to', 'downloads', '--choice', choiceId]);
     assert.equal(ran.exit, EXIT_CODES.OK, `${label}: ${ran.stdout}${ran.stderr}`);
     const data = (JSON.parse(ran.stdout) as { data: FileDownloadResult }).data;
     assert.equal(data.files.length, 1, `${label}: ${ran.stdout}`);

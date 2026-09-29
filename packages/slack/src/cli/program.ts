@@ -1,5 +1,6 @@
 import {
   agentMarker,
+  answerDownloadAtTerminal,
   approvalKind,
   approvalsOf,
   approveChangeAtTerminal,
@@ -17,6 +18,7 @@ import {
   type OutputOptions,
   openCore,
   paint,
+  personAtTerminal,
   refuseRetiredOut,
   refuseUnclaimedApproval,
   renderChannelPreview,
@@ -863,8 +865,14 @@ configuration problem.`,
     // Uploaded, not shared: `files.list` filters on when a file was created, in whole seconds.
     .option('--since <ts>', 'with --channel: only files uploaded at or after this Slack timestamp, to the second')
     .option('--max-files <n>', 'stop after this many files: 1 to 200 (default 50)')
-    .option('--to <where>', 'save without asking: downloads, current, or a folder (absolute, or starting with ~)')
-    .option('--choice <id>', 'with --to: the choice id the question came with, when an agent asked it')
+    .option(
+      '--to <where>',
+      'where to save: downloads, current, or a folder (absolute, or starting with ~) — alone only at your own terminal',
+    )
+    .option(
+      '--choice <id>',
+      'the choice id the question came with: beside --to, or alone once the person answered it with approve',
+    )
     // Removed: the person chooses the folder now. Kept only to say so, rather than as Commander's "unknown option".
     .addOption(new Option('--out <folder>').hideHelp())
     .action(
@@ -914,7 +922,7 @@ configuration problem.`,
           ...request,
           saveTo: to,
           choiceId: choice,
-          personChose: choice === undefined && agentMarker(env) === null,
+          personChose: choice === undefined && personAtTerminal(env, streams, { json: options.json }),
         });
         const opened = await session(context, workspace);
         const result = await downloadAtTerminal<FileDownloadQuestion>({
@@ -934,6 +942,7 @@ configuration problem.`,
             ...(request.since === undefined ? [] : [`--since ${request.since}`]),
             ...(request.maxFiles === undefined ? [] : [`--max-files ${String(request.maxFiles)}`]),
           ].join(' '),
+          approveCommand: 'agent-slack approve',
           render: (question) => renderFileDownloadQuestion(question, options.color),
           streams,
         });
@@ -1094,7 +1103,9 @@ configuration problem.`,
 
   program
     .command('approve <approvalId>')
-    .description('approve a post, a reaction or a change at this terminal: read it, then type the code back')
+    .description(
+      'approve a post, a reaction or a change at this terminal: read it, then type the code back — or answer where a download is saved',
+    )
     .action(
       act(async (context, globalOptions, approvalId: string) => {
         /*
@@ -1143,6 +1154,25 @@ configuration problem.`,
             outcome.state === 'approved'
               ? 'Approved. This command approves; the change is applied by the command that prepared it.\n'
               : 'Cancelled. Nothing was changed.\n',
+          );
+          return;
+        }
+        /*
+         * A download's question, answered here: where a stranger's files are saved, said by the person at their own
+         * terminal — the one way to answer it when the workspace's change policy is `confirm`, since an agent cannot
+         * type into this. The download that asked saves where this says, when it is made again with the choice id alone.
+         */
+        if (pending && approvalKind(pending) === 'download') {
+          const outcome = await answerDownloadAtTerminal(context.core, approvalId, {
+            env,
+            color: globalOptions.color,
+            approveCommand: 'agent-slack approve',
+            streams,
+          });
+          streams.stdout.write(
+            outcome.state === 'approved'
+              ? `Answered. Nothing is saved yet: the download that asked saves there when it is made again with --choice ${approvalId}, or choiceId "${approvalId}".\n`
+              : 'Cancelled. Nothing was saved.\n',
           );
           return;
         }

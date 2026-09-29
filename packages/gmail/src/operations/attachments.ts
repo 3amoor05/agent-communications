@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { type FileHandle, rm } from 'node:fs/promises';
 import { basename } from 'node:path';
 import {
   askWhereToSave,
@@ -10,6 +11,7 @@ import {
   type DownloadRequest,
   decodeHeaderWords,
   downloadRecordPath,
+  effectiveChangePolicy,
   ensurePrivateDir,
   expandHome,
   homeDirectory,
@@ -18,6 +20,7 @@ import {
   parseAddressList,
   type SaveChoice,
   savedFileName,
+  saveFailure,
   saveFolders,
   settleDestination,
   slug,
@@ -246,7 +249,10 @@ export interface DownloadedFile {
   /** Wrapped: the subject of the message it came with. */
   subject: string;
   date: string | null;
-  /** True when an identical file (same hash) had already been written in this batch: `path` is that one's. */
+  /**
+   * True when the same file — the same name and the same bytes — had already been written in this batch: `path` is
+   * that one's. The same bytes under another name are written under that name: the person asked for each by name.
+   */
   duplicate: boolean;
   riskFlags: string[];
 }
@@ -255,6 +261,8 @@ export interface DownloadSkip {
   messageId: string;
   partId: string;
   reason: string;
+  /** `stopped` for a file the download stopped before saving; absent for one it never meant to save. */
+  cause?: 'stopped' | undefined;
 }
 
 /** What a download answers once it has saved — or found nothing to save. */
@@ -287,6 +295,11 @@ export interface DownloadOptions extends DownloadAnswer {
   /** How many files at most, as given; checked by `downloadAttachments` against {@link MAX_FILES}. */
   maxFiles?: unknown;
   maxBytes?: number | undefined;
+  /**
+   * How a file's bytes are written into the file made for them: the handle's own `writeFile` when left out. Neither
+   * surface passes it; a test does, to fail a write part-way as a full disk would, which no fake mailbox can.
+   */
+  write?: ((handle: FileHandle, bytes: Buffer) => Promise<void>) | undefined;
 }
 
 export const DEFAULT_MAX_FILES = 50;
@@ -321,7 +334,12 @@ interface Planned {
   readonly messageId: string;
   readonly part: DecodedPart & { attachmentId: string };
   readonly listed: AttachmentToSave;
+  /** The name it would be saved under: the sender's, made safe, and `download-<name>` for one tools read themselves. */
+  readonly name: string;
 }
+
+/** The command that answers a download's question at a person's own terminal, under a `confirm` change policy. */
+const APPROVE_COMMAND = 'agent-gmail approve';
 
 /**
  * Downloads specific attachments — where the person says, and only once they have said it.
@@ -329,9 +347,14 @@ interface Planned {
  * Without an answer nothing is saved. The messages are read, and what comes back is the question: the attachments
  * the request names, by name and size, and three places to save them, the first two by their exact paths — see core's
  * `save-destination.ts`. With the person's answer and the question's `choiceId` the question is claimed, for these
- * messages and these attachments only, and each attachment is saved in the chosen folder under the name its sender
- * gave it, made safe by `savedFileName`, created exclusively and never through a link or over a file already there.
- * Nothing else is written into that folder.
+ * messages and these attachments only — under this mailbox's change policy, so that under `confirm` only an answer the
+ * person gave at their terminal or in a trusted form will do — and each attachment is saved in the chosen folder, never
+ * one on core's deny list (`save-deny.ts`), under the name its sender gave it, made safe by `savedFileName`, created
+ * exclusively and never through a link or over a file already there. Nothing else is written into that folder.
+ *
+ * A download that stops part-way — a part Gmail will not hand over, a file that cannot be written — records what it
+ * saved, in the manifest and the audit log, removes a file it wrote only part of, and ends in an error that says what
+ * was saved and what was not.
  *
  * The attachment id is resolved fresh from the message each time: Gmail's ids are reported to change between fetches,
  * and a stale one fails in a way that looks like the file is gone.
@@ -410,6 +433,11 @@ export async function downloadAttachments(
       planned.push({
         messageId: target.messageId,
         part: part as DecodedPart & { attachmentId: string },
+        // Under the sender's name, made safe; the part's own id when nothing of the name is left.
+        name: savedFileName(
+          decodeHeaderWords(part.filename ?? ''),
+          `${slug(target.messageId, 64, 'message')}-part-${slug(part.partId, 32, 'root')}`,
+        ),
         listed: {
           messageId: target.messageId,
           partId: part.partId,
@@ -442,6 +470,8 @@ export async function downloadAttachments(
 
   const config = await context.config();
   const folders = () => saveFolders({ configured: config.defaults.downloadsDir, env: context.env, cwd: context.cwd });
+  // Where a stranger's files land is a change to this machine, answered as this mailbox's other changes are approved.
+  const policy = effectiveChangePolicy(config, { inbox: alias });
 
   if (answer.kind === 'none') {
     // Nothing to save is said as it is, with the reasons, rather than asked about.
@@ -452,8 +482,16 @@ export async function downloadAttachments(
       configured: Boolean(config.defaults.downloadsDir),
       count: planned.length,
       bytes: planned.reduce((sum, entry) => sum + entry.part.size, 0),
+      listing: planned.map((entry) => ({
+        name: entry.name,
+        size: entry.part.size,
+        renamed: entry.listed.riskFlags.includes('auto-read'),
+      })),
+      policy,
+      approveCommand: APPROVE_COMMAND,
       surface: context.surface,
       tool: 'gmail_attachment_download',
+      env: context.env,
     });
     return {
       ...question,
@@ -466,44 +504,100 @@ export async function downloadAttachments(
   // request holds now, so that one asked about other files is refused rather than answered with nothing.
   if (answer.kind === 'person' && planned.length === 0) return nothingToSave(skipped);
 
-  const destination = await settleDestination(context.core, { answer, request, folders, env: context.env });
+  const destination = await settleDestination(context.core, {
+    answer,
+    request,
+    folders,
+    policy,
+    approveCommand: APPROVE_COMMAND,
+    surface: context.surface,
+    env: context.env,
+  });
   const files: DownloadedFile[] = [];
-  const seenHashes = new Map<string, { path: string; savedAs: string }>();
+  // The same file twice — the same name and the same bytes — is written once. The same bytes under another name are
+  // written under that name as well: the person asked for each file by its name, and `report-copy.pdf` pointing at
+  // `report.pdf` is a file they were told was saved and cannot find.
+  const writtenAs = new Map<string, { path: string; savedAs: string }>();
   let totalBytes = 0;
+  // Boxed, so that even something thrown as `undefined` still counts as the download having stopped.
+  let stopped: { readonly error: unknown } | undefined;
+  // A file whose write failed and whose part-written copy could not be removed either: see below.
+  let leftBehind: { readonly fileId: string; readonly path: string } | undefined;
 
-  for (const { messageId, part, listed } of planned) {
-    if (totalBytes + part.size > maxBytes) {
-      skipped.push({ messageId, partId: part.partId, reason: `more than ${maxBytes} bytes in one batch` });
-      continue;
-    }
-    const bytes = await transport.getAttachment(messageId, part.attachmentId);
-    const sha256 = createHash('sha256').update(bytes).digest('hex');
-    const envelope: FieldEnvelope = { boundary, inbox: alias, id: messageId };
-    const existing = seenHashes.get(sha256);
-    if (existing) {
-      files.push({ ...savedFields(listed, existing), size: bytes.byteLength, sha256, duplicate: true });
-      continue;
-    }
+  let at = 0;
+  try {
+    for (; at < planned.length; at += 1) {
+      const { messageId, part, listed, name } = planned[at] as Planned;
+      const fileId = `${messageId}/${part.partId}`;
+      if (totalBytes + part.size > maxBytes) {
+        skipped.push({ messageId, partId: part.partId, reason: `more than ${maxBytes} bytes in one batch` });
+        continue;
+      }
+      const bytes = await transport.getAttachment(messageId, part.attachmentId);
+      const sha256 = createHash('sha256').update(bytes).digest('hex');
+      const envelope: FieldEnvelope = { boundary, inbox: alias, id: messageId };
+      const same = writtenAs.get(`${name}\u0000${sha256}`);
+      if (same) {
+        files.push({ ...savedFields(listed, same), size: bytes.byteLength, sha256, duplicate: true });
+        continue;
+      }
 
-    // Under the sender's name, made safe; the part's own id when nothing of the name is left.
-    const name = savedFileName(
-      decodeHeaderWords(part.filename ?? ''),
-      `${slug(messageId, 64, 'message')}-part-${slug(part.partId, 32, 'root')}`,
-    );
-    const { path, handle } = await createUniqueFile(destination.folder, name);
-    try {
-      await handle.writeFile(bytes);
-    } finally {
-      await handle.close();
+      // Created here, exclusively: an error from the file system names the folder and the part, never the sender's
+      // name, which its own message would carry in the path.
+      const created = await createUniqueFile(destination.folder, name).catch((error: unknown) => {
+        throw saveFailure(error, { folder: destination.folder, fileId });
+      });
+      try {
+        await (options.write ?? ((handle, data) => handle.writeFile(data)))(created.handle, bytes);
+        await created.handle.close();
+      } catch (error) {
+        /*
+         * A file cut short is worse than none. It looks like the file, under the file's own name, and neither the
+         * manifest nor the audit lists it — and a download made again saves the whole one beside it as `-2`. So it is
+         * removed before the failure goes on; the path was created here, exclusively, so what is removed is this
+         * download's own. The removal can fail too, and then the error, the manifest and the audit record each say so.
+         */
+        await created.handle.close().catch(() => undefined);
+        await rm(created.path, { force: true }).catch(() => {
+          leftBehind = { fileId, path: savedNameFields(created.path, envelope).path };
+        });
+        throw saveFailure(error, { folder: destination.folder, fileId });
+      }
+      const shown = savedNameFields(created.path, envelope);
+      writtenAs.set(`${name}\u0000${sha256}`, shown);
+      totalBytes += bytes.byteLength;
+      files.push({ ...savedFields(listed, shown), size: bytes.byteLength, sha256, duplicate: false });
     }
-    const shown = savedNameFields(path, envelope);
-    seenHashes.set(sha256, shown);
-    totalBytes += bytes.byteLength;
-    files.push({ ...savedFields(listed, shown), size: bytes.byteLength, sha256, duplicate: false });
+  } catch (error) {
+    // A part Gmail would not hand over, or a file this machine could not write, stops the download. What was saved
+    // before it is still recorded, below, before the failure is reported.
+    stopped = { error };
   }
 
-  const at = context.now();
-  const manifestPath = downloadRecordPath(context.core, at, destination.choiceId);
+  /*
+   * The files the download stopped before: the one it was on, and each it never reached. Without them a download that
+   * stopped part-way left files on disk that no record named, and a caller told only that it failed would ask for
+   * everything again, and save each file it already had a second time as `-2`.
+   */
+  const stoppedBefore: string[] = [];
+  if (stopped !== undefined) {
+    for (const { messageId, part } of planned.slice(at)) {
+      const fileId = `${messageId}/${part.partId}`;
+      stoppedBefore.push(fileId);
+      skipped.push({
+        messageId,
+        partId: part.partId,
+        cause: 'stopped',
+        reason:
+          leftBehind?.fileId === fileId
+            ? `the download stopped while it was being written, and the part written could not be removed: ${leftBehind.path}`
+            : 'the download stopped before this file was saved',
+      });
+    }
+  }
+
+  const now = context.now();
+  const manifestPath = downloadRecordPath(context.core, now, destination.choiceId);
   const result: DownloadResult = {
     destinationRequired: false,
     folder: destination.folder,
@@ -513,23 +607,154 @@ export async function downloadAttachments(
     manifestPath,
     totalBytes,
   };
-  await writeFileAtomic(
+
+  // The manifest and the audit record, each written whatever became of the other: see Slack's `downloadFiles`.
+  let manifestFailure: { readonly error: unknown } | undefined;
+  try {
+    // This package's own file, under its state directory: never in the folder the person chose.
+    await writeFileAtomic(
+      manifestPath,
+      `${JSON.stringify(
+        {
+          at: now.toISOString(),
+          inbox: alias,
+          choiceId: destination.choiceId,
+          answeredVia: destination.answeredVia,
+          complete: stopped === undefined,
+          ...result,
+        },
+        null,
+        2,
+      )}\n`,
+    );
+  } catch (error) {
+    manifestFailure = { error };
+  }
+  const savedCount = files.filter((file) => !file.duplicate).length;
+  let auditFailure: { readonly error: unknown } | undefined;
+  try {
+    await context.core.audit.append({
+      inboxId: resolved.inbox.id,
+      alias,
+      operation: 'attachments.download',
+      outcome: stopped === undefined && manifestFailure === undefined ? 'ok' : 'failed',
+      surface: context.surface,
+      ids: {
+        messageIds: targets.map((target) => target.messageId),
+        savedParts: files.filter((file) => !file.duplicate).map((file) => `${file.messageId}/${file.partId}`),
+        ...(stoppedBefore.length === 0 ? {} : { stoppedBefore: [...stoppedBefore] }),
+      },
+      ...(destination.choiceId ? { approvalId: destination.choiceId } : {}),
+      // The folder and the parts' ids, never a saved name: a name is the sender's words, and the audit log is read back.
+      reason: `${savedCount} file(s), ${totalBytes} bytes, saved to ${destination.folder} (${destination.choice}, answered ${
+        destination.answeredVia === 'flag' ? 'by flag' : `in ${destination.answeredVia}`
+      }); ${skipped.length} skipped${stopped === undefined ? '' : '; stopped part-way'}${
+        manifestFailure === undefined ? '' : '; the manifest not written'
+      }${leftBehind === undefined ? '' : `; part of ${leftBehind.fileId} could not be removed from ${destination.folder}`}`,
+    });
+  } catch (error) {
+    auditFailure = { error };
+  }
+
+  if (stopped === undefined && manifestFailure === undefined && auditFailure === undefined) return result;
+  throw unfinished({
+    stopped,
+    manifestFailure,
+    auditFailure,
+    files: files.filter((file) => !file.duplicate),
+    folder: destination.folder,
     manifestPath,
-    `${JSON.stringify({ at: at.toISOString(), inbox: alias, choiceId: destination.choiceId, ...result }, null, 2)}\n`,
-  );
-
-  await context.core.audit.append({
-    inboxId: resolved.inbox.id,
-    alias,
-    operation: 'attachments.download',
-    outcome: 'ok',
-    surface: context.surface,
-    ids: { messageIds: targets.map((target) => target.messageId) },
-    ...(destination.choiceId ? { approvalId: destination.choiceId } : {}),
-    reason: `${files.length} file(s), ${totalBytes} bytes, saved to ${destination.folder} (${destination.choice})`,
+    stoppedBefore,
+    leftBehind,
   });
+}
 
-  return result;
+/** A failure's message, whatever was thrown. By here a file-system error has been made one naming no sender's name. */
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * The error a download ends with once files may be on disk: what went wrong, what was saved and where it is listed,
+ * which parts it stopped before, and any part-written file it could not remove — as Slack's `unfinished` says it.
+ *
+ * Parts are named by their ids, `<message id>/<part id>`, and the folder by its path: a saved name is the sender's
+ * words, and a hint is the tool's. A part-written file's path is carried as `savedNameFields` carries any path, inside
+ * the envelope unless its name is plainly a file name. A refusal the download stopped on keeps its own code and hint;
+ * anything else is `CONFIG`, as another file this machine could not write is.
+ */
+function unfinished(state: {
+  readonly stopped: { readonly error: unknown } | undefined;
+  readonly manifestFailure: { readonly error: unknown } | undefined;
+  readonly auditFailure: { readonly error: unknown } | undefined;
+  readonly files: readonly DownloadedFile[];
+  readonly folder: string;
+  readonly manifestPath: string;
+  readonly stoppedBefore: readonly string[];
+  readonly leftBehind: { readonly fileId: string; readonly path: string } | undefined;
+}): CommsError {
+  const { stopped, manifestFailure, auditFailure, files, folder, manifestPath, stoppedBefore, leftBehind } = state;
+  const cause = (stopped ?? manifestFailure ?? auditFailure)?.error;
+  const own = cause instanceof CommsError ? cause : undefined;
+  const count = files.length;
+  const them = count === 1 ? 'it' : 'them';
+  const ids = files.map((file) => `${file.messageId}/${file.partId}`);
+
+  const savedSoFar = count === 0 ? '' : `${count === 1 ? 'the file was' : 'the files were'} saved`;
+  let message: string;
+  if (stopped !== undefined) message = `the download stopped part-way: ${messageOf(stopped.error)}`;
+  else if (manifestFailure !== undefined) {
+    message = `${savedSoFar === '' ? '' : `${savedSoFar}, but `}the manifest could not be written: ${messageOf(manifestFailure.error)}`;
+  } else {
+    message = `${savedSoFar === '' ? '' : `${savedSoFar} and the manifest lists ${them}, but `}the audit log could not be written: ${messageOf(auditFailure?.error)}`;
+  }
+
+  const hint: string[] = [];
+  if (own?.hint !== undefined) hint.push(own.hint);
+  if (count === 0) hint.push('Nothing was saved.');
+  else {
+    const listed =
+      manifestFailure === undefined
+        ? `, and the manifest at ${manifestPath} lists ${them}`
+        : auditFailure === undefined
+          ? ', and the audit log records which'
+          : `, and nothing else records ${count === 1 ? 'it' : 'which'}: ${ids.join(', ')}, in ${folder}`;
+    hint.push(
+      `${count === 1 ? '1 file was' : `${count} files were`} saved${stopped === undefined ? '' : ' before it stopped'}${listed}.`,
+      `Downloading again saves ${count === 1 ? 'that file' : 'each of those files'} a second time, so ask only for what is missing.`,
+    );
+  }
+  if (stoppedBefore.length > 0) {
+    const which =
+      stoppedBefore.length === 1
+        ? 'The attachment it stopped before is'
+        : `The ${stoppedBefore.length} attachments it stopped before are`;
+    hint.push(
+      manifestFailure === undefined
+        ? `${which} in the manifest under \`skipped\`, as \`stopped\`.`
+        : auditFailure === undefined
+          ? `${which} in the audit log.`
+          : `${which} ${stoppedBefore.join(', ')}.`,
+    );
+  }
+  if (leftBehind !== undefined) {
+    hint.push(
+      `Part of ${leftBehind.fileId} was written and could not be removed: delete it — it is not the whole file. It is ${leftBehind.path}`,
+    );
+  }
+
+  return new CommsError(own?.code ?? 'CONFIG', message, {
+    hint: hint.join(' '),
+    details: {
+      ...(own?.details ?? {}),
+      saved: count,
+      savedFiles: files.map((file) => ({ messageId: file.messageId, partId: file.partId, path: file.path })),
+      stoppedBefore: [...stoppedBefore],
+      partialFile: leftBehind?.path ?? null,
+      manifestPath: manifestFailure === undefined ? manifestPath : null,
+      audited: auditFailure === undefined,
+    },
+  });
 }
 
 /** A download with nothing in it to save: said, with each reason, and nothing asked, made or written. */

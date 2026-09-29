@@ -45,7 +45,8 @@ test('control, zero-width and bidi characters are dropped from a saved name', ()
 
 test('a saved name never starts with a dot or a hyphen, so it is never a project’s configuration or an option', () => {
   assert.equal(savedFileName('.npmrc', 'F1'), 'npmrc');
-  assert.equal(savedFileName('.envrc', 'F1'), 'envrc');
+  // Without its dot, `.envrc` is still a name a tool reads on its own: see below.
+  assert.equal(savedFileName('.envrc', 'F1'), 'download-envrc');
   assert.equal(savedFileName('..gitattributes', 'F1'), 'gitattributes');
   assert.equal(savedFileName(' .env.local', 'F1'), 'env.local');
   // An invisible character in front is dropped first, so it cannot shield the dot.
@@ -56,6 +57,74 @@ test('a saved name never starts with a dot or a hyphen, so it is never a project
   // Dropped before the leading characters are looked at, so none of them can shield a hyphen either.
   assert.equal(savedFileName(`${ZWSP}-rf`, 'F1'), 'rf');
   assert.equal(savedFileName(`${RLO}--help`, 'F1'), 'help');
+});
+
+test('a file tools read on their own is saved as download-<name>, whatever its case', () => {
+  for (const [given, saved] of [
+    ['CLAUDE.md', 'download-CLAUDE.md'],
+    ['claude.MD', 'download-claude.MD'],
+    ['AGENTS.md', 'download-AGENTS.md'],
+    ['GEMINI.md', 'download-GEMINI.md'],
+    ['CONVENTIONS.md', 'download-CONVENTIONS.md'],
+    ['.cursorrules', 'download-cursorrules'],
+    ['copilot-instructions.md', 'download-copilot-instructions.md'],
+    ['Makefile', 'download-Makefile'],
+    ['GNUmakefile', 'download-GNUmakefile'],
+    ['makefile', 'download-makefile'],
+    ['Dockerfile', 'download-Dockerfile'],
+    ['docker-compose.yml', 'download-docker-compose.yml'],
+    ['compose.yaml', 'download-compose.yaml'],
+    ['package.json', 'download-package.json'],
+    ['package-lock.json', 'download-package-lock.json'],
+    ['pnpm-workspace.yaml', 'download-pnpm-workspace.yaml'],
+    ['pyproject.toml', 'download-pyproject.toml'],
+    ['setup.py', 'download-setup.py'],
+    ['setup.cfg', 'download-setup.cfg'],
+    ['conftest.py', 'download-conftest.py'],
+    ['requirements.txt', 'download-requirements.txt'],
+    ['Gemfile', 'download-Gemfile'],
+    ['Rakefile', 'download-Rakefile'],
+    ['Cargo.toml', 'download-Cargo.toml'],
+    ['go.mod', 'download-go.mod'],
+    ['build.gradle', 'download-build.gradle'],
+    ['pom.xml', 'download-pom.xml'],
+    ['tsconfig.json', 'download-tsconfig.json'],
+    ['jsconfig.json', 'download-jsconfig.json'],
+    ['vite.config.ts', 'download-vite.config.ts'],
+    ['next.config.mjs', 'download-next.config.mjs'],
+    ['webpack.config.js', 'download-webpack.config.js'],
+    ['.env', 'download-env'],
+    ['.envrc', 'download-envrc'],
+    ['authorized_keys', 'download-authorized_keys'],
+    ['known_hosts', 'download-known_hosts'],
+    ['id_rsa', 'download-id_rsa'],
+    ['id_ed25519.pub', 'download-id_ed25519.pub'],
+    ['com.example.agent.plist', 'download-com.example.agent.plist'],
+    ['app.desktop', 'download-app.desktop'],
+    ['sync.service', 'download-sync.service'],
+    ['evil.pth', 'download-evil.pth'],
+    ['Invoice.lnk', 'download-Invoice.lnk'],
+    ['portal.url', 'download-portal.url'],
+    ['link.webloc', 'download-link.webloc'],
+    // Made safe first, then judged: a trailing dot Windows drops, and a leading one, do not hide it.
+    ['CLAUDE.md.', 'download-CLAUDE.md'],
+    ['..CLAUDE.md', 'download-CLAUDE.md'],
+  ] as const) {
+    assert.equal(savedFileName(given, 'F1'), saved, given);
+    assert.ok(fileRisks(given, 'text/plain').includes('auto-read'), `${given} is not flagged`);
+  }
+  // Near names are not these names.
+  for (const name of [
+    'CLAUDE.md.txt',
+    'my-package.json',
+    'Makefile.old',
+    'env.local',
+    'notes.md',
+    'download-CLAUDE.md',
+  ]) {
+    assert.equal(savedFileName(name, 'F1'), name, name);
+    assert.ok(!fileRisks(name, 'text/plain').includes('auto-read'), `${name} is flagged`);
+  }
 });
 
 test('Windows: reserved device names, and the trailing dots and spaces it drops', () => {

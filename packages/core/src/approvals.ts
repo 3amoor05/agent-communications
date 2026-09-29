@@ -29,11 +29,13 @@ import { withFileLock } from './lock.ts';
  * A change approval (`kind: 'change'`) lives in the same store and goes through the same states, except that its
  * claim goes straight to `used`: what it permits is a write to the configuration, which the claimant makes itself.
  *
- * So does a download's question (`kind: 'download'`): where to save the files a Gmail or Slack download names. Nobody
- * approves it — the person answers it, in the chat or at a terminal — so it is only ever pending, then claimed once,
- * straight to `used`, by the download that asked, with the person's answer beside it. It gets the store's expiry, its
- * single use and its binding for the reason a change does: an answer given for three invoices must not save the next
- * conversation's files, nor be spent twice.
+ * So does a download's question (`kind: 'download'`): where to save the files a Gmail or Slack download names. It is
+ * held to the change policy of the mailbox or workspace it is about, as every other change there is. Under `chat` the
+ * person's answer, relayed from the chat, claims it straight from `pending`. Under `confirm` it has to be answered
+ * where an agent cannot answer for them — at their own terminal, or in a form a trusted client shows them — which
+ * records the answer and moves it to `approved`; only then is it claimed, straight to `used`, and the recorded answer
+ * is the one that saves. It gets the store's expiry, its single use and its binding for the reason a change does: an
+ * answer given for three invoices must not save the next conversation's files, nor be spent twice.
  */
 
 export type ApprovalState = 'pending' | 'approved' | 'sending' | 'used' | 'failed' | 'unknown' | 'expired' | 'revoked';
@@ -100,7 +102,22 @@ export interface DownloadBinding {
   files: string[];
   /** The two folders the question offered, as absolute paths. */
   folders: { downloads: string; current: string };
+  /**
+   * The files as the question listed them to the person — the names they would be saved under, made safe, and their
+   * sizes — so a terminal or a form can show the question again. Not part of the digest: the ids above are.
+   */
+  listing?: Array<{ name: string; size: number | null; renamed?: boolean | undefined }> | undefined;
+  /** The person's answer, when they gave it where an agent cannot: at a terminal, or in a trusted client's form. */
+  answer?: RecordedSaveAnswer | undefined;
 }
+
+/**
+ * An answer recorded on a question: one of the two folders it offered, or the folder the person named, as an absolute
+ * path — resolved where they typed it, so it means the folder they read.
+ */
+export type RecordedSaveAnswer =
+  | { readonly choice: 'downloads' | 'current' }
+  | { readonly choice: 'other'; readonly folder: string };
 
 /** What a claim of a download's question is held to: all of the binding but its summary and the folders it offered. */
 export type DownloadRequest = Pick<DownloadBinding, 'target' | 'operation' | 'request' | 'files'>;
@@ -137,6 +154,36 @@ export function downloadDrift(asked: DownloadRequest, now: DownloadRequest): str
   }
   if (canonicalJson(asked.files) !== canonicalJson(now.files)) return 'the files are not the ones the question listed';
   return 'the download is not the one the question was asked for';
+}
+
+/**
+ * Why a download's question cannot be claimed under this change policy — the stricter of `livePolicy` and the one it
+ * was asked under — or null. Changes nothing, so a download can ask before it looks at a folder, and the store asks
+ * again as it claims.
+ *
+ * Under `chat` nothing stops it: the person's answer, relayed from the conversation, is the answer. Anything stricter
+ * needs the answer recorded on the question by a channel an agent cannot answer — the person's own terminal, or a
+ * form a trusted client showed them. An answer carried in a tool's arguments or a command's flags is refused however
+ * it was worded, with the command that answers it named, and the question left open for the person.
+ */
+export function downloadClaimRefusal(
+  record: ApprovalRecord,
+  livePolicy: ChangePolicy,
+  pendingHint?: string,
+): CommsError | null {
+  if (stricterPolicy(livePolicy, record.requiredPolicy) === 'chat') return null;
+  const answered =
+    record.state === 'approved' &&
+    (record.approvedVia === 'terminal' || record.approvedVia === 'elicitation') &&
+    record.download?.answer !== undefined;
+  if (answered) return null;
+  return refuseDownload(
+    'APPROVAL_PENDING',
+    'the change policy here is confirm, so the person answers where to save themselves — at their own terminal, not through an agent',
+    record,
+    pendingHint ??
+      'Ask the person to answer it at their own terminal, with the approve command of the channel the files come from and this choice id; then make the download again with the choice id alone.',
+  );
 }
 
 /** The kind of a record. Absent is a send: every record written before changes had approvals. */
@@ -286,6 +333,13 @@ export interface ClaimOptions {
    */
   pendingHint?: string | undefined;
 }
+
+/**
+ * What to do with a download's question, for a caller that took it for something else: it is answered, not approved
+ * with a code — in the chat, or at the person's own terminal with the command of the channel that asked.
+ */
+export const DOWNLOAD_ANSWER_HINT =
+  'It is answered, not approved with a code: the person says where in the chat, or — under a confirm change policy — at their own terminal, with the `approve` command of the channel the files come from and this id. The download that asked is then made again with this id.';
 
 export const APPROVAL_TTL_MS: number = 10 * 60 * 1000;
 /** A record left in `sending` this long belongs to a process that died mid-send: the outcome is unknown. */
@@ -490,7 +544,7 @@ export class ApprovalStore {
         'USAGE',
         `${id} is a question about where to save files, not ${kind === 'send' ? 'a send' : 'a configuration change'}`,
         record,
-        'Nobody approves it: the person answers it, and the download that asked is made again with their answer and this id.',
+        DOWNLOAD_ANSWER_HINT,
       );
     }
     if (kind === 'download') {
@@ -757,8 +811,15 @@ export class ApprovalStore {
   /**
    * A download's question, pending, bound to `downloadDigest(input.download)` — computed here, never taken from the
    * caller, as a change's digest is. It stands in for the draft revision too.
+   *
+   * `policy` is the change policy of the mailbox or workspace the files come from, as it stands when the question is
+   * asked: where a stranger's files land on this machine is a change to it, and is answered the way that account's
+   * other changes are approved. A claim holds the question to the stricter of this and the policy then.
    */
-  async createDownload(input: { download: DownloadBinding }): Promise<ApprovalRecord & { download: DownloadBinding }> {
+  async createDownload(input: {
+    download: DownloadBinding;
+    policy: ChangePolicy;
+  }): Promise<ApprovalRecord & { download: DownloadBinding }> {
     const now = this.#now();
     const download: DownloadBinding = {
       summary: input.download.summary,
@@ -767,8 +828,19 @@ export class ApprovalStore {
       request: JSON.parse(canonicalJson(input.download.request)) as Record<string, unknown>,
       files: [...input.download.files],
       folders: { downloads: input.download.folders.downloads, current: input.download.folders.current },
+      ...(input.download.listing === undefined
+        ? {}
+        : {
+            listing: input.download.listing.map((file) => ({
+              name: file.name,
+              size: file.size,
+              ...(file.renamed === true ? { renamed: true } : {}),
+            })),
+          }),
     };
     const digest = downloadDigest(download);
+    // Anything but `chat` is `confirm`: a policy word this release does not know is not a reason to ask less.
+    const policy: ChangePolicy = input.policy === 'chat' ? 'chat' : 'confirm';
     const record = {
       approvalId: newApprovalId(),
       kind: 'download' as const,
@@ -777,9 +849,8 @@ export class ApprovalStore {
       draftId: 'download',
       draftMessageId: digest,
       digest,
-      // A question is answered in the chat or at a terminal, whatever any policy says: nothing is loosened or sent.
-      policy: 'chat' as const,
-      requiredPolicy: 'chat' as const,
+      policy,
+      requiredPolicy: policy,
       riskFlags: [],
       // Not an expectation of recipients, as for a change: the field every listing already shows.
       expect: { to: [], cc: [], bcc: [], subject: download.summary },
@@ -795,22 +866,63 @@ export class ApprovalStore {
   }
 
   /**
+   * Records the person's answer to a download's question, given where an agent cannot give it: at their own terminal,
+   * or in a form a trusted client showed them. The question moves to `approved`, carrying the answer, and waits for
+   * the download to claim it — which it may then do under `confirm`, and which saves where this answer says.
+   *
+   * Only a pending question can be answered, and only once: a second answer is refused, not taken over the first.
+   */
+  async answerDownload(
+    approvalId: string,
+    via: ApprovalChannel,
+    answer: RecordedSaveAnswer,
+  ): Promise<ApprovalRecord & { download: DownloadBinding }> {
+    const recorded: RecordedSaveAnswer =
+      answer.choice === 'other' ? { choice: 'other', folder: answer.folder } : { choice: answer.choice };
+    const result = await this.#transition(approvalId, (current) => {
+      this.#requireKind(current, 'download');
+      if (current.state === 'approved') {
+        throw refuseDownload('APPROVAL_VOID', 'the question was answered already, and it is answered once', current);
+      }
+      if (current.state !== 'pending') throw this.#stateError(current);
+      if (!current.download || downloadDigest(current.download) !== current.digest) {
+        throw refuseDownload('APPROVAL_VOID', 'the question does not describe the download it is bound to', current);
+      }
+      return {
+        ...current,
+        state: 'approved',
+        approvedVia: via,
+        approvedDigest: current.digest,
+        download: { ...current.download, answer: recorded },
+      };
+    });
+    return result as ApprovalRecord & { download: DownloadBinding };
+  }
+
+  /**
    * Claims a download's question, once, for the download the caller is about to make — and returns it, with the
-   * folders it offered, so that `downloads` and `current` in the answer mean the paths the person read.
+   * folders it offered, so that `downloads` and `current` in the answer mean the paths the person read, and with the
+   * answer the person recorded, when they recorded one.
    *
    * `live` is the download as the caller computes it now: the same account, the same request and the same files, or
-   * the question is voided and has to be asked again — the person answered for those files and no others. Only a
-   * pending question can be claimed; one used, voided or expired is refused as an approval in that state is.
+   * the question is voided and has to be asked again — the person answered for those files and no others.
+   *
+   * `options.policy` is the change policy of that account now, and the stricter of it and the one the question was
+   * asked under decides. Under `chat`, a pending question is claimed with the answer the caller carries: the person
+   * gave it in the conversation. Under `confirm`, only a question the person answered at a terminal or in a trusted
+   * form can be claimed; a pending one is refused, and left as it is, so they can still answer it. One used, voided or
+   * expired is refused as an approval in that state is.
    */
   async claimForDownload(
     approvalId: string,
     live: DownloadRequest,
+    options: { policy?: ChangePolicy | undefined; pendingHint?: string | undefined } = {},
   ): Promise<ApprovalRecord & { download: DownloadBinding }> {
     const digest = downloadDigest(live);
     let failure: Failure | null = null;
     const result = await this.#transition(approvalId, (current) => {
       this.#requireKind(current, 'download');
-      if (current.state !== 'pending') throw this.#stateError(current);
+      if (current.state !== 'pending' && current.state !== 'approved') throw this.#stateError(current);
       const voidWith = (reason: string): ApprovalRecord => {
         failure = { code: 'APPROVAL_VOID', reason };
         return { ...current, state: 'revoked', reason };
@@ -820,6 +932,8 @@ export class ApprovalStore {
         return voidWith('the question does not describe the download it is bound to');
       }
       if (digest !== current.digest) return voidWith(downloadDrift(current.download, live));
+      const refusal = downloadClaimRefusal(current, options.policy ?? 'chat', options.pendingHint);
+      if (refusal !== null) throw refusal;
       return { ...current, state: 'used' };
     });
     const failed = failure as Failure | null;
