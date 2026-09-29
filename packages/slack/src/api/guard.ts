@@ -1,5 +1,13 @@
 import { CommsError } from '@agentcomms/core';
-import { type FileOfPath, fileOfPath, methodOfUrl, methodRule, SLACK_FILES_ORIGIN, SLACK_ORIGIN } from './methods.ts';
+import {
+  type FileOfPath,
+  fileOfPath,
+  isUploadPath,
+  methodOfUrl,
+  methodRule,
+  SLACK_FILES_ORIGIN,
+  SLACK_ORIGIN,
+} from './methods.ts';
 
 /**
  * The one door every Slack request goes through.
@@ -14,7 +22,9 @@ import { type FileOfPath, fileOfPath, methodOfUrl, methodRule, SLACK_FILES_ORIGI
  * stepped around by calling Slack directly.
  *
  * Two origins, both hardcoded: the Web API, and `files.slack.com` for a file's bytes. The second is shut except
- * inside a download grant naming one file, and then open for one `GET` of that file's path and nothing else.
+ * inside a download grant naming one file, and then open for one `GET` of that file's path and nothing else — or
+ * inside an upload grant naming one upload URL, which opens only inside an approved file post, and then for one
+ * `POST` to that exact URL and nothing else.
  */
 
 export interface WritePermit {
@@ -43,11 +53,28 @@ export interface WritePermit {
    * gets through inside a download, and a download is refused inside either of those.
    */
   downloading: FileOfPath | null;
+  /**
+   * The one upload URL a file's bytes may be sent to next, or null — which is always, except inside `uploadWith`.
+   *
+   * The fourth answer on this object, and the only one that borrows. An upload is part of a post: the bytes are what
+   * the person approved, and Slack discards them unless the post that names a channel follows. So it opens only while
+   * that post's own permit is open for {@link UPLOAD_PUBLISHES}, and the guard asks again at the request whether it
+   * still is. It lends nothing back: opening it leaves the post's permit as it was, for the one call that publishes.
+   */
+  uploading: string | null;
 }
 
 export function closedPermit(): WritePermit {
-  return { approvalId: null, method: null, configuring: null, downloading: null };
+  return { approvalId: null, method: null, configuring: null, downloading: null, uploading: null };
 }
+
+/**
+ * The method whose permit an upload goes out inside: the call that makes uploaded files visible in a channel.
+ *
+ * `files.getUploadURLExternal` is a `prepare` and spends nothing, and the bytes themselves are not a Web API call, so
+ * a file post's approval opens the permit for this method alone — and the upload rides inside it, before it is spent.
+ */
+const UPLOAD_PUBLISHES = 'files.completeUploadExternal';
 
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
@@ -96,6 +123,39 @@ function checkDownload(url: URL, verb: string, permit: WritePermit): void {
   }
   // One grant, one request: a second fetch inside the same grant finds the door shut.
   permit.downloading = null;
+}
+
+function refuseUpload(message: string): CommsError {
+  return new CommsError('SEND_REFUSED', message, { hint: 'This is a bug — please report it.' });
+}
+
+/**
+ * The files host's upload path: one `POST`, to the exact URL the open grant names, while the post it belongs to is
+ * still open — and then the grant is spent.
+ *
+ * The post's permit is asked about here, at the request, and not only where the grant was opened. A grant is opened
+ * inside the permit, but the permit is spent by the call that publishes; bytes sent after that belong to no approval,
+ * whichever way the grant came to be still standing. As with a download, every refusal here comes before the grant
+ * is spent, so a request that got something wrong does not use up the upload it was meant to be.
+ */
+function checkUpload(url: URL, verb: string, permit: WritePermit): void {
+  const grant = permit.uploading;
+  if (grant === null) {
+    throw refuseUpload(`${SLACK_FILES_ORIGIN} takes an upload only inside an approved post, and no upload is open`);
+  }
+  if (permit.approvalId === null || permit.method !== UPLOAD_PUBLISHES) {
+    throw refuseUpload(
+      `a file is uploaded only inside an approved post, and no approval for ${UPLOAD_PUBLISHES} is open`,
+    );
+  }
+  if (verb !== 'POST') throw refuseUpload(`a file is uploaded with POST, not ${verb}`);
+  /*
+   * The whole URL, compared exactly: Slack's reply named it, and nothing about it is ours to vary. Not repeated in the
+   * refusal — it is a signed address, good for one upload.
+   */
+  if (url.href !== grant) throw refuseUpload('that is not the URL Slack gave for this upload');
+  // One grant, one request: a second POST inside the same grant finds the door shut.
+  permit.uploading = null;
 }
 
 /**
@@ -160,7 +220,13 @@ export function guardSlackRequests(inner: FetchLike, permit: WritePermit): Fetch
 
     if (actual === SLACK_FILES_ORIGIN) {
       const verb = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
-      checkDownload(parsed, verb, permit);
+      /*
+       * Which of the two the path is decides which grant is asked, and each refuses everything its own grant does not
+       * name. So a download path is shut inside an upload grant, and an upload path inside a download grant: neither
+       * grant lends the host to anything but the one request it was opened for.
+       */
+      if (parsed.pathname === '/upload' || parsed.pathname.startsWith('/upload/')) checkUpload(parsed, verb, permit);
+      else checkDownload(parsed, verb, permit);
       // The redirect rule below holds here too, and matters more: this request carries the token, and a 30x would
       // take it to an address chosen by whatever answered rather than by the path just checked.
       return inner(input, { ...init, redirect: 'error' });
@@ -259,7 +325,7 @@ export async function spendOn<T>(
   method: string,
   body: () => Promise<T>,
 ): Promise<T> {
-  if (permit.approvalId !== null || permit.downloading !== null) {
+  if (permit.approvalId !== null || permit.downloading !== null || permit.uploading !== null) {
     throw new CommsError('SEND_REFUSED', 'a permit is already open; they do not nest', {
       hint: 'This is a bug — please report it.',
     });
@@ -289,7 +355,12 @@ export async function configureWith<T>(permit: WritePermit, method: string, body
       hint: 'This is a bug — please report it.',
     });
   }
-  if (permit.approvalId !== null || permit.configuring !== null || permit.downloading !== null) {
+  if (
+    permit.approvalId !== null ||
+    permit.configuring !== null ||
+    permit.downloading !== null ||
+    permit.uploading !== null
+  ) {
     throw new CommsError('SEND_REFUSED', 'a permit is already open; they do not nest', {
       hint: 'This is a bug — please report it.',
     });
@@ -317,7 +388,12 @@ export async function downloadWith<T>(permit: WritePermit, file: FileOfPath, bod
   if (named === null || named.teamId !== file.teamId || named.fileId !== file.fileId) {
     throw refuseDownload('a download grant names one Slack team id and one Slack file id', 'wrong-path');
   }
-  if (permit.approvalId !== null || permit.configuring !== null || permit.downloading !== null) {
+  if (
+    permit.approvalId !== null ||
+    permit.configuring !== null ||
+    permit.downloading !== null ||
+    permit.uploading !== null
+  ) {
     throw new CommsError('SEND_REFUSED', 'a permit is already open; they do not nest', {
       hint: 'This is a bug — please report it.',
     });
@@ -327,5 +403,53 @@ export async function downloadWith<T>(permit: WritePermit, file: FileOfPath, bod
     return await body();
   } finally {
     permit.downloading = null;
+  }
+}
+
+/**
+ * Opens an upload grant for exactly one `POST` of one file's bytes to `url`, and closes it however `body` ends.
+ *
+ * The fourth of the shape, and the one that is not a door of its own: it opens only inside a post's permit for
+ * {@link UPLOAD_PUBLISHES}, which the gate opens after the person's approval has been claimed. So there is no way to
+ * send a file's bytes that does not pass the approval first — and none to send them after the post has published,
+ * since the guard asks again at the request.
+ *
+ * `url` is the `upload_url` Slack returned, whole. It must be on the files origin, under `/upload/`, with no
+ * credentials and no fragment; the request is then compared with it exactly, so the grant names one URL and not a
+ * pattern. It lends nothing and does not nest: no download, configuration, other upload or other post opens inside it.
+ *
+ * Not exported from the package root. `api/upload.ts` is the one caller, and a test fails if another appears.
+ */
+export async function uploadWith<T>(permit: WritePermit, url: string, body: () => Promise<T>): Promise<T> {
+  let named: URL | undefined;
+  try {
+    named = new URL(url);
+  } catch {
+    named = undefined;
+  }
+  if (
+    named === undefined ||
+    named.origin !== SLACK_FILES_ORIGIN ||
+    named.username !== '' ||
+    named.password !== '' ||
+    named.hash !== '' ||
+    url.includes('#') ||
+    !isUploadPath(named.pathname)
+  ) {
+    throw refuseUpload(`an upload grant names one URL under ${SLACK_FILES_ORIGIN}/upload/, as Slack gave it`);
+  }
+  if (permit.approvalId === null || permit.method !== UPLOAD_PUBLISHES) {
+    throw refuseUpload(`a file is uploaded only inside an approved post, with the permit for ${UPLOAD_PUBLISHES} open`);
+  }
+  if (permit.configuring !== null || permit.downloading !== null || permit.uploading !== null) {
+    throw new CommsError('SEND_REFUSED', 'a permit is already open; they do not nest', {
+      hint: 'This is a bug — please report it.',
+    });
+  }
+  permit.uploading = named.href;
+  try {
+    return await body();
+  } finally {
+    permit.uploading = null;
   }
 }

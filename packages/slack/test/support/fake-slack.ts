@@ -14,10 +14,16 @@ import type { AddressInfo } from 'node:net';
  * One server for both hosts, told apart by a prefix the rewrite adds: `/api/…` is the Web API, `/files/…` the files
  * host. Anything else that arrives — a redirect somebody followed, say — is recorded as `other`, so a test can say
  * nothing did.
+ *
+ * The files host takes uploads as well as downloads: `acceptUploads` scripts the three Web API methods a file post
+ * makes — `files.getUploadURLExternal`, `files.completeUploadExternal` and `files.info` — and the upload URLs it hands
+ * out are paths on the files host, whose bytes are kept exactly as they arrived.
  */
 
 export const API = 'https://slack.com/api/';
 export const FILES = 'https://files.slack.com/files-pri/';
+/** Where the upload URLs `acceptUploads` hands out point: the files host, under `/upload/`, as Slack's do. */
+export const UPLOADS = 'https://files.slack.com/upload/';
 
 export interface SlackRequest {
   /** Which host it reached: the Web API, the files host, or neither — which is always a failure. */
@@ -31,6 +37,8 @@ export interface SlackRequest {
   readonly authorization: string | undefined;
   readonly contentType: string | undefined;
   readonly params: URLSearchParams;
+  /** The body exactly as it arrived, byte for byte: what an upload sent. */
+  readonly body: Buffer;
   /** The path and query exactly as received. */
   readonly url: string;
   /** Everything that arrived — request line, every header, the body — for "it appeared nowhere else" assertions. */
@@ -57,12 +65,58 @@ export interface FileReply {
 
 export type FileAnswer = (request: SlackRequest) => FileReply;
 
+/** One upload URL `files.getUploadURLExternal` handed out, and what it was asked for. */
+export interface IssuedUpload {
+  readonly fileId: string;
+  readonly url: string;
+  readonly filename: string;
+  readonly length: number;
+}
+
+/** One `files.completeUploadExternal`, as Slack was asked it. */
+export interface CompletedUpload {
+  readonly channelId: string | null;
+  readonly initialComment: string | null;
+  readonly threadTs: string | null;
+  readonly files: readonly { id: string; title?: string }[];
+}
+
+/** What the scripted file post has seen, for a test to hold the request against. */
+export interface FakeUploads {
+  readonly issued: IssuedUpload[];
+  /** The bytes each upload URL received, by the file id it was issued for. */
+  readonly received: Record<string, Buffer>;
+  readonly completed: CompletedUpload[];
+}
+
+export interface UploadOptions {
+  /**
+   * The message ts `files.info` reports in the file's shares for the channel. `null` reports no shares at all — Slack
+   * has not attached the file to a message yet — which is what a post returns `ts: null` for.
+   */
+  ts?: string | null;
+  /** Whether the channel is private, so the share is under `shares.private` rather than `shares.public`. */
+  private?: boolean;
+  /** A Slack error for `files.completeUploadExternal` to answer with, in place of success. */
+  completeError?: string;
+  /** A Slack error for `files.getUploadURLExternal` to answer with, in place of an upload URL. */
+  urlError?: string;
+}
+
 export interface FakeSlack {
   readonly requests: SlackRequest[];
   /** Replies by method. A method with no reply answers `unknown_method`, as Slack does. */
   script: Record<string, Reply>;
   /** Answers by `<TEAM>-<FILEID>`, the pair the files path names. A file with no answer is a 404. */
   files: Record<string, FileAnswer>;
+  /** How the files host answers an upload. `200 OK` unless replaced. */
+  uploadAnswer: FileAnswer;
+  /**
+   * Scripts the three Web API methods a file post makes, and returns what they see as they are called.
+   *
+   * Replaces any `files.info` already scripted: a test that posts files is not also downloading them.
+   */
+  acceptUploads(options?: UploadOptions): FakeUploads;
   /** This server's own origin, for a reply that must point somewhere the guard never approved — a redirect. */
   readonly local: string;
   /** The inner fetch to hand the CLI. */
@@ -70,19 +124,92 @@ export interface FakeSlack {
   close(): Promise<void>;
 }
 
-function read(request: IncomingMessage): Promise<string> {
+function read(request: IncomingMessage): Promise<Buffer> {
   return new Promise((settle, fail) => {
-    let body = '';
-    request.setEncoding('utf8');
-    request.on('data', (chunk: string) => {
-      body += chunk;
+    const chunks: Buffer[] = [];
+    request.on('data', (chunk: Buffer) => {
+      chunks.push(chunk);
     });
-    request.on('end', () => settle(body));
+    request.on('end', () => settle(Buffer.concat(chunks)));
     request.on('error', fail);
   });
 }
 
+function sendReply(reply: FileReply, response: ServerResponse): void {
+  if (reply.drop) {
+    response.socket?.destroy();
+    return;
+  }
+  const status = reply.status ?? 200;
+  const headers = { 'content-type': 'application/octet-stream', ...reply.headers };
+  const body = typeof reply.body === 'string' ? Buffer.from(reply.body) : Buffer.from(reply.body ?? new Uint8Array());
+  response.writeHead(status, { 'content-length': String(body.byteLength), ...headers });
+  response.end(body);
+}
+
+/** Scripts a file post on `fake`: see {@link FakeSlack.acceptUploads}. */
+function acceptUploads(fake: FakeSlack, options: UploadOptions = {}): FakeUploads {
+  const seen: FakeUploads = { issued: [], received: {}, completed: [] };
+  let next = 0;
+  fake.script['files.getUploadURLExternal'] = (request) => {
+    if (options.urlError) return { ok: false, error: options.urlError };
+    next += 1;
+    const fileId = `F0UP${String(next).padStart(4, '0')}`;
+    // Opaque, as Slack's are, and different for every file.
+    const url = `${UPLOADS}v1/CwAB${fileId}x${String(next * 7919)}`;
+    seen.issued.push({
+      fileId,
+      url,
+      filename: request.params.get('filename') ?? '',
+      length: Number(request.params.get('length')),
+    });
+    return { ok: true, upload_url: url, file_id: fileId };
+  };
+  fake.script['files.completeUploadExternal'] = (request) => {
+    const files = JSON.parse(request.params.get('files') ?? '[]') as { id: string; title?: string }[];
+    seen.completed.push({
+      channelId: request.params.get('channel_id'),
+      initialComment: request.params.get('initial_comment'),
+      threadTs: request.params.get('thread_ts'),
+      files,
+    });
+    if (options.completeError) return { ok: false, error: options.completeError };
+    // Slack's answer: the files, and no message ts anywhere in it.
+    return { ok: true, files: files.map((file) => ({ id: file.id, title: file.title ?? '' })) };
+  };
+  fake.script['files.info'] = (request) => {
+    const id = request.params.get('file') ?? '';
+    const done = seen.completed.find((completed) => completed.files.some((file) => file.id === id));
+    const ts = options.ts === undefined ? '1700000000.000200' : options.ts;
+    const channel = done?.channelId ?? '';
+    const share = { ts: ts ?? '', ...(done?.threadTs ? { thread_ts: done.threadTs } : {}) };
+    return {
+      ok: true,
+      file: {
+        id,
+        name: seen.issued.find((issued) => issued.fileId === id)?.filename ?? '',
+        shares:
+          ts === null || done === undefined ? {} : { [options.private ? 'private' : 'public']: { [channel]: [share] } },
+      },
+    };
+  };
+  // Kept apart from `uploadAnswer`, so a test that changes how the host answers still sees what it was sent.
+  receivers.set(fake, (request) => {
+    const issued = seen.issued.find((upload) => upload.url === `https://files.slack.com${request.path}`);
+    if (issued) seen.received[issued.fileId] = request.body;
+  });
+  return seen;
+}
+
+/** What each fake does with an upload's bytes before it answers: `acceptUploads` keeps them. */
+const receivers = new WeakMap<FakeSlack, (request: SlackRequest) => void>();
+
 function answerFile(fake: FakeSlack, recorded: SlackRequest, response: ServerResponse): void {
+  if (recorded.path.startsWith('/upload/')) {
+    receivers.get(fake)?.(recorded);
+    sendReply(fake.uploadAnswer(recorded), response);
+    return;
+  }
   const pair = recorded.path.split('/')[2] ?? '';
   const answer = fake.files[pair];
   const reply: FileReply = answer ? answer(recorded) : { status: 404, body: 'file_not_found' };
@@ -114,6 +241,8 @@ export async function startFakeSlack(script: Record<string, Reply> = {}): Promis
     requests,
     script,
     files: {},
+    uploadAnswer: () => ({ status: 200, body: 'OK' }),
+    acceptUploads: (options) => acceptUploads(fake, options),
     local: '',
     fetch: async () => {
       throw new Error('not started');
@@ -123,7 +252,8 @@ export async function startFakeSlack(script: Record<string, Reply> = {}): Promis
 
   const server = createServer((request: IncomingMessage, response: ServerResponse) => {
     void (async () => {
-      const body = await read(request);
+      const bytes = await read(request);
+      const body = bytes.toString('utf8');
       const url = request.url ?? '';
       const pathname = url.split('?')[0] ?? '';
       const host = pathname.startsWith('/api/') ? 'api' : pathname.startsWith('/files/') ? 'files' : 'other';
@@ -140,6 +270,7 @@ export async function startFakeSlack(script: Record<string, Reply> = {}): Promis
         authorization: request.headers.authorization,
         contentType: request.headers['content-type'],
         params: new URLSearchParams(body),
+        body: bytes,
         url,
         raw: `${request.method} ${url}\n${headers.join('\n')}\n\n${body}`,
       };
@@ -171,7 +302,9 @@ export async function startFakeSlack(script: Record<string, Reply> = {}): Promis
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
       // Only ever a URL the guard has approved. Anything else here means the guard let it through, which is a failure.
       if (url.startsWith(API)) return fetch(url.replace('https://slack.com', origin), init);
-      if (url.startsWith(FILES)) return fetch(url.replace('https://files.slack.com', `${origin}/files`), init);
+      if (url.startsWith(FILES) || url.startsWith(UPLOADS)) {
+        return fetch(url.replace('https://files.slack.com', `${origin}/files`), init);
+      }
       throw new Error(`the guard let ${url} through`);
     },
     close: () =>

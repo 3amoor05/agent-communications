@@ -5,11 +5,19 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { CommsError } from '@agentcomms/core';
 import { callSlack } from '../src/api/call.ts';
-import { closedPermit, configureWith, downloadWith, guardSlackRequests, spendOn } from '../src/api/guard.ts';
+import {
+  closedPermit,
+  configureWith,
+  downloadWith,
+  guardSlackRequests,
+  spendOn,
+  uploadWith,
+} from '../src/api/guard.ts';
 import {
   classifiedMethods,
   FILE_DOWNLOAD,
   fileOfPath,
+  isUploadPath,
   methodOfUrl,
   methodRule,
   SLACK_FILES_ORIGIN,
@@ -17,6 +25,8 @@ import {
   unscopedMethods,
   writeMethods,
 } from '../src/api/methods.ts';
+import { slackFileUpload } from '../src/api/upload.ts';
+import { startFakeSlack } from './support/fake-slack.ts';
 
 const API = 'https://slack.com/api';
 
@@ -396,10 +406,13 @@ test('the package root does not hand out the key to its own door', async () => {
     'spendOn',
     'configureWith',
     'downloadWith',
+    'uploadWith',
     'WritePermit',
     // The download itself: it carries a token to the files host, and only this package's own operation calls it.
     'slackFileDownload',
     'checkedFileUrl',
+    // And the upload: it carries a token and a file's bytes there, and only the gate calls it, inside a post.
+    'slackFileUpload',
   ]) {
     assert.equal(surface[name], undefined, `${name} is exported from the package root`);
   }
@@ -864,11 +877,21 @@ async function sources(): Promise<{ path: string; text: string }[]> {
  * of it, or of anything not written out — reaches everything it exports without spelling any of it.
  *
  * A comment that cites `downloadWith` in backquotes, as `methods.ts` does, breaks none of them.
+ *
+ * The same rules answer for `uploadWith`, the upload's grant, through {@link reachOf}: the two are opened by one module
+ * each, and a scan written twice is two scans free to differ.
  */
 function grantReach(text: string): string[] {
+  return reachOf('downloadWith', text);
+}
+
+/** The same ways, for any one of `guard.ts`'s openers by name. */
+function reachOf(name: string, text: string): string[] {
   const broken: string[] = [];
-  if (/^\s*(?:import|export)\b[^;]*\bdownloadWith\b[^;]*;/m.test(text)) broken.push('names it in an import or export');
-  if (/\bdownloadWith\s*\(|\.\s*downloadWith\b|\[\s*['"`]downloadWith['"`]\s*\]/.test(text)) {
+  if (new RegExp(`^\\s*(?:import|export)\\b[^;]*\\b${name}\\b[^;]*;`, 'm').test(text)) {
+    broken.push('names it in an import or export');
+  }
+  if (new RegExp(`\\b${name}\\s*\\(|\\.\\s*${name}\\b|\\[\\s*['"\`]${name}['"\`]\\s*\\]`).test(text)) {
     broken.push('calls it or reads it off an object');
   }
   if (/\bimport\s*\*\s*as\s+\w+\s+from\s*['"][^'"]*guard(?:\.ts)?['"]/.test(text)) {
@@ -921,5 +944,369 @@ test('only the download transport opens a download grant', async () => {
       .filter((file) => file.path !== 'api/guard.ts' && grantReach(file.text).length > 0)
       .map((file) => [file.path, grantReach(file.text)]),
     [['api/download.ts', ['names it in an import or export', 'calls it or reads it off an object']]],
+  );
+});
+
+// ── Uploads: one POST, to the URL Slack gave, inside the post it belongs to ─────────────────────────────────────
+
+const UPLOAD_URL = `${SLACK_FILES_ORIGIN}/upload/v1/CwABAAAAXAoAAZnKg309`;
+const PUBLISH = 'files.completeUploadExternal';
+
+test('an upload POST goes through only to the URL Slack gave, inside an approved post', async () => {
+  /*
+   * The three steps of a file post, as the gate takes them: ask where to put the bytes, put them there, then name the
+   * channel. Only the last publishes, and it spends the permit; the bytes go out inside that permit and not otherwise.
+   */
+  const { calls, inner } = recorder();
+  const permit = closedPermit();
+  const fetch = guardSlackRequests(inner, permit);
+
+  await spendOn(permit, 'ap_1', PUBLISH, async () => {
+    await fetch(`${API}/files.getUploadURLExternal`);
+    await uploadWith(permit, UPLOAD_URL, async () => {
+      await fetch(UPLOAD_URL, { method: 'POST', body: 'the bytes' });
+      // Spent: a second POST inside the same grant finds the door shut.
+      await assert.rejects(fetch(UPLOAD_URL, { method: 'POST', body: 'the bytes' }), /no upload is open/);
+    });
+    assert.equal(permit.uploading, null, 'the grant closed behind the upload');
+    // The upload borrowed the post's permit without spending it: the call that publishes still has it.
+    assert.equal(permit.approvalId, 'ap_1');
+    await fetch(`${API}/${PUBLISH}`);
+  });
+
+  assert.deepEqual(calls, [`${API}/files.getUploadURLExternal`, UPLOAD_URL, `${API}/${PUBLISH}`]);
+  assert.deepEqual(permit, closedPermit());
+  await assert.rejects(fetch(UPLOAD_URL, { method: 'POST', body: 'the bytes' }), /no upload is open/);
+  assert.equal(calls.length, 3);
+});
+
+test('an upload is refused when no approved post is open, however the grant came to be there', async () => {
+  const { calls, inner } = recorder();
+  const permit = closedPermit();
+  const fetch = guardSlackRequests(inner, permit);
+
+  // Outside any post, a grant does not open.
+  await assert.rejects(
+    uploadWith(permit, UPLOAD_URL, () => fetch(UPLOAD_URL, { method: 'POST', body: 'x' })),
+    /only inside an approved post/,
+  );
+  // Inside a permit for another act, neither.
+  await spendOn(permit, 'ap_1', 'chat.postMessage', async () => {
+    await assert.rejects(
+      uploadWith(permit, UPLOAD_URL, () => fetch(UPLOAD_URL, { method: 'POST', body: 'x' })),
+      /only inside an approved post/,
+    );
+  });
+
+  /*
+   * And the guard asks again, at the request, rather than trusting that the grant was opened properly. The permit is
+   * spent by the call that publishes, so bytes attempted after it — inside a grant opened while it was open — belong to
+   * no approval any more.
+   */
+  await spendOn(permit, 'ap_2', PUBLISH, async () => {
+    await uploadWith(permit, UPLOAD_URL, async () => {
+      await fetch(`${API}/${PUBLISH}`);
+      assert.equal(permit.approvalId, null, 'the publish spent the permit');
+      await assert.rejects(
+        fetch(UPLOAD_URL, { method: 'POST', body: 'x' }),
+        /no approval for files\.completeUploadExternal is open/,
+      );
+      assert.equal(permit.uploading, UPLOAD_URL, 'a refused upload spent the grant');
+    });
+  });
+
+  // A grant standing on the permit with no post open — however it got there — lets nothing through.
+  for (const [approvalId, method] of [
+    [null, null],
+    ['ap_3', 'chat.postMessage'],
+    ['ap_4', 'reactions.add'],
+  ] as const) {
+    permit.approvalId = approvalId;
+    permit.method = method;
+    permit.uploading = UPLOAD_URL;
+    await assert.rejects(
+      fetch(UPLOAD_URL, { method: 'POST', body: 'x' }),
+      /no approval for files\.completeUploadExternal is open/,
+      `${approvalId} / ${method}`,
+    );
+  }
+  assert.deepEqual(calls, [`${API}/${PUBLISH}`], 'an upload with no post open reached the inner fetch');
+});
+
+test('an upload goes to the exact URL Slack gave, and every other URL is refused without spending the grant', async () => {
+  const { calls, inner } = recorder();
+  const permit = closedPermit();
+  const fetch = guardSlackRequests(inner, permit);
+  const cases: [string, RegExp][] = [
+    // Another upload URL, or this one with anything added.
+    [`${SLACK_FILES_ORIGIN}/upload/v1/CwABAAAAXAoAAZnKg308`, /not the URL Slack gave/],
+    [`${UPLOAD_URL}x`, /not the URL Slack gave/],
+    [`${UPLOAD_URL}/`, /not the URL Slack gave/],
+    [`${UPLOAD_URL}/more`, /not the URL Slack gave/],
+    [`${UPLOAD_URL}?filename=other.pdf`, /not the URL Slack gave/],
+    [`${SLACK_FILES_ORIGIN}/upload/v2/CwABAAAAXAoAAZnKg309`, /not the URL Slack gave/],
+    [`${SLACK_FILES_ORIGIN}/upload/`, /not the URL Slack gave/],
+    // A file's path on the same host: shut as it always was, since no download is open.
+    [`${SLACK_FILES_ORIGIN}/files-pri/${TEAM}-${FILE}/report.pdf`, /no download is open/],
+    // The same path at another host.
+    ['https://files-edge.slack.com/upload/v1/CwABAAAAXAoAAZnKg309', /only calls https:\/\/slack\.com and/],
+    ['http://files.slack.com/upload/v1/CwABAAAAXAoAAZnKg309', /only calls https:\/\/slack\.com and/],
+    ['https://evil.example/upload/v1/CwABAAAAXAoAAZnKg309', /only calls https:\/\/slack\.com and/],
+    [UPLOAD_URL.replace('https://', 'https://someone@'), /carrying credentials/],
+  ];
+  await spendOn(permit, 'ap_1', PUBLISH, async () => {
+    await uploadWith(permit, UPLOAD_URL, async () => {
+      for (const [url, message] of cases) {
+        await assert.rejects(fetch(url, { method: 'POST', body: 'x' }), message, url);
+        assert.equal(permit.uploading, UPLOAD_URL, `${url} spent the grant`);
+      }
+      await fetch(UPLOAD_URL, { method: 'POST', body: 'x' });
+    });
+  });
+  assert.deepEqual(calls, [UPLOAD_URL], 'a near miss reached the inner fetch');
+});
+
+test('an upload goes by POST and nothing else', async () => {
+  const { calls, inner } = recorder();
+  const permit = closedPermit();
+  const fetch = guardSlackRequests(inner, permit);
+  await spendOn(permit, 'ap_1', PUBLISH, async () => {
+    await uploadWith(permit, UPLOAD_URL, async () => {
+      for (const verb of ['PUT', 'put', 'GET', 'DELETE', 'HEAD', 'PATCH']) {
+        await assert.rejects(
+          fetch(UPLOAD_URL, verb === 'GET' || verb === 'HEAD' ? { method: verb } : { method: verb, body: 'x' }),
+          new RegExp(`uploaded with POST, not ${verb.toUpperCase()}`),
+          verb,
+        );
+      }
+      // No verb at all is a GET.
+      await assert.rejects(fetch(UPLOAD_URL), /uploaded with POST, not GET/);
+      // A Request carrying its own verb meets the same rule as an init that names one.
+      await assert.rejects(fetch(new Request(UPLOAD_URL, { method: 'PUT', body: 'x' })), /uploaded with POST, not PUT/);
+      assert.equal(permit.uploading, UPLOAD_URL, 'a refused verb spent the grant');
+      await fetch(UPLOAD_URL, { method: 'post', body: 'x' });
+    });
+  });
+  assert.deepEqual(calls, [UPLOAD_URL]);
+});
+
+test('an upload is not followed through a redirect, whatever the caller asks', async () => {
+  const seen: (RequestInit | undefined)[] = [];
+  const permit = closedPermit();
+  const fetch = guardSlackRequests(async (_input, init) => {
+    seen.push(init);
+    return new Response('OK');
+  }, permit);
+  const asked = [undefined, 'follow', 'manual'] as const;
+  for (const redirect of asked) {
+    await spendOn(permit, 'ap_1', PUBLISH, () =>
+      uploadWith(permit, UPLOAD_URL, () =>
+        fetch(UPLOAD_URL, redirect ? { method: 'POST', body: 'x', redirect } : { method: 'POST', body: 'x' }),
+      ),
+    );
+  }
+  assert.deepEqual(
+    seen.map((init) => init?.redirect),
+    asked.map(() => 'error'),
+    'an upload went out with a redirect mode a caller chose',
+  );
+});
+
+test('an upload grant names one URL on files.slack.com under /upload/, or it does not open', async () => {
+  const { calls, inner } = recorder();
+  const permit = closedPermit();
+  const fetch = guardSlackRequests(inner, permit);
+  const bad = [
+    'not a url',
+    'https://slack.com/upload/v1/CwABAAAAXAoAAZnKg309',
+    'https://files-edge.slack.com/upload/v1/CwABAAAAXAoAAZnKg309',
+    'http://files.slack.com/upload/v1/CwABAAAAXAoAAZnKg309',
+    'https://files.slack.com:8443/upload/v1/CwABAAAAXAoAAZnKg309',
+    'https://evil.example/upload/v1/CwABAAAAXAoAAZnKg309',
+    'https://someone@files.slack.com/upload/v1/CwABAAAAXAoAAZnKg309',
+    `${SLACK_FILES_ORIGIN}/files-pri/${TEAM}-${FILE}/report.pdf`,
+    `${SLACK_FILES_ORIGIN}/upload`,
+    `${SLACK_FILES_ORIGIN}/upload/`,
+    `${SLACK_FILES_ORIGIN}/upload//x`,
+    `${SLACK_FILES_ORIGIN}/upload/v1/a%2F..%2F..%2Ffiles-pri`,
+    `${SLACK_FILES_ORIGIN}/upload/v1/a%5Cb`,
+    `${SLACK_FILES_ORIGIN}/xupload/v1/CwABAAAAXAoAAZnKg309`,
+    `${UPLOAD_URL}#top`,
+  ];
+  await spendOn(permit, 'ap_1', PUBLISH, async () => {
+    for (const url of bad) {
+      await assert.rejects(
+        uploadWith(permit, url, () => fetch(url, { method: 'POST', body: 'x' })),
+        /an upload grant names one URL/,
+        url,
+      );
+      assert.equal(permit.uploading, null, url);
+    }
+  });
+  assert.deepEqual(calls, []);
+
+  // What reads as an upload's path, as the guard and the grant both read it.
+  assert.equal(isUploadPath('/upload/v1/CwABAAAAXAoAAZnKg309'), true);
+  assert.equal(isUploadPath('/upload/x'), true);
+  for (const path of ['/upload', '/upload/', '/upload//x', '/upload/a/', '/upload/..', '/files-pri/T-F/x', '', '/']) {
+    assert.equal(isUploadPath(path), false, path);
+  }
+});
+
+test('an upload grant lends nothing, borrows only the post it is part of, and does not nest', async () => {
+  const { calls, inner } = recorder();
+  const permit = closedPermit();
+  const fetch = guardSlackRequests(inner, permit);
+
+  await spendOn(permit, 'ap_1', PUBLISH, async () => {
+    await uploadWith(permit, UPLOAD_URL, async () => {
+      // The post's permit is for publishing the file, not for any other act.
+      await assert.rejects(fetch(`${API}/chat.postMessage`), /the open approval is for files\.completeUploadExternal/);
+      await assert.rejects(fetch(`${API}/apps.manifest.update`), /only `agent-slack app` may call it/);
+      await assert.rejects(fetch(FILE_URL), /no download is open/);
+      for (const opening of [
+        () => uploadWith(permit, `${SLACK_FILES_ORIGIN}/upload/v1/other`, async () => undefined),
+        () => downloadWith(permit, { teamId: TEAM, fileId: FILE }, async () => undefined),
+        () => configureWith(permit, 'apps.manifest.update', async () => undefined),
+        () => spendOn(permit, 'ap_2', 'chat.postMessage', async () => undefined),
+      ]) {
+        await assert.rejects(opening(), /already open; they do not nest/);
+      }
+      assert.equal(permit.uploading, UPLOAD_URL, 'a refused opening closed the grant');
+    });
+  });
+  // Nor does one open inside a download or a configuration grant, where no post is open either.
+  await downloadWith(permit, { teamId: TEAM, fileId: FILE }, async () => {
+    await assert.rejects(
+      uploadWith(permit, UPLOAD_URL, async () => undefined),
+      /only inside an approved post/,
+    );
+  });
+  await configureWith(permit, 'apps.manifest.update', async () => {
+    await assert.rejects(
+      uploadWith(permit, UPLOAD_URL, async () => undefined),
+      /only inside an approved post/,
+    );
+  });
+  assert.deepEqual(calls, []);
+  assert.deepEqual(permit, closedPermit());
+});
+
+test('an upload grant closes when what runs inside it throws', async () => {
+  const { calls, inner } = recorder();
+  const permit = closedPermit();
+  const fetch = guardSlackRequests(inner, permit);
+  await spendOn(permit, 'ap_1', PUBLISH, async () => {
+    await assert.rejects(
+      uploadWith(permit, UPLOAD_URL, async () => {
+        throw new Error('network died before the bytes');
+      }),
+      /network died/,
+    );
+    assert.equal(permit.uploading, null, 'a failed upload left a grant open behind it');
+    await assert.rejects(fetch(UPLOAD_URL, { method: 'POST', body: 'x' }), /no upload is open/);
+  });
+  assert.deepEqual(calls, []);
+});
+
+test('the upload transport sends the bytes, and only to the URL Slack gave, with the token in its header alone', async () => {
+  /*
+   * Through the real guard to a loopback Slack: what arrives is exactly the file's bytes, at the upload path, by POST,
+   * with the token in the authorization header and nowhere else in the request.
+   */
+  const fake = await startFakeSlack();
+  try {
+    const bytes = Buffer.from([0, 1, 2, 250, 251, 252, 10, 13, 0x25, 0x32]);
+    const permit = closedPermit();
+    const call = { token: 'fake-user-token-7', fetch: fake.fetch, permit };
+    await spendOn(permit, 'ap_1', PUBLISH, () => slackFileUpload(call, { url: UPLOAD_URL, bytes }));
+    const [upload, ...rest] = fake.requests;
+    assert.deepEqual(rest, []);
+    assert.equal(upload?.host, 'files');
+    assert.equal(upload?.verb, 'POST');
+    assert.equal(upload?.path, '/upload/v1/CwABAAAAXAoAAZnKg309');
+    assert.deepEqual(upload?.body, bytes, 'the upload host received other bytes than the file’s');
+    assert.equal(upload?.authorization, 'Bearer fake-user-token-7');
+    assert.equal(upload?.raw.split('fake-user-token-7').length, 2, 'the token appeared somewhere besides its header');
+
+    // Outside a post it does not go at all.
+    await assert.rejects(slackFileUpload(call, { url: UPLOAD_URL, bytes }), /only inside an approved post/);
+    await assert.rejects(
+      slackFileUpload({ token: 't', fetch: fake.fetch }, { url: UPLOAD_URL, bytes }),
+      /only inside an approved post/,
+    );
+    assert.equal(fake.requests.length, 1);
+  } finally {
+    await fake.close();
+  }
+});
+
+test('an upload the host answers with a redirect is refused, and the redirect is never followed', async () => {
+  const fake = await startFakeSlack();
+  try {
+    fake.uploadAnswer = () => ({ status: 302, headers: { location: `${fake.local}/elsewhere` } });
+    const permit = closedPermit();
+    await assert.rejects(
+      spendOn(permit, 'ap_1', PUBLISH, () =>
+        slackFileUpload({ token: 't', fetch: fake.fetch, permit }, { url: UPLOAD_URL, bytes: Buffer.from('x') }),
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof CommsError);
+        assert.match(error.message, /redirect, which is never followed/);
+        return true;
+      },
+    );
+    assert.deepEqual(
+      fake.requests.map((request) => request.host),
+      ['files'],
+      'the redirect was followed',
+    );
+
+    // Any other failure is a failure, with the status it came with.
+    fake.uploadAnswer = () => ({ status: 500, body: 'no' });
+    await assert.rejects(
+      spendOn(permit, 'ap_2', PUBLISH, () =>
+        slackFileUpload({ token: 't', fetch: fake.fetch, permit }, { url: UPLOAD_URL, bytes: Buffer.from('x') }),
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof CommsError);
+        assert.equal(error.code, 'TRANSIENT');
+        assert.match(error.message, /answered 500/);
+        return true;
+      },
+    );
+  } finally {
+    await fake.close();
+  }
+});
+
+test('the check for who opens an upload grant catches every ordinary way of reaching it', () => {
+  const reaching: Record<string, string> = {
+    named: "import { closedPermit, uploadWith } from './guard.ts';",
+    aliased: "import { uploadWith as putFile } from '../api/guard.ts';\nputFile(permit, url, work);",
+    reexported: "export { uploadWith } from './guard.ts';",
+    namespace: "import * as guard from '../api/guard.ts';\nguard.uploadWith(permit, url, work);",
+    'namespace, bracketed': "import * as g from './guard.ts';\ng['uploadWith'](permit, url, work);",
+  };
+  for (const [how, text] of Object.entries(reaching)) {
+    assert.notDeepEqual(reachOf('uploadWith', text), [], `${how}: caught`);
+  }
+  // The download's opener is not the upload's: naming one is not reaching the other.
+  assert.deepEqual(reachOf('uploadWith', "import { downloadWith } from './guard.ts';"), []);
+  assert.deepEqual(reachOf('uploadWith', ' * inside the post it belongs to (`uploadWith` in `guard.ts`).'), []);
+});
+
+test('only the upload transport opens an upload grant', async () => {
+  /*
+   * The grant is what lets bytes leave for the files host, so the question is who can open one. One module:
+   * `api/upload.ts`, which opens it only around a POST of the bytes it was handed, to the URL Slack gave, inside the
+   * permit of the post they belong to. Anything else that reached it could send any bytes there with the token on them.
+   */
+  const files = await sources();
+  assert.deepEqual(
+    files
+      .filter((file) => file.path !== 'api/guard.ts' && reachOf('uploadWith', file.text).length > 0)
+      .map((file) => [file.path, reachOf('uploadWith', file.text)]),
+    [['api/upload.ts', ['names it in an import or export', 'calls it or reads it off an object']]],
   );
 });

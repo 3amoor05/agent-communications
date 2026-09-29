@@ -28,10 +28,12 @@ export const SLACK_ORIGIN = 'https://slack.com';
 /**
  * Where Slack serves a file's bytes, and the only other origin this package talks to.
  *
- * Hardcoded for the same reason as {@link SLACK_ORIGIN}, and reachable for one thing only: a `GET` of the path of a
+ * Hardcoded for the same reason as {@link SLACK_ORIGIN}, and reachable for two things only. A `GET` of the path of a
  * file just looked up with `files.info` or `files.list`, inside a grant for exactly that file (`downloadWith` in
  * `guard.ts`). The link Slack returns is never followed as given — it is checked against {@link fileOfPath} and
- * rebuilt on this origin, so a link pointing anywhere else is refused before the token could go with it.
+ * rebuilt on this origin, so a link pointing anywhere else is refused before the token could go with it. And a `POST`
+ * of a file's bytes to the exact upload URL `files.getUploadURLExternal` returned, inside a grant for that URL
+ * (`uploadWith` in `guard.ts`), which opens only inside the approved post the file belongs to.
  *
  * Unlike Resend's attachment CDN, this host needs the workspace's token: Slack documents that both `url_private` and
  * `url_private_download` answer only a request carrying `Authorization: Bearer` with a token that has `files:read`.
@@ -344,6 +346,22 @@ function isPlainName(segment: string | undefined): boolean {
     if (code === 0x2f || code === 0x5c || code < 0x20 || code === 0x7f) return false;
   }
   return true;
+}
+
+/**
+ * Whether a path on the files host is where an upload's bytes go: `/upload/` and then one or more plain segments.
+ *
+ * Slack's upload URLs are opaque — `/upload/v1/CwABAAAAXAoAAZnKg309…` — so this does not read them, only rules out
+ * what no upload URL is: the bare `/upload/` directory, an empty segment, and a segment that a server decoding again
+ * would read as a way out of it. The guard does not trust this to say *which* upload: a grant names one URL exactly,
+ * and that is what the request is compared with. This decides only whether a grant may name it at all.
+ *
+ * A split rather than a regular expression, for the reason {@link methodOfUrl} gives.
+ */
+export function isUploadPath(pathname: string): boolean {
+  const segments = pathname.split('/');
+  if (segments[0] !== '' || segments[1] !== 'upload' || segments.length < 3) return false;
+  return segments.slice(2).every(isPlainName);
 }
 
 /**
