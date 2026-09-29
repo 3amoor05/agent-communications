@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { constants } from 'node:fs';
+import { type BigIntStats, constants } from 'node:fs';
 import { type FileHandle, lstat, open, realpath } from 'node:fs/promises';
 import { basename, extname, resolve } from 'node:path';
 import { type AttachPolicy, CommsError, checkAttachable, expandHome } from '@agentcomms/core';
@@ -47,6 +47,15 @@ export const WARN_FILE_BYTES: number = 10 * 1024 * 1024;
  */
 const READ_FLAGS =
   process.platform === 'win32' ? constants.O_RDONLY : constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
+
+/**
+ * For tests only: what runs between the steps of one read, so a test can move a file at exactly those moments.
+ *
+ * `beforeOpen` runs after the file was looked at and judged and before it is opened; `afterRead` after its bytes were
+ * read and before its name is looked at again. Nothing in the package sets either, and neither is exported from the
+ * package root.
+ */
+export const TEST_ONLY_HOOKS: { beforeOpen?: (path: string) => void; afterRead?: (path: string) => void } = {};
 
 /** How much of a file is read at a time: enough to be quick, little enough that a large file is never all in memory. */
 const CHUNK = 1024 * 1024;
@@ -146,6 +155,22 @@ function notRegular(shown: string): CommsError {
   });
 }
 
+function moved(shown: string): CommsError {
+  return new CommsError('BAD_DATA', `${shown} moved while it was being read`, {
+    hint: 'Wait until nothing is moving or replacing it, or a folder above it, then try again.',
+  });
+}
+
+/** Whether two looks at a file saw the same file: the same device and the same file on it, whatever its name. */
+function sameFile(a: BigIntStats, b: BigIntStats): boolean {
+  return a.dev === b.dev && a.ino === b.ino;
+}
+
+/** A look at a name that does not follow it, with identities exact: on Windows a file's index does not fit a number. */
+function look(path: string): Promise<BigIntStats> {
+  return lstat(path, { bigint: true });
+}
+
 function isALink(shown: string): CommsError {
   return new CommsError('BAD_DATA', `${shown} is a link, and a file is named by itself`, {
     hint: 'Name the file the link points to, if that is the one you mean.',
@@ -196,37 +221,61 @@ async function readThrough(
  * Every limit is checked on the open file, from `fstat`, before anything is read — so a file too large is refused
  * without a byte of it read, and what is measured is the file that was opened rather than whatever the name points
  * to by the time a second call looks.
+ *
+ * And it has to be the file that was judged. `expected` is what the caller's own `lstat` saw before the jail judged
+ * the path; the open file must be that one — the same device, the same file on it — and after the read the path must
+ * still be its own real path and still name that file. Between the judging and the opening, a folder above the file
+ * could be swapped for a link to somewhere else: `O_NOFOLLOW` guards only the file's own name, and Windows has no such
+ * flag at all. Checked this way, with nothing particular to any platform, a file that moved in either gap is refused.
  */
 async function measure(
   real: string,
   shown: string,
   keep: boolean,
+  expected: BigIntStats,
 ): Promise<{ size: number; sha256: string; bytes: Buffer | undefined }> {
+  TEST_ONLY_HOOKS.beforeOpen?.(real);
   let handle: FileHandle;
   try {
     handle = await open(real, READ_FLAGS);
   } catch (error) {
     throw unreadable(error, shown);
   }
+  let measured: { size: number; sha256: string; bytes: Buffer | undefined };
   try {
-    const info = await handle.stat();
+    const info = await handle.stat({ bigint: true });
     if (!info.isFile()) throw notRegular(shown);
-    if (info.size === 0) {
+    if (!sameFile(info, expected)) throw moved(shown);
+    const size = Number(info.size);
+    if (size === 0) {
       throw new CommsError('BAD_DATA', `${shown} is empty`, { hint: 'There is nothing in it to send.' });
     }
-    if (info.size > MAX_FILE_BYTES) throw tooLarge(shown);
+    if (size > MAX_FILE_BYTES) throw tooLarge(shown);
     const hash = createHash('sha256');
     const pieces: Buffer[] = [];
-    await readThrough(handle, info.size, shown, (piece) => {
+    await readThrough(handle, size, shown, (piece) => {
       hash.update(piece);
       if (keep) pieces.push(piece);
     });
-    return { size: info.size, sha256: hash.digest('hex'), bytes: keep ? Buffer.concat(pieces, info.size) : undefined };
+    measured = { size, sha256: hash.digest('hex'), bytes: keep ? Buffer.concat(pieces, size) : undefined };
   } catch (error) {
     throw unreadable(error, shown);
   } finally {
     await handle.close();
   }
+  TEST_ONLY_HOOKS.afterRead?.(real);
+  // After the read: the name still leads, by its real path, to the file that was read.
+  let after: BigIntStats;
+  let where: string;
+  try {
+    after = await look(real);
+    where = await realpath(real);
+  } catch {
+    throw moved(shown);
+  }
+  if (where !== real) throw moved(shown);
+  if (!sameFile(after, expected)) throw moved(shown);
+  return measured;
 }
 
 /**
@@ -238,9 +287,9 @@ async function measure(
  */
 export async function recordFile(given: string, policy: AttachPolicy): Promise<SlackDraftFile> {
   const requested = resolve(expandHome(given, policy.home));
-  let info: Awaited<ReturnType<typeof lstat>>;
+  let info: BigIntStats;
   try {
-    info = await lstat(requested);
+    info = await look(requested);
   } catch (error) {
     throw unreadable(error, given);
   }
@@ -249,7 +298,8 @@ export async function recordFile(given: string, policy: AttachPolicy): Promise<S
   // The folders the person allows, and none of the ones never sent: the rule Gmail's attachments follow.
   const real = await checkAttachable(requested, policy);
   const name = basename(real);
-  const { size, sha256 } = await measure(real, given, false);
+  // The file the look above saw, and no other, is the one measured: see `measure`.
+  const { size, sha256 } = await measure(real, given, false, info);
   return { path: real, name, size, sha256, mimeType: mimeTypeOf(name) };
 }
 
@@ -311,10 +361,10 @@ async function recheck(
   if (file.name !== basename(file.path) || file.mimeType !== mimeTypeOf(file.name)) {
     return not('its record was changed outside agent-slack');
   }
-  let info: Awaited<ReturnType<typeof lstat>>;
+  let info: BigIntStats;
   let real: string;
   try {
-    info = await lstat(file.path);
+    info = await look(file.path);
     real = await realpath(file.path);
   } catch {
     return not('it is no longer there');
@@ -329,9 +379,11 @@ async function recheck(
   }
   let measured: { size: number; sha256: string; bytes: Buffer | undefined };
   try {
-    measured = await measure(file.path, file.name, keep);
+    measured = await measure(file.path, file.name, keep, info);
   } catch (error) {
-    return not((error as Error).message);
+    // Said as the reason, not as the file's name followed by it: the caller names the file.
+    const message = (error as Error).message;
+    return not(message.startsWith(`${file.name} `) ? `it ${message.slice(file.name.length + 1)}` : message);
   }
   if (measured.size !== file.size) return not(`it is ${measured.size} bytes now, not the ${file.size} recorded`);
   if (measured.sha256 !== file.sha256) return not('its contents have changed');

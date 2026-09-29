@@ -1,9 +1,19 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  truncateSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { type TestContext, test } from 'node:test';
 import { CommsError, renderChannelPreview } from '@agentcomms/core';
+import { TEST_ONLY_HOOKS } from '../src/compose/files.ts';
 import { SlackContext } from '../src/context.ts';
 import { scopesForMode } from '../src/manifest.ts';
 import { createDraft } from '../src/operations/drafts.ts';
@@ -584,4 +594,69 @@ test('the order of the files is part of what is approved: reordering them on dis
   assert.deepEqual(w.uploads.received, {});
   assert.deepEqual(w.uploads.completed, []);
   assert.notEqual((await w.context.core.approvals.get(prepared.approvalId))?.state, 'used');
+});
+
+/**
+ * Runs `hook` at `moment` of the `nth` read of a file from now on, and clears the hook however the test ends.
+ *
+ * A send reads every file twice: once in the pass that checks them all before anything is uploaded, and again just
+ * before each one's upload. `nth` picks which of those a test races.
+ */
+function onRead(t: TestContext, moment: 'beforeOpen' | 'afterRead', nth: number, hook: (path: string) => void): void {
+  let reads = 0;
+  TEST_ONLY_HOOKS[moment] = (path) => {
+    reads += 1;
+    if (reads === nth) hook(path);
+  };
+  t.after(() => {
+    delete TEST_ONLY_HOOKS[moment];
+  });
+}
+
+/** Another file with the same bytes, put where `path` is: the same contents, and not the file that was looked at. */
+function replaceWithTwin(path: string): void {
+  writeFileSync(`${path}.twin`, readFileSync(path));
+  renameSync(`${path}.twin`, path);
+}
+
+test('a file replaced while prepare reads it is refused, and nothing is approved', async (t) => {
+  const w = await world(t);
+  const real = file(w.docs, 'plan.md', '# plan');
+  const draft = await createDraft(w.context, 'acme', { channel: 'C1', files: [real] });
+  onRead(t, 'beforeOpen', 1, replaceWithTwin);
+
+  const error = await refusal(prepareDraftPost(w.context, 'acme', { draftId: draft.draftId }, w.slack));
+  assert.equal(error.code, 'BAD_DATA');
+  assert.match(error.message, /plan\.md is not the file the draft recorded — it moved while it was being read/);
+  assert.deepEqual(await w.context.core.approvals.list(), []);
+});
+
+test('at send, a file replaced while the first pass reads it voids the approval, and nothing is uploaded', async (t) => {
+  const w = await world(t);
+  const real = file(w.docs, 'plan.md', '# plan');
+  const draft = await createDraft(w.context, 'acme', { channel: 'C1', files: [real] });
+  const { send } = await prepareAndSend(w, draft.draftId);
+  onRead(t, 'afterRead', 1, replaceWithTwin);
+
+  const error = await refusal(send());
+  assert.equal(error.code, 'APPROVAL_VOID');
+  assert.match(error.message, /it moved while it was being read/);
+  assert.equal(w.uploads.issued.length, 0);
+  assert.deepEqual(w.uploads.received, {});
+});
+
+test('at send, a file replaced while it is read for its upload voids the approval, and its bytes never reach Slack', async (t) => {
+  const w = await world(t);
+  const real = file(w.docs, 'plan.md', '# plan');
+  const draft = await createDraft(w.context, 'acme', { channel: 'C1', files: [real] });
+  const { send } = await prepareAndSend(w, draft.draftId);
+  // The second read of the send: the one whose bytes go to the upload URL.
+  onRead(t, 'beforeOpen', 2, replaceWithTwin);
+
+  const error = await refusal(send());
+  assert.equal(error.code, 'APPROVAL_VOID');
+  assert.match(error.message, /it moved while it was being read/);
+  assert.equal(w.uploads.issued.length, 1, 'the upload URL is asked for before the read that goes to it');
+  assert.deepEqual(w.uploads.received, {}, 'bytes reached the upload URL from a file that moved');
+  assert.deepEqual(w.uploads.completed, []);
 });

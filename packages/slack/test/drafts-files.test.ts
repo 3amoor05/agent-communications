@@ -1,13 +1,22 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, realpathSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
+import {
+  linkSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  symlinkSync,
+  truncateSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
-import { test } from 'node:test';
+import { type TestContext, test } from 'node:test';
 import { CommsError } from '@agentcomms/core';
 import { compose } from '../src/compose/blocks.ts';
 import { openDraftStore, type SlackDraft } from '../src/compose/drafts.ts';
-import { MAX_FILE_BYTES, MAX_FILES } from '../src/compose/files.ts';
+import { MAX_FILE_BYTES, MAX_FILES, TEST_ONLY_HOOKS } from '../src/compose/files.ts';
 import { SlackContext } from '../src/context.ts';
 import { createDraft, updateDraft } from '../src/operations/drafts.ts';
 import { type Harness, newHarness, tempDir } from './support/harness.ts';
@@ -334,4 +343,141 @@ test('an update reaches only this workspace’s drafts, and not one changed outs
   const edited = await refusal(updateDraft(context, 'acme', mine.draftId, { text: 'hello again' }));
   assert.equal(edited.code, 'BAD_DATA');
   assert.equal(edited.details?.reason, 'not-composed');
+});
+
+// ── A file that moves while it is read ────────────────────────────────────────────────────────────────────────
+
+/**
+ * Runs `hook` once, at `moment` of the next read of a file, and clears it however the test ends.
+ *
+ * The hooks sit between the steps of one read: `beforeOpen` after the name was looked at and judged and before it is
+ * opened, `afterRead` after the bytes were read and before the name is looked at again. What a test does there is what
+ * something racing the read could do.
+ */
+function once(t: TestContext, moment: 'beforeOpen' | 'afterRead', hook: (path: string) => void): void {
+  TEST_ONLY_HOOKS[moment] = (path) => {
+    delete TEST_ONLY_HOOKS[moment];
+    hook(path);
+  };
+  t.after(() => {
+    delete TEST_ONLY_HOOKS[moment];
+  });
+}
+
+/** Puts another file with the same bytes where `path` is: the same contents, but not the file that was looked at. */
+function replaceWithTwin(path: string): void {
+  const twin = `${path}.twin`;
+  writeFileSync(twin, readFileSync(path));
+  renameSync(twin, path);
+}
+
+/** Moves `dir` aside and puts a link to `elsewhere` in its place, or says it cannot here. */
+function swapForLink(dir: string, elsewhere: string): boolean {
+  renameSync(dir, `${dir}.was`);
+  try {
+    symlinkSync(elsewhere, dir, process.platform === 'win32' ? 'junction' : 'dir');
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EPERM') throw error;
+    renameSync(`${dir}.was`, dir);
+    return false;
+  }
+}
+
+test('a file replaced between being judged and being opened is refused: it moved while it was being read', async (t) => {
+  const { context, docs } = await world();
+  const real = file(docs, 'plan.md', '# plan');
+  once(t, 'beforeOpen', replaceWithTwin);
+  const error = await refusal(createDraft(context, 'acme', { channel: 'C1', files: [real] }));
+  assert.equal(error.code, 'BAD_DATA');
+  assert.match(error.message, /plan\.md moved while it was being read/);
+});
+
+test('a file replaced while it was being read is refused as well', async (t) => {
+  const { context, docs } = await world();
+  const real = file(docs, 'plan.md', '# plan');
+  once(t, 'afterRead', replaceWithTwin);
+  const error = await refusal(createDraft(context, 'acme', { channel: 'C1', files: [real] }));
+  assert.match(error.message, /plan\.md moved while it was being read/);
+});
+
+test('a folder above the file swapped for a link to somewhere else, just before it is opened, is refused', async (t) => {
+  /*
+   * The jail judged the path through its real folders; `O_NOFOLLOW` guards only the file's own name, and Windows has
+   * no such flag. So the folder is swapped for a link to another folder holding a file of the same name, after the
+   * judging and before the opening — and what is opened is the other file.
+   */
+  const { context, docs, harness } = await world();
+  const inner = join(docs, 'inner');
+  mkdirSync(inner);
+  const real = file(inner, 'plan.md', '# plan');
+  const other = join(harness.home, 'other');
+  mkdirSync(other);
+  writeFileSync(join(other, 'plan.md'), '# plan');
+  let swapped = true;
+  once(t, 'beforeOpen', () => {
+    swapped = swapForLink(inner, other);
+  });
+  const outcome = await createDraft(context, 'acme', { channel: 'C1', files: [real] }).then(
+    () => 'recorded',
+    (error: unknown) => error,
+  );
+  if (!swapped) return t.skip('links cannot be made here');
+  assert.ok(outcome instanceof CommsError, `it was ${String(outcome)}`);
+  assert.match(outcome.message, /plan\.md moved while it was being read/);
+});
+
+test('a folder above the file swapped while it was read, for a link to a hard link of the same file, is refused', async (t) => {
+  /*
+   * The same file, by its identity — a hard link is one file under two names — reached by another path. Only the real
+   * path, looked up again after the read, tells it from the file that was judged.
+   */
+  const { context, docs, harness } = await world();
+  const inner = join(docs, 'inner');
+  mkdirSync(inner);
+  const real = file(inner, 'plan.md', '# plan');
+  const other = join(harness.home, 'other');
+  mkdirSync(other);
+  linkSync(real, join(other, 'plan.md'));
+  let swapped = true;
+  once(t, 'afterRead', () => {
+    swapped = swapForLink(inner, other);
+  });
+  const outcome = await createDraft(context, 'acme', { channel: 'C1', files: [real] }).then(
+    () => 'recorded',
+    (error: unknown) => error,
+  );
+  if (!swapped) return t.skip('links cannot be made here');
+  assert.ok(outcome instanceof CommsError, `it was ${String(outcome)}`);
+  assert.match(outcome.message, /plan\.md moved while it was being read/);
+});
+
+test('a file nothing moves is recorded as before, with the hooks in place and doing nothing', async (t) => {
+  const { context, docs } = await world();
+  const real = file(docs, 'plan.md', '# plan');
+  let seen = 0;
+  once(t, 'beforeOpen', () => {
+    seen += 1;
+  });
+  const draft = await createDraft(context, 'acme', { channel: 'C1', files: [real] });
+  assert.equal(seen, 1);
+  assert.equal(draft.files?.[0]?.path, real);
+});
+
+test('a file swapped for another just before it is opened, and put back once it is read, is refused', async (t) => {
+  /*
+   * Afterwards the name leads to the right file again, by its real path, so looking at it after the read sees nothing
+   * wrong. Only the open file itself — which file the bytes came from — gives it away.
+   */
+  const { context, docs } = await world();
+  const real = file(docs, 'plan.md', '# plan');
+  once(t, 'beforeOpen', (path) => {
+    renameSync(path, `${path}.aside`);
+    writeFileSync(path, '# plan');
+  });
+  once(t, 'afterRead', (path) => {
+    renameSync(`${path}.aside`, path);
+  });
+  const error = await refusal(createDraft(context, 'acme', { channel: 'C1', files: [real] }));
+  assert.match(error.message, /plan\.md moved while it was being read/);
 });
