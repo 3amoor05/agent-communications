@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { rm } from 'node:fs/promises';
+import { type FileHandle, rm } from 'node:fs/promises';
 import { basename } from 'node:path';
 import {
   askWhereToSave,
@@ -73,6 +73,11 @@ export interface FileDownloadDeps {
   caps?: { perFile?: number | undefined; perRun?: number | undefined } | undefined;
   /** How a saved file is marked as downloaded from the internet: core's `markFromInternet` unless a test says. */
   mark?: ((path: string) => Promise<InternetMark>) | undefined;
+  /**
+   * How a file's bytes are written into the file made for them: the handle's own `writeFile` unless a test says, to see
+   * what had happened to the file by then.
+   */
+  write?: ((handle: FileHandle, bytes: Buffer) => Promise<void>) | undefined;
 }
 
 interface Caps {
@@ -830,8 +835,15 @@ export async function downloadFiles(
       // its own message would carry in the path.
       const { name, given, renamed } = names[at] as ReturnType<typeof savedName>;
       const { path, handle } = await createSavedFile(destination, name, { fileId });
+      let marking: InternetMark;
       try {
-        await handle.writeFile(body.bytes);
+        /*
+         * Marked as downloaded from the internet the moment it exists, before a byte of it is written: a program that
+         * watches the folder and acts on a file as soon as it is there, or as soon as it is closed, finds it marked
+         * already. A mark that cannot be made is said in the result, file by file; the file is still saved.
+         */
+        marking = await (deps.mark ?? markFromInternet)(path);
+        await (deps.write ?? ((file, bytes) => file.writeFile(bytes)))(handle, body.bytes);
         await handle.close();
       } catch (error) {
         /*
@@ -851,7 +863,6 @@ export async function downloadFiles(
         throw saveFailure(error, { folder: destination.folder, fileId });
       }
       totalBytes += body.bytes.byteLength;
-      const marking = await (deps.mark ?? markFromInternet)(path);
       const { size: _declared, ...rest } = listed;
       saved.push({
         ...rest,

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { rmSync, symlinkSync } from 'node:fs';
-import { chmod, type FileHandle, mkdir, readdir, readFile, symlink, writeFile } from 'node:fs/promises';
+import { chmod, type FileHandle, mkdir, readdir, readFile, stat, symlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { CommsError, openCore } from '@agentcomms/core';
@@ -1241,6 +1241,33 @@ test('a file that cannot be written is named by its part and folder, never by it
   });
   // The file cut short is gone: only the whole one is left.
   assert.deepEqual(await everything(cwd), ['first.pdf']);
+});
+
+test('each file is marked as downloaded the moment it is made, before a byte is written; a mark that fails is a warning', async () => {
+  const { context, cwd } = await twoInvoices();
+  const order: string[] = [];
+  const result = (await answeredCurrent(context, {
+    mark: async (path) => {
+      // There already, and still empty: made, and not yet written.
+      order.push(`mark ${basename(path)}, ${(await stat(path)).size} bytes`);
+      return basename(path) === 'second.pdf'
+        ? { mark: null, failure: 'it failed (ENOTSUP)' }
+        : { mark: 'com.apple.quarantine' };
+    },
+    write: async (handle, bytes) => {
+      order.push(`write ${bytes.toString('utf8')}`);
+      await handle.writeFile(bytes);
+    },
+  })) as DownloadResult;
+  assert.deepEqual(order, ['mark first.pdf, 0 bytes', 'write first', 'mark second.pdf, 0 bytes', 'write second']);
+  // The one that could not be marked is saved all the same, and the result says so.
+  assert.deepEqual(await everything(cwd), ['first.pdf', 'second.pdf']);
+  assert.equal(await readFile(join(cwd, 'second.pdf'), 'utf8'), 'second');
+  assert.deepEqual(
+    result.files.map((file) => file.marked),
+    ['com.apple.quarantine', null],
+  );
+  assert.deepEqual(result.warnings, ['second.pdf is not marked as downloaded from the internet: it failed (ENOTSUP)']);
 });
 
 test('a part-written file that cannot be removed either is named in the error, wrapped, and in the manifest', async () => {

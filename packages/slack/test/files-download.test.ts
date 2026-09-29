@@ -1319,6 +1319,36 @@ test('a file whose write fails part-way is removed, not left cut short beside th
   assert.deepEqual(record?.ids?.fileIds, ['F0A']);
 });
 
+test('each file is marked as downloaded the moment it is made, before a byte is written; a mark that fails is a warning', async () => {
+  const records = { F0A: fileRecord('F0A'), F0B: fileRecord('F0B') };
+  const { folder, run } = await setup({ 'files.info': filesInfo(records) });
+  const order: string[] = [];
+  const result = await run(
+    { fileIds: ['F0A', 'F0B'] },
+    {
+      download: transport({ F0A: 'a', F0B: 'bb' }).download,
+      mark: async (path) => {
+        // There already, and still empty: made, and not yet written.
+        order.push(`mark ${path.split(sep).at(-1)}, ${(await stat(path)).size} bytes`);
+        return path.endsWith('F0B.pdf') ? { mark: null, failure: 'it failed (ENOTSUP)' } : { mark: 'Zone.Identifier' };
+      },
+      write: async (handle, bytes) => {
+        order.push(`write ${bytes.toString('utf8')}`);
+        await handle.writeFile(bytes);
+      },
+    },
+  );
+  assert.deepEqual(order, ['mark F0A.pdf, 0 bytes', 'write a', 'mark F0B.pdf, 0 bytes', 'write bb']);
+  // The one that could not be marked is saved all the same, and the result says so.
+  assert.deepEqual(await listing(folder), ['F0A.pdf', 'F0B.pdf']);
+  assert.equal(await readFile(join(folder, 'F0B.pdf'), 'utf8'), 'bb');
+  assert.deepEqual(
+    result.files.map((file) => file.marked),
+    ['Zone.Identifier', null],
+  );
+  assert.deepEqual(result.warnings, ['F0B.pdf is not marked as downloaded from the internet: it failed (ENOTSUP)']);
+});
+
 test('a part-written file that cannot be removed either is named in the error, the manifest and the audit record', async () => {
   /*
    * Two failures in a row: the write, then the removal — a full copy-on-write disk, a handle Windows still holds.

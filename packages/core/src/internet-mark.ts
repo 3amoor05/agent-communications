@@ -3,7 +3,8 @@ import { writeFile } from 'node:fs/promises';
 import { childEnvironment } from './system-programs.ts';
 
 /**
- * Every file a download saves is marked, as a browser marks what it downloads, as having come from the internet.
+ * Every file a download saves is marked, as a browser marks what it downloads, as having come from the internet — the
+ * moment it is made, empty, before a byte of it is written, so that nothing watching the folder finds it unmarked.
  *
  * The mark is what the system itself goes by. On macOS, Gatekeeper asks before a quarantined app or script runs for
  * the first time, and says where it came from; on Windows, SmartScreen asks before a program runs, and Office opens a

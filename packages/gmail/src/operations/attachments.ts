@@ -580,7 +580,14 @@ export async function downloadAttachments(
       // Created here, exclusively, and proved to be in the folder that was checked: an error from the file system
       // names the folder and the part, never the sender's name, which its own message would carry in the path.
       const created = await createSavedFile(destination, name, { fileId });
+      let marking: InternetMark;
       try {
+        /*
+         * Marked as downloaded from the internet the moment it exists, before a byte of it is written: a program that
+         * watches the folder and acts on a file as soon as it is there, or as soon as it is closed, finds it marked
+         * already. A mark that cannot be made is said in the result, file by file; the file is still saved.
+         */
+        marking = await (options.mark ?? markFromInternet)(created.path);
         await (options.write ?? ((handle, data) => handle.writeFile(data)))(created.handle, bytes);
         await created.handle.close();
       } catch (error) {
@@ -596,7 +603,6 @@ export async function downloadAttachments(
         });
         throw saveFailure(error, { folder: destination.folder, fileId });
       }
-      const marking = await (options.mark ?? markFromInternet)(created.path);
       const shown = { ...savedNameFields(created.path, envelope), marked: marking.mark };
       writtenAs.set(`${name}\u0000${sha256}`, shown);
       totalBytes += bytes.byteLength;
