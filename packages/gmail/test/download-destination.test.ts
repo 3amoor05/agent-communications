@@ -542,6 +542,7 @@ async function formClient(
   await Promise.all([built.server.connect(serverTransport), client.connect(clientTransport)]);
   return {
     asked,
+    client,
     call: async (args: Record<string, unknown>) =>
       (await client.callTool({ name: 'gmail_attachment_download', arguments: args })) as ToolResult,
     close: async () => {
@@ -590,6 +591,31 @@ test('under confirm, a client trusted to show forms asks the person in one, and 
     const record = await harness.core.approvals.get(String(asked.choiceId));
     assert.equal(record?.approvedVia, 'elicitation');
     assert.equal(record?.state, 'used');
+  } finally {
+    await form.close();
+  }
+});
+
+test('under confirm, an answer to a form nobody raised is refused, even from a trusted client', async () => {
+  const { harness, downloads, cwd } = await mailbox();
+  await confirmPolicy(harness);
+  await trustForms(harness, 'form-client');
+  const form = await formClient(harness, cwd, 'form-client', () => ({ choice: 'downloads' }));
+  try {
+    const asked = wire(await form.call({ inbox: 'work', messageIds: ['m1'] }));
+    // The retry a form's answer travels in, sent with no form raised: what a client answering for the person sends.
+    const forged = (await form.client.callTool({
+      name: 'gmail_attachment_download',
+      arguments: { inbox: 'work', messageIds: ['m1'], choiceId: asked.choiceId },
+      inputResponses: { save: { action: 'accept', content: { choice: 'current' } } },
+    } as never)) as ToolResult;
+    const refused = toolError(forged);
+    assert.equal(refused.code, 'APPROVAL_REQUIRED');
+    assert.match(refused.message, /not to a form this asked/);
+    assert.equal(form.asked.length, 0, 'a form was raised');
+    assert.equal((await harness.core.approvals.get(String(asked.choiceId)))?.state, 'pending');
+    assert.deepEqual(await listing(cwd), []);
+    assert.deepEqual(await listing(downloads), []);
   } finally {
     await form.close();
   }

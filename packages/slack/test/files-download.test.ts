@@ -1269,9 +1269,10 @@ test('a part-written file that cannot be removed either is named in the error, t
    * does not refuse a removal for that, and root is refused nothing, so neither runs it.
    */
   if (!posix || process.getuid?.() === 0) return;
-  const records = { F0A: fileRecord('F0A'), F0B: fileRecord('F0B') };
+  // A name with a space in it: prose, so the path that ends in it is carried inside the envelope wherever it goes.
+  const records = { F0A: fileRecord('F0A'), F0B: fileRecord('F0B', { name: 'Quarterly F0B.pdf' }) };
   const { harness, folder, run } = await setup({ 'files.info': filesInfo(records) });
-  const partial = join(folder, 'F0B.pdf');
+  const partial = join(folder, 'Quarterly F0B.pdf');
 
   let manifestPath = '';
   try {
@@ -1283,27 +1284,30 @@ test('a part-written file that cannot be removed either is named in the error, t
           error.message,
           /^the download stopped part-way: could not save F0B in .*: the disk is full \(ENOSPC\)$/,
         );
-        assert.equal(error.details?.partialFile, partial);
+        assert.equal(unwrapped(String(error.details?.partialFile)), partial);
+        assert.match(String(error.details?.partialFile), /^<untrusted-content [^>]*field="saved-path"/);
         manifestPath = String(error.details?.manifestPath);
         assert.match(
           error.hint ?? '',
-          new RegExp(
-            `Part of F0B was written and could not be removed: delete it — it is not the whole file\\. It is ${escaped(partial)}$`,
-          ),
+          /Part of F0B was written and could not be removed: delete it — it is not the whole file\. It is <untrusted-content [^>]*field="saved-path"/,
         );
+        assert.ok((error.hint ?? '').includes(partial));
         return true;
       },
     );
     assert.equal(await readFile(partial, 'utf8'), 'partial', 'the file the error names is the one left behind');
     const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as FileDownloadResult;
-    assert.deepEqual(manifest.skipped, [
-      {
-        fileId: 'F0B',
-        cause: 'stopped',
-        reason: `the download stopped while it was being written, and the part written could not be removed: ${partial}`,
-      },
-    ]);
+    assert.equal(manifest.skipped.length, 1);
+    assert.equal(manifest.skipped[0]?.fileId, 'F0B');
+    assert.equal(manifest.skipped[0]?.cause, 'stopped');
+    const reason = manifest.skipped[0]?.reason ?? '';
+    assert.match(
+      reason,
+      /^the download stopped while it was being written, and the part written could not be removed: <untrusted-content /,
+    );
+    assert.ok(reason.includes(partial), reason);
     const [record] = await audited(harness);
+    assert.doesNotMatch(record?.reason ?? '', /Quarterly/);
     // The folder and the file's id: a path that ends in the uploader's words is not the audit log's to repeat.
     assert.match(record?.reason ?? '', new RegExp(`; part of F0B could not be removed from ${escaped(folder)}$`));
   } finally {

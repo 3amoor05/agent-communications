@@ -1012,6 +1012,16 @@ test('a question asked under chat is held to confirm when the account is tighten
   );
 });
 
+test('a question asked under confirm stays confirm when the account is loosened before it is answered', async () => {
+  const { core, env, home } = machine();
+  const { approvalId } = await core.approvals.createDownload({ download: binding(), policy: 'confirm' });
+  await assert.rejects(
+    settling(core, env, home, { kind: 'choice', answer: { choice: 'current' }, choiceId: approvalId }, 'chat'),
+    refusal(/confirm/, 'APPROVAL_PENDING'),
+  );
+  assert.equal((await core.approvals.get(approvalId))?.state, 'pending');
+});
+
 test('under confirm, the answer the person gave at their terminal or in a trusted form saves — with the id alone', async () => {
   const { core, env, home } = machine();
   for (const via of ['terminal', 'elicitation'] as const) {
