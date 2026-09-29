@@ -38,6 +38,7 @@ import {
   updateToolGate,
 } from '../src/update-gate.ts';
 import {
+  changeUpdateCheck,
   nextLocalMidnight,
   pendingUpdate,
   readUpdateCheck,
@@ -113,20 +114,23 @@ function machine(extra: Record<string, string> = {}): Machine {
   return { home, env, core, stateDir: core.paths.stateDir };
 }
 
-/** The file as a check would have left it: asked `ago` milliseconds before `at`. */
-function seed(m: Machine, record: Partial<UpdateCheckRecord>, at = new Date()): void {
+/**
+ * The file as a check would have left it, asked at `at` — written under the check's own lock, as every writer does. A
+ * call starts a check in the background; written around the lock, the seed could land between that check reading the
+ * file and writing its claim back, and the claim would put the file back as it was before the seed.
+ */
+async function seed(m: Machine, record: Partial<UpdateCheckRecord>, at = new Date()): Promise<void> {
   mkdirSync(m.stateDir, { recursive: true });
-  writeFileSync(
-    updateCheckPath(m.stateDir),
-    JSON.stringify({
+  await changeUpdateCheck(m.stateDir, () => ({
+    record: {
       lastChecked: at.toISOString(),
       latest: null,
       behind: null,
       lastError: null,
       snoozedUntil: null,
       ...record,
-    }),
-  );
+    } as UpdateCheckRecord,
+  }));
 }
 
 /** A registry that answers `latest` for core, counting the asks. */
@@ -378,7 +382,7 @@ test('offline, the check stops nothing: it keeps the last result, says why, and 
 
   // A machine that knew of an update before going offline still knows of it: the file keeps its last result.
   const known = machine();
-  seed(known, { latest: LATEST, behind: true }, new Date(Date.now() - 25 * 3_600_000));
+  await seed(known, { latest: LATEST, behind: true }, new Date(Date.now() - 25 * 3_600_000));
   await checkForUpdates(known.core, known.env, { deps: deps(offline.latestVersion) });
   const kept = await readUpdateCheck(known.stateDir);
   assert.equal(kept.latest, LATEST);
@@ -409,7 +413,7 @@ test('a hanging registry never delays a tool call: the check runs in the backgro
 
 test('a prerelease named latest never stops anything, in the file or from the registry', async () => {
   const m = machine();
-  seed(m, { latest: '99.0.0-rc.1', behind: true });
+  await seed(m, { latest: '99.0.0-rc.1', behind: true });
   assert.equal(await pendingUpdate({ core: m.core, env: m.env, running: VERSION, ...SERVER }), null);
   const { call, close } = await connect(m);
   try {
@@ -425,7 +429,7 @@ test('a prerelease named latest never stops anything, in the file or from the re
   assert.equal(outcome.record.behind, null);
   assert.equal(await pendingUpdate({ core: fresh.core, env: fresh.env, running: VERSION, ...SERVER }), null);
   // And the release after it is: 99.0.0 is newer than anything this checkout is.
-  seed(fresh, { latest: LATEST, behind: true });
+  await seed(fresh, { latest: LATEST, behind: true });
   assert.notEqual(await pendingUpdate({ core: fresh.core, env: fresh.env, running: VERSION, ...SERVER }), null);
 });
 
@@ -433,7 +437,7 @@ test('a prerelease named latest never stops anything, in the file or from the re
 
 test('an update that is out stops a tool with the owner’s words, and never the update, the doctor or the paths', async () => {
   const m = machine();
-  seed(m, { latest: LATEST, behind: true });
+  await seed(m, { latest: LATEST, behind: true });
   const { latestVersion } = registry();
   const { call, close } = await connect(m, { update: deps(latestVersion) });
   try {
@@ -484,7 +488,7 @@ test('a call that claims an approval this machine holds goes ahead; an empty or 
     assert.match(approvalId, /^ap_/);
     assert.equal(await claimsApproval(m.core, approvalId), true);
     // The check lands.
-    seed(m, { latest: LATEST, behind: true });
+    await seed(m, { latest: LATEST, behind: true });
     const revoke = await call('comms_approval_revoke', { approvalId });
     assert.ok(!stopped(revoke), JSON.stringify(revoke.structuredContent));
     assert.equal(revoke.isError, undefined);
@@ -549,7 +553,7 @@ async function spentApprovals(m: Machine): Promise<Record<'revoked' | 'used' | '
 test("a used, revoked or expired approval claims nothing, nor a send's for a change; one prepared for another change reaches only a refusal", async () => {
   const m = machine();
   const spent = await spentApprovals(m);
-  seed(m, { latest: LATEST, behind: true });
+  await seed(m, { latest: LATEST, behind: true });
   const { call, close } = await connect(m);
   try {
     // Records stay in the store after they are spent; one of those let any call past the stop for as long as it
@@ -585,7 +589,7 @@ test("a look-up of a send goes past the stop by the approval it went under, used
   const spent = await spentApprovals(m);
   const send = spent['a send'];
   // After the update is found, as an agent that was stopped can have "not now" prepared.
-  seed(m, { latest: LATEST, behind: true });
+  await seed(m, { latest: LATEST, behind: true });
   const later = await preparedFor(m, updateLaterChange(m.core));
   // The store's own path for a send that went: claimed, then completed.
   await m.core.approvals.claimForSend(send, {
@@ -632,7 +636,7 @@ test('a download’s answer goes past the stop by its question’s choiceId; the
     },
     policy: 'chat',
   });
-  seed(m, { latest: LATEST, behind: true });
+  await seed(m, { latest: LATEST, behind: true });
   const later = await preparedFor(m, updateLaterChange(m.core));
 
   const gate = updateToolGate({
@@ -687,7 +691,7 @@ test('a download’s answer goes past the stop by its question’s choiceId; the
 test('an update installed but not yet loaded says to restart the client, not to update', async () => {
   const m = machine();
   // What the check found: every registration of the core server names 99.0.0.
-  seed(m, { latest: LATEST, behind: false, current: { registered: ['core'], global: [] } });
+  await seed(m, { latest: LATEST, behind: false, current: { registered: ['core'], global: [] } });
   const { call, close } = await connect(m);
   try {
     const result = await call('comms_audit_tail');
@@ -711,7 +715,7 @@ test('an update installed but not yet loaded says to restart the client, not to 
   // once. A server nothing here registers — Gmail's, started by a plugin — is not made "installed" by it.
   const updated = machine();
   cursorWith(updated, { agentcomms: npxEntry('core', OLD) });
-  seed(updated, { latest: LATEST, behind: true });
+  await seed(updated, { latest: LATEST, behind: true });
   const { latestVersion } = registry();
   const server = await connect(updated, { update: deps(latestVersion) });
   try {
@@ -815,7 +819,7 @@ test('a server a plugin or an extension started is told to update, even where th
    * started the release the plugin pins. Its launcher, or its manifest, says so in its environment.
    */
   const m = machine();
-  seed(m, { latest: LATEST, behind: false, current: { registered: ['gmail'], global: ['gmail'] } });
+  await seed(m, { latest: LATEST, behind: false, current: { registered: ['gmail'], global: ['gmail'] } });
   const verdict = async (surface: 'server' | 'command', startedBy?: string) =>
     (
       await pendingUpdate({
@@ -1031,7 +1035,7 @@ test('what an update records: an old entry by the same name in another scope is 
 
 test('not now lasts until local midnight, and holds for every server on the machine', async () => {
   const m = machine();
-  seed(m, { latest: LATEST, behind: true });
+  await seed(m, { latest: LATEST, behind: true });
   const evening = new Date(2026, 8, 28, 21, 30, 0);
   const midnight = nextLocalMidnight(evening);
   assert.deepEqual(
@@ -1076,7 +1080,7 @@ test('not now lasts until local midnight, and holds for every server on the mach
 
 test('not now and turning the check off each need the person’s approval, and cannot be applied without it', async () => {
   const m = machine();
-  seed(m, { latest: LATEST, behind: true });
+  await seed(m, { latest: LATEST, behind: true });
   const { call, close } = await connect(m);
   try {
     // Not now: a preview and an id, and nothing written yet.
@@ -1127,7 +1131,7 @@ test('not now and turning the check off each need the person’s approval, and c
   );
   // And without an approval the change flow applies neither: both need one.
   const fresh = machine();
-  seed(fresh, { latest: LATEST, behind: true });
+  await seed(fresh, { latest: LATEST, behind: true });
   const changes: GatedChange<unknown>[] = [updateLaterChange(fresh.core), updateAutoChange(fresh.core, 'off')];
   for (const change of changes) {
     const request = await change.plan(await fresh.core.config.load());
@@ -1136,9 +1140,9 @@ test('not now and turning the check off each need the person’s approval, and c
   }
 });
 
-test('the command: --later and --auto off wait for an approval; --auto on applies at once', () => {
+test('the command: --later and --auto off wait for an approval; --auto on applies at once', async () => {
   const m = machine();
-  seed(m, { latest: LATEST, behind: true });
+  await seed(m, { latest: LATEST, behind: true });
   const run = (args: string[]) =>
     spawnSync(process.execPath, [...NODE_FLAGS, CLI, ...args], {
       encoding: 'utf8',
@@ -1176,7 +1180,7 @@ test('CI, AGENT_COMMS_UPDATE_CHECK=off and the machine’s own setting each skip
       );
     }
     const stale = new Date(Date.now() - 3 * 24 * 3_600_000);
-    seed(m, { latest: LATEST, behind: true }, stale);
+    await seed(m, { latest: LATEST, behind: true }, stale);
     const { asked, latestVersion } = registry();
     const outcome = await checkForUpdates(m.core, m.env, { deps: deps(latestVersion) });
     assert.equal(outcome.asked, false, label);
@@ -1197,7 +1201,7 @@ test('CI, AGENT_COMMS_UPDATE_CHECK=off and the machine’s own setting each skip
   }
   // `CI=false` and `CI=0` are not CI.
   const notCi = machine({ CI: 'false' });
-  seed(notCi, { latest: LATEST, behind: true });
+  await seed(notCi, { latest: LATEST, behind: true });
   assert.notEqual(await pendingUpdate({ core: notCi.core, env: notCi.env, running: VERSION, ...SERVER }), null);
 });
 
@@ -1304,7 +1308,7 @@ async function gateAt(
 test('at a terminal: "Update now, later today, or cancel?" — and each answer does what it says', async () => {
   // Cancel: nothing runs, nothing changes.
   const cancelled = machine();
-  seed(cancelled, { latest: LATEST, behind: true });
+  await seed(cancelled, { latest: LATEST, behind: true });
   const cancel = await gateAt(cancelled, ['cancel']);
   assert.match(
     cancel.tty.err(),
@@ -1318,7 +1322,7 @@ test('at a terminal: "Update now, later today, or cancel?" — and each answer d
 
   // Later: put off until midnight — the answer is the approval — and the command runs.
   const put = machine();
-  seed(put, { latest: LATEST, behind: true });
+  await seed(put, { latest: LATEST, behind: true });
   const later = await gateAt(put, ['later']);
   assert.equal(later.error, null, String(later.error));
   assert.equal(later.value, null, 'the command runs');
@@ -1328,7 +1332,7 @@ test('at a terminal: "Update now, later today, or cancel?" — and each answer d
 
   // Now: the update, with its own preview and yes, then "run your command again" — and the command does not run.
   const now = machine();
-  seed(now, { latest: LATEST, behind: true });
+  await seed(now, { latest: LATEST, behind: true });
   const update = await gateAt(now, ['now', 'yes']);
   assert.equal(update.error, null, String(update.error));
   assert.equal(update.value, 0);
@@ -1340,15 +1344,15 @@ test('at a terminal: "Update now, later today, or cancel?" — and each answer d
 
   // Without a network-capable update (WhatsApp): it says what to run, and ends.
   const reader = machine();
-  seed(reader, { latest: LATEST, behind: true });
+  await seed(reader, { latest: LATEST, behind: true });
   const handoff = await gateAt(reader, ['now'], { check: undefined, update: undefined, binary: 'agent-whatsapp' });
   assert.equal(handoff.value, 11);
   assert.match(handoff.tty.out(), /Run `agentcomms update`/);
 });
 
-test('with nobody to ask, the command does not run and ends with UPDATE_REQUIRED, exit 11, naming both commands', () => {
+test('with nobody to ask, the command does not run and ends with UPDATE_REQUIRED, exit 11, naming both commands', async () => {
   const m = machine();
-  seed(m, { latest: LATEST, behind: true });
+  await seed(m, { latest: LATEST, behind: true });
   const run = (args: string[], extra: Record<string, string> = {}) =>
     spawnSync(process.execPath, [...NODE_FLAGS, CLI, ...args], { encoding: 'utf8', env: { ...m.env, ...extra } });
   const json = run(['channels', '--json']);
@@ -1521,7 +1525,7 @@ test('at a terminal, an agent or --json is never asked, even with a terminal on 
     ['--json', {}, { json: true, color: false }],
   ] as const) {
     const m = machine(env);
-    seed(m, { latest: LATEST, behind: true });
+    await seed(m, { latest: LATEST, behind: true });
     const asked = await gateAt(m, ['later'], { output });
     assert.equal(asked.error?.code, 'UPDATE_REQUIRED', `${label}: ${String(asked.error)}`);
     assert.equal(asked.tty.err(), '', `${label}: it was asked`);
@@ -1532,7 +1536,7 @@ test('at a terminal, an agent or --json is never asked, even with a terminal on 
 
 test('at a terminal, an update installed and an older copy running stops as the servers do, and says to run the installed one', async () => {
   const m = machine();
-  seed(m, { latest: LATEST, behind: false, current: { registered: [], global: ['core'] } });
+  await seed(m, { latest: LATEST, behind: false, current: { registered: [], global: ['core'] } });
   // Nobody to ask: stopped, and told so — not a note beside a command that runs.
   const script = await gateAt(m, [], { output: { json: true, color: false } });
   assert.equal(script.error?.code, 'UPDATE_REQUIRED');
@@ -1563,7 +1567,7 @@ test('at a terminal, an update installed and an older copy running stops as the 
 test('now, at a terminal: "Updated" only when this command is at the latest release after it; the command never runs', async () => {
   // The update has nothing to do — this copy is not what it updates (npx's cache, say): not "Updated", and exit 11.
   const short = machine();
-  seed(short, { latest: LATEST, behind: null });
+  await seed(short, { latest: LATEST, behind: null });
   const nothing = await gateAt(short, ['now', 'yes'], {}, deps(registry().latestVersion, {}));
   assert.equal(nothing.error, null, String(nothing.error));
   assert.equal(nothing.value, 11);
@@ -1573,7 +1577,7 @@ test('now, at a terminal: "Updated" only when this command is at the latest rele
   // The check could not tell (npm ls unreadable, say), and the global package was at the latest all along: the update
   // changes nothing, and says so — not "Updated" — and the command still did not run.
   const already = machine();
-  seed(already, { latest: LATEST, behind: null });
+  await seed(already, { latest: LATEST, behind: null });
   const installed = await gateAt(already, ['now', 'yes'], {}, deps(registry().latestVersion, { [CORE]: LATEST }));
   assert.equal(installed.value, 11, installed.tty.out());
   assert.match(installed.tty.out(), /Nothing was changed\./);
@@ -1585,7 +1589,7 @@ test('now, at a terminal: "Updated" only when this command is at the latest rele
 
   // A step fails: said, not "Updated", exit 69 — and the file keeps saying "update", not "restart".
   const failing = machine();
-  seed(failing, { latest: LATEST, behind: true });
+  await seed(failing, { latest: LATEST, behind: true });
   const broken = {
     ...deps(registry().latestVersion),
     installGlobal: async () => {
@@ -1613,7 +1617,7 @@ test('at a terminal, a command claiming an approval this machine holds runs, as 
   const m = machine();
   const approvalId = await preparedFor(m, updateLaterChange(m.core));
   assert.match(approvalId, /^ap_/);
-  seed(m, { latest: LATEST, behind: true });
+  await seed(m, { latest: LATEST, behind: true });
   const claimed = await gateAt(m, [], { output: { json: true, color: false }, approvals: [undefined, approvalId] });
   assert.equal(claimed.error, null, String(claimed.error));
   assert.equal(claimed.value, null, 'the command runs');
@@ -1655,7 +1659,7 @@ test('agentcomms: an approval a command claims is one still waiting, prepared as
   const tightened = await gatedChange(m.core, changePolicyChange(m.core, {}, 'confirm'), { surface: 'cli' });
   assert.equal(tightened.status, 'applied');
   const forThis = await preparedFor(m, changePolicyChange(m.core, {}, 'chat'));
-  seed(m, { latest: LATEST, behind: true });
+  await seed(m, { latest: LATEST, behind: true });
   const run = (args: string[]) =>
     spawnSync(process.execPath, [...NODE_FLAGS, CLI, ...args], { encoding: 'utf8', env: m.env });
   const errorOf = (result: ReturnType<typeof run>) =>
@@ -1769,7 +1773,7 @@ test('stopped, an agent that has "not now" prepared and hands its id to a dry ru
     })}\n`,
   );
   const before = readFileSync(configFile, 'utf8');
-  seed(m, { latest: LATEST, behind: true });
+  await seed(m, { latest: LATEST, behind: true });
   const { call, close } = await connect(m);
   let later = '';
   try {
@@ -1815,7 +1819,7 @@ test('stopped, an agent that has "not now" prepared and hands its id to a dry ru
 test('the doctor gives the check one line: on or off, when last checked, the latest, and what is running', async () => {
   const m = machine();
   const checked = new Date('2026-09-28T09:00:00.000Z');
-  seed(m, { latest: LATEST, behind: true }, checked);
+  await seed(m, { latest: LATEST, behind: true }, checked);
   const { call, close } = await connect(m);
   try {
     const report = (await call('comms_doctor')).structuredContent as {
@@ -1830,7 +1834,7 @@ test('the doctor gives the check one line: on or off, when last checked, the lat
     // "Installed: restart" only when both the core's server and its command would start the latest: the doctor
     // speaks for both.
     const fixFor = async (current: UpdateCheckRecord['current']) => {
-      seed(m, { latest: LATEST, behind: false, current }, checked);
+      await seed(m, { latest: LATEST, behind: false, current }, checked);
       const again = (await call('comms_doctor')).structuredContent as { checks: { name: string; fix?: string }[] };
       return String(again.checks.find((check) => check.name === 'update check')?.fix);
     };
