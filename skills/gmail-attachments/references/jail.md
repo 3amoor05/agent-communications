@@ -169,7 +169,7 @@ installation (`conda-meta`, `Lib/os.py` or `lib/python3.<minor>/os.py` in it or 
 Windows the profile's `AppData`, `%APPDATA%`, `%LOCALAPPDATA%`, `%PROGRAMDATA%`, the Windows folder, Program Files,
 PowerShell's profile folders (`Documents\PowerShell`, `Documents\WindowsPowerShell`, in the profile's Documents and
 wherever the registry says Documents is), a drive's root, a network share, a device path and a path with no drive; on
-Linux the same Windows folders reached through WSL's `/mnt/<letter>` — the drive itself, `Windows`, `Program Files`,
+Linux the same Windows folders reached through WSL on a Windows drive, wherever it is mounted (`/mnt/<letter>` by default) — the drive itself, `Windows`, `Program Files`,
 `ProgramData`, a profile's `AppData`, PowerShell's profile folders — in any case; and
 the system's folders — `/`, `/etc`, `/usr`, `/bin`, `/sbin`, `/lib`, `/var` (but not macOS's per-user temporary folder
 in it), `/opt`, `/root`, `/System`, `/Library`, `/Applications`, `/private/etc`, `/private/var` — except a home inside

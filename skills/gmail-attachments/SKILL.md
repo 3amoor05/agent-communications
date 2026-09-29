@@ -75,7 +75,7 @@ here:
   `.husky` or `.claude` — a checkout under `.claude/worktrees/<name>` excepted), `node_modules`, `site-packages`, a
   Python virtual environment or installation (`~/miniconda3`, `C:\Python312`), `~/Library`, this package's own
   folders, the system's folders, and on Windows `AppData`, PowerShell's profile folders, Program Files, a share or a
-  path with no drive — the same Windows folders too when reached from WSL through `/mnt/<letter>`. The home itself is
+  path with no drive — the same Windows folders too when reached from WSL on a Windows drive, wherever it is mounted. The home itself is
   fine. The refusal is the answer; ask for another folder.
 - **A file that could run is saved under a name nothing runs it by.** Only a document, image, sound, video, archive,
   calendar, contact, mail or Apple file keeps its extension; anything else is saved with `.download` after its whole
@@ -242,7 +242,7 @@ anything in `defaults.attachDeny`.
 | A path that does not exist (`NOT_FOUND`) | A typo and a deliberately misleading path look identical from here. | Confirm the path with the user rather than guessing near-matches on disk. |
 | A download's `out`, or a `saveTo` with no `choiceId` | Where files from strangers land is the person's to say; `out` was how a tool once decided it. | Download without either, show the person the question, and pass their answer with the `choiceId`. |
 | A relative `saveTo` — `Invoices`, `../x` | It would mean a different folder wherever the server or the command runs. | Ask the person for the folder as an absolute path, or one starting with `~`. |
-| A download's folder that is a hidden one anywhere, `node_modules`, `site-packages`, a Python virtual environment or installation, `~/Library`, this package's own, a system folder, a Windows `AppData`, PowerShell profile folder, Program Files, share or driveless path, one of those Windows folders reached from WSL through `/mnt/<letter>` — or a link to one (`BAD_DATA`) | A stranger's file there is not one the person reads: it is a hook, a package, a module, a profile, a key or an approval a program acts on. | Ask the person for another folder. The question is still open. |
+| A download's folder that is a hidden one anywhere, `node_modules`, `site-packages`, a Python virtual environment or installation, `~/Library`, this package's own, a system folder, a Windows `AppData`, PowerShell profile folder, Program Files, share or driveless path, one of those Windows folders reached from WSL on a Windows drive, wherever it is mounted — or a link to one (`BAD_DATA`) | A stranger's file there is not one the person reads: it is a hook, a package, a module, a profile, a key or an approval a program acts on. | Ask the person for another folder. The question is still open. |
 | A call with other arguments than the question was asked with (`USAGE`) | The question is bound to the mailbox, the messages, the parts and the names it showed. | Call again with the arguments it was asked with; the question is still open until it expires. |
 | A folder nothing can be written in (`BAD_DATA`) | Found before the question is used up, so the answer can be given again. | Ask for another folder. |
 | A `saveTo` under the `confirm` change policy (`APPROVAL_PENDING`) | Under `confirm` the person answers where an agent cannot answer for them. | Ask them to run `agent-gmail approve <choiceId>`, then call with the `choiceId` alone. |

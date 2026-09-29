@@ -22,6 +22,7 @@ import { type Core, openCore } from '../src/core.ts';
 import { CommsError } from '../src/errors.ts';
 import {
   checkSaveFolder,
+  parseWindowsDriveMounts,
   refusedSaveFolder,
   type SaveDenyInput,
   saveFolderRefusal,
@@ -1018,7 +1019,7 @@ test('on Linux, Windows’s own folders reached through WSL’s /mnt/<letter> ar
     },
     env: { HOME: '/srv/sam' },
     platform: 'linux',
-    wsl: () => true,
+    windowsDrives: () => ['/mnt/c', '/mnt/d', '/mnt/e'],
   };
   for (const [folder, why] of [
     ['/mnt/c', /the root of a Windows drive, reached through \/mnt\/c$/],
@@ -1060,8 +1061,8 @@ test('on Linux, Windows’s own folders reached through WSL’s /mnt/<letter> ar
   }
   // Only on Linux: a Mac has no WSL, and its /mnt is its own.
   assert.equal(refusedSaveFolder('/mnt/c/Windows', { ...deny, platform: 'darwin' }), null);
-  // Only under WSL: on any other Linux, /mnt/c is a disk the person mounted, its root and its folders theirs.
-  const plainLinux: SaveDenyInput = { ...deny, wsl: () => false };
+  // Only where Windows's drives are mounted: on any other Linux, /mnt/c is a disk the person mounted, theirs.
+  const plainLinux: SaveDenyInput = { ...deny, windowsDrives: () => [] };
   for (const folder of [
     '/mnt/c',
     '/mnt/c/Windows',
@@ -1070,6 +1071,48 @@ test('on Linux, Windows’s own folders reached through WSL’s /mnt/<letter> ar
     '/mnt/d/Users/jo/AppData',
   ]) {
     assert.equal(refusedSaveFolder(folder, plainLinux), null, `not WSL: ${folder}`);
+  }
+});
+
+test('Windows drives are found in the kernel’s mount table, as WSL mounts them and wherever wsl.conf puts them', () => {
+  const mountinfo = [
+    // WSL 2: drvfs over 9p, named in the options.
+    '97 95 0:52 / /mnt/c rw,noatime - 9p C:\\134 rw,dirsync,aname=drvfs;path=C:\\;uid=1000;gid=1000,trans=fd',
+    // WSL 1: drvfs by name, at a root wsl.conf moved, with a space written the way the kernel writes it.
+    '45 24 0:40 / /win\\040drives/d rw,noatime - drvfs D:\\ rw',
+    // Not Windows's: an ordinary disk, a container's root, WSL's own /mnt/wsl, a 9p share that is not drvfs.
+    '31 1 8:1 / /mnt/e rw,relatime - ext4 /dev/sda1 rw',
+    '600 590 0:120 / / rw,relatime - overlay overlay rw,lowerdir=/x',
+    '52 24 0:45 / /mnt/wsl rw,relatime - tmpfs none rw',
+    '53 24 0:46 / /mnt/f rw - 9p f rw,aname=other;path=x',
+  ].join('\n');
+  assert.deepEqual(parseWindowsDriveMounts(mountinfo), ['/mnt/c', '/win drives/d']);
+  const deny: SaveDenyInput = {
+    paths: {
+      configDir: '/srv/sam/.config/ac',
+      stateDir: '/srv/sam/.local/state/ac',
+      dataDir: '/srv/sam/.local/share/ac',
+      secretsDir: '/srv/sam/.config/ac/secrets',
+    },
+    env: { HOME: '/srv/sam' },
+    platform: 'linux',
+    windowsDrives: () => parseWindowsDriveMounts(mountinfo),
+  };
+  assert.match(
+    String(refusedSaveFolder('/win drives/d/Program Files/App', deny)),
+    /inside Program Files, .*reached through \/win drives\/d$/,
+  );
+  assert.match(String(refusedSaveFolder('/mnt/c/Users/jo/AppData', deny)), /inside an AppData folder/);
+  // A folder whose name only begins like a drive's mount is not inside it: /mnt/cWindows is not /mnt/c's Windows.
+  for (const folder of [
+    '/mnt/e/Windows',
+    '/mnt/e',
+    '/mnt/wsl/x',
+    '/mnt/f/Program Files',
+    '/mnt/cdrive/Windows',
+    '/mnt/cWindows',
+  ]) {
+    assert.equal(refusedSaveFolder(folder, deny), null, folder);
   }
 });
 
@@ -1090,10 +1133,19 @@ test('on Windows, Program Files (Arm) and any folder named by its short name are
     ['C:\\PROGRA~1\\Vendor', /short name \(PROGRA~1\)/],
     ['C:\\Users\\sam\\APPDAT~1\\Roaming', /short name \(APPDAT~1\)/],
     ['D:\\Work\\MYPROJ~2.OLD', /short name \(MYPROJ~2\.OLD\)/],
+    ['C:\\progra~1\\Vendor', /short name \(progra~1\)/],
+    ['C:\\Users\\sam\\MYPRO~12', /short name \(MYPRO~12\)/],
   ] as const) {
     assert.match(String(refusedSaveFolder(folder, deny)), why, folder);
   }
-  for (const folder of ['C:\\Users\\sam\\Invoices', 'D:\\Photos 2024', 'D:\\Work\\report~final']) {
+  // Not an 8.3 alias: more than eight characters before the dot, letters after the tilde, or a space.
+  for (const folder of [
+    'C:\\Users\\sam\\Invoices',
+    'D:\\Photos 2024',
+    'D:\\Work\\report~final',
+    'D:\\Photos~2024',
+    'D:\\ab~1.t t',
+  ]) {
     assert.equal(refusedSaveFolder(folder, deny), null, folder);
   }
 });

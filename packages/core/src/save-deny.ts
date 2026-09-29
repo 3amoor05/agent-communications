@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { lstat, readdir, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { CommsError } from './errors.ts';
@@ -62,10 +62,10 @@ export interface SaveDenyInput {
    */
   knownDocuments?: (() => string | undefined) | undefined;
   /**
-   * Whether this Linux is WSL, whose `/mnt/<letter>` are Windows's drives. Read from `/proc` when left out — never from
-   * the environment, which an agent can set: see {@link runningUnderWsl}.
+   * Where this Linux has Windows's drives mounted — WSL's `/mnt/c`, or wherever its `wsl.conf` puts them. Read from
+   * the kernel's mount table when left out, never from the environment: see {@link windowsDriveMounts}.
    */
-  wsl?: (() => boolean) | undefined;
+  windowsDrives?: (() => readonly string[]) | undefined;
 }
 
 /** One place a download is never written, and why, in words the person reads. */
@@ -147,7 +147,6 @@ const PACKAGE_FOLDERS = new Set(['node_modules', 'site-packages', 'dist-packages
  * Windows's and opens `appdata` as `AppData`. The pattern is fixed, never read from `/etc/wsl.conf`: what an agent can
  * set is not what decides where Windows is.
  */
-const WSL_DRIVE = /^\/mnt\/([a-z])(?:\/|$)/i;
 const WSL_PROGRAM_FOLDERS = new Map([
   ['windows', 'it is the Windows folder'],
   ['program files', 'it is inside Program Files, where programs are installed'],
@@ -164,7 +163,7 @@ const WSL_DOCUMENTS = /^(?:onedrive(?: - [^/]+)?\/)?documents\/(powershell|windo
  * one, so `/mnt/c/PROGRA~1/App` would be let through as a folder of the person's. Every segment of that shape is
  * refused on a Windows drive: a real folder named like `Photos~2` is refused with it, and the reason says why.
  */
-const SHORT_NAME = /^[^\\/~.\s]{1,6}~\d{1,6}(?:\.[^.\\/]{1,3})?$/;
+const SHORT_NAME = /^(?=[^.]{3,8}(?:\.|$))[^\\/~.\s]{1,6}~\d{1,6}(?:\.[^.\\/\s]{1,3})?$/;
 
 /** Why a segment of a path on a Windows drive is a short name that could stand for a refused folder — or null. */
 function shortNameIn(segments: readonly string[]): string | null {
@@ -175,37 +174,53 @@ function shortNameIn(segments: readonly string[]): string | null {
 }
 
 /*
- * Whether this Linux is WSL. `/mnt/<letter>` is only Windows's drive there; on any other Linux it is whatever the
- * person mounted, and refusing its root or its `Windows` folder would refuse their own disk. Read from the kernel —
- * WSL's interop handler, or `microsoft` in `/proc/version` — never from the environment, which an agent can set.
+ * Where Windows's drives are mounted on this Linux, from the kernel's own mount table: WSL mounts each as `drvfs` (WSL
+ * 1), or as `9p` with `aname=drvfs` (WSL 2). Nothing else is — not a disk a person mounted at `/mnt/c` on an ordinary
+ * Linux, and not a container that shares WSL's kernel but has no Windows drive in it. Read on every check, since a
+ * drive can be mounted at any time, and never from the environment, which an agent can set. Where `wsl.conf` moves the
+ * drives (`/c`, `/win/c`), the rules follow them.
  */
-let underWsl: boolean | undefined;
-export function runningUnderWsl(): boolean {
-  if (underWsl !== undefined) return underWsl;
-  try {
-    underWsl =
-      existsSync('/proc/sys/fs/binfmt_misc/WSLInterop') || /microsoft/i.test(readFileSync('/proc/version', 'utf8'));
-  } catch {
-    underWsl = false;
+export function parseWindowsDriveMounts(mountinfo: string): string[] {
+  const mounts: string[] = [];
+  for (const line of mountinfo.split('\n')) {
+    const split = line.indexOf(' - ');
+    if (split < 0) continue;
+    const before = line.slice(0, split).split(' ');
+    const [fstype = '', , options = ''] = line.slice(split + 3).split(' ');
+    const drvfs =
+      fstype === 'drvfs' || ((fstype === '9p' || fstype === 'v9fs') && /(?:^|[,;])aname=drvfs(?:[,;]|$)/.test(options));
+    const point = before[4];
+    if (drvfs && point)
+      mounts.push(point.replace(/\\([0-7]{3})/g, (_, octal: string) => String.fromCharCode(Number.parseInt(octal, 8))));
   }
-  return underWsl;
+  return mounts;
 }
 
-/** Whether the WSL rules apply: only on Linux, and only when it is WSL — or when a test says so. */
-function wslFor(input: SaveDenyInput, platform: NodeJS.Platform): boolean {
-  if (platform !== 'linux') return false;
-  if (input.wsl) return input.wsl();
-  return process.platform === 'linux' && runningUnderWsl();
+export function windowsDriveMounts(): string[] {
+  try {
+    return parseWindowsDriveMounts(readFileSync('/proc/self/mountinfo', 'utf8'));
+  } catch {
+    return [];
+  }
+}
+
+/** Where Windows's drives are, when the rules for them apply: only on Linux — or where a test says. */
+function drivesFor(input: SaveDenyInput, platform: NodeJS.Platform): readonly string[] {
+  if (platform !== 'linux') return [];
+  if (input.windowsDrives) return input.windowsDrives();
+  return process.platform === 'linux' ? windowsDriveMounts() : [];
 }
 
 /** Why a Linux path is one of Windows's own folders, reached through WSL's `/mnt/<letter>` — or null. */
-function windowsThroughWsl(folder: string): string | null {
-  const drive = WSL_DRIVE.exec(folder);
-  if (drive === null) return null;
-  const through = `reached through /mnt/${(drive[1] as string).toLowerCase()}`;
+function windowsThroughWsl(folder: string, drives: readonly string[]): string | null {
+  const drive = drives
+    .filter((mount) => folder === mount || folder.startsWith(`${mount.replace(/\/$/, '')}/`))
+    .sort((a, b) => b.length - a.length)[0];
+  if (drive === undefined) return null;
+  const through = `reached through ${drive}`;
   const segments = folder
+    .slice(drive.length)
     .split('/')
-    .slice(3)
     .filter((segment) => segment !== '');
   if (segments.length === 0) return `it is the root of a Windows drive, ${through}`;
   const short = shortNameIn(segments);
@@ -389,7 +404,7 @@ function breaks(
   list: readonly DeniedFolder[],
   homes: readonly string[],
   platform: NodeJS.Platform,
-  wsl: boolean,
+  drives: readonly string[],
 ): string | null {
   const paths = pathsFor(platform);
   const blind = caseBlind(platform);
@@ -401,8 +416,8 @@ function breaks(
     // The root of any drive, not only the one the home is on: `D:\` is as much a disk's top level as `C:\`.
     if (paths.parse(folder).root === folder) return 'it is the root of a drive';
   }
-  if (platform === 'linux' && wsl) {
-    const windows = windowsThroughWsl(folder);
+  if (platform === 'linux') {
+    const windows = windowsThroughWsl(folder, drives);
     if (windows !== null) return windows;
   }
   for (const entry of list) {
@@ -447,7 +462,7 @@ export function refusedSaveFolder(folder: string, input: SaveDenyInput): string 
     if (form) return form;
   }
   const home = paths.resolve(homeOf(input.env, platform));
-  return breaks(paths.resolve(folder), saveDenyList(input), [home], platform, wslFor(input, platform));
+  return breaks(paths.resolve(folder), saveDenyList(input), [home], platform, drivesFor(input, platform));
 }
 
 /** The real path of `target`, through whatever part of it exists; the rest kept as written. */
@@ -562,7 +577,7 @@ export async function saveFolderRefusal(folder: string, input: SaveDenyInput): P
   const homes = [home, await realpathOfExisting(home)];
   const candidates = [paths.resolve(folder), await realpathOfExisting(folder)];
   for (const candidate of candidates) {
-    const why = breaks(candidate, [...list, ...real], homes, platform, wslFor(input, platform));
+    const why = breaks(candidate, [...list, ...real], homes, platform, drivesFor(input, platform));
     if (why !== null) return why;
   }
   for (const candidate of candidates) {

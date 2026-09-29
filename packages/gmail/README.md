@@ -117,7 +117,7 @@ configuration, state, data and credentials folders; the system's folders (`/`, `
 `/System`, …), though a home inside one, such as `/root`, is yours; and on Windows `AppData`, `%PROGRAMDATA%`, the
 Windows folder, Program Files, PowerShell's profile folders (`Documents\PowerShell` and `Documents\WindowsPowerShell`,
 wherever Windows says Documents is), a drive's root, a network share and a path with no drive — and on Linux the same
-Windows folders reached through WSL's `/mnt/<letter>`: the drive itself, `Windows`, `Program Files`, `ProgramData`, a
+Windows folders reached through WSL, on a Windows drive wherever it is mounted (`/mnt/<letter>` by default): the drive itself, `Windows`, `Program Files`, `ProgramData`, a
 profile's `AppData` and PowerShell's profile folders, in any case. A folder that leads to one through a link is refused
 as that folder: a `hooks` link to `.husky` is `.husky`. In any of them a file would be something a program runs or loads
 on its own — a hook, a package, a profile, a key, an approval — rather than a file you read. These are the folders every
