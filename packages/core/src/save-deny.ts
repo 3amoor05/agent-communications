@@ -548,18 +548,22 @@ function hiddenSegment(segments: readonly string[], blind: boolean): number {
   return -1;
 }
 
-/** The first rule a resolved folder breaks, against these forms of the list and of the home — or null. */
+/**
+ * The first rule a resolved folder breaks, against these forms of the list and of the home — or null. `shortNames`
+ * off leaves Windows short names to another form of the same folder: see {@link saveFolderRefusal}.
+ */
 function breaks(
   folder: string,
   list: readonly DeniedFolder[],
   homes: readonly string[],
   platform: NodeJS.Platform,
   mounts: readonly Mount[],
+  shortNames = true,
 ): string | null {
   const paths = pathsFor(platform);
   const blind = caseBlind(platform);
   if (platform === 'win32') {
-    const short = shortNameIn(folder.split(/[\\/]/).slice(1));
+    const short = shortNames ? shortNameIn(folder.split(/[\\/]/).slice(1)) : null;
     if (short !== null) return short;
     if (/^\\\\/.test(folder))
       return windowsPathProblem(folder) ?? 'it is a network share, not a folder on this computer';
@@ -725,9 +729,16 @@ export async function saveFolderRefusal(folder: string, input: SaveDenyInput): P
   );
   const home = paths.resolve(homeOf(input.env, platform));
   const homes = [home, await realpathOfExisting(home)];
-  const candidates = [paths.resolve(folder), await realpathOfExisting(folder)];
+  const written = paths.resolve(folder);
+  const resolved = await realpathOfExisting(folder);
+  const candidates = [written, resolved];
+  // On Windows the real path names every folder that exists by its long name — `C:\Users\RUNNER~1` comes back as
+  // `C:\Users\runneradmin`, `C:\PROGRA~1` as `C:\Program Files` — so short names are judged there alone. The form as
+  // written would refuse a folder of the person's reached by its short name, as `%TEMP%` often is; and a part that
+  // does not exist yet keeps its written name in the real path, where one that looks short is still refused.
   for (const candidate of candidates) {
-    const why = breaks(candidate, [...list, ...real], homes, platform, mountsFor(input, platform));
+    const shortNames = !(platform === 'win32' && candidate === written && resolved !== written);
+    const why = breaks(candidate, [...list, ...real], homes, platform, mountsFor(input, platform), shortNames);
     if (why !== null) return why;
   }
   for (const candidate of candidates) {

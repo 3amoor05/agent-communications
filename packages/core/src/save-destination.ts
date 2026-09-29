@@ -151,7 +151,7 @@ export function saveFolders(input: SaveFoldersInput): OfferedFolders {
   }
   const folders: OfferedFolders = {
     downloads: input.configured
-      ? paths.resolve(expandHome(input.configured, home))
+      ? paths.resolve(expandHome(input.configured, home, paths.join))
       : downloadsFolder(input.env, platform, input.knownDownloads),
     current: paths.resolve(input.cwd),
   };
@@ -354,7 +354,8 @@ export function folderFor(
   platform: NodeJS.Platform = process.platform,
 ): string {
   if (answer.choice !== 'other') return answer.choice === 'downloads' ? folders.downloads : folders.current;
-  return pathsFor(platform).resolve(expandHome(answer.folder, homeOf(env, platform)));
+  const paths = pathsFor(platform);
+  return paths.resolve(expandHome(answer.folder, homeOf(env, platform), paths.join));
 }
 
 /** An answer as a question records it: the person's folder resolved where they typed it, so it means what they read. */

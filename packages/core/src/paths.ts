@@ -101,10 +101,17 @@ export function accountHome(): string {
   return homedir();
 }
 
-/** Expands a leading `~` to the home directory. Nothing else is expanded. */
-export function expandHome(path: string, home: string = homedir()): string {
+/**
+ * Expands a leading `~` to the home directory. Nothing else is expanded. `joinPaths` is the platform's own, for a path
+ * judged for another platform than this one: a Linux home joined on Windows would otherwise take its backslashes.
+ */
+export function expandHome(
+  path: string,
+  home: string = homedir(),
+  joinPaths: (...parts: string[]) => string = join,
+): string {
   if (path === '~') return home;
-  if (path.startsWith('~/') || path.startsWith('~\\')) return join(home, path.slice(2));
+  if (path.startsWith('~/') || path.startsWith('~\\')) return joinPaths(home, path.slice(2));
   return path;
 }
 
