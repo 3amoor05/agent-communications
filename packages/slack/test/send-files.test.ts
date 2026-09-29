@@ -149,7 +149,7 @@ test('the preview lists several files in order, and warns about a large one and 
   const rendered = renderChannelPreview(prepared.preview);
   for (const line of [
     'Attach:   chart.png · 6 bytes · image/png',
-    'Attach:   dump.bin · 10.0 MiB (10,485,761 bytes) · application/octet-stream',
+    'Attach:   dump.bin · 10.0 MB (10,485,761 bytes) · application/octet-stream',
     'Attach:   logs.zip · 9 bytes · application/zip',
   ]) {
     assert.ok(rendered.includes(line), `${line}\n${rendered}`);

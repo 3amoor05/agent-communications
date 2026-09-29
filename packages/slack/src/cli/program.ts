@@ -54,7 +54,7 @@ import {
   signInStarted,
 } from '../operations/changes.ts';
 import { runDoctor } from '../operations/doctor.ts';
-import { createDraft, deleteOwnDraft, listDrafts, showDraft } from '../operations/drafts.ts';
+import { createDraft, deleteOwnDraft, listDrafts, showDraft, updateDraft } from '../operations/drafts.ts';
 import {
   downloadFiles,
   downloadSelection,
@@ -88,6 +88,7 @@ import {
   renderAppUpdateNeeded,
   renderChannels,
   renderConnected,
+  renderCreatedDraft,
   renderDeletedDraft,
   renderDoctor,
   renderDraft,
@@ -101,11 +102,13 @@ import {
   renderMode,
   renderPeople,
   renderPolicies,
+  renderPosted,
   renderRemoved,
   renderSearch,
   renderSignInStarted,
   renderSteps,
   renderThread,
+  renderUpdatedDraft,
   renderWorkspace,
   renderWorkspaces,
 } from './render.ts';
@@ -965,36 +968,62 @@ configuration problem.`,
 
   const draft = program.command('draft').description('compose and keep messages locally; nothing reaches Slack');
 
+  /*
+   * The three the preview can count, and no other word. This took any word, and `--broadcast subteam^S0123` wrote a
+   * user-group mention the preview counted as nobody, under `chat`. `createDraft` refuses it too, for any caller.
+   */
+  const broadcastOption = () =>
+    new Option('--broadcast <who>', 'interrupt the room; always needs a person to approve').choices([...BROADCASTS]);
+  const FILE_HELP = 'a local file to post, under your home folder and not in a hidden folder there; up to 10';
+
   workspaceOption(draft.command('create'))
     .description('write a draft. It lives on this machine — Slack has no server-side draft')
     .requiredOption('--channel <id>', 'the channel or conversation id')
-    .requiredOption('--text <text>', 'what to say. Markup in it is shown, not interpreted')
+    .option(
+      '--text <text>',
+      'what to say — optional with --file, as the files’ message. Markup in it is shown, not interpreted',
+    )
     .option('--thread <ts>', 'reply inside this thread')
     .option('--mention <userId...>', 'mention someone, by id — a name is ambiguous')
-    .addOption(
-      /*
-       * The three the preview can count, and no other word. This took any word, and `--broadcast subteam^S0123` wrote a
-       * user-group mention the preview counted as nobody, under `chat`. `createDraft` refuses it too, for any caller.
-       */
-      new Option('--broadcast <who>', 'interrupt the room; always needs a person to approve').choices([...BROADCASTS]),
-    )
+    .addOption(broadcastOption())
+    .option('--file <path...>', FILE_HELP)
     .action(
       act(async (context, options, flags: Options) => {
-        // The same operation `slack_post_prepare` writes a draft with, mentions checked and all: see `draftPayload`.
+        // The same operation `slack_post_prepare` writes a draft with, mentions and files checked and all.
         const created = await createDraft(context, String(flags.workspace), {
           channel: String(flags.channel),
-          text: String(flags.text),
+          text: flags.text as string | undefined,
           threadTs: flags.thread as string | undefined,
           mentionUsers: flags.mention as string[] | undefined,
           broadcast: flags.broadcast,
+          files: flags.file as string[] | undefined,
         });
-        writeResult(
-          created,
-          output(),
-          (data) =>
-            `Draft ${data.draftId}. Nothing has reached Slack.\nPreview it with: agent-slack post prepare --workspace ${flags.workspace} --draft ${data.draftId}`,
-          streams,
-        );
+        writeResult(created, output(), (data) => renderCreatedDraft(data, String(flags.workspace)), streams);
+      }),
+    );
+
+  workspaceOption(draft.command('update <draftId>'))
+    .description('change a draft: what you give replaces what it had. Any approval it had no longer holds')
+    .option('--channel <id>', 'post it here instead')
+    .option('--text <text>', 'what to say instead. Markup in it is shown, not interpreted')
+    .option('--thread <ts>', 'reply inside this thread instead')
+    .option('--mention <userId...>', 'mention these people instead, by id')
+    .addOption(broadcastOption())
+    .option('--file <path...>', `${FILE_HELP}. Replaces the files it had`)
+    .option('--add-file <path...>', 'a local file to add to the ones it has, from the same folders')
+    .action(
+      act(async (context, _options, draftId: string, flags: Options) => {
+        // The same operation as `slack_draft_update`: a new revision whatever it changes — see `updateDraft`.
+        const updated = await updateDraft(context, String(flags.workspace), draftId, {
+          channel: flags.channel as string | undefined,
+          text: flags.text as string | undefined,
+          threadTs: flags.thread as string | undefined,
+          mentionUsers: flags.mention as string[] | undefined,
+          broadcast: flags.broadcast,
+          files: flags.file as string[] | undefined,
+          addFiles: flags.addFile as string[] | undefined,
+        });
+        writeResult(updated, output(), (data) => renderUpdatedDraft(data, String(flags.workspace)), streams);
       }),
     );
 
@@ -1065,7 +1094,7 @@ configuration problem.`,
           },
           { fetch: deps.read, baseUrl: deps.slackBaseUrl },
         );
-        writeResult(posted, output(), (data) => `Posted to ${data.channel} at ${data.ts}.`, streams);
+        writeResult(posted, output(), renderPosted, streams);
       }),
     );
 

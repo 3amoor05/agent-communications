@@ -8,7 +8,7 @@ import {
   type Mention,
 } from '../compose/blocks.ts';
 import { type DraftStore, isUnreadableDraft, openDraftStore, type SlackDraft } from '../compose/drafts.ts';
-import { checkFileCount, recordFiles } from '../compose/files.ts';
+import { checkFileCount, recordFiles, type SlackDraftFile } from '../compose/files.ts';
 import type { SlackContext } from '../context.ts';
 import { decodeSlackText } from '../text/decode.ts';
 import { changedOutsideHint, postedPayload } from './send.ts';
@@ -288,6 +288,11 @@ export interface DraftView {
   readonly problem?: DraftProblem | undefined;
   /** What would be sent, byte for byte: the payload the gate composes again and posts. Absent when it refuses. */
   readonly payload?: ComposedPayload | undefined;
+  /**
+   * The local files it would post, as the draft recorded them: each is read again, and must still match, when it is
+   * prepared and when it is sent. Absent on a post of text alone.
+   */
+  readonly files?: readonly SlackDraftFile[] | undefined;
   readonly revision: string;
   readonly accountId: string;
   readonly createdAt: string;
@@ -304,6 +309,11 @@ function heading(draft: SlackDraft): Pick<DraftView, 'draftId' | 'channel' | 'th
     channel: draft.payload.channel,
     ...(typeof threadTs === 'string' ? { threadTs } : {}),
   };
+}
+
+/** A draft's files, when it has any — so a view of a post of text alone is the view it always was. */
+function filesOf(draft: SlackDraft): Pick<DraftView, 'files'> {
+  return draft.files === undefined || draft.files.length === 0 ? {} : { files: draft.files };
 }
 
 function kept(draft: SlackDraft): Pick<DraftView, 'revision' | 'accountId' | 'createdAt' | 'updatedAt'> {
@@ -339,6 +349,7 @@ export function viewDraft(draft: SlackDraft): DraftView {
           },
         }),
     payload,
+    ...filesOf(draft),
     ...kept(draft),
   };
 }

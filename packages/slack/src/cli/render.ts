@@ -1,4 +1,5 @@
-import { escapeForDisplay, paint, sizeOf, stripInvisible, truncateDisplay } from '@agentcomms/core';
+import { describeSize, escapeForDisplay, paint, sizeOf, stripInvisible, truncateDisplay } from '@agentcomms/core';
+import type { SlackDraft } from '../compose/drafts.ts';
 import { renderManifest } from '../manifest.ts';
 import type { AppCreated, AppUpdated } from '../operations/app.ts';
 import type { AppUpdateNeeded, PolicyResult } from '../operations/changes.ts';
@@ -15,6 +16,7 @@ import type {
   SearchResult,
   ThreadResult,
 } from '../operations/read.ts';
+import type { PostedFiles, PostedMessage } from '../operations/send.ts';
 import type { StartedSignIn } from '../operations/signin.ts';
 import type { WorkspaceView } from '../operations/workspaces.ts';
 
@@ -140,6 +142,13 @@ export function renderDraft(draft: DraftView, color: boolean): string {
     '',
     escapeForDisplay(draft.text ?? ''),
   ];
+  // Each file as the preview will list it, less the hash: which file, how large, and where it is read from.
+  if (draft.files !== undefined && draft.files.length > 0) {
+    lines.push('');
+    for (const file of draft.files) {
+      lines.push(`file: ${draftCell(file.name, 80)} · ${describeSize(file.size)} · from ${draftCell(file.path, 200)}`);
+    }
+  }
   if (draft.problem) {
     lines.push(
       '',
@@ -167,9 +176,50 @@ export function renderDrafts(drafts: readonly DraftView[], color: boolean): stri
       const changed = draft.problem
         ? paint(color, 'yellow', '  · changed outside agent-slack; shown as it would post')
         : '';
-      return `${head}  ${draftCell(draft.text, 60)}${changed}`;
+      const count = draft.files?.length ?? 0;
+      const files = count === 0 ? '' : paint(color, 'dim', `  · ${count} file${count === 1 ? '' : 's'}`);
+      return `${head}  ${draftCell(draft.text, 60)}${files}${changed}`;
     })
     .join('\n');
+}
+
+/** What `draft create` wrote, and what to run next: nothing has gone anywhere yet. */
+export function renderCreatedDraft(draft: SlackDraft, workspace: string): string {
+  const count = draft.files?.length ?? 0;
+  const files = count === 0 ? '' : ` with ${count} file${count === 1 ? '' : 's'}`;
+  return `Draft ${draft.draftId}${files}. Nothing has reached Slack.\nPreview it with: agent-slack post prepare --workspace ${workspace} --draft ${draft.draftId}`;
+}
+
+/** What `draft update` saved: a new revision, which no approval made before it covers. */
+export function renderUpdatedDraft(draft: SlackDraft, workspace: string): string {
+  const count = draft.files?.length ?? 0;
+  return [
+    `Draft ${draft.draftId} saved${count === 0 ? '' : ` with ${count} file${count === 1 ? '' : 's'}`}, as a new revision: any approval it had no longer holds.`,
+    `Preview it with: agent-slack post prepare --workspace ${workspace} --draft ${draft.draftId}`,
+  ].join('\n');
+}
+
+/**
+ * What `post send` posted.
+ *
+ * A post of text alone is the one line it always was. A post with files says how many and where, and the message's ts
+ * — or, when Slack had not attached the files to a message yet, that the ts is not known, in the words of the result's
+ * own note — and then each file as Slack now has it: its id there, its name, its size and the hash that was sent.
+ */
+export function renderPosted(posted: PostedMessage | PostedFiles): string {
+  if (!('files' in posted)) return `Posted to ${posted.channel} at ${posted.ts}.`;
+  const count = `${posted.files.length} file${posted.files.length === 1 ? '' : 's'}`;
+  const note = posted.note ?? 'Slack did not say which message holds them';
+  const head =
+    posted.ts === null
+      ? `Posted ${count} to ${posted.channel}. ${note.charAt(0).toUpperCase()}${note.slice(1)}.`
+      : `Posted ${count} to ${posted.channel} at ${posted.ts}.`;
+  return [
+    head,
+    ...posted.files.map(
+      (file) => `  ${file.id}  ${truncateDisplay(file.name, 80)} · ${describeSize(file.size)} · sha256 ${file.sha256}`,
+    ),
+  ].join('\n');
 }
 
 /** What `draft delete` removed — and, for a draft nobody could read, that what it said is gone unseen. */

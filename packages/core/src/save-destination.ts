@@ -18,7 +18,7 @@ import { APPROVAL_ID_PATTERN } from './ids.ts';
 import { createUniqueFile } from './jail.ts';
 import { DOWNLOADS_KNOWN_FOLDER, knownFolder } from './known-folders.ts';
 import { expandHome, homeOf } from './paths.ts';
-import { truncateDisplay } from './render.ts';
+import { sizeOf, truncateDisplay } from './render.ts';
 import {
   checkSaveFolder,
   refusedFolder,
@@ -751,13 +751,6 @@ export async function askWhereToSave(core: Core, input: AskInput): Promise<Desti
     expiresAt: record.expiresAt,
     next,
   };
-}
-
-/** A byte count as a person reads it. */
-export function sizeOf(bytes: number): string {
-  if (bytes < 1024) return `${bytes} ${bytes === 1 ? 'byte' : 'bytes'}`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 /** Where an answered download saves: the folder, made and resolved, and how it was chosen. */

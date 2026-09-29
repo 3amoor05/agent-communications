@@ -424,6 +424,8 @@ test('every tool says whether it writes and whether it reaches Slack', async () 
     assert.deepEqual(writers.sort(), [
       'slack_draft_create',
       'slack_draft_delete',
+      // It replaces what a draft said, on this machine; nothing reaches Slack.
+      'slack_draft_update',
       // It writes files on this machine, as `gmail_attachment_download` does — never over one, so not destructive.
       'slack_file_download',
       'slack_mode_set',

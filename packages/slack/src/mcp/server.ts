@@ -33,7 +33,7 @@ import {
   signInStarted,
 } from '../operations/changes.ts';
 import { runDoctor } from '../operations/doctor.ts';
-import { createDraft, deleteOwnDraft, listDrafts, showDraft } from '../operations/drafts.ts';
+import { createDraft, deleteOwnDraft, listDrafts, showDraft, updateDraft } from '../operations/drafts.ts';
 import { downloadFiles, downloadSelection, type FileDownloader } from '../operations/files.ts';
 import type { ProbeFetch } from '../operations/identity.ts';
 import { manifestFor } from '../operations/manifest.ts';
@@ -160,6 +160,8 @@ async function buildInstructions(context: SlackContext, pinned: string | undefin
     'always for @channel, @here or a room of 50 or more — the person runs `agent-slack approve <id>` at their own',
     'terminal; you cannot approve it yourself, so say so and wait. Under `never` nothing posts. A workspace in `read`',
     'mode cannot post at all; Slack enforces that.',
+    'Files post the same way: name local files by path, and the preview lists each with its SHA-256. The approval is',
+    'bound to those bytes, and every file is read and checked again at send.',
     '',
     canPost.length > 0
       ? `Workspaces that could post if a person approves: ${listOf(canPost)}.`
@@ -343,6 +345,13 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
    * the operation's, in the same words at both surfaces.
    */
   const oneOfWords = (values: readonly string[]) => z.string().meta({ enum: [...values] });
+  /**
+   * Local files to post, by path. The limits and the folders are the operation's to check — `recordFiles` — so a path
+   * outside them is refused in the words the command refuses it with, not by the schema.
+   */
+  const filesArg = () => z.array(z.string()).optional();
+  const FILES_HELP =
+    'local files to post, by path: under the home folder and not in a hidden folder there, at most 10, each at most 100 MiB';
 
   server.registerTool(
     'slack_workspaces_list',
@@ -674,7 +683,7 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
     {
       title: 'Prepare a post',
       description:
-        'Return the preview a person must approve, with its approval id. **Nothing is posted.** Either compose a new message — `channel` and `text`, stored as a local draft — or pass `draftId` alone to prepare a draft already written: one from `agent-slack draft create`, or one whose approval expired. Not both. The preview says how many people it would interrupt; show it in full and wait. The same as `agent-slack draft create` then `agent-slack post prepare --draft`.',
+        'Return the preview a person must approve, with its approval id. **Nothing is posted.** Either compose a new message — `channel` with `text`, `files` or both, stored as a local draft — or pass `draftId` alone to prepare a draft already written: one from `agent-slack draft create`, or one whose approval expired. Not both. The preview says how many people it would interrupt, and lists every file by name, size, type, SHA-256 and the path it is read from; the approval is bound to those bytes, and a file that changed since the draft was written is refused. Show it in full and wait. The same as `agent-slack draft create` then `agent-slack post prepare --draft`.',
       inputSchema: {
         ...workspaceArg,
         draftId: z
@@ -686,6 +695,7 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
         threadTs: z.string().optional().describe('reply inside this thread, for a new message'),
         mentionUsers: z.array(z.string()).optional().describe('user ids to mention, by id — never by name'),
         broadcast: oneOfWords(BROADCASTS).optional().describe('interrupts the room; needs a person'),
+        files: filesArg().describe(`${FILES_HELP}, for a new message; with files, \`text\` is optional`),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     },
@@ -703,6 +713,7 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
               threadTs: args.threadTs,
               mentionUsers: args.mentionUsers,
               broadcast: args.broadcast,
+              files: args.files,
             },
             slackDeps,
           ),
@@ -728,7 +739,7 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
     {
       title: 'Post a prepared draft',
       description:
-        'Post a draft `slack_post_prepare` prepared — only after the person has seen that whole preview and said yes to it in this conversation. Pass the channel you believe it goes to, from the preview; if it is not the draft’s, nothing is posted. Under the workspace’s `chat` policy this posts it. Under `confirm`, and for any @channel, @here or room of 50 or more, it returns APPROVAL_PENDING with the command the person runs at their own terminal (`agent-slack approve <approvalId>`): you cannot approve it yourself — tell them, and call this again once they have. Under `never` it refuses. Single use; an edit to the draft, or a room that grew, voids the approval. A post cannot be taken back.',
+        'Post a draft `slack_post_prepare` prepared — only after the person has seen that whole preview and said yes to it in this conversation. Pass the channel you believe it goes to, from the preview; if it is not the draft’s, nothing is posted. Under the workspace’s `chat` policy this posts it. Under `confirm`, and for any @channel, @here or room of 50 or more, it returns APPROVAL_PENDING with the command the person runs at their own terminal (`agent-slack approve <approvalId>`): you cannot approve it yourself — tell them, and call this again once they have. Under `never` it refuses. Single use; an edit to the draft, or a room that grew, voids the approval. For a post with files, every file is read again first, and nothing is sent unless each still has the SHA-256 the preview showed; it returns the file ids and the message `ts` — `null`, with a `note`, when Slack had not attached them to a message yet. A post cannot be taken back.',
       inputSchema: {
         ...workspaceArg,
         draftId: z.string().describe('from slack_post_prepare'),
@@ -771,14 +782,18 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
     {
       title: 'Write a draft',
       description:
-        'Write a draft on this machine, without preparing it. **Nothing reaches Slack** — Slack keeps no server-side draft. Mentions are by user id and checked as slack_post_prepare checks them, and `broadcast` is only `here`, `channel` or `everyone`. To post it, call slack_post_prepare with its `draftId`, show the preview, and wait for the person. The same as `agent-slack draft create`.',
+        'Write a draft on this machine, without preparing it. **Nothing reaches Slack** — Slack keeps no server-side draft. Mentions are by user id and checked as slack_post_prepare checks them, and `broadcast` is only `here`, `channel` or `everyone`. `files` are local files to post with it, each checked and recorded now by name, size, type and SHA-256 — never its bytes; with files, `text` is optional and is posted as their message. To post it, call slack_post_prepare with its `draftId`, show the preview, and wait for the person. The same as `agent-slack draft create`.',
       inputSchema: {
         ...workspaceArg,
         channel: z.string().describe('the channel or conversation id'),
-        text: z.string().describe('what to say. Markup in it is shown, not interpreted'),
+        text: z
+          .string()
+          .optional()
+          .describe('what to say — optional with files, as their message. Markup in it is shown, not interpreted'),
         threadTs: z.string().optional().describe('reply inside this thread'),
         mentionUsers: z.array(z.string()).optional().describe('user ids to mention, by id — never by name'),
         broadcast: oneOfWords(BROADCASTS).optional().describe('interrupts the room; posting it needs a person'),
+        files: filesArg().describe(FILES_HELP),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
@@ -791,6 +806,51 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
             threadTs: args.threadTs,
             mentionUsers: args.mentionUsers,
             broadcast: args.broadcast,
+            files: args.files,
+          }),
+        );
+      } catch (error) {
+        return fail(error);
+      }
+    },
+  );
+
+  /*
+   * Changing a draft: `agent-slack draft update`. Every field it is given replaces what the draft had, and every change
+   * is a new revision, so an approval prepared before it no longer holds. Nothing reaches Slack; a file added is
+   * checked and recorded here, as `slack_draft_create` does it.
+   */
+  server.registerTool(
+    'slack_draft_update',
+    {
+      title: 'Change a draft',
+      description:
+        'Change a draft on this machine: each field given replaces what it had, and the rest — mentions included — is kept. `files` replaces its files and `addFiles` adds to them, each checked and recorded as slack_draft_create records it. **Nothing reaches Slack.** Every change is a new revision and voids any approval the draft had: call slack_post_prepare with its `draftId` again and show the new preview. The same as `agent-slack draft update`.',
+      inputSchema: {
+        ...workspaceArg,
+        draftId: z.string(),
+        channel: z.string().optional().describe('post it to this channel id instead'),
+        text: z.string().optional().describe('what to say instead. Markup in it is shown, not interpreted'),
+        threadTs: z.string().optional().describe('reply inside this thread instead'),
+        mentionUsers: z.array(z.string()).optional().describe('mention these people instead, by user id'),
+        broadcast: oneOfWords(BROADCASTS).optional().describe('interrupts the room; posting it needs a person'),
+        files: filesArg().describe(`${FILES_HELP}. Replaces the files it had; an empty list takes them all off`),
+        addFiles: filesArg().describe('local files to add to the ones it has, from the same folders'),
+      },
+      // It replaces what the draft said, which is not an addition — though nothing leaves this machine.
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+    },
+    async (args) => {
+      try {
+        return reply(
+          await updateDraft(context, await resolve(args.workspace), args.draftId, {
+            channel: args.channel,
+            text: args.text,
+            threadTs: args.threadTs,
+            mentionUsers: args.mentionUsers,
+            broadcast: args.broadcast,
+            files: args.files,
+            addFiles: args.addFiles,
           }),
         );
       } catch (error) {

@@ -1,7 +1,8 @@
 import { CommsError } from '@agentcomms/core';
 import { openDraftStore } from '../compose/drafts.ts';
+import { checkFileCount, recordFiles } from '../compose/files.ts';
 import type { SlackContext } from '../context.ts';
-import { type DraftInput, draftPayload, ownDraft } from './drafts.ts';
+import { attachPolicyOf, type DraftInput, draftPayload, ownDraft } from './drafts.ts';
 import { gateDepsFor } from './gate.ts';
 import { NameBook } from './people.ts';
 import {
@@ -36,7 +37,8 @@ import type { SessionDeps } from './session.ts';
  *
  * Exactly one. `draftId` is `agent-slack post prepare --draft`: a draft `draft create` wrote, or one whose approval
  * expired and is being shown again. The message is `draft create` and `post prepare` in one call, which is how a tool
- * does it. Given both, which one was meant is a guess, so it is refused rather than made.
+ * does it — with its text, its files, or both. Given both a draft and a message, which one was meant is a guess, so it
+ * is refused rather than made.
  */
 export interface PrepareRequest {
   readonly draftId?: string | undefined;
@@ -45,24 +47,33 @@ export interface PrepareRequest {
   readonly threadTs?: string | undefined;
   readonly mentionUsers?: readonly string[] | undefined;
   readonly broadcast?: unknown;
+  /** Local files to post, by path, for a new message: see `DraftInput.files`. */
+  readonly files?: readonly string[] | undefined;
 }
 
 function draftToWrite(request: PrepareRequest): DraftInput | undefined {
-  const composing = [request.channel, request.text, request.threadTs, request.mentionUsers, request.broadcast].some(
-    (given) => given !== undefined,
-  );
+  const composing = [
+    request.channel,
+    request.text,
+    request.threadTs,
+    request.mentionUsers,
+    request.broadcast,
+    request.files,
+  ].some((given) => given !== undefined);
   if (request.draftId !== undefined) {
     if (composing) {
       throw new CommsError('USAGE', 'prepare a draft already written, or a new message — not both', {
-        hint: 'Pass `draftId` alone, or `channel` and `text` (with `threadTs`, `mentionUsers` or `broadcast`) without it.',
+        hint: 'Pass `draftId` alone, or `channel` with `text`, `files` or both (and `threadTs`, `mentionUsers` or `broadcast`) without it.',
       });
     }
     return undefined;
   }
-  if (request.channel === undefined || request.text === undefined) {
-    throw new CommsError('USAGE', 'nothing to prepare: name a draft, or give the channel and the text of a new one', {
-      hint: 'Pass `draftId` for a draft already written, or `channel` and `text` to write one.',
-    });
+  if (request.channel === undefined || (request.text === undefined && (request.files ?? []).length === 0)) {
+    throw new CommsError(
+      'USAGE',
+      'nothing to prepare: name a draft, or give the channel and the text or files of a new one',
+      { hint: 'Pass `draftId` for a draft already written, or `channel` with `text`, `files` or both to write one.' },
+    );
   }
   return {
     channel: request.channel,
@@ -70,6 +81,7 @@ function draftToWrite(request: PrepareRequest): DraftInput | undefined {
     threadTs: request.threadTs,
     mentionUsers: request.mentionUsers,
     broadcast: request.broadcast,
+    files: request.files,
   };
 }
 
@@ -78,8 +90,9 @@ function draftToWrite(request: PrepareRequest): DraftInput | undefined {
  *
  * One function, so the same draft gives the same preview from either surface and a draft written at a terminal — or
  * one whose approval ran out — can be prepared from a chat. The request is checked and a new message composed before
- * Slack is asked anything, so a bad mention is refused without opening the workspace; the draft is written only once
- * the workspace has opened, so a sign-in that has lapsed leaves no draft behind it.
+ * Slack is asked anything, so a bad mention is refused without opening the workspace — and so is a file that may not
+ * be sent, since each one is checked and recorded here, on this machine; the draft is written only once the workspace
+ * has opened, so a sign-in that has lapsed leaves no draft behind it.
  */
 export async function prepareDraftPost(
   context: SlackContext,
@@ -89,13 +102,16 @@ export async function prepareDraftPost(
 ): Promise<PreparedPost> {
   const writing = draftToWrite(request);
   const composed = writing === undefined ? undefined : { payload: draftPayload(writing), source: writing.text ?? '' };
+  const paths = writing?.files ?? [];
+  checkFileCount(paths.length);
+  const files = paths.length === 0 ? [] : await recordFiles(paths, await attachPolicyOf(context));
   const gate = await gateDepsFor(context, alias, slack);
   const store = openDraftStore(context.core.paths.stateDir, context.now);
   const draft =
     composed === undefined
       ? // Another workspace's draft is absent here: drafts share one directory, and the id alone proves nothing.
         await ownDraft(store, gate.accountId, request.draftId as string)
-      : await store.create(gate.accountId, composed.payload, composed.source);
+      : await store.create(gate.accountId, composed.payload, composed.source, files);
   return preparePost(gate, draft, new NameBook());
 }
 

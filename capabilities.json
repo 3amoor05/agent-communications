@@ -1019,7 +1019,21 @@
       "cli": "draft create",
       "mcp": "slack_draft_create",
       "status": "both",
-      "operation": "createDraft"
+      "operation": "createDraft",
+      "argv": ["--file", "chart.png"],
+      "args": { "files": ["chart.png"] },
+      "expect": { "input.files": ["chart.png"] }
+    },
+    {
+      "id": "slack.draft.update",
+      "package": "slack",
+      "cli": "draft update",
+      "mcp": "slack_draft_update",
+      "status": "both",
+      "operation": "updateDraft",
+      "argv": ["--file", "chart.png", "--add-file", "notes.md"],
+      "args": { "files": ["chart.png"], "addFiles": ["notes.md"] },
+      "expect": { "change.files": ["chart.png"], "change.addFiles": ["notes.md"] }
     },
     {
       "id": "slack.draft.list",

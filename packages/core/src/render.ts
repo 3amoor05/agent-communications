@@ -292,15 +292,24 @@ export function describeNotifies(notifies: PreviewNotifies): string {
 }
 
 /**
- * A file's size as a person checks it: exact under a kibibyte, and above that a rounded figure with the exact count
- * beside it — `47 bytes`, `10.0 MiB (10,485,761 bytes)`. Grouped the same way on every machine, whatever its locale.
+ * A byte count as a person reads it.
+ *
+ * Here, beside the rest of what formats a value for a person, since the channel preview wants it as well as the
+ * download question — and `save-destination.ts` already imports from here.
+ */
+export function sizeOf(bytes: number): string {
+  if (bytes < 1024) return `${bytes} ${bytes === 1 ? 'byte' : 'bytes'}`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * A file's size as a person checks it against a file they know: `sizeOf`'s figure, with the exact count beside it
+ * above a kilobyte — `47 bytes`, `10.0 MB (10,485,761 bytes)`. Grouped the same way on every machine, whatever its
+ * locale.
  */
 export function describeSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} ${bytes === 1 ? 'byte' : 'bytes'}`;
-  const exact = bytes.toLocaleString('en-US');
-  const rounded =
-    bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KiB` : `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
-  return `${rounded} (${exact} bytes)`;
+  return bytes < 1024 ? sizeOf(bytes) : `${sizeOf(bytes)} (${bytes.toLocaleString('en-US')} bytes)`;
 }
 
 /**
