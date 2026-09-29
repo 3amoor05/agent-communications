@@ -342,10 +342,30 @@ agent-slack draft create [options]
 |---|---|---|
 | `--workspace <name>` | which workspace, as `organisation/slack` | — |
 | `--channel <id>` | the channel or conversation id | — |
-| `--text <text>` | what to say. Markup in it is shown, not interpreted | — |
+| `--text <text>` | what to say — optional with --file, as the files’ message. Markup in it is shown, not interpreted | — |
 | `--thread <ts>` | reply inside this thread | — |
 | `--mention <userId...>` | mention someone, by id — a name is ambiguous | — |
 | `--broadcast <who>` | interrupt the room; always needs a person to approve (choices: "here", "channel", "everyone") | — |
+| `--file <path...>` | a local file to post, under your home folder and not in a hidden folder there; up to 10 | — |
+
+### `agent-slack draft update`
+
+change a draft: what you give replaces what it had. Any approval it had no longer holds
+
+```
+agent-slack draft update [options] <draftId>
+```
+
+| Option | What it does | Default |
+|---|---|---|
+| `--workspace <name>` | which workspace, as `organisation/slack` | — |
+| `--channel <id>` | post it here instead | — |
+| `--text <text>` | what to say instead. Markup in it is shown, not interpreted | — |
+| `--thread <ts>` | reply inside this thread instead | — |
+| `--mention <userId...>` | mention these people instead, by id | — |
+| `--broadcast <who>` | interrupt the room; always needs a person to approve (choices: "here", "channel", "everyone") | — |
+| `--file <path...>` | a local file to post, under your home folder and not in a hidden folder there; up to 10. Replaces the files it had | — |
+| `--add-file <path...>` | a local file to add to the ones it has, from the same folders | — |
 
 ### `agent-slack draft list`
 

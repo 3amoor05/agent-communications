@@ -3,6 +3,39 @@
 All notable changes to this project are recorded here, newest first. Every package in this repository is released
 together under one version.
 
+## Unreleased
+
+**Slack posts can carry files, behind the same preview and approval as a message.** Name up to ten local files, each
+up to 100 MiB, on a draft — `files` on `slack_draft_create` and `slack_post_prepare`, `--file` on
+`agent-slack draft create` — with or without words; the words become the files' message, so they arrive as one post,
+in a thread when the draft replies in one.
+- **Which files:** the rule Gmail's attachments follow. A regular file under your home folder, and none from its
+  hidden folders, a `.git` folder or a `.env` file. A file in `/tmp`, or anywhere else, is refused: copy it under your
+  home folder first. A link at the name you give is refused too.
+- **What the draft keeps:** each file's real path, the name Slack will show, its size, its type and its SHA-256 —
+  never its bytes. An empty file, an eleventh file or one over 100 MiB is refused, naming the limit.
+- **What you are shown:** the preview lists every file with those five things, after the channel and before the
+  words, and warns about a file over 10 MiB or one Slack shows in the channel itself — an image, a PDF, any text.
+- **What you approve:** those bytes. The approval is bound to each file's hash. Each file is read again when the post
+  is prepared, and again when it is sent — every one of them, before anything is uploaded — and a file that changed,
+  was replaced by a link or moved voids the approval, and nothing is sent. Then each file goes to the upload URL Slack
+  gives for it, and one call shares them all. Nothing else reaches Slack's files host but a download.
+- **What comes back:** each file's id in Slack, and the message's `ts` — or `null`, with a note saying so, when Slack
+  had not attached the files to a message yet. Slack's answer carries no `ts`, and none is guessed.
+- **What it needs:** a workspace in `send` mode granted `files:write`. Otherwise the prepare is refused with
+  `SCOPE_MISSING` and the command that fixes it, and the same check is made again at send.
+
+**A draft can be changed.** `agent-slack draft update <draftId>` and `slack_draft_update` change any of a draft's
+words, channel, thread, mentions and files, and keep the rest: `--file` / `files` replaces its files and `--add-file` /
+`addFiles` adds to them. Every change is a new revision, so any approval the draft had no longer holds.
+
+**Also**
+- **An attachment from outside the allowed folders is refused with advice you can follow.** The refusal, for a Gmail
+  attachment and a Slack file alike, named a command for widening the folders that does not exist. It now says to
+  copy the file under your home folder, not into one of its hidden folders.
+- **A post of text alone is previewed and approved exactly as before**, so an approval outstanding across the upgrade
+  still holds.
+
 ## 0.10.0
 
 **A download asks you where to save, and saves under the files' own names.** A Gmail attachment

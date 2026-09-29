@@ -1,6 +1,6 @@
 ---
 name: slack-posting
-description: "Draft a Slack message and take it through the approval gate, including how many people a post would interrupt. Symptoms: 'post this to #engineering', 'reply in that thread', 'let the team know', 'react to that message'. Not for reading — slack-reading does that; not for connecting a workspace — slack-setup does."
+description: "Draft a Slack message, with local files if asked, and take it through the approval gate, including how many people a post would interrupt. Symptoms: 'post this to #engineering', 'reply in that thread', 'let the team know', 'send the report to the channel', 'share this file in Slack', 'react to that message'. Not for reading — slack-reading does that; not for connecting a workspace — slack-setup does."
 license: MIT
 compatibility: "@agentcomms/slack@0.10.0"
 metadata:
@@ -31,6 +31,7 @@ preview, and `slack_post_send` is the third. Both surfaces run one operation, so
 | `slack_react` | `agent-slack react` |
 | `slack_react_send` | `agent-slack react --approval <approvalId>` |
 | `slack_draft_create` | `agent-slack draft create` — writes a draft and prepares nothing; prepare it by id |
+| `slack_draft_update` | `agent-slack draft update <draftId>` — changes a draft; any approval it had no longer holds |
 | `slack_draft_list` | `agent-slack draft list` |
 | `slack_draft_get` | `agent-slack draft show <draftId>` |
 | `slack_draft_delete` | `agent-slack draft delete <draftId>` |
@@ -82,6 +83,47 @@ the room cannot be read at that moment it says so and approves nothing, and the 
 When you post, pass the channel you believe it goes to (`expectChannel`, `--expect-channel`), from the preview. If
 it is not the draft's channel, nothing is posted.
 
+## Sending files
+
+Files go through the same gate as words, in the same post. Name each one by its local path: `files` on
+`slack_draft_create` or `slack_post_prepare`, `--file` on `agent-slack draft create`. With files the text is
+optional; when there is some, it is posted as the files' message, so the two arrive as one post.
+
+```sh
+agent-slack draft create --workspace acme/slack --channel C024BE7LR --text 'the Q3 numbers' --file ~/reports/q3.pdf ~/reports/q3.csv
+agent-slack draft update <draftId> --workspace acme/slack --add-file ~/reports/q3-chart.png
+```
+
+`slack_draft_update` (`agent-slack draft update`) changes a draft: `files` (`--file`) replaces its files, `addFiles`
+(`--add-file`) adds to them, and every change is a new revision, so prepare it again and show the new preview.
+
+**Which files.** The rule Gmail's attachments follow: a regular file under the home folder, and not in one of its
+hidden folders (`~/.ssh`, `~/.config` and the like), a `.git` folder, or a `.env` file. A file anywhere else — `/tmp`
+included — is refused, and the refusal says so: ask the person to copy it under their home folder, then name the
+copy. Do not copy it yourself without saying so. A link is refused too; name the file it points to.
+
+**Limits.** At most ten files a post, each at most 100 MiB, and none empty. Above either limit the draft is refused,
+naming the limit.
+
+**The preview lists every file** — the name Slack will show, its size, its type, its SHA-256, and the path it is read
+from — before the channel's reach and the words. It warns about a file over 10 MiB, and about one Slack shows in the
+channel itself (an image, a PDF, any kind of text), since everyone in the room will see what is in it. Show it in
+full, as for any post.
+
+**The approval is bound to each file's hash.** A draft records each file's size and hash when it is written. The
+file is read again when it is prepared and refused if it changed since; and when it is sent every file is read and
+checked again before anything is uploaded, then the bytes just checked are the ones sent. A file edited, replaced or
+moved after the preview voids the approval, and nothing is sent.
+
+**What comes back.** `slack_post_send` (`agent-slack post send`) returns each file's id in Slack and the message's
+`ts`. Slack's own answer carries no message, so the `ts` is read back afterwards, and may be `null` with a `note`
+when Slack had not attached the files to a message yet. Say that; never guess a `ts`. If something fails before the
+post, nothing was posted, and the error names any file that had been uploaded — Slack discards those.
+
+**The workspace has to be able to.** Sending a file needs a workspace in `send` mode granted `files:write`. Otherwise
+the prepare is refused with `SCOPE_MISSING` and the command that fixes it, which is the person's to run — see
+`slack-setup`.
+
 ## Waiting for a person
 
 Under `confirm` — or for a broadcast or a large room under any policy — `slack_post_send` and `agent-slack post
@@ -95,6 +137,8 @@ do next on the surface you are using. Tell the person, and stop. Once they have 
 | Refusal | What happened |
 |---|---|
 | the draft was edited after the preview | The approved bytes are the posted bytes, or nothing is |
+| a file is not the one the draft recorded, or the one approved | It changed, or was replaced, after it was named; nothing was sent |
+| a file must come from an allowed folder | It is outside the home folder, or in a folder never sent from; ask the person to copy it under their home folder |
 | the draft is not what its text composes to (`BAD_DATA`) | Its file was changed outside agent-slack, so a preview of its text would not be what posts. Delete it and compose it again |
 | the room grew after the preview | The words did not change; who reads them did |
 | the channel given is not the draft's | You were about to post somewhere other than where you think |

@@ -222,6 +222,31 @@ preview is written to be pasteable.
 The approval binds the exact bytes. Editing the draft voids it; so does the room growing between the preview and
 the post, because the words did not change but who reads them did.
 
+### Files
+
+A post can carry up to ten local files, each up to 100 MiB, with or without words: `--file` on `draft create`, and
+`draft update <draftId>` with `--file` to replace them or `--add-file` to add more.
+
+```sh
+agent-slack draft create --workspace acme/slack --channel C024BE7LR --text 'the Q3 numbers' --file ~/reports/q3.pdf
+agent-slack draft update <draftId> --workspace acme/slack --add-file ~/reports/q3.csv
+```
+
+Which files may be sent is the rule Gmail's attachments follow: regular files under your home folder, and none from
+its hidden folders, a `.git` folder or a `.env` file. A file in `/tmp` or anywhere else is refused — copy it under your
+home folder first. A draft records each file's real path, the name Slack will show, its size, its type and its
+SHA-256, never its bytes.
+
+The preview lists every file with those five things, and warns about one over 10 MiB or one Slack shows in the
+channel itself. The approval is bound to each file's hash: a file is read again when the post is prepared, and every
+file is read and checked again when it is sent, before anything is uploaded — one that changed voids the approval
+and nothing goes. Then each file goes to the upload URL Slack gives for it, and one call shares them all, with the
+words as their message. `post send` prints each file's id in Slack and the message's `ts`, or says that Slack had not
+attached them to a message yet: Slack's answer has no `ts`, and none is guessed.
+
+Sending a file needs the workspace in `send` mode with `files:write` granted; without it the prepare is refused with
+the command that fixes it.
+
 ## As an MCP server
 
 Register it with your agent's client, which also starts it once to prove the entry works:
@@ -254,9 +279,10 @@ on stdio directly.
 | `slack_manifest` | the app manifest, and for a connected workspace the link to its own app's manifest page — changes nothing |
 | `slack_channels`, `slack_read`, `slack_thread`, `slack_search`, `slack_people`, `slack_files` | read, bounded |
 | `slack_file_download` | save files where the person says — asks first; by id, from one message, or from a conversation; opens nothing |
-| `slack_post_prepare` | compose a draft and return the preview a person must approve — posts nothing |
-| `slack_post_send` | post a prepared draft once its approval allows it — the operation `agent-slack post send` runs |
+| `slack_post_prepare` | compose a draft, with local files if given, and return the preview a person must approve — posts nothing |
+| `slack_post_send` | post a prepared draft once its approval allows it, reading every file again first — the operation `agent-slack post send` runs |
 | `slack_react`, `slack_react_send` | add or remove a reaction through the same gate — `agent-slack react` |
+| `slack_draft_create`, `slack_draft_update` | write a draft, or change one — words, channel, thread, mentions or files — without preparing it |
 | `slack_draft_list`, `slack_draft_get`, `slack_draft_delete` | the drafts prepares leave behind |
 | `slack_mode_request_send`, `slack_mode_narrow` | the steps to change a workspace's mode, as text — changes nothing |
 

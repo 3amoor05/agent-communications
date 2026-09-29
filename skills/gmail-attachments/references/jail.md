@@ -52,9 +52,10 @@ match by segment, and anything else is treated as a directory path.
 ### Outside every allowed root
 
 The roots are the whole of what this machine will let leave as mail. A file outside them was never offered,
-and the check cannot tell a deliberate path from a mistaken one. The refusal carries a hint about widening
-`defaults.attachRoots`; see *Changing the policy* below before repeating it, because the hint names a route
-that does not exist as a command.
+and the check cannot tell a deliberate path from a mistaken one. The refusal's hint says what always works
+with the default roots: copy the file under the home folder, not into one of its hidden folders, and name the
+copy. (It used to name a command for widening `defaults.attachRoots`, which does not exist; see *Changing the
+policy* below.) Slack's files meet the same refusal, in the same words.
 
 **Instead:** ask the user to move or copy the file under an allowed folder themselves, knowingly, or to widen
 the roots themselves. Do not offer to do either for them.

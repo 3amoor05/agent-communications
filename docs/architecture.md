@@ -117,6 +117,14 @@ after the preview voids it. Both surfaces post through that one gate: `slack_pos
 `slack_post_send` (or `agent-slack post send`) posts it once the approval allows — a yes in the conversation under
 `chat`, `agent-slack approve` at the person's own terminal under `confirm`, which no tool can run.
 
+A post can carry local files, chosen by the attachment jail Gmail uses (under the home folder, never from its hidden
+folders). The draft records each by real path, name, size, type and SHA-256; the preview lists them and the digest
+binds them. At send, after the approval is claimed and inside the one permit for `files.completeUploadExternal`, every
+file is read and matched to its hash before anything is uploaded; each is then read and hashed once more and those
+bytes go to the upload URL Slack returned, through a grant the guard opens only inside that permit, for one `POST`
+to that exact URL on `files.slack.com`; and one call shares them all. No other request reaches the files host but a
+download of a file just looked up.
+
 ## How a Resend email is gated
 
 Resend has no read-only key, so unlike Slack's `read` mode, a Resend account's `read` mode is this software's rule and
