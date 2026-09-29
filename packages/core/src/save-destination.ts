@@ -370,17 +370,25 @@ export function recordedAnswer(
 
 /**
  * Refuses a folder that is something else — a file, or a path through one — before the question is spent on it. A
- * folder that is not there yet is fine: it is made when the files are saved.
+ * folder that is not there yet is fine: it is made when the files are saved. What is not there is followed up to the
+ * nearest part that is, as {@link checkWritable} does: Windows says a path through a file is not there (`ENOENT`),
+ * where Unix says `ENOTDIR`.
  */
 export async function checkFolder(folder: string): Promise<void> {
-  try {
-    const info = await stat(folder);
-    if (!info.isDirectory()) throw notAFolder(folder, 'it is a file');
-  } catch (error) {
-    if (error instanceof CommsError) throw error;
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT') return;
-    throw notAFolder(folder, code === 'ENOTDIR' ? 'part of the path is a file' : fileSystemReason(error));
+  let existing = folder;
+  for (;;) {
+    try {
+      const info = await stat(existing);
+      if (info.isDirectory()) return;
+      throw notAFolder(folder, existing === folder ? 'it is a file' : 'part of the path is a file');
+    } catch (error) {
+      if (error instanceof CommsError) throw error;
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOTDIR') throw notAFolder(folder, 'part of the path is a file');
+      const parent = path.dirname(existing);
+      if (code !== 'ENOENT' || parent === existing) throw notAFolder(folder, fileSystemReason(error));
+      existing = parent;
+    }
   }
 }
 
