@@ -44,8 +44,9 @@ Windows — before a byte of it is written, so Gatekeeper, SmartScreen and Offic
 - `~/Library`;
 - agentcomms' own folders;
 - system folders;
-- on Windows, and from WSL under `/mnt/<drive>/`: AppData, Program Files, ProgramData, the drive root, the
-  PowerShell profile folders, and network paths.
+- on Windows, and from WSL under `/mnt/<drive>/`: AppData, Program Files (x86 and Arm too), ProgramData, the drive
+  root, the PowerShell profile folders, network paths, and any folder written by its Windows short name
+  (`PROGRA~1`). On a Linux that is not WSL, `/mnt` is left alone.
 
 A folder that cannot be written in is refused before your answer is used, and a choice that is not available is shown
 as unavailable. A folder that loads every file whatever its name — a shell's completions folder, say — is still yours

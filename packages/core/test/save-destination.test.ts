@@ -1018,6 +1018,7 @@ test('on Linux, Windows’s own folders reached through WSL’s /mnt/<letter> ar
     },
     env: { HOME: '/srv/sam' },
     platform: 'linux',
+    wsl: () => true,
   };
   for (const [folder, why] of [
     ['/mnt/c', /the root of a Windows drive, reached through \/mnt\/c$/],
@@ -1026,6 +1027,10 @@ test('on Linux, Windows’s own folders reached through WSL’s /mnt/<letter> ar
     ['/mnt/c/WINDOWS', /the Windows folder/],
     ['/mnt/c/Program Files/App', /inside Program Files, where programs are installed, reached/],
     ['/mnt/c/program files (x86)/App', /inside Program Files/],
+    ['/mnt/c/Program Files (Arm)/Vendor/Plugins', /inside Program Files/],
+    ['/mnt/c/PROGRA~1/Vendor', /short name \(PROGRA~1\), .*reached through \/mnt\/c$/],
+    ['/mnt/c/Users/jo/APPDAT~1/Roaming', /short name \(APPDAT~1\)/],
+    ['/mnt/c/Users/jo/Documents/POWERS~1', /short name \(POWERS~1\)/],
     ['/mnt/c/ProgramData/Microsoft/Windows/Start Menu/Programs/StartUp', /inside ProgramData/],
     ['/mnt/c/Users/jo/AppData', /inside an AppData folder/],
     ['/mnt/c/Users/jo/AppData/Roaming/Microsoft/Excel/XLSTART', /inside an AppData folder/],
@@ -1055,6 +1060,42 @@ test('on Linux, Windows’s own folders reached through WSL’s /mnt/<letter> ar
   }
   // Only on Linux: a Mac has no WSL, and its /mnt is its own.
   assert.equal(refusedSaveFolder('/mnt/c/Windows', { ...deny, platform: 'darwin' }), null);
+  // Only under WSL: on any other Linux, /mnt/c is a disk the person mounted, its root and its folders theirs.
+  const plainLinux: SaveDenyInput = { ...deny, wsl: () => false };
+  for (const folder of [
+    '/mnt/c',
+    '/mnt/c/Windows',
+    '/mnt/c/Program Files/App',
+    '/mnt/c/PROGRA~1',
+    '/mnt/d/Users/jo/AppData',
+  ]) {
+    assert.equal(refusedSaveFolder(folder, plainLinux), null, `not WSL: ${folder}`);
+  }
+});
+
+test('on Windows, Program Files (Arm) and any folder named by its short name are refused', () => {
+  const deny: SaveDenyInput = {
+    paths: {
+      configDir: 'C:\\Users\\sam\\AppData\\Roaming\\ac',
+      stateDir: 'C:\\Users\\sam\\AppData\\Local\\ac\\state',
+      dataDir: 'C:\\Users\\sam\\AppData\\Local\\ac',
+      secretsDir: 'C:\\Users\\sam\\AppData\\Roaming\\ac\\secrets',
+    },
+    env: { USERPROFILE: 'C:\\Users\\sam', SystemDrive: 'C:', SystemRoot: 'C:\\Windows' },
+    platform: 'win32',
+    knownDocuments: () => undefined,
+  };
+  for (const [folder, why] of [
+    ['C:\\Program Files (Arm)\\Vendor\\Plugins', /inside Program Files/],
+    ['C:\\PROGRA~1\\Vendor', /short name \(PROGRA~1\)/],
+    ['C:\\Users\\sam\\APPDAT~1\\Roaming', /short name \(APPDAT~1\)/],
+    ['D:\\Work\\MYPROJ~2.OLD', /short name \(MYPROJ~2\.OLD\)/],
+  ] as const) {
+    assert.match(String(refusedSaveFolder(folder, deny)), why, folder);
+  }
+  for (const folder of ['C:\\Users\\sam\\Invoices', 'D:\\Photos 2024', 'D:\\Work\\report~final']) {
+    assert.equal(refusedSaveFolder(folder, deny), null, folder);
+  }
 });
 
 test('on Windows a share, a device path, and a path with no drive or only a drive’s current folder are refused', () => {

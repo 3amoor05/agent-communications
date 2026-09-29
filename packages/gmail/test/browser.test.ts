@@ -48,6 +48,13 @@ function xdgOpen(directory: string): string {
   return file;
 }
 
+/*
+ * What these check, and what they cannot: the program and the arguments handed to `spawn`. How Windows then passes
+ * them to rundll32 is Windows's own, and no test here runs Windows's argument handling. Node quotes an argument only
+ * when it holds a space, a tab or a quote, and rundll32 is not a shell, so an `&` in the link is not a command
+ * separator the way it was under `cmd.exe /c start` — Microsoft documents `rundll32.exe url.dll,FileProtocolHandler
+ * <URL>` for opening a link. Checked by hand on Windows before a release that changes this, not by these tests.
+ */
 test('on Windows the link is handed to rundll32.exe under the Windows folder, whole, and no shell reads it', () => {
   const { started, spawn } = recorder();
   assert.equal(openInBrowser(LINK, 'win32', { spawn, env: { SystemRoot: 'C:\\Windows', PATH: 'C:\\Tools' } }), true);

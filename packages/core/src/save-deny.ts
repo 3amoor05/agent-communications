@@ -1,3 +1,4 @@
+import { existsSync, readFileSync } from 'node:fs';
 import { lstat, readdir, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { CommsError } from './errors.ts';
@@ -60,6 +61,11 @@ export interface SaveDenyInput {
    * registry when left out — on Windows, and only for the profile of the user running this (`known-folders.ts`).
    */
   knownDocuments?: (() => string | undefined) | undefined;
+  /**
+   * Whether this Linux is WSL, whose `/mnt/<letter>` are Windows's drives. Read from `/proc` when left out — never from
+   * the environment, which an agent can set: see {@link runningUnderWsl}.
+   */
+  wsl?: (() => boolean) | undefined;
 }
 
 /** One place a download is never written, and why, in words the person reads. */
@@ -146,10 +152,51 @@ const WSL_PROGRAM_FOLDERS = new Map([
   ['windows', 'it is the Windows folder'],
   ['program files', 'it is inside Program Files, where programs are installed'],
   ['program files (x86)', 'it is inside Program Files, where programs are installed'],
+  ['program files (arm)', 'it is inside Program Files, where programs are installed'],
   ['programdata', 'it is inside ProgramData, where programs keep what they load for every user'],
 ]);
 // Documents where Windows keeps it, and where OneDrive moves it to: `OneDrive`, or `OneDrive - <organisation>`.
 const WSL_DOCUMENTS = /^(?:onedrive(?: - [^/]+)?\/)?documents\/(powershell|windowspowershell)(?:\/|$)/;
+
+/*
+ * A folder named by its Windows short name — `PROGRA~1` for `Program Files`, `APPDAT~1` for `AppData`. NTFS answers to
+ * both names, and neither Linux under WSL nor a check on the path as written turns the short one back into the long
+ * one, so `/mnt/c/PROGRA~1/App` would be let through as a folder of the person's. Every segment of that shape is
+ * refused on a Windows drive: a real folder named like `Photos~2` is refused with it, and the reason says why.
+ */
+const SHORT_NAME = /^[^\\/~.\s]{1,6}~\d{1,6}(?:\.[^.\\/]{1,3})?$/;
+
+/** Why a segment of a path on a Windows drive is a short name that could stand for a refused folder — or null. */
+function shortNameIn(segments: readonly string[]): string | null {
+  const short = segments.find((segment) => SHORT_NAME.test(segment));
+  return short === undefined
+    ? null
+    : `it names a folder by its Windows short name (${short}), which can stand for a folder that is refused`;
+}
+
+/*
+ * Whether this Linux is WSL. `/mnt/<letter>` is only Windows's drive there; on any other Linux it is whatever the
+ * person mounted, and refusing its root or its `Windows` folder would refuse their own disk. Read from the kernel —
+ * WSL's interop handler, or `microsoft` in `/proc/version` — never from the environment, which an agent can set.
+ */
+let underWsl: boolean | undefined;
+export function runningUnderWsl(): boolean {
+  if (underWsl !== undefined) return underWsl;
+  try {
+    underWsl =
+      existsSync('/proc/sys/fs/binfmt_misc/WSLInterop') || /microsoft/i.test(readFileSync('/proc/version', 'utf8'));
+  } catch {
+    underWsl = false;
+  }
+  return underWsl;
+}
+
+/** Whether the WSL rules apply: only on Linux, and only when it is WSL — or when a test says so. */
+function wslFor(input: SaveDenyInput, platform: NodeJS.Platform): boolean {
+  if (platform !== 'linux') return false;
+  if (input.wsl) return input.wsl();
+  return process.platform === 'linux' && runningUnderWsl();
+}
 
 /** Why a Linux path is one of Windows's own folders, reached through WSL's `/mnt/<letter>` — or null. */
 function windowsThroughWsl(folder: string): string | null {
@@ -161,6 +208,8 @@ function windowsThroughWsl(folder: string): string | null {
     .slice(3)
     .filter((segment) => segment !== '');
   if (segments.length === 0) return `it is the root of a Windows drive, ${through}`;
+  const short = shortNameIn(segments);
+  if (short !== null) return `${short}, ${through}`;
   const [top = '', user, ...inProfile] = segments.map((segment) => segment.toLowerCase());
   const program = WSL_PROGRAM_FOLDERS.get(top);
   if (program !== undefined) return `${program}, ${through}`;
@@ -221,10 +270,13 @@ export function saveDenyList(input: SaveDenyInput): DeniedFolder[] {
       why: 'it is inside %PROGRAMDATA%, where programs keep what they load for every user',
       system: true,
     });
-    const programs = ['ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432']
+    const programs = ['ProgramFiles', 'ProgramFiles(x86)', 'ProgramFiles(Arm)', 'ProgramW6432']
       .map((name) => envValue(input.env, name))
       .filter((folder): folder is string => folder !== undefined);
-    for (const folder of [...programs, paths.join(drive, 'Program Files'), paths.join(drive, 'Program Files (x86)')]) {
+    const standard = ['Program Files', 'Program Files (x86)', 'Program Files (Arm)'].map((name) =>
+      paths.join(drive, name),
+    );
+    for (const folder of [...programs, ...standard]) {
       list.push({ folder, why: 'it is inside Program Files, where programs are installed', system: true });
     }
     // PowerShell runs `profile.ps1` from these at every start. Documents is where Windows says, and the profile's too.
@@ -337,16 +389,19 @@ function breaks(
   list: readonly DeniedFolder[],
   homes: readonly string[],
   platform: NodeJS.Platform,
+  wsl: boolean,
 ): string | null {
   const paths = pathsFor(platform);
   const blind = caseBlind(platform);
   if (platform === 'win32') {
+    const short = shortNameIn(folder.split(/[\\/]/).slice(1));
+    if (short !== null) return short;
     if (/^\\\\/.test(folder))
       return windowsPathProblem(folder) ?? 'it is a network share, not a folder on this computer';
     // The root of any drive, not only the one the home is on: `D:\` is as much a disk's top level as `C:\`.
     if (paths.parse(folder).root === folder) return 'it is the root of a drive';
   }
-  if (platform === 'linux') {
+  if (platform === 'linux' && wsl) {
     const windows = windowsThroughWsl(folder);
     if (windows !== null) return windows;
   }
@@ -392,7 +447,7 @@ export function refusedSaveFolder(folder: string, input: SaveDenyInput): string 
     if (form) return form;
   }
   const home = paths.resolve(homeOf(input.env, platform));
-  return breaks(paths.resolve(folder), saveDenyList(input), [home], platform);
+  return breaks(paths.resolve(folder), saveDenyList(input), [home], platform, wslFor(input, platform));
 }
 
 /** The real path of `target`, through whatever part of it exists; the rest kept as written. */
@@ -507,7 +562,7 @@ export async function saveFolderRefusal(folder: string, input: SaveDenyInput): P
   const homes = [home, await realpathOfExisting(home)];
   const candidates = [paths.resolve(folder), await realpathOfExisting(folder)];
   for (const candidate of candidates) {
-    const why = breaks(candidate, [...list, ...real], homes, platform);
+    const why = breaks(candidate, [...list, ...real], homes, platform, wslFor(input, platform));
     if (why !== null) return why;
   }
   for (const candidate of candidates) {
