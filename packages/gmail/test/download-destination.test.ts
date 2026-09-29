@@ -648,6 +648,10 @@ test('under confirm, a declined form saves nothing; a client not trusted with fo
   assert.deepEqual(await listing(cwd), []);
 });
 
+/** A folder programs load from on their own: `~/Library`'s on macOS and Linux, AppData on Windows, whose list has no
+ * `~/Library`. */
+const LOADED_ON_THEIR_OWN = process.platform === 'win32' ? '~/AppData/Roaming' : '~/Library/LaunchAgents';
+
 // ── Where a download is never saved ───────────────────────────────────────────────────────────────────────────
 
 test('a hidden folder, one reached through a link, and this package’s own are refused over MCP, and the question kept', async () => {
@@ -659,7 +663,7 @@ test('a hidden folder, one reached through a link, and this package’s own are 
   try {
     const asked = wire(await call('gmail_attachment_download', { inbox: 'work', messageIds: ['m1'] }));
     const approvals = join(harness.core.paths.stateDir, 'approvals');
-    for (const saveTo of ['~/.ssh', join(elsewhere, 'keys'), approvals, '~/Library/LaunchAgents']) {
+    for (const saveTo of ['~/.ssh', join(elsewhere, 'keys'), approvals, LOADED_ON_THEIR_OWN]) {
       const refused = toolError(
         await call('gmail_attachment_download', {
           inbox: 'work',
@@ -695,12 +699,15 @@ test('a server started in a hidden folder does not offer it; one started in the 
       {
         choice: 'current',
         path: hidden,
-        unavailable:
-          'it is inside ~/app/.claude, a hidden folder: hidden folders hold settings, hooks and keys that programs read on their own',
+        // `~/app/.claude`, written with this machine's separator: `~\app\.claude` on Windows.
+        unavailable: `it is inside ${join('~', 'app', '.claude')}, a hidden folder: hidden folders hold settings, hooks and keys that programs read on their own`,
       },
       { choice: 'other' },
     ]);
-    assert.match(String(asked.question), /2\. The current folder — .* — not available: it is inside ~\/app\/\.claude/);
+    assert.match(
+      String(asked.question),
+      /2\. The current folder — .* — not available: it is inside ~[\\/]app[\\/]\.claude/,
+    );
     const refused = toolError(
       await call('gmail_attachment_download', {
         inbox: 'work',

@@ -599,14 +599,18 @@ test('under confirm, the person answers with `agent-slack approve` at their term
   }
 });
 
-test('a hidden folder, one in ~/Library, or this package’s own is refused by both surfaces, and the question kept', async () => {
+/** A folder programs load from on their own: `~/Library`'s on macOS and Linux, AppData on Windows, whose list has no
+ * `~/Library`. */
+const LOADED_ON_THEIR_OWN = process.platform === 'win32' ? '~/AppData/Roaming' : '~/Library/LaunchAgents';
+
+test('a hidden folder, one in ~/Library (AppData on Windows), or this package’s own is refused by both surfaces, and the question kept', async () => {
   const harness = await newHarness();
   await harness.addWorkspace({ alias: 'acme' });
   const cwd = tempDir('agent-slack-cwd-');
   const tool = await connect(harness, { fetch: slackApi(script()).fetch, download: transport(BYTES).download, cwd });
   try {
     const asked = ok<FileDownloadQuestion>(await tool.call({ workspace: 'acme', fileIds: ['F0AAA2'] }));
-    for (const saveTo of ['~/.ssh', '~/Library/LaunchAgents', harness.configDir, join(cwd, '.git', 'hooks')]) {
+    for (const saveTo of ['~/.ssh', LOADED_ON_THEIR_OWN, harness.configDir, join(cwd, '.git', 'hooks')]) {
       const refused = failed(
         await tool.call({ workspace: 'acme', fileIds: ['F0AAA2'], saveTo, choiceId: asked.choiceId }),
       );
