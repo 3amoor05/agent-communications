@@ -1655,6 +1655,37 @@ test('NODE_OPTIONS is read as Node reads it: a quoted word stays whole, and on W
   assert.equal(linux.node_options, '--inspect-brk');
 });
 
+test('every spelling of a debugger flag is taken out, and only a space separates the words of NODE_OPTIONS', () => {
+  const flags = [
+    '--inspect_brk=0',
+    '--inspect-brk-node',
+    '--inspect_brk_node=9229',
+    '--debug_port',
+    '9230',
+    '--no-warnings',
+  ];
+  assert.deepEqual(
+    updateCheckChildEntry(fileURLToPath(new URL('../src/cli.ts', import.meta.url)), flags)?.args.slice(0, -1),
+    ['--no-warnings'],
+  );
+  assert.equal(
+    updateCheckChildEnvironment({ NODE_OPTIONS: '--inspect_brk=0 --inspect-brk-node --no-warnings' }, 'linux')
+      .NODE_OPTIONS,
+    '--no-warnings',
+  );
+  // A tab or a new line is part of a word to Node, so a word holding one is kept whole, as written.
+  const tabbed = '--title=a\tb --require=x\ny --inspect';
+  assert.equal(
+    updateCheckChildEnvironment({ NODE_OPTIONS: tabbed }, 'linux').NODE_OPTIONS,
+    '--title=a\tb --require=x\ny',
+  );
+  // A word may even begin with one: to Node `\t--inspect` is not the debugger's flag, so it stays as written.
+  assert.equal(
+    updateCheckChildEnvironment({ NODE_OPTIONS: '--a \t--inspect' }, 'linux').NODE_OPTIONS,
+    '--a \t--inspect',
+  );
+});
+
 test("the child is this CLI again: the running script when it is a CLI's entry, links followed, and nothing else", () => {
   const root = tempDir('comms-update-entry-');
   const entry = join(root, 'dist', 'cli.mjs');

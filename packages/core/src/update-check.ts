@@ -217,18 +217,21 @@ function keptWords<T extends { word: string }>(words: readonly T[]): T[] {
   const kept: T[] = [];
   for (let index = 0; index < words.length; index++) {
     const word = words[index] as T;
-    if (!/^--(?:inspect|debug)(?:-brk|-port|-wait)?(?:=.*)?$/.test(word.word)) {
+    // Node reads `_` in an option's name as `-`: `--inspect_brk=0` is `--inspect-brk=0`.
+    const equals = word.word.indexOf('=');
+    const name = (equals < 0 ? word.word : word.word.slice(0, equals)).replaceAll('_', '-');
+    if (!/^--(?:inspect|debug)(?:-brk(?:-node)?|-port|-wait)?$/.test(name)) {
       kept.push(word);
       continue;
     }
     // `--inspect-port=9229` and `--inspect=9229` are one word; `--inspect-port 9229` takes the next.
-    if (/^--(?:inspect|debug)-port$/.test(word.word)) index++;
+    if (equals < 0 && /^--(?:inspect|debug)-port$/.test(name)) index++;
   }
   return kept;
 }
 
 /**
- * `NODE_OPTIONS` split as Node splits it: at white space, except inside double quotes, where a backslash takes the
+ * `NODE_OPTIONS` split as Node splits it: at a space — not a tab or a new line — except inside double quotes, where a backslash takes the
  * character after it as it is. Each word keeps how it was written, so what is kept goes to the child unchanged —
  * `--require "/tmp/with --inspect hook.js"` is one word, and not a debugger's.
  */
@@ -236,7 +239,7 @@ function nodeOptionWords(options: string): { word: string; raw: string }[] {
   const words: { word: string; raw: string }[] = [];
   let index = 0;
   while (index < options.length) {
-    while (index < options.length && /\s/.test(options[index] ?? '')) index++;
+    while (index < options.length && options[index] === ' ') index++;
     if (index >= options.length) break;
     const start = index;
     let word = '';
@@ -247,7 +250,7 @@ function nodeOptionWords(options: string): { word: string; raw: string }[] {
         if (character === '\\' && index + 1 < options.length) word += options[++index];
         else if (character === '"') quoted = false;
         else word += character;
-      } else if (/\s/.test(character)) {
+      } else if (character === ' ') {
         break;
       } else if (character === '"') {
         quoted = true;
