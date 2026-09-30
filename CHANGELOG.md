@@ -3,7 +3,7 @@
 All notable changes to this project are recorded here, newest first. Every package in this repository is released
 together under one version.
 
-## Unreleased
+## 0.11.0
 
 **Slack posts can carry files, behind the same preview and approval as a message.** Name up to ten local files, each
 up to 100 MiB, on a draft — `files` on `slack_draft_create` and `slack_post_prepare`, `--file` on
@@ -27,14 +27,26 @@ in a thread when the draft replies in one.
 
 **A draft can be changed.** `agent-slack draft update <draftId>` and `slack_draft_update` change any of a draft's
 words, channel, thread, mentions and files, and keep the rest: `--file` / `files` replaces its files, `--add-file` /
-`addFiles` adds to them, and `--no-files` / `files: []` takes them all off. Every change is a new revision, so any approval the draft had no longer holds.
+`addFiles` adds to them, and `--no-files` / `files: []` takes them all off. Every change is a new revision, so any
+approval the draft had no longer holds.
 
 **Also**
+- **The doctor says whether each workspace can send files:** yes in `send` mode with `files:write`; not in `read`
+  mode, by choice; and a `send` workspace without `files:write` fails, with the sign-in that brings the scope back.
 - **An attachment from outside the allowed folders is refused with advice you can follow.** The refusal, for a Gmail
   attachment and a Slack file alike, named a command for widening the folders that does not exist. It now says to
   copy the file under your home folder, not into one of its hidden folders.
 - **A post of text alone is previewed and approved exactly as before**, so an approval outstanding across the upgrade
   still holds.
+
+What it means for you: a minor release; nothing that worked changes.
+- A workspace already in `send` mode was granted `files:write` when it signed in, so it can send files at once — no
+  new sign-in.
+- An agent that wrote its file under `/tmp` or another scratch folder copies it under your home folder first.
+- A link in the words of a file post can show its preview in Slack: Slack's upload has no switch to turn that off,
+  as a text post does.
+- To get 0.11.0: your servers will say an update is out; run `agentcomms update` (or say "update my comms"), then
+  restart your client.
 
 ## 0.10.0
 
