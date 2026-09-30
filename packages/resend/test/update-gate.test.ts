@@ -1,7 +1,15 @@
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { test } from 'node:test';
-import { gatedChange, UPDATE_FIRST, updateCheckPath, updateLaterChange } from '@agentcomms/core';
+import {
+  claimUpdateCheck,
+  gatedChange,
+  readUpdateCheck,
+  UPDATE_CHECK_CHILD_COMMAND,
+  UPDATE_FIRST,
+  updateCheckPath,
+  updateLaterChange,
+} from '@agentcomms/core';
 import { type Harness, newHarness, type ToolResult } from './support/harness.ts';
 
 /*
@@ -181,6 +189,28 @@ test('an approval the stop let through is refused by the policy report, over MCP
 
     assert.equal(JSON.stringify(await harness.core.config.load()), before, 'the account was changed');
     assert.equal((await harness.core.approvals.get(later))?.state, 'pending', 'the approval was claimed');
+  } finally {
+    await harness.close();
+  }
+});
+
+test('agent-resend finishes the update check a command handed on: under its claim, never stopped, and not in help', async () => {
+  // The child a command starts for the day's check (#48) is this CLI again, with the hidden command and the claim.
+  const harness = await newHarness();
+  try {
+    updateOut(harness);
+    // A day old, so every other command would ask first — and, with an update out, be stopped.
+    const stateDir = harness.core.paths.stateDir;
+    writeFileSync(updateCheckPath(stateDir), JSON.stringify({ latest: '99.0.0', behind: true }));
+    const claimedAt = await claimUpdateCheck(harness.core);
+    assert.ok(claimedAt !== null);
+    const child = await harness.cli(['--json', UPDATE_CHECK_CHILD_COMMAND, claimedAt]);
+    assert.equal(child.code, 0, child.stdout + child.stderr);
+    // The registry here refuses at once: the ask is recorded as the day's, with why, and the claim given up.
+    const record = await readUpdateCheck(stateDir);
+    assert.deepEqual([record.lastChecked, record.checking], [claimedAt, null]);
+    assert.match(String(record.lastError), /could not be reached/);
+    assert.doesNotMatch((await harness.cli(['--help'])).stdout, new RegExp(UPDATE_CHECK_CHILD_COMMAND));
   } finally {
     await harness.close();
   }

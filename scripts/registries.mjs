@@ -156,9 +156,10 @@ const isHelpEntry = (name) => /^help\b/.test(name);
  * The core CLI is not Commander. Its help is one usage table, a line per command, so there a path with a line of its
  * own acts, and a path that only prefixes others (`audit` in `audit tail`) is a group.
  *
- * Hidden commands are not in help and so not in the tree. There are two, `agent-gmail oauth-listen` and
- * `agent-slack sign-in-listen`: the half of a sign-in this software starts in the background, which no person or
- * agent is meant to run.
+ * Hidden commands are not in help and so not in the tree, and no person or agent is meant to run them: what this
+ * software starts in the background. `agent-gmail oauth-listen` and `agent-slack sign-in-listen` are the half of a
+ * sign-in; `update-check-child`, in `agentcomms`, `agent-gmail`, `agent-slack` and `agent-resend`, is the rest of the
+ * day's update check, which a command hands on so that it can end (#48).
  */
 export async function commandTree(surface, { env = scratchEnv() } = {}) {
   return surface.cli === 'usage' ? usageTree(surface, env) : commanderTree(surface, env);

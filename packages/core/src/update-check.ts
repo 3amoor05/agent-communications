@@ -1,11 +1,16 @@
+import { type ChildProcess, spawn } from 'node:child_process';
+import { realpathSync } from 'node:fs';
+import { basename } from 'node:path';
 import { gatedChangeAtTerminal } from './change-flow.ts';
 import { channelServer } from './channel-servers.ts';
 import { type OutputOptions, type Streams, writeResult } from './cli-runtime.ts';
 import type { Core } from './core.ts';
+import { CommsError } from './errors.ts';
 import { npmLatestVersion } from './npm.ts';
 import { type UpdateDeps, updateChange, updateCheck } from './operations/update.ts';
 import { renderUpdate } from './render.ts';
-import type { TerminalUpdateHooks } from './update-gate.ts';
+import { childEnvironment } from './system-programs.ts';
+import { TERMINAL_CHECK_WAIT_MS, type TerminalUpdateHooks } from './update-gate.ts';
 import {
   changeUpdateCheck,
   EMPTY_UPDATE_CHECK,
@@ -33,8 +38,9 @@ import { isPrerelease, isVersion } from './versions.ts';
  * result, and stops nothing. It never throws.
  *
  * Nothing here gives up on the registry sooner than the registry's own timeout: a command at a terminal stops
- * *waiting* after about three seconds and goes on, and the check carries on beside it. Cut off at three seconds, a
- * registry that takes five would have been asked every day and heard from never.
+ * *waiting* after about three seconds and goes on, and the check carries on beside it — in a detached child of its
+ * own (`UPDATE_CHECK_CHILD_COMMAND`), so the command's process, and its output, end when the command does (#48). Cut
+ * off at three seconds, a registry that takes five would have been asked every day and heard from never.
  *
  * WhatsApp imports none of this: see `update-state.ts`.
  */
@@ -156,6 +162,160 @@ async function ask(
   }
 }
 
+// ── The rest of a command's check, in a child of its own ───────────────────────────────────────────────────────────
+
+/**
+ * The hidden command every CLI that asks the registry answers to — `agentcomms`, `agent-gmail`, `agent-slack`,
+ * `agent-resend` — with the claim's time after it: the ask a command handed on (`terminalUpdateHooks`). Not in any
+ * help, never stopped by the update gate, and nothing a person or an agent runs.
+ */
+export const UPDATE_CHECK_CHILD_COMMAND = 'update-check-child';
+
+/** How to start this CLI again: a program and the arguments before the hidden command. */
+export interface UpdateCheckChildEntry {
+  readonly command: string;
+  readonly args: readonly string[];
+}
+
+/**
+ * How to start the CLI this process is running: this Node, the flags it was started with, and the script it runs —
+ * when that script is a CLI's entry, `cli.mjs` built or `cli.ts` from a checkout. Links are followed first: npm's
+ * `agentcomms` is a link to `dist/cli.mjs`, and on Windows its `.cmd` shim has already started Node on the `.mjs`, so
+ * no shim is ever started here. Every package that answers the hidden command bundles this function into its own
+ * build, so the entry is the running script, not this module's neighbour — core's own CLI, next to a bundled copy of
+ * core, is not the command the person ran.
+ *
+ * Null when the script is not a CLI's entry: a CLI's `run()` called from something else, a test runner for one. The
+ * check is then asked in this process, as it always was.
+ */
+export function updateCheckChildEntry(
+  script: string | undefined = process.argv[1],
+  execArgv: readonly string[] = process.execArgv,
+): UpdateCheckChildEntry | null {
+  if (!script) return null;
+  let path: string;
+  try {
+    path = realpathSync.native(script);
+  } catch {
+    return null;
+  }
+  if (!/^cli\.(?:mjs|ts)$/.test(basename(path))) return null;
+  return { command: process.execPath, args: [...execArgv, path] };
+}
+
+/**
+ * The day's check at a terminal, handed on (#48). The command claims the check itself, as it always has, so only one
+ * process asks — then starts this CLI again, detached, with the hidden command and the claim's time, and waits up to
+ * the gate's three seconds for it to say the ask is over. After that it lets go of the child, which carries on alone,
+ * and the command's process ends when the command does: before, it lived until the ask was over — the registry's ten
+ * seconds, then `npm ls`'s minute — and a `$(…)`, a pipe or an agent's shell waited with it. A fast answer is written
+ * before the wait ends, and the gate reads the file after it, so it still stops the day's first command.
+ *
+ * The child holds none of the command's output — stdin, stdout and stderr ignored, only the IPC channel for its one
+ * message — or whatever reads that output would wait for the child as it waited for the check. Detached, so a
+ * Ctrl-C at the terminal does not cut the ask short, and hidden, so Windows opens no console for it.
+ *
+ * When the child cannot be started — no entry to start, a program not there or not allowed — the check is asked in
+ * this process instead, as it was before. It never throws.
+ */
+async function handUpdateCheckToChild(
+  core: Core,
+  env: NodeJS.ProcessEnv,
+  options: { now?: (() => Date) | undefined; entry?: UpdateCheckChildEntry | null | undefined },
+): Promise<void> {
+  const deadline = Date.now() + TERMINAL_CHECK_WAIT_MS;
+  try {
+    // Switched off — `CI`, the switch, the machine's setting — nothing is claimed, and no child is started.
+    if (!(await updateCheckEnabled(core, env)).on) return;
+    const claimedAt = await claimUpdateCheck(core, { now: options.now });
+    if (claimedAt === null) return;
+    const entry = options.entry === undefined ? updateCheckChildEntry() : options.entry;
+    const started = entry !== null && (await startUpdateCheckChild(entry, claimedAt, env, deadline));
+    if (!started) await askUnderClaim(core, env, claimedAt, { now: options.now });
+  } catch {
+    // The check never stops anything, a command least of all.
+  }
+}
+
+/**
+ * Starts the child and waits, until `deadline` at most, for it to say the ask is over, or to end. False when it could
+ * not be started at all; then nothing was asked, and the claim is still this process's to ask under.
+ */
+async function startUpdateCheckChild(
+  entry: UpdateCheckChildEntry,
+  claimedAt: string,
+  env: NodeJS.ProcessEnv,
+  deadline: number,
+): Promise<boolean> {
+  let child: ChildProcess;
+  try {
+    child = spawn(entry.command, [...entry.args, UPDATE_CHECK_CHILD_COMMAND, claimedAt], {
+      detached: true,
+      windowsHide: true,
+      stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+      env: childEnvironment(env),
+    });
+  } catch {
+    return false;
+  }
+  // Attached before the next `await`, and never taken off: `spawn` reports a program that is not there, or not
+  // allowed, on the following tick, and an 'error' event with no listener is thrown past every catch here.
+  let failed = false;
+  child.on('error', () => {
+    // Without a process id the child never started: the ask is this process's after all.
+    if (child.pid === undefined) failed = true;
+  });
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, Math.max(0, deadline - Date.now()));
+    const done = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    child.once('error', done);
+    child.once('exit', done);
+    child.on('message', (message: { type?: unknown } | null) => {
+      if (message?.type === 'settled') done();
+    });
+  });
+  // Let go: the channel closed and the child unreferenced, so nothing of it keeps this process alive.
+  if (child.connected) child.disconnect();
+  child.unref();
+  return !failed;
+}
+
+/**
+ * The hidden command's work, in the child a command started (`UPDATE_CHECK_CHILD_COMMAND`): the ask, under the claim
+ * the command took and handed over. It claims nothing itself, and asks only while the file still holds that claim —
+ * a claim that ran out, and that another process took since, is that process's to ask under. It says `settled` to the
+ * command if the command is still listening, lets go of the channel, and ends; a command that stopped listening has
+ * already gone on, and the ask is finished all the same. Results are written only while the claim is this child's.
+ */
+export async function runUpdateCheckChild(
+  core: Core,
+  env: NodeJS.ProcessEnv,
+  claimedAt: string | undefined,
+): Promise<void> {
+  if (claimedAt === undefined || !Number.isFinite(Date.parse(claimedAt))) {
+    throw new CommsError('USAGE', `${UPDATE_CHECK_CHILD_COMMAND} takes the time of the claim it asks under`, {
+      hint: 'Nothing runs this but a command finishing the day’s update check; `agentcomms update --check` asks now.',
+    });
+  }
+  try {
+    if ((await readUpdateCheck(core.paths.stateDir)).checking === claimedAt) await askUnderClaim(core, env, claimedAt);
+  } finally {
+    settled();
+  }
+}
+
+/** Tells the command that started this child the ask is over, if it is still listening, and closes the channel. */
+function settled(): void {
+  if (!process.send || !process.connected) return;
+  // With a callback, a channel the command closed meanwhile is an error handed to it, not one thrown.
+  process.send({ type: 'settled' }, undefined, {}, () => {
+    if (process.connected) process.disconnect();
+  });
+}
+
 /**
  * What a command at a terminal hands the update gate (`updateGateAtTerminal`): the check, and the update itself for
  * the person's "now" — its own preview and yes.
@@ -170,13 +330,24 @@ export function terminalUpdateHooks(
     streams: Streams;
     /** The command that approves a change beside this CLI — see `gatedChangeAtTerminal`. */
     approveCommand?: string | undefined;
+    /** Stand-ins for the registry and `npm ls`, for a test: the check is then asked in this process. */
     deps?: UpdateDeps | undefined;
     now?: (() => Date) | undefined;
+    /**
+     * How to start the child the check is handed to: this CLI, found from the running script, when left out. For a
+     * test, one that cannot be started, or null for none, and the check is asked in this process instead.
+     */
+    childEntry?: UpdateCheckChildEntry | null | undefined;
   },
 ): TerminalUpdateHooks {
   return {
     check: async () => {
-      await checkForUpdates(core, env, { deps: options.deps, now: options.now });
+      // A child could not be handed a test's stand-ins: with them, the check is asked here, as it always was.
+      if (options.deps !== undefined) {
+        await checkForUpdates(core, env, { deps: options.deps, now: options.now });
+        return;
+      }
+      await handUpdateCheckToChild(core, env, { now: options.now, entry: options.childEntry });
     },
     update: async () => {
       const result = await gatedChangeAtTerminal(core, updateChange(core, env, {}, options.deps), {

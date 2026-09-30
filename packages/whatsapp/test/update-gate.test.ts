@@ -141,7 +141,18 @@ test('the bundle as it ships carries the update gate’s reader, and none of the
     .join('\n');
   assert.match(shipped, /update-check\.json/, 'the reader is there');
   assert.match(shipped, /Hang on a minute, there's an update\. Let's update first\./);
-  for (const checker of ['checkForUpdates', 'npmLatestVersion', 'terminalUpdateHooks', 'npmGlobalPackages']) {
+  for (const checker of [
+    'checkForUpdates',
+    'npmLatestVersion',
+    'terminalUpdateHooks',
+    'npmGlobalPackages',
+    'claimUpdateCheck',
+    'askUnderClaim',
+    'runUpdateCheckChild',
+    'updateCheckChildEntry',
+    'UPDATE_CHECK_CHILD_COMMAND',
+    'update-check-child',
+  ]) {
     assert.ok(!shipped.includes(checker), `the bundle carries ${checker}`);
   }
 });

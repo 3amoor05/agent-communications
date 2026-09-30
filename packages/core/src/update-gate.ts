@@ -248,8 +248,8 @@ export type TerminalUpdateOutcome = 'updated' | 'short' | 'failed';
 export interface TerminalUpdateHooks {
   /**
    * The check, when the file is a day old. It never throws, and it is never cut short: the gate stops waiting for it
-   * after about three seconds, and it carries on beside the command — the process ends by its exit code, so it ends
-   * once the check has.
+   * after about three seconds, and it carries on beside the command — in a detached child of its own, which holds none
+   * of the command's output, so the command's process ends when the command does (#48).
    */
   check?: (() => Promise<void>) | undefined;
   /** The update, at this terminal, with its own preview and yes. */

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { dirname, join } from 'node:path';
@@ -27,7 +27,14 @@ import {
   updateCheckFindings,
 } from '../src/operations/update.ts';
 import { updateAutoChange, updateLaterChange } from '../src/operations/update-settings.ts';
-import { askUnderClaim, checkForUpdates, claimUpdateCheck, terminalUpdateHooks } from '../src/update-check.ts';
+import {
+  askUnderClaim,
+  checkForUpdates,
+  claimUpdateCheck,
+  terminalUpdateHooks,
+  UPDATE_CHECK_CHILD_COMMAND,
+  updateCheckChildEntry,
+} from '../src/update-check.ts';
 import {
   approvalsOf,
   claimsApproval,
@@ -1466,6 +1473,164 @@ test('a registry slower than the terminal waits is still heard from: the check f
   } finally {
     await served.close();
   }
+});
+
+/** The core's command, run as a person's shell runs it: done when its output closes, not when the gate is. */
+function command(env: Record<string, string>, args: string[]) {
+  const started = Date.now();
+  const child = spawn(process.execPath, [...NODE_FLAGS, CLI, ...args], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => {
+    stdout += String(chunk);
+  });
+  child.stderr.on('data', (chunk) => {
+    stderr += String(chunk);
+  });
+  return new Promise<{ code: number | null; ms: number; output: string }>((resolve, reject) => {
+    child.once('error', reject);
+    // 'close', not 'exit': the output is closed only when nothing holds it — a `$(…)` or a pipe waits for exactly this.
+    child.once('close', (code) => resolve({ code, ms: Date.now() - started, output: stdout + stderr }));
+  });
+}
+
+test("the day's first command ends when its own work does: a detached child finishes the ask, and asks once", async () => {
+  /*
+   * #48: the command waited about three seconds and ran, and the check went on in the same process — the registry's
+   * ten seconds, then `npm ls` — so its output stayed open for as long, and anything reading it waited too. The
+   * command takes the day's claim and hands the ask to a child of its own that holds none of its output.
+   */
+  const m = machine();
+  const served = await loopbackRegistry(LATEST, 8_000);
+  // Globally installed here: nothing, so `npm ls -g` answers at once — and reads no real global folder.
+  const env = { ...m.env, npm_config_registry: served.url, npm_config_prefix: tempDir('comms-update-prefix-') };
+  try {
+    const first = await command(env, ['channels', '--json']);
+    assert.equal(first.code, 0, first.output);
+    assert.ok(first.ms < 5_000, `the command's output closed after ${first.ms} ms, with the registry still asked`);
+    // Inside the claim's lease, the next command asks nothing and hands nothing on: the child is asking.
+    const second = await command(env, ['channels', '--json']);
+    assert.equal(second.code, 0, second.output);
+    await until(() => served.requests.length > 0, 'the child to ask the registry', 15_000);
+    await until(
+      async () => {
+        const record = await readUpdateCheck(m.stateDir);
+        return record.latest === LATEST && record.checking === null;
+      },
+      'the child to record what the registry said, and give up the claim',
+      30_000,
+    );
+    assert.deepEqual(served.requests, ['/@agentcomms%2fcore'], 'the registry was asked once');
+    assert.equal((await readUpdateCheck(m.stateDir)).lastError, null);
+    // What the child found stops the next command, as a check in the command's own process would have.
+    const third = await command(env, ['channels', '--json']);
+    assert.equal(third.code, 11, third.output);
+    assert.deepEqual(served.requests, ['/@agentcomms%2fcore'], 'the day was asked about again');
+  } finally {
+    await served.close();
+  }
+});
+
+test('a child that cannot be started loses nothing: the command asks in its own process, as it did', async () => {
+  const served = await loopbackRegistry(LATEST, 0);
+  try {
+    const notAllowed = join(tempDir('comms-update-nochild-'), 'node');
+    writeFileSync(notAllowed, '', { mode: 0o644 });
+    const entries: [string, { command: string; args: string[] } | null][] = [
+      ['no entry to start', null],
+      ['a program that is not there', { command: join(tempDir('comms-update-nochild-'), 'node'), args: [] }],
+    ];
+    // Windows has no execute bit to refuse.
+    if (process.platform !== 'win32') entries.push(['a program not allowed to run', { command: notAllowed, args: [] }]);
+    for (const [label, childEntry] of entries) {
+      const m = machine();
+      const env = { ...m.env, npm_config_registry: served.url, npm_config_prefix: tempDir('comms-update-prefix-') };
+      const asked = served.requests.length;
+      const output = { json: true, color: false };
+      const streams = terminal([]).streams;
+      const outcome = await updateGateAtTerminal({
+        core: m.core,
+        env,
+        binary: 'agentcomms',
+        channel: 'core',
+        running: VERSION,
+        output,
+        streams,
+        ...terminalUpdateHooks(m.core, env, { output, streams, childEntry }),
+        // Long enough that only the ask's own end ends the wait: asked in this process, it has, by the time this does.
+        waitMs: 30_000,
+      }).catch((error: unknown) => error);
+      // Asked here, and at once: the answer stops this very command, as a fast answer always did.
+      assert.equal((outcome as CommsError | null)?.code, 'UPDATE_REQUIRED', `${label}: ${String(outcome)}`);
+      const record = await readUpdateCheck(m.stateDir);
+      assert.deepEqual([record.latest, record.checking], [LATEST, null], label);
+      assert.equal(served.requests.length, asked + 1, `${label}: asked ${served.requests.length - asked} times`);
+    }
+  } finally {
+    await served.close();
+  }
+});
+
+test('agentcomms finishes the update check a command handed on: under its claim, never stopped, and not in help', async () => {
+  const m = machine();
+  // A day old with an update known, so every other command would ask first and be stopped.
+  await seed(m, { latest: LATEST, behind: true }, new Date(Date.now() - 25 * 3_600_000));
+  const claimedAt = await claimUpdateCheck(m.core);
+  assert.ok(claimedAt !== null);
+  const run = (args: string[], extra: Record<string, string> = {}) =>
+    spawnSync(process.execPath, [...NODE_FLAGS, CLI, ...args], { encoding: 'utf8', env: { ...m.env, ...extra } });
+  const child = run([UPDATE_CHECK_CHILD_COMMAND, claimedAt, '--json']);
+  assert.equal(child.status, 0, child.stdout + child.stderr);
+  // Nobody answers on the registry here: the ask is the day's, with why, and the claim is given up.
+  const record = await readUpdateCheck(m.stateDir);
+  assert.deepEqual([record.lastChecked, record.checking, record.latest], [claimedAt, null, LATEST]);
+  assert.match(String(record.lastError), /could not be reached/);
+  // A claim the file does not hold is another process's, or none: nothing is asked under it.
+  const served = await loopbackRegistry(LATEST, 0);
+  try {
+    const stale = await new Promise<{ status: number | null; output: string }>((resolve, reject) => {
+      const env = { ...m.env, npm_config_registry: served.url, npm_config_prefix: tempDir('comms-update-prefix-') };
+      const process_ = spawn(process.execPath, [...NODE_FLAGS, CLI, UPDATE_CHECK_CHILD_COMMAND, claimedAt], { env });
+      let output = '';
+      process_.stdout.on('data', (chunk) => {
+        output += String(chunk);
+      });
+      process_.stderr.on('data', (chunk) => {
+        output += String(chunk);
+      });
+      process_.once('error', reject);
+      process_.once('close', (status) => resolve({ status, output }));
+    });
+    assert.equal(stale.status, 0, stale.output);
+    assert.deepEqual(served.requests, [], 'asked under a claim the file no longer holds');
+  } finally {
+    await served.close();
+  }
+  assert.deepEqual(await readUpdateCheck(m.stateDir), record);
+  assert.equal(run([UPDATE_CHECK_CHILD_COMMAND, '--json']).status, 64, 'no claim, no ask');
+  assert.doesNotMatch(run(['--help']).stdout, new RegExp(UPDATE_CHECK_CHILD_COMMAND));
+});
+
+test("the child is this CLI again: the running script when it is a CLI's entry, links followed, and nothing else", () => {
+  const root = tempDir('comms-update-entry-');
+  const entry = join(root, 'dist', 'cli.mjs');
+  mkdirSync(dirname(entry), { recursive: true });
+  writeFileSync(entry, '');
+  const real = realpathSync.native(entry);
+  const flags = ['--experimental-strip-types'];
+  assert.deepEqual(updateCheckChildEntry(entry, flags), { command: process.execPath, args: [...flags, real] });
+  // npm's `agentcomms` on PATH is a link to the entry. (Windows starts it through a `.cmd` shim instead, which has
+  // already run Node on the `.mjs`: the script is the entry itself.)
+  if (process.platform !== 'win32') {
+    const link = join(root, 'bin', 'agentcomms');
+    mkdirSync(dirname(link));
+    symlinkSync(entry, link);
+    assert.deepEqual(updateCheckChildEntry(link, []), { command: process.execPath, args: [real] });
+  }
+  // A CLI's `run()` called from a test runner, a script that is not there, or none: the check is asked in-process.
+  assert.equal(updateCheckChildEntry(fileURLToPath(import.meta.url), []), null);
+  assert.equal(updateCheckChildEntry(join(root, 'dist', 'missing', 'cli.mjs'), []), null);
+  assert.equal(updateCheckChildEntry(undefined, []), null);
 });
 
 test('an ask that never finished does not use up the day: its claim runs out and the next process asks', async () => {

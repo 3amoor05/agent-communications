@@ -3,7 +3,16 @@ import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
-import { EXIT_CODES, gatedChange, UPDATE_FIRST, updateCheckPath, updateLaterChange } from '@agentcomms/core';
+import {
+  claimUpdateCheck,
+  EXIT_CODES,
+  gatedChange,
+  readUpdateCheck,
+  UPDATE_CHECK_CHILD_COMMAND,
+  UPDATE_FIRST,
+  updateCheckPath,
+  updateLaterChange,
+} from '@agentcomms/core';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { run } from '../src/cli/program.ts';
@@ -582,4 +591,36 @@ test('the person’s answer goes past the stop by its question’s choice id; th
   assert.equal(atCommand.exit, EXIT_CODES.OK, `${atCommand.stdout}${atCommand.stderr}`);
   assert.deepEqual(saved(root), ['numbers-2.pdf', 'numbers.pdf']);
   assert.equal(await downloadAudits(harness), 2);
+});
+
+test('agent-slack finishes the update check a command handed on: under its claim, never stopped, and not in help', async () => {
+  // The child a command starts for the day's check (#48) is this CLI again, with the hidden command and the claim.
+  const harness = await newHarness();
+  updateOut(harness);
+  // A day old, so every other command would ask first — and, with an update out, be stopped.
+  const stateDir = harness.core.paths.stateDir;
+  writeFileSync(updateCheckPath(stateDir), JSON.stringify({ latest: '99.0.0', behind: true }));
+  const command = async (argv: string[]) => {
+    let stdout = '';
+    const out = new PassThrough();
+    out.on('data', (chunk) => {
+      stdout += String(chunk);
+    });
+    const exit = await run(argv, {
+      core: harness.core,
+      env: harness.env,
+      streams: { stdout: out, stderr: new PassThrough(), stdin: new PassThrough() },
+      read: refuseEverything,
+    });
+    return { exit, stdout };
+  };
+  const claimedAt = await claimUpdateCheck(harness.core);
+  assert.ok(claimedAt !== null);
+  const child = await command([UPDATE_CHECK_CHILD_COMMAND, claimedAt, '--json']);
+  assert.equal(child.exit, 0, child.stdout);
+  // The registry here refuses at once: the ask is recorded as the day's, with why, and the claim given up.
+  const record = await readUpdateCheck(stateDir);
+  assert.deepEqual([record.lastChecked, record.checking], [claimedAt, null]);
+  assert.match(String(record.lastError), /could not be reached/);
+  assert.doesNotMatch((await command(['--help'])).stdout, new RegExp(UPDATE_CHECK_CHILD_COMMAND));
 });

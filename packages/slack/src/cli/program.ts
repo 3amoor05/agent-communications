@@ -24,10 +24,12 @@ import {
   renderChannelPreview,
   renderPrune,
   runCommand,
+  runUpdateCheckChild,
   type Streams,
   serverInstallChange,
   serverPruneChange,
   terminalUpdateHooks,
+  UPDATE_CHECK_CHILD_COMMAND,
   updateGateAtTerminal,
   wholeNumber,
   writeResult,
@@ -256,8 +258,8 @@ configuration problem.`,
   program.hook('preAction', async (_program, command) => {
     const path = commandPathOf(command);
     // `sign-in-listen` too: it is the listener a sign-in started, not a command anybody types, and stopping it would
-    // break the sign-in the person is in the middle of.
-    if (exemptFromUpdateGate(path, ['sign-in-listen'])) return;
+    // break the sign-in the person is in the middle of. So is the update check a command handed on (#48).
+    if (exemptFromUpdateGate(path, ['sign-in-listen', UPDATE_CHECK_CHILD_COMMAND])) return;
     const core = openCore({ env });
     let ended: number | null = null;
     const code = await runCommand(
@@ -1385,6 +1387,17 @@ configuration problem.`,
     .action(
       act(async (context, _options, flowId: string) => {
         await runSignInListener(context, flowId);
+      }),
+    );
+
+  // ── the hidden rest of the day's update check, handed on by a command (#48) ─────────────────────────────────────
+
+  program
+    .command(`${UPDATE_CHECK_CHILD_COMMAND} <claimedAt>`, { hidden: true })
+    .description("internal: finish the day's update check a command handed on")
+    .action(
+      act(async (context, _options, claimedAt: string) => {
+        await runUpdateCheckChild(context.core, env, claimedAt);
       }),
     );
 

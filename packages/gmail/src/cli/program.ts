@@ -23,12 +23,14 @@ import {
   refuseRetiredOut,
   refuseUnclaimedApproval,
   runCommand,
+  runUpdateCheckChild,
   type ServerInstallResult,
   type Streams,
   serverInstallChange,
   serverPruneChange,
   terminalUpdateHooks,
   toCommsError,
+  UPDATE_CHECK_CHILD_COMMAND,
   updateGateAtTerminal,
   writeResult,
 } from '@agentcomms/core';
@@ -199,8 +201,8 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
   program.hook('preAction', async (_program, command) => {
     const path = commandPathOf(command);
     // `oauth-listen` too: it is the listener a sign-in started, not a command anybody types, and stopping it would
-    // break the sign-in the person is in the middle of.
-    if (exemptFromUpdateGate(path, ['oauth-listen'])) return;
+    // break the sign-in the person is in the middle of. So is the update check a command handed on (#48).
+    if (exemptFromUpdateGate(path, ['oauth-listen', UPDATE_CHECK_CHILD_COMMAND])) return;
     const core = openCore({ env });
     let ended: number | null = null;
     const code = await runCommand(
@@ -2257,6 +2259,15 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
     .action(
       act(async (context, _globalOptions, flowId: string) => {
         await runOauthListener(context, flowId);
+      }),
+    );
+
+  program
+    .command(`${UPDATE_CHECK_CHILD_COMMAND} <claimedAt>`, { hidden: true })
+    .description("internal: finish the day's update check a command handed on")
+    .action(
+      act(async (context, _globalOptions, claimedAt: string) => {
+        await runUpdateCheckChild(context.core, env, claimedAt);
       }),
     );
 

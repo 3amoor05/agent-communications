@@ -38,7 +38,7 @@ import {
   updateLaterChange,
 } from './operations/update-settings.ts';
 import { renderDoctor, renderInstall, renderPrune, renderUpdate, renderUpdateCheck } from './render.ts';
-import { terminalUpdateHooks } from './update-check.ts';
+import { runUpdateCheckChild, terminalUpdateHooks, UPDATE_CHECK_CHILD_COMMAND } from './update-check.ts';
 import { CHANGE_CLAIM, exemptFromUpdateGate, updateGateAtTerminal } from './update-gate.ts';
 import { VERSION } from './version.ts';
 
@@ -233,6 +233,12 @@ export async function main(
     const { startCoreStdioServer } = await import('./mcp/server.ts');
     await startCoreStdioServer({ core, env });
     return EXIT_CODES.OK;
+  }
+
+  // The rest of the day's update check, which a command handed to this child before it ended (#48): hidden, and never
+  // stopped by the gate it is part of — it is run before the gate, as the server is.
+  if (command === UPDATE_CHECK_CHILD_COMMAND) {
+    return runCommand(output, () => runUpdateCheckChild(core, env, sub));
   }
 
   // The daily update check (design 2026-09-28 §3): before any command but the exempt ones, an update that is out
