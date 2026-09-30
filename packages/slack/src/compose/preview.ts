@@ -125,6 +125,56 @@ function linksOf(text: string): string[] {
   return references.filter((reference) => reference.kind === 'link').map((reference) => reference.id);
 }
 
+/** A span in Slack's wire text, as `decodeSlackText` finds one: literal angle brackets, nothing nested. */
+const SPAN = /<[^<>]*>/g;
+/** A bare web address, as Slack links one by itself: the scheme, then up to a space, an angle bracket or a bar. */
+const BARE_URL = /https?:\/\/[^\s<>|]+/gi;
+/** What ends a sentence rather than an address: `see https://example.com.` links the address, not the full stop. */
+const TRAILING = /[.,;:!?'")\]}]+$/;
+
+/**
+ * Every URL in a post's words, in the order they appear, each once: each link span, and each bare `http://` or
+ * `https://` address — which Slack links by itself, span or not. For a post with files, whose words Slack may unfurl
+ * (see `unfurlWarnings`).
+ *
+ * The bare ones are looked for between the spans, in the words as they read — the author's `&amp;` is an `&` in an
+ * address — so a span is never read twice, and a mention is never read as an address.
+ */
+export function urlsInWords(text: string): string[] {
+  const found: string[] = [];
+  const bare = (between: string): void => {
+    // No span is left in it, so this only undoes Slack's escaping.
+    for (const match of decodeSlackText(between).text.matchAll(BARE_URL)) {
+      const url = match[0].replace(TRAILING, '');
+      if (url.length > url.indexOf('//') + 2) found.push(url);
+    }
+  };
+  let cursor = 0;
+  for (const match of text.matchAll(SPAN)) {
+    bare(text.slice(cursor, match.index));
+    cursor = match.index + match[0].length;
+    const [reference] = decodeSlackText(match[0]).references;
+    if (reference?.kind === 'link') found.push(reference.id);
+  }
+  bare(text.slice(cursor));
+  return [...new Set(found)];
+}
+
+/**
+ * The warning for a post with files whose words hold a link — issue #44. A mitigation, not a fix: there is none.
+ *
+ * A message goes out with `unfurl_links` and `unfurl_media` off (see `ComposedPayload`). The files' message goes out
+ * through `files.completeUploadExternal`, which takes no such switch, so Slack may fetch a link in it and show that
+ * page's preview to the whole room — content nobody here wrote or saw. The one way to keep a link from unfurling is to
+ * post it as a message of its own, which is what the warning says.
+ */
+function unfurlWarnings(files: readonly SlackDraftFile[], urls: readonly string[]): string[] {
+  if (files.length === 0 || urls.length === 0) return [];
+  return [
+    'Slack may fetch a link in this post’s words and show its preview to everyone in the channel: Slack offers no way to turn that off for a post with files. To keep a link from unfurling, post it as a message of its own.',
+  ];
+}
+
 /** Warnings about the person's own text: not refusals, just what a reader should notice before saying yes. */
 function warningsOf(text: string): string[] {
   const warnings: string[] = [];
@@ -180,6 +230,11 @@ function fileWarnings(files: readonly SlackDraftFile[]): string[] {
 export function previewOf(input: PreviewInput): ChannelPreview {
   const payload = input.draft.payload;
   const files = input.draft.files ?? [];
+  /*
+   * A post of text alone lists its link spans, as it always has: it posts with unfurling off, so a bare address in it
+   * is only text. A post with files lists every address in its words, bare or not, because any of them may unfurl.
+   */
+  const links = files.length > 0 ? urlsInWords(payload.text) : linksOf(payload.text);
   // Decoded, because that is what the recipient reads — see this module's own note.
   const body = decodeSlackText(payload.text, input.book.names()).text;
   const channelName = input.channel?.isIm
@@ -201,9 +256,14 @@ export function previewOf(input: PreviewInput): ChannelPreview {
       ...(input.approvalId ? { approvalId: input.approvalId } : {}),
       note: input.note ?? 'nothing has been posted',
     },
-    links: linksOf(payload.text),
+    links,
     ...(input.policy ? { policy: input.policy } : {}),
-    warnings: [...membershipWarnings(input.membershipUnchecked), ...warningsOf(payload.text), ...fileWarnings(files)],
+    warnings: [
+      ...membershipWarnings(input.membershipUnchecked),
+      ...warningsOf(payload.text),
+      ...unfurlWarnings(files, links),
+      ...fileWarnings(files),
+    ],
   };
 }
 

@@ -20,7 +20,7 @@ import { slackFileUpload } from '../api/upload.ts';
 import { type ComposedPayload, payloadOf } from '../compose/blocks.ts';
 import type { SlackDraft } from '../compose/drafts.ts';
 import { checkRecordedFile, rereadFile, type SlackDraftFile } from '../compose/files.ts';
-import { mentionedUserIds, previewOf } from '../compose/preview.ts';
+import { mentionedUserIds, previewOf, urlsInWords } from '../compose/preview.ts';
 import { decodeSlackText } from '../text/decode.ts';
 import { type Channel, channelOf, type NameBook } from './people.ts';
 
@@ -177,6 +177,12 @@ export const REACH_UNKNOWN = 'reach-unknown';
 /** The flag on a post's approval that carries files: what the approval screen and the audit can tell a file post by. */
 export const CONTAINS_FILES = 'contains-files';
 
+/**
+ * The flag on a post with files whose words hold a link, which Slack may unfurl for the whole room — issue #44. Its
+ * preview warns about it; see `unfurlWarnings`.
+ */
+export const LINK_MAY_UNFURL = 'link-may-unfurl';
+
 /** Anything about this post a person should look at twice. Flags, never refusals. */
 function risksOf(
   payload: { text: string },
@@ -191,6 +197,8 @@ function risksOf(
   if (notifies.estimated >= 50) flags.push('large-audience');
   const { references } = decodeSlackText(payload.text);
   if (references.some((reference) => reference.kind === 'link')) flags.push('contains-link');
+  // Only with files: a message posts with unfurling off, and its flags are what they always were.
+  if (files > 0 && urlsInWords(payload.text).length > 0) flags.push(LINK_MAY_UNFURL);
   return flags;
 }
 

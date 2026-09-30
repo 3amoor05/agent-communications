@@ -13,6 +13,8 @@ import {
 import { join } from 'node:path';
 import { type TestContext, test } from 'node:test';
 import { CommsError, renderChannelPreview } from '@agentcomms/core';
+import { payloadOf } from '../src/compose/blocks.ts';
+import { openDraftStore } from '../src/compose/drafts.ts';
 import { TEST_ONLY_HOOKS } from '../src/compose/files.ts';
 import { SlackContext } from '../src/context.ts';
 import { scopesForMode } from '../src/manifest.ts';
@@ -280,6 +282,94 @@ test('a post of text alone is previewed and bound exactly as it was before files
       'say yes and it posts',
     ].join('\n'),
   );
+});
+
+// ── Links in a file post's words: Slack may unfurl them, and nothing can stop it ─────────────────────────────
+
+/** The warning a file post with a link in its words carries — issue #44. */
+const MAY_UNFURL =
+  /^Slack may fetch a link in this post’s words and show its preview to everyone in the channel: Slack offers no way to turn that off for a post with files\. To keep a link from unfurling, post it as a message of its own\.$/;
+
+test('a file post whose words hold a bare URL and a link span lists both, flags link-may-unfurl, and warns', async (t) => {
+  /*
+   * Issue #44. A message is posted with unfurling off; the files' message goes out through
+   * files.completeUploadExternal, which takes no such switch, so Slack may fetch a link in it and show the page to the
+   * whole room. Nothing here can turn that off, so the person is told before they agree — every link, the bare ones
+   * Slack links by itself as well as a span, and what to do instead.
+   *
+   * The span is written into the draft's payload directly, as a hand-written draft would carry one: the composer
+   * escapes the author's words, so it never writes one itself.
+   */
+  const w = await world(t);
+  const draft = await createDraft(w.context, 'acme', {
+    channel: 'C1',
+    text: 'placeholder',
+    files: [file(w.docs, 'plan.zip', 'PK the plan')],
+  });
+  const words = 'the plan: https://docs.example.com/plan?v=2&amp;x=1, and <https://notes.example.org/q3|the notes>';
+  const store = openDraftStore(w.harness.core.paths.stateDir, () => new Date());
+  await store.update(draft.draftId, payloadOf(words, 'C1', undefined), words, draft.files);
+
+  const prepared = await prepareDraftPost(w.context, 'acme', { draftId: draft.draftId }, w.slack);
+  assert.deepEqual(prepared.preview.links, ['https://docs.example.com/plan?v=2&x=1', 'https://notes.example.org/q3']);
+  assert.ok(prepared.riskFlags.includes('link-may-unfurl'), prepared.riskFlags.join(', '));
+  const warned = (prepared.preview.warnings ?? []).filter((warning) => MAY_UNFURL.test(warning));
+  assert.equal(warned.length, 1, (prepared.preview.warnings ?? []).join('\n'));
+  const rendered = renderChannelPreview(prepared.preview);
+  assert.match(rendered, /Link: +https:\/\/docs\.example\.com\/plan\?v=2&x=1\n/);
+  assert.match(rendered, /Link: +https:\/\/notes\.example\.org\/q3\n/);
+  assert.match(rendered, /! Slack may fetch a link in this post’s words/);
+});
+
+test('a bare URL typed into a file post’s words is flagged as it is written, and the digest is what it was', async (t) => {
+  /*
+   * The ordinary way a link gets there: typed into the words. The digest is pinned from before #44 — a warning and a
+   * flag are for the person reading, and must not change what the approval binds.
+   */
+  const w = await world(t);
+  const draft = await createDraft(w.context, 'acme', {
+    channel: 'C1',
+    text: 'the build is at HTTPS://ci.example.com/runs/42.',
+    files: [file(w.docs, 'build.log', 'ok\n')],
+  });
+  const prepared = await prepareDraftPost(w.context, 'acme', { draftId: draft.draftId }, w.slack);
+  // Pinned first, so that a mutation to the flag or the warning is caught by the assertions below, not masked here.
+  assert.equal(
+    (await w.context.core.approvals.get(prepared.approvalId))?.digest,
+    'e8f5274ffc2e8ae4c65eb35c3d372f034973a068ad863c3bb47d01ce3320b9b9',
+  );
+  assert.deepEqual(prepared.preview.links, ['HTTPS://ci.example.com/runs/42']);
+  assert.deepEqual(prepared.riskFlags, ['contains-files', 'link-may-unfurl']);
+  assert.equal((prepared.preview.warnings ?? []).filter((warning) => MAY_UNFURL.test(warning)).length, 1);
+});
+
+test('a file post without a link in its words has no link, no flag and no warning about one', async (t) => {
+  const w = await world(t);
+  const draft = await createDraft(w.context, 'acme', {
+    channel: 'C1',
+    // A domain with no scheme, and a scheme with no address: neither is a link Slack would fetch.
+    text: 'the numbers from example.com, as promised — see https:// for nothing',
+    files: [file(w.docs, 'numbers.csv', 'a,b\n1,2\n')],
+  });
+  const prepared = await prepareDraftPost(w.context, 'acme', { draftId: draft.draftId }, w.slack);
+  assert.deepEqual(prepared.preview.links, []);
+  assert.deepEqual(prepared.riskFlags, ['contains-files']);
+  assert.equal(
+    (prepared.preview.warnings ?? []).some((warning) => MAY_UNFURL.test(warning)),
+    false,
+  );
+});
+
+test('a post of text alone with a bare URL is previewed and flagged as it always was: it posts with unfurling off', async (t) => {
+  const w = await world(t);
+  const draft = await createDraft(w.context, 'acme', {
+    channel: 'C1',
+    text: 'the build is at https://ci.example.com/runs/42',
+  });
+  const prepared = await prepareDraftPost(w.context, 'acme', { draftId: draft.draftId }, w.slack);
+  assert.deepEqual(prepared.preview.links, []);
+  assert.deepEqual(prepared.riskFlags, []);
+  assert.deepEqual(prepared.preview.warnings, []);
 });
 
 // ── Sending: every file read again, then uploaded, then one post that names the channel ───────────────────────
