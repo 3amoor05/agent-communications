@@ -3,11 +3,13 @@ import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { CommsError } from '../src/errors.ts';
 import {
   checkAttachable,
   createUniqueFile,
   isInside,
+  namesItsPlace,
   relativeSubpath,
   resolveInsideRoot,
   safeFilename,
@@ -180,4 +182,21 @@ test('a name that lies about what it is loses the characters doing the lying', (
   assert.equal(safeFilename(`re${zwj}port.pdf`), 'report.pdf');
   // An ordinary name is untouched, accents and all.
   assert.equal(safeFilename('Rapport financier — août.pdf'), 'Rapport financier — août.pdf');
+});
+
+test('a configured folder that does not name its own place allows nothing: a relative one, or a drive-less one on Windows', async () => {
+  // This file is inside the folder the tests run in; a root of "." or "test" would be that folder, wherever it is.
+  const here = fileURLToPath(import.meta.url);
+  for (const roots of [['.'], ['test'], ['./test']]) {
+    await assert.rejects(checkAttachable(here, { roots, deny: [] }), /must come from an allowed folder/, roots.join());
+  }
+  for (const place of ['~', '~/Documents', '~\\Documents', '/srv/outgoing'])
+    assert.equal(namesItsPlace(place, 'linux'), true, place);
+  for (const place of ['.', 'test', './x', '']) assert.equal(namesItsPlace(place, 'linux'), false, place);
+  for (const place of ['C:\\outgoing', 'd:/x', '\\\\server\\share\\x', '~', '~\\x']) {
+    assert.equal(namesItsPlace(place, 'win32'), true, place);
+  }
+  for (const place of ['\\outgoing', '/outgoing', 'C:outgoing', '\\\\?\\C:\\x', '\\\\.\\pipe\\x', 'x']) {
+    assert.equal(namesItsPlace(place, 'win32'), false, place);
+  }
 });

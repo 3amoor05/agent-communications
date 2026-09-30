@@ -5,7 +5,7 @@ import type { ChangeSurface } from '../changes.ts';
 import { type Config, comparablePath, isInsideDirectory } from '../config.ts';
 import type { Core } from '../core.ts';
 import { CommsError } from '../errors.ts';
-import { defaultAttachDeny } from '../jail.ts';
+import { defaultAttachDeny, namesItsPlace } from '../jail.ts';
 import { expandHome, homeDirectory } from '../paths.ts';
 
 /**
@@ -88,7 +88,8 @@ export function attachChange(
       hint: `One of: ${ATTACH_CHANGE_KINDS.join(', ')}.`,
     });
   }
-  const path = checkedPath(change.path);
+  const removing = change.kind === 'rootsRemove' || change.kind === 'denyRemove';
+  const path = removing ? listedPath(change.path) : checkedPath(change.path);
   const { kind } = change;
   const home = homeDirectory(env);
   const edit = editOf(kind, path, home);
@@ -171,32 +172,31 @@ export function checkedPath(path: unknown, platform: NodeJS.Platform = process.p
       hint: `For example: \`${ATTACH_ROOTS_ADD.replace('<folder>', '~/Documents/outgoing')}\`.`,
     });
   }
-  const fromHome = value === '~' || value.startsWith('~/') || value.startsWith('~\\');
-  if (fromHome) return value;
-  if (platform === 'win32') {
-    /*
-     * Windows calls `\outgoing` absolute, but it is on whichever drive is current when it is read: approved as
-     * `C:\outgoing` today, it would allow `D:\outgoing` from a process started on D:, with nobody asked again. So a
-     * drive, or a share's `\\server\share`, is part of the path, and nothing else is taken as absolute.
-     */
-    const drive = /^[A-Za-z]:[\\/]/.test(value);
-    const share = /^[\\/]{2}[^\\/?.][^\\/]*[\\/][^\\/]+/.test(value);
-    if (!drive && !share) {
-      throw new CommsError(
-        'USAGE',
-        `"${value}" does not name its drive: give it in full, like C:\\outgoing, or starting with ~`,
-        {
-          hint: 'A path with no drive is on whichever drive is current when it is read, which is not something a person approves once.',
-        },
-      );
-    }
-    return value;
+  // The jail's own rule, so what this takes is what the jail allows (see `namesItsPlace`).
+  if (namesItsPlace(value, platform)) return value;
+  if (platform === 'win32' && isAbsolute(value)) {
+    throw new CommsError(
+      'USAGE',
+      `"${value}" does not name its drive: give it in full, like C:\\outgoing, or starting with ~`,
+      {
+        hint: 'A path with no drive is on whichever drive is current when it is read, which is not something a person approves once.',
+      },
+    );
   }
-  if (!isAbsolute(value)) {
-    throw new CommsError('USAGE', `"${value}" is a relative path: give it absolute, or starting with ~`, {
-      hint: 'A relative path means whatever folder this happened to start in. Write it in full, or from your home folder: `~/Documents/outgoing`.',
-    });
-  }
+  throw new CommsError('USAGE', `"${value}" is a relative path: give it absolute, or starting with ~`, {
+    hint: 'A relative path means whatever folder this happened to start in. Write it in full, or from your home folder: `~/Documents/outgoing`.',
+  });
+}
+
+/**
+ * An entry to take out, as it is listed. Not held to `checkedPath`: an entry written by hand before 0.12.0 may name no
+ * place — `\outgoing` on Windows — and the one way to be rid of it must not be to edit the file again. An entry that is
+ * not listed is refused when the change is planned.
+ */
+function listedPath(path: unknown): string {
+  const value = typeof path === 'string' ? path.trim() : '';
+  if (value === '')
+    throw new CommsError('USAGE', 'name the folder or path to take out, as `agentcomms attach` lists it');
   return value;
 }
 

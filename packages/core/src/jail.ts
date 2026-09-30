@@ -161,6 +161,19 @@ async function realOrResolved(path: string): Promise<string> {
 }
 
 /**
+ * Whether a folder, as written, says where it is on its own: from the home (`~`), or absolute — and on Windows with its
+ * drive (`C:\…`) or share (`\\server\share\…`). Windows calls `\outgoing` absolute, but it is on whichever drive is
+ * current when it is read, and `C:outgoing` is relative to that drive's current folder; either would move with the
+ * process that reads it. A folder in the configuration that does not name its place — written by hand before 0.12.0,
+ * say — allows nothing, and `agentcomms attach` takes none (#45).
+ */
+export function namesItsPlace(path: string, platform: NodeJS.Platform = process.platform): boolean {
+  if (path === '~' || path.startsWith('~/') || path.startsWith('~\\')) return true;
+  if (platform === 'win32') return /^[A-Za-z]:[\\/]/.test(path) || /^[\\/]{2}[^\\/?.][^\\/]*[\\/][^\\/]+/.test(path);
+  return isAbsolute(path);
+}
+
+/**
  * Proves a local file may be attached to a draft: it resolves (following links) to a regular file inside one of the
  * allowed roots and inside none of the deny entries. A deny entry of the form `**` + `/name*` matches by file name
  * prefix (so `.env*` matches `.env` and `.env.local`). Returns the real path.
@@ -177,7 +190,10 @@ export async function checkAttachable(path: string, policy: AttachPolicy): Promi
   const info = await stat(real);
   if (!info.isFile()) throw new CommsError('BAD_DATA', `not a regular file: ${path}`);
 
-  const roots = await Promise.all(policy.roots.map((root) => realOrResolved(expandHome(root, home))));
+  // A configured folder that does not name its own place allows nothing: see `namesItsPlace`.
+  const roots = await Promise.all(
+    policy.roots.filter((root) => namesItsPlace(root)).map((root) => realOrResolved(expandHome(root, home))),
+  );
   if (!roots.some((root) => isInside(real, root))) {
     /*
      * What a person can do about it, and nothing they cannot. This once named a CLI command for widening the allowed

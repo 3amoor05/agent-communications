@@ -294,3 +294,19 @@ test('`agentcomms attach roots add` is the same change at the command line: an a
   assert.equal(cli(m, ['attach', 'roots', 'add', '--json']).status, 64);
   assert.equal(cli(m, ['attach', '--approval', approvalId, '--json']).status, 64);
 });
+
+test('an entry that names no place, written by hand, can still be taken out as it is listed', async () => {
+  const m = machine({ attachRoots: ['~', 'legacy-folder'], attachDeny: ['old-deny'] });
+  const { ok, error, close } = await connect(m);
+  try {
+    // Adding one is refused as it always was: a relative path means wherever this started.
+    assert.match(String((await error({ rootsAdd: 'legacy-folder' })).message), /relative path/);
+    // Taking it out is a tightening, applied at once, as listed.
+    await ok({ rootsRemove: 'legacy-folder' });
+    assert.deepEqual((await defaultsOf(m)).attachRoots, ['~']);
+    // One that is not listed is still refused, by name.
+    assert.match(String((await error({ rootsRemove: 'never-listed' })).message), /never-listed/);
+  } finally {
+    await close();
+  }
+});
