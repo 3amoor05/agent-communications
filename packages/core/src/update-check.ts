@@ -209,32 +209,83 @@ export function updateCheckChildEntry(
  * `--experimental-strip-types` for a checkout, say — the child needs as the command did.
  */
 function withoutDebugger(execArgv: readonly string[]): string[] {
-  const kept: string[] = [];
-  for (let index = 0; index < execArgv.length; index++) {
-    const flag = execArgv[index] ?? '';
-    if (!/^--(?:inspect|debug)(?:-brk|-port|-wait)?(?:=.*)?$/.test(flag)) {
-      kept.push(flag);
+  return keptWords(execArgv.map((word) => ({ word, raw: word }))).map(({ raw }) => raw);
+}
+
+/** Words as Node reads them, each with how it was written, less a debugger's; `--inspect-port 9229` is two words. */
+function keptWords<T extends { word: string }>(words: readonly T[]): T[] {
+  const kept: T[] = [];
+  for (let index = 0; index < words.length; index++) {
+    const word = words[index] as T;
+    if (!/^--(?:inspect|debug)(?:-brk|-port|-wait)?(?:=.*)?$/.test(word.word)) {
+      kept.push(word);
       continue;
     }
-    // `--inspect-port 9229` is two words; `--inspect-port=9229` and `--inspect=9229` are one.
-    if (/^--(?:inspect|debug)-port$/.test(flag)) index++;
+    // `--inspect-port=9229` and `--inspect=9229` are one word; `--inspect-port 9229` takes the next.
+    if (/^--(?:inspect|debug)-port$/.test(word.word)) index++;
   }
   return kept;
+}
+
+/**
+ * `NODE_OPTIONS` split as Node splits it: at white space, except inside double quotes, where a backslash takes the
+ * character after it as it is. Each word keeps how it was written, so what is kept goes to the child unchanged —
+ * `--require "/tmp/with --inspect hook.js"` is one word, and not a debugger's.
+ */
+function nodeOptionWords(options: string): { word: string; raw: string }[] {
+  const words: { word: string; raw: string }[] = [];
+  let index = 0;
+  while (index < options.length) {
+    while (index < options.length && /\s/.test(options[index] ?? '')) index++;
+    if (index >= options.length) break;
+    const start = index;
+    let word = '';
+    let quoted = false;
+    for (; index < options.length; index++) {
+      const character = options[index] ?? '';
+      if (quoted) {
+        if (character === '\\' && index + 1 < options.length) word += options[++index];
+        else if (character === '"') quoted = false;
+        else word += character;
+      } else if (/\s/.test(character)) {
+        break;
+      } else if (character === '"') {
+        quoted = true;
+      } else {
+        word += character;
+      }
+    }
+    words.push({ word, raw: options.slice(start, index) });
+  }
+  return words;
 }
 
 /**
  * The child's environment: the command's, with a debugger's flags taken out of `NODE_OPTIONS` too. Node reads
  * `NODE_OPTIONS` before any flag, so a command debugged through it — `NODE_OPTIONS=--inspect-brk` — would start a child
  * that waits for a debugger, holds its claim until the lease runs out, and outlives the command. Every other option in
- * it is kept; with none left, `NODE_OPTIONS` is left out.
+ * it is kept as written; with none left, `NODE_OPTIONS` is left out. On Windows a variable's name is the same in any
+ * case, so `node_options` is read, and taken out, as `NODE_OPTIONS` is.
  */
-export function updateCheckChildEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const child = { ...childEnvironment(env) };
-  const options = child.NODE_OPTIONS;
-  if (options === undefined) return child;
-  const kept = withoutDebugger(options.split(/\s+/).filter((word) => word !== '')).join(' ');
-  if (kept === '') delete child.NODE_OPTIONS;
-  else child.NODE_OPTIONS = kept;
+export function updateCheckChildEnvironment(
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
+): NodeJS.ProcessEnv {
+  const child = { ...childEnvironment(env, platform) };
+  const names = Object.keys(child).filter((name) =>
+    platform === 'win32' ? name.toUpperCase() === 'NODE_OPTIONS' : name === 'NODE_OPTIONS',
+  );
+  if (names.length === 0) return child;
+  const kept = names
+    .map((name) =>
+      keptWords(nodeOptionWords(child[name] ?? ''))
+        .map(({ raw }) => raw)
+        .join(' '),
+    )
+    .filter((options) => options !== '')
+    .join(' ');
+  for (const name of names) delete child[name];
+  if (kept !== '') child.NODE_OPTIONS = kept;
   return child;
 }
 

@@ -1638,6 +1638,23 @@ test("a debugger given through NODE_OPTIONS stays with the command: the child's 
   assert.equal('NODE_OPTIONS' in updateCheckChildEnvironment({ PATH: '/x' }), false);
 });
 
+test('NODE_OPTIONS is read as Node reads it: a quoted word stays whole, and on Windows the name is the same in any case', () => {
+  const quoted = '--require "/srv/with --inspect hook.js"   --inspect-brk  --title="a \\"quoted\\" name"';
+  assert.equal(
+    updateCheckChildEnvironment({ NODE_OPTIONS: quoted }, 'linux').NODE_OPTIONS,
+    '--require "/srv/with --inspect hook.js" --title="a \\"quoted\\" name"',
+  );
+  const windows = updateCheckChildEnvironment(
+    { Path: 'C:\\x', node_options: '--inspect-brk --max-old-space-size=64' },
+    'win32',
+  );
+  assert.equal(windows.NODE_OPTIONS, '--max-old-space-size=64');
+  assert.equal('node_options' in windows, false, 'no second name for the same variable');
+  // Elsewhere the name has one case, and another is another variable.
+  const linux = updateCheckChildEnvironment({ node_options: '--inspect-brk' }, 'linux');
+  assert.equal(linux.node_options, '--inspect-brk');
+});
+
 test("the child is this CLI again: the running script when it is a CLI's entry, links followed, and nothing else", () => {
   const root = tempDir('comms-update-entry-');
   const entry = join(root, 'dist', 'cli.mjs');
