@@ -34,6 +34,7 @@ import {
   terminalUpdateHooks,
   UPDATE_CHECK_CHILD_COMMAND,
   updateCheckChildEntry,
+  updateCheckChildEnvironment,
 } from '../src/update-check.ts';
 import {
   approvalsOf,
@@ -1622,6 +1623,19 @@ test('agentcomms finishes the update check a command handed on: under its claim,
   assert.deepEqual(await readUpdateCheck(m.stateDir), record);
   assert.equal(run([UPDATE_CHECK_CHILD_COMMAND, '--json']).status, 64, 'no claim, no ask');
   assert.doesNotMatch(run(['--help']).stdout, new RegExp(UPDATE_CHECK_CHILD_COMMAND));
+});
+
+test("a debugger given through NODE_OPTIONS stays with the command: the child's environment keeps every other option", () => {
+  const env = {
+    PATH: '/x',
+    NODE_OPTIONS: '--inspect-brk=0 --max-old-space-size=512 --inspect-port 9230 --enable-source-maps',
+  };
+  const child = updateCheckChildEnvironment(env);
+  assert.equal(child.NODE_OPTIONS, '--max-old-space-size=512 --enable-source-maps');
+  assert.equal(child.PATH, '/x');
+  assert.equal(env.NODE_OPTIONS.startsWith('--inspect-brk'), true, "the command's own environment is not changed");
+  assert.equal('NODE_OPTIONS' in updateCheckChildEnvironment({ NODE_OPTIONS: '--inspect' }), false);
+  assert.equal('NODE_OPTIONS' in updateCheckChildEnvironment({ PATH: '/x' }), false);
 });
 
 test("the child is this CLI again: the running script when it is a CLI's entry, links followed, and nothing else", () => {

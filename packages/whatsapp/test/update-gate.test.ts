@@ -150,6 +150,7 @@ test('the bundle as it ships carries the update gate’s reader, and none of the
     'askUnderClaim',
     'runUpdateCheckChild',
     'updateCheckChildEntry',
+    'updateCheckChildEnvironment',
     'UPDATE_CHECK_CHILD_COMMAND',
     'update-check-child',
   ]) {

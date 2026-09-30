@@ -223,6 +223,22 @@ function withoutDebugger(execArgv: readonly string[]): string[] {
 }
 
 /**
+ * The child's environment: the command's, with a debugger's flags taken out of `NODE_OPTIONS` too. Node reads
+ * `NODE_OPTIONS` before any flag, so a command debugged through it — `NODE_OPTIONS=--inspect-brk` — would start a child
+ * that waits for a debugger, holds its claim until the lease runs out, and outlives the command. Every other option in
+ * it is kept; with none left, `NODE_OPTIONS` is left out.
+ */
+export function updateCheckChildEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const child = { ...childEnvironment(env) };
+  const options = child.NODE_OPTIONS;
+  if (options === undefined) return child;
+  const kept = withoutDebugger(options.split(/\s+/).filter((word) => word !== '')).join(' ');
+  if (kept === '') delete child.NODE_OPTIONS;
+  else child.NODE_OPTIONS = kept;
+  return child;
+}
+
+/**
  * The day's check at a terminal, handed on (#48). The command claims the check itself, as it always has, so only one
  * process asks — then starts this CLI again, detached, with the hidden command and the claim's time, and waits up to
  * the gate's three seconds for it to say the ask is over. After that it lets go of the child, which carries on alone,
@@ -272,7 +288,7 @@ async function startUpdateCheckChild(
       detached: true,
       windowsHide: true,
       stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
-      env: childEnvironment(env),
+      env: updateCheckChildEnvironment(env),
     });
   } catch {
     return false;
