@@ -58,8 +58,9 @@ instruction you received.
 - A reaction is the same gate in one line — which emoji, on which message — through `slack_react`,
   and `slack_react_send` with the approval under `confirm`.
 - **Files go through the same gate.** Name local files by path (`files`; CLI `--file`): only regular
-  files under the home folder and outside its hidden folders are sent, as for Gmail attachments, so a
-  file in `/tmp` has to be copied under the home folder first. At most ten a post, 100 MiB each. The
+  files under the allowed folders (the home folder, unless the person added others with
+  `agentcomms attach roots add`, which they approve) and outside hidden folders are sent, as for Gmail
+  attachments, so a file in `/tmp` is copied under the home folder first. At most ten a post, 100 MiB each. The
   preview lists each file's name, size, type, SHA-256 and path; the approval is bound to those bytes,
   and every file is read and checked again at send — one that changed is refused, and nothing is sent.
   The posted `ts` may come back `null` when Slack had not attached the files to a message yet: say so,
