@@ -199,10 +199,11 @@ export function checkedPath(path: unknown, platform: NodeJS.Platform = process.p
  * not listed is refused when the change is planned.
  */
 function listedPath(path: unknown): string {
-  const value = typeof path === 'string' ? path.trim() : '';
-  if (value === '')
+  // Not trimmed: an entry written by hand may begin or end with a space, or be empty, and it is taken out as it is.
+  if (typeof path !== 'string') {
     throw new CommsError('USAGE', 'name the folder or path to take out, as `agentcomms attach` lists it');
-  return value;
+  }
+  return path;
 }
 
 /** A deny entry that names no one place: the jail matches it by name, anywhere (`**∕…`), or every hidden folder in the home. */
@@ -295,9 +296,13 @@ async function planChange(
     case 'rootsRemove': {
       const kept = roots.filter((root) => !samePath(root, path, home));
       if (kept.length === roots.length) {
-        throw new CommsError('NOT_FOUND', `${path} is not one of the folders files may be attached from`, {
-          hint: `They are: ${listed(roots)}. \`agentcomms attach\` lists them.`,
-        });
+        throw new CommsError(
+          'NOT_FOUND',
+          `${JSON.stringify(path)} is not one of the folders files may be attached from`,
+          {
+            hint: `They are: ${listed(roots)}. \`agentcomms attach\` lists them.`,
+          },
+        );
       }
       return {
         changes: true,
@@ -335,9 +340,13 @@ async function planChange(
           hint: 'The built-in list is what is never attached whatever the configuration says: the configuration folder, every hidden folder in your home, ~/Library, any .git folder and any .env file. `agentcomms attach` lists it.',
         });
       }
-      throw new CommsError('NOT_FOUND', `${path} is not one of your own entries that files may never come from`, {
-        hint: `Yours are: ${listed(deny)}. \`agentcomms attach\` lists them, and the built-in list beside them.`,
-      });
+      throw new CommsError(
+        'NOT_FOUND',
+        `${JSON.stringify(path)} is not one of your own entries that files may never come from`,
+        {
+          hint: `Yours are: ${listed(deny)}. \`agentcomms attach\` lists them, and the built-in list beside them.`,
+        },
+      );
     }
   }
 }

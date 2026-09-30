@@ -342,9 +342,30 @@ test('the report shows a listed folder that names no place apart: it allows noth
     }
     const shown = cli(m, ['attach']);
     assert.equal(shown.status, 0, shown.stderr);
-    assert.match(shown.stdout, /Listed, but allowing nothing[^\n]*\n {2}outgoing\n/);
-    assert.match(shown.stdout, /agentcomms attach roots remove <folder>, written as it is here/);
+    assert.match(shown.stdout, /Listed, but allowing nothing[^\n]*\n {2}"outgoing"\n/);
+    assert.match(
+      shown.stdout,
+      /agentcomms attach roots remove "<folder>", written exactly as it is between the quotes/,
+    );
     if (allowed === 0) assert.match(shown.stdout, /so nothing can be attached/);
     else assert.doesNotMatch(shown.stdout, /so nothing can be attached/);
   }
+});
+
+test('an entry is taken out exactly as it is listed: spaces at either end, or nothing at all, from both surfaces', async () => {
+  const m = machine({ attachRoots: ['~', ' outgoing ', ''] });
+  const shown = cli(m, ['attach']);
+  assert.match(shown.stdout, /\n {2}" outgoing "\n {2}""\n/, 'the spaces and the empty entry are not visible');
+  const { ok, error, close } = await connect(m);
+  try {
+    // Trimmed, it is another entry, and is not listed.
+    assert.match(String((await error({ rootsRemove: 'outgoing' })).message), /"outgoing" is not one of the folders/);
+    await ok({ rootsRemove: ' outgoing ' });
+    assert.deepEqual((await defaultsOf(m)).attachRoots, ['~', '']);
+  } finally {
+    await close();
+  }
+  const removed = cli(m, ['attach', 'roots', 'remove', '']);
+  assert.equal(removed.status, 0, removed.stderr);
+  assert.deepEqual((await defaultsOf(m)).attachRoots, ['~']);
 });

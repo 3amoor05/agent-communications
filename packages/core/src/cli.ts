@@ -627,8 +627,9 @@ function renderAttach(report: AttachReport): string {
       : [
           '',
           'Listed, but allowing nothing — they do not say which drive or folder they are on:',
-          ...report.ignored.map((root) => `  ${root}`),
-          '  Take one out with agentcomms attach roots remove <folder>, written as it is here.',
+          // Quoted, so a space at either end, or an empty entry, can be seen and written back.
+          ...report.ignored.map((root) => `  ${JSON.stringify(root)}`),
+          '  Take one out with agentcomms attach roots remove "<folder>", written exactly as it is between the quotes.',
         ]),
     '',
     'Never from, by your own entries:',
