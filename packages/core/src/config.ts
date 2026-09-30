@@ -7,6 +7,7 @@ import { CHANNEL_SNAPSHOT } from './channels.generated.ts';
 import { type ConfigVersion, NEW_CONFIG_VERSION } from './config-version.ts';
 import { CommsError } from './errors.ts';
 import { FILE_MODE, writeFileAtomic } from './fs.ts';
+import { namesItsPlace } from './jail.ts';
 import { withCredentialsLock, withFileLock } from './lock.ts';
 import { NAME_MESSAGE, NAME_PATTERN, parseName } from './name-grammar.ts';
 import { expandHome } from './paths.ts';
@@ -1303,9 +1304,12 @@ export function classifyChange(before: Config, after: Config): { loosened: strin
   // same place, and comparing them as strings would either ask for consent that is not needed or miss a change
   // that is.
   const roots = (list: readonly string[]) => new Set(list.map(normalisePath));
-  const before_roots = roots(b.attachRoots);
+  // Folders as the jail reads them: one that names no place allows nothing, so adding its proper form is a loosening.
+  // Not so for deny entries, which deny however they are written.
+  const readRoots = (list: readonly string[]) => roots(list.filter((root) => namesItsPlace(root)));
+  const before_roots = readRoots(b.attachRoots);
   const after_deny = roots(a.attachDeny);
-  if ([...roots(a.attachRoots)].some((root) => !before_roots.has(root))) {
+  if ([...readRoots(a.attachRoots)].some((root) => !before_roots.has(root))) {
     loosen('defaults.attachRoots', b.attachRoots, a.attachRoots);
   }
   if ([...roots(b.attachDeny)].some((deny) => !after_deny.has(deny))) {

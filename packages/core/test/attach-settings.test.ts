@@ -310,3 +310,18 @@ test('an entry that names no place, written by hand, can still be taken out as i
     await close();
   }
 });
+
+test('a folder listed with no place covers nothing: adding its proper form is a widening, approved first', async () => {
+  // `outgoing`, written by hand, is read against wherever a process starts; the jail ignores it. Its proper form —
+  // here the same folder written in full — is then a new folder to attach from, and needs the person's approval.
+  const m = machine({ attachRoots: ['~', 'outgoing'] });
+  const full = join(process.cwd(), 'outgoing');
+  const { ok, close } = await connect(m);
+  try {
+    const prepared = await ok({ rootsAdd: full });
+    assert.equal(prepared.approvalRequired, true, 'taken as already allowed, or applied with nobody asked');
+    assert.deepEqual((await defaultsOf(m)).attachRoots, ['~', 'outgoing'], 'written before it was approved');
+  } finally {
+    await close();
+  }
+});

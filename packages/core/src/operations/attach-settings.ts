@@ -240,6 +240,9 @@ async function reportOf(config: Config, core: Core, env: NodeJS.ProcessEnv): Pro
 function samePath(a: string, b: string, home: string): boolean {
   if (a === b) return true;
   if (isPattern(a) || isPattern(b)) return false;
+  // An entry that names no place is only ever itself: resolved, it would be whichever folder this happened to start
+  // in, and the folder written in full would count as already listed, and never be added.
+  if (!namesItsPlace(a) || !namesItsPlace(b)) return false;
   return comparablePath(resolve(expandHome(a, home))) === comparablePath(resolve(expandHome(b, home)));
 }
 
@@ -261,7 +264,8 @@ async function planChange(
     case 'rootsAdd': {
       // Judged by where each leads, as the jail judges a file: `~/link` inside `~` that leads to `/` is not inside it.
       const real = await realOf(path, home);
-      for (const root of roots) {
+      // Only the folders the jail reads: one that names no place allows nothing, so it covers nothing either.
+      for (const root of roots.filter((listed) => namesItsPlace(listed))) {
         if (isInsideDirectory(comparablePath(real), comparablePath(await realOf(root, home)))) {
           return {
             changes: false,
