@@ -699,3 +699,28 @@ test('an upload whose answer failed is reported as possibly uploaded, in the err
     assert.equal(JSON.stringify(record).includes('secret b'), false, `${what}: the audit holds the file's contents`);
   }
 });
+
+test('a file changed after the first pass and before its upload voids the approval, and its bytes never reach Slack', async (t) => {
+  /*
+   * The first pass reads every file before anything is uploaded; each one is then read and hashed again just before
+   * its own upload. This changes the file in between — as Slack is asked where to put it — so only that second read
+   * can see it. The same size and other bytes, so only the hash tells.
+   */
+  const w = await world(t);
+  const real = file(w.docs, 'totals.csv', 'a,b\n1,2\n');
+  w.uploads = w.fake.acceptUploads({
+    onUploadUrl: (filename) => {
+      if (filename === 'totals.csv') writeFileSync(real, 'a,b\n9,9\n');
+    },
+  });
+  const draft = await createDraft(w.context, 'acme', { channel: 'C1', text: 'the totals', files: [real] });
+  const { prepared, send } = await prepareAndSend(w, draft.draftId);
+
+  const error = await refusal(send());
+  assert.equal(error.code, 'APPROVAL_VOID');
+  assert.match(error.message, /totals\.csv is not the file that was approved — its contents have changed/);
+  assert.equal(w.uploads.issued.length, 1, 'the URL was asked for, so the first pass had passed');
+  assert.deepEqual(w.uploads.received, {}, 'bytes reached the upload URL from a file changed after it was approved');
+  assert.deepEqual(w.uploads.completed, []);
+  assert.equal((await w.context.core.approvals.get(prepared.approvalId))?.state, 'failed');
+});

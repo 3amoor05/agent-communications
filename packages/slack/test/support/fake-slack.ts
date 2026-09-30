@@ -101,6 +101,11 @@ export interface UploadOptions {
   completeError?: string;
   /** A Slack error for `files.getUploadURLExternal` to answer with, in place of an upload URL. */
   urlError?: string;
+  /**
+   * Runs as `files.getUploadURLExternal` is asked for a file, before it answers: after a send's first pass over every
+   * file, and before that file's own read and upload — the gap a test changes a file in.
+   */
+  onUploadUrl?: (filename: string) => void;
 }
 
 export interface FakeSlack {
@@ -152,6 +157,7 @@ function acceptUploads(fake: FakeSlack, options: UploadOptions = {}): FakeUpload
   const seen: FakeUploads = { issued: [], received: {}, completed: [] };
   let next = 0;
   fake.script['files.getUploadURLExternal'] = (request) => {
+    options.onUploadUrl?.(request.params.get('filename') ?? '');
     if (options.urlError) return { ok: false, error: options.urlError };
     next += 1;
     const fileId = `F0UP${String(next).padStart(4, '0')}`;
