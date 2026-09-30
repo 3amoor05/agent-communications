@@ -306,12 +306,17 @@ test('the claim and the ask are two steps: one claim a day, and the ask handed i
   assert.equal(await claimUpdateCheck(m.core, { now: at(60_000) }), null);
 });
 
-/** A registry on the loopback address that answers `latest` for core after `delayMs`, and counts every request. */
+/**
+ * A registry on the loopback address that answers `latest` for core after `delayMs`, and counts every request — and
+ * every answer, once it is given.
+ */
 async function loopbackRegistry(latest: string, delayMs: number) {
   const requests: string[] = [];
+  const answered: string[] = [];
   const server: Server = createServer((request, response) => {
     requests.push(request.url ?? '');
     setTimeout(() => {
+      answered.push(request.url ?? '');
       response
         .writeHead(200, { 'content-type': 'application/json' })
         .end(JSON.stringify({ name: CORE, 'dist-tags': { latest }, versions: { [latest]: {} } }));
@@ -322,6 +327,7 @@ async function loopbackRegistry(latest: string, delayMs: number) {
   return {
     url: `http://127.0.0.1:${port}/`,
     requests,
+    answered,
     close: () =>
       new Promise<void>((resolve) => {
         server.closeAllConnections();
@@ -1507,7 +1513,14 @@ test("the day's first command ends when its own work does: a detached child fini
   try {
     const first = await command(env, ['channels', '--json']);
     assert.equal(first.code, 0, first.output);
-    assert.ok(first.ms < 5_000, `the command's output closed after ${first.ms} ms, with the registry still asked`);
+    // About three and a half seconds here: the gate's wait, and the command. Held to the registry's clock rather than
+    // to a number of seconds, so a slow machine cannot fail it — the registry answers eight seconds after it is asked,
+    // and a command whose output something else held open closes only after that.
+    assert.deepEqual(
+      served.answered,
+      [],
+      `the command's output closed after ${first.ms} ms, once the registry answered`,
+    );
     // Inside the claim's lease, the next command asks nothing and hands nothing on: the child is asking.
     const second = await command(env, ['channels', '--json']);
     assert.equal(second.code, 0, second.output);
