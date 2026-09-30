@@ -67,7 +67,8 @@ release is out:
   configuration the check does not read goes by its channel's registrations;
 - **every command stops** — except `update`, `doctor`, `paths`, `approve`, `approvals`, `mcp` on its own (the server,
   which stops each call itself; `mcp install` and `mcp prune` are stopped like any other command), the listener a
-  sign-in starts (`agent-gmail oauth-listen`, `agent-slack sign-in-listen`), WhatsApp's `status`, and a command
+  sign-in starts (`agent-gmail oauth-listen`, `agent-slack sign-in-listen`), the hidden `update-check-child` a
+  command starts to finish the day's check, WhatsApp's `status`, and a command
   that takes `--approval` carrying one still waiting to be used (a command that takes none refuses it, and so does
   one that would not use it: a report, a dry run, a `--finish`) — and at a
   terminal asks "Update now, later today, or
@@ -87,11 +88,12 @@ check on one line: on or off, when it last asked, the latest release, and the on
 It never gets in the way of a machine that cannot reach npm: an ask that fails keeps the last result, stops nothing,
 and is not tried again that day. A prerelease never counts as an update. A command at a terminal waits about three
 seconds for the answer at most, then goes on while the ask finishes beside it, so a slow registry is still heard from;
-a server never waits for it. The command's process, though, ends only once the ask has: on the day's first run, its
-output can be there after three seconds and the process still running for up to ten more while npm's registry
-answers, and longer while `npm ls` lists the global packages. Anything that waits for the command to exit — a
-script's `$(…)`, a pipe into `jq`, an agent's shell tool — waits that long too, once a day. An ask cut short — a process ended part-way — does not use up the day: another process
-asks a couple of minutes later. WhatsApp's server and command, which never reach the network, do not ask npm
+a server never waits for it. The ask that goes on is handed to a detached process of its own, which holds none of the
+command's output, so the command's process ends when the command does: on the day's first run a script's `$(…)`, a
+pipe into `jq` or an agent's shell tool waits at most about three seconds longer than usual, and never for npm's
+registry or `npm ls` behind it. Where that process cannot be started, the command asks in its own process, as before, and ends
+once the ask has. An ask cut short — a process ended part-way — does not use up the day: another process asks a
+couple of minutes later. WhatsApp's server and command, which never reach the network, do not ask npm
 themselves; they stop once any other server or command on the machine has found an update. The check is skipped
 entirely when `CI` is set, or when `AGENT_COMMS_UPDATE_CHECK=off`.
 

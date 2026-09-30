@@ -138,12 +138,24 @@ settle beyond them, after review:
   acts on a change already in flight.
 - **The terminal's three seconds bound the wait, not the check**: the ask finishes beside the command. A check is
   claimed with a short lease (`checking`) and the day's `lastChecked` written when the ask is over, so an ask cut
-  short does not use up the day. The process therefore exits only when the check has: measured with an eight-second
-  loopback registry, `agentcomms channels --json` printed at 3.3 s and exited at 11.8 s, and the whole check may take
-  the registry's ten-second timeout plus `npm ls`'s sixty. Anything that waits for the exit — an agent's shell tool,
-  `$(…)`, `| jq` — waits for the check, once a day. **Accepted as is for 0.9.0 by the owner** (review of the first fix
-  round, 2026-09-29), over handing the check to a detached child or unref'ing its handles and leaving the next process
-  to retry once the lease runs out; `docs/upgrading.md` says so to the person.
+  short does not use up the day. Until 0.12.0 the process therefore exited only when the check had: measured with an
+  eight-second loopback registry, `agentcomms channels --json` printed at 3.3 s and exited at 11.8 s, and the whole
+  check may take the registry's ten-second timeout plus `npm ls`'s sixty. Anything that waits for the exit — an
+  agent's shell tool, `$(…)`, `| jq` — waited for the check, once a day. That was accepted as is for 0.9.0 by the
+  owner (review of the first fix round, 2026-09-29), over handing the check to a detached child or unref'ing its
+  handles and leaving the next process to retry once the lease runs out.
+- **From 0.12.0 the ask is handed to a detached child (#48).** The command takes the claim itself, as before, then
+  starts its own CLI again — this Node and its flags, the running script when it is a CLI's entry — with the hidden
+  `update-check-child` and the claim's time: detached, hidden on Windows, stdin, stdout and stderr ignored and only an
+  IPC channel open, so nothing reading the command's output waits for it. The command waits up to the same three
+  seconds for the child's `settled`, or its exit, then disconnects and unrefs it; the gate reads the file after the
+  wait, so a fast answer still stops the day's first command. The child asks only while the file still holds the
+  claim it was handed, never claims itself, and writes only under that claim; the two-minute lease covers its worst
+  case. Every CLI that asks the registry — core, Gmail, Slack, Resend — answers the hidden command, exempt from the
+  gate and out of help; WhatsApp's asks nothing and has none. A child that cannot be started, and a test's stand-ins
+  for the registry, leave the ask in the command's own process; a check switched off starts nothing; the servers are
+  unchanged. Measured with the same eight-second registry, the command's output closes at about 3.4 s.
+  `docs/upgrading.md` says so to the person.
 - **"Updated. Run your command again." only when the update brought this command to the latest release**; otherwise
   the terminal says what is left, and ends non-zero. Both ways on are also named in their npx form, for a machine with
   no `agentcomms` installed.
