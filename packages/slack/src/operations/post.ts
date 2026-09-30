@@ -2,7 +2,8 @@ import { CommsError } from '@agentcomms/core';
 import { openDraftStore } from '../compose/drafts.ts';
 import { checkFileCount, recordFiles } from '../compose/files.ts';
 import type { SlackContext } from '../context.ts';
-import { attachPolicyOf, type DraftInput, draftPayload, ownDraft, requireConversation } from './drafts.ts';
+import { requireConversation } from './destination.ts';
+import { attachPolicyOf, type DraftInput, draftPayload, ownDraft } from './drafts.ts';
 import { gateDepsFor } from './gate.ts';
 import { NameBook } from './people.ts';
 import {

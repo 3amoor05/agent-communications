@@ -6,12 +6,12 @@ import {
   composedFrom,
   escapeForSlack,
   type Mention,
-  USER_ID,
 } from '../compose/blocks.ts';
 import { type DraftStore, isUnreadableDraft, openDraftStore, type SlackDraft } from '../compose/drafts.ts';
 import { checkFileCount, recordFiles, type SlackDraftFile } from '../compose/files.ts';
 import type { SlackContext } from '../context.ts';
 import { decodeSlackText } from '../text/decode.ts';
+import { requireConversation } from './destination.ts';
 import { changedOutsideHint, postedPayload } from './send.ts';
 import { requireWorkspace } from './workspaces.ts';
 
@@ -69,22 +69,6 @@ export async function attachPolicyOf(context: SlackContext): Promise<AttachPolic
     deny: [...defaultAttachDeny(context.core.paths.configDir, context.env), ...config.defaults.attachDeny],
     home,
   };
-}
-
-/**
- * Refuses a user id as the place a post goes — issue #43. Only the destination: a mention takes a user id, as ever.
- *
- * A post goes to a conversation. A person is not one: a direct message with them has an id of its own, `D…`, and it is
- * that conversation the gate reads, counts and shows in the preview. Whatever Slack would do with a user id there, it
- * is not a room the preview could have described. Checked before anything is written, read or asked of Slack, by the
- * three operations that take a destination: `createDraft`, `updateDraft`, and `prepareDraftPost` given a new message.
- */
-export function requireConversation(channel: string, alias: string): void {
-  if (!USER_ID.test(channel)) return;
-  throw new CommsError('USAGE', `"${channel}" is a user id: a post goes to a conversation id`, {
-    hint: `For a direct message use the DM’s id (D…), which \`agent-slack channels --workspace ${alias}\` and slack_channels list.`,
-    details: { channel, reason: 'user-id' },
-  });
 }
 
 /** The refusal for a draft that would post nothing: no words and no files. */

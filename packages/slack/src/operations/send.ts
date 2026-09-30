@@ -22,6 +22,7 @@ import type { SlackDraft } from '../compose/drafts.ts';
 import { checkRecordedFile, rereadFile, type SlackDraftFile } from '../compose/files.ts';
 import { mentionedUserIds, previewOf, urlsInWords } from '../compose/preview.ts';
 import { decodeSlackText } from '../text/decode.ts';
+import { requireConversation } from './destination.ts';
 import { type Channel, channelOf, type NameBook } from './people.ts';
 
 /**
@@ -272,6 +273,8 @@ export async function viewPost(
 ): Promise<PostView> {
   // Before Slack is asked anything: a draft that is not what its text composes to is shown to nobody.
   const payload = postedPayload(draft);
+  // A draft stored before 0.12.0, or written by hand, may name a user: refused here too, before Slack is asked.
+  requireConversation(payload.channel, deps.workspaceName);
   const { channel, members, why } = await roomOf(deps.call, payload.channel);
   // Here, so preparing, the approval screen and posting all refuse it — and posting before the approval is claimed.
   if (channel) requireMember(channel, payload.channel);

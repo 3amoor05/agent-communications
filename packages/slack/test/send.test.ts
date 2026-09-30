@@ -254,6 +254,37 @@ test('a post to a channel this account has not joined is refused at prepare, and
   }
 });
 
+test('a stored draft that names a user is refused at prepare and at send, before Slack is asked anything', async () => {
+  /*
+   * Creating and updating a draft refuse a user id; a draft stored before 0.12.0, or written by hand, never went
+   * through either. `chat.postMessage` takes a user id as a destination of its own, so it is refused where every post
+   * is viewed, before the room is read.
+   */
+  const userId = (error: unknown) =>
+    error instanceof CommsError && error.code === 'USAGE' && error.details?.reason === 'user-id';
+  for (const channel of ['U024BE7LH', 'W024BE7LH']) {
+    const { deps, draft, book, sent, approvals } = await setUp({ channel });
+    await assert.rejects(preparePost(deps, draft, book), userId, channel);
+    assert.deepEqual(sent, [], `Slack was asked something about ${channel}`);
+    assert.deepEqual(await approvals.list(), []);
+  }
+  // Prepared to a channel, then the stored draft pointed at a user: refused at send, with nothing posted.
+  const { deps, draft, book, sent, drafts } = await setUp();
+  const prepared = await preparePost(deps, draft, book);
+  const moved = await drafts.update(
+    draft.draftId,
+    compose({ channel: 'U024BE7LH', text: 'shipping in ten minutes' }),
+    'shipping in ten minutes',
+  );
+  // The channel the send is told to expect is the draft's own, so this is the user-id check and not the one that
+  // compares the draft with what was approved.
+  await assert.rejects(postPrepared(deps, moved, prepared.approvalId, 'U024BE7LH', book), userId);
+  assert.equal(
+    sent.some((call) => call.method === 'chat.postMessage'),
+    false,
+  );
+});
+
 test('a person who left the channel after prepare is refused at send, before the approval is claimed', async () => {
   /*
    * Before the claim, so the refusal spends nothing: the approval is still there, and once the person has joined again
