@@ -3,7 +3,7 @@ import { readdir, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { CommsError, writeFileAtomic } from '@agentcomms/core';
 import type { ComposedPayload } from './blocks.ts';
-import type { SlackDraftFile } from './files.ts';
+import { MAX_FILES, type SlackDraftFile } from './files.ts';
 
 /**
  * A Slack draft, which lives here rather than in Slack.
@@ -133,8 +133,17 @@ function isDraftShaped(parsed: unknown): parsed is SlackDraft {
   const draft = parsed as Record<string, unknown>;
   const text = ['draftId', 'accountId', 'revision', 'source', 'createdAt', 'updatedAt'];
   if (!text.every((field) => typeof draft[field] === 'string')) return false;
-  // A damaged file list is a damaged draft: the gate reads every entry, and one it could not would fail mid-post.
-  if (draft.files !== undefined && !(Array.isArray(draft.files) && draft.files.every(isFileShaped))) return false;
+  /*
+   * A damaged file list is a damaged draft: the gate reads every entry, and one it could not would fail mid-post. And
+   * so is a list longer than a post may carry. The limit is checked where files are named, and a draft file is JSON
+   * anything with a shell can edit: eleven well-formed records are no more sendable for having got there another way.
+   */
+  if (
+    draft.files !== undefined &&
+    !(Array.isArray(draft.files) && draft.files.length <= MAX_FILES && draft.files.every(isFileShaped))
+  ) {
+    return false;
+  }
   const payload = draft.payload as Record<string, unknown> | null | undefined;
   return (
     typeof payload === 'object' &&

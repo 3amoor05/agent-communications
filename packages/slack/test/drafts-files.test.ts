@@ -481,3 +481,27 @@ test('a file swapped for another just before it is opened, and put back once it 
   const error = await refusal(createDraft(context, 'acme', { channel: 'C1', files: [real] }));
   assert.match(error.message, /plan\.md moved while it was being read/);
 });
+
+test('a stored draft with more files than a post may carry is refused when it is read, as a damaged draft is', async () => {
+  /*
+   * The limit is checked when files are named, and a draft file is JSON anything with a shell can edit. Eleven
+   * well-formed records are no more sendable for having got there another way.
+   */
+  const { harness, context, docs } = await world();
+  const paths = Array.from({ length: MAX_FILES }, (_, i) => file(docs, `page-${i}.txt`, `page ${i}`));
+  const draft = await createDraft(context, 'acme', { channel: 'C1', text: 'pages', files: paths });
+  const stored = JSON.parse(onDisk(harness, draft)) as { files: unknown[] };
+  writeFileSync(
+    join(harness.core.paths.stateDir, 'slack', 'drafts', `${draft.draftId}.json`),
+    `${JSON.stringify({ ...stored, files: [...stored.files, stored.files[0]] }, null, 2)}\n`,
+  );
+
+  const store = openDraftStore(harness.core.paths.stateDir, NOW);
+  const error = await refusal(store.get(draft.draftId));
+  assert.equal(error.code, 'BAD_DATA');
+  assert.equal(error.details?.reason, 'unreadable');
+  assert.match(error.message, /could not be read/);
+  // Preparing it, updating it or showing it meets the same refusal; deleting it still works.
+  await refusal(updateDraft(context, 'acme', draft.draftId, { text: 'fewer pages' }));
+  assert.deepEqual(await store.list(), [], 'a draft that cannot be read was listed');
+});
