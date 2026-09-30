@@ -325,3 +325,26 @@ test('a folder listed with no place covers nothing: adding its proper form is a 
     await close();
   }
 });
+
+test('the report shows a listed folder that names no place apart: it allows nothing, and says how to take it out', async () => {
+  for (const [roots, allowed] of [
+    [['outgoing'], 0],
+    [['~', 'outgoing'], 1],
+  ] as const) {
+    const m = machine({ attachRoots: [...roots] });
+    const { ok, close } = await connect(m);
+    try {
+      const report = await ok();
+      assert.equal((report.roots as unknown[]).length, allowed, JSON.stringify(roots));
+      assert.deepEqual(report.ignored, ['outgoing'], 'shown as allowed, or left out');
+    } finally {
+      await close();
+    }
+    const shown = cli(m, ['attach']);
+    assert.equal(shown.status, 0, shown.stderr);
+    assert.match(shown.stdout, /Listed, but allowing nothing[^\n]*\n {2}outgoing\n/);
+    assert.match(shown.stdout, /agentcomms attach roots remove <folder>, written as it is here/);
+    if (allowed === 0) assert.match(shown.stdout, /so nothing can be attached/);
+    else assert.doesNotMatch(shown.stdout, /so nothing can be attached/);
+  }
+});

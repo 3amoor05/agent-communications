@@ -36,6 +36,11 @@ export interface AttachEntry {
 export interface AttachReport {
   /** The folders files may be attached from. None: nothing can be attached. */
   roots: AttachEntry[];
+  /**
+   * Folders the configuration lists that name no place — relative, or on Windows without a drive — as written. They
+   * allow nothing (see `namesItsPlace`), so they are shown apart from `roots`, with no place to lead to.
+   */
+  ignored: string[];
   /** The person's own entries that files may never come from, on top of the built-in list. */
   deny: AttachEntry[];
   /** What the jail never attaches from, whatever the configuration says: it cannot be removed. */
@@ -229,8 +234,10 @@ async function entryOf(path: string, home: string): Promise<AttachEntry> {
 async function reportOf(config: Config, core: Core, env: NodeJS.ProcessEnv): Promise<AttachReport> {
   const home = homeDirectory(env);
   const entries = (list: readonly string[]) => Promise.all(list.map((path) => entryOf(path, home)));
+  const listed = config.defaults.attachRoots;
   return {
-    roots: await entries(config.defaults.attachRoots),
+    roots: await entries(listed.filter((root) => namesItsPlace(root))),
+    ignored: listed.filter((root) => !namesItsPlace(root)),
     deny: await entries(config.defaults.attachDeny),
     builtIn: await entries(defaultAttachDeny(core.paths.configDir, env)),
   };

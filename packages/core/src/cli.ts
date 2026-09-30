@@ -622,6 +622,14 @@ function renderAttach(report: AttachReport): string {
     'Files may be attached from under:',
     ...renderAttachEntries(report.roots),
     ...(report.roots.length === 0 ? ['  — so nothing can be attached.'] : []),
+    ...(report.ignored.length === 0
+      ? []
+      : [
+          '',
+          'Listed, but allowing nothing — they do not say which drive or folder they are on:',
+          ...report.ignored.map((root) => `  ${root}`),
+          '  Take one out with agentcomms attach roots remove <folder>, written as it is here.',
+        ]),
     '',
     'Never from, by your own entries:',
     ...renderAttachEntries(report.deny),
