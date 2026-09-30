@@ -49,7 +49,8 @@ It refuses before any approval exists when:
 - the From domain is not one of the team's, is not verified, or cannot send (a sending-only key cannot read the
   domain list, so the preview says it was not checked, and Resend refuses an unverified domain itself);
 - the email reaches more than 50 people — that is a broadcast, which this does not send;
-- an attachment is outside the allowed folders;
+- an attachment is outside the allowed folders — the person can copy it under their home folder, or allow its folder
+  with `agentcomms attach roots add <folder>`, which needs their approval;
 - the HTML loads anything from the internet, shows an image of any kind (inline `data:` and `cid:` ones too), hides
   parts, has forms or scripts, or shows something other than the text part (`UNSENDABLE_HTML`) — send plain text
   instead, or HTML that shows exactly the text.

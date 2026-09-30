@@ -171,13 +171,16 @@ for (const product of PRODUCTS) {
     // unrelated span as the two-word command `send agent-gmail`.
     // Not inside a package name: `@agentcomms/core` and "an @agentcomms server" name no `agentcomms` command.
     const commandPattern = new RegExp(
-      `(?<![@/\\w-])${product.binary}[ \\t]+([a-z][a-z-]*)(?:[ \\t]+([a-z][a-z-]*))?`,
+      `(?<![@/\\w-])${product.binary}[ \\t]+([a-z][a-z-]*)(?:[ \\t]+([a-z][a-z-]*))?(?:[ \\t]+([a-z][a-z-]*))?`,
       'g',
     );
     for (const { file, text } of await documentation()) {
       // A leading `-` is a flag, not a subcommand: `agent-gmail --json` names no command at all.
       for (const match of codeOnly(text).matchAll(commandPattern)) {
-        const [, first, second] = match;
+        const [, first, second, third] = match;
+        // Three words are a command only as a whole — `agentcomms attach roots add` — never by their first two:
+        // `attach roots` groups the others, as `draft` does below.
+        if (third && commands.has(`${first} ${second} ${third}`)) continue;
         // A two-word form counts if the pair is a command, or if the first word is a command on its own and the
         // second is one of its arguments. Not when the first word is a group: `draft peek` is not a command just
         // because `draft` is one, and reading it as an argument let an invented subcommand through.

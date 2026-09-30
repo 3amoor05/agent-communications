@@ -213,9 +213,10 @@ answer "is this email real" — that is `gmail-security`, and a file's risk flag
 9. **Report a refusal as a finding.** The jail throws `BAD_DATA` for a path it will not take and
    `NOT_FOUND` for one that does not exist (CLI exit codes 65 and 66). Say which file, which rule, and the
    one thing that would change it — see the table below. Do not copy, move, rename or archive the file to
-   get it past the check, and do not propose widening `defaults.attachRoots` or shortening
-   `defaults.attachDeny`: those belong to the user, in `config.json`, and widening them is refused as
-   `LOOSENING_REFUSED` unless a person consents.
+   get it past the check, and do not widen the lists yourself to make a path work. They belong to the user:
+   `agentcomms attach` shows them, and `agentcomms attach roots add <folder>` (or `comms_attach` with
+   `rootsAdd` on the core server) allows another folder — a change that needs their approval, shown to them
+   first. Name it when a file is outside every folder; running it is their decision.
    **Complete when:** the user knows what was refused and why, and nothing was smuggled through.
 
 10. **Watch the size.** Over 25 MB of attachments on one draft returns a warning: that is Gmail's limit and
@@ -231,7 +232,7 @@ anything in `defaults.attachDeny`.
 
 | What is refused | Why | What to do instead |
 |---|---|---|
-| A file outside every allowed root | The roots are the whole of what this machine will let leave as mail. Outside them, nothing was ever offered. | Ask the user to move the file under an allowed folder, or to add that folder to `defaults.attachRoots` themselves. |
+| A file outside every allowed root | The roots are the whole of what this machine will let leave as mail. Outside them, nothing was ever offered. | Ask the user to move the file under an allowed folder, or to allow its folder with `agentcomms attach roots add <folder>`, which needs their approval. |
 | Anything under a dot-entry directly in home — `~/.ssh`, `~/.aws`, `~/.config`, `~/.gnupg`, `~/.npmrc` | This is where SSH keys, cloud credentials, npm and git tokens, shell history and agent configs live. One attached key is a compromised account. | Ask the user what they actually meant to send. If they want a public key, they can copy it somewhere ordinary first, knowingly. |
 | `~/Library` on macOS | Mail stores, keychains, browser profiles and application tokens, none of which anyone means to email. | Nothing here is attachable. Find the user's own copy of the document elsewhere. |
 | Any path with a `.git` segment | A repository's internals: remote URLs that sometimes carry tokens, and the full object history of everything ever committed. | Attach the working-tree file itself, or an archive the user made deliberately. |

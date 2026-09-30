@@ -731,8 +731,10 @@ TTL); execution requires that token. Trash always requires a plan token. Every w
   send policy moving towards `chat` (including through a looser default an inbox inherits), turning
   `riskEscalation` off, raising `sendCaps`, adding `attachRoots` or removing `attachDeny` entries, changing
   `downloadsDir`, adding `internalDomains`, adding an elicitation client, and moving secrets from keychain to files.
-  Tightening never needs consent. `agentcomms config get|set <path>` is the supported editor, so nobody has to
-  hand-edit around the gate.
+  Tightening never needs consent. The supported editors are the commands for each setting — for the attachment
+  lists, `agentcomms attach roots add <folder>` (a change the person approves), `attach roots remove`,
+  `attach deny add` and `attach deny remove`, and `comms_attach` from a chat — so nobody has to hand-edit around
+  the gate.
 
   **The exception, and why it is one.** `gmail_inbox_add` and `gmail_inbox_finish` add an inbox from MCP. The
   original rule said no MCP tool did, and it was written before there was any way to set this up from a

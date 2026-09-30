@@ -52,13 +52,14 @@ match by segment, and anything else is treated as a directory path.
 ### Outside every allowed root
 
 The roots are the whole of what this machine will let leave as mail. A file outside them was never offered,
-and the check cannot tell a deliberate path from a mistaken one. The refusal's hint says what always works
-with the default roots: copy the file under the home folder, not into one of its hidden folders, and name the
-copy. (It used to name a command for widening `defaults.attachRoots`, which does not exist; see *Changing the
-policy* below.) Slack's files meet the same refusal, in the same words.
+and the check cannot tell a deliberate path from a mistaken one. The refusal's hint names both ways on: copy the
+file under the home folder, not into one of its hidden folders, and name the copy — or allow its folder with
+`agentcomms attach roots add <folder>`, which needs the user's approval. Slack's files and Resend's attachments
+meet the same refusal, in the same words.
 
-**Instead:** ask the user to move or copy the file under an allowed folder themselves, knowingly, or to widen
-the roots themselves. Do not offer to do either for them.
+**Instead:** ask the user to move or copy the file under an allowed folder themselves, knowingly, or to allow
+its folder with `agentcomms attach roots add <folder>` — see *Changing the policy* below. Do not do either for
+them unasked.
 
 ### A dot-entry directly under home
 
@@ -208,15 +209,29 @@ Exports still land under the downloads root, `<root>/<organisation>/<platform>/<
 Both lists live in `config.json` under `defaults`: `attachRoots` (default `["~"]`) and `attachDeny` (default
 empty, appended to the built-ins above). The configuration layer classifies **adding a root** and **removing a
 deny entry** as loosening a safety setting: a write that does either is refused with `LOOSENING_REFUSED`
-(CLI exit 10) unless it carries a consent proof produced by a person at an interactive terminal.
+unless a person consented to exactly that change.
 
-Two things follow, and both matter when you report a refusal:
+One command changes both lists, from a terminal or a chat, as a change like any other:
 
-- **No command in this package edits either list.** The hint attached to the out-of-roots error suggests
-  adding the folder to `defaults.attachRoots` "with the CLI", and there is no such CLI command. In practice
-  the user edits `config.json` themselves. Report the refusal and the setting; do not invent the command.
-- **Never propose widening.** Not as a workaround, not as a suggestion, not as a "you could always". The
-  refusal is the finding. What to do about it belongs to the user.
+```text
+agentcomms attach                          # the folders, the user's own deny entries, and the built-in list
+agentcomms attach roots add <folder>       # allow another folder: shown first, and needs the user's approval
+agentcomms attach roots remove <folder>    # stop attaching from one: at once
+agentcomms attach deny add <path>          # never attach from a path: at once
+agentcomms attach deny remove <path>       # one of the user's own entries away: needs their approval
+```
+
+From a chat it is `comms_attach` on the core server, with `rootsAdd`, `rootsRemove`, `denyAdd` or `denyRemove`.
+A path is absolute or starts with `~`, and is kept as written; the preview says where a link in it leads. The
+built-in list cannot be removed. Where only a channel's package is installed, `npx @agentcomms/core attach …` is
+the same command.
+
+What that means when you report a refusal:
+
+- **Name the command; do not run it to get a file through.** Allowing a folder is the user's decision, and the
+  preview they approve is where they make it. Offer it once, with the folder, and leave it there.
+- **Never edit `config.json` around it.** A hand edit that widens either list skips the preview the user would
+  have read.
 
 ## Reporting a refusal
 

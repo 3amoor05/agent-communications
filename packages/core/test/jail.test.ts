@@ -124,15 +124,15 @@ test('checkAttachable enforces allowed roots, the deny list and dotenv files', a
   writeFileSync(elsewhere, 'x');
   await assert.rejects(checkAttachable(elsewhere, { ...policy, roots: [join(home, 'docs')] }), /outside them/);
   /*
-   * What to do about it, in words that can be followed. The hint named a CLI command for widening the allowed folders,
-   * and there is none; what a person can do is copy the file somewhere the rule already allows. Gmail and Slack both
-   * meet this refusal, so it is said once, here.
+   * What to do about it, in words that can be followed. The hint once named a CLI command for widening the allowed
+   * folders when there was none, and then only the copy. There is one now (#45), and it is a change the person
+   * approves, so both ways are named. Gmail, Resend and Slack all meet this refusal, so it is said once, here.
    */
   await assert.rejects(checkAttachable(elsewhere, policy), (error: CommsError) => {
     assert.match(error.message, /must come from an allowed folder/);
     assert.equal(
       error.hint,
-      'Copy the file under your home folder — not into one of its hidden folders — and name the copy instead.',
+      'Copy the file under your home folder — not into one of its hidden folders — and name the copy instead, or allow its folder with `agentcomms attach roots add <folder>` (needs your approval).',
     );
     return true;
   });

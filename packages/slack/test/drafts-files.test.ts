@@ -205,13 +205,15 @@ test('anything but a regular file under the home folder is refused, and nothing 
   assert.deepEqual(await openDraftStore(harness.core.paths.stateDir, NOW).list(), [], 'a refused file left a draft');
 });
 
-test('a file outside the allowed folders is refused with the rule and what to do, not with a command that is not there', async () => {
+test('a file outside the allowed folders is refused with the rule and what to do: copy it, or allow its folder', async () => {
   const { context } = await world();
   const outside = file(tempDir(), 'from-tmp.pdf', 'pdf');
   const error = await refusal(createDraft(context, 'acme', { channel: 'C1', text: 'x', files: [outside] }));
   assert.equal(error.code, 'BAD_DATA');
   assert.match(error.message, /must come from an allowed folder/);
   assert.match(error.hint ?? '', /Copy the file under your home folder/);
+  // The command that exists, and that it is the person's to approve — not a setting to edit by hand.
+  assert.match(error.hint ?? '', /`agentcomms attach roots add <folder>` \(needs your approval\)/);
   assert.doesNotMatch(error.hint ?? '', /with the CLI|attachRoots/);
 });
 

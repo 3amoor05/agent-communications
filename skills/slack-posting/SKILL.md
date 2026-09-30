@@ -109,7 +109,8 @@ prepare it again and show the new preview.
 **Which files.** The rule Gmail's attachments follow: a regular file under the home folder, and not in one of its
 hidden folders (`~/.ssh`, `~/.config` and the like), a `.git` folder, or a `.env` file. A file anywhere else — `/tmp`
 included — is refused, and the refusal says so: ask the person to copy it under their home folder, then name the
-copy. Do not copy it yourself without saying so. A link is refused too; name the file it points to.
+copy, or to allow its folder with `agentcomms attach roots add <folder>`, which needs their approval. Do not copy it
+yourself without saying so. A link is refused too; name the file it points to.
 
 **Limits.** At most ten files a post, each at most 100 MiB, and none empty. Above either limit the draft is refused,
 naming the limit.
@@ -153,7 +154,7 @@ do next on the surface you are using. Tell the person, and stop. Once they have 
 |---|---|
 | the draft was edited after the preview | The approved bytes are the posted bytes, or nothing is |
 | a file is not the one the draft recorded, or the one approved | It changed, or was replaced, after it was named; nothing was sent |
-| a file must come from an allowed folder | It is outside the home folder, or in a folder never sent from; ask the person to copy it under their home folder |
+| a file must come from an allowed folder | It is outside the allowed folders, or in a folder never sent from; ask the person to copy it under their home folder, or to allow its folder with `agentcomms attach roots add <folder>` (needs their approval) |
 | the draft is not what its text composes to (`BAD_DATA`) | Its file was changed outside agent-slack, so a preview of its text would not be what posts. Delete it and compose it again |
 | the room grew after the preview | The words did not change; who reads them did |
 | not a member of the channel (`SCOPE_MISSING`, `not-a-member`) | This account has not joined that room. The person joins it in Slack themselves, then you prepare again; a DM or group DM is never refused for this |
