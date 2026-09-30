@@ -1011,8 +1011,19 @@ configuration problem.`,
     .addOption(broadcastOption())
     .option('--file <path...>', `${FILE_HELP}. Replaces the files it had`)
     .option('--add-file <path...>', 'a local file to add to the ones it has, from the same folders')
+    // `files: []` on `slack_draft_update`, which a list of paths cannot say: an empty `--file` is no option at all.
+    .option('--no-files', 'take every file off it')
     .action(
       act(async (context, _options, draftId: string, flags: Options) => {
+        const noFiles = flags.files === false;
+        const naming = flags.file !== undefined ? '--file' : flags.addFile !== undefined ? '--add-file' : undefined;
+        if (noFiles && naming !== undefined) {
+          throw new CommsError(
+            'USAGE',
+            `--no-files takes every file off, and ${naming} names files to put on it: give one or the other`,
+            { hint: 'To replace its files, give --file alone; to take them all off, --no-files alone.' },
+          );
+        }
         // The same operation as `slack_draft_update`: a new revision whatever it changes — see `updateDraft`.
         const updated = await updateDraft(context, String(flags.workspace), draftId, {
           channel: flags.channel as string | undefined,
@@ -1020,7 +1031,7 @@ configuration problem.`,
           threadTs: flags.thread as string | undefined,
           mentionUsers: flags.mention as string[] | undefined,
           broadcast: flags.broadcast,
-          files: flags.file as string[] | undefined,
+          files: noFiles ? [] : (flags.file as string[] | undefined),
           addFiles: flags.addFile as string[] | undefined,
         });
         writeResult(updated, output(), (data) => renderUpdatedDraft(data, String(flags.workspace)), streams);

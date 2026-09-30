@@ -225,7 +225,7 @@ the post, because the words did not change but who reads them did.
 ### Files
 
 A post can carry up to ten local files, each up to 100 MiB, with or without words: `--file` on `draft create`, and
-`draft update <draftId>` with `--file` to replace them or `--add-file` to add more.
+`draft update <draftId>` with `--file` to replace them, `--add-file` to add more or `--no-files` to take them all off.
 
 ```sh
 agent-slack draft create --workspace acme/slack --channel C024BE7LR --text 'the Q3 numbers' --file ~/reports/q3.pdf

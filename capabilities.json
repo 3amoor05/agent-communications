@@ -1036,6 +1036,18 @@
       "expect": { "change.files": ["chart.png"], "change.addFiles": ["notes.md"] }
     },
     {
+      "id": "slack.draft.update.nofiles",
+      "package": "slack",
+      "cli": "draft update",
+      "mcp": "slack_draft_update",
+      "status": "both",
+      "operation": "updateDraft",
+      "argv": ["--no-files"],
+      "args": { "files": [] },
+      "expect": { "change.files": [] },
+      "reason": "Every file taken off: `--no-files` on the command, `files: []` on the tool — an empty list, which a list of paths cannot say on the command line."
+    },
+    {
       "id": "slack.draft.list",
       "package": "slack",
       "cli": "draft list",

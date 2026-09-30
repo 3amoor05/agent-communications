@@ -366,6 +366,7 @@ agent-slack draft update [options] <draftId>
 | `--broadcast <who>` | interrupt the room; always needs a person to approve (choices: "here", "channel", "everyone") | — |
 | `--file <path...>` | a local file to post, under your home folder and not in a hidden folder there; up to 10. Replaces the files it had | — |
 | `--add-file <path...>` | a local file to add to the ones it has, from the same folders | — |
+| `--no-files` | take every file off it | — |
 
 ### `agent-slack draft list`
 

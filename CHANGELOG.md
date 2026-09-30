@@ -26,8 +26,8 @@ in a thread when the draft replies in one.
   `SCOPE_MISSING` and the command that fixes it, and the same check is made again at send.
 
 **A draft can be changed.** `agent-slack draft update <draftId>` and `slack_draft_update` change any of a draft's
-words, channel, thread, mentions and files, and keep the rest: `--file` / `files` replaces its files and `--add-file` /
-`addFiles` adds to them. Every change is a new revision, so any approval the draft had no longer holds.
+words, channel, thread, mentions and files, and keep the rest: `--file` / `files` replaces its files, `--add-file` /
+`addFiles` adds to them, and `--no-files` / `files: []` takes them all off. Every change is a new revision, so any approval the draft had no longer holds.
 
 **Also**
 - **An attachment from outside the allowed folders is refused with advice you can follow.** The refusal, for a Gmail

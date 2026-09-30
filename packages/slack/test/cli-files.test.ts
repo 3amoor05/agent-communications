@@ -315,3 +315,50 @@ test('post send says so in words when Slack has not attached the files to a mess
     /^Posted 1 file to C1\. Slack had not attached the files to a message yet, so the message's ts is not known/,
   );
 });
+
+test('draft update --no-files takes every file off, as slack_draft_update with files: [] does, and not with --file', async (t) => {
+  const { harness, fake, docs } = await world(t);
+  const a = file(docs, 'a.txt', 'a');
+  const b = file(docs, 'b.txt', 'bb');
+  const created = await data<Drafted>(harness, fake, [
+    'draft',
+    'create',
+    ...W,
+    '--channel',
+    'C1',
+    '--text',
+    'files',
+    '--file',
+    a,
+    b,
+  ]);
+
+  // Together with a flag that names files, it is a contradiction, refused before anything changes.
+  for (const flag of ['--file', '--add-file']) {
+    const both = await cli(harness, fake, ['--json', 'draft', 'update', created.draftId, ...W, '--no-files', flag, a]);
+    assert.equal(both.code, 64, both.stdout);
+    const error = (JSON.parse(both.stdout) as Envelope<never>).error;
+    assert.equal(error?.code, 'USAGE');
+    assert.match(
+      error?.message ?? '',
+      new RegExp(`--no-files takes every file off, and ${flag} names files to put on it`),
+    );
+  }
+  const unchanged = await data<Drafted & { files?: DraftFile[] }>(harness, fake, [
+    'draft',
+    'show',
+    created.draftId,
+    ...W,
+  ]);
+  assert.equal(unchanged.files?.length, 2, 'a refused update changed the draft');
+
+  const bare = await data<Drafted>(harness, fake, ['draft', 'update', created.draftId, ...W, '--no-files']);
+  assert.equal('files' in bare, false, 'the files were left on');
+  assert.equal(bare.payload.text, 'files');
+  assert.notEqual(bare.revision, created.revision);
+
+  // A draft with no words has nothing left to post without its files: the operation refuses it, as the tool's would.
+  const quiet = await data<Drafted>(harness, fake, ['draft', 'create', ...W, '--channel', 'C1', '--file', a]);
+  const empty = await cli(harness, fake, ['--json', 'draft', 'update', quiet.draftId, ...W, '--no-files']);
+  assert.equal((JSON.parse(empty.stdout) as Envelope<never>).error?.code, 'USAGE');
+});

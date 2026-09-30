@@ -95,7 +95,8 @@ agent-slack draft update <draftId> --workspace acme/slack --add-file ~/reports/q
 ```
 
 `slack_draft_update` (`agent-slack draft update`) changes a draft: `files` (`--file`) replaces its files, `addFiles`
-(`--add-file`) adds to them, and every change is a new revision, so prepare it again and show the new preview.
+(`--add-file`) adds to them, `files: []` (`--no-files`) takes them all off, and every change is a new revision, so
+prepare it again and show the new preview.
 
 **Which files.** The rule Gmail's attachments follow: a regular file under the home folder, and not in one of its
 hidden folders (`~/.ssh`, `~/.config` and the like), a `.git` folder, or a `.env` file. A file anywhere else — `/tmp`
