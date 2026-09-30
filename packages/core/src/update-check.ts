@@ -60,26 +60,54 @@ export async function checkForUpdates(
   options: UpdateCheckOptions = {},
 ): Promise<UpdateCheckOutcome> {
   const stateDir = core.paths.stateDir;
-  const now = options.now ?? (() => new Date());
   try {
     if (!(await updateCheckEnabled(core, env)).on) return { asked: false, record: await readUpdateCheck(stateDir) };
-    // The claim: under the lock, due or not — and claimed by another process or not — is decided on the file as it is
-    // now, and the claim written before anyone asks, so of two processes that both found it a day old, one asks. The
-    // time is read under the lock too: read before it, the second process's time could be earlier than the first's
-    // claim, which reads as a clock gone back.
-    const claim = await changeUpdateCheck<string>(stateDir, (record) => {
-      const claimedAt = now();
-      if (!updateCheckDue(record, claimedAt) || updateCheckUnderway(record, claimedAt)) return null;
-      const checking = claimedAt.toISOString();
-      return { record: { ...record, checking }, result: checking };
-    }).catch(() => null);
-    if (claim?.result === undefined) return { asked: false, record: await readUpdateCheck(stateDir) };
-    await ask(core, env, { ...options, now, claimedAt: claim.result });
+    const claimedAt = await claimUpdateCheck(core, options);
+    if (claimedAt === null) return { asked: false, record: await readUpdateCheck(stateDir) };
+    await askUnderClaim(core, env, claimedAt, options);
     return { asked: true, record: await readUpdateCheck(stateDir) };
   } catch {
     // The check never stops anything, a command least of all: whatever went wrong, the file is what it was.
     return { asked: false, record: await readUpdateCheck(stateDir).catch(() => ({ ...EMPTY_UPDATE_CHECK })) };
   }
+}
+
+/**
+ * The day's claim, when the check is due and nobody else is asking: the claim's time, written to the file as
+ * `checking`, or null — not due, claimed by another process, or the file could not be written. Whoever is handed the
+ * time asks under it (`askUnderClaim`). Whether the check is on at all is the caller's to decide first.
+ *
+ * Under the lock, due or not — and claimed by another process or not — is decided on the file as it is now, and the
+ * claim written before anyone asks, so of two processes that both found it a day old, one asks. The time is read under
+ * the lock too: read before it, the second process's time could be earlier than the first's claim, which reads as a
+ * clock gone back.
+ */
+export async function claimUpdateCheck(
+  core: Core,
+  options: { now?: (() => Date) | undefined } = {},
+): Promise<string | null> {
+  const now = options.now ?? (() => new Date());
+  const claim = await changeUpdateCheck<string>(core.paths.stateDir, (record) => {
+    const claimedAt = now();
+    if (!updateCheckDue(record, claimedAt) || updateCheckUnderway(record, claimedAt)) return null;
+    const checking = claimedAt.toISOString();
+    return { record: { ...record, checking }, result: checking };
+  }).catch(() => null);
+  return claim?.result ?? null;
+}
+
+/**
+ * The ask, under a claim already taken (`claimUpdateCheck`): the registry, then `comms_update`'s own check. What it
+ * found is written — the day's check recorded, and the claim given up — only while the claim in the file is still
+ * `claimedAt`. It claims nothing itself.
+ */
+export async function askUnderClaim(
+  core: Core,
+  env: NodeJS.ProcessEnv,
+  claimedAt: string,
+  options: UpdateCheckOptions = {},
+): Promise<void> {
+  await ask(core, env, { ...options, now: options.now ?? (() => new Date()), claimedAt });
 }
 
 async function ask(

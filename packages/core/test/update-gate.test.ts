@@ -27,7 +27,7 @@ import {
   updateCheckFindings,
 } from '../src/operations/update.ts';
 import { updateAutoChange, updateLaterChange } from '../src/operations/update-settings.ts';
-import { checkForUpdates, terminalUpdateHooks } from '../src/update-check.ts';
+import { askUnderClaim, checkForUpdates, claimUpdateCheck, terminalUpdateHooks } from '../src/update-check.ts';
 import {
   approvalsOf,
   claimsApproval,
@@ -275,6 +275,28 @@ test('a stale file triggers one check, and never a second in the same day — tw
   // A clock that did go back — hours — asks: the record is from its future, and cannot be trusted.
   assert.equal((await check(20 * 3_600_000)).asked, true);
   assert.equal(asked.length, 3);
+});
+
+test('the claim and the ask are two steps: one claim a day, and the ask handed it records as of the claim', async () => {
+  // What lets a command claim the day's check and hand the ask to another process: the claim is taken once, and the
+  // ask, given the claim's time, records the day's check and gives the claim up.
+  const m = machine();
+  const start = new Date('2026-09-28T09:00:00.000Z');
+  const at = (ms: number) => () => new Date(start.getTime() + ms);
+  const claimedAt = await claimUpdateCheck(m.core, { now: at(0) });
+  assert.equal(claimedAt, start.toISOString());
+  assert.equal((await readUpdateCheck(m.stateDir)).checking, claimedAt, 'the claim is in the file');
+  assert.equal(await claimUpdateCheck(m.core, { now: at(1_000) }), null, 'claimed twice inside the lease');
+  const { asked, latestVersion } = registry();
+  await askUnderClaim(m.core, m.env, claimedAt as string, { deps: deps(latestVersion), now: at(2_000) });
+  assert.deepEqual(asked, [CORE]);
+  const record = await readUpdateCheck(m.stateDir);
+  assert.deepEqual(
+    [record.lastChecked, record.latest, record.behind, record.checking],
+    [at(2_000)().toISOString(), LATEST, true, null],
+  );
+  // The day is used: nothing claims it again.
+  assert.equal(await claimUpdateCheck(m.core, { now: at(60_000) }), null);
 });
 
 /** A registry on the loopback address that answers `latest` for core after `delayMs`, and counts every request. */
