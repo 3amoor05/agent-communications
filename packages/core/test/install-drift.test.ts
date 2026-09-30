@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { basename, delimiter, join } from 'node:path';
+import { basename, delimiter, dirname, isAbsolute, join } from 'node:path';
 import { test } from 'node:test';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
@@ -511,6 +511,30 @@ test('the entry starts the command the plan resolved: the install looks for node
   const cursor = knownClientConfigs(m.env).find((file) => file.client === 'cursor')?.path;
   assert.ok(cursor);
   assert.equal(JSON.parse(readFileSync(cursor, 'utf8')).mcpServers.agentcomms.command, planned);
+});
+
+test('an npx entry starts npx by its full path, found beside node when PATH has none; with none at all nothing is written', async () => {
+  // No node and no npx on PATH: the install's own node, and the npx beside it — never the bare word.
+  const bare = machine();
+  const beside = join(dirname(process.execPath), process.platform === 'win32' ? 'npx.cmd' : 'npx');
+  const plan = () =>
+    planThenApply(bare, { channel: 'core', client: 'cursor', launcher: 'npx', noVerify: true }, () => undefined);
+  if (existsSync(beside)) {
+    const result = await plan();
+    assert.notEqual(result.entry.command, 'npx', 'never the bare word');
+    assert.ok(isAbsolute(result.entry.command), result.entry.command);
+    assert.equal(basename(result.entry.command).replace(/\.(cmd|exe)$/i, ''), 'npx');
+  }
+  // A node on PATH with no npx on PATH or beside it: refused, and nothing written.
+  const m = machine();
+  standIn(m.bin, 'node');
+  const cursor = knownClientConfigs(m.env).find((file) => file.client === 'cursor')?.path;
+  await assert.rejects(
+    planThenApply(m, { channel: 'core', client: 'cursor', launcher: 'npx', noVerify: true }, () => undefined),
+    (error: unknown) =>
+      error instanceof CommsError && error.code === 'CONFIG' && /npx could not be found/.test(error.message),
+  );
+  assert.ok(cursor && !existsSync(cursor), 'nothing was written');
 });
 
 test('a node found elsewhere by the time of the apply is refused: it is not the command planned', async () => {

@@ -996,9 +996,23 @@ export async function preflightInstall(
   const { options: effective, kept } = keepNarrowing(product, options, previous);
   // After the client's own CLI is looked for, so that look stays the first this makes of PATH.
   const node = await resolveNode(context.env);
-  const command =
-    (options.launcher ?? 'managed') === 'npx' ? ((await whichExecutable('npx', context.env)) ?? 'npx') : node;
+  const command = (options.launcher ?? 'managed') === 'npx' ? await resolveNpx(context.env, node) : node;
   return { scan, target, previous, effective, kept, node, command };
+}
+
+/**
+ * The `npx` an npx entry starts, as a full path: from PATH, or beside the `node` found, where npm installs it.
+ *
+ * Never the bare name. An entry that says only `npx` is resolved by the client, later, in its own environment — its
+ * PATH, and on Windows its current folder — so the approval would bind a word, and the program run would be whichever
+ * the client found. With no `npx` either way, nothing is written.
+ */
+async function resolveNpx(env: NodeJS.ProcessEnv, node: string): Promise<string> {
+  const found = (await whichExecutable('npx', env)) ?? (await executableIn('npx', [dirname(node)], env));
+  if (found !== null) return found;
+  throw new CommsError('CONFIG', 'npx could not be found, on PATH or beside node, so nothing was written', {
+    hint: 'Install Node.js with npm, which brings npx, or register with the managed launcher — the default — which needs no npx.',
+  });
 }
 
 /**
