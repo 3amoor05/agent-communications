@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { delimiter, join } from 'node:path';
+import { basename, delimiter, join } from 'node:path';
 import { test } from 'node:test';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
@@ -384,8 +384,9 @@ const whereAndHow = (client: string, file: string, command: string) =>
 
 test('the preview names the client config file and the command the entry starts, the home as ~', async () => {
   const m = machine();
-  standIn(m.bin, 'node');
-  standIn(m.bin, 'npx');
+  // As found on PATH, home written `~`: `npx.exe` and `node.exe` on Windows, where PATHEXT decides what runs.
+  const node = join('~', 'bin', basename(standIn(m.bin, 'node')));
+  const npxPath = join('~', 'bin', basename(standIn(m.bin, 'npx')));
   const plan = async (request: Omit<ServerInstallRequest, 'client'>) =>
     (
       await serverInstallChange(m.core, m.env, { client: 'cursor', noVerify: true, ...request }).plan(
@@ -394,10 +395,10 @@ test('the preview names the client config file and the command the entry starts,
     ).effects ?? [];
   const cursor = join('~', '.cursor', 'mcp.json');
   const npx = await plan({ channel: 'gmail', launcher: 'npx' });
-  assert.ok(npx.includes(whereAndHow('cursor', cursor, join('~', 'bin', 'npx'))), npx.join('\n'));
+  assert.ok(npx.includes(whereAndHow('cursor', cursor, npxPath)), npx.join('\n'));
   // `local` and `managed` start node, from this PATH.
   const local = await plan({ channel: 'core', launcher: 'local' });
-  assert.ok(local.includes(whereAndHow('cursor', cursor, join('~', 'bin', 'node'))), local.join('\n'));
+  assert.ok(local.includes(whereAndHow('cursor', cursor, node)), local.join('\n'));
   // Printing writes nowhere, so it has no such sentence — and asks nobody.
   assert.ok(
     !(await plan({ channel: 'core', launcher: 'local', print: true })).some((effect) => /entry goes in/.test(effect)),
