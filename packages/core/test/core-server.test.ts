@@ -201,6 +201,7 @@ test('a loosening refused by the store names both ways to approve it: from a cha
 
 const READING = ['comms_paths', 'comms_doctor', 'comms_audit_tail', 'comms_approvals_list', 'comms_channels_available'];
 const CHANGING = [
+  'comms_attach',
   'comms_change_policy',
   'comms_server_install',
   'comms_server_prune',

@@ -1064,8 +1064,18 @@ const POLICY_RANK: Record<SendPolicy, number> = { chat: 0, confirm: 1, never: 2 
  * user a consent prompt for a change that is not one. Linux is case-sensitive, so case is kept.
  */
 function normalisePath(path: string): string {
-  const expanded = withoutTrailingSeparators(resolve(expandHome(path.trim(), homedir())));
-  return platform() === 'darwin' || platform() === 'win32' ? expanded.toLowerCase() : expanded;
+  return comparablePath(resolve(expandHome(path.trim(), homedir())));
+}
+
+/**
+ * An absolute path in the form two paths are compared in here: no trailing separator, and case folded on macOS and
+ * Windows, whose filesystems are case-insensitive by default (see `normalisePath`). The top of a disk keeps its
+ * separator — `/`, `C:\` — so it is not read as no path at all.
+ */
+export function comparablePath(absolute: string): string {
+  const stripped = withoutTrailingSeparators(absolute);
+  const kept = stripped === '' || /^[A-Za-z]:$/.test(stripped) ? absolute.slice(0, stripped.length + 1) : stripped;
+  return platform() === 'darwin' || platform() === 'win32' ? kept.toLowerCase() : kept;
 }
 
 /**
@@ -1089,9 +1099,14 @@ function holdsSecrets(config: Config): boolean {
   );
 }
 
-/** True when `candidate` is the same directory as `parent`, or inside it. Both may be unset. */
-function isInsideDirectory(candidate: string | undefined, parent: string | undefined): boolean {
+/**
+ * True when `candidate` is the same directory as `parent`, or inside it. Both may be unset. Both are compared as
+ * written, so both have to be in one form first: `normalisePath`, or `comparablePath` of a real path. A parent that is
+ * the top of a disk — `/`, `c:\` — holds everything on it.
+ */
+export function isInsideDirectory(candidate: string | undefined, parent: string | undefined): boolean {
   if (!candidate || !parent) return false;
+  if (parent.endsWith('/') || parent.endsWith('\\')) return candidate.startsWith(parent);
   return candidate === parent || candidate.startsWith(`${parent}/`) || candidate.startsWith(`${parent}\\`);
 }
 

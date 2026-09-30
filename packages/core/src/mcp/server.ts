@@ -6,6 +6,7 @@ import { accountChannels, listed, narrowingOwner } from '../channel-words.ts';
 import { type Core, openCore } from '../core.ts';
 import { CommsError, toCommsError } from '../errors.ts';
 import { installFailure, SERVER_NAME_MESSAGE, SERVER_NAME_PATTERN } from '../mcp-install.ts';
+import { ATTACH_CHANGE_KINDS, attachChange, attachReport } from '../operations/attach-settings.ts';
 import {
   CHANGE_POLICIES,
   changePolicyChange,
@@ -99,14 +100,15 @@ async function buildInstructions(core: Core): Promise<string> {
     `agent-communications core: install and manage the ${listed(CHANNEL_LABELS_LISTED, 'and')} servers, and look after this machine.`,
     '',
     'Reading needs nobody: comms_paths, comms_doctor, comms_audit_tail, comms_approvals_list,',
-    'comms_channels_available, comms_change_policy without `set`, and comms_update with `check`.',
+    'comms_channels_available, comms_attach and comms_change_policy with no change, and comms_update with `check`.',
     '',
     'Every change — registering, updating or pruning a server, migrating names or secrets, loosening the change',
-    'policy — is shown to the person before it happens. The first call returns `approvalRequired` with a `preview` and an',
-    '`approvalId`: show the preview in full and ask. Then call the same tool again, with the same arguments and the',
-    '`approvalId`. Under the `chat` change policy the person’s yes in this conversation is the approval; under',
-    '`confirm` they run `agentcomms approve <approvalId>` in their own terminal first — you cannot approve it for them,',
-    'so say so and wait. If they say no, call comms_approval_revoke. Tightening applies at once.',
+    'policy, allowing another folder for attachments — is shown to the person before it happens. The first call',
+    'returns `approvalRequired` with a `preview` and an `approvalId`: show the preview in full and ask. Then call the',
+    'same tool again, with the same arguments and the `approvalId`. Under the `chat` change policy the person’s yes in',
+    'this conversation is the approval; under `confirm` they run `agentcomms approve <approvalId>` in their own',
+    'terminal first — you cannot approve it for them, so say so and wait. If they say no, call comms_approval_revoke.',
+    'Tightening applies at once.',
     '',
     `The default change policy here is ${policy}.`,
     'A server registered with a client appears only after that client is restarted: say so.',
@@ -167,6 +169,7 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
       // Every tool here that takes an approval claims a change with it, as the same command does at a terminal.
       // `comms_approval_revoke` takes either kind: it is how a person's no reaches a send or a change.
       approvals: {
+        comms_attach: CHANGE_CLAIM,
         comms_change_policy: CHANGE_CLAIM,
         comms_server_install: CHANGE_CLAIM,
         comms_server_prune: CHANGE_CLAIM,
@@ -321,6 +324,47 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
       }
       const to = args.set as (typeof CHANGE_POLICIES)[number];
       return change(() => changePolicyChange(core, { inbox: args.inbox, account: args.account }, to), args.approvalId);
+    },
+  );
+
+  server.registerTool(
+    'comms_attach',
+    {
+      title: 'Which files may be attached',
+      description:
+        'Report or change which local files may be attached to a draft, an email or a post: the folders they may come from, the paths they never may, and the built-in list the jail always applies. With no change it only reports. Otherwise exactly one of `rootsAdd`, `rootsRemove`, `denyAdd`, `denyRemove`, a path absolute or starting with `~`. Allowing another folder, or removing a deny entry, is a change the person approves: the first call returns the preview — which says where a link leads — and an approvalId; call again with it once they agree. Removing a folder, or adding a deny entry, narrows what can be attached and applies at once. The built-in list cannot be changed.',
+      inputSchema: {
+        rootsAdd: z.string().optional().describe('let files under this folder be attached — approved first'),
+        rootsRemove: z.string().optional().describe('stop attaching files from under this folder — at once'),
+        denyAdd: z.string().optional().describe('never attach files from this path — at once'),
+        denyRemove: z
+          .string()
+          .optional()
+          .describe('take this path off your own deny entries, so files there can be attached again — approved first'),
+        ...approvalArg,
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async (args) => {
+      const asked = ATTACH_CHANGE_KINDS.filter((kind) => args[kind] !== undefined);
+      if (asked.length === 0) {
+        return read(async () => {
+          refuseUnclaimedApproval(args.approvalId, {
+            message: 'with no change this only reports, so it takes no approvalId',
+            hint: 'Pass the change the approval was prepared for — `rootsAdd`, `rootsRemove`, `denyAdd` or `denyRemove` — with it.',
+          });
+          return attachReport(core, env);
+        });
+      }
+      if (asked.length > 1) {
+        return fail(
+          new CommsError('USAGE', `one change at a time: this call asks for ${asked.join(' and ')}`, {
+            hint: 'Call comms_attach once for each change; each is shown, and approved when it widens what can be attached, on its own.',
+          }),
+        );
+      }
+      const [kind] = asked as [(typeof ATTACH_CHANGE_KINDS)[number]];
+      return change(() => attachChange(core, env, { kind, path: String(args[kind]) }, 'mcp'), args.approvalId);
     },
   );
 

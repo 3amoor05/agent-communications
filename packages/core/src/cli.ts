@@ -15,6 +15,14 @@ import { installExitStatus, type Launcher, type SupportedClient } from './mcp-in
 import type { NamesMigrationRow, NotApplicableRename } from './names.ts';
 import { wholeNumber } from './numbers.ts';
 import {
+  type AttachChangeKind,
+  type AttachChangeResult,
+  type AttachEntry,
+  type AttachReport,
+  attachChange,
+  attachReport,
+} from './operations/attach-settings.ts';
+import {
   type ChangePolicyReport,
   changePolicyChange,
   changePolicyReport,
@@ -68,6 +76,14 @@ Usage:
   agentcomms policy [--account <name> | --inbox <name>] [chat|confirm] [--approval <id>]
                                            report or set the change policy: how a loosening is approved;
                                            confirm applies at once, chat is approved first
+  agentcomms attach                        which files may be attached: the folders they may come from, the
+                                           paths they never may, and the built-in list
+  agentcomms attach roots add <folder> [--approval <id>]
+                                           let files under a folder be attached: approved first
+  agentcomms attach roots remove <folder>  stop attaching files from under a folder: applies at once
+  agentcomms attach deny add <path>        never attach files from a path: applies at once
+  agentcomms attach deny remove <path> [--approval <id>]
+                                           take one of your own deny entries away: approved first
   agentcomms channels                      which channel servers exist, which are installed, and where they are registered
   agentcomms mcp                           run the core MCP server on stdio (what an MCP client starts)
   agentcomms mcp install --client <client> [--name <name>] [--launcher managed|npx|local] [--force]
@@ -85,11 +101,12 @@ Usage:
   agentcomms secrets migrate --to keychain|file [--approval <id>]
   agentcomms names migrate [--rename <old>=<new>] [--dry-run] [--approval <id>]
 
-A change that loosens something or cannot be taken back — policy chat, mcp install and prune, update, secrets and
-names migrate — is shown before it happens. At a terminal you approve it there; anything else gets the preview and an
-approval id (exit 10), and runs the command again with --approval <id> once the person has agreed: in the chat under
-the \`chat\` change policy, with \`agentcomms approve\` under \`confirm\`. A tightening — policy confirm — applies at
-once and asks nobody, and a --dry-run changes nothing.
+A change that loosens something or cannot be taken back — policy chat, attach roots add, attach deny remove, mcp
+install and prune, update, secrets and names migrate — is shown before it happens. At a terminal you approve it there;
+anything else gets the preview and an approval id (exit 10), and runs the command again with --approval <id> once the
+person has agreed: in the chat under the \`chat\` change policy, with \`agentcomms approve\` under \`confirm\`. A
+tightening — policy confirm, attach roots remove, attach deny add — applies at once and asks nobody, and a --dry-run
+changes nothing.
 
 Once a day this machine asks npm whether a newer release is out. When one is, every command but update, doctor,
 paths, approve and approvals stops first: at a terminal it asks "Update now, later today, or cancel?"; anywhere else
@@ -161,6 +178,7 @@ const CLIENT_NAMES = ['claude-code', 'claude-desktop', 'codex', 'cursor', 'gemin
 function takesApproval(command: string | undefined, sub: string | undefined): boolean {
   switch (command) {
     case 'policy':
+    case 'attach':
       return sub !== undefined;
     case 'mcp':
       return sub === 'install' || sub === 'prune';
@@ -188,7 +206,7 @@ function refuseApprovalNotTaken(command: string | undefined, sub: string | undef
   if (command === 'policy') refuseApprovalWithoutChange(String(approvalId));
   const typed = ['agentcomms', command, sub].filter((word) => word !== undefined).join(' ');
   throw new CommsError('USAGE', `\`${typed}\` takes no --approval: it makes no change a person approves`, {
-    hint: 'An approval goes with the change it was prepared for — policy chat|confirm, mcp install, mcp prune, names migrate, secrets migrate or update — run again exactly as the preview named it. Nothing was run.',
+    hint: 'An approval goes with the change it was prepared for — policy chat|confirm, attach roots|deny add|remove, mcp install, mcp prune, names migrate, secrets migrate or update — run again exactly as the preview named it. Nothing was run.',
   });
 }
 
@@ -342,6 +360,24 @@ export async function main(
           command: shellCommand(['agentcomms', 'policy', ...where, sub]),
         });
         writeResult(report, output, renderPolicy);
+        return;
+      }
+      case 'attach': {
+        const [, list, action, path, ...extra] = positionals;
+        if (list === undefined) {
+          // Reporting takes no --approval: refused with the rest, before the update check's stop.
+          writeResult(await attachReport(core, env), output, renderAttach);
+          return;
+        }
+        const kind = ATTACH_KINDS[`${list} ${action ?? ''}`];
+        if (kind === undefined || path === undefined || extra.length > 0) {
+          throw usage('usage: agentcomms attach [roots|deny add|remove <path>] [--approval <id>]');
+        }
+        const result = await gatedChangeAtTerminal(core, attachChange(core, env, { kind, path }, 'cli'), {
+          ...approval,
+          command: shellCommand(['agentcomms', 'attach', list, action as string, path]),
+        });
+        writeResult(result, output, renderAttachChange);
         return;
       }
       case 'channels': {
@@ -564,6 +600,43 @@ function renderPolicy(report: ChangePolicyReport): string {
     for (const entry of report.looser) lines.push(`  ${entry.tighten.command}`);
   }
   return lines.join('\n');
+}
+
+/** `attach roots add` and the rest, by their words. */
+const ATTACH_KINDS: Readonly<Record<string, AttachChangeKind>> = {
+  'roots add': 'rootsAdd',
+  'roots remove': 'rootsRemove',
+  'deny add': 'denyAdd',
+  'deny remove': 'denyRemove',
+};
+
+function renderAttachEntries(entries: readonly AttachEntry[]): string[] {
+  if (entries.length === 0) return ['  (none)'];
+  return entries.map((entry) =>
+    entry.real === null || entry.real === entry.path ? `  ${entry.path}` : `  ${entry.path}  (${entry.real})`,
+  );
+}
+
+function renderAttach(report: AttachReport): string {
+  return [
+    'Files may be attached from under:',
+    ...renderAttachEntries(report.roots),
+    ...(report.roots.length === 0 ? ['  — so nothing can be attached.'] : []),
+    '',
+    'Never from, by your own entries:',
+    ...renderAttachEntries(report.deny),
+    '',
+    'Never from, whatever the configuration says:',
+    ...renderAttachEntries(report.builtIn),
+    '',
+    'To allow another folder: agentcomms attach roots add <folder> (you approve it first).',
+    'To stop attaching from one: agentcomms attach roots remove <folder>; to deny a path: agentcomms attach deny add <path>.',
+  ].join('\n');
+}
+
+function renderAttachChange(result: AttachChangeResult): string {
+  const done = result.changed ? 'Done.' : 'Nothing was changed.';
+  return [result.note ?? done, '', renderAttach(result)].join('\n');
 }
 
 function renderLater(result: UpdateLaterResult): string {

@@ -17,6 +17,8 @@ npx @agentcomms/core audit tail # mailbox writes, Slack prepares and posts, and 
 npx @agentcomms/core approvals list
 npx @agentcomms/core approve <id>  # approve a settings change an agent prepared: read it, type the code it shows
 npx @agentcomms/core policy        # the change policy: how a loosening is approved — chat or confirm
+npx @agentcomms/core attach        # which files may be attached: the folders, your deny entries, the built-in list
+npx @agentcomms/core attach roots add ~/Documents/outgoing  # allow another folder (a change you approve)
 npx @agentcomms/core channels      # which servers exist, which are installed, and where each is registered
 npx @agentcomms/core mcp install --client claude-code   # register the core MCP server
 npx @agentcomms/core update --check  # what is behind the latest release; `update` brings it there, as one change
@@ -36,9 +38,9 @@ given on this machine. A registry that cannot be reached stops nothing. The chec
 Every command takes `--json` and prints `{ "ok": true, "schemaVersion": 1, "data": … }` or
 `{ "ok": false, "schemaVersion": 1, "error": { "code", "message", "hint" } }`.
 
-A command that loosens something or cannot be undone — `policy chat`, `mcp install`, `mcp prune`, `update`,
-`secrets migrate`, `names migrate` — shows the change first (`policy confirm` tightens, so it applies at once). At a terminal you
-approve it there; anything else gets the preview and an
+A command that loosens something or cannot be undone — `policy chat`, `attach roots add`, `attach deny remove`,
+`mcp install`, `mcp prune`, `update`, `secrets migrate`, `names migrate` — shows the change first (`policy confirm`,
+`attach roots remove` and `attach deny add` tighten, so they apply at once). At a terminal you approve it there; anything else gets the preview and an
 approval id and exits `10`, and runs the same command again with `--approval <id>` once the person has agreed.
 `agent-gmail` and `agent-slack` register and prune their own servers through the same change, so an approval
 `comms_server_install` or `comms_server_prune` prepared is claimed by their `mcp install` or `mcp prune` for the same
@@ -56,6 +58,7 @@ is the one registration that cannot come from chat. After a restart of the clien
 | `comms_server_prune` | remove the managed runtimes old releases left behind; `dryRun` lists them |
 | `comms_update` | what is behind the latest release (`check`), and bringing every registration, runtime and global package there as one change; `later` puts the daily check's stop off until midnight, `auto` turns the check on or off |
 | `comms_change_policy` | report or set the change policy of the defaults, a mailbox or a workspace |
+| `comms_attach` | which files may be attached, as `attach`; `rootsAdd` allows another folder once the person approves, and `rootsRemove`, `denyAdd` and `denyRemove` change the rest |
 | `comms_names_migrate` | rename every account to `organisation/platform`; `dryRun` shows the mapping |
 | `comms_secrets_migrate` | move every credential between the keychain and files |
 | `comms_paths`, `comms_doctor`, `comms_audit_tail` | as `paths`, `doctor` and `audit tail` |

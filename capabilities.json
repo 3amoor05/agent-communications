@@ -69,6 +69,83 @@
       "operation": "changePolicyReport"
     },
     {
+      "id": "core.attach",
+      "package": "core",
+      "cli": "attach",
+      "mcp": "comms_attach",
+      "status": "both",
+      "operation": "attachReport",
+      "reason": "Which files may be attached: the folders they may come from, the person's own deny entries, and the built-in list. `comms_attach` with no change is this report."
+    },
+    {
+      "id": "core.attach.roots.add",
+      "package": "core",
+      "cli": "attach roots add",
+      "mcp": "comms_attach",
+      "status": "both",
+      "operation": "attachChange",
+      "argv": ["~/parity"],
+      "args": {
+        "rootsAdd": "~/parity"
+      },
+      "expect": {
+        "change.kind": "rootsAdd",
+        "change.path": "~/parity"
+      },
+      "reason": "A folder added widens what can be attached, so it is a change the person approves; the preview says where a link leads."
+    },
+    {
+      "id": "core.attach.roots.remove",
+      "package": "core",
+      "cli": "attach roots remove",
+      "mcp": "comms_attach",
+      "status": "both",
+      "operation": "attachChange",
+      "argv": ["~/parity"],
+      "args": {
+        "rootsRemove": "~/parity"
+      },
+      "expect": {
+        "change.kind": "rootsRemove",
+        "change.path": "~/parity"
+      },
+      "reason": "A folder taken away narrows what can be attached, and applies at once."
+    },
+    {
+      "id": "core.attach.deny.add",
+      "package": "core",
+      "cli": "attach deny add",
+      "mcp": "comms_attach",
+      "status": "both",
+      "operation": "attachChange",
+      "argv": ["~/parity"],
+      "args": {
+        "denyAdd": "~/parity"
+      },
+      "expect": {
+        "change.kind": "denyAdd",
+        "change.path": "~/parity"
+      },
+      "reason": "A deny entry added narrows what can be attached, and applies at once."
+    },
+    {
+      "id": "core.attach.deny.remove",
+      "package": "core",
+      "cli": "attach deny remove",
+      "mcp": "comms_attach",
+      "status": "both",
+      "operation": "attachChange",
+      "argv": ["~/parity"],
+      "args": {
+        "denyRemove": "~/parity"
+      },
+      "expect": {
+        "change.kind": "denyRemove",
+        "change.path": "~/parity"
+      },
+      "reason": "A deny entry taken away widens what can be attached, so it is a change the person approves; the built-in list cannot be removed."
+    },
+    {
       "id": "core.channels",
       "package": "core",
       "cli": "channels",
