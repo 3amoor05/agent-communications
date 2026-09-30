@@ -1029,6 +1029,17 @@ test('a file over its cap is not fetched, and what is left of the run’s budget
     ],
     'each is handed the smaller of its own cap and what is left of the run’s',
   );
+  // And the size its record gives, when it gives one: what the time its download is allowed is measured against (#49).
+  assert.deepEqual(
+    bytes.asked.map((request) => [request.fileId, request.size]),
+    [
+      ['F0A', 8],
+      ['F0B', undefined],
+      ['F0LIAR', undefined],
+      ['F0NOSIZE', undefined],
+    ],
+  );
+  assert.equal(Object.hasOwn(bytes.asked[1] ?? {}, 'size'), false, 'a size nobody gave was passed as one');
   assert.deepEqual(
     result.skipped.map((entry) => [entry.fileId, entry.cause, entry.reason]),
     [

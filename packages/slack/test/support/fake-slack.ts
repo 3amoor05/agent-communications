@@ -57,7 +57,17 @@ export interface FileReply {
   body?: Uint8Array | string;
   /** Sent one after another with no length declared, so only a running count can tell how much is coming. */
   chunks?: readonly Uint8Array[];
-  /** Send the headers and one byte, then nothing more: the case a timeout exists for. */
+  /**
+   * Sent slowly: the headers at once, then one chunk every `everyMs`, then the end. No length is declared unless
+   * `headers` declares one. A slow host that never stops — the case a limit on a whole download exists for.
+   */
+  pace?: { readonly chunks: readonly Uint8Array[]; readonly everyMs: number };
+  /** With `pace`, how many of its chunks are sent before the host goes silent, holding the connection open. */
+  stallAfter?: number;
+  /**
+   * Send the headers and one byte, then nothing more: the case a timeout exists for. For an upload, take the bytes
+   * and never answer at all — no status, no headers.
+   */
   stall?: boolean;
   /** Destroy the socket instead of answering. */
   drop?: boolean;
@@ -145,6 +155,8 @@ function sendReply(reply: FileReply, response: ServerResponse): void {
     response.socket?.destroy();
     return;
   }
+  // The bytes were read before this was asked; the answer never comes, and the connection is held until the fake closes.
+  if (reply.stall) return;
   const status = reply.status ?? 200;
   const headers = { 'content-type': 'application/octet-stream', ...reply.headers };
   const body = typeof reply.body === 'string' ? Buffer.from(reply.body) : Buffer.from(reply.body ?? new Uint8Array());
@@ -236,9 +248,40 @@ function answerFile(fake: FakeSlack, recorded: SlackRequest, response: ServerRes
     response.end();
     return;
   }
+  if (reply.pace) {
+    sendPaced(reply.pace, reply.stallAfter, status, headers, response);
+    return;
+  }
   const body = typeof reply.body === 'string' ? Buffer.from(reply.body) : Buffer.from(reply.body ?? new Uint8Array());
   response.writeHead(status, { 'content-length': String(body.byteLength), ...headers });
   response.end(body);
+}
+
+/** The headers now, then a chunk every `everyMs` — or silence, with the connection open, after `stallAfter` of them. */
+function sendPaced(
+  pace: NonNullable<FileReply['pace']>,
+  stallAfter: number | undefined,
+  status: number,
+  headers: Record<string, string>,
+  response: ServerResponse,
+): void {
+  response.writeHead(status, headers);
+  response.flushHeaders();
+  let sent = 0;
+  const next = (): void => {
+    // A client that gave up, or a fake that closed: nothing more to send.
+    if (response.destroyed || response.writableEnded) return;
+    if (stallAfter !== undefined && sent >= stallAfter) return;
+    const chunk = pace.chunks[sent];
+    if (chunk === undefined) {
+      response.end();
+      return;
+    }
+    response.write(chunk);
+    sent += 1;
+    setTimeout(next, pace.everyMs);
+  };
+  setTimeout(next, pace.everyMs);
 }
 
 export async function startFakeSlack(script: Record<string, Reply> = {}): Promise<FakeSlack> {

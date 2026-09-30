@@ -28,7 +28,9 @@ import { fileOfPath, SLACK_FILES_ORIGIN } from './methods.ts';
  *   not read an HTML file. The caller reports such a file as indistinguishable from the sign-in page.
  * - `too-large` — more bytes than the cap, whether declared up front or counted as they arrived.
  * - `http-error` — any other status that is not success, with `details.status`.
- * - `network` — the connection failed or the time ran out, before or during the body.
+ * - `network` — the connection failed or the time ran out, before or during the body. When the time ran out,
+ *   `details.why` says which limit: `stalled`, the host went silent for too long, or `too-slow`, the whole file took
+ *   longer than its size allows.
  */
 
 export interface SlackFileRequest {
@@ -40,6 +42,11 @@ export interface SlackFileRequest {
   fileId: string;
   /** The smaller of the per-file cap and what is left of the run's. Never more than {@link FILE_CEILING}. */
   maxBytes: number;
+  /**
+   * The size the file's record gives, when it gives one: what the time the download is allowed is measured against
+   * until the answer declares a length of its own. Slack's claim, used only for time — never for how much is read.
+   */
+  size?: number | undefined;
 }
 
 export interface SlackFileBody {
@@ -68,25 +75,72 @@ export type SlackFileRefusal =
 const FILE_CEILING = 100 * 1024 * 1024;
 
 /**
- * How long one file may take, headers and body together — Resend's download bound.
+ * How long the host may go without sending anything: before the answer, and between any two pieces of the body.
  *
- * `SlackCall.timeoutMs` overrides it, which tests use; production leaves it unset, so a file gets two minutes where an
- * API call gets thirty seconds.
+ * Issue #49. A single limit on the whole download — two minutes, once — could not tell a host that had stopped from a
+ * large file on a slow link: it gave up on a 100 MiB file at any speed under about 850 KiB a second, and waited the full
+ * two minutes on a host that had sent nothing for all of them. Silence is the sign of a stall, so silence is what this
+ * limits. `SlackCall.timeoutMs` sets it instead, which tests use; production leaves it unset.
  */
-const DOWNLOAD_TIMEOUT_MS = 120_000;
+const DOWNLOAD_IDLE_MS = 30_000;
+
+/**
+ * How long a whole download may take, for its size: the least it is allowed, and the slowest average it may arrive at.
+ *
+ * The second limit, beside the one on silence: a host that sends a byte every few seconds is never silent for long, and
+ * without this would hold a download open for as long as it cared to. 128 KiB a second is a slow link, and a file is
+ * allowed its size at that rate — 100 MiB, the most one file may be, gets 800 seconds — or two minutes, if longer.
+ */
+export interface DownloadPace {
+  readonly floorMs: number;
+  readonly bytesPerSecond: number;
+}
+
+export const DOWNLOAD_PACE: DownloadPace = { floorMs: 120_000, bytesPerSecond: 128 * 1024 };
+
+/** How long a whole download of `expectedBytes` may take at `pace`: see {@link DownloadPace}. */
+export function downloadCeilingMs(expectedBytes: number, pace: DownloadPace = DOWNLOAD_PACE): number {
+  // A size that is not a number, or not a finite positive one, counts as nothing: the floor, never an unbounded wait.
+  const bytes = Number.isFinite(expectedBytes) && expectedBytes > 0 ? expectedBytes : 0;
+  return Math.max(pace.floorMs, Math.ceil((bytes / pace.bytesPerSecond) * 1000));
+}
+
+/**
+ * A length of time as a person says it: `0.4 seconds`, `30 seconds`, `2 minutes`, `13 minutes 20 seconds`.
+ *
+ * Shared with the upload, whose refusal says its own limit the same way.
+ */
+export function spokenDuration(ms: number): string {
+  const unit = (count: number, name: string): string => `${count} ${name}${count === 1 ? '' : 's'}`;
+  if (ms < 60_000) return unit(Math.round(ms / 100) / 10, 'second');
+  const minutes = Math.floor(ms / 60_000);
+  const seconds = Math.round((ms % 60_000) / 1000);
+  return seconds === 0 ? unit(minutes, 'minute') : `${unit(minutes, 'minute')} ${unit(seconds, 'second')}`;
+}
+
+/** Which limit ended a download: the host went silent, or the whole file took longer than its size allows. */
+type OutOfTime = 'stalled' | 'too-slow';
 
 interface Deadline {
   /** Handed to `fetch`, so the connection is closed when the time is up — when `fetch` is still listening. */
   readonly signal: AbortSignal;
-  /** `work`, or a rejection the moment the time is up or the caller gives up, whichever comes first. */
+  /** `work`, or a rejection the moment either limit is reached or the caller gives up, whichever comes first. */
   within<T>(work: Promise<T>): Promise<T>;
-  timedOut(): boolean;
-  /** Lets the timer go. Called however the download ends. */
+  /** The host sent something — the answer, or a piece of the body — so the limit on silence starts again. */
+  heard(): void;
+  /** The whole download's limit, measured from its start, now that the answer has said how long the file is. */
+  allow(ms: number): void;
+  /** How long the whole download is allowed, as it stands. */
+  allowed(): number;
+  /** Which limit was reached, or undefined when neither was. */
+  outOfTime(): OutOfTime | undefined;
+  /** Lets both timers go. Called however the download ends. */
   end(): void;
 }
 
 /**
- * A deadline that is kept even after garbage collection has run over a stalled download.
+ * Two limits that are kept even after garbage collection has run over a stalled download — one on silence, one on the
+ * whole file — rejecting the same promise, so whichever is reached first wakes the download.
  *
  * Measured, not argued. The first version handed an `AbortSignal.timeout` to `fetch` and trusted `fetch` to fail the
  * read when it fired — Resend's download has the same shape. With a body stalled and garbage collection forced while
@@ -97,13 +151,19 @@ interface Deadline {
  * What fixed it is here: every wait — for the answer, and for each piece of the body — is raced against a promise the
  * deadline itself rejects, so the code waiting is woken by the deadline rather than by whatever `fetch` still holds.
  * The signal still goes to `fetch` as well, so that when `fetch` is listening the connection is closed too. The timer
- * is a plain `setTimeout`, cleared when the download ends, and a caller's own signal is forwarded into the same place,
- * so what keeps the deadline alive is explicit rather than a matter of how the runtime holds `AbortSignal.timeout` or
- * `AbortSignal.any`.
+ * is a plain `setTimeout` — two of them, each cleared when the download ends — and a caller's own signal is forwarded
+ * into the same place, so what keeps the limits alive is explicit rather than a matter of how the runtime holds
+ * `AbortSignal.timeout` or `AbortSignal.any`.
+ *
+ * The limit on silence is started again each time the host is heard from (`heard`): when the answer arrives, and after
+ * every piece of the body. The one on the whole file runs from the start, and is set again (`allow`) once the answer
+ * declares a length — still measured from the start, so a late answer does not buy the body more time.
  */
-function deadline(ms: number, outer: AbortSignal | undefined): Deadline {
+function deadline(idleMs: number, wholeMs: number, outer: AbortSignal | undefined): Deadline {
   const controller = new AbortController();
-  let expired = false;
+  const started = Date.now();
+  let whole = wholeMs;
+  let ran: OutOfTime | undefined;
   let give: (reason: unknown) => void = () => undefined;
   const up = new Promise<never>((_, reject) => {
     give = reject;
@@ -114,19 +174,33 @@ function deadline(ms: number, outer: AbortSignal | undefined): Deadline {
     controller.abort(reason);
     give(reason);
   };
-  const timer = setTimeout(() => {
-    expired = true;
-    stop(new DOMException('the download took longer than it is allowed', 'TimeoutError'));
-  }, ms);
+  const outOf = (which: OutOfTime) => (): void => {
+    // The first limit reached is the one reported; the promise is rejected once whichever it was.
+    if (ran !== undefined || controller.signal.aborted) return;
+    ran = which;
+    stop(new DOMException(`the download ran out of time (${which})`, 'TimeoutError'));
+  };
+  const idle = setTimeout(outOf('stalled'), idleMs);
+  let ceiling = setTimeout(outOf('too-slow'), whole);
   const forward = (): void => stop(outer?.reason);
   if (outer?.aborted) forward();
   else outer?.addEventListener('abort', forward, { once: true });
   return {
     signal: controller.signal,
     within: (work) => Promise.race([work, up]),
-    timedOut: () => expired,
+    heard: () => {
+      idle.refresh();
+    },
+    allow: (ms) => {
+      whole = ms;
+      clearTimeout(ceiling);
+      ceiling = setTimeout(outOf('too-slow'), Math.max(0, started + ms - Date.now()));
+    },
+    allowed: () => whole,
+    outOfTime: () => ran,
     end: () => {
-      clearTimeout(timer);
+      clearTimeout(idle);
+      clearTimeout(ceiling);
       outer?.removeEventListener('abort', forward);
     },
   };
@@ -223,23 +297,54 @@ function mediaTypeOf(header: string | null): string | null {
  * opened on a permit of this call's own, because the context's may be open for something else — a post the gate is
  * about to send — and a download, which is a read, must neither be refused for that nor touch it.
  */
-export async function slackFileDownload(context: SlackCall, request: SlackFileRequest): Promise<SlackFileBody> {
+export async function slackFileDownload(
+  context: SlackCall,
+  request: SlackFileRequest,
+  pace: DownloadPace = DOWNLOAD_PACE,
+): Promise<SlackFileBody> {
   // A cap that is not a number allows nothing, rather than everything.
   const asked = Number.isFinite(request.maxBytes) ? Math.max(0, Math.floor(request.maxBytes)) : 0;
   const cap = Math.min(asked, FILE_CEILING);
   const url = checkedFileUrl(request);
+  /*
+   * What the whole download is allowed to take is measured against the file's size as best it is known: the length the
+   * answer declares, once it has; the size the file's record gave until then; and, with neither, the most it may be.
+   * Never more than the cap: a length declared past it is refused before a byte of the body is read.
+   */
+  const expectedFor = (known: number | undefined): number =>
+    Math.min(known !== undefined && Number.isFinite(known) && known >= 0 ? known : cap, cap);
 
   const permit = closedPermit();
   const send = guardSlackRequests(context.fetch ?? (fetch as FetchLike), permit);
-  const clock = deadline(context.timeoutMs ?? DOWNLOAD_TIMEOUT_MS, context.signal);
-  // Which of the two it was is worth saying: a timeout on a large file is a different fix from a dropped network.
-  const lost = (message: string): CommsError =>
-    refusal(
-      'network',
-      'TRANSIENT',
-      clock.timedOut() ? `the download from ${SLACK_FILES_ORIGIN} took longer than it is allowed` : message,
-      'Check the network, then try again.',
-    );
+  const idleMs = context.timeoutMs ?? DOWNLOAD_IDLE_MS;
+  const clock = deadline(idleMs, downloadCeilingMs(expectedFor(request.size), pace), context.signal);
+  /*
+   * Which of the three it was is worth saying, because each has its own fix: a host that went silent is the network or
+   * Slack; a file that arrived too slowly for its size needs a faster connection, not the same one again; and a
+   * connection that failed outright is the network.
+   */
+  const lost = (message: string): CommsError => {
+    const why = clock.outOfTime();
+    if (why === 'stalled') {
+      return refusal(
+        'network',
+        'TRANSIENT',
+        `${SLACK_FILES_ORIGIN} stopped sending for ${spokenDuration(idleMs)}`,
+        'Check the network, then try again.',
+        { why },
+      );
+    }
+    if (why === 'too-slow') {
+      return refusal(
+        'network',
+        'TRANSIENT',
+        `the download from ${SLACK_FILES_ORIGIN} took longer than a file of this size is allowed (${spokenDuration(clock.allowed())})`,
+        'It kept arriving, but too slowly to finish in time. Download it again on a faster connection, or open it in Slack and save it from there.',
+        { why },
+      );
+    }
+    return refusal('network', 'TRANSIENT', message, 'Check the network, then try again.');
+  };
   const redirected = (): CommsError =>
     refusal(
       'redirect',
@@ -273,6 +378,7 @@ export async function slackFileDownload(context: SlackCall, request: SlackFileRe
         if (isRefusedRedirect(error)) throw redirected();
         throw lost(`could not reach ${SLACK_FILES_ORIGIN}`);
       }
+      clock.heard();
 
       /*
        * Everything that refuses an answer cancels its body first, so a refused file is not read — and a connection
@@ -325,6 +431,10 @@ export async function slackFileDownload(context: SlackCall, request: SlackFileRe
         discard();
         throw tooLarge();
       }
+      // And the time the whole file is allowed, now measured against the length the answer declares.
+      if (declared !== null && declared.trim() !== '') {
+        clock.allow(downloadCeilingMs(expectedFor(Number(declared)), pace));
+      }
 
       /*
        * Then what actually arrives, counted as it arrives.
@@ -341,6 +451,7 @@ export async function slackFileDownload(context: SlackCall, request: SlackFileRe
           for (;;) {
             const { done, value } = await clock.within(reader.read());
             if (done) break;
+            clock.heard();
             total += value.byteLength;
             if (total > cap) throw tooLarge();
             chunks.push(value);

@@ -817,7 +817,14 @@ export async function downloadFiles(
       const teamId = uploaderTeam !== undefined && TEAM_ID.test(uploaderTeam) ? uploaderTeam : session.teamId;
       let body: SlackFileBody;
       try {
-        body = await download(call, { url, teamId, fileId, maxBytes });
+        // The size the record gives, when it gives one: the time the download is allowed is measured against it.
+        body = await download(call, {
+          url,
+          teamId,
+          fileId,
+          maxBytes,
+          ...(declared === undefined ? {} : { size: declared }),
+        });
       } catch (error) {
         const refusal = refusalOf(error, record, maxBytes, caps);
         skipped.push({ fileId, reason: refusal.reason, cause: refusal.cause });

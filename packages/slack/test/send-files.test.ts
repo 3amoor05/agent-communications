@@ -12,7 +12,11 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { type TestContext, test } from 'node:test';
+import { setFlagsFromString } from 'node:v8';
+import { runInNewContext } from 'node:vm';
 import { CommsError, renderChannelPreview } from '@agentcomms/core';
+import { closedPermit, spendOn } from '../src/api/guard.ts';
+import { slackFileUpload, uploadDeadlineMs } from '../src/api/upload.ts';
 import { payloadOf } from '../src/compose/blocks.ts';
 import { openDraftStore } from '../src/compose/drafts.ts';
 import { TEST_ONLY_HOOKS } from '../src/compose/files.ts';
@@ -20,7 +24,7 @@ import { SlackContext } from '../src/context.ts';
 import { scopesForMode } from '../src/manifest.ts';
 import { createDraft } from '../src/operations/drafts.ts';
 import { prepareDraftPost, sendPost } from '../src/operations/post.ts';
-import { type FakeSlack, type FakeUploads, startFakeSlack } from './support/fake-slack.ts';
+import { type FakeSlack, type FakeUploads, startFakeSlack, UPLOADS } from './support/fake-slack.ts';
 import { type Harness, newHarness } from './support/harness.ts';
 
 /**
@@ -850,4 +854,68 @@ test('a file changed after the first pass and before its upload voids the approv
   assert.deepEqual(w.uploads.received, {}, 'bytes reached the upload URL from a file changed after it was approved');
   assert.deepEqual(w.uploads.completed, []);
   assert.equal((await w.context.core.approvals.get(prepared.approvalId))?.state, 'failed');
+});
+
+// ── The time an upload is allowed ────────────────────────────────────────────────────────────────────────────
+
+/** One upload straight to the transport, inside a post's permit as the gate opens it: nothing else of a post. */
+function uploadOne(fake: FakeSlack, extra: { timeoutMs?: number } = {}) {
+  const permit = closedPermit();
+  return spendOn(permit, 'ap_1', 'files.completeUploadExternal', () =>
+    slackFileUpload(
+      { token: 'fake-user-token-0', fetch: fake.fetch, permit, ...extra },
+      { url: `${UPLOADS}v1/CwABF0UP0001x7919`, bytes: new Uint8Array(64 * 1024) },
+    ),
+  );
+}
+
+test('an upload the host never answers is given up on in time, even with garbage collected while it waits', {
+  timeout: 60_000,
+}, async (t) => {
+  /*
+   * The shape the download's own deadline was measured against (see `deadline` in api/download.ts): a timeout handed
+   * to `fetch` and trusted to wake the wait, with collection forced meanwhile. The upload's wait is raced against a
+   * timer of its own instead, so this fails by name rather than hanging the post.
+   */
+  setFlagsFromString('--expose-gc');
+  const collect = runInNewContext('gc') as () => void;
+  const fake = await startFakeSlack();
+  t.after(() => fake.close());
+  fake.uploadAnswer = () => ({ stall: true });
+  const every = setInterval(collect, 50);
+  const started = Date.now();
+  try {
+    const error = await refusal(uploadOne(fake, { timeoutMs: 1_000 }));
+    assert.equal(error.code, 'TRANSIENT');
+    assert.match(error.message, /was not answered within 1 second/);
+  } finally {
+    clearInterval(every);
+  }
+  assert.ok(Date.now() - started < 15_000, `the upload waited ${Date.now() - started} ms`);
+  assert.equal(fake.requests.filter((request) => request.path.startsWith('/upload/')).length, 1, 'sent once');
+});
+
+test('the time an upload is allowed grows with the file: five minutes at least, and 64 KiB a second beyond', () => {
+  // Issue #49: five minutes for every file gave up on 100 MiB over any uplink slower than about 340 KiB a second.
+  const MIB = 1024 * 1024;
+  assert.equal(uploadDeadlineMs(100 * MIB), 1_600_000);
+  assert.equal(uploadDeadlineMs(20 * MIB), 320_000);
+  assert.equal(uploadDeadlineMs(1 * MIB), 300_000);
+  assert.equal(uploadDeadlineMs(0), 300_000);
+  assert.equal(uploadDeadlineMs(Number.NaN), 300_000);
+});
+
+test('an upload the host answers is done, and leaves no timer behind to hold the process', async (t) => {
+  /*
+   * Its deadline is a plain timer of minutes, so one left running would hold the process open that long after the post
+   * was done. Counted, rather than waited out: the timers alive before the upload and after it.
+   */
+  const fake = await startFakeSlack();
+  t.after(() => fake.close());
+  const timers = (): number => process.getActiveResourcesInfo().filter((kind) => kind === 'Timeout').length;
+  const before = timers();
+  await uploadOne(fake);
+  assert.equal(timers(), before, 'a timer outlived the upload');
+  const [sent] = fake.requests.filter((request) => request.path.startsWith('/upload/'));
+  assert.equal(sent?.body.byteLength, 64 * 1024);
 });

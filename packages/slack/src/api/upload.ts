@@ -1,5 +1,6 @@
 import { CommsError, type ErrorCode } from '@agentcomms/core';
 import type { SlackCall } from './call.ts';
+import { spokenDuration } from './download.ts';
 import { type FetchLike, guardSlackRequests, uploadWith } from './guard.ts';
 import { SLACK_FILES_ORIGIN } from './methods.ts';
 
@@ -27,12 +28,62 @@ export interface SlackFileUploadRequest {
 }
 
 /**
- * How long one upload may take to be answered.
+ * How long one upload of `bytes` may take to be answered: five minutes at least, and 64 KiB a second beyond that.
  *
- * Longer than a download's two minutes, because a file of up to 100 MiB goes out over whatever uplink the person has,
- * which is usually the slower direction. `SlackCall.timeoutMs` overrides it, which tests use.
+ * Issue #49. It was five minutes for every file, which gave up on a 100 MiB file on any uplink slower than about
+ * 340 KiB a second — and an upload goes out over the slower direction of most connections. Now a file is allowed its
+ * size at 64 KiB a second, so 100 MiB gets 1600 seconds, or five minutes if that is longer. An upload cannot be
+ * watched for silence as a download is: `fetch` says nothing until the answer comes, so this one limit is all there is.
+ * `SlackCall.timeoutMs` sets it instead, which tests use.
  */
-const UPLOAD_TIMEOUT_MS = 300_000;
+export function uploadDeadlineMs(bytes: number): number {
+  const size = Number.isFinite(bytes) && bytes > 0 ? bytes : 0;
+  return Math.max(UPLOAD_FLOOR_MS, Math.ceil((size / UPLOAD_BYTES_PER_SECOND) * 1000));
+}
+
+const UPLOAD_FLOOR_MS = 300_000;
+const UPLOAD_BYTES_PER_SECOND = 64 * 1024;
+
+/**
+ * The upload's deadline, raced against the wait rather than trusted to `fetch` alone — the download's design (see
+ * `deadline` in `download.ts`), for the same reason.
+ *
+ * The download's first version handed `fetch` an `AbortSignal.timeout` and trusted it to wake the wait, and with garbage
+ * collection forced over a stalled body the wait outlived its limit. That was measured on a body read; the upload's own
+ * wait, for the answer, did not hang the same way when it was tried here. It is raced all the same: one mechanism for
+ * both transfers, and a limit that is kept whatever the runtime does with a signal. The signal still goes to `fetch`,
+ * so the connection is closed when `fetch` is listening, and a caller's own signal is forwarded into the same place.
+ */
+function uploadClock(ms: number, outer: AbortSignal | undefined) {
+  const controller = new AbortController();
+  let expired = false;
+  let give: (reason: unknown) => void = () => undefined;
+  const up = new Promise<never>((_, reject) => {
+    give = reject;
+  });
+  // Marked handled once, here: it may be rejected before the race has subscribed to it, or after it has settled.
+  up.catch(() => undefined);
+  const stop = (reason: unknown): void => {
+    controller.abort(reason);
+    give(reason);
+  };
+  const timer = setTimeout(() => {
+    expired = true;
+    stop(new DOMException('the upload took longer than it is allowed', 'TimeoutError'));
+  }, ms);
+  const forward = (): void => stop(outer?.reason);
+  if (outer?.aborted) forward();
+  else outer?.addEventListener('abort', forward, { once: true });
+  return {
+    signal: controller.signal,
+    within: <T>(work: Promise<T>): Promise<T> => Promise.race([work, up]),
+    timedOut: (): boolean => expired,
+    end: (): void => {
+      clearTimeout(timer);
+      outer?.removeEventListener('abort', forward);
+    },
+  };
+}
 
 /** Whether a failed `fetch` failed because it met a redirect, which the guard told it to treat as an error. */
 function isRefusedRedirect(error: unknown): boolean {
@@ -76,45 +127,61 @@ export async function slackFileUpload(context: SlackCall, request: SlackFileUplo
     });
   }
   const send = guardSlackRequests(context.fetch ?? (fetch as FetchLike), permit);
-  const deadline = AbortSignal.timeout(context.timeoutMs ?? UPLOAD_TIMEOUT_MS);
-  const signal = context.signal === undefined ? deadline : AbortSignal.any([context.signal, deadline]);
+  const allowed = context.timeoutMs ?? uploadDeadlineMs(request.bytes.byteLength);
+  const clock = uploadClock(allowed, context.signal);
 
-  await uploadWith(permit, request.url, async () => {
-    let response: Response;
-    try {
-      response = await send(request.url, {
-        method: 'POST',
-        headers: {
-          authorization: `Bearer ${context.token}`,
-          'content-type': 'application/octet-stream',
-        },
-        body: request.bytes,
-        signal,
-      });
-    } catch (error) {
-      // The guard's own refusal, as it is: it already says what it means.
-      if (error instanceof CommsError) throw error;
-      if (isRefusedRedirect(error)) throw redirected();
-      throw new CommsError(
-        'TRANSIENT',
-        deadline.aborted
-          ? `the upload to ${SLACK_FILES_ORIGIN} took longer than it is allowed`
-          : `could not reach ${SLACK_FILES_ORIGIN} to upload the file`,
-        { hint: 'Check the network, then try again.' },
-      );
-    }
-    // Not awaited: the answer is decided by its status, and a host that stops sending must not hold the post.
-    response.body?.cancel().catch(() => undefined);
-    if (response.redirected || (response.status >= 300 && response.status < 400)) throw redirected();
-    if (!response.ok) {
-      throw new CommsError(
-        codeForStatus(response.status),
-        `${SLACK_FILES_ORIGIN} answered ${response.status} to the upload`,
-        {
-          hint: response.status === 429 || response.status >= 500 ? 'Try again shortly.' : 'Nothing was posted.',
-          details: { status: response.status },
-        },
-      );
-    }
-  });
+  try {
+    await uploadWith(permit, request.url, () =>
+      answered(clock, allowed, () =>
+        send(request.url, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${context.token}`,
+            'content-type': 'application/octet-stream',
+          },
+          body: request.bytes,
+          signal: clock.signal,
+        }),
+      ),
+    );
+  } finally {
+    // However it ended, the deadline is let go: a finished upload leaves no timer behind.
+    clock.end();
+  }
+}
+
+/** The upload's answer, judged by its status: nothing, or a `CommsError` saying what went wrong. */
+async function answered(
+  clock: ReturnType<typeof uploadClock>,
+  allowed: number,
+  post: () => Promise<Response>,
+): Promise<void> {
+  let response: Response;
+  try {
+    response = await clock.within(post());
+  } catch (error) {
+    // The guard's own refusal, as it is: it already says what it means.
+    if (error instanceof CommsError) throw error;
+    if (isRefusedRedirect(error)) throw redirected();
+    throw new CommsError(
+      'TRANSIENT',
+      clock.timedOut()
+        ? `the upload to ${SLACK_FILES_ORIGIN} was not answered within ${spokenDuration(allowed)}, the time a file of this size is allowed`
+        : `could not reach ${SLACK_FILES_ORIGIN} to upload the file`,
+      { hint: 'Check the network, then try again.' },
+    );
+  }
+  // Not awaited: the answer is decided by its status, and a host that stops sending must not hold the post.
+  response.body?.cancel().catch(() => undefined);
+  if (response.redirected || (response.status >= 300 && response.status < 400)) throw redirected();
+  if (!response.ok) {
+    throw new CommsError(
+      codeForStatus(response.status),
+      `${SLACK_FILES_ORIGIN} answered ${response.status} to the upload`,
+      {
+        hint: response.status === 429 || response.status >= 500 ? 'Try again shortly.' : 'Nothing was posted.',
+        details: { status: response.status },
+      },
+    );
+  }
 }

@@ -5,7 +5,13 @@ import { runInNewContext } from 'node:vm';
 import { gzipSync } from 'node:zlib';
 import { CommsError } from '@agentcomms/core';
 import { callSlack, type SlackCall } from '../src/api/call.ts';
-import { checkedFileUrl, type SlackFileRequest, slackFileDownload } from '../src/api/download.ts';
+import {
+  checkedFileUrl,
+  type DownloadPace,
+  downloadCeilingMs,
+  type SlackFileRequest,
+  slackFileDownload,
+} from '../src/api/download.ts';
 import { closedPermit } from '../src/api/guard.ts';
 import { type FakeSlack, type FileReply, startFakeSlack } from './support/fake-slack.ts';
 
@@ -310,7 +316,8 @@ test('a host that stops sending is given up on when the time runs out', { timeou
   const fake = await slack({ stall: true });
   const started = Date.now();
   await refused(slackFileDownload(context(fake, { timeoutMs: 300 }), request()), 'network', (error) => {
-    assert.match(error.message, /took longer than it is allowed/);
+    assert.match(error.message, /stopped sending for 0\.3 seconds/);
+    assert.equal(error.details?.why, 'stalled');
   });
   assert.ok(Date.now() - started < 20_000, 'the timeout did not bound the body');
 });
@@ -328,11 +335,100 @@ test('the time limit holds even when garbage is collected while the body stalls'
   const every = setInterval(collect, 50);
   try {
     await refused(slackFileDownload(context(fake, { timeoutMs: 1_000 }), request()), 'network', (error) => {
-      assert.match(error.message, /took longer than it is allowed/);
+      assert.match(error.message, /stopped sending for 1 second\b/);
+      assert.equal(error.details?.why, 'stalled');
     });
   } finally {
     clearInterval(every);
   }
+});
+
+// ── How long a download may take: a limit on silence, and one on the whole file for its size ─────────────────
+
+const MIB = 1024 * 1024;
+
+test('the time a whole download is allowed grows with the file: two minutes at least, and 128 KiB a second beyond', () => {
+  // Issue #49: one two-minute limit for every file refused a 100 MiB file on any link slower than about 850 KiB a second.
+  assert.equal(downloadCeilingMs(100 * MIB), 800_000);
+  assert.equal(downloadCeilingMs(1 * MIB), 120_000);
+  assert.equal(downloadCeilingMs(15 * MIB), 120_000, 'fifteen MiB at 128 KiB a second is exactly the two minutes');
+  assert.equal(downloadCeilingMs(16 * MIB), 128_000);
+  assert.equal(downloadCeilingMs(0), 120_000);
+  for (const nonsense of [Number.NaN, -1, Number.POSITIVE_INFINITY]) {
+    assert.equal(downloadCeilingMs(nonsense), 120_000, String(nonsense));
+  }
+});
+
+/** `count` pieces of `size` bytes each. */
+function pieces(count: number, size: number): Uint8Array[] {
+  return Array.from({ length: count }, (_, at) => new Uint8Array(size).fill(at % 256));
+}
+
+test('a slow host that keeps sending is waited for, long past the limit on silence', { timeout: 30_000 }, async () => {
+  /*
+   * Fifteen pieces a tenth of a second apart: a second and a half, three times the half-second of silence allowed.
+   * Silence is what is limited, and there never is any — every piece that arrives starts the limit again.
+   */
+  const fake = await slack({ pace: { chunks: pieces(15, 1000), everyMs: 100 } });
+  const body = await slackFileDownload(context(fake, { timeoutMs: 500 }), request());
+  assert.equal(body.bytes.byteLength, 15_000);
+});
+
+test('a host that stops sending partway is given up on once it has been silent for the limit', {
+  timeout: 30_000,
+}, async () => {
+  const fake = await slack({ pace: { chunks: pieces(10, 1000), everyMs: 50 }, stallAfter: 3 });
+  const started = Date.now();
+  await refused(slackFileDownload(context(fake, { timeoutMs: 400 }), request()), 'network', (error) => {
+    assert.equal(error.code, 'TRANSIENT');
+    assert.equal(error.details?.why, 'stalled');
+    assert.match(error.message, /^https:\/\/files\.slack\.com stopped sending for 0\.4 seconds/);
+  });
+  assert.ok(Date.now() - started < 10_000);
+});
+
+/** A pace that allows a 2000-byte file half a second: a small ceiling, so a test can trickle past it quickly. */
+const TIGHT: DownloadPace = { floorMs: 200, bytesPerSecond: 4000 };
+
+test('a host that trickles is given up on once the file has taken longer than its size allows', {
+  timeout: 30_000,
+}, async () => {
+  /*
+   * Twenty pieces of a hundred bytes, a twentieth of a second apart: never silent for long, and a second in all — twice
+   * what 2000 bytes are allowed at this pace. The refusal says which limit it was, and what to do that is not only
+   * trying again on the same connection.
+   */
+  const fake = await slack({ pace: { chunks: pieces(20, 100), everyMs: 50 }, headers: { 'content-length': '2000' } });
+  await refused(slackFileDownload(context(fake, { timeoutMs: 400 }), request(), TIGHT), 'network', (error) => {
+    assert.equal(error.code, 'TRANSIENT');
+    assert.equal(error.details?.why, 'too-slow');
+    assert.match(error.message, /took longer than a file of this size is allowed \(0\.5 seconds\)/);
+    assert.doesNotMatch(error.message, /stopped sending/);
+    assert.match(error.hint ?? '', /faster connection|save it from there/);
+    assert.notEqual(error.hint, 'Check the network, then try again.');
+  });
+});
+
+test('the whole file is allowed the time its declared length, else its recorded size, else the cap, is worth', {
+  timeout: 60_000,
+}, async () => {
+  const trickle = (headers: Record<string, string> = {}) =>
+    slack({ pace: { chunks: pieces(20, 100), everyMs: 50 }, headers });
+  const tooSlow = (error: CommsError) => assert.equal(error.details?.why, 'too-slow');
+
+  // The length the answer declares, over the size the file's record gave.
+  await refused(
+    slackFileDownload(context(await trickle({ 'content-length': '2000' })), request({ size: MIB }), TIGHT),
+    'network',
+    tooSlow,
+  );
+  // No length declared: the recorded size.
+  await refused(slackFileDownload(context(await trickle()), request({ size: 2000 }), TIGHT), 'network', tooSlow);
+  // Neither: the most the download may be — here, as small as the file.
+  await refused(slackFileDownload(context(await trickle()), request({ maxBytes: 2000 }), TIGHT), 'network', tooSlow);
+  // And a larger size is allowed longer: the same trickle, measured against a mebibyte, arrives whole.
+  const whole = await slackFileDownload(context(await trickle()), request({ size: MIB }), TIGHT);
+  assert.equal(whole.bytes.byteLength, 2000);
 });
 
 test('a caller’s signal stops a download too', async () => {
