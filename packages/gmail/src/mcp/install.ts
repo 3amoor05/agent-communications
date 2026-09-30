@@ -95,6 +95,36 @@ export async function clientServesInbox(
   return false;
 }
 
+/**
+ * The mailbox `client`'s entry of ours under the name serves, when that is another than `inbox` — the entry a
+ * registration for `inbox` would find in its place, pinned elsewhere — or null.
+ *
+ * A finish that registers the server for the mailbox it has just connected pins it to that mailbox when this is not
+ * null (#47). Left to the installer, a replacement keeps the pin of the entry it replaces, so `setup --replace-server`
+ * for `home` over an entry for `other` registered `other` again, and `home` was reached by nothing; and without
+ * `--replace-server` the refusal's hint was that same command. With the pin given, the replacement serves `home`, and
+ * the refusal names a second entry instead. Read as `clientServesInbox` reads: of ours, at user scope, under the name.
+ */
+export async function mailboxServedElsewhere(
+  env: NodeJS.ProcessEnv,
+  request: { client: string; inbox: string; name?: string | undefined },
+): Promise<string | null> {
+  let servers: RegisteredServer[];
+  try {
+    servers = await listRegisteredServers(env);
+  } catch {
+    return null;
+  }
+  const name = request.name ?? GMAIL_MCP.defaultServerName;
+  for (const server of servers) {
+    if (server.client !== request.client || server.name !== name || server.scope === 'project') continue;
+    if (!isProductServer(server, GMAIL_MCP)) continue;
+    const pin = GMAIL_MCP.narrowingOf(server.args).inbox;
+    if (pin !== undefined && pin !== request.inbox) return pin;
+  }
+  return null;
+}
+
 export async function mcpInstall(context: GmailContext, options: InstallOptions): Promise<InstallResult> {
   /*
    * The pin is resolved before anything is written.

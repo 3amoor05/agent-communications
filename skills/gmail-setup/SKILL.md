@@ -226,10 +226,13 @@ send policy?" either: `gmail_inboxes_list` answers that in one call.
    `finish` registers the server once the mailbox is connected. From an agent that finish exits `10` with
    the mailbox connected and `registration: { status: "approval-required", approvalId, preview, claim }`:
    show `preview`, and after the user's yes run `claim` — `agent-gmail mcp install --client <client>
-   --approval <id>`, with `--force` when replacing. `"already-registered"` means the client's `gmail`
-   entry already serves this mailbox; nothing was asked. `"not-registered"` means it did not happen, and
-   `reason` says why — somebody else's server under that name, ours there without `--replace-server`, or
-   a client this cannot write to. The mailbox is connected all the same, and nothing was replaced.
+   --approval <id>`, with `--force` when replacing, and `--inbox <mailbox>` when the entry there served
+   another mailbox: the replacement serves the one just connected, and the preview says what the old one
+   served. `"already-registered"` means the client's `gmail` entry already serves this mailbox; nothing was
+   asked. `"not-registered"` means it did not happen, and `reason` says why — somebody else's server under
+   that name, ours there without `--replace-server` (its `hint` then names a second entry for this mailbox,
+   under a name of its own), or a client this cannot write to. The mailbox is connected all the same, and
+   nothing was replaced.
    **Complete when:** every step you can drive has run, and anything left is named in `blocked`.
 
 2. **Offer the import when a legacy setup exists.** If `~/.gmail-mcp` is there, run

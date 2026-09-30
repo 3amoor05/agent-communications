@@ -366,9 +366,15 @@ export function serverInstallChange(
           pinned !== undefined ? `pinned to the ${noun} ${pinned}` : '',
           effective.readOnly ? 'read-only' : '',
         ].filter(Boolean);
+        // What the entry being replaced served, in the channel's words (#47): the account its pin named, or every one.
+        const served =
+          pinName === undefined || pinName === 'readOnly'
+            ? []
+            : [...new Set(previous.map((server) => facts.narrowingOf(server.args)[pinName] ?? null))];
+        const what = served.map((pin) => (pin === null ? `every ${noun}` : `the ${noun} ${pin}`)).join(' and ');
         const replacing =
           previous.length > 0
-            ? `, replacing its own earlier entry of that name${kept.length > 0 ? ` and keeping ${kept.join(' ')} from it` : ''}`
+            ? `, replacing its own earlier entry of that name${what ? `, which served ${what}${kept.length > 0 ? ',' : ''}` : ''}${kept.length > 0 ? ` and keeping ${kept.join(' ')} from it` : ''}`
             : '';
         effects.push(
           `registers the ${label} MCP server with ${request.client} as "${name}"${pins.length > 0 ? `, ${pins.join(', ')}` : ''}${replacing}`,

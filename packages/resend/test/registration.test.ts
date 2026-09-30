@@ -180,7 +180,10 @@ test('pinned with `account`: prepared by comms_server_install, written with --ac
     // ── Registered again with --force and no pin named: the pin is kept, never widened ──
     const force = ['mcp', 'install', '--client', 'cursor', '--launcher', 'npx', '--no-verify', '--force'];
     const again = pending(await cli(m, force));
-    assert.match(again.preview, /replacing its own earlier entry of that name and keeping --account acme\/resend/);
+    assert.match(
+      again.preview,
+      /replacing its own earlier entry of that name, which served the account acme\/resend, and keeping --account acme\/resend/,
+    );
     assert.doesNotMatch(again.preview, /not pinned/);
     const forced = await cli(m, [...force, '--approval', again.approvalId]);
     assert.equal(forced.code, 0, forced.stdout);

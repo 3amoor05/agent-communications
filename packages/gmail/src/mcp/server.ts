@@ -19,6 +19,7 @@ import {
 } from '@agentcomms/core';
 import { acceptedContent, inputRequired, inputResponse, McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
+import type { RegistrationIntent } from '../auth/flows.ts';
 import { GmailContext, type GmailContextOptions } from '../context.ts';
 import { listLabels, listSendAs, threadTimeline } from '../operations/analyse.ts';
 import { downloadAttachments, findAttachments } from '../operations/attachments.ts';
@@ -64,7 +65,7 @@ import {
   startSignIn,
 } from '../operations/signin.ts';
 import { VERSION } from '../version.ts';
-import { clientServesInbox } from './install.ts';
+import { clientServesInbox, mailboxServedElsewhere } from './install.ts';
 import { inboxArgument, mcpBoolean, mcpInboxes, mcpInteger, mcpStringArray } from './schemas.ts';
 
 export interface GmailMcpOptions extends GmailContextOptions {
@@ -126,6 +127,46 @@ export async function buildInstructions(context: GmailContext, pinned: string | 
     aliases.length > 0 ? `Known mailboxes: ${listed}${more}.` : 'No mailbox is connected yet.',
     'Call gmail_inboxes_list for the current list, what each may do, and how each treats sending.',
   ].join('\n');
+}
+
+/**
+ * The registration a finished sign-in hands back for comms_server_install: the request `inbox add --finish` makes,
+ * and what to do with it, in words an agent can follow.
+ *
+ * Pinned to the mailbox just connected when the entry of ours under that name serves another (#47): replacing it —
+ * `setup --replace-server`, which travels as `force` — then serves this mailbox rather than keeping the other's pin;
+ * and without replacing, the way to reach both is a second entry under a name of its own, which the text names.
+ */
+async function pendingRegistrationOf(
+  env: NodeJS.ProcessEnv,
+  intent: RegistrationIntent,
+  alias: string,
+  replace: boolean,
+) {
+  const served = await mailboxServedElsewhere(env, { client: intent.client, inbox: alias });
+  const launcher = intent.launcher ? ` --launcher ${intent.launcher}` : '';
+  const second = `gmail-${alias.split('/')[0]}`;
+  const what = replace
+    ? `setup was asked to replace the Gmail server's entry in ${intent.client}${served === null ? '' : ` — it served the mailbox ${served}`} — and it has not been replaced yet`
+    : served === null
+      ? `no Gmail server registered with ${intent.client} serves it yet`
+      : `the Gmail server's entry in ${intent.client} serves the mailbox ${served}, not this one. Replacing it would take ${served}'s server away, so the way to reach both is a second entry under a name of its own: call comms_server_install with these arguments and \`name: "${second}"\`, or at a terminal \`agent-gmail mcp install --client ${intent.client} --name ${second} --inbox ${alias}${launcher}\``;
+  const command = `agent-gmail mcp install --client ${intent.client}${launcher}${served === null ? '' : ` --inbox ${alias}`}${replace ? ' --force' : ''}`;
+  return {
+    client: intent.client,
+    tool: 'comms_server_install' as const,
+    arguments: {
+      channel: 'gmail' as const,
+      client: intent.client,
+      ...(intent.launcher ? { launcher: intent.launcher } : {}),
+      ...(served === null ? {} : { inbox: alias }),
+      ...(replace ? { force: true as const } : {}),
+    },
+    next:
+      !replace && served !== null
+        ? `The mailbox is connected; ${what}. Show the person the preview, and call it again with the approvalId once they say yes.`
+        : `The mailbox is connected; ${what}. Call comms_server_install on the core server with these arguments, show the person its preview, and call it again with the approvalId once they say yes. Without the core server, the person runs \`${command}\` at a terminal.`,
+  };
 }
 
 /**
@@ -1482,13 +1523,14 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
                   channel: z.literal('gmail'),
                   client: z.string(),
                   launcher: z.string().optional(),
+                  inbox: z.string().optional(),
                   force: z.literal(true).optional(),
                 }),
                 next: z.string(),
               })
               .optional()
               .describe(
-                'present when `agent-gmail setup --mcp-client` handed this sign-in off and no entry of this server in that client serves this mailbox yet — or `setup` was given `--replace-server`, which `force` carries: nothing was registered — call comms_server_install with `arguments`, show its preview, and claim it after the user says yes',
+                'present when `agent-gmail setup --mcp-client` handed this sign-in off and no entry of this server in that client serves this mailbox yet — or `setup` was given `--replace-server`, which `force` carries: nothing was registered — call comms_server_install with `arguments`, show its preview, and claim it after the user says yes. `inbox` pins it to this mailbox, where the entry under that name serves another',
               ),
           }),
           annotations: { readOnlyHint: false, openWorldHint: true },
@@ -1528,21 +1570,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
             const pending =
               intent &&
               (replace || !(await clientServesInbox(context.env, { client: intent.client, inbox: result.alias })))
-                ? {
-                    client: intent.client,
-                    tool: 'comms_server_install' as const,
-                    arguments: {
-                      channel: 'gmail' as const,
-                      client: intent.client,
-                      ...(intent.launcher ? { launcher: intent.launcher } : {}),
-                      ...(replace ? { force: true as const } : {}),
-                    },
-                    next: `The mailbox is connected; ${
-                      replace
-                        ? `setup was asked to replace the Gmail server's entry in ${intent.client}, and it has not been replaced yet`
-                        : `no Gmail server registered with ${intent.client} serves it yet`
-                    }. Call comms_server_install on the core server with these arguments, show the person its preview, and call it again with the approvalId once they say yes. Without the core server, the person runs \`agent-gmail mcp install --client ${intent.client}${intent.launcher ? ` --launcher ${intent.launcher}` : ''}${replace ? ' --force' : ''}\` at a terminal.`,
-                  }
+                ? await pendingRegistrationOf(context.env, intent, result.alias, replace)
                 : undefined;
             return reply({
               alias: result.alias,

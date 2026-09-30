@@ -682,6 +682,20 @@ function claimName(
   }
   if (taken.length > 0 && !options.force) {
     /*
+     * Asked for a server pinned to one account, where ours under the name serves another: replacing it would take that
+     * one's server away. The way to reach both is a second entry under a name of its own (#47) — the command that
+     * replaces this one, below, registered the other account again and left the one asked for reached by nothing.
+     */
+    for (const pin of PIN_OPTIONS) {
+      const wanted = options[pin];
+      const served = taken.map((server) => product.narrowingOf(server.args)[pin]).find(Boolean);
+      if (!wanted || !served || served === wanted) continue;
+      const second = `${product.defaultServerName}-${wanted.split('/')[0]}`;
+      throw new CommsError('CONFIG', `${options.client} already has this server registered as "${name}"`, {
+        hint: `That entry serves ${served}; to serve ${wanted} as well, register a second entry under its own name: \`${installCommand(product, options, second === name ? `${name}-2` : second)}\`.`,
+      });
+    }
+    /*
      * The command that replaces this entry as it is, read off the entry the way the doctors' repair reads it.
      * Built from the caller's flags alone, it told somebody who had left the pin out to run a command that dropped
      * it; the caller's own flags still win, and only what they left out comes from the entry.

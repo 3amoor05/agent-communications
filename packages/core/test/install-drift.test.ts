@@ -239,7 +239,7 @@ test(
       assert.equal(asked.structuredContent?.approvalRequired, true, JSON.stringify(asked.structuredContent));
       assert.match(
         String(asked.structuredContent?.preview),
-        /pinned to the mailbox acme\/gmail, replacing its own earlier entry of that name and keeping --inbox acme\/gmail from it/,
+        /pinned to the mailbox acme\/gmail, replacing its own earlier entry of that name, which served the mailbox acme\/gmail, and keeping --inbox acme\/gmail from it/,
       );
       const result = await call('comms_server_install', {
         ...request,

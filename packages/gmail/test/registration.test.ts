@@ -754,7 +754,12 @@ test('an entry of ours pinned to another mailbox does not serve this one: the fi
   // own preflight refused it — ours under that name, with no `--replace-server` — which is said, with the way on.
   assert.equal(finished.registration?.status, 'not-registered', finished.run.stdout);
   assert.match(String(finished.registration?.reason), /cursor already has this server registered as "gmail"/);
-  assert.match(String(finished.registration?.hint), /--force/);
+  // The way on is a second entry for the mailbox just connected (#47). It was `--inbox other … --force`: the command
+  // that registers `other` again, and leaves `home` reached by nothing.
+  const hint = String(finished.registration?.hint);
+  assert.match(hint, /`agent-gmail mcp install --client cursor --name gmail-home --inbox home --launcher local`/);
+  assert.match(hint, /serves other/);
+  assert.doesNotMatch(hint, /--inbox other|--force/);
   // The mailbox is connected, in an envelope that says the finish worked; the status is the registration's refusal.
   assert.equal(finished.envelope.ok, true, finished.run.stdout);
   assert.equal(finished.envelope.data?.alias, 'home');
@@ -892,6 +897,66 @@ test('`setup --replace-server` travels with the sign-in, and the finish replaces
   );
 });
 
+/*
+ * `setup --replace-server` over an entry pinned to another mailbox. The replacement kept that pin — the install's rule
+ * for an entry it replaces — so the finish of `home` re-registered the server for `other`, and the preview said only
+ * "replacing its own earlier entry". The mailbox just connected is the pin now, and the preview says what the old
+ * entry served (#47).
+ */
+test('`setup --replace-server` over an entry pinned to another mailbox pins the replacement to the one just connected', async () => {
+  const machine = await clientOnly();
+  await cursorHolds(machine, { gmail: ours('--inbox', 'other') });
+  const finished = await finishing(machine, await handedOff(machine, ['--replace-server']));
+  assert.equal(finished.registration?.status, 'approval-required', finished.run.stdout);
+  const preview = String(finished.registration?.preview);
+  assert.match(
+    preview,
+    /as "gmail", pinned to the mailbox home, replacing its own earlier entry of that name, which served the mailbox other/,
+  );
+  assert.doesNotMatch(preview, /keeping --inbox other/);
+  assert.equal(
+    finished.registration?.claim,
+    `agent-gmail mcp install --client cursor --launcher local --inbox home --force --approval ${finished.registration?.approvalId}`,
+  );
+
+  // The printed claim is the prepared change: it claims, and the entry serves `home`.
+  const claimed = await cli(machine.harness, [...argvOf(String(finished.registration?.claim)), '--json'], {
+    env: machine.env,
+  });
+  assert.equal(claimed.code, 0, `${claimed.stdout}${claimed.stderr}`);
+  const written = JSON.parse(await readFile(machine.cursor, 'utf8')) as {
+    mcpServers: { gmail: { args: string[] } };
+  };
+  const args = written.mcpServers.gmail.args;
+  assert.deepEqual(args.slice(args.indexOf('--inbox'), args.indexOf('--inbox') + 2), ['--inbox', 'home']);
+  assert.ok(!args.includes('other'), args.join(' '));
+});
+
+test('gmail_inbox_finish hands the mailbox just connected back as the pin, when the entry it replaces serves another', async () => {
+  const machine = await clientOnly();
+  await cursorHolds(machine, { gmail: ours('--inbox', 'other') });
+  const pending = (await finishedOverMcp(machine, ['--replace-server'])).pendingRegistration as
+    | Record<string, unknown>
+    | undefined;
+  assert.ok(pending);
+  const args = pending.arguments as Record<string, unknown>;
+  assert.deepEqual(args, { channel: 'gmail', client: 'cursor', launcher: 'local', inbox: 'home', force: true });
+  assert.match(String(pending.next), /it served the mailbox other/);
+  assert.match(String(pending.next), /`agent-gmail mcp install --client cursor --launcher local --inbox home --force`/);
+
+  // The core server takes them as that replacement: pinned to `home`, saying what the old entry served.
+  const server = await coreServer(machine.harness, machine.env);
+  try {
+    const asked = approvalAsked(await server.call('comms_server_install', args));
+    assert.match(
+      asked.preview,
+      /pinned to the mailbox home, replacing its own earlier entry of that name, which served the mailbox other/,
+    );
+  } finally {
+    await server.close();
+  }
+});
+
 test('a sign-in that carries no registration finishes exactly as it always did', async () => {
   // Started by `inbox add --start`, as every flow before this change was: its record has no `registerWith` at all.
   const machine = await clientOnly();
@@ -957,7 +1022,14 @@ test('gmail_inbox_finish decides `pendingRegistration` by the entry that serves 
   const before = await cursorHolds(pinned, { gmail: ours('--inbox', 'other') });
   const pending = (await finishedOverMcp(pinned)).pendingRegistration as Record<string, unknown> | undefined;
   assert.ok(pending, 'an entry for another mailbox is not this one');
-  assert.deepEqual(pending.arguments, { channel: 'gmail', client: 'cursor', launcher: 'local' });
+  // Pinned to the mailbox just connected, as `inbox add --finish` asks for it; and, since nothing is to be replaced,
+  // the way to reach both is a second entry, which the text names (#47).
+  assert.deepEqual(pending.arguments, { channel: 'gmail', client: 'cursor', launcher: 'local', inbox: 'home' });
+  assert.match(String(pending.next), /serves the mailbox other, not this one/);
+  assert.match(
+    String(pending.next),
+    /`agent-gmail mcp install --client cursor --name gmail-home --inbox home --launcher local`/,
+  );
   assert.equal(await readFile(pinned.cursor, 'utf8'), before);
 
   // One that serves it: nothing pending, as the command says "already-registered".

@@ -413,7 +413,13 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
    */
   const setupRegistration = async (
     context: GmailContext,
-    request: { client: string; launcher?: string | undefined; force?: boolean | undefined },
+    request: {
+      client: string;
+      launcher?: string | undefined;
+      force?: boolean | undefined;
+      /** The mailbox to pin it to: the one just connected, when the entry in its place serves another (#47). */
+      inbox?: string | undefined;
+    },
   ) => {
     const { GMAIL_MCP } = await import('../mcp/install.ts');
     return serverInstallChange(
@@ -424,9 +430,20 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
         client: request.client as SupportedClient,
         force: request.force === true,
         ...(request.launcher ? { launcher: request.launcher as Launcher } : {}),
+        ...(request.inbox ? { inbox: request.inbox } : {}),
       },
       GMAIL_MCP,
     );
+  };
+
+  /**
+   * The pin a registration for `inbox` takes: that mailbox, when the entry of ours in its place serves another
+   * (`mailboxServedElsewhere`), so a replacement serves the mailbox just connected rather than keeping the other's
+   * pin, and a refusal names a second entry for it; otherwise none, as `setup` has always registered.
+   */
+  const pinFor = async (client: string, inbox: string): Promise<string | undefined> => {
+    const { mailboxServedElsewhere } = await import('../mcp/install.ts');
+    return (await mailboxServedElsewhere(env, { client, inbox })) === null ? undefined : inbox;
   };
 
   /**
@@ -456,11 +473,13 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
         return { client, status: 'already-registered' };
       }
     }
+    const pin = await pinFor(client, connected.alias);
     // `mcp install` with what `setup` was given: the request `setupRegistration` makes, and so the same change.
     const install = [
       'agent-gmail mcp install --client',
       client,
       ...(intent.launcher ? ['--launcher', intent.launcher] : []),
+      ...(pin ? ['--inbox', pin] : []),
       // Without it the claim's own preflight refuses the entry the prepared change replaces: not the same change.
       ...(replace ? ['--force'] : []),
     ].join(' ');
@@ -472,6 +491,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
         client,
         ...(intent.launcher ? { launcher: intent.launcher } : {}),
         force: replace,
+        ...(pin ? { inbox: pin } : {}),
       });
       let result: ServerInstallResult;
       if (person) {
@@ -1730,15 +1750,19 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
          * make. An approval for it from either of those is claimed here with `--mcp-approval`, and one from here by
          * them.
          */
-        const registration = (client: string) =>
-          setupRegistration(context, {
+        const registration = async (client: string) => {
+          // The mailbox this run connected with `--inbox`, when the entry in its place serves another: see `pinFor`.
+          const pin = options.inbox ? await pinFor(client, String(options.inbox)) : undefined;
+          return setupRegistration(context, {
             client,
             ...(options.launcher ? { launcher: String(options.launcher) } : {}),
             // `force` removes an existing entry before adding its replacement. Doing that silently, from a
             // headless run, would take somebody's working server away on the strength of a flag they passed for
             // a different reason — so it needs asking for, exactly as `mcp install` makes you ask.
             force: options.replaceServer === true,
+            ...(pin ? { inbox: pin } : {}),
           });
+        };
         const mcpApproval = typeof options.mcpApproval === 'string' ? options.mcpApproval : undefined;
         // This command again, without the approvals it carried: the OAuth client's is spent by the time the
         // registration is reached, and the registration's is the one to put back.

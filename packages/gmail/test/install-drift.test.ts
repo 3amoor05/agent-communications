@@ -167,7 +167,7 @@ test(
     assert.equal(asked.envelope.error?.code, 'APPROVAL_PENDING');
     assert.match(
       String(asked.envelope.error?.details?.preview),
-      /pinned to the mailbox work, replacing its own earlier entry of that name and keeping --inbox work from it/,
+      /pinned to the mailbox work, replacing its own earlier entry of that name, which served the mailbox work, and keeping --inbox work from it/,
     );
     const approvalId = String(asked.envelope.error?.details?.approvalId);
 

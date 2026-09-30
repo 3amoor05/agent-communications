@@ -236,7 +236,7 @@ test('`--force` keeps a pin written as one argument, `--flag=value`, for every c
     assert.ok(
       effects.some((effect) =>
         effect.includes(
-          `pinned to the ${accountNoun(channel)} ${value}, replacing its own earlier entry of that name and keeping ${flag} ${value} from it`,
+          `pinned to the ${accountNoun(channel)} ${value}, replacing its own earlier entry of that name, which served the ${accountNoun(channel)} ${value}, and keeping ${flag} ${value} from it`,
         ),
       ),
       `${channel}: ${effects.join(' | ')}`,

@@ -873,7 +873,10 @@ test('setup --replace-server keeps the mailbox pin and --read-only of the entry 
     { env: { HOME: home, USERPROFILE: home } },
   );
   // What the person approved already said so: the replacement, and the narrowing it keeps.
-  assert.match(first.stdout, /replacing its own earlier entry of that name and keeping --inbox work --read-only/);
+  assert.match(
+    first.stdout,
+    /replacing its own earlier entry of that name, which served the mailbox work, and keeping --inbox work --read-only/,
+  );
 
   const written = JSON.parse(await readFile(cursor, 'utf8')) as { mcpServers: { gmail: { args: string[] } } };
   assert.deepEqual(
