@@ -321,13 +321,25 @@ function attachPolicyFor(deps: Pick<PrepareDeps, 'attachPolicy'>): AttachPolicy 
 }
 
 /**
+ * The command that puts a draft's files on it again, as it is run: the draft's id and the workspace's own name, and
+ * only the paths left to fill in. `draft update` takes nothing without `--workspace`, and a refusal whose one step
+ * leaves it out offers a command that fails.
+ */
+export function refileCommand(workspace: string, draftId: string): string {
+  return `agent-slack draft update ${draftId} --workspace ${workspace} --file <path…>`;
+}
+
+/**
  * Reads every file of a draft again, and refuses the post if any is no longer the file the draft recorded.
  *
  * Before anyone is shown anything: the preview lists each file's hash, and a person must never be asked to approve
  * bytes other than the ones listed. The draft's record is what the digest binds, so a file that changed since is
  * refused here rather than shown as its old self.
  */
-async function filesAsRecorded(deps: Pick<PrepareDeps, 'attachPolicy'>, draft: SlackDraft): Promise<void> {
+async function filesAsRecorded(
+  deps: Pick<PrepareDeps, 'attachPolicy' | 'workspaceName'>,
+  draft: SlackDraft,
+): Promise<void> {
   const files = draft.files ?? [];
   if (files.length === 0) return;
   const policy = attachPolicyFor(deps);
@@ -338,8 +350,14 @@ async function filesAsRecorded(deps: Pick<PrepareDeps, 'attachPolicy'>, draft: S
         'BAD_DATA',
         `nothing was prepared: ${file.name} is not the file the draft recorded — ${check.why}`,
         {
-          hint: `Put the files on the draft again with \`agent-slack draft update ${draft.draftId} --file <path…>\` (every one: --file replaces the list) or slack_draft_update, then prepare it again.`,
-          details: { draftId: draft.draftId, file: file.name, path: file.path, reason: 'file-changed' },
+          hint: `Put the files on the draft again with \`${refileCommand(deps.workspaceName, draft.draftId)}\` (every one: --file replaces the list) or slack_draft_update, then prepare it again.`,
+          details: {
+            draftId: draft.draftId,
+            file: file.name,
+            path: file.path,
+            reason: 'file-changed',
+            command: refileCommand(deps.workspaceName, draft.draftId),
+          },
         },
       );
     }
@@ -589,7 +607,7 @@ export async function postPrepared(
     waitingHint('post', deps.surface, approvalId),
   );
 
-  if (policy !== undefined) return postFiles(deps, approvalId, payload, files, policy);
+  if (policy !== undefined) return postFiles(deps, approvalId, draft.draftId, payload, files, policy);
 
   try {
     const response = await spendOn(deps.permit, approvalId, 'chat.postMessage', () =>
@@ -662,18 +680,23 @@ function perhapsDiscarded(possible: readonly { name: string }[]): string {
 }
 
 /** The refusal for a file that is not the one approved: nothing more is sent, and the approval is spent. */
-function notApproved(file: SlackDraftFile, why: string, uploaded: readonly { id: string; name: string }[]): CommsError {
+function notApproved(
+  file: SlackDraftFile,
+  why: string,
+  uploaded: readonly { id: string; name: string }[],
+  command: string,
+): CommsError {
   return new CommsError(
     'APPROVAL_VOID',
     `${uploaded.length === 0 ? 'nothing was sent' : 'nothing was posted'}: ${file.name} is not the file that was approved — ${why}`,
     {
       hint: [
         discarded(uploaded),
-        'Put the files on the draft again with `agent-slack draft update <draftId> --file <path…>` or slack_draft_update, prepare it, and approve the new preview.',
+        `Put the files on the draft again with \`${command}\` or slack_draft_update, prepare it, and approve the new preview.`,
       ]
         .filter(Boolean)
         .join(' '),
-      details: { file: file.name, path: file.path, reason: 'file-changed', uploaded: [...uploaded] },
+      details: { file: file.name, path: file.path, reason: 'file-changed', uploaded: [...uploaded], command },
     },
   );
 }
@@ -734,6 +757,7 @@ async function messageTsOf(
 async function postFiles(
   deps: PostDeps,
   approvalId: string,
+  draftId: string,
   payload: ComposedPayload,
   files: readonly SlackDraftFile[],
   policy: AttachPolicy,
@@ -746,12 +770,13 @@ async function postFiles(
   let inFlight: { id: string; name: string } | undefined;
   const posted: PostedFile[] = [];
   const call: SlackCall = { ...deps.call, permit: deps.permit };
+  const refile = refileCommand(deps.workspaceName, draftId);
   let stage: 'check' | 'upload' | 'complete' = 'check';
   try {
     await spendOn(deps.permit, approvalId, PUBLISH_FILES, async () => {
       for (const file of files) {
         const check = await checkRecordedFile(file, policy);
-        if (!check.ok) throw notApproved(file, check.why, uploaded);
+        if (!check.ok) throw notApproved(file, check.why, uploaded, refile);
       }
       stage = 'upload';
       for (const file of files) {
@@ -762,7 +787,7 @@ async function postFiles(
           });
         }
         const read = await rereadFile(file, policy);
-        if (!read.ok) throw notApproved(file, read.why, uploaded);
+        if (!read.ok) throw notApproved(file, read.why, uploaded, refile);
         inFlight = { id: place.file_id, name: file.name };
         await slackFileUpload(call, { url: place.upload_url, bytes: read.bytes });
         inFlight = undefined;

@@ -196,7 +196,7 @@ test('a file that changed after the draft was written is refused at prepare, and
   assert.equal(error.code, 'BAD_DATA');
   assert.match(error.message, /notes\.md is not the file the draft recorded/);
   assert.equal(error.details?.file, 'notes.md');
-  assert.match(error.hint ?? '', new RegExp(`agent-slack draft update ${draft.draftId} --file`));
+  assert.match(error.hint ?? '', new RegExp(`agent-slack draft update ${draft.draftId} --workspace acme --file`));
   assert.deepEqual(await context.core.approvals.list(), [], 'an approval was made for bytes nobody was shown');
   assert.deepEqual(asked(fake), [], 'Slack was asked something about a post that was refused');
 });

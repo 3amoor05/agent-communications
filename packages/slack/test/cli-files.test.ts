@@ -362,3 +362,58 @@ test('draft update --no-files takes every file off, as slack_draft_update with f
   const empty = await cli(harness, fake, ['--json', 'draft', 'update', quiet.draftId, ...W, '--no-files']);
   assert.equal((JSON.parse(empty.stdout) as Envelope<never>).error?.code, 'USAGE');
 });
+
+test('the command a changed-file refusal names can be run as it is written, at prepare and at send', async (t) => {
+  /*
+   * It named `agent-slack draft update <draftId> --file …` without `--workspace`, which the command requires — so the
+   * one step it offered failed. The command now carries the draft's id and the workspace's own name; only the paths
+   * are left to fill in, and a person runs it as written.
+   */
+  const { harness, fake, docs } = await world(t);
+  const real = file(docs, 'totals.csv', 'a,b\n1,2\n');
+  const created = await data<Drafted>(harness, fake, ['draft', 'create', ...W, '--channel', 'C1', '--file', real]);
+  const expected = `agent-slack draft update ${created.draftId} --workspace acme --file <path…>`;
+  const runAsWritten = async (command: string): Promise<void> => {
+    const argv = command.replace('<path…>', real).split(' ').slice(1);
+    const ran = await cli(harness, fake, argv);
+    assert.equal(ran.code, 0, `${command}: ${ran.stdout}${ran.stderr}`);
+  };
+
+  // At prepare.
+  writeFileSync(real, 'a,b\n9,9\n');
+  const atPrepare = await cli(harness, fake, ['--json', 'post', 'prepare', ...W, '--draft', created.draftId]);
+  const prepareError = (JSON.parse(atPrepare.stdout) as Envelope<never>).error;
+  assert.equal(prepareError?.code, 'BAD_DATA');
+  assert.equal(prepareError?.details?.command, expected);
+  assert.ok(prepareError?.hint?.includes(`\`${expected}\``), prepareError?.hint);
+  await runAsWritten(String(prepareError?.details?.command));
+
+  // At send: prepared with the file as it is now, then changed again before the send.
+  const prepared = await data<{ approvalId: string }>(harness, fake, [
+    'post',
+    'prepare',
+    ...W,
+    '--draft',
+    created.draftId,
+  ]);
+  writeFileSync(real, 'a,b\n7,7\n');
+  const argv = [
+    'post',
+    'send',
+    ...W,
+    '--draft',
+    created.draftId,
+    '--approval',
+    prepared.approvalId,
+    '--expect-channel',
+    'C1',
+  ];
+  const atSend = await cli(harness, fake, ['--json', ...argv]);
+  const sendError = (JSON.parse(atSend.stdout) as Envelope<never>).error;
+  assert.equal(sendError?.code, 'APPROVAL_VOID');
+  assert.equal(sendError?.details?.command, expected);
+  assert.ok(sendError?.hint?.includes(`\`${expected}\``), sendError?.hint);
+  await runAsWritten(String(sendError?.details?.command));
+  const again = await cli(harness, fake, ['post', 'prepare', ...W, '--draft', created.draftId]);
+  assert.equal(again.code, 0, `${again.stdout}${again.stderr}`);
+});
