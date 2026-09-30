@@ -690,7 +690,10 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
           .string()
           .optional()
           .describe('a draft already written, to prepare as it is; leave out to compose one'),
-        channel: z.string().optional().describe('the channel id, for a new message'),
+        channel: z
+          .string()
+          .optional()
+          .describe('the conversation id, for a new message: a channel’s C… or G…, or a DM’s D… — never a user id'),
         text: z.string().optional().describe('what to say, for a new message. Markup in it is shown, not interpreted'),
         threadTs: z.string().optional().describe('reply inside this thread, for a new message'),
         mentionUsers: z.array(z.string()).optional().describe('user ids to mention, by id — never by name'),
@@ -785,7 +788,7 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
         'Write a draft on this machine, without preparing it. **Nothing reaches Slack** — Slack keeps no server-side draft. Mentions are by user id and checked as slack_post_prepare checks them, and `broadcast` is only `here`, `channel` or `everyone`. `files` are local files to post with it, each checked and recorded now by name, size, type and SHA-256 — never its bytes; with files, `text` is optional and is posted as their message. To post it, call slack_post_prepare with its `draftId`, show the preview, and wait for the person. The same as `agent-slack draft create`.',
       inputSchema: {
         ...workspaceArg,
-        channel: z.string().describe('the channel or conversation id'),
+        channel: z.string().describe('the conversation id: a channel’s C… or G…, or a DM’s D… — never a user id'),
         text: z
           .string()
           .optional()
@@ -829,7 +832,7 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
       inputSchema: {
         ...workspaceArg,
         draftId: z.string(),
-        channel: z.string().optional().describe('post it to this channel id instead'),
+        channel: z.string().optional().describe('post it to this conversation id instead — never a user id'),
         text: z.string().optional().describe('what to say instead. Markup in it is shown, not interpreted'),
         threadTs: z.string().optional().describe('reply inside this thread instead'),
         mentionUsers: z.array(z.string()).optional().describe('mention these people instead, by user id'),

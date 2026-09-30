@@ -21,11 +21,14 @@ export interface ComposedPayload {
   readonly channel: string;
   readonly thread_ts?: string | undefined;
   /**
-   * Both off, on everything this package posts.
+   * Both off, on every message this package posts.
    *
    * They default to `true`. Slack's own security guidance says to disable them when an LLM may have generated
    * the URL, and that is exactly this package's case: an agent that can be talked into including a link should
    * not thereby be able to make a preview of that link appear in a channel, fetched by Slack, for everyone.
+   *
+   * A post with files does not send them: its words go out through `files.completeUploadExternal`, which has no such
+   * switch. Its preview warns instead, and its approval is flagged — see `unfurlWarnings` in `preview.ts` (#44).
    */
   readonly unfurl_links: false;
   readonly unfurl_media: false;

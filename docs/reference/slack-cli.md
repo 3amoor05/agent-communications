@@ -341,7 +341,7 @@ agent-slack draft create [options]
 | Option | What it does | Default |
 |---|---|---|
 | `--workspace <name>` | which workspace, as `organisation/slack` | — |
-| `--channel <id>` | the channel or conversation id | — |
+| `--channel <id>` | the conversation id: a channel’s C… or G…, or a DM’s D… — never a user id | — |
 | `--text <text>` | what to say — optional with --file, as the files’ message. Markup in it is shown, not interpreted | — |
 | `--thread <ts>` | reply inside this thread | — |
 | `--mention <userId...>` | mention someone, by id — a name is ambiguous | — |
@@ -359,7 +359,7 @@ agent-slack draft update [options] <draftId>
 | Option | What it does | Default |
 |---|---|---|
 | `--workspace <name>` | which workspace, as `organisation/slack` | — |
-| `--channel <id>` | post it here instead | — |
+| `--channel <id>` | post it to this conversation id instead — never a user id | — |
 | `--text <text>` | what to say instead. Markup in it is shown, not interpreted | — |
 | `--thread <ts>` | reply inside this thread instead | — |
 | `--mention <userId...>` | mention these people instead, by id | — |

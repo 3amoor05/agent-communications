@@ -136,8 +136,13 @@ Five additions:
 1. **Unfurls are third-party content inside somebody else's message.** An unfurl attaches Block Kit content that
    the message author never wrote. When reading, unfurled content is **labelled as unfurled** and attributed to
    the URL it came from, never merged into the author's text.
-2. **`unfurl_links: false` and `unfurl_media: false` on everything we post.** They default to `true`. Slack's own
+2. **`unfurl_links: false` and `unfurl_media: false` on every message we post.** They default to `true`. Slack's own
    security guidance says to disable them when an LLM may have generated the URL, and that is exactly our case.
+   A post with files cannot say it: its words go out through `files.completeUploadExternal`, which takes no such
+   switch, so Slack may unfurl a link in them for the whole room. For such a post the preview lists every URL in the
+   words — link spans and bare `http://`/`https://` addresses alike — the approval is flagged `link-may-unfurl`, and a
+   warning says Slack offers no way to turn this off for files and to post the link as a message of its own (#44). A
+   mitigation, not a fix; a post of text alone, its preview and its digest are unchanged.
 3. **Invisible characters in `mrkdwn`.** Slack is not documented to normalise them. We do, on the way in, and
    count what we removed. Since the Gmail release this happens *inside* `neutralise` rather than beside it, so a
    caller cannot run the two in the wrong order — the Gmail build found `<​/untrusted-email-content>` passing a
@@ -452,11 +457,12 @@ is true is the one we ship.
 | Whether a user-token `chat.update` shows "(edited)" | The preview says an edit **may** be visible to anyone who saw the original, and never promises a silent correction | Post, edit, and look at another account's client |
 | Whether `files.upload` is hard-disabled past its sunset | Only the current three-step external upload flow is implemented; the old one is not called at all | Nothing — we do not depend on it either way |
 | Whether the API can read the 90-day band free workspaces hide | A search that returns nothing says "nothing in what this workspace lets the API see", never "nothing exists" | Search a free workspace for a message older than 90 days |
-| Whether a user token can post to a public channel the person has not joined | The preview names the channel **and whether the person is a member of it**, and a non-member post is refused by us regardless of whether Slack allows it | Attempt one, and see |
+| Whether a user token can post to a public channel the person has not joined | A post to a room that was read and does not count the person as a member is refused by us regardless of whether Slack allows it — `SCOPE_MISSING`, `not-a-member`, before any preview, at the approval screen, and at send before the approval is claimed (#43). DMs and group DMs are exempt by kind. A room that could not be read prepares as before, and its preview says membership could not be checked. A user id is refused as a destination: a DM has a `D…` id of its own | Attempt one, and see |
 | The exact body of a 429 | The retry reads `Retry-After` from the header, which is documented, and treats a missing one as sixty seconds | Trip one deliberately and record the body |
 
 Two of those — the edit label and the non-member post — are the ones that could mislead a person about what their
-approval meant, and both are handled by the preview saying less rather than by assuming more.
+approval meant. The edit label is handled by the preview saying less rather than by assuming more; the non-member
+post by refusing it, so no approval is ever asked for one.
 
 ## 9. What this design does not protect against
 

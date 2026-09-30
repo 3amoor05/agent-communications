@@ -186,7 +186,9 @@ marked is still saved, and `warnings` says so.
 
 The bytes come from `files.slack.com` alone, with the workspace's token, and only at the address of the file just
 looked up: a file held outside Slack, a redirect or Slack's sign-in page is refused, and no file may be over 100 MiB
-or a run over 500 MiB. An HTML file is refused too, always: Slack answers with a web page when the token cannot read a
+or a run over 500 MiB. A download is given up on when `files.slack.com` sends nothing for 30 seconds, or when the
+whole file takes longer than its size allows — its size at 128 KiB a second, and two minutes at least, so 800 seconds
+for 100 MiB; the reason under `skipped` says which. An HTML file is refused too, always: Slack answers with a web page when the token cannot read a
 file, and an HTML file is a web page, so the two cannot be told apart. It is listed under `skipped` as
 indistinguishable from the sign-in page; open it in Slack instead. A file that cannot be fetched is listed under
 `skipped` with the reason while the rest are saved; a manifest under this package's own state directory — never in
@@ -222,6 +224,13 @@ preview is written to be pasteable.
 The approval binds the exact bytes. Editing the draft voids it; so does the room growing between the preview and
 the post, because the words did not change but who reads them did.
 
+A post goes to a conversation id — a channel's `C…` or `G…`, or a direct message's `D…`, which `agent-slack channels`
+lists. A user id (`U…`, `W…`) is refused as the destination; mentions still take one. And it goes only to a room you
+have joined: a post to a channel you are not a member of is refused (`SCOPE_MISSING`) before any preview, and again at
+`approve` and at `post send`, before the approval is spent — join the channel in Slack yourself, then prepare it
+again. Direct messages and group DMs are exempt. When the room cannot be read, the preview says membership could not
+be checked.
+
 ### Files
 
 A post can carry up to ten local files, each up to 100 MiB, with or without words: `--file` on `draft create`, and
@@ -242,7 +251,13 @@ channel itself. The approval is bound to each file's hash: a file is read again 
 file is read and checked again when it is sent, before anything is uploaded — one that changed voids the approval
 and nothing goes. Then each file goes to the upload URL Slack gives for it, and one call shares them all, with the
 words as their message. `post send` prints each file's id in Slack and the message's `ts`, or says that Slack had not
-attached them to a message yet: Slack's answer has no `ts`, and none is guessed.
+attached them to a message yet: Slack's answer has no `ts`, and none is guessed. Each upload is allowed its size at
+64 KiB a second, and five minutes at least.
+
+A message is posted with link previews off. A post with files cannot be — Slack offers no way to turn them off for
+files — so Slack may fetch a link in the files' words and show its preview to everyone in the channel. For such a post
+the preview lists every link in the words, bare `https://…` ones included, the approval is flagged `link-may-unfurl`,
+and a warning says to post the link as a message of its own if it should not unfurl.
 
 Sending a file needs the workspace in `send` mode with `files:write` granted; without it the prepare is refused with
 the command that fixes it.

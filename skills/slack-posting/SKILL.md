@@ -83,6 +83,14 @@ the room cannot be read at that moment it says so and approves nothing, and the 
 When you post, pass the channel you believe it goes to (`expectChannel`, `--expect-channel`), from the preview. If
 it is not the draft's channel, nothing is posted.
 
+**Where a post can go.** A post goes to a conversation id: a channel's `C…` or `G…`, or a direct message's `D…`. A
+user id (`U…`, `W…`) is refused as a destination; for a direct message, find the DM's own id with `slack_channels`
+(`agent-slack channels --workspace <name>`). And it goes only to a room this account has joined: a post to a channel
+it is not a member of is refused before any preview — and again at `agent-slack approve` and at send, before the
+approval is spent. Ask the person to join it in Slack themselves, then prepare again; nothing here joins a channel. A
+DM or a group DM is never refused for this. If the room could not be read, the preview says membership could not be
+checked; say so when you show it.
+
 ## Sending files
 
 Files go through the same gate as words, in the same post. Name each one by its local path: `files` on
@@ -110,6 +118,12 @@ naming the limit.
 from — before the channel's reach and the words. It warns about a file over 10 MiB, and about one Slack shows in the
 channel itself (an image, a PDF, any kind of text), since everyone in the room will see what is in it. Show it in
 full, as for any post.
+
+**A link in a file post's words may unfurl.** A message is posted with link previews turned off. A post with files
+cannot be: Slack offers no way to turn them off for files, so it may fetch a link in the files' words and show that
+page's preview to everyone in the channel. For such a post the preview lists every link in the words — a bare
+`https://…` as well as a formatted one — flags the approval `link-may-unfurl`, and warns. Show the warning, and offer
+what it suggests: post the link as a message of its own, which does not unfurl. Do not take the link out on your own.
 
 **The approval is bound to each file's hash.** A draft records each file's size and hash when it is written. The
 file is read again when it is prepared and refused if it changed since; and when it is sent every file is read and
@@ -142,6 +156,8 @@ do next on the surface you are using. Tell the person, and stop. Once they have 
 | a file must come from an allowed folder | It is outside the home folder, or in a folder never sent from; ask the person to copy it under their home folder |
 | the draft is not what its text composes to (`BAD_DATA`) | Its file was changed outside agent-slack, so a preview of its text would not be what posts. Delete it and compose it again |
 | the room grew after the preview | The words did not change; who reads them did |
+| not a member of the channel (`SCOPE_MISSING`, `not-a-member`) | This account has not joined that room. The person joins it in Slack themselves, then you prepare again; a DM or group DM is never refused for this |
+| a user id is not a destination (`USAGE`) | A post goes to a conversation id. For a direct message use the DM's `D…` id, which `slack_channels` lists; mentions still take user ids |
 | the channel given is not the draft's | You were about to post somewhere other than where you think |
 | already claimed | An approval is single-use, across processes |
 | refused at `agent-slack approve` | The draft or the room changed since the preview; the screen is only shown when it is still what the approval binds |

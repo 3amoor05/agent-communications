@@ -978,7 +978,7 @@ configuration problem.`,
 
   workspaceOption(draft.command('create'))
     .description('write a draft. It lives on this machine — Slack has no server-side draft')
-    .requiredOption('--channel <id>', 'the channel or conversation id')
+    .requiredOption('--channel <id>', 'the conversation id: a channel’s C… or G…, or a DM’s D… — never a user id')
     .option(
       '--text <text>',
       'what to say — optional with --file, as the files’ message. Markup in it is shown, not interpreted',
@@ -1004,7 +1004,7 @@ configuration problem.`,
 
   workspaceOption(draft.command('update <draftId>'))
     .description('change a draft: what you give replaces what it had. Any approval it had no longer holds')
-    .option('--channel <id>', 'post it here instead')
+    .option('--channel <id>', 'post it to this conversation id instead — never a user id')
     .option('--text <text>', 'what to say instead. Markup in it is shown, not interpreted')
     .option('--thread <ts>', 'reply inside this thread instead')
     .option('--mention <userId...>', 'mention these people instead, by id')

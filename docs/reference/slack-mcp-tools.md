@@ -195,7 +195,7 @@ Return the preview a person must approve, with its approval id. **Nothing is pos
 |---|---|---|---|
 | `workspace` | string | no | which workspace, as `organisation/slack` |
 | `draftId` | string | no | a draft already written, to prepare as it is; leave out to compose one |
-| `channel` | string | no | the channel id, for a new message |
+| `channel` | string | no | the conversation id, for a new message: a channel’s C… or G…, or a DM’s D… — never a user id |
 | `text` | string | no | what to say, for a new message. Markup in it is shown, not interpreted |
 | `threadTs` | string | no | reply inside this thread, for a new message |
 | `mentionUsers` | string[] | no | user ids to mention, by id — never by name |
@@ -224,7 +224,7 @@ Write a draft on this machine, without preparing it. **Nothing reaches Slack** �
 | Argument | Type | Required | What it is |
 |---|---|---|---|
 | `workspace` | string | no | which workspace, as `organisation/slack` |
-| `channel` | string | **yes** | the channel or conversation id |
+| `channel` | string | **yes** | the conversation id: a channel’s C… or G…, or a DM’s D… — never a user id |
 | `text` | string | no | what to say — optional with files, as their message. Markup in it is shown, not interpreted |
 | `threadTs` | string | no | reply inside this thread |
 | `mentionUsers` | string[] | no | user ids to mention, by id — never by name |
@@ -241,7 +241,7 @@ Change a draft on this machine: each field given replaces what it had, and the r
 |---|---|---|---|
 | `workspace` | string | no | which workspace, as `organisation/slack` |
 | `draftId` | string | **yes** |  |
-| `channel` | string | no | post it to this channel id instead |
+| `channel` | string | no | post it to this conversation id instead — never a user id |
 | `text` | string | no | what to say instead. Markup in it is shown, not interpreted |
 | `threadTs` | string | no | reply inside this thread instead |
 | `mentionUsers` | string[] | no | mention these people instead, by user id |
