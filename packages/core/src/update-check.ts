@@ -200,7 +200,26 @@ export function updateCheckChildEntry(
     return null;
   }
   if (!/^cli\.(?:mjs|ts)$/.test(basename(path))) return null;
-  return { command: process.execPath, args: [...execArgv, path] };
+  return { command: process.execPath, args: [...withoutDebugger(execArgv), path] };
+}
+
+/**
+ * Node's own flags, less a debugger's. A child started with `--inspect-brk` would wait for a debugger nobody attaches
+ * until its claim ran out, and one with `--inspect` would ask for the port the command already holds. The rest —
+ * `--experimental-strip-types` for a checkout, say — the child needs as the command did.
+ */
+function withoutDebugger(execArgv: readonly string[]): string[] {
+  const kept: string[] = [];
+  for (let index = 0; index < execArgv.length; index++) {
+    const flag = execArgv[index] ?? '';
+    if (!/^--(?:inspect|debug)(?:-brk|-port|-wait)?(?:=.*)?$/.test(flag)) {
+      kept.push(flag);
+      continue;
+    }
+    // `--inspect-port 9229` is two words; `--inspect-port=9229` and `--inspect=9229` are one.
+    if (/^--(?:inspect|debug)-port$/.test(flag)) index++;
+  }
+  return kept;
 }
 
 /**

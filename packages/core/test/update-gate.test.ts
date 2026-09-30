@@ -1632,6 +1632,20 @@ test("the child is this CLI again: the running script when it is a CLI's entry, 
   const real = realpathSync.native(entry);
   const flags = ['--experimental-strip-types'];
   assert.deepEqual(updateCheckChildEntry(entry, flags), { command: process.execPath, args: [...flags, real] });
+  // A debugger's flags stay with the command: a child started with `--inspect-brk` would wait for a debugger nobody
+  // attaches until its claim ran out, and one with `--inspect` would fight the command for its port.
+  const debugging = [
+    '--inspect-brk',
+    '--experimental-strip-types',
+    '--inspect=9229',
+    '--inspect-port',
+    '9230',
+    '--debug',
+  ];
+  assert.deepEqual(updateCheckChildEntry(entry, debugging), {
+    command: process.execPath,
+    args: ['--experimental-strip-types', real],
+  });
   // npm's `agentcomms` on PATH is a link to the entry. (Windows starts it through a `.cmd` shim instead, which has
   // already run Node on the `.mjs`: the script is the entry itself.)
   if (process.platform !== 'win32') {
