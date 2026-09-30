@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { claimChange, prepareChange } from '../src/changes.ts';
@@ -124,6 +124,10 @@ function cursor(m: Machine, servers: Record<string, { command: string; args: str
 function normalise(m: Machine, text: string): string {
   let out = text;
   for (const home of new Set([m.home, realpathSync(m.home)])) out = out.split(home).join('<home>');
+  // The npx an npx entry starts is the one beside this node when PATH has none (#46): `npx`, or `npx.cmd` on Windows.
+  for (const npx of ['npx', 'npx.cmd', 'npx.CMD', 'npx.exe'].map((name) => join(dirname(process.execPath), name))) {
+    out = out.split(npx).join('<npx>');
+  }
   out = out.split(REPO).join('<repo>').split(process.execPath).join('<node>');
   out = out.split(VERSION).join('<version>');
   return out.replace(/\\/g, '/');

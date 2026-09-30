@@ -12,7 +12,7 @@ import { CHANNEL_SERVERS } from '../src/channel-servers.ts';
 import type { AccountConfig, InboxConfig } from '../src/config.ts';
 import { type Core, openCore } from '../src/core.ts';
 import { type CoreMcpOptions, createCoreMcpServer } from '../src/mcp/server.ts';
-import { managedRuntimeDir, managedRuntimeEntry } from '../src/mcp-install.ts';
+import { managedRuntimeDir, managedRuntimeEntry, whichExecutable } from '../src/mcp-install.ts';
 import { compareVersions, npmLatestVersion } from '../src/npm.ts';
 import type { UpdateDeps } from '../src/operations/update.ts';
 import { VERSION } from '../src/version.ts';
@@ -600,14 +600,17 @@ test('update prepares one approval listing every step, writes nothing before it,
     assert.equal(first.policy, 'chat');
     const preview = String(first.preview);
     const steps = preview.slice(preview.indexOf('It also:')).split('\n').slice(1);
-    // Where each entry goes and what it starts (#46): no npx on this PATH, and this process's node.
+    // Where each entry goes and what it starts (#46): no npx on this PATH, so the npx beside this process's node,
+    // found as the install finds it (npx.cmd on Windows), and this process's node.
+    const npx = await whichExecutable('npx', { PATH: dirname(process.execPath), PATHEXT: process.env.PATHEXT });
+    assert.ok(npx, 'npm installs npx beside node');
     const goes = (command: string) =>
       `  - the entry goes in ${join('~', '.cursor', 'mcp.json')}, and cursor will start it with ${command}`;
     assert.deepEqual(steps, [
       `  - installs ${PACKAGES.gmail}@${LATEST} from npm into ${managedRuntimeDir(m.dataDir, PACKAGES.gmail, LATEST)}`,
       `  - installs ${PACKAGES.slack}@${LATEST} from npm into ${managedRuntimeDir(m.dataDir, PACKAGES.slack, LATEST)}`,
       `  - registers the agentcomms (core) MCP server with cursor as "agentcomms" again (user scope, npx launcher), at ${LATEST} in place of ${OLD}`,
-      goes('npx'),
+      goes(npx),
       `  - cursor will fetch ${PACKAGES.core}@${LATEST} from npm each time it starts "agentcomms"`,
       `  - registers the Gmail MCP server with cursor as "gmail" again (user scope, managed launcher), at ${LATEST} in place of ${OLD} — pinned to the mailbox acme/gmail, read-only, as now`,
       goes(process.execPath),
