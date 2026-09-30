@@ -164,7 +164,7 @@ export const ATTACH_ROOTS_ADD = 'agentcomms attach roots add <folder>';
  * path means whatever folder the command or the server happened to start in, which is not something a person reads
  * in a preview and knows.
  */
-function checkedPath(path: unknown): string {
+export function checkedPath(path: unknown, platform: NodeJS.Platform = process.platform): string {
   const value = typeof path === 'string' ? path.trim() : '';
   if (value === '') {
     throw new CommsError('USAGE', 'name the folder or path', {
@@ -172,7 +172,27 @@ function checkedPath(path: unknown): string {
     });
   }
   const fromHome = value === '~' || value.startsWith('~/') || value.startsWith('~\\');
-  if (!fromHome && !isAbsolute(value)) {
+  if (fromHome) return value;
+  if (platform === 'win32') {
+    /*
+     * Windows calls `\outgoing` absolute, but it is on whichever drive is current when it is read: approved as
+     * `C:\outgoing` today, it would allow `D:\outgoing` from a process started on D:, with nobody asked again. So a
+     * drive, or a share's `\\server\share`, is part of the path, and nothing else is taken as absolute.
+     */
+    const drive = /^[A-Za-z]:[\\/]/.test(value);
+    const share = /^[\\/]{2}[^\\/?.][^\\/]*[\\/][^\\/]+/.test(value);
+    if (!drive && !share) {
+      throw new CommsError(
+        'USAGE',
+        `"${value}" does not name its drive: give it in full, like C:\\outgoing, or starting with ~`,
+        {
+          hint: 'A path with no drive is on whichever drive is current when it is read, which is not something a person approves once.',
+        },
+      );
+    }
+    return value;
+  }
+  if (!isAbsolute(value)) {
     throw new CommsError('USAGE', `"${value}" is a relative path: give it absolute, or starting with ~`, {
       hint: 'A relative path means whatever folder this happened to start in. Write it in full, or from your home folder: `~/Documents/outgoing`.',
     });

@@ -9,6 +9,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { type Core, openCore } from '../src/core.ts';
 import { defaultAttachDeny } from '../src/jail.ts';
 import { createCoreMcpServer } from '../src/mcp/server.ts';
+import { checkedPath } from '../src/operations/attach-settings.ts';
 import { tempDir } from './helpers/temp.ts';
 
 /*
@@ -85,6 +86,18 @@ async function connect(m: Machine) {
 }
 
 const defaultsOf = async (m: Machine) => (await m.core.config.load()).defaults;
+
+test('on Windows a folder is named with its drive or share: a path with no drive would be whichever drive is current', () => {
+  for (const ok of ['C:\\outgoing', 'd:/outgoing', '\\\\server\\share\\outgoing', '~\\outgoing', '~/outgoing', '~']) {
+    assert.equal(checkedPath(ok, 'win32'), ok, ok);
+  }
+  for (const bad of ['\\outgoing', '/outgoing', 'outgoing', 'C:outgoing', '\\\\?\\C:\\x', '\\\\.\\pipe\\x']) {
+    assert.throws(() => checkedPath(bad, 'win32'), /does not name its drive|relative path/, bad);
+  }
+  // Elsewhere a path from the root is absolute, as it always was.
+  assert.equal(checkedPath('/srv/outgoing', 'linux'), '/srv/outgoing');
+  assert.throws(() => checkedPath('outgoing', 'linux'), /relative path/);
+});
 
 test('the report lists the folders, the person’s own deny entries and the built-in list, the same from both surfaces', async () => {
   const m = machine({ attachRoots: ['~', join('~', 'work')], attachDeny: [join('~', 'work', 'secret')] });
