@@ -651,6 +651,16 @@ function discarded(uploaded: readonly { name: string }[]): string {
     : `${names.join(', ')} were uploaded and never shared; Slack discards them.`;
 }
 
+/**
+ * A file whose bytes went out and whose answer did not come back as success, in words: a 500 after the body was read,
+ * or a connection dropped. Whether Slack kept them is not known, so it is said to be possible, never either way.
+ */
+function perhapsDiscarded(possible: readonly { name: string }[]): string {
+  if (possible.length === 0) return '';
+  const names = possible.map((file) => truncateDisplay(file.name, 60)).join(', ');
+  return `${names} may have been uploaded before the failure; nothing shared it, so if Slack has it, Slack discards it.`;
+}
+
 /** The refusal for a file that is not the one approved: nothing more is sent, and the approval is spent. */
 function notApproved(file: SlackDraftFile, why: string, uploaded: readonly { id: string; name: string }[]): CommsError {
   return new CommsError(
@@ -729,6 +739,11 @@ async function postFiles(
   policy: AttachPolicy,
 ): Promise<PostedFiles> {
   const uploaded: { id: string; name: string }[] = [];
+  /*
+   * The file whose bytes are on their way, from the moment the POST starts until its answer says they arrived. If the
+   * upload fails in between, they may have reached Slack or may not — so the failure names it as possibly uploaded.
+   */
+  let inFlight: { id: string; name: string } | undefined;
   const posted: PostedFile[] = [];
   const call: SlackCall = { ...deps.call, permit: deps.permit };
   let stage: 'check' | 'upload' | 'complete' = 'check';
@@ -748,7 +763,9 @@ async function postFiles(
         }
         const read = await rereadFile(file, policy);
         if (!read.ok) throw notApproved(file, read.why, uploaded);
+        inFlight = { id: place.file_id, name: file.name };
         await slackFileUpload(call, { url: place.upload_url, bytes: read.bytes });
+        inFlight = undefined;
         uploaded.push({ id: place.file_id, name: file.name });
         posted.push({ id: place.file_id, name: file.name, size: file.size, sha256: file.sha256 });
       }
@@ -762,7 +779,8 @@ async function postFiles(
       });
     });
   } catch (error) {
-    const reported = reportFailure(error, stage, uploaded);
+    const possiblyUploaded = inFlight === undefined ? [] : [inFlight];
+    const reported = reportFailure(error, stage, uploaded, possiblyUploaded);
     const message = reported instanceof Error ? reported.message : String(reported);
     // Recorded before it is rethrown: an approval left in `sending` is one whose outcome nobody knows.
     await deps.approvals.complete(approvalId, { error: message });
@@ -771,7 +789,19 @@ async function postFiles(
       alias: deps.workspaceName,
       operation: 'slack.post',
       outcome: stage === 'check' ? 'refused' : 'failed',
-      ids: { channel: payload.channel, ...(uploaded.length > 0 ? { files: uploaded.map((file) => file.id) } : {}) },
+      // Which files went up, and which may have: by id and name, never by what is in them.
+      ids: {
+        channel: payload.channel,
+        ...(uploaded.length > 0
+          ? { files: uploaded.map((file) => file.id), fileNames: uploaded.map((file) => file.name) }
+          : {}),
+        ...(possiblyUploaded.length > 0
+          ? {
+              possiblyUploaded: possiblyUploaded.map((file) => file.id),
+              possiblyUploadedNames: possiblyUploaded.map((file) => file.name),
+            }
+          : {}),
+      },
       approvalId,
       reason: message,
       ...(deps.surface ? { surface: deps.surface } : {}),
@@ -806,25 +836,31 @@ async function postFiles(
  * A file post's failure, in words that say what did and did not happen.
  *
  * A refusal of a changed file is already worded for itself. Anything else before the files were shared posts nothing,
- * and names the files that had gone up; a failure at the call that shares them is a failed post.
+ * and names the files that had gone up, and the one that may have — its bytes sent, its answer failed; a failure at
+ * the call that shares them is a failed post.
  */
 function reportFailure(
   error: unknown,
   stage: 'check' | 'upload' | 'complete',
   uploaded: readonly { id: string; name: string }[],
+  possiblyUploaded: readonly { id: string; name: string }[],
 ): unknown {
   if (!(error instanceof CommsError) || error.code === 'APPROVAL_VOID') return error;
+  const which = {
+    uploaded: [...uploaded],
+    ...(possiblyUploaded.length > 0 ? { possiblyUploaded: [...possiblyUploaded] } : {}),
+  };
   if (stage === 'complete') {
     return new CommsError(error.code, `the post failed: ${error.message}`, {
       hint: [error.hint, 'The files were uploaded; if Slack did not share them, it discards them.']
         .filter(Boolean)
         .join(' '),
-      details: { ...error.details, stage, uploaded: [...uploaded] },
+      details: { ...error.details, stage, ...which },
     });
   }
   return new CommsError(error.code, `nothing was posted: ${error.message}`, {
-    hint: [discarded(uploaded), error.hint].filter(Boolean).join(' '),
-    details: { ...error.details, stage, uploaded: [...uploaded] },
+    hint: [discarded(uploaded), perhapsDiscarded(possiblyUploaded), error.hint].filter(Boolean).join(' '),
+    details: { ...error.details, stage, ...which },
   });
 }
 

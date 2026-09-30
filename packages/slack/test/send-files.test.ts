@@ -660,3 +660,42 @@ test('at send, a file replaced while it is read for its upload voids the approva
   assert.deepEqual(w.uploads.received, {}, 'bytes reached the upload URL from a file that moved');
   assert.deepEqual(w.uploads.completed, []);
 });
+
+test('an upload whose answer failed is reported as possibly uploaded, in the error and the audit — by id and name', async (t) => {
+  /*
+   * The bytes were sent and the answer did not come back as success: a 500 after the body was read, or a connection
+   * dropped. Whether Slack kept them is not known, so the file is neither "uploaded" nor left out — it is named as
+   * possibly uploaded, which Slack discards all the same once it is never shared.
+   */
+  for (const answer of [{ status: 500, body: 'no' }, { drop: true }] as const) {
+    const w = await world(t);
+    let uploads = 0;
+    w.fake.uploadAnswer = () => {
+      uploads += 1;
+      return uploads === 1 ? { status: 200, body: 'OK' } : answer;
+    };
+    const draft = await createDraft(w.context, 'acme', {
+      channel: 'C1',
+      files: [file(w.docs, 'a.txt', 'a'), file(w.docs, 'b.txt', 'secret b'), file(w.docs, 'c.txt', 'c')],
+    });
+    const { prepared, send } = await prepareAndSend(w, draft.draftId);
+    const error = await refusal(send());
+    const [first, second] = w.uploads.issued;
+    const what = JSON.stringify(answer);
+
+    assert.deepEqual(w.uploads.received[second?.fileId ?? ''], Buffer.from('secret b'), `${what}: the body was sent`);
+    assert.deepEqual(error.details?.uploaded, [{ id: first?.fileId, name: 'a.txt' }], what);
+    assert.deepEqual(error.details?.possiblyUploaded, [{ id: second?.fileId, name: 'b.txt' }], what);
+    assert.match(error.hint ?? '', /b\.txt may have been uploaded/, what);
+    assert.deepEqual(w.uploads.completed, [], what);
+
+    const record = (await w.context.core.audit.tail()).find(
+      (entry) => entry.operation === 'slack.post' && entry.approvalId === prepared.approvalId,
+    );
+    assert.equal(record?.outcome, 'failed', what);
+    assert.deepEqual(record?.ids?.files, [first?.fileId], what);
+    assert.deepEqual(record?.ids?.possiblyUploaded, [second?.fileId], what);
+    assert.deepEqual(record?.ids?.possiblyUploadedNames, ['b.txt'], what);
+    assert.equal(JSON.stringify(record).includes('secret b'), false, `${what}: the audit holds the file's contents`);
+  }
+});
