@@ -7,6 +7,7 @@ import { CommsError, toCommsError } from '../errors.ts';
 import { type RegisteredServer, scanRegisteredServers, type UnreadableConfig } from '../mcp-clients.ts';
 import {
   clientCliSearch,
+  entryDestination,
   type InstallContext,
   type InstallOptions,
   type InstallResult,
@@ -19,7 +20,9 @@ import {
   managedRuntimeDir,
   mcpInstall,
   type Narrowing,
+  type PlannedInstall,
   pinnedVersion,
+  plannedInstall,
   preflightInstall,
   reusableRuntime,
   type SupportedClient,
@@ -619,6 +622,10 @@ interface RegistrationStep {
   item: RegistrationItem & { version: string; launcher: Launcher };
   product: McpProduct;
   options: InstallOptions;
+  /** What the plan's preflight found the install would do — the config file and the command among it — held to. */
+  install: PlannedInstall;
+  /** Where the entry goes and what it starts, as the preview says it: see `entryDestination`. */
+  destination: string;
 }
 
 interface Planned {
@@ -658,9 +665,15 @@ function registrationEffects(step: RegistrationStep): string[] {
   const { item } = step;
   const reach = reachOf(item.channel, channelServer(item.channel).narrowingOf(item.narrowing));
   const entry = `registers the ${channelLabel(item.channel)} MCP server with ${item.client} as "${item.name}" again (${item.scope} scope, ${item.launcher} launcher), at ${item.latest} in place of ${item.version}${reach ? ` — ${reach}, as now` : ''}`;
+  // Where it goes and what it starts, as `mcp install` says it (#46): in the digest, so a claim from an environment
+  // that resolves another config file or another command is another update.
   return item.launcher === 'npx'
-    ? [entry, `${item.client} will fetch ${item.package}@${item.latest} from npm each time it starts "${item.name}"`]
-    : [entry];
+    ? [
+        entry,
+        step.destination,
+        `${item.client} will fetch ${item.package}@${item.latest} from npm each time it starts "${item.name}"`,
+      ]
+    : [entry, step.destination];
 }
 
 /** Every step as the sentences a person reads, in the order the steps are taken. */
@@ -728,7 +741,13 @@ async function planRegistrations(
       );
       continue;
     }
-    steps.push({ item: item as RegistrationStep['item'], product, options });
+    steps.push({
+      item: item as RegistrationStep['item'],
+      product,
+      options,
+      install: plannedInstall(preflight),
+      destination: entryDestination(item.client, preflight.target, preflight.command, context.env),
+    });
   }
   return { steps, manual };
 }
@@ -836,7 +855,7 @@ async function applyUpdate(context: InstallContext, planned: Planned, deps: Upda
     }
   }
 
-  for (const { item, product, options } of planned.registrations) {
+  for (const { item, product, options, install } of planned.registrations) {
     const base = {
       kind: 'registration' as const,
       channel: item.channel,
@@ -861,7 +880,9 @@ async function applyUpdate(context: InstallContext, planned: Planned, deps: Upda
       // The pins the plan checked the install's own keep-the-pin rule arrives at, given outright: the entry is written
       // with exactly those whatever it finds to replace now, and says nothing of keeping what it was told.
       const pins = channelServer(item.channel).narrowingOf(item.narrowing);
-      const result = await mcpInstall(context, product, { ...options, ...pins });
+      // Held to what the plan found — the file, the client CLI, the entry replaced and the command it starts — so
+      // nothing is looked for again and registered in its place.
+      const result = await mcpInstall(context, product, { ...options, ...pins }, install);
       if (!result.applied) {
         steps.push({ ...base, outcome: 'failed', detail: result.notApplied ?? 'nothing was registered' });
         continue;

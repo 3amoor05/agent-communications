@@ -130,7 +130,8 @@ function fakeClient(
   writeFileSync(
     path,
     [
-      '#!/usr/bin/env node',
+      // This node, by path: the client CLI is started with the install's own environment, whose PATH has none.
+      `#!${process.execPath}`,
       'const fs = require("node:fs");',
       'const argv = process.argv.slice(2);',
       `fs.appendFileSync(${JSON.stringify(log)}, argv.join(" ") + "\\n");`,
@@ -365,4 +366,162 @@ test('a registration applied before it was planned is refused', async () => {
     change.apply(undefined, { before: await m.core.config.load(), after: await m.core.config.load(), summary: 'x' }),
     (error: unknown) => error instanceof CommsError && error.code === 'UNEXPECTED',
   );
+});
+
+// ── Where the entry goes, and what it starts: in the approval, and held to it (#46) ─────────────────────────────
+
+/** An executable stand-in called `name` in `dir`: found on PATH, never run (every test here passes `noVerify`). */
+function standIn(dir: string, name: 'node' | 'npx'): string {
+  const path = join(dir, process.platform === 'win32' ? `${name}.exe` : name);
+  writeFileSync(path, '');
+  chmodSync(path, 0o755);
+  return path;
+}
+
+/** The effect sentence that names the client's config file and the command, as the preview says it. */
+const whereAndHow = (client: string, file: string, command: string) =>
+  `the entry goes in ${file}, and ${client} will start it with ${command}`;
+
+test('the preview names the client config file and the command the entry starts, the home as ~', async () => {
+  const m = machine();
+  standIn(m.bin, 'node');
+  standIn(m.bin, 'npx');
+  const plan = async (request: Omit<ServerInstallRequest, 'client'>) =>
+    (
+      await serverInstallChange(m.core, m.env, { client: 'cursor', noVerify: true, ...request }).plan(
+        await m.core.config.load(),
+      )
+    ).effects ?? [];
+  const cursor = join('~', '.cursor', 'mcp.json');
+  const npx = await plan({ channel: 'gmail', launcher: 'npx' });
+  assert.ok(npx.includes(whereAndHow('cursor', cursor, join('~', 'bin', 'npx'))), npx.join('\n'));
+  // `local` and `managed` start node, from this PATH.
+  const local = await plan({ channel: 'core', launcher: 'local' });
+  assert.ok(local.includes(whereAndHow('cursor', cursor, join('~', 'bin', 'node'))), local.join('\n'));
+  // Printing writes nowhere, so it has no such sentence — and asks nobody.
+  assert.ok(
+    !(await plan({ channel: 'core', launcher: 'local', print: true })).some((effect) => /entry goes in/.test(effect)),
+  );
+});
+
+test(
+  'an approval is claimed only from an environment that resolves the same config file and command',
+  NOT_ON_WINDOWS,
+  async () => {
+    /*
+     * The approval is bound to its sentences, and the sentences said nothing of where the entry goes or what it
+     * starts. An approval prepared in one environment and claimed from another — `CLAUDE_CONFIG_DIR` pointing at
+     * another account's `.claude.json`, a PATH that finds another `npx` — registered there, with what the person
+     * never read.
+     */
+    const m = machine();
+    const calls = fakeClient(m.bin, 'claude');
+    const npx = standIn(m.bin, 'npx');
+    const elsewhere = join(m.home, 'elsewhere');
+    mkdirSync(elsewhere);
+    standIn(elsewhere, 'npx');
+    const request = { channel: 'gmail', client: 'claude-code', launcher: 'npx', noVerify: true };
+    const here = await connect(m);
+    const claims = async (env: Record<string, string>) => {
+      const asked = await here.call('comms_server_install', request);
+      assert.equal(asked.structuredContent?.approvalRequired, true, JSON.stringify(asked.structuredContent));
+      const there = await connect({ ...m, env: { ...m.env, ...env } });
+      try {
+        return {
+          preview: String(asked.structuredContent?.preview),
+          result: await there.call('comms_server_install', {
+            ...request,
+            approvalId: asked.structuredContent?.approvalId,
+          }),
+        };
+      } finally {
+        await there.close();
+      }
+    };
+    try {
+      for (const env of [
+        { CLAUDE_CONFIG_DIR: join(m.home, 'other-account') },
+        { PATH: [elsewhere, m.bin].join(delimiter) },
+      ]) {
+        const { preview, result } = await claims(env);
+        assert.equal(result.isError, true, `${JSON.stringify(env)}: ${JSON.stringify(result.structuredContent)}`);
+        const error = result.structuredContent?.error as { code: string; message: string };
+        assert.equal(error.code, 'APPROVAL_VOID', error.message);
+        assert.match(error.message, /what it does outside the configuration is not what was approved/);
+        assert.deepEqual(writesOf(calls()), [], `${JSON.stringify(env)}: claude was asked to write`);
+        // What the person read, and what the other environment would have changed.
+        assert.ok(
+          preview.includes(whereAndHow('claude-code', join('~', '.claude.json'), join('~', 'bin', 'npx'))),
+          preview,
+        );
+      }
+
+      // Claimed where it was prepared, it registers, starting exactly the command it named.
+      const asked = await here.call('comms_server_install', request);
+      const done = await here.call('comms_server_install', {
+        ...request,
+        approvalId: asked.structuredContent?.approvalId,
+      });
+      assert.notEqual(done.isError, true, JSON.stringify(done.structuredContent));
+      const [add] = writesOf(calls());
+      assert.match(add ?? '', /^mcp add-json gmail /);
+      assert.equal(
+        JSON.parse(add?.replace(/^mcp add-json gmail /, '').replace(/ --scope user$/, '') ?? '{}').command,
+        npx,
+      );
+    } finally {
+      await here.close();
+    }
+  },
+);
+
+/**
+ * PATH as `first` for the first `looks` times anything reads it, and as `then` after: the plan's look for node and the
+ * apply's, then anything later. Returns how many times it was read.
+ */
+function pathAfter(env: Record<string, string>, looks: number, first: string, then: string): () => number {
+  let reads = 0;
+  Object.defineProperty(env, 'PATH', {
+    enumerable: true,
+    configurable: true,
+    get: () => {
+      reads += 1;
+      return reads <= looks ? first : then;
+    },
+  });
+  return () => reads;
+}
+
+test('the entry starts the command the plan resolved: the install looks for node once, before it asks', async () => {
+  const m = machine();
+  const planned = standIn(m.bin, 'node');
+  standIn(m.later, 'node');
+  // One look by the plan, one by the apply's own preflight, and then the machine changes: a node that turns up now is
+  // not the one the plan named, and nothing after the preflight looks again.
+  const reads = pathAfter(m.env, 2, m.bin, m.later);
+  const result = await planThenApply(
+    m,
+    { channel: 'core', client: 'cursor', launcher: 'local', noVerify: true },
+    () => undefined,
+  );
+  assert.equal(result.applied, true);
+  assert.equal(result.entry.command, planned, 'the command the preview named');
+  assert.equal(reads(), 2, 'looked for once by the plan and once by the apply, and never again');
+  const cursor = knownClientConfigs(m.env).find((file) => file.client === 'cursor')?.path;
+  assert.ok(cursor);
+  assert.equal(JSON.parse(readFileSync(cursor, 'utf8')).mcpServers.agentcomms.command, planned);
+});
+
+test('a node found elsewhere by the time of the apply is refused: it is not the command planned', async () => {
+  const m = machine();
+  standIn(m.bin, 'node');
+  standIn(m.later, 'node');
+  const cursor = knownClientConfigs(m.env).find((file) => file.client === 'cursor')?.path;
+  await assert.rejects(
+    planThenApply(m, { channel: 'core', client: 'cursor', launcher: 'local', noVerify: true }, () => {
+      m.env.PATH = m.later;
+    }),
+    drifted(/it would start the server with .*later.*node, not .*bin.*node/),
+  );
+  assert.ok(cursor && !existsSync(cursor), 'nothing was written');
 });

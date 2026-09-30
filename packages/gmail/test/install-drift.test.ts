@@ -79,7 +79,8 @@ function fakeCodex(dir: string, options: { entry?: typeof PINNED; answers?: numb
   writeFileSync(
     path,
     [
-      '#!/usr/bin/env node',
+      // This node, by path: the client CLI is started with the install's own environment, whose PATH has none.
+      `#!${process.execPath}`,
       'const fs = require("node:fs");',
       'const argv = process.argv.slice(2);',
       `fs.appendFileSync(${JSON.stringify(log)}, argv.join(" ") + "\\n");`,

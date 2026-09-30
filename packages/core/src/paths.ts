@@ -116,6 +116,27 @@ export function expandHome(
 }
 
 /**
+ * A path as a preview shows it: the home at its start written `~`, the way a person reads and types it. The inverse of
+ * `expandHome`, and like it, nothing else is touched. Case is ignored on Windows, whose paths are not case-sensitive.
+ */
+export function shortenHome(path: string, home: string, platform: NodeJS.Platform = process.platform): string {
+  if (!home) return path;
+  const same = (a: string, b: string) => (platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b);
+  // A loop rather than a pattern anchored at the end, which backtracks over every run of separators in the string.
+  let end = home.length;
+  while (end > 0 && (home[end - 1] === '/' || home[end - 1] === '\\')) end -= 1;
+  const root = home.slice(0, end);
+  if (same(path, root)) return '~';
+  for (const separator of platform === 'win32' ? ['\\', '/'] : ['/']) {
+    const prefix = `${root}${separator}`;
+    if (path.length > prefix.length && same(path.slice(0, prefix.length), prefix)) {
+      return `~${separator}${path.slice(prefix.length)}`;
+    }
+  }
+  return path;
+}
+
+/**
  * The user's home directory, read from an environment.
  *
  * Windows does not set `HOME`; it sets `USERPROFILE`. Call sites that wrote `env.HOME ?? ''` and handed the result to

@@ -380,7 +380,8 @@ const NOT_ON_WINDOWS =
 function fakeClaude(config: string, bin: string = tempDir()): string {
   mkdirSync(bin, { recursive: true });
   const script = [
-    '#!/usr/bin/env node',
+    // This node, by path: the client CLI is started with the install's own environment, whose PATH has none.
+    `#!${process.execPath}`,
     'const fs = require("node:fs");',
     `const config = ${JSON.stringify(config)};`,
     'const [, sub, name, entry] = process.argv.slice(2);',

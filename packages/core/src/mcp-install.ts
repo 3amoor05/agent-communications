@@ -11,6 +11,7 @@ import {
   type RegisteredServer,
   scanRegisteredServers,
 } from './mcp-clients.ts';
+import { homeDirectory, shortenHome } from './paths.ts';
 import { absoluteSearchPath, childEnvironment } from './system-programs.ts';
 
 /*
@@ -452,7 +453,7 @@ export async function installManagedRuntime(
     `${JSON.stringify({ name: `${product.binary}-runtime`, private: true }, null, 2)}\n`,
   );
   const npmCli = await findNpmCli();
-  await run(process.execPath, [
+  await run(context.env, process.execPath, [
     npmCli,
     'install',
     '--prefix',
@@ -491,12 +492,14 @@ export async function findNpmCli(): Promise<string> {
 }
 
 /**
- * A command run to its end. Its environment is this process's, and on Windows also tells it never to take a program
- * from its current folder: `npm` and a client's command both start programs of their own by name.
+ * A command run to its end, in `env`: the environment the install resolved its target from — which client config,
+ * which client CLI, which node — and not this process's, which may be another. On Windows it also tells the command
+ * never to take a program from its current folder: `npm` and a client's command both start programs of their own by
+ * name.
  */
-function run(command: string, args: string[]): Promise<void> {
+function run(env: NodeJS.ProcessEnv, command: string, args: string[]): Promise<void> {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(command, args, { stdio: ['ignore', 'ignore', 'pipe'], env: childEnvironment(process.env) });
+    const child = spawn(command, args, { stdio: ['ignore', 'ignore', 'pipe'], env: childEnvironment(env) });
     let stderr = '';
     child.stderr?.on('data', (chunk) => {
       stderr += String(chunk);
@@ -509,22 +512,27 @@ function run(command: string, args: string[]): Promise<void> {
   });
 }
 
+/**
+ * The entry for one server, starting the command its preflight resolved (`resolved`): what the plan named and the
+ * person approved. Nothing here looks on PATH again — a node or an npx that turned up since would be another command
+ * than the one the preview said.
+ */
 async function buildEntry(
   context: InstallContext,
   product: McpProduct,
   options: InstallOptions,
   apply: boolean,
+  resolved: Pick<InstallPreflight, 'node' | 'command'>,
 ): Promise<{ entry: ServerEntry; launcher: Launcher; runtimeMissing: boolean }> {
   const launcher = options.launcher ?? 'managed';
-  const node = await resolveNode(context.env);
+  const { node } = resolved;
   const env = minimalEnv(context, node);
   const serverArgs = product.serverArgs(options);
 
   if (launcher === 'npx') {
-    const npx = (await whichExecutable('npx', context.env)) ?? 'npx';
     return {
       entry: {
-        command: npx,
+        command: resolved.command,
         args: ['-y', `${product.npxPackage}@${product.version}`, ...(product.npxArgs ?? []), ...serverArgs],
         env,
       },
@@ -737,11 +745,16 @@ function installCommand(product: McpProduct, options: InstallOptions, name: stri
 
 /**
  * A command's exit status and what it printed, kept here and never shown: codex prints an entry's env. Started as
- * `run` starts one, so that on Windows it takes no program from its current folder either.
+ * `run` starts one — in the environment the target was resolved from — so that on Windows it takes no program from its
+ * current folder either.
  */
-function capture(command: string, args: string[]): Promise<{ code: number | null; stdout: string; stderr: string }> {
+function capture(
+  env: NodeJS.ProcessEnv,
+  command: string,
+  args: string[],
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], env: childEnvironment(process.env) });
+    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], env: childEnvironment(env) });
     let stdout = '';
     let stderr = '';
     child.stdout?.on('data', (chunk) => {
@@ -765,14 +778,19 @@ function capture(command: string, args: string[]): Promise<{ code: number | null
  * or a failure that is not "no such server", stops the install: not knowing is not the same as nothing there.
  * Nothing codex prints is repeated, because its answer carries the entry's env.
  */
-async function codexRegistration(binary: string, name: string, path: string): Promise<RegisteredServer | null> {
+async function codexRegistration(
+  env: NodeJS.ProcessEnv,
+  binary: string,
+  name: string,
+  path: string,
+): Promise<RegisteredServer | null> {
   const unknown = () =>
     new CommsError('CONFIG', `codex would not say what it has registered as "${name}", so nothing was written`, {
       hint: `Look with \`codex mcp get ${name}\`. If it is not an older copy of this server, choose another --name; \`--print\` shows the entry to add by hand.`,
     });
   let answer: Awaited<ReturnType<typeof capture>>;
   try {
-    answer = await capture(binary, ['mcp', 'get', name, '--json']);
+    answer = await capture(env, binary, ['mcp', 'get', name, '--json']);
   } catch (error) {
     /*
      * Codex did not run at all, which is a different fact from codex not saying, and the one a person can act on.
@@ -913,6 +931,13 @@ export interface InstallPreflight {
   effective: InstallOptions;
   /** The server flags kept from that entry, as `serverArgs` writes them. */
   kept: string[];
+  /**
+   * The node the entry runs under — the one on this environment's PATH, or this process's — whose folder its own PATH
+   * starts with. Resolved here, once: the plan names it, and the install writes exactly it.
+   */
+  node: string;
+  /** What the entry starts: that node, or for the npx launcher the npx on this environment's PATH. */
+  command: string;
 }
 
 /**
@@ -951,11 +976,33 @@ export async function preflightInstall(
   }
   let previous = writes ? claimName(product, options, name, existing) : [];
   if (writes && binary && options.client === 'codex') {
-    const reported = await codexRegistration(binary, name, configPath ?? 'codex');
+    const reported = await codexRegistration(context.env, binary, name, configPath ?? 'codex');
     if (reported) previous = claimName(product, options, name, [reported]);
   }
   const { options: effective, kept } = keepNarrowing(product, options, previous);
-  return { scan, target, previous, effective, kept };
+  // After the client's own CLI is looked for, so that look stays the first this makes of PATH.
+  const node = await resolveNode(context.env);
+  const command =
+    (options.launcher ?? 'managed') === 'npx' ? ((await whichExecutable('npx', context.env)) ?? 'npx') : node;
+  return { scan, target, previous, effective, kept, node, command };
+}
+
+/**
+ * Where an install puts the entry and what the entry starts, as one sentence of the preview a person approves: the
+ * client's own config file and the command, each with the home written `~`. In the approval's digest with the rest, so
+ * a claim from an environment that resolves another file or another command — `CLAUDE_CONFIG_DIR` set to another
+ * account's, a PATH that finds another node — is another change, and refused.
+ */
+export function entryDestination(
+  client: string,
+  target: Pick<InstallPreflight['target'], 'own' | 'configPath'>,
+  command: string,
+  env: NodeJS.ProcessEnv,
+): string {
+  const home = homeDirectory(env);
+  const file = target.own ?? target.configPath;
+  const where = file === undefined ? `${client}'s own configuration` : shortenHome(file, home);
+  return `the entry goes in ${where}, and ${client} will start it with ${shortenHome(command, home)}`;
 }
 
 /**
@@ -980,11 +1027,14 @@ export interface PlannedInstall {
   readonly replaces: readonly string[];
   /** The pin and `--read-only` the server is started with: the caller's, and what it keeps from what it replaces. */
   readonly narrowing: Required<Pick<Narrowing, 'readOnly'>> & Record<'account' | 'inbox' | 'workspace', string | null>;
+  /** The node the entry runs under, and what it starts: see `InstallPreflight`. */
+  readonly node: string;
+  readonly command: string;
 }
 
 /** The plan a preflight arrived at, in the form `mcpInstall` compares: see `PlannedInstall`. */
 export function plannedInstall(preflight: InstallPreflight): PlannedInstall {
-  const { target, previous, effective } = preflight;
+  const { target, previous, effective, node, command } = preflight;
   return {
     writes: target.writes,
     cliName: target.cliName,
@@ -1012,6 +1062,8 @@ export function plannedInstall(preflight: InstallPreflight): PlannedInstall {
       workspace: effective.workspace ?? null,
       readOnly: effective.readOnly === true,
     },
+    node,
+    command,
   };
 }
 
@@ -1054,6 +1106,11 @@ function planDrift(
     const flags = (narrowing: PlannedInstall['narrowing']) =>
       product.serverArgs({ client, ...pinsOf(narrowing) }).join(' ') || 'no pin';
     drift.push(`the server would start with ${flags(now.narrowing)}, not ${flags(planned.narrowing)}`);
+  }
+  if (planned.command !== now.command) {
+    drift.push(`it would start the server with ${now.command}, not ${planned.command}`);
+  } else if (planned.node !== now.node) {
+    drift.push(`it would run under the node at ${now.node}, not ${planned.node}`);
   }
   return drift;
 }
@@ -1138,7 +1195,9 @@ export async function mcpInstall(
     }
   }
 
-  const { entry, launcher, runtimeMissing } = await buildEntry(context, product, effective, apply);
+  // The command the preflight resolved — and, when a plan was given, the one it named: the drift check above held them
+  // to each other.
+  const { entry, launcher, runtimeMissing } = await buildEntry(context, product, effective, apply, preflight);
   const snippet = snippetFor(options.client, name, entry);
   const backupPath =
     previous.length > 0 ? await backUp(context, options.client, name, previous, new Date()) : undefined;
@@ -1195,7 +1254,7 @@ export async function mcpInstall(
       const removal =
         options.client === 'claude-code' ? ['mcp', 'remove', name, '--scope', 'user'] : ['mcp', 'remove', name];
       try {
-        await run(binary, removal);
+        await run(context.env, binary, removal);
       } catch (error) {
         // Nothing registered under that name is the state we wanted anyway. Anything else is a real failure and
         // must not be swallowed: proceeding would add beside an entry we failed to remove.
@@ -1204,7 +1263,7 @@ export async function mcpInstall(
       }
 
       try {
-        await run(binary, args);
+        await run(context.env, binary, args);
       } catch (error) {
         // What was there goes back if the replacement does not land. Otherwise `--force` removes a working entry
         // and leaves the client with no server at all — strictly worse than the stale one it was asked to replace.
@@ -1230,7 +1289,7 @@ export async function mcpInstall(
         // their working server survived, when in fact nothing is registered at all.
         let restored = true;
         try {
-          await run(binary, restore);
+          await run(context.env, binary, restore);
         } catch {
           restored = false;
         }
@@ -1249,7 +1308,7 @@ export async function mcpInstall(
       }
     } else {
       try {
-        await run(binary, args);
+        await run(context.env, binary, args);
       } catch (error) {
         const message = error instanceof CommsError ? error.message : String(error);
         if (/already exists/i.test(message)) {

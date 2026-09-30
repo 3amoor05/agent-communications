@@ -124,7 +124,8 @@ function fakeClaude(bin: string): () => string[] {
   const path = join(bin, 'claude');
   writeFileSync(
     path,
-    `#!/usr/bin/env node\nrequire('node:fs').appendFileSync(${JSON.stringify(log)}, process.argv.slice(2).join(' ') + '\\n');\n`,
+    // This node, by path: the client CLI is started with the install's own environment, whose PATH has none.
+    `#!${process.execPath}\nrequire('node:fs').appendFileSync(${JSON.stringify(log)}, process.argv.slice(2).join(' ') + '\\n');\n`,
   );
   chmodSync(path, 0o755);
   return () => (existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean) : []);

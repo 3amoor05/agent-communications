@@ -20,6 +20,7 @@ import { CommsError } from '../errors.ts';
 import { type RegisteredServer, scanRegisteredServers, type UnreadableConfig } from '../mcp-clients.ts';
 import {
   checkServerName,
+  entryDestination,
   type InstallContext,
   type InstallOptions,
   type InstallResult,
@@ -320,9 +321,10 @@ function installOptions(request: ServerInstallRequest): InstallOptions {
  *
  * `own` is the calling channel's product, from its own `mcp install`: see `ownProduct`. The sentences depend on the
  * request and the machine, not on which surface prepared them, so an approval prepared by one is claimed by the
- * other. The one sentence that names code — `--launcher local`, which starts a checkout — names the file that will be
- * started; a core running from another build of the checkout than the channel's command names another file, and that
- * is another registration, refused as one.
+ * other. The sentences that name code name it as this environment resolves it: the client's config file and the node
+ * or npx the entry starts (#46), and for `--launcher local` the checkout's file. A claim from an environment that
+ * resolves another — `CLAUDE_CONFIG_DIR` set to another account's, a PATH that finds another node, a core running
+ * from another build of the checkout — is another registration, refused as one.
  */
 export function serverInstallChange(
   core: Core,
@@ -354,7 +356,7 @@ export function serverInstallChange(
       const { version } = product;
       // Refuses here what the install would refuse, before anybody is asked; and says what a replacement keeps.
       const preflight = await preflightInstall(context, product, installOptions(request));
-      const { target, previous, effective, kept } = preflight;
+      const { target, previous, effective, kept, command } = preflight;
       planned = { product, install: plannedInstall(preflight) };
       const effects: string[] = [];
       if (target.writes) {
@@ -384,6 +386,9 @@ export function serverInstallChange(
         } else if (everyTool) {
           effects.push(`not read-only: it has every tool for ${pinned}, including those that change it`);
         }
+        // Where the entry goes and what it starts, as this environment resolves them (#46): bound with the rest, so a
+        // claim from an environment that resolves another file or another command is another change.
+        effects.push(entryDestination(request.client, target, command, env));
         if (launcher === 'npx') {
           effects.push(`${request.client} will fetch ${facts.npxPackage}@${version} from npm each time it starts it`);
         } else if (launcher === 'local') {

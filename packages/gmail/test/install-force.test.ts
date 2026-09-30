@@ -37,7 +37,8 @@ async function fakeClaude(options: { failAdd?: boolean; failRestore?: boolean; f
   // CommonJS, deliberately: an extensionless file run through a shebang is parsed as CJS, and an `import` here
   // made the script fail on every call — which made two of these tests pass for the wrong reason.
   const script = [
-    '#!/usr/bin/env node',
+    // This node, by path: the client CLI is started with the install's own environment, whose PATH has none.
+    `#!${process.execPath}`,
     'const fs = require("node:fs");',
     `const log = ${JSON.stringify(log)};`,
     'const argv = process.argv.slice(2);',
@@ -58,7 +59,7 @@ async function fakeClaude(options: { failAdd?: boolean; failRestore?: boolean; f
   // POSIX, and a `.cmd` shim on Windows, where PATHEXT decides what counts as executable and a shebang does not
   // run at all. Written as the wrong one the binary is simply not found, the whole CLI branch is skipped, and
   // every test here passes without exercising anything — which is what it did on the Windows leg.
-  await writeFile(join(dir, 'claude.js'), script.replace('#!/usr/bin/env node\n', ''));
+  await writeFile(join(dir, 'claude.js'), script.replace(`#!${process.execPath}\n`, ''));
   const posix = join(dir, 'claude');
   await writeFile(posix, script);
   await chmod(posix, 0o755);

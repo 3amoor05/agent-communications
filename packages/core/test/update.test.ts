@@ -600,13 +600,19 @@ test('update prepares one approval listing every step, writes nothing before it,
     assert.equal(first.policy, 'chat');
     const preview = String(first.preview);
     const steps = preview.slice(preview.indexOf('It also:')).split('\n').slice(1);
+    // Where each entry goes and what it starts (#46): no npx on this PATH, and this process's node.
+    const goes = (command: string) =>
+      `  - the entry goes in ${join('~', '.cursor', 'mcp.json')}, and cursor will start it with ${command}`;
     assert.deepEqual(steps, [
       `  - installs ${PACKAGES.gmail}@${LATEST} from npm into ${managedRuntimeDir(m.dataDir, PACKAGES.gmail, LATEST)}`,
       `  - installs ${PACKAGES.slack}@${LATEST} from npm into ${managedRuntimeDir(m.dataDir, PACKAGES.slack, LATEST)}`,
       `  - registers the agentcomms (core) MCP server with cursor as "agentcomms" again (user scope, npx launcher), at ${LATEST} in place of ${OLD}`,
+      goes('npx'),
       `  - cursor will fetch ${PACKAGES.core}@${LATEST} from npm each time it starts "agentcomms"`,
       `  - registers the Gmail MCP server with cursor as "gmail" again (user scope, managed launcher), at ${LATEST} in place of ${OLD} — pinned to the mailbox acme/gmail, read-only, as now`,
+      goes(process.execPath),
       `  - registers the Slack MCP server with cursor as "slack-acme" again (user scope, managed launcher), at ${LATEST} in place of ${OLD} — pinned to the workspace acme/slack, as now`,
+      goes(process.execPath),
       `  - updates the global ${PACKAGES.core} from ${OLD} to ${LATEST}: \`npm install -g ${PACKAGES.core}@${LATEST}\``,
     ]);
     assert.equal(
@@ -969,7 +975,8 @@ function fakeCodex(bin: string, answer: Record<string, unknown>): () => string[]
   writeFileSync(
     path,
     [
-      '#!/usr/bin/env node',
+      // This node, by path: the client CLI is started with the install's own environment, whose PATH has none.
+      `#!${process.execPath}`,
       `require('node:fs').appendFileSync(${JSON.stringify(log)}, process.argv.slice(2).join(' ') + '\\n');`,
       `if (process.argv[2] === 'mcp' && process.argv[3] === 'get') process.stdout.write(${JSON.stringify(JSON.stringify(answer))});`,
       '',
@@ -1083,6 +1090,12 @@ test('`agentcomms update` gives the tool’s check and preview, and claims the a
    */
   const m = machine();
   const config = cursor(m, { gmail: npx('gmail', OLD, ['--inbox', 'acme/gmail']) });
+  /*
+   * An npx first on both PATHs. The approval names the command the entry starts (#46), so the command claims what
+   * the tool prepared only where both resolve the same one: the command's PATH also holds this node's folder, where
+   * an npx of its own would otherwise be found — a different command, and a different change.
+   */
+  writeFileSync(join(m.bin, process.platform === 'win32' ? 'npx.exe' : 'npx'), '', { mode: 0o755 });
   const served = await loopbackRegistry(EVERYTHING_LATEST);
   const prefix = join(m.home, 'npm-global');
   // npm's global root: `lib/node_modules` on POSIX, `node_modules` on Windows.
