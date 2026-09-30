@@ -75,7 +75,7 @@ export type Broadcast = (typeof BROADCASTS)[number];
  * anything else is refused rather than escaped: an escaped id would mention nobody, which is not what was asked for
  * either.
  */
-const USER_ID = /^[UW][A-Z0-9]+$/;
+export const USER_ID: RegExp = /^[UW][A-Z0-9]+$/;
 const CHANNEL_ID = /^[CGD][A-Z0-9]+$/;
 
 /**

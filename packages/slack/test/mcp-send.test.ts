@@ -366,6 +366,99 @@ test('a post held for a person is the same refusal on both surfaces, each naming
   }
 });
 
+// ── Where a post goes ──────────────────────────────────────────────────────────────────────────────────────────
+
+/** The refusal of a user id as a post's destination, and the step it offers: the DM's own id, and where to find it. */
+function refusedAsUserId(error: { code?: string; message?: string; hint?: string | null } | undefined, id: string) {
+  assert.equal(error?.code, 'USAGE', JSON.stringify(error));
+  assert.match(error?.message ?? '', new RegExp(`^"${id}" is a user id: a post goes to a conversation id`));
+  assert.match(error?.hint ?? '', /use the DM’s id \(D…\)/);
+  assert.match(error?.hint ?? '', /`agent-slack channels --workspace acme`/);
+  assert.match(error?.hint ?? '', /slack_channels/);
+}
+
+test('a user id is refused as where a post goes: on draft create, draft update and prepare, from both surfaces', async () => {
+  /*
+   * Issue #43. A post goes to a conversation, and a person is not one: a direct message has an id of its own, `D…`,
+   * which the channel list gives. Refused before anything is written and before Slack is asked anything — whatever
+   * Slack would make of a user id there, it is not the conversation the preview could show. Mentions are another field,
+   * and take user ids as they always did.
+   */
+  const harness = await newHarness();
+  await harness.addWorkspace({ alias: 'acme', mode: 'send', sendPolicy: 'chat' });
+  const fake = slack();
+  const { call, close } = await connect(harness, fake.read);
+  try {
+    const written = await cli(
+      harness,
+      ['--json', 'draft', 'create', '--workspace', 'acme', '--channel', 'C1', '--text', 'hi', '--mention', 'U024BE7LH'],
+      { read: fake.read },
+    );
+    assert.equal(written.code, EXIT_CODES.OK, written.stdout + written.stderr);
+    const draft = written.json<Envelope<{ draftId: string; revision: string }>>().data;
+    const draftId = draft?.draftId ?? '';
+
+    for (const id of ['U024BE7LH', 'W012A3CDE']) {
+      const created = await cli(
+        harness,
+        ['--json', 'draft', 'create', '--workspace', 'acme', '--channel', id, '--text', 'hi'],
+        { read: fake.read },
+      );
+      assert.equal(created.code, EXIT_CODES.USAGE, created.stdout);
+      refusedAsUserId(created.json<Envelope<never>>().error, id);
+      refusedAsUserId(failure(await call('slack_draft_create', { workspace: 'acme', channel: id, text: 'hi' })), id);
+
+      const updated = await cli(
+        harness,
+        ['--json', 'draft', 'update', draftId, '--workspace', 'acme', '--channel', id],
+        { read: fake.read },
+      );
+      assert.equal(updated.code, EXIT_CODES.USAGE, updated.stdout);
+      refusedAsUserId(updated.json<Envelope<never>>().error, id);
+      refusedAsUserId(failure(await call('slack_draft_update', { workspace: 'acme', draftId, channel: id })), id);
+
+      refusedAsUserId(failure(await call('slack_post_prepare', { workspace: 'acme', channel: id, text: 'hi' })), id);
+    }
+
+    const store = openDraftStore(harness.core.paths.stateDir, () => new Date());
+    const kept = await store.list();
+    assert.deepEqual(
+      kept.map((one) => [one.draftId, one.revision, one.payload.channel]),
+      [[draftId, draft?.revision, 'C1']],
+      'a refused create or update wrote something',
+    );
+    assert.equal(fake.count('conversations.info'), 0, 'Slack was asked about a post that was refused');
+  } finally {
+    await close();
+  }
+});
+
+test('a channel, a private channel and a DM are all somewhere a post can go', async () => {
+  const harness = await newHarness();
+  await harness.addWorkspace({ alias: 'acme', mode: 'send', sendPolicy: 'chat' });
+  const fake = slack();
+  const { call, close } = await connect(harness, fake.read);
+  try {
+    for (const id of ['C024BE7LR', 'G024BE7LR', 'D024BE7LR']) {
+      fake.script['conversations.info'] = {
+        ok: true,
+        channel: id.startsWith('D')
+          ? { id, is_im: true, user: 'U024BE7LH' }
+          : { id, name: 'eng', num_members: 4, is_member: true },
+      };
+      const created = await call('slack_draft_create', { workspace: 'acme', channel: 'C1', text: 'hi' });
+      assert.notEqual(created.isError, true, JSON.stringify(created.structuredContent));
+      const { draftId } = created.structuredContent as { draftId: string };
+      const moved = await call('slack_draft_update', { workspace: 'acme', draftId, channel: id });
+      assert.notEqual(moved.isError, true, JSON.stringify(moved.structuredContent));
+      const prepared = await call('slack_post_prepare', { workspace: 'acme', channel: id, text: 'hi' });
+      assert.notEqual(prepared.isError, true, JSON.stringify(prepared.structuredContent));
+    }
+  } finally {
+    await close();
+  }
+});
+
 // ── Reactions ──────────────────────────────────────────────────────────────────────────────────────────────────
 
 const REACTION = { workspace: 'acme', channel: 'C1', ts: '1.1', emoji: 'tada' };
