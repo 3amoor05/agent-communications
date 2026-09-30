@@ -30,6 +30,11 @@ export interface PreviewInput {
   readonly memberCount?: number | undefined;
   /** Why the count is missing, when it is. */
   readonly countUnknown?: string | undefined;
+  /**
+   * Why the room could not be read, when it could not — so whether this account has joined it was never checked. A
+   * room that was read and has not been joined is refused before any preview (see `requireMember` in `send.ts`).
+   */
+  readonly membershipUnchecked?: string | undefined;
   readonly approvalId?: string | undefined;
   readonly policy?: string | undefined;
   readonly note?: string | undefined;
@@ -198,6 +203,14 @@ export function previewOf(input: PreviewInput): ChannelPreview {
     },
     links: linksOf(payload.text),
     ...(input.policy ? { policy: input.policy } : {}),
-    warnings: [...warningsOf(payload.text), ...fileWarnings(files)],
+    warnings: [...membershipWarnings(input.membershipUnchecked), ...warningsOf(payload.text), ...fileWarnings(files)],
   };
+}
+
+/** A room that could not be read, so whether this account has joined it is not known: said, not refused. */
+function membershipWarnings(why: string | undefined): string[] {
+  if (why === undefined) return [];
+  return [
+    `could not check whether this account is a member of the channel (${why}): if it has not joined it, this posts into a conversation it is not part of`,
+  ];
 }

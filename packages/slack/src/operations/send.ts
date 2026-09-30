@@ -142,6 +142,31 @@ async function roomOf(
 }
 
 /**
+ * Refuses a post to a room this account has not joined — issue #43.
+ *
+ * A post to a room this account has not joined puts the person into a conversation they are not part of, under their
+ * name — an agent that picked the wrong room — and Slack cannot be relied on to refuse it first. So a room that was
+ * read, and does not say it counts this account as a member, is refused.
+ *
+ * A direct message and a group DM are exempt by what they are, never by `is_member`: Slack leaves that field out of a
+ * DM's answer, and `channelOf` reads a missing field as false, so checking the field alone would refuse every DM. A
+ * room that could not be read is not refused here — nothing is known about it — and its preview says membership was
+ * not checked (see `previewOf`).
+ *
+ * `SCOPE_MISSING`, the code Slack's own `not_in_channel` maps to in `callSlack`: the same fact, found before Slack is
+ * asked to post rather than after.
+ */
+function requireMember(channel: Channel, channelId: string): void {
+  if (channel.isIm || channel.isMpim || channel.isMember) return;
+  const name = channel.name?.text;
+  const named = name ? `#${truncateDisplay(name, 80)} (${channelId})` : channelId;
+  throw new CommsError('SCOPE_MISSING', `nothing was sent: this account is not a member of ${named}`, {
+    hint: 'Join the channel in Slack yourself, then prepare the post again: agent-slack never joins a channel for you.',
+    details: { channel: channelId, reason: 'not-a-member' },
+  });
+}
+
+/**
  * The flag on a post's approval whose reach could not be counted when it was prepared.
  *
  * Read back as well as shown. The digest binds a reach nobody measured as exactly that, and the approval screen reads
@@ -240,6 +265,8 @@ export async function viewPost(
   // Before Slack is asked anything: a draft that is not what its text composes to is shown to nobody.
   const payload = postedPayload(draft);
   const { channel, members, why } = await roomOf(deps.call, payload.channel);
+  // Here, so preparing, the approval screen and posting all refuse it — and posting before the approval is claimed.
+  if (channel) requireMember(channel, payload.channel);
   if (channel) book.addChannel(channel);
 
   const preview = previewOf({
@@ -251,6 +278,7 @@ export async function viewPost(
     book,
     memberCount: members,
     countUnknown: why,
+    membershipUnchecked: why,
   });
 
   const canonical: CanonicalChannelMessage = {

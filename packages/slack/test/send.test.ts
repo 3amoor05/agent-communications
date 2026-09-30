@@ -47,21 +47,37 @@ function fakeSlack(script: Record<string, unknown> = {}) {
   return { call, sent };
 }
 
-async function setUp(options: { text?: string; members?: number; policy?: 'chat' | 'confirm' | 'never' } = {}) {
+/**
+ * `conversations.info` for the room: a channel of eight this account has joined, with `room` laid over it. A field set
+ * to `undefined` is left out of the answer, as Slack leaves `is_member` out of a direct message's.
+ */
+function roomReply(room: Record<string, unknown> = {}, members = 8): unknown {
+  return {
+    ok: true,
+    channel: { id: 'C1', name: 'engineering', num_members: members, is_member: true, ...room },
+  };
+}
+
+async function setUp(
+  options: {
+    text?: string;
+    members?: number;
+    policy?: 'chat' | 'confirm' | 'never';
+    channel?: string;
+    room?: Record<string, unknown>;
+  } = {},
+) {
   const state = temp();
   const drafts = openDraftStore(state, NOW);
   const approvals = new ApprovalStore(state, { now: NOW });
   const draft = await drafts.create(
     'acc_1',
-    compose({ channel: 'C1', text: options.text ?? 'shipping in ten minutes' }),
+    compose({ channel: options.channel ?? 'C1', text: options.text ?? 'shipping in ten minutes' }),
     options.text ?? 'shipping in ten minutes',
   );
-  const { call, sent } = fakeSlack({
-    'conversations.info': {
-      ok: true,
-      channel: { id: 'C1', name: 'engineering', num_members: options.members ?? 8 },
-    },
-  });
+  // Replaceable mid-test: what Slack says about the room when the send reads it again.
+  const script: Record<string, unknown> = { 'conversations.info': roomReply(options.room, options.members) };
+  const { call, sent } = fakeSlack(script);
   const deps = {
     call,
     accountId: 'acc_1',
@@ -72,7 +88,7 @@ async function setUp(options: { text?: string; members?: number; policy?: 'chat'
     approvals,
     permit: closedPermit(),
   };
-  return { drafts, approvals, draft, deps, sent, book: new NameBook() };
+  return { drafts, approvals, draft, deps, sent, script, book: new NameBook() };
 }
 
 // ── Preparing ──────────────────────────────────────────────────────────────────────────────────────────────────
@@ -206,6 +222,101 @@ test('a workspace on `never` cannot prepare at all, and is told how to send it b
   });
 });
 
+// ── Membership ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+/** The refusal of a post to a room this account has not joined: its code, its details, and the step it offers. */
+function notAMember(error: unknown): boolean {
+  assert.ok(error instanceof CommsError, `not a CommsError: ${String(error)}`);
+  assert.equal(error.code, 'SCOPE_MISSING', error.message);
+  assert.match(error.message, /nothing was sent/);
+  assert.match(error.message, /#engineering \(C1\)/, 'the channel is named');
+  assert.deepEqual(error.details, { channel: 'C1', reason: 'not-a-member' });
+  assert.match(error.hint ?? '', /Join the channel in Slack yourself, then prepare the post again/);
+  return true;
+}
+
+test('a post to a channel this account has not joined is refused at prepare, and only the room was read', async () => {
+  /*
+   * Issue #43: a post an agent aims at a room the person never joined puts them into a conversation they are not part
+   * of, and Slack cannot be relied on to stop it. It is stopped here, before anyone is shown a preview of it. A room
+   * whose answer leaves `is_member` out is not taken as joined either.
+   */
+  for (const room of [{ is_member: false }, { is_member: undefined }]) {
+    const { deps, draft, book, sent, approvals } = await setUp({ room });
+    await assert.rejects(preparePost(deps, draft, book), notAMember, JSON.stringify(room));
+    assert.deepEqual(
+      sent.map((call) => call.method),
+      ['conversations.info'],
+      'the only call made is the read of the room',
+    );
+    assert.deepEqual(await approvals.list(), [], 'an approval was made for a post that was refused');
+    assert.equal(deps.permit.approvalId, null);
+  }
+});
+
+test('a person who left the channel after prepare is refused at send, before the approval is claimed', async () => {
+  /*
+   * Before the claim, so the refusal spends nothing: the approval is still there, and once the person has joined again
+   * the same approval posts. Checked after it, the approval would be spent on a post that never went.
+   */
+  const { deps, draft, book, sent, approvals, script } = await setUp();
+  const prepared = await preparePost(deps, draft, book);
+  script['conversations.info'] = roomReply({ is_member: false });
+
+  await assert.rejects(postPrepared(deps, draft, prepared.approvalId, 'C1', book), notAMember);
+  assert.equal(
+    sent.some((call) => call.method === 'chat.postMessage'),
+    false,
+    'posted to a room the person has left',
+  );
+  assert.equal((await approvals.get(prepared.approvalId))?.state, 'pending', 'the refusal spent the approval');
+
+  // Back in the room, the same approval posts.
+  script['conversations.info'] = roomReply();
+  const posted = await postPrepared(deps, draft, prepared.approvalId, 'C1', book);
+  assert.equal(posted.ts, '1700000000.000100');
+  assert.equal((await approvals.get(prepared.approvalId))?.state, 'used');
+});
+
+test('a direct message and a group DM post, though Slack says nothing of membership for either', async () => {
+  /*
+   * Slack leaves `is_member` out of a direct message's answer, and `channelOf` reads that as false. A DM is exempt by
+   * what it is, never by that field — otherwise every DM would be refused as a room nobody had joined.
+   */
+  for (const [channel, room] of [
+    ['D1', { id: 'D1', name: undefined, is_im: true, user: 'U7', is_member: undefined, num_members: undefined }],
+    ['G1', { id: 'G1', name: 'mpdm-ann--bo--cy-1', is_mpim: true, is_member: undefined, num_members: 3 }],
+  ] as const) {
+    const { deps, draft, book, sent } = await setUp({ channel, room });
+    const prepared = await preparePost(deps, draft, book);
+    const posted = await postPrepared(deps, draft, prepared.approvalId, channel, book);
+    assert.equal(posted.ts, '1700000000.000100', channel);
+    assert.equal(sent.filter((call) => call.method === 'chat.postMessage').length, 1, channel);
+  }
+});
+
+test('a room that cannot be read prepares as it did, and the preview says membership could not be checked', async () => {
+  const { deps, draft, book, sent, script } = await setUp();
+  script['conversations.info'] = { ok: false, error: 'ratelimited' };
+  const prepared = await preparePost(deps, draft, book);
+  assert.ok(
+    (prepared.preview.warnings ?? []).some((warning) =>
+      /could not check whether this account is a member/.test(warning),
+    ),
+    (prepared.preview.warnings ?? []).join('\n'),
+  );
+  // And it posts as it did before membership was checked: nothing is known to be wrong, only unread.
+  const posted = await postPrepared(deps, draft, prepared.approvalId, 'C1', book);
+  assert.equal(posted.ts, '1700000000.000100');
+  assert.ok(sent.some((call) => call.method === 'chat.postMessage'));
+});
+
+test('a joined room’s preview carries no membership warning', async () => {
+  const { deps, draft, book } = await setUp();
+  const prepared = await preparePost(deps, draft, book);
+  assert.deepEqual(prepared.preview.warnings, []);
+});
+
 // ── Posting ────────────────────────────────────────────────────────────────────────────────────────────────────
 
 test('a prepared post goes once, through a permit that is open for exactly that request', async () => {
@@ -331,7 +442,9 @@ test('a room that grew between the preview and the post voids the approval', asy
     fetch: async (input, init) => {
       const method = String(input instanceof Request ? input.url : input).split('/api/')[1] ?? '';
       if (method === 'conversations.info') {
-        return new Response(JSON.stringify({ ok: true, channel: { id: 'C1', name: 'eng', num_members: members } }));
+        return new Response(
+          JSON.stringify({ ok: true, channel: { id: 'C1', name: 'eng', num_members: members, is_member: true } }),
+        );
       }
       void init;
       return new Response(JSON.stringify({ ok: true, ts: '1.1' }));
@@ -371,7 +484,13 @@ test('a caller that restates the wrong destination cannot post', async () => {
 test('a failed post is recorded rather than left in flight', async () => {
   const { deps, draft, book, approvals } = await setUp();
   const prepared = await preparePost(deps, draft, book);
-  const failing = { ...deps, call: fakeSlack({ 'chat.postMessage': { ok: false, error: 'channel_not_found' } }).call };
+  const failing = {
+    ...deps,
+    call: fakeSlack({
+      'conversations.info': roomReply(),
+      'chat.postMessage': { ok: false, error: 'channel_not_found' },
+    }).call,
+  };
   await assert.rejects(postPrepared(failing, draft, prepared.approvalId, 'C1', book));
   const record = await approvals.get(prepared.approvalId);
   assert.notEqual(record?.state, 'sending', 'an approval left in `sending` is one whose outcome nobody knows');

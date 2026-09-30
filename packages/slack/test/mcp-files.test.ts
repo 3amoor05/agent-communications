@@ -35,7 +35,7 @@ async function world(t: TestContext) {
   const harness = await newHarness();
   await harness.addWorkspace({ alias: 'acme', mode: 'send' });
   const fake = await startFakeSlack({
-    'conversations.info': () => ({ ok: true, channel: { id: 'C1', name: 'eng', num_members: 4 } }),
+    'conversations.info': () => ({ ok: true, channel: { id: 'C1', name: 'eng', num_members: 4, is_member: true } }),
   });
   t.after(() => fake.close());
   const uploads = fake.acceptUploads();

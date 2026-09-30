@@ -37,6 +37,8 @@ interface World {
   uploads: FakeUploads;
   docs: string;
   slack: { fetch: FakeSlack['fetch'] };
+  /** The room as `conversations.info` describes it, read at each call: a test changes it between prepare and send. */
+  room: Record<string, unknown>;
 }
 
 async function world(
@@ -56,14 +58,14 @@ async function world(
     ...(options.sendPolicy === undefined ? {} : { sendPolicy: options.sendPolicy }),
   });
   const context = new SlackContext({ core: harness.core, env: harness.env });
-  const fake = await startFakeSlack({
-    'conversations.info': () => ({ ok: true, channel: { id: 'C1', name: 'eng', num_members: options.members ?? 4 } }),
-  });
+  const w = {} as World;
+  w.room = { id: 'C1', name: 'eng', num_members: options.members ?? 4, is_member: true };
+  const fake = await startFakeSlack({ 'conversations.info': () => ({ ok: true, channel: w.room }) });
   t.after(() => fake.close());
   const uploads = fake.acceptUploads();
   const docs = join(harness.home, 'docs');
   mkdirSync(docs);
-  return { harness, context, fake, uploads, docs, slack: { fetch: fake.fetch } };
+  return Object.assign(w, { harness, context, fake, uploads, docs, slack: { fetch: fake.fetch } });
 }
 
 function sha256(bytes: string | Buffer): string {
@@ -472,6 +474,41 @@ test('a grant narrowed after prepare refuses the send, before anything is upload
   assert.equal(error.code, 'SCOPE_MISSING');
   assert.match(error.hint ?? '', /agent-slack workspace reauth acme --mode send/);
   assert.deepEqual(w.uploads.issued, []);
+  assert.equal((await w.context.core.approvals.get(prepared.approvalId))?.state, 'pending');
+});
+
+test('a file post to a channel this account has not joined is refused at prepare: no upload URL, nothing uploaded', async (t) => {
+  const w = await world(t);
+  w.room = { ...w.room, is_member: false };
+  const draft = await createDraft(w.context, 'acme', {
+    channel: 'C1',
+    text: 'the report',
+    files: [file(w.docs, 'report.pdf', '%PDF-1.7')],
+  });
+
+  const error = await refusal(prepareDraftPost(w.context, 'acme', { draftId: draft.draftId }, w.slack));
+  assert.equal(error.code, 'SCOPE_MISSING');
+  assert.match(error.message, /#eng \(C1\)/);
+  assert.deepEqual(error.details, { channel: 'C1', reason: 'not-a-member' });
+  assert.deepEqual(asked(w.fake), ['conversations.info'], 'Slack was asked more than the room');
+  assert.deepEqual(w.uploads.issued, []);
+  assert.deepEqual(w.uploads.received, {});
+  assert.deepEqual(await w.context.core.approvals.list(), []);
+});
+
+test('a file post whose sender left the channel after prepare is refused at send, before the claim and any upload', async (t) => {
+  const w = await world(t);
+  const draft = await createDraft(w.context, 'acme', { channel: 'C1', files: [file(w.docs, 'a.txt', 'a')] });
+  const { prepared, send } = await prepareAndSend(w, draft.draftId);
+  w.room = { ...w.room, is_member: false };
+  const before = w.fake.requests.length;
+
+  const error = await refusal(send());
+  assert.equal(error.code, 'SCOPE_MISSING');
+  assert.equal(error.details?.reason, 'not-a-member');
+  assert.deepEqual(sending(w.fake, before), [], 'something went to Slack after the room was read');
+  assert.deepEqual(w.uploads.issued, []);
+  assert.deepEqual(w.uploads.received, {});
   assert.equal((await w.context.core.approvals.get(prepared.approvalId))?.state, 'pending');
 });
 
