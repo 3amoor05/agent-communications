@@ -3,6 +3,67 @@
 All notable changes to this project are recorded here, newest first. Every package in this repository is released
 together under one version.
 
+## 0.12.0
+
+**You can see, and change, which folders a file may be attached from.** `agentcomms attach` (and `comms_attach` from
+chat) lists the folders Gmail attachments, Resend attachments and Slack files may come from, your own entries they may
+never come from, and the built-in list. `agentcomms attach roots add <folder>` and `attach deny remove <path>` widen
+what can be sent, so they show a preview and wait for your approval — the preview says where a folder leads when a link
+takes it somewhere else. `attach roots remove` and `attach deny add` narrow it, and apply at once. Until now the only
+way to allow another folder was to edit the configuration by hand, with no approval and no audit line (#45).
+- A folder is written in full or from `~`; on Windows with its drive or share (`C:\outgoing`, `\\server\share`), since
+  `\outgoing` is on whichever drive happens to be current.
+- A folder in your configuration that does not say where it is — a relative one, or one without a drive on Windows,
+  written by hand before this release — now allows nothing. `agentcomms attach` lists it apart, in quotes, and
+  `attach roots remove` takes it out exactly as written.
+- The refusal for a file outside the allowed folders names the command, and that it needs your approval.
+
+**Slack refuses a post to a channel you have not joined — before anything is spent** (#43). The preview is refused,
+the approval screen refuses it, and so does the send, before the approval is claimed and before any file is uploaded;
+join the channel in Slack yourself, then prepare the post again. Direct messages and group DMs are unaffected. When
+the channel cannot be read, the preview says membership could not be checked. Before, the approval was used up — and
+every file uploaded — before Slack refused the post.
+- **A user id is no longer a place a post goes.** `U…` or `W…` as a draft's channel is refused when the draft is
+  written, when it is prepared and when it is sent — a draft stored by an earlier release too. For a direct message use
+  the DM's `D…` id, which `agent-slack channels` and `slack_channels` list. Mentions still take user ids.
+- **A file post warns about its links** (#44). Slack may fetch a link in a file post's words and show its preview to
+  the whole channel, and offers no way to turn that off for files. The preview now lists every link in the words,
+  plain `https://…` ones included, and says so; to keep a link from unfurling, post it as a message of its own. Posts
+  of text alone are unchanged.
+
+**Large Slack files no longer fail on a slow connection** (#49). A download stopped at two minutes whatever its size,
+so a 100 MiB file needed about 7 Mbit/s, and "try again" failed the same way every time. Now a download stops if Slack
+sends nothing for 30 seconds, or if the whole file takes longer than its size allows — at least two minutes, 800
+seconds for 100 MiB — and the error says which. An upload gets time in proportion to its size too, at least five
+minutes.
+
+**The day's first command no longer outlives its output** (#48). On the first command of the day the update check kept
+the process running after the command had finished — up to about 70 seconds, not the ten 0.9.0 said — so `$(…)`, a
+pipe or an agent's shell waited for it. The check now finishes in a background process of its own, detached from the
+command's input and output; a fast answer still stops the command, and if the background process cannot start the
+command asks npm itself, as before. A debugger the command was started with (`--inspect…`, in its flags or in
+`NODE_OPTIONS`) is not passed on to it. MCP servers and WhatsApp are unchanged.
+
+**Also**
+- **A server-install approval says where the entry goes and what it starts** (#46): "the entry goes in
+  ~/.claude.json, and claude-code will start it with …". A claim from an environment that resolves another config file
+  or another command is refused with nothing written, and an npx entry starts npx by its full path, never the bare word.
+  `agentcomms update` says the same for each registration it renews.
+- **`setup --replace-server` serves the mailbox you just connected** (#47). Replacing an entry pinned to another
+  mailbox kept that pin, so the new mailbox was reachable by no server while the finish reported success. The
+  replacement is now pinned to the new mailbox, and the preview says which mailbox the old entry served. Without
+  `--replace-server`, the refusal suggests a second entry (`--name gmail-<org> --inbox <new>`).
+
+What it means for you: a minor release.
+- A Slack post to a channel you are not in, or to a person's user id, that went through before is now refused with what
+  to do instead.
+- A hand-written attachment folder with no drive (Windows) or a relative path now allows nothing; `agentcomms attach`
+  shows it, and `attach roots add` adds it properly with your approval.
+- An install's preview names the config file and the command, so a preview approved in one place and claimed from a
+  differently set-up terminal is refused rather than written somewhere else.
+- To get 0.12.0: your servers will say an update is out; run `agentcomms update` (or say "update my comms"), then
+  restart your client.
+
 ## 0.11.0
 
 **Slack posts can carry files, behind the same preview and approval as a message.** Name up to ten local files, each
