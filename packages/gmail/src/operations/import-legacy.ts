@@ -33,6 +33,7 @@ import type { GmailContext } from '../context.ts';
 import { getProfileWithToken } from '../gmail-api/profile.ts';
 import { parseStore } from './clients.ts';
 import { requireNewInboxName } from './inbox-names.ts';
+import { clearSetupProgress } from './setup-progress.ts';
 import { readSmallFile } from './small-file.ts';
 
 /**
@@ -342,6 +343,9 @@ export async function importLegacy(context: GmailContext, options: ImportOptions
         },
       );
     });
+    // A client is registered, so setup's record of the Google Cloud walk is done with — as after `client add`, the
+    // other way a client is registered (see `registerClient`). Best effort: the import stands either way.
+    await clearSetupProgress(context.core.paths.stateDir).catch(() => undefined);
   }
 
   for (const file of credentialFiles.sort()) {

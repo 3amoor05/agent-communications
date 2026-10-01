@@ -20,6 +20,7 @@ import {
 import { type InstalledClient, parseClientJson, probeClientCredentials } from '../auth/oauth.ts';
 import { clientSecretRef } from '../auth/session.ts';
 import type { GmailContext } from '../context.ts';
+import { clearSetupProgress } from './setup-progress.ts';
 import { MAX_CLIENT_BYTES, readSmallFile } from './small-file.ts';
 import { oneOf } from './words.ts';
 
@@ -333,6 +334,14 @@ async function registerClient(
     }
     return row;
   });
+
+  /*
+   * Setup's record of the Google Cloud walk has done its job: from here on a registered client is what says the
+   * console is behind. Cleared here, where every registration lands — `setup` at a terminal or headless, `client add`,
+   * `gmail_client_add` — so a record cannot outlive the client and come back if it is ever removed. Best effort: the
+   * client is registered either way, and that is what this call is.
+   */
+  await clearSetupProgress(context.core.paths.stateDir).catch(() => undefined);
 
   // Only once the secret is safely stored, and only if asked: the file is the one copy Google will ever show.
   let sourceRemoved = false;

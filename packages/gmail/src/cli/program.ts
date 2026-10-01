@@ -16,6 +16,7 @@ import {
   type GatedChange,
   gatedChange,
   gatedChangeAtTerminal,
+  homeDirectory,
   installExitStatus,
   type OutputOptions,
   openCore,
@@ -94,7 +95,6 @@ import { VERSION } from '../version.ts';
 import { openInBrowser } from './browser.ts';
 import { askFor } from './prompt.ts';
 import {
-  CLIENT_KIND_LABEL,
   type FinishRegistration,
   renderApprovals,
   renderAttachments,
@@ -2009,6 +2009,8 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
          */
         let addAnother = Boolean(options.inbox);
         let addMcp = Boolean(options.mcpClient);
+        /** Set by `--restart`, or by answering "start over": the walk then begins at 1/5 whatever is recorded. */
+        let startOver = options.restart === true;
         if (state.done.length > 0 && !options.restart && !addAnother && !addMcp) {
           out.write(`${bold('Picking up where you left off.')}\n`);
           if (state.clients.length > 0) out.write(`  done · client "${state.clients.join('", "')}" registered\n`);
@@ -2050,58 +2052,88 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
             ],
             initial: 'continue',
           });
-          if (choice === 'restart') walkConsole = true;
+          if (choice === 'restart') {
+            walkConsole = true;
+            startOver = true;
+          }
           out.write('\n');
         } else {
           out.write(`${bold('Setting up agent-gmail')}\n\n`);
         }
 
         // ── 1. The Google client ──────────────────────────────────────────────────────────────────────────────
-        if (walkConsole) {
-          out.write(
-            'Gmail only accepts calls from an OAuth client registered to a Google Cloud project, and it has to be\n' +
-              'yours — there is no shared one to borrow. This is once per person, and one client covers every\n' +
-              'mailbox you connect and everyone you share it with.\n\n',
-          );
-          for (const [index, step] of CONSOLE_STEPS.entries()) {
-            out.write(`${bold(`${index + 1}/${CONSOLE_STEPS.length}  ${step.title}`)}\n`);
-            out.write(`${dim(`      ${step.why}`)}\n`);
-            out.write(`      ${dim(step.url)}\n\n`);
-            for (const action of step.actions) out.write(`      • ${action}\n`);
-            for (const warning of step.avoid)
-              out.write(`      ${paint(globalOptions.color, 'yellow', '!')} ${warning}\n`);
-            out.write('\n');
-            if (options.browser !== false) openInBrowser(step.url);
-            await askFor(streams, { question: '      press Enter when that is done — ' });
+        const { planConsoleWalk, runConsoleWalk } = await import('./console-walk.ts');
+        const { asTyped, chooseClientFile } = await import('./client-step.ts');
+        const { readSetupProgress, recordConsoleStep } = await import('../operations/setup-progress.ts');
+        const { downloadDirectory, findClientJson } = await import('../operations/setup.ts');
+        const stateDir = context.core.paths.stateDir;
+        const where = asTyped(downloadDirectory(context.env), homeDirectory(context.env));
+        let clientPath = options.clientJson ? String(options.clientJson) : '';
+        /*
+         * Where the walk starts. A run that has no client yet asks before walking it all again (CUE-298): a client file
+         * already in the download directory, or a step confirmed by an earlier run, is offered as a place to resume.
+         * `--client-json` puts the file in hand, so there is nothing in the console left to do.
+         */
+        let walkFrom = 0;
+        if (walkConsole && state.next === 'client' && !startOver) {
+          if (clientPath) walkFrom = CONSOLE_STEPS.length;
+          else {
+            const plan = await planConsoleWalk({
+              steps: CONSOLE_STEPS,
+              progress: await readSetupProgress(stateDir, CONSOLE_STEPS.length),
+              candidates: state.candidates,
+              where,
+              choose: (question) => askChoice(mode, streams, question),
+            });
+            walkFrom = plan.from;
+            if (plan.path) clientPath = plan.path;
             out.write('\n');
           }
         }
+        if (walkConsole && walkFrom < CONSOLE_STEPS.length) {
+          if (walkFrom === 0)
+            out.write(
+              'Gmail only accepts calls from an OAuth client registered to a Google Cloud project, and it has to be\n' +
+                'yours — there is no shared one to borrow. This is once per person, and one client covers every\n' +
+                'mailbox you connect and everyone you share it with.\n\n',
+            );
+          await runConsoleWalk({
+            steps: CONSOLE_STEPS,
+            from: walkFrom,
+            show: async (step, index) => {
+              out.write(`${bold(`${index + 1}/${CONSOLE_STEPS.length}  ${step.title}`)}\n`);
+              out.write(`${dim(`      ${step.why}`)}\n`);
+              out.write(`      ${dim(step.url)}\n\n`);
+              for (const action of step.actions) out.write(`      • ${action}\n`);
+              for (const warning of step.avoid)
+                out.write(`      ${paint(globalOptions.color, 'yellow', '!')} ${warning}\n`);
+              out.write('\n');
+              if (options.browser !== false) openInBrowser(step.url);
+              await askFor(streams, { question: '      press Enter when that is done — ' });
+              out.write('\n');
+            },
+            // Only while there is no client: walking the console again on a finished setup is a re-read, not progress.
+            // And never at the walk's expense: a state directory that cannot be written costs the resume, not the setup.
+            record: async (consoleStep) => {
+              if (state.next === 'client')
+                await recordConsoleStep(stateDir, consoleStep, context.now()).catch(() => undefined);
+            },
+          });
+        }
 
         if (state.next === 'client') {
-          let path = options.clientJson ? String(options.clientJson) : '';
-          const candidates = state.candidates;
-          if (!path && candidates.length > 0) {
-            const usable = candidates.find((candidate) => candidate.kind === 'desktop');
-            const picked = await askChoice(mode, streams, {
-              message: 'Which client file?',
-              choices: [
-                ...candidates.map((candidate) => ({
-                  value: candidate.path,
-                  label: candidate.path.split('/').pop() ?? candidate.path,
-                  hint: `${CLIENT_KIND_LABEL[candidate.kind] ?? candidate.kind} · downloaded ${new Date(candidate.modifiedAt).toLocaleString()}`,
-                })),
-                { value: '', label: 'Somewhere else…', hint: 'type a path' },
-              ],
-              ...(usable ? { initial: usable.path } : {}),
-            });
-            path = picked;
-          }
-          while (!path) {
-            path = await askText(mode, streams, {
-              message: 'Path to the downloaded client JSON',
-              placeholder: '~/Downloads/client_secret_….json',
-            });
-          }
+          // Looked for now, not taken from the scan made as the command started: that was before the walk, and so
+          // before the download this step is waiting for.
+          const path =
+            clientPath ||
+            (await chooseClientFile(
+              {
+                choose: (question) => askChoice(mode, streams, question),
+                type: (question) => askText(mode, streams, question),
+              },
+              () => findClientJson(context.env),
+              where,
+            ));
 
           // Asked here as `client add` asks: the person reads what is registered, and says yes to it.
           const added = await changed(

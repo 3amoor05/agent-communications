@@ -215,14 +215,19 @@ export interface FindClientOptions {
   maxOpened?: number;
 }
 
+/** The directory the scan reads, so a person told "nothing found" is also told where nothing was found. */
+export function downloadDirectory(env: NodeJS.ProcessEnv = process.env): string {
+  const home = env.HOME || env.USERPROFILE || homedir();
+  return env.XDG_DOWNLOAD_DIR || join(home, 'Downloads');
+}
+
 export async function findClientJson(
   env: NodeJS.ProcessEnv = process.env,
   options: FindClientOptions = {},
 ): Promise<ClientCandidate[]> {
   const maxDated = options.maxDated ?? MAX_NAMES_DATED;
   const maxOpened = options.maxOpened ?? MAX_CANDIDATES;
-  const home = env.HOME || env.USERPROFILE || homedir();
-  const directory = env.XDG_DOWNLOAD_DIR || join(home, 'Downloads');
+  const directory = downloadDirectory(env);
   let names: string[];
   try {
     names = await readdir(directory);
