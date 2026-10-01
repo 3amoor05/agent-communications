@@ -146,7 +146,9 @@ agent-gmail search 'newer_than:7d' --inbox acme/gmail
 
 `setup` is the way in. It walks the five Google Cloud screens with a link to each and says what to type in
 every field, finds the client JSON you downloaded, connects the first mailbox, and offers to register the MCP
-server — stopping at whatever is already done rather than starting over. Run it again to add another mailbox.
+server — stopping at whatever is already done rather than starting over. Stopped partway, the next run offers to
+carry on from the last Google Cloud screen you confirmed, or to use a client file already in your downloads. Run it
+again to add another mailbox.
 
 At a terminal it draws a list you move through with the cursor keys; `--no-tui` asks the same questions one
 line at a time. Where nobody can answer one — `--json`, `--no-input`, CI, or a redirected stream — it acts on

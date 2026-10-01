@@ -14,7 +14,9 @@ agent-gmail setup
 
 `setup` is this page as a command. It walks the same Google Cloud screens with a link to each and says what to
 type in every field, finds the JSON you download at the end, connects a mailbox, and offers to register the MCP
-server — skipping whatever is already done. If it works, you do not need the rest of this page.
+server — skipping whatever is already done. If you stop it partway, the next run offers to carry on from the last
+screen you confirmed, or to use the client file already in your downloads. If it works, you do not need the rest of
+this page.
 
 The rest of this page is here for three reasons: to explain *why* each screen is set the way it is, to be
 readable before you run anything, and because the one step nothing can automate — approving the grant in your

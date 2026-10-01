@@ -31,7 +31,8 @@ agent-gmail setup
 `setup` is the way in. You need one OAuth client of your own, created once in Google Cloud (type **Desktop app**)
 and published so its tokens do not expire after a week — `setup` walks those five screens with a link to each and
 says what to type in every field, then finds the JSON you downloaded, connects a mailbox, and offers to register
-the MCP server. It skips whatever is already done, so running it again adds another mailbox.
+the MCP server. It skips whatever is already done, so running it again adds another mailbox — and stopped partway,
+it offers to carry on from the last Google Cloud screen you confirmed.
 
 At a terminal it draws a list you move through with the cursor keys; `--no-tui` asks the same questions one line
 at a time. Where nobody can answer one — `--json`, `--no-input`, CI, a redirected stream — it acts on the flags it

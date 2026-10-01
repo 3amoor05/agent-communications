@@ -3,6 +3,28 @@
 All notable changes to this project are recorded here, newest first. Every package in this repository is released
 together under one version.
 
+## 0.12.1
+
+**`agent-gmail setup` finds the client file you just downloaded.** The last Google Cloud step is downloading the client
+JSON, but setup looked for it in your downloads before that step, as the command started. So the first time through it
+never found the file, asked you to type the path, and had no way to look again. Running setup a second time found the
+file at once. Now setup looks when it reaches the client file step, and both prompts can look again: **Look again**
+in the list of files, or Enter on an empty path. The prompt also says where it looked (`~/Downloads`, or
+`XDG_DOWNLOAD_DIR`).
+
+**Stopped partway, setup no longer starts the Google Cloud steps from 1/5.** Those five steps happen in your browser and
+left nothing on the machine, so until a client was registered every run walked all five again. Setup now remembers the
+last step you confirmed, and the next run offers to carry on from the step after it, or to start over. If a Desktop
+client file is already in your downloads, it offers to use that file and skip the walk. `--client-json` skips the walk
+too, since the file is already in hand. The record is removed once a client is registered, and nothing on the machine
+changes whichever you choose.
+
+What it means for you: a patch release, and only `agent-gmail setup` at a terminal behaves differently. `--json`,
+`--no-input` and the MCP `gmail_setup` tool are unchanged; `gmail_setup` already looked again on every call.
+- If you are setting up Gmail for the first time, or helping someone who is, use 0.12.1.
+- To get 0.12.1: your servers will say an update is out. Run `agentcomms update` (or say "update my comms"), then
+  restart your client. A new install with `npx -y @agentcomms/gmail setup` gets it already.
+
 ## 0.12.0
 
 **You can see, and change, which folders a file may be attached from.** `agentcomms attach` (and `comms_attach` from
