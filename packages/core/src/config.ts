@@ -1303,7 +1303,10 @@ export function classifyChange(before: Config, after: Config): { loosened: strin
   // Paths are compared by what they resolve to: a path written with `~` and the same path written in full are the
   // same place, and comparing them as strings would either ask for consent that is not needed or miss a change
   // that is.
-  const roots = (list: readonly string[]) => new Set(list.map(normalisePath));
+  // Not `normalisePath`, which trims: a space at the end is part of a folder's name, and the jail reads `/allowed ` and
+  // `/allowed` as two folders — so taking one of them off a deny list is a loosening, whichever it is.
+  const roots = (list: readonly string[]) =>
+    new Set(list.map((path) => comparablePath(resolve(expandHome(path, homedir())))));
   // Folders as the jail reads them: one that names no place allows nothing, so adding its proper form is a loosening.
   // Not so for deny entries, which deny however they are written.
   const readRoots = (list: readonly string[]) => roots(list.filter((root) => namesItsPlace(root)));

@@ -171,8 +171,9 @@ export const ATTACH_ROOTS_ADD = 'agentcomms attach roots add <folder>';
  * in a preview and knows.
  */
 export function checkedPath(path: unknown, platform: NodeJS.Platform = process.platform): string {
-  const value = typeof path === 'string' ? path.trim() : '';
-  if (value === '') {
+  // Not trimmed: a space at the end is part of a folder's name on macOS and Linux, and `/outgoing ` is not `/outgoing`.
+  const value = typeof path === 'string' ? path : '';
+  if (value.trim() === '') {
     throw new CommsError('USAGE', 'name the folder or path', {
       hint: `For example: \`${ATTACH_ROOTS_ADD.replace('<folder>', '~/Documents/outgoing')}\`.`,
     });

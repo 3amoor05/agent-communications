@@ -395,3 +395,30 @@ test(
     assert.equal(existsSync(marker), false, 'a $(…) in an entry was run');
   },
 );
+
+test(
+  'a space at the end of a folder is part of its name: /allowed and "/allowed " are two entries, and taking one off is approved',
+  NOT_ON_WINDOWS,
+  async () => {
+    const base = realpathSync.native(tempDir('comms-attach-space-'));
+    const plain = join(base, 'allowed');
+    const spaced = `${plain} `;
+    mkdirSync(plain);
+    mkdirSync(spaced);
+    const m = machine({ attachDeny: [plain, spaced] });
+    const { ok, close } = await connect(m);
+    try {
+      // Removing a deny entry widens what can be sent, even when another entry differs from it only by the space.
+      const asked = await ok({ denyRemove: spaced });
+      assert.equal(asked.approvalRequired, true, 'taken off with nobody asked');
+      await ok({ denyRemove: spaced, approvalId: asked.approvalId });
+      assert.deepEqual((await defaultsOf(m)).attachDeny, [plain], 'the other entry was taken off with it');
+      // And a folder added with a space at its end keeps it.
+      const add = await ok({ rootsAdd: spaced });
+      await ok({ rootsAdd: spaced, approvalId: add.approvalId });
+      assert.ok((await defaultsOf(m)).attachRoots.includes(spaced), 'the space was trimmed off');
+    } finally {
+      await close();
+    }
+  },
+);
