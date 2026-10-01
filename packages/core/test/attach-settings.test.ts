@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join, parse } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -84,6 +84,8 @@ async function connect(m: Machine) {
   };
   return { ok, call, error, close: () => Promise.all([client.close(), server.close()]) };
 }
+
+const NOT_ON_WINDOWS = { skip: process.platform === 'win32' && 'needs a POSIX shell' };
 
 const defaultsOf = async (m: Machine) => (await m.core.config.load()).defaults;
 
@@ -342,10 +344,9 @@ test('the report shows a listed folder that names no place apart: it allows noth
     }
     const shown = cli(m, ['attach']);
     assert.equal(shown.status, 0, shown.stderr);
-    assert.match(shown.stdout, /Listed, but allowing nothing[^\n]*\n {2}"outgoing"\n/);
     assert.match(
       shown.stdout,
-      /agentcomms attach roots remove "<folder>", written exactly as it is between the quotes/,
+      /Listed, but allowing nothing[^\n]*\n[^\n]*\n {2}agentcomms attach roots remove outgoing\n/,
     );
     if (allowed === 0) assert.match(shown.stdout, /so nothing can be attached/);
     else assert.doesNotMatch(shown.stdout, /so nothing can be attached/);
@@ -355,7 +356,11 @@ test('the report shows a listed folder that names no place apart: it allows noth
 test('an entry is taken out exactly as it is listed: spaces at either end, or nothing at all, from both surfaces', async () => {
   const m = machine({ attachRoots: ['~', ' outgoing ', ''] });
   const shown = cli(m, ['attach']);
-  assert.match(shown.stdout, /\n {2}" outgoing "\n {2}""\n/, 'the spaces and the empty entry are not visible');
+  assert.match(
+    shown.stdout,
+    /\n {2}agentcomms attach roots remove ' outgoing '\n {2}agentcomms attach roots remove ''\n/,
+    'the spaces and the empty entry are not visible',
+  );
   const { ok, error, close } = await connect(m);
   try {
     // Trimmed, it is another entry, and is not listed.
@@ -369,3 +374,24 @@ test('an entry is taken out exactly as it is listed: spaces at either end, or no
   assert.equal(removed.status, 0, removed.stderr);
   assert.deepEqual((await defaultsOf(m)).attachRoots, ['~']);
 });
+
+test(
+  'the command shown to take an entry out gives the shell back the entry, as written: nothing in it is expanded or run',
+  NOT_ON_WINDOWS,
+  () => {
+    const marker = join(tempDir('comms-attach-shell-'), 'ran');
+    const entries = ['$HOME/outgoing', `$(touch ${marker})`, "it's here", 'back\\slash', ' spaced ', ''];
+    const m = machine({ attachRoots: ['~', ...entries] });
+    const shown = cli(m, ['attach']);
+    assert.equal(shown.status, 0, shown.stderr);
+    const commands = shown.stdout.split('\n').filter((line) => line.startsWith('  agentcomms attach roots remove'));
+    assert.equal(commands.length, entries.length);
+    for (const [index, command] of commands.entries()) {
+      // The shell reads the line; printf hands back the one word it was given in place of the folder.
+      const word = command.trim().replace(/^agentcomms attach roots remove /, '');
+      const echoed = spawnSync('/bin/sh', ['-c', `printf '%s' ${word}`], { encoding: 'utf8' });
+      assert.equal(echoed.stdout, entries[index], command);
+    }
+    assert.equal(existsSync(marker), false, 'a $(…) in an entry was run');
+  },
+);

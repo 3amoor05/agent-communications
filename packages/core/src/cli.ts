@@ -626,10 +626,11 @@ function renderAttach(report: AttachReport): string {
       ? []
       : [
           '',
-          'Listed, but allowing nothing — they do not say which drive or folder they are on:',
-          // Quoted, so a space at either end, or an empty entry, can be seen and written back.
-          ...report.ignored.map((root) => `  ${JSON.stringify(root)}`),
-          '  Take one out with agentcomms attach roots remove "<folder>", written exactly as it is between the quotes.',
+          'Listed, but allowing nothing — they do not say which drive or folder they are on. To take one out, run the',
+          'command shown for it:',
+          // The whole command, quoted for a shell: the entry as written, a space at either end or nothing at all, and
+          // never a `$HOME` or a `$(…)` the shell would expand or run when it is pasted.
+          ...report.ignored.map((root) => `  ${shellCommand(['agentcomms', 'attach', 'roots', 'remove', root])}`),
         ]),
     '',
     'Never from, by your own entries:',
