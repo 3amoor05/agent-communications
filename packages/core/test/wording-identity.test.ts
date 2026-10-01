@@ -124,8 +124,9 @@ function cursor(m: Machine, servers: Record<string, { command: string; args: str
 function normalise(m: Machine, text: string): string {
   let out = text;
   for (const home of new Set([m.home, realpathSync(m.home)])) out = out.split(home).join('<home>');
-  // The npx an npx entry starts is the one beside this node when PATH has none (#46): `npx`, or `npx.cmd` on Windows.
-  for (const npx of ['npx', 'npx.cmd', 'npx.CMD', 'npx.exe'].map((name) => join(dirname(process.execPath), name))) {
+  // The npx an npx entry starts is the one beside this node when PATH has none (#46): `npx`, or `npx.cmd` on Windows —
+  // the longer names first, so `npx.cmd` is not left as `<npx>.cmd`.
+  for (const npx of ['npx.cmd', 'npx.CMD', 'npx.exe', 'npx'].map((name) => join(dirname(process.execPath), name))) {
     out = out.split(npx).join('<npx>');
   }
   out = out.split(REPO).join('<repo>').split(process.execPath).join('<node>');

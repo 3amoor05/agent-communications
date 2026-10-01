@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { parse } from 'node:path';
 import { test } from 'node:test';
 import { parseAddressList } from '../src/addresses.ts';
 import {
@@ -153,7 +154,11 @@ test('loosening a safety setting is refused without consent; tightening and cons
   const loosenings: [string, (c: ReturnType<typeof emptyConfig>) => ReturnType<typeof emptyConfig>][] = [
     ['defaults.riskEscalation', (c) => ({ ...c, defaults: { ...c.defaults, riskEscalation: false } })],
     ['defaults.sendCaps', (c) => ({ ...c, defaults: { ...c.defaults, sendCaps: { perHour: 99, perDay: 100 } } })],
-    ['defaults.attachRoots', (c) => ({ ...c, defaults: { ...c.defaults, attachRoots: ['~', '/'] } })],
+    // The top of this machine's disk — `/`, or a drive's on Windows, where `/` names no drive and so allows nothing.
+    [
+      'defaults.attachRoots',
+      (c) => ({ ...c, defaults: { ...c.defaults, attachRoots: ['~', parse(process.cwd()).root] } }),
+    ],
     ['defaults.downloadsDir', (c) => ({ ...c, defaults: { ...c.defaults, downloadsDir: '/tmp/x' } })],
     [
       'defaults.confirm.elicitationClients',

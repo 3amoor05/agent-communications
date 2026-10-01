@@ -546,7 +546,8 @@ test('a node found elsewhere by the time of the apply is refused: it is not the 
     planThenApply(m, { channel: 'core', client: 'cursor', launcher: 'local', noVerify: true }, () => {
       m.env.PATH = m.later;
     }),
-    drifted(/it would start the server with .*later.*node, not .*bin.*node/),
+    // `node.exe` on Windows, where PATHEXT decides what runs.
+    drifted(/it would start the server with .*later.*node(?:\.exe)?, not .*bin.*node/),
   );
   assert.ok(cursor && !existsSync(cursor), 'nothing was written');
 });
