@@ -150,8 +150,11 @@ async function pendingRegistrationOf(
     ? `setup was asked to replace the Gmail server's entry in ${intent.client}${served === null ? '' : ` — it served the mailbox ${served}`} — and it has not been replaced yet`
     : served === null
       ? `no Gmail server registered with ${intent.client} serves it yet`
-      : `the Gmail server's entry in ${intent.client} serves the mailbox ${served}, not this one. Replacing it would take ${served}'s server away, so the way to reach both is a second entry under a name of its own: call comms_server_install with these arguments and \`name: "${second}"\`, or at a terminal \`agent-gmail mcp install --client ${intent.client} --name ${second} --inbox ${alias}${launcher}\``;
-  const command = `agent-gmail mcp install --client ${intent.client}${launcher}${served === null ? '' : ` --inbox ${alias}`}${replace ? ' --force' : ''}`;
+      : `the Gmail server's entry in ${intent.client} serves the mailbox ${served}, not this one. Replacing it would take ${served}'s server away, so the way to reach both is a second entry under a name of its own, \`${second}\`, which these arguments already name: call comms_server_install with them, or at a terminal \`agent-gmail mcp install --client ${intent.client} --name ${second} --inbox ${alias}${launcher}\``;
+  // A second entry when ours under the default name serves another mailbox and is not being replaced: the arguments
+  // carry its name, so they work as they are given — passed on unchanged, they would ask for the taken name again.
+  const separate = !replace && served !== null;
+  const command = `agent-gmail mcp install --client ${intent.client}${launcher}${separate ? ` --name ${second}` : ''}${served === null ? '' : ` --inbox ${alias}`}${replace ? ' --force' : ''}`;
   return {
     client: intent.client,
     tool: 'comms_server_install' as const,
@@ -160,6 +163,7 @@ async function pendingRegistrationOf(
       client: intent.client,
       ...(intent.launcher ? { launcher: intent.launcher } : {}),
       ...(served === null ? {} : { inbox: alias }),
+      ...(separate ? { name: second } : {}),
       ...(replace ? { force: true as const } : {}),
     },
     next:
@@ -1524,13 +1528,14 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
                   client: z.string(),
                   launcher: z.string().optional(),
                   inbox: z.string().optional(),
+                  name: z.string().optional(),
                   force: z.literal(true).optional(),
                 }),
                 next: z.string(),
               })
               .optional()
               .describe(
-                'present when `agent-gmail setup --mcp-client` handed this sign-in off and no entry of this server in that client serves this mailbox yet — or `setup` was given `--replace-server`, which `force` carries: nothing was registered — call comms_server_install with `arguments`, show its preview, and claim it after the user says yes. `inbox` pins it to this mailbox, where the entry under that name serves another',
+                'present when `agent-gmail setup --mcp-client` handed this sign-in off and no entry of this server in that client serves this mailbox yet — or `setup` was given `--replace-server`, which `force` carries: nothing was registered — call comms_server_install with `arguments`, show its preview, and claim it after the user says yes. `inbox` pins it to this mailbox, where the entry under that name serves another; `name` names a second entry when that one is not being replaced',
               ),
           }),
           annotations: { readOnlyHint: false, openWorldHint: true },

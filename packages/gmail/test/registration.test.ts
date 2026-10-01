@@ -1024,13 +1024,41 @@ test('gmail_inbox_finish decides `pendingRegistration` by the entry that serves 
   assert.ok(pending, 'an entry for another mailbox is not this one');
   // Pinned to the mailbox just connected, as `inbox add --finish` asks for it; and, since nothing is to be replaced,
   // the way to reach both is a second entry, which the text names (#47).
-  assert.deepEqual(pending.arguments, { channel: 'gmail', client: 'cursor', launcher: 'local', inbox: 'home' });
+  assert.deepEqual(pending.arguments, {
+    channel: 'gmail',
+    client: 'cursor',
+    launcher: 'local',
+    inbox: 'home',
+    name: 'gmail-home',
+  });
   assert.match(String(pending.next), /serves the mailbox other, not this one/);
   assert.match(
     String(pending.next),
     /`agent-gmail mcp install --client cursor --name gmail-home --inbox home --launcher local`/,
   );
   assert.equal(await readFile(pinned.cursor, 'utf8'), before);
+  // The arguments work as they are given: passed on unchanged, they ask for the second entry, not the taken name.
+  const env = { ...pinned.harness.env, ...pinned.env };
+  const core = await coreServer(pinned.harness, env);
+  try {
+    const asked = approvalAsked(
+      await core.call('comms_server_install', { ...(pending.arguments as object), noVerify: true }),
+    );
+    assert.match(
+      asked.preview,
+      /registers the Gmail MCP server with cursor as "gmail-home", pinned to the mailbox home/,
+    );
+    await core.call('comms_server_install', {
+      ...(pending.arguments as object),
+      noVerify: true,
+      approvalId: asked.approvalId,
+    });
+    const servers = JSON.parse(await readFile(pinned.cursor, 'utf8')).mcpServers;
+    assert.ok(servers['gmail-home'], 'the second entry was not written');
+    assert.deepEqual(servers.gmail, JSON.parse(before).mcpServers.gmail, "the other mailbox's entry was changed");
+  } finally {
+    await core.close();
+  }
 
   // One that serves it: nothing pending, as the command says "already-registered".
   const serving = await clientOnly();
