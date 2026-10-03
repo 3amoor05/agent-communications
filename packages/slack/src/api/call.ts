@@ -147,6 +147,33 @@ function body(params: Record<string, string | number | boolean | undefined>): st
 const RENEWABLE: ReadonlySet<string> = new Set(['invalid_auth', 'token_expired', 'token_revoked']);
 
 /**
+ * The refusals that do not say nothing happened.
+ *
+ * Slack documents these two with the same sentence: "It's possible some aspect of the operation succeeded before the
+ * error was raised." `unknown_error` is this module's stand-in for an answer that was neither a success nor a named
+ * refusal (see `callOnce`), which says nothing either way.
+ */
+const MAY_HAVE_ACTED: ReadonlySet<string> = new Set(['internal_error', 'fatal_error', 'unknown_error']);
+
+/**
+ * Whether a write that failed certainly did nothing at Slack.
+ *
+ * True for a refusal before the request left — the guard's, which is `SEND_REFUSED` — for Slack's own refusal in so many
+ * words, an `ok: false` naming any error but the ones above, and for a 429, which Slack answers instead of acting.
+ * False for everything else after the request was handed over: a connection that failed or dropped, a call's own time
+ * running out, a 5xx, an answer that could not be read. Those say nothing about whether Slack acted, and a post that may
+ * be in the channel must never be recorded as one that is not — that is how a person is invited to post it twice.
+ */
+export function certainlyRefused(error: unknown): boolean {
+  if (!(error instanceof CommsError)) return false;
+  if (error.code === 'SEND_REFUSED') return true;
+  const slackError = error.details?.slackError;
+  if (typeof slackError === 'string') return !MAY_HAVE_ACTED.has(slackError);
+  // The 429 in `callOnce` is the one failure that carries this, with or without a number in it.
+  return error.details !== undefined && 'retryAfterSeconds' in error.details;
+}
+
+/**
  * One call.
  *
  * Every read goes through here, which is what makes "reads never carry a permit" and "every failure is mapped"

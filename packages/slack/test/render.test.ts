@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { renderWorkspace, renderWorkspaces } from '../src/cli/render.ts';
+import { renderPosted, renderWorkspace, renderWorkspaces } from '../src/cli/render.ts';
 import type { WorkspaceView } from '../src/operations/workspaces.ts';
 
 /**
@@ -69,4 +69,23 @@ test('a workspace with no name shows its id rather than an empty gap', () => {
   const printed = renderWorkspaces([view({ workspaceName: undefined })], false);
   assert.match(printed, /T0001/);
   assert.doesNotMatch(printed, / — \n/);
+});
+
+test('a post reads as it always did, and a note about its record is said after it rather than dropped', () => {
+  // `post send` prints this: a post whose approval could not be marked used afterwards has to say so at a terminal too.
+  assert.equal(
+    renderPosted({ approvalId: 'ap_1', channel: 'C1', ts: '1700000000.000100' }),
+    'Posted to C1 at 1700000000.000100.',
+  );
+  const note = 'the approval could not be marked used (the store was busy), so it will read as unknown';
+  assert.equal(
+    renderPosted({ approvalId: 'ap_1', channel: 'C1', ts: '1700000000.000100', note }),
+    `Posted to C1 at 1700000000.000100. The approval could not be marked used (the store was busy), so it will read as unknown.`,
+  );
+  const file = { id: 'F1', name: 'a.txt', size: 1, sha256: 'ab' };
+  assert.match(
+    renderPosted({ approvalId: 'ap_1', channel: 'C1', ts: '1700000000.000200', files: [file], note }).split('\n')[0] ??
+      '',
+    /^Posted 1 file to C1 at 1700000000\.000200\. The approval could not be marked used/,
+  );
 });

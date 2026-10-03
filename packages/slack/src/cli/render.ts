@@ -205,15 +205,19 @@ export function renderUpdatedDraft(draft: SlackDraft, workspace: string): string
  * A post of text alone is the one line it always was. A post with files says how many and where, and the message's ts
  * — or, when Slack had not attached the files to a message yet, that the ts is not known, in the words of the result's
  * own note — and then each file as Slack now has it: its id there, its name, its size and the hash that was sent.
+ *
+ * A note on a post with a ts is said after it: a record of the post that could not be written is something the person
+ * at the terminal has to hear, and `--json` is not the only way they read this. A post with no note reads as it did.
  */
 export function renderPosted(posted: PostedMessage | PostedFiles): string {
-  if (!('files' in posted)) return `Posted to ${posted.channel} at ${posted.ts}.`;
+  const sentence = (note: string) => `${note.charAt(0).toUpperCase()}${note.slice(1)}.`;
+  const after = posted.note === undefined ? '' : ` ${sentence(posted.note)}`;
+  if (!('files' in posted)) return `Posted to ${posted.channel} at ${posted.ts}.${after}`;
   const count = `${posted.files.length} file${posted.files.length === 1 ? '' : 's'}`;
-  const note = posted.note ?? 'Slack did not say which message holds them';
   const head =
     posted.ts === null
-      ? `Posted ${count} to ${posted.channel}. ${note.charAt(0).toUpperCase()}${note.slice(1)}.`
-      : `Posted ${count} to ${posted.channel} at ${posted.ts}.`;
+      ? `Posted ${count} to ${posted.channel}. ${sentence(posted.note ?? 'Slack did not say which message holds them')}`
+      : `Posted ${count} to ${posted.channel} at ${posted.ts}.${after}`;
   return [
     head,
     ...posted.files.map(

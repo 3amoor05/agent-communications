@@ -45,6 +45,13 @@ export interface SlackRequest {
   readonly raw: string;
 }
 
+/**
+ * What a scripted method returns to have the Web API take the request — it is recorded, and whatever the script did
+ * before returning has happened — and then destroy the socket instead of answering: Slack acting on a post, and the
+ * answer lost on the way back. The case that says nothing about whether a write happened.
+ */
+export const DROP: unique symbol = Symbol('drop the connection instead of answering');
+
 export type Reply = (request: SlackRequest) => unknown;
 
 /** How the files host answers one file. */
@@ -337,6 +344,10 @@ export async function startFakeSlack(script: Record<string, Reply> = {}): Promis
       }
       const reply = fake.script[method];
       const answer = reply ? reply(recorded) : { ok: false, error: 'unknown_method' };
+      if (answer === DROP) {
+        response.socket?.destroy();
+        return;
+      }
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end(JSON.stringify(answer));
     })();
