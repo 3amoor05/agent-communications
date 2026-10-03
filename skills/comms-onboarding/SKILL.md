@@ -152,8 +152,10 @@ Every step has a command, for a person at a terminal or an agent that can run co
 | Policies | `agent-gmail inbox policy <name> --send <policy> --change <policy>`, `agent-slack workspace policy <name> --send <policy> --change <policy>`, `agent-resend account policy <name> --send <policy> --change <policy>`, `agentcomms policy confirm` |
 | Check | `agentcomms doctor`, `agent-gmail doctor`, `agent-slack doctor`, `agent-resend doctor`, `agent-whatsapp status` |
 
-A change stops with exit `10`, its preview and an approval id, and changes nothing. Show the preview;
-after their yes, run the command its hint gives, which carries the approval id. Under `confirm` they
+A change stops with exit `10`, its preview and an approval id, and changes nothing — with one
+exception: `agentcomms org update <organisation> --for-other-addresses off` turns that off at once,
+because narrowing never waits, and the preview and the final result both say it was done. Show the
+preview; after their yes, run the command its hint gives, which carries the approval id. Under `confirm` they
 run `agentcomms approve <id>` in their own terminal first. A person running a command at a terminal
 approves there and then: `yes`, or the code under `confirm`.
 

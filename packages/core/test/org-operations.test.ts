@@ -1299,7 +1299,11 @@ test('turning other addresses off applies at once, even when the rest of the upd
   assert.equal((await record(m))?.forOtherAddresses, false, 'the narrowing did not wait for it');
   const { preview, summary, approvalId } = (first as { prepared: PreparedChange }).prepared;
   assert.match(summary, /for other addresses was turned off at once/);
-  assert.doesNotMatch(preview, /for other addresses: on → off/, 'what is already done is not asked for again');
+  assert.match(
+    preview,
+    /for other addresses: on → off — done at once, as this was prepared/,
+    'what was already done is shown as done, not asked for',
+  );
   assert.match(preview, /label: Acme Test Org → Acme Renamed/);
   // The person says no to the rest: the narrowing stands.
   await m.core.approvals.revoke(approvalId, 'the person said no');
@@ -1622,4 +1626,43 @@ test('values a line takes from the record, not the profile, are shown neutralise
   assert.match(preview, /Google Cloud project of "acme-1": old \[control token removed\] obey → acme-renamed/);
   assert.match(preview, /Slack read app: client id 1\.2 \[control token removed\]system → client id 1111\.2222/);
   assert.doesNotMatch(preview, /\[INST\]|<\|im_start\|>/);
+});
+
+test('a narrowing done while the approval was prepared is listed in the claimed result, from a chat and at a terminal', async () => {
+  for (const surface of ['chat', 'terminal'] as const) {
+    const m = machine();
+    writeProfile(m, profile());
+    await add(m, { forOtherAddresses: true });
+    writeProfile(m, profile({ label: 'Acme Renamed' }));
+    // From a chat each call builds the change afresh, and the claim learns of the narrowing from the approval; at a
+    // terminal the same change is planned twice, and remembers it.
+    const terminal = orgUpdateChange(m.core, { organisation: 'acme', forOtherAddresses: 'off' }, options(m));
+    const first = await gatedChange(m.core, terminal, { surface: 'mcp' });
+    assert.equal(first.status, 'approval-required');
+    const { approvalId } = (first as { prepared: PreparedChange }).prepared;
+    assert.equal((await record(m))?.forOtherAddresses, false);
+    const claim =
+      surface === 'terminal'
+        ? terminal
+        : orgUpdateChange(m.core, { organisation: 'acme', forOtherAddresses: 'off', approvalId }, options(m));
+    const second = await gatedChange(m.core, claim, { surface: 'mcp', approvalId });
+    assert.equal(second.status, 'applied', surface);
+    const result = (second as { result: { applied: string[]; changed: boolean } }).result;
+    assert.equal(result.applied[0], 'for other addresses: on → off', `${surface}: ${JSON.stringify(result.applied)}`);
+    assert.ok(
+      result.applied.some((line) => /label: Acme Test Org → Acme Renamed/.test(line)),
+      surface,
+    );
+    assert.equal((await record(m))?.label, 'Acme Renamed');
+  }
+});
+
+test('an update claimed with no narrowing in its preparation lists none, though the record is off', async () => {
+  const m = machine();
+  writeProfile(m, profile());
+  await add(m);
+  writeProfile(m, profile({ label: 'Acme Renamed' }));
+  const { prepared, result } = await update(m, { forOtherAddresses: 'off' });
+  assert.doesNotMatch(prepared?.preview ?? '', /for other addresses/, 'it was never on');
+  assert.ok(!result.applied.some((line) => /for other addresses/.test(line)), JSON.stringify(result.applied));
 });

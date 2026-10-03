@@ -14,8 +14,10 @@ what was shown. Connecting a mailbox, or a workspace in `read`, is not one: its 
 and the consent screen is the person's (§2).
 
 - The first call of a changing tool (without `approvalId`) returns `approvalRequired`, a `preview`
-  and `next`. **Nothing has changed at that point.** Show the preview in full — every line that
-  loosens something and every effect — and ask.
+  and `next`. **Nothing has changed at that point** — except a narrowing asked for beside it, which
+  never waits: `comms_org_update` with `forOtherAddresses: "off"` turns that off at once, and the
+  preview says so. Show the preview in full — every line that loosens something and every effect —
+  and ask.
 - Under the `chat` change policy, the person's yes in this conversation to that preview is the
   approval: call the same tool again with `approvalId`. Under `confirm`, give them
   `agentcomms approve <approvalId>` to run in their own terminal, and call again once they have.

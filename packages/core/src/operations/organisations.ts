@@ -812,6 +812,12 @@ function profileChange(
 ): GatedChange<OrgChangeResult> {
   let planned: Planned | null = null;
   /*
+   * Whether this change turned `forOtherAddresses` off on an earlier call of its own — the call at a terminal that
+   * prepared what it now claims. The claim plans from a record that is off already, and must still bind, and report,
+   * what the preparation did.
+   */
+  let narrowedEarlier = false;
+  /*
    * The store a planned secret goes to — chosen only when an owned secret will be written — and the refusal of a
    * `--store` with nothing to write. A store chosen for the first time is a setting the person sees, even on a repair.
    */
@@ -853,12 +859,24 @@ function profileChange(
        * serving the person's other addresses; done with the plan, it waited for whatever approval the rest needed.
        * The rest is then planned from what the narrowing left, and refused or approved as before.
        */
-      let narrowed = false;
+      let narrowedNow = false;
       if (spec.mode === 'update' && spec.forOtherAddresses === 'off' && spec.organisation !== undefined) {
         const outcome = await narrowAtOnce(core, options, spec.organisation);
         config = outcome.config;
-        narrowed = outcome.changed;
+        narrowedNow = outcome.changed;
       }
+      /*
+       * A narrowing done while an approval was prepared belongs to that approval's story: the preview says it was
+       * done, and the result of the claim lists it, as every change is listed. The claim plans from a record already
+       * off, so it learns of it from the preparation — this change's own earlier call at a terminal, or, from a chat
+       * where each call builds the change afresh, the approval it claims, which carries the line.
+       */
+      const narrowedBefore =
+        spec.mode === 'update' &&
+        spec.forOtherAddresses === 'off' &&
+        (narrowedEarlier || (await approvalRecordsNarrowing(core, spec.approvalId)));
+      narrowedEarlier ||= narrowedNow;
+      const narrowed = narrowedNow || narrowedBefore;
       const file = await readProfileFile(spec.path(config));
       await refuseChangedProfile(core, spec.approvalId, file, options.surface);
       const now = (options.now?.() ?? new Date()).toISOString();
@@ -867,7 +885,9 @@ function profileChange(
       planned = { plan: profilePlan, file, inputs: inputsOf(config), store, now, narrowed };
       const { organisation } = profilePlan;
       const label = shownText(file.profile.label, 64);
-      const effects = profilePlan.needsApproval ? previewLines(spec.mode, profilePlan, file, store) : [];
+      const effects = profilePlan.needsApproval
+        ? [...previewLines(spec.mode, profilePlan, file, store), ...(narrowed ? [NARROWED_WHEN_PREPARED] : [])]
+        : [];
       return {
         before: config,
         after: withPlan(config, profilePlan, store),
@@ -884,6 +904,24 @@ function profileChange(
       return applyProfile(core, options, spec.mode, planned, consent);
     },
   };
+}
+
+/**
+ * The preview line of a narrowing done as the approval was prepared: what it did, not what the approval permits. It is
+ * one of the approval's effects so that the claim, which plans from a record already off, can find it in the approval
+ * and list it in its result.
+ */
+const NARROWED_WHEN_PREPARED = 'for other addresses: on → off — done at once, as this was prepared';
+
+/** Whether the approval being claimed was prepared by a call that narrowed: it carries the line that says so. */
+async function approvalRecordsNarrowing(core: Core, approvalId: string | undefined): Promise<boolean> {
+  if (approvalId === undefined) return false;
+  const record = await core.approvals.get(approvalId).catch(() => null);
+  return (
+    record !== null &&
+    approvalKind(record) === 'change' &&
+    record.change?.effects.includes(NARROWED_WHEN_PREPARED) === true
+  );
 }
 
 /**
