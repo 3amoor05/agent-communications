@@ -1384,6 +1384,57 @@ test('org remove names every secret it could not delete, once the rows are gone'
   assert.equal((await config(m)).organisations, undefined);
 });
 
+/**
+ * Holds the next config write at the store's door, inside whatever lock its caller holds, until `release` is called:
+ * a deterministic place for a second change to arrive while the first is mid-write.
+ */
+function holdNextWrite(m: Machine): { entered: Promise<void>; release: () => void } {
+  const original = m.core.config.update.bind(m.core.config);
+  let enter: () => void = () => undefined;
+  let release: () => void = () => undefined;
+  const entered = new Promise<void>((resolve) => {
+    enter = resolve;
+  });
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let armed = true;
+  m.core.config.update = (async (mutator, opts) => {
+    if (armed) {
+      armed = false;
+      enter();
+      await released;
+    }
+    return original(mutator, opts);
+  }) as typeof m.core.config.update;
+  return { entered, release };
+}
+
+test('an update and a remove that race: whichever reaches the lock second finds the configuration moved', async () => {
+  for (const first of ['remove', 'update'] as const) {
+    const m = machine();
+    writeProfile(m, profile());
+    await add(m);
+    const removing = orgRemoveChange(m.core, { organisation: 'acme' }, options(m));
+    const updating = orgUpdateChange(m.core, { organisation: 'acme', forOtherAddresses: 'on' }, options(m));
+    const removal = await removing.plan(await m.core.config.load());
+    const change = await updating.plan(await m.core.config.load());
+    const held = holdNextWrite(m);
+    const one = first === 'remove' ? removing.apply(undefined, removal) : updating.apply(undefined, change);
+    await held.entered;
+    // The first is inside the credentials lock, at the store's door; the second arrives now, and waits for the lock.
+    const two = first === 'remove' ? updating.apply(undefined, change) : removing.apply(undefined, removal);
+    held.release();
+    const [won, lost] = await Promise.allSettled([one, two]);
+    assert.equal(won?.status, 'fulfilled', `${first}: ${JSON.stringify(won)}`);
+    assert.equal(lost?.status, 'rejected', `${first}: the second change was made over the first`);
+    assert.match(String((lost as PromiseRejectedResult).reason?.message), /changed while this ran/);
+    const after = await record(m);
+    if (first === 'remove') assert.equal(after, undefined, 'the removal stands, and nothing was written back');
+    else assert.equal(after?.forOtherAddresses, true, 'the update stands, and nothing was removed');
+  }
+});
+
 test('an earlier client marked again stays marked: its project id comes back with the mark, so nothing flips', async () => {
   const m = machine();
   writeProfile(m, profile());
