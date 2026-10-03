@@ -354,13 +354,18 @@ export function holdersOf(config: Config, name: string): string[] {
  * - `ok` — the row is the generation's: for an owned one, marked with this organisation, the same client id, project
  *   and the canonical secret reference; for an adopted one, the same client id and held by no other organisation.
  * - `missing` — no row under its name.
- * - `name-reused` — owned, and its name now holds a row that is not this organisation's (unmarked, or another's).
+ * - `unmarked` — owned, and its name holds a row of the same client with no organisation's mark: what an older release's
+ *   `client add --replace` leaves, since it writes the row afresh and knows nothing of the mark. The same client, so it
+ *   is marked again rather than counted as a reused name — which would make the organisation a second client of the
+ *   one it already has.
+ * - `name-reused` — owned, and its name now holds a row that is not this organisation's: another client with no mark,
+ *   or a row another organisation has marked.
  * - `replaced` — owned, marked with this organisation, but holding another client id: row (c).
  * - `altered` — owned, marked, the same client id, but another project, provider or secret reference: rows (b), (e).
  * - `gone` — adopted, and the row now holds another client: the person replaced it.
  * - `held` — adopted, and another organisation has claimed the row since.
  */
-export type GenerationState = 'ok' | 'missing' | 'name-reused' | 'replaced' | 'altered' | 'gone' | 'held';
+export type GenerationState = 'ok' | 'missing' | 'unmarked' | 'name-reused' | 'replaced' | 'altered' | 'gone' | 'held';
 
 export function generationState(
   config: Config,
@@ -370,6 +375,7 @@ export function generationState(
   const row = own(config.clients, generation.name);
   if (!row) return 'missing';
   if (generation.ownership === 'owned') {
+    if (row.organisation === undefined && row.clientId === generation.clientId) return 'unmarked';
     if (row.organisation !== organisation) return 'name-reused';
     if (row.clientId !== generation.clientId) return 'replaced';
     const altered =
@@ -390,7 +396,7 @@ export function generationState(
 export function generationUsable(config: Config, organisation: string, generation: OrganisationGeneration): boolean {
   const state = generationState(config, organisation, generation);
   return generation.ownership === 'owned'
-    ? state === 'ok' || state === 'missing' || state === 'altered'
+    ? state === 'ok' || state === 'missing' || state === 'altered' || state === 'unmarked'
     : state === 'ok';
 }
 
@@ -616,7 +622,8 @@ export function organisationDrift(config: Config, organisation: string): Organis
         'name-reused': `the name "${name}", the client ${organisation} gives new mailboxes, now holds a client that is not ${organisation}'s`,
         replaced: `"${name}", marked as ${organisation}'s, holds another client id than the profile's`,
         altered: `"${name}", the client ${organisation} gives new mailboxes, was changed: another secret reference or project`,
-      }[state as 'missing' | 'name-reused' | 'replaced' | 'altered'];
+        unmarked: `"${name}", the client ${organisation} gives new mailboxes, has lost its mark as ${organisation}'s (an older release's \`client add --replace\` drops it)`,
+      }[state as 'missing' | 'name-reused' | 'replaced' | 'altered' | 'unmarked'];
       drift.push({
         kind: 'repair',
         client: name,
@@ -635,6 +642,17 @@ export function organisationDrift(config: Config, organisation: string): Organis
         state,
         detail: `"${name}", an earlier client of ${organisation}, was changed and is still marked as ${organisation}'s`,
         fix: `${update} It clears the mark, and the client stays as one of your own.`,
+      });
+      continue;
+    }
+    if (state === 'unmarked') {
+      drift.push({
+        kind: 'repair',
+        client: name,
+        active: false,
+        state,
+        detail: `"${name}", an earlier client of ${organisation}, has lost its mark as ${organisation}'s`,
+        fix: `${update} It marks the client as ${organisation}'s again, leaving it and its secret as they are.`,
       });
       continue;
     }

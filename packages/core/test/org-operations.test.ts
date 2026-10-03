@@ -836,7 +836,7 @@ test('the Slack workspace cannot change while an account carries this organisati
   await assert.rejects(remove(m), is('CONFIG', /connected through acme's apps: acme\/slack/));
 });
 
-test('org add is refused while an account of the organisation is connected to its workspace through its own app', async () => {
+test('org add leaves an account connected through its own app as it is, and says so', async () => {
   const m = machine({
     secrets: { store: 'file' },
     accounts: {
@@ -854,8 +854,17 @@ test('org add is refused while an account of the organisation is connected to it
     },
   });
   writeProfile(m, profile());
-  await assert.rejects(add(m), is('CONFIG', /acme\/slack is already connected.*not touched/s));
-  assert.equal((await config(m)).accounts['acme/slack']?.workspace, 'TACME0001');
+  // Early members connected the workspace through an app of their own before profiles existed: adding the profile
+  // must not make them disconnect Slack first, and must not take the account over either.
+  const { result } = await add(m);
+  assert.match(
+    result.reported.join('\n'),
+    /acme\/slack is connected to this workspace through an app of your own, and stays as it is/,
+  );
+  const after = (await config(m)).accounts['acme/slack'] as AccountConfig & { organisation?: unknown };
+  assert.equal(after.workspace, 'TACME0001');
+  assert.equal(after.organisation, undefined, 'the account was taken over by the profile');
+  assert.deepEqual((await orgShow(m.core, 'acme')).accounts, []);
 });
 
 // ── Drift: the rows of §D8, repaired at once ─────────────────────────────────────────────────────────────────────
@@ -888,10 +897,11 @@ test('(a) the active name reused by another row: the client is registered again 
     raw.inboxes = { 'acme/gmail': mailbox('acme-1') };
   });
   const path = join(m.configDir, 'config.json');
+  // Another client under the name: the person replaced it with a client of their own.
   writeFileSync(
     path,
     writeAsReleased0121(readFileSync(path, 'utf8'), (raw) =>
-      clientAddReplaceAsReleased0121(raw, 'acme-1', { clientId: CLIENT_A, addedAt: CREATED }),
+      clientAddReplaceAsReleased0121(raw, 'acme-1', { clientId: CLIENT_B, addedAt: CREATED }),
     ),
   );
   const { prepared, result } = await update(m);
@@ -902,6 +912,54 @@ test('(a) the active name reused by another row: the client is registered again 
   assert.equal(after.clients['acme-1']?.organisation, undefined, 'the person’s row is left as it is');
   assert.equal(after.clients['acme-2']?.organisation, 'acme');
   assert.equal(after.inboxes['acme/gmail']?.client, 'acme-1', 'its mailbox stays on it');
+});
+
+test('(a) the same client rewritten by an older release loses only its mark, and is marked again in place', async () => {
+  const m = machine();
+  writeProfile(m, profile());
+  await add(m);
+  await edit(m, (raw) => {
+    raw.inboxes = { 'acme/gmail': mailbox('acme-1') };
+  });
+  // 0.12.1's `client add --replace` with the organisation's own client: the row written afresh, its mark dropped.
+  const path = join(m.configDir, 'config.json');
+  writeFileSync(
+    path,
+    writeAsReleased0121(readFileSync(path, 'utf8'), (raw) =>
+      clientAddReplaceAsReleased0121(raw, 'acme-1', { clientId: CLIENT_A, addedAt: CREATED }),
+    ),
+  );
+  assert.equal((await orgShow(m.core, 'acme')).drift[0]?.state, 'unmarked');
+  const { prepared, result } = await update(m);
+  assert.equal(prepared, null, 'marking the same client again repairs drift, and asks nobody');
+  assert.equal(result.gmail.client, 'acme-1', 'no second client of the client it already has');
+  assert.match(result.applied.join('\n'), /marks "acme-1" as acme's again/);
+  const after = await config(m);
+  assert.equal(after.clients['acme-1']?.organisation, 'acme');
+  assert.equal(after.clients['acme-2'], undefined);
+  assert.equal(after.inboxes['acme/gmail']?.client, 'acme-1');
+  assert.deepEqual((await orgShow(m.core, 'acme')).drift, []);
+});
+
+test('an earlier client whose mark an older release dropped is marked again, and nothing else of it is touched', async () => {
+  const m = machine();
+  writeProfile(m, profile());
+  await add(m);
+  writeProfile(m, profile({ gmail: gmail({ clientId: CLIENT_B, clientSecret: SECRET_B }) }));
+  await update(m);
+  const path = join(m.configDir, 'config.json');
+  writeFileSync(
+    path,
+    writeAsReleased0121(readFileSync(path, 'utf8'), (raw) =>
+      clientAddReplaceAsReleased0121(raw, 'acme-1', { clientId: CLIENT_A, addedAt: CREATED }),
+    ),
+  );
+  const before = await storedSecret(m, 'acme-1');
+  const { prepared, result } = await update(m);
+  assert.equal(prepared, null);
+  assert.match(result.applied.join('\n'), /marks "acme-1", an earlier client of acme, as acme's again/);
+  assert.equal((await config(m)).clients['acme-1']?.organisation, 'acme');
+  assert.equal(await storedSecret(m, 'acme-1'), before, 'an earlier client’s secret is not the profile’s to change');
 });
 
 test('(b) the active owned row altered is rewritten from the profile, by snapshot and restore', async () => {

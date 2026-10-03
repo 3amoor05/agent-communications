@@ -460,7 +460,12 @@ async function planProfile(config: Config, input: PlanInput): Promise<ProfilePla
       };
       if (gmail.action === 'created') write();
       else if (!row) write(`recreates "${target.name}" from the profile: its client row had gone`);
-      else if (row.provider !== 'gmail' || row.secretRef !== clientSecretRef(target.name)) {
+      else if (row.organisation === undefined && row.clientId === target.clientId) {
+        // Unmarked (`generationState`): the same client, its mark dropped by an older release's `client add
+        // --replace`. Marked again; the secret is then held to the profile's by the check below, as for any owned row.
+        rows[target.name] = wanted;
+        repairs.push(`marks "${target.name}" as ${organisation}'s again: an older release had dropped the mark`);
+      } else if (row.provider !== 'gmail' || row.secretRef !== clientSecretRef(target.name)) {
         // Row (b): rebuilt by snapshot and restore, since a secret reference that is not the canonical one says
         // nothing about what the canonical reference holds now.
         write(`rewrites "${target.name}" from the profile: its row had been changed`);
@@ -498,6 +503,14 @@ async function planProfile(config: Config, input: PlanInput): Promise<ProfilePla
   for (const generation of generations) {
     if (generation.name === active || Object.hasOwn(rows, generation.name)) continue;
     const state = generationState(config, organisation, generation);
+    if (generation.ownership === 'owned' && state === 'unmarked') {
+      // An earlier client's mark, dropped by an older release: marked again, and nothing else touched — the profile
+      // holds only the current client's secret, so this one's is left as the person's store has it.
+      const row = own(config.clients, generation.name) as ClientConfig;
+      rows[generation.name] = { ...row, organisation } as ClientConfig;
+      repairs.push(`marks "${generation.name}", an earlier client of ${organisation}, as ${organisation}'s again`);
+      continue;
+    }
     if (generation.ownership === 'owned' && (state === 'replaced' || state === 'altered')) {
       unmark.add(generation.name);
       repairs.push(
@@ -533,14 +546,17 @@ async function planProfile(config: Config, input: PlanInput): Promise<ProfilePla
   let slack: OrganisationRecord['slack'];
   if (ps) {
     if (input.mode === 'add') {
+      /*
+       * Reported, not refused. Somebody who connected the organisation's workspace through an app of their own — every
+       * early member did, before profiles existed — would otherwise have to disconnect Slack to add the profile at all,
+       * which takes away the one thing they had working to gain nothing yet. The account is left exactly as it is: it
+       * carries no provenance, so nothing here treats it as the profile's, and the profile's apps are for accounts
+       * connected from it.
+       */
       const unmanaged = unmanagedSlackAccounts(config, organisation, ps.workspace);
       if (unmanaged.length > 0) {
-        throw new CommsError(
-          'CONFIG',
-          `${unmanaged.join(', ')} ${unmanaged.length === 1 ? 'is' : 'are'} already connected to this profile's Slack workspace through an app of your own`,
-          {
-            hint: `Nothing was changed, and ${unmanaged.length === 1 ? 'it was' : 'they were'} not touched. To use the organisation's apps instead, remove ${unmanaged.length === 1 ? 'it' : 'them'} with \`agent-slack workspace remove <name>\`, then add the profile again.`,
-          },
+        reports.push(
+          `${unmanaged.join(', ')} ${unmanaged.length === 1 ? 'is' : 'are'} connected to this workspace through an app of your own, and ${unmanaged.length === 1 ? 'stays' : 'stay'} as ${unmanaged.length === 1 ? 'it is' : 'they are'}: the profile's apps are for accounts connected from it`,
         );
       }
     }
