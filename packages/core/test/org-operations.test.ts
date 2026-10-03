@@ -1282,6 +1282,32 @@ test('a preview names what is added in full: a Google client’s serves and proj
   assert.match(preview, /Slack read app: none → client id 1111\.2222/);
 });
 
+test('turning other addresses off applies at once, even when the rest of the update waits for its approval', async () => {
+  const m = machine();
+  writeProfile(m, profile());
+  await add(m, { forOtherAddresses: true });
+  writeProfile(m, profile({ label: 'Acme Renamed' }));
+  const first = await gatedChange(
+    m.core,
+    orgUpdateChange(m.core, { organisation: 'acme', forOtherAddresses: 'off' }, options(m)),
+    { surface: 'mcp' },
+  );
+  assert.equal(first.status, 'approval-required', 'the changed label still asks');
+  assert.equal((await record(m))?.forOtherAddresses, false, 'the narrowing did not wait for it');
+  const { preview, summary, approvalId } = (first as { prepared: PreparedChange }).prepared;
+  assert.match(summary, /for other addresses was turned off at once/);
+  assert.doesNotMatch(preview, /for other addresses: on → off/, 'what is already done is not asked for again');
+  assert.match(preview, /label: Acme Test Org → Acme Renamed/);
+  // The person says no to the rest: the narrowing stands.
+  await m.core.approvals.revoke(approvalId, 'the person said no');
+  assert.equal((await record(m))?.forOtherAddresses, false);
+  assert.equal((await record(m))?.label, 'Acme Test Org');
+  // And yes, on another try: the rest applies, and other addresses stay off.
+  await update(m, { forOtherAddresses: 'off' });
+  assert.equal((await record(m))?.label, 'Acme Renamed');
+  assert.equal((await record(m))?.forOtherAddresses, false);
+});
+
 test('an earlier client marked again stays marked: its project id comes back with the mark, so nothing flips', async () => {
   const m = machine();
   writeProfile(m, profile());

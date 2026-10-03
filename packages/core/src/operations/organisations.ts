@@ -761,6 +761,23 @@ function profileChange(
   },
 ): GatedChange<OrgChangeResult> {
   let planned: Planned | null = null;
+  /*
+   * The store a planned secret goes to — chosen only when an owned secret will be written — and the refusal of a
+   * `--store` with nothing to write. A store chosen for the first time is a setting the person sees, even on a repair.
+   */
+  const storeFor = async (config: Config, profilePlan: ProfilePlan): Promise<StoreKind | null> => {
+    if (profilePlan.secret) {
+      const chosen = await chooseSecretStore(config, spec.store, { keyring: options.keyring });
+      if (chosen.choosing) profilePlan.needsApproval = true;
+      return chosen.store;
+    }
+    if (spec.store !== undefined) {
+      throw new CommsError('USAGE', '--store does not apply: this writes no client secret', {
+        hint: 'A store is chosen only when a client secret is written here — never for a Slack-only profile, an adopted client, or an update that writes none. Leave out --store.',
+      });
+    }
+    return null;
+  };
   const plan = async (config: Config, file: ProfileFile, now: string): Promise<ProfilePlan> => {
     // Opened only when a stored secret is asked for: a plan that writes a new client reads nothing from the store.
     const committed = committedSecretsStore(config);
@@ -776,21 +793,26 @@ function profileChange(
     });
   };
   return {
-    plan: async (config): Promise<ChangeRequest> => {
+    plan: async (given): Promise<ChangeRequest> => {
+      let config = given;
       const file = await readProfileFile(spec.path(config));
       await refuseChangedProfile(core, spec.approvalId, file, options.surface);
       const now = (options.now?.() ?? new Date()).toISOString();
-      const profilePlan = await plan(config, file, now);
-      let store: StoreKind | null = null;
-      if (profilePlan.secret) {
-        const chosen = await chooseSecretStore(config, spec.store, { keyring: options.keyring });
-        store = chosen.store;
-        // A store chosen for the first time is a setting the person sees, even on a repair.
-        if (chosen.choosing) profilePlan.needsApproval = true;
-      } else if (spec.store !== undefined) {
-        throw new CommsError('USAGE', '--store does not apply: this writes no client secret', {
-          hint: 'A store is chosen only when a client secret is written here — never for a Slack-only profile, an adopted client, or an update that writes none. Leave out --store.',
-        });
+      let profilePlan = await plan(config, file, now);
+      let store = await storeFor(config, profilePlan);
+      /*
+       * A narrowing applies at once, whatever else the call asks for (§D8). `--for-other-addresses off` beside a
+       * changed profile was planned with it, and the whole plan then waited for the approval the rest needed — so a
+       * person who said "stop serving my other addresses" kept serving them until somebody approved something else,
+       * or for good when they never did. It is written now, on its own, under the credentials lock; the rest is planned
+       * again from what that left and asks for its approval as before.
+       */
+      let narrowed = false;
+      if (profilePlan.needsApproval && profilePlan.immediate.length > 0) {
+        config = await narrowAtOnce(core, options, profilePlan.organisation);
+        narrowed = true;
+        profilePlan = await plan(config, file, now);
+        store = await storeFor(config, profilePlan);
       }
       planned = { plan: profilePlan, file, inputs: inputsOf(config), store, now };
       const { organisation } = profilePlan;
@@ -802,7 +824,7 @@ function profileChange(
         summary:
           spec.mode === 'add'
             ? `Add the organisation profile "${organisation}" (${label}): its apps beside what you have`
-            : `Update the organisation profile "${organisation}" (${label})`,
+            : `Update the organisation profile "${organisation}" (${label})${narrowed ? '; for other addresses was turned off at once' : ''}`,
         effects,
       };
     },
@@ -812,6 +834,31 @@ function profileChange(
       return applyProfile(core, options, spec.mode, planned, consent);
     },
   };
+}
+
+/**
+ * `--for-other-addresses off`, written on its own under the credentials lock: the configuration it leaves, which the
+ * rest of the call is planned again from. Nothing else of the record moves, and a record already off is left alone.
+ */
+async function narrowAtOnce(core: Core, options: OrgOptions, organisation: string): Promise<Config> {
+  return withCredentialsLock(core.paths.configDir, async () => {
+    const written = await core.config.update((current) => {
+      const record = recordOf(current, organisation);
+      if (current.version !== 2 || !record?.forOtherAddresses) return current;
+      return {
+        ...current,
+        organisations: { ...organisationsOf(current), [organisation]: { ...record, forOtherAddresses: false } },
+      };
+    });
+    await core.audit.append({
+      inboxId: '',
+      operation: 'org.update',
+      outcome: 'ok',
+      surface: options.surface,
+      reason: `${organisation}: for other addresses off`,
+    });
+    return written;
+  });
 }
 
 /**
