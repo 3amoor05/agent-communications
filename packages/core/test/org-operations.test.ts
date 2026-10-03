@@ -1308,6 +1308,43 @@ test('turning other addresses off applies at once, even when the rest of the upd
   assert.equal((await record(m))?.forOtherAddresses, false);
 });
 
+test('a write that lands only in part is not reported as made: the whole expected state is compared', async () => {
+  const m = machine();
+  writeProfile(m, profile());
+  await add(m);
+  const first = await gatedChange(
+    m.core,
+    orgUpdateChange(m.core, { organisation: 'acme', forOtherAddresses: 'on' }, options(m)),
+    { surface: 'mcp' },
+  );
+  const { approvalId } = (first as { prepared: PreparedChange }).prepared;
+  // The write lands with the record's SHA-256 and read time as planned but `forOtherAddresses` left off — and then
+  // reports failure, as a lock released badly does.
+  const original = m.core.config.update.bind(m.core.config);
+  m.core.config.update = (async (mutator, opts) => {
+    await original(async (current) => {
+      const next = (await mutator(current)) as ConfigV2;
+      const acme = next.organisations?.acme;
+      if (acme) acme.forOtherAddresses = false;
+      return next;
+    }, opts);
+    throw new CommsError('LOCK_TIMEOUT', 'the lock could not be released');
+  }) as typeof m.core.config.update;
+  await assert.rejects(
+    gatedChange(
+      m.core,
+      orgUpdateChange(m.core, { organisation: 'acme', forOtherAddresses: 'on', approvalId }, options(m)),
+      {
+        surface: 'mcp',
+        approvalId,
+      },
+    ),
+    is('LOCK_TIMEOUT'),
+  );
+  m.core.config.update = original;
+  assert.equal((await record(m))?.forOtherAddresses, false);
+});
+
 test('org remove whose secret store cannot be opened removes nothing, and says why', async () => {
   const m = machine();
   writeProfile(m, profile());

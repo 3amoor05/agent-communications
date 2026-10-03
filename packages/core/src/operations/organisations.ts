@@ -8,6 +8,7 @@ import {
   type LooseningConsent,
   type OrganisationGeneration,
   type OrganisationRecord,
+  parseConfig,
   type StoreKind,
 } from '../config.ts';
 import type { Core } from '../core.ts';
@@ -966,16 +967,22 @@ async function applyProfile(
         consent ? { consent } : {},
       );
     };
-    const landed = async (): Promise<boolean> => {
-      const now = await core.config.load();
-      const record = recordOf(now, organisation);
-      return (
-        record !== undefined &&
-        record.sha256 === plan.next.sha256 &&
-        record.readAt === plan.next.readAt &&
-        Object.entries(plan.rows).every(([name, row]) => canonical(own(now.clients, name)) === canonical(row))
-      );
-    };
+    /*
+     * Whether a write that rejected is in anyway (`writeOutcome`): everything this plan changes, compared whole with
+     * what it was meant to leave — the record, every row it writes or unmarks, and the store it records when it writes
+     * a secret. Comparing a few fields — the SHA-256, when it was read, the rows written — answered "yes" for a write
+     * that left the record's `forOtherAddresses` or an unmarked row as they were, and reported a change as made that
+     * was not. What it was meant to leave goes through the schema first, as the written file did.
+     */
+    const touched = [...Object.keys(plan.rows), ...plan.unmark];
+    const stateOf = (config: Config): string =>
+      canonical({
+        record: recordOf(config, organisation) ?? null,
+        rows: Object.fromEntries(touched.map((name) => [name, own(config.clients, name) ?? null])),
+        store: plan.secret ? (config.secrets?.store ?? null) : null,
+      });
+    const expected = stateOf(parseConfig(JSON.stringify(withPlan(fresh, plan, store))));
+    const landed = async (): Promise<boolean> => stateOf(await core.config.load()) === expected;
     if (plan.secret && store) {
       const profileSecret = file.profile.gmail?.clientSecret;
       if (profileSecret === undefined)
