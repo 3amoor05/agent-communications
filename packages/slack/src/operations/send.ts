@@ -505,12 +505,20 @@ export interface PostDeps extends PrepareDeps {
     ): Promise<ApprovalRecord>;
     complete(approvalId: string, outcome: { sentMessageId: string } | { error: string }): Promise<ApprovalRecord>;
   };
+  /**
+   * The call's cancellation: the MCP request's signal, which the SDK aborts when the client cancels the call. The
+   * command line passes none — Ctrl-C ends the process. Honoured until the request that posts goes out, and never
+   * after it: see {@link postPrepared}.
+   */
+  readonly signal?: AbortSignal | undefined;
 }
 
 export interface PostedMessage {
   readonly approvalId: string;
   readonly channel: string;
   readonly ts: string;
+  /** Present only when the call was cancelled too late to stop the post: {@link POSTED_ANYWAY}. */
+  readonly note?: string | undefined;
 }
 
 /** One file of a post, as Slack now has it: its id there, and what was sent. */
@@ -565,6 +573,34 @@ function waitingHint(kind: 'post' | 'reaction', surface: 'cli' | 'mcp' | undefin
 }
 
 /**
+ * A post whose call was cancelled before Slack had it: nothing was posted.
+ *
+ * `USAGE` and `cancelled:`, the words every cancellation in this repository is reported in, with `details.reason` saying
+ * so for a caller that branches on it. The hint says what became of the approval, which depends on when it came.
+ */
+function cancelledPost(hint: string): CommsError {
+  return new CommsError('USAGE', 'cancelled: nothing was posted', { hint, details: { reason: 'cancelled' } });
+}
+
+/** Whether a failure is {@link cancelledPost}'s, so a file post's report keeps its words. */
+function isCancelledPost(error: unknown): boolean {
+  return error instanceof CommsError && error.details?.reason === 'cancelled';
+}
+
+/** After the claim, a cancellation spends the approval: a claim is single use, and cannot be put back. */
+const SPENT_BY_CANCEL =
+  'The approval was used up by the attempt. If it should still be posted, prepare the draft again and approve the new preview.';
+
+/**
+ * What a post says when its call was cancelled after the request that posts it had gone out: that it is posted.
+ *
+ * In the result and in the audit record, because the result alone may reach nobody — the SDK sends a cancelled call no
+ * answer — and the audit log is where the person can still find out that what they tried to stop happened.
+ */
+const POSTED_ANYWAY =
+  'the call was cancelled too late to stop it: Slack accepted the post, and a post cannot be taken back';
+
+/**
  * Claims an approval, and when it is waiting for a person, says so with the command they run as data.
  *
  * The hint is prose for whoever reads it. An agent relaying the step to a person should not have to dig a command out
@@ -595,6 +631,14 @@ async function claimOrHandOver(
  * an `O_EXCL` marker that makes the claim single-use across processes, the digest is recomputed from the draft as
  * it is *now*, and the permit is opened around exactly one request and closed in a `finally` — so a write that
  * throws halfway leaves no door open behind it.
+ *
+ * A cancelled call (`deps.signal`, CUE-305) is honoured up to the request that posts, in three stretches. Before the
+ * claim it posts nothing and spends nothing: the approval is as it was, as though the call had never been made. After
+ * the claim and before Slack has the post it posts nothing, and the approval is recorded as failed, saying it was
+ * cancelled — the outcome of any attempt that posted nothing, since a claim cannot be put back. Once the request that
+ * posts has gone out it is never abandoned: Slack may already have acted on it, and abandoning it would record as
+ * failed a post that is in the channel. So it is waited for, the approval is recorded as used, and the result and the
+ * audit record say the call was cancelled too late.
  */
 export async function postPrepared(
   deps: PostDeps,
@@ -631,6 +675,10 @@ export async function postPrepared(
   // The payload sent below is this one: checked against the file, previewed, and the one the digest is taken over.
   const { preview, digest, payload } = await viewPost(deps, draft, book);
 
+  // The last moment a cancellation costs nothing: the room has just been looked up, and the claim is next.
+  if (deps.signal?.aborted) {
+    throw cancelledPost('The approval was not used: it can still post this draft until it expires.');
+  }
   await claimOrHandOver(
     deps,
     approvalId,
@@ -649,6 +697,9 @@ export async function postPrepared(
   if (policy !== undefined) return postFiles(deps, approvalId, draft.draftId, payload, files, policy);
 
   try {
+    // Claimed, and nothing sent yet: thrown into the failure below, which records the approval as failed and why.
+    if (deps.signal?.aborted) throw cancelledPost(SPENT_BY_CANCEL);
+    // Without the signal, deliberately: this is the request that posts, and it is never abandoned once it is out.
     const response = await spendOn(deps.permit, approvalId, 'chat.postMessage', () =>
       callSlack({ ...deps.call, permit: deps.permit }, 'chat.postMessage', {
         channel: payload.channel,
@@ -660,6 +711,7 @@ export async function postPrepared(
       }),
     );
     const ts = typeof response.ts === 'string' ? response.ts : '';
+    const late = deps.signal?.aborted ? POSTED_ANYWAY : undefined;
     await deps.approvals.complete(approvalId, { sentMessageId: ts });
     await deps.audit?.append({
       inboxId: deps.accountId,
@@ -668,9 +720,10 @@ export async function postPrepared(
       outcome: 'ok',
       ids: { channel: payload.channel, ts },
       approvalId,
+      ...(late ? { reason: late } : {}),
       ...(deps.surface ? { surface: deps.surface } : {}),
     });
-    return { approvalId, channel: payload.channel, ts };
+    return { approvalId, channel: payload.channel, ts, ...(late ? { note: late } : {}) };
   } catch (error) {
     // Recorded before it is rethrown: an approval left in `sending` is one whose outcome nobody knows.
     await deps.approvals.complete(approvalId, { error: (error as Error).message });
@@ -792,6 +845,10 @@ async function messageTsOf(
  *
  * A failure before the last step posts nothing, and says which files had been uploaded — Slack discards a file that
  * is never shared. A failure at it is a failed post. Afterwards, a few looks at `files.info` for the message's ts.
+ *
+ * A cancelled call stops an upload on its way and is asked once more before the last step: either way nothing is
+ * shared, and the approval is recorded as failed. The last step itself is the request that posts, and is never
+ * abandoned — see {@link postPrepared}.
  */
 async function postFiles(
   deps: PostDeps,
@@ -809,6 +866,11 @@ async function postFiles(
   let inFlight: { id: string; name: string } | undefined;
   const posted: PostedFile[] = [];
   const call: SlackCall = { ...deps.call, permit: deps.permit };
+  /*
+   * The uploads, and only the uploads, carry the signal. On `call` it would reach `callSlack` too, which uses a call's
+   * signal in place of its thirty-second limit — and one of those calls is the one that shares the files.
+   */
+  const transfer: SlackCall = deps.signal === undefined ? call : { ...call, signal: deps.signal };
   const refile = refileCommand(deps.workspaceName, draftId);
   let stage: 'check' | 'upload' | 'complete' = 'check';
   try {
@@ -828,11 +890,20 @@ async function postFiles(
         const read = await rereadFile(file, policy);
         if (!read.ok) throw notApproved(file, read.why, uploaded, refile);
         inFlight = { id: place.file_id, name: file.name };
-        await slackFileUpload(call, { url: place.upload_url, bytes: read.bytes });
+        try {
+          await slackFileUpload(transfer, { url: place.upload_url, bytes: read.bytes });
+        } catch (error) {
+          // A cancelled upload fails as a lost connection does; it is reported as what it was. `inFlight` is kept, so
+          // the record says this file's bytes may have reached Slack — they had begun to go.
+          if (deps.signal?.aborted) throw cancelledPost(SPENT_BY_CANCEL);
+          throw error;
+        }
         inFlight = undefined;
         uploaded.push({ id: place.file_id, name: file.name });
         posted.push({ id: place.file_id, name: file.name, size: file.size, sha256: file.sha256 });
       }
+      // Every file is up and none is shared: the last moment a cancellation keeps the post from happening.
+      if (deps.signal?.aborted) throw cancelledPost(SPENT_BY_CANCEL);
       stage = 'complete';
       await callSlack(call, PUBLISH_FILES, {
         files: JSON.stringify(posted.map((file) => ({ id: file.id, title: file.name }))),
@@ -874,7 +945,10 @@ async function postFiles(
   }
 
   const first = posted[0]?.id ?? '';
-  const { ts, note } = await messageTsOf(deps.call, first, payload.channel);
+  const { ts, note: unshared } = await messageTsOf(deps.call, first, payload.channel);
+  // The looks above are not cut short by a cancellation: the post has happened, and its ts is part of the record.
+  const late = deps.signal?.aborted ? POSTED_ANYWAY : undefined;
+  const note = [unshared, late].filter((said) => said !== undefined).join('; ') || undefined;
   await deps.approvals.complete(approvalId, { sentMessageId: ts ?? posted.map((file) => file.id).join(',') });
   await deps.audit?.append({
     inboxId: deps.accountId,
@@ -891,6 +965,7 @@ async function postFiles(
       fileSha256: posted.map((file) => file.sha256),
     },
     approvalId,
+    ...(late ? { reason: late } : {}),
     ...(deps.surface ? { surface: deps.surface } : {}),
   });
   return { approvalId, channel: payload.channel, ts, files: posted, ...(note === undefined ? {} : { note }) };
@@ -901,7 +976,7 @@ async function postFiles(
  *
  * A refusal of a changed file is already worded for itself. Anything else before the files were shared posts nothing,
  * and names the files that had gone up, and the one that may have — its bytes sent, its answer failed; a failure at
- * the call that shares them is a failed post.
+ * the call that shares them is a failed post. A cancellation keeps its own words, which already say nothing was posted.
  */
 function reportFailure(
   error: unknown,
@@ -914,6 +989,12 @@ function reportFailure(
     uploaded: [...uploaded],
     ...(possiblyUploaded.length > 0 ? { possiblyUploaded: [...possiblyUploaded] } : {}),
   };
+  if (isCancelledPost(error)) {
+    return new CommsError(error.code, error.message, {
+      hint: [discarded(uploaded), perhapsDiscarded(possiblyUploaded), error.hint].filter(Boolean).join(' '),
+      details: { ...error.details, stage, ...which },
+    });
+  }
   if (stage === 'complete') {
     return new CommsError(error.code, `the post failed: ${error.message}`, {
       hint: [error.hint, 'The files were uploaded; if Slack did not share them, it discards them.']

@@ -122,6 +122,11 @@ export interface SendPostInput {
   readonly approvalId: string;
   /** The channel the caller believes this goes to, restated from the preview and checked against the draft. */
   readonly expectChannel: string;
+  /**
+   * The call's cancellation: `slack_post_send` passes the MCP request's signal, and `post send` none — Ctrl-C ends
+   * the process. See `PostDeps.signal` for how far it reaches.
+   */
+  readonly signal?: AbortSignal | undefined;
 }
 
 /**
@@ -140,7 +145,7 @@ export async function sendPost(
   const store = openDraftStore(context.core.paths.stateDir, context.now);
   // Another workspace's draft is absent here: drafts share one directory, and the id alone proves nothing.
   const draft = await ownDraft(store, gate.accountId, input.draftId);
-  return postPrepared(gate, draft, input.approvalId, input.expectChannel, new NameBook());
+  return postPrepared({ ...gate, signal: input.signal }, draft, input.approvalId, input.expectChannel, new NameBook());
 }
 
 /**

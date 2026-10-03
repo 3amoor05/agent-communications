@@ -78,6 +78,11 @@ export interface FileDownloadDeps {
    * what had happened to the file by then.
    */
   write?: ((handle: FileHandle, bytes: Buffer) => Promise<void>) | undefined;
+  /**
+   * The call's cancellation: the MCP request's signal, which the SDK aborts when the client cancels the call. The
+   * command line passes none — Ctrl-C ends the process. See {@link downloadFiles} for what a cancellation stops.
+   */
+  signal?: AbortSignal | undefined;
 }
 
 interface Caps {
@@ -710,6 +715,11 @@ async function planFiles(
  *
  * No file may be more than 100 MiB and no run more than 500 MiB: the transport is handed the smaller of the file's cap
  * and what is left of the run's, and holds the bytes it receives to it.
+ *
+ * A call cancelled before the answer is claimed saves nothing and leaves the answer unused. One cancelled after stops
+ * the file on its way and fetches nothing after it: what was saved whole before it stays, and is recorded as any run
+ * that stopped part-way records it. No part of the file that was arriving is left on disk, because none of it is
+ * written until all of it has arrived — the transport holds the bytes, and the file is made only once they are whole.
  */
 export async function downloadFiles(
   context: SlackContext,
@@ -720,6 +730,7 @@ export async function downloadFiles(
   const plan = downloadSelection({ ...request, surface: request.surface ?? context.surface });
   const download = deps.download ?? slackFileDownload;
   const caps = capsOf(deps);
+  const { signal } = deps;
   const { call, name: workspace } = session;
 
   // What to save is found before anything is asked: a message that does not exist, or has no files, asks nothing.
@@ -778,6 +789,17 @@ export async function downloadFiles(
   if (answer.kind === 'person' && planned.length === 0) {
     return nothingToSave(workspace, plan.selection, skipped, listedAll);
   }
+  /*
+   * Before the answer is claimed, the last moment a cancellation costs nothing. Claimed, the answer is spent whether or
+   * not a file follows — and the files are looked up again first, one call each, which is where a cancellation is most
+   * likely to arrive. So it is asked here, and the person's answer is left for the same call made again.
+   */
+  if (signal?.aborted) {
+    throw new CommsError('USAGE', 'cancelled: nothing was saved', {
+      hint: 'Nothing was fetched, and the person’s answer was not used: call again with the same arguments to save the files.',
+      details: { reason: 'cancelled' },
+    });
+  }
   const destination = await settleDestination(context.core, {
     answer,
     request: binding,
@@ -817,8 +839,14 @@ export async function downloadFiles(
       const teamId = uploaderTeam !== undefined && TEAM_ID.test(uploaderTeam) ? uploaderTeam : session.teamId;
       let body: SlackFileBody;
       try {
-        // The size the record gives, when it gives one: the time the download is allowed is measured against it.
-        body = await download(call, {
+        /*
+         * The size the record gives, when it gives one: the time the download is allowed is measured against it.
+         *
+         * The signal rides on a copy of the call, for this one transfer, and never on the session's own: `callSlack`
+         * uses a call's signal in place of its thirty-second limit, so every lookup after it would have lost its limit.
+         * The transport races it beside its own two, so a cancellation wakes a read the host has stopped feeding.
+         */
+        body = await download(signal === undefined ? call : { ...call, signal }, {
           url,
           teamId,
           fileId,
@@ -826,6 +854,14 @@ export async function downloadFiles(
           ...(declared === undefined ? {} : { size: declared }),
         });
       } catch (error) {
+        /*
+         * Cancelled: the transport stopped because the caller did, not because of anything about this file. It reports
+         * that as a lost connection, and a lost connection sets the file aside and goes on to the next — which is what
+         * a cancelled call must not do. So the run stops here, as one stops on a file it could not write.
+         */
+        if (signal?.aborted) {
+          throw new CommsError('USAGE', 'the call was cancelled', { details: { reason: 'cancelled' } });
+        }
         const refusal = refusalOf(error, record, maxBytes, caps);
         skipped.push({ fileId, reason: refusal.reason, cause: refusal.cause });
         continue;
@@ -901,6 +937,8 @@ export async function downloadFiles(
    * id the caller could work that out; for a conversation's files, nothing recorded which they were.
    */
   const stoppedBefore: string[] = [];
+  // Said wherever the stop is recorded, because over MCP nothing else is: the SDK sends a cancelled call no answer.
+  const cancelled = stopped !== undefined && isCancellation(stopped.error);
   if (stopped !== undefined) {
     complete = false;
     for (const { fileId } of planned.slice(at)) {
@@ -911,7 +949,9 @@ export async function downloadFiles(
         reason:
           leftBehind?.fileId === fileId
             ? `the download stopped while it was being written, and the part written could not be removed: ${leftBehind.path}`
-            : 'the download stopped before this file was saved',
+            : cancelled
+              ? 'the call was cancelled before this file was saved'
+              : 'the download stopped before this file was saved',
       });
     }
   }
@@ -972,7 +1012,7 @@ export async function downloadFiles(
         destination.answeredVia === 'flag' ? 'by flag' : `in ${destination.answeredVia}`
       }); ${skipped.length} skipped${manifestFailure === undefined ? '' : '; the manifest not written'}${
         leftBehind === undefined ? '' : `; part of ${leftBehind.fileId} could not be removed from ${destination.folder}`
-      }`,
+      }${cancelled ? '; the call was cancelled' : ''}`,
     });
   } catch (error) {
     auditFailure = { error };
@@ -1016,6 +1056,11 @@ function nothingToSave(
 /** A failure's message, whatever was thrown. */
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** Whether a run stopped because its call was cancelled: the stop `downloadFiles` throws for it says so in `details`. */
+function isCancellation(error: unknown): boolean {
+  return error instanceof CommsError && error.details?.reason === 'cancelled';
 }
 
 /**

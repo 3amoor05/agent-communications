@@ -655,7 +655,7 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
       // as Slack is concerned: it works in `read` mode and needs no approval.
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     },
-    async (args) => {
+    async (args, ctx) => {
       try {
         // The workspace first, so a pinned server refuses another one whatever else the call says.
         const name = await resolve(args.workspace);
@@ -671,7 +671,17 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
         };
         // Then the arguments, before the workspace is opened: see `downloadSelection`. `files download` does the same.
         downloadSelection(request);
-        return reply(await downloadFiles(context, await session(name), request, { download: options.fileDownload }));
+        /*
+         * The request's signal, which the SDK aborts when the client cancels the call (CUE-305). Without it a cancelled
+         * download went on fetching until the file was whole or its own limit ran out — thirty seconds of a host gone
+         * silent — and then fetched and saved the files after it. The command has no signal: Ctrl-C ends the process.
+         */
+        return reply(
+          await downloadFiles(context, await session(name), request, {
+            download: options.fileDownload,
+            signal: ctx.mcpReq.signal,
+          }),
+        );
       } catch (error) {
         return fail(error);
       }
@@ -751,14 +761,20 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
       },
       annotations: outward,
     },
-    async (args) => {
+    async (args, ctx) => {
       try {
         const name = await resolve(args.workspace);
         await ownApproval(args.approvalId, name);
+        // The request's signal, so a cancelled call stops before Slack has the post: see `postPrepared` for how far.
         const posted = await sendPost(
           context,
           name,
-          { draftId: args.draftId, approvalId: args.approvalId, expectChannel: args.expectChannel },
+          {
+            draftId: args.draftId,
+            approvalId: args.approvalId,
+            expectChannel: args.expectChannel,
+            signal: ctx.mcpReq.signal,
+          },
           slackDeps,
         );
         return reply(posted);
