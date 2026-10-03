@@ -1,7 +1,7 @@
 import type { GatedChange } from '../change-flow.ts';
 import { CHANNELS, type Channel, channelLabel, channelServer, requireChannelManifest } from '../channel-servers.ts';
 import { accountNoun, listed, pinOption } from '../channel-words.ts';
-import { shellCommand } from '../cli-runtime.ts';
+import { inlineCommand, type ShellCommand, shellCommand } from '../cli-runtime.ts';
 import type { Config } from '../config.ts';
 import type { Core } from '../core.ts';
 import { CommsError, toCommsError } from '../errors.ts';
@@ -79,6 +79,8 @@ export interface UpdateDeps {
   installRuntime?: ((packageName: string, version: string) => Promise<void>) | undefined;
   /** The clock a check or an update is recorded by in the daily check's file. */
   now?: (() => Date) | undefined;
+  /** The shell the commands it prints are quoted for: this machine's, unless a test asks for another by name. */
+  platform?: NodeJS.Platform | undefined;
 }
 
 export interface UpdateRequest {
@@ -262,13 +264,18 @@ async function latestReleases(
   return Object.fromEntries(answers.map((answer) => [answer.name, answer.version ?? '']));
 }
 
-/** How to register an entry again by hand: its channel's own `mcp install`, with every flag that decides its reach. */
-function installCommand(item: RegistrationItem): string {
+/**
+ * How to register an entry again by hand: its channel's own `mcp install`, with every flag that decides its reach.
+ *
+ * The entry's name and pins are read from the client's file, which may hold anything, so a word may come back as a
+ * placeholder to type by hand: the reasons below give it with `inlineCommand`, which says so.
+ */
+function installCommand(item: RegistrationItem, platform: NodeJS.Platform | undefined): ShellCommand {
   const facts = channelServer(item.channel);
   const words = [facts.binary, 'mcp', 'install', '--client', item.client];
   if (item.name !== facts.defaultServerName) words.push('--name', item.name);
   words.push(...item.narrowing, '--force');
-  return shellCommand(words);
+  return shellCommand(words, platform);
 }
 
 /**
@@ -286,7 +293,7 @@ async function whyNotUpdatable(
   narrowing: Narrowing,
 ): Promise<string | undefined> {
   if (item.launcher !== 'managed' && item.launcher !== 'npx') {
-    return `it was not written by \`mcp install\`, so how it starts cannot be carried over; register it again with \`${installCommand(item)}\``;
+    return `it was not written by \`mcp install\`, so how it starts cannot be carried over; register it again with ${inlineCommand(installCommand(item, context.platform))}`;
   }
   if (item.scope !== 'user') {
     return `it is registered for one project (in ${item.path}), and \`mcp install\` registers at user scope only; register it again from that project with ${item.client}'s own command`;
@@ -295,7 +302,7 @@ async function whyNotUpdatable(
   const target = await installTarget(context, { client: item.client as SupportedClient, apply: true });
   if (!target.writes) {
     return target.cliName
-      ? `\`${target.cliName}\` is not ${clientCliSearch(context.env)}, so the entry cannot be replaced from here; run \`${installCommand(item)}\` where it is`
+      ? `\`${target.cliName}\` is not ${clientCliSearch(context.env)}, so the entry cannot be replaced from here; run ${inlineCommand(installCommand(item, context.platform))} where it is`
       : `this environment names no ${item.client} configuration to write to`;
   }
   const own = pinOption(item.channel);
@@ -352,7 +359,7 @@ async function runtimesNeeded(
 }
 
 async function inspect(core: Core, env: NodeJS.ProcessEnv, deps: UpdateDeps): Promise<Inspection> {
-  const context: InstallContext = { env, core };
+  const context: InstallContext = { env, core, platform: deps.platform };
   const scan = await scanRegisteredServers(env);
   const unreadable: UnreadableConfig[] = [...scan.unreadable];
   const found = registrations(scan.servers).map(({ channel, server }) => {
@@ -738,7 +745,7 @@ async function planRegistrations(
     if (JSON.stringify(keeps) !== JSON.stringify(item.narrowing)) {
       leave(
         item,
-        `registering it again would not keep exactly ${item.narrowing.length > 0 ? item.narrowing.join(' ') : 'no pin'}: ${item.client} itself has the entry as ${keeps.length > 0 ? keeps.join(' ') : 'not pinned'}. Register it again yourself with the pins it should have: \`${installCommand(item)}\``,
+        `registering it again would not keep exactly ${item.narrowing.length > 0 ? item.narrowing.join(' ') : 'no pin'}: ${item.client} itself has the entry as ${keeps.length > 0 ? keeps.join(' ') : 'not pinned'}. Register it again yourself with the pins it should have: ${inlineCommand(installCommand(item, context.platform))}`,
       );
       continue;
     }
@@ -765,7 +772,7 @@ export function updateChange(
   request: UpdateRequest = {},
   deps: UpdateDeps = {},
 ): GatedChange<UpdateResult> {
-  const context: InstallContext = { env, core };
+  const context: InstallContext = { env, core, platform: deps.platform };
   let planned: Planned | null = null;
   return {
     plan: async (config) => {

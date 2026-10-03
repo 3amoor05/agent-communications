@@ -15,7 +15,7 @@ import { type Core, openCore } from '../src/core.ts';
 import { CommsError, ERROR_REGISTRY, EXIT_CODES } from '../src/errors.ts';
 import { type CoreMcpOptions, createCoreMcpServer } from '../src/mcp/server.ts';
 import { type McpProduct, managedRuntimeDir, managedRuntimeEntry, pruneManagedRuntimes } from '../src/mcp-install.ts';
-import type { DoctorCheck, DoctorReport } from '../src/operations/maintenance.ts';
+import { type DoctorCheck, type DoctorReport, doctor } from '../src/operations/maintenance.ts';
 import { serverInstallChange, serverPruneChange } from '../src/operations/servers.ts';
 import { renderDoctor } from '../src/render.ts';
 import type { SecretStore } from '../src/secrets.ts';
@@ -477,9 +477,47 @@ test('the doctor gives the name of an entry to register again as one word, quote
   const words = ['agent-slack', 'mcp', 'install', '--client', 'claude-code', '--name', 'slack acme'];
   assert.equal(
     checks.find((check) => check.name === 'slack server')?.fix,
-    `Register it again: \`${shellCommand([...words, '--workspace', 'acme/slack', '--force'])}\`.`,
+    `Register it again: \`${shellCommand([...words, '--workspace', 'acme/slack', '--force']).line}\`.`,
   );
 });
+
+test('the doctor gives a name Windows cannot print as a placeholder, with the name beside it to type (CUE-306)', async () => {
+  /*
+   * Quoted for PowerShell, a name like `$x&whoami&` came out in single quotes, which cmd.exe reads as characters: pasted
+   * there, the repair ran `whoami`. Asked for Windows by name, the doctor prints a placeholder and gives the name apart.
+   */
+  const m = doctorMachine();
+  const gone = managedRuntimeEntry(m.core.paths.dataDir, '@agentcomms/slack', VERSION);
+  writeFileSync(
+    join(m.home, '.claude.json'),
+    JSON.stringify({
+      mcpServers: { '$x&whoami&': { command: process.execPath, args: [gone, 'mcp', '--workspace', 'acme/slack'] } },
+    }),
+  );
+  const report = await doctor(m.core, m.env, { keyring: null, platform: 'win32' });
+  assert.equal(
+    report.checks.find((check) => check.name === 'slack server')?.fix,
+    'Register it again: `agent-slack mcp install --client claude-code --name <name> --workspace acme/slack --force` (<name> is "$x&whoami&", written as JSON: type it in yourself, quoted for your shell — no quoting reads the same in cmd.exe and PowerShell).',
+  );
+});
+
+test(
+  'the doctor gives a loose directory Windows could not print as a placeholder too, with the path beside it (CUE-306)',
+  process.platform === 'win32' ? { skip: 'Windows has no mode bits for the doctor to find loose' } : {},
+  async () => {
+    // Asked for Windows' quoting by name on a machine with mode bits: a `%` is expanded by cmd.exe inside quotes too.
+    const m = machine();
+    const configDir = join(m.home, '50% comms');
+    mkdirSync(configDir);
+    chmodSync(configDir, 0o755);
+    const env = { ...m.env, AGENT_COMMS_CONFIG_DIR: configDir };
+    const report = await doctor(openCore({ env }), env, { keyring: null, platform: 'win32' });
+    assert.equal(
+      report.checks.find((check) => check.name === 'config dir')?.fix,
+      `chmod 700 <folder> (<folder> is ${JSON.stringify(configDir)}, written as JSON: type it in yourself, quoted for your shell — no quoting reads the same in cmd.exe and PowerShell)`,
+    );
+  },
+);
 
 // ── The change policy ───────────────────────────────────────────────────────────────────────────────────────────
 

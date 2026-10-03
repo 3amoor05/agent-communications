@@ -570,8 +570,44 @@ test('the command that registers an entry again by hand gives its name as one wo
   try {
     const [hand] = of((await ok('comms_update', { check: true })).behind, 'registration');
     const words = ['agent-gmail', 'mcp', 'install', '--client', 'cursor', '--name', 'gmail by hand', '--read-only'];
-    assert.ok(String(hand?.reason).includes(`\`${shellCommand([...words, '--force'])}\``), String(hand?.reason));
+    assert.ok(String(hand?.reason).includes(`\`${shellCommand([...words, '--force']).line}\``), String(hand?.reason));
     assert.doesNotMatch(String(hand?.reason), /--name gmail by hand/);
+  } finally {
+    await close();
+  }
+});
+
+test('a name Windows cannot print in a command to register again is a placeholder, with the name beside it (CUE-306)', async () => {
+  /*
+   * Quoted for PowerShell, a name like `$x&whoami&` came out in single quotes, which cmd.exe reads as characters: pasted
+   * there, it ran `whoami`. Asked for Windows by name, both reasons that give a command print a placeholder instead:
+   * an entry written by hand, and one whose client has no command here to replace it with.
+   */
+  const m = machine();
+  cursor(m, { '$x&whoami&': { command: 'npx', args: ['-y', `${PACKAGES.gmail}@${OLD}`, 'mcp', '--read-only'] } });
+  writeFileSync(
+    join(m.home, '.claude.json'),
+    JSON.stringify({ mcpServers: { 'slack 50%': managed(m, PACKAGES.slack, OLD) } }),
+  );
+  const { ok, close } = await connect(m, { update: { ...fakes(m), platform: 'win32' } });
+  const typed = (name: string) =>
+    `(<name> is ${JSON.stringify(name)}, written as JSON: type it in yourself, quoted for your shell — no quoting reads the same in cmd.exe and PowerShell)`;
+  try {
+    const registrations = of((await ok('comms_update', { check: true })).behind, 'registration');
+    const hand = registrations.find((item) => item.client === 'cursor');
+    assert.ok(
+      String(hand?.reason).endsWith(
+        `register it again with \`agent-gmail mcp install --client cursor --name <name> --read-only --force\` ${typed('$x&whoami&')}`,
+      ),
+      String(hand?.reason),
+    );
+    const noClaude = registrations.find((item) => item.client === 'claude-code');
+    assert.ok(
+      String(noClaude?.reason).endsWith(
+        `run \`agent-slack mcp install --client claude-code --name <name> --force\` ${typed('slack 50%')} where it is`,
+      ),
+      String(noClaude?.reason),
+    );
   } finally {
     await close();
   }

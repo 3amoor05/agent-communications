@@ -6,7 +6,7 @@ import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
 import { type GatedChange, gatedChange, gatedChangeAtTerminal } from '../src/change-flow.ts';
-import type { Streams } from '../src/cli-runtime.ts';
+import { type Streams, shellCommand } from '../src/cli-runtime.ts';
 import type { AccountConfig, SendPolicy } from '../src/config.ts';
 import { openCore } from '../src/core.ts';
 import { CommsError } from '../src/errors.ts';
@@ -170,6 +170,51 @@ test('at the CLI an agent gets the preview and the approval id, and exits 10; --
   assert.equal(await policyNow(core), 'never', 'the agent did not answer its own question');
 
   assert.equal(await gatedChangeAtTerminal(core, change, { ...options, approvalId }), 'chat');
+});
+
+test('a command to run again with a word Windows cannot print says to type it by hand, under either policy (CUE-306)', async () => {
+  /*
+   * The agent is told the command to run again with the approval. With a word no quoting makes safe in both Windows
+   * shells — a folder with a `%` in it, which cmd.exe expands even in double quotes — the command is printed with a
+   * placeholder, and the folder given beside it as JSON, under `chat` and under `confirm` alike.
+   */
+  const folder = 'C:\\Profiles\\50% off';
+  const words = ['agentcomms', 'attach', 'roots', 'add', { value: folder, label: 'path' }];
+  for (const policy of ['chat', 'confirm'] as const) {
+    const core = coreWith('never', policy);
+    await assert.rejects(
+      gatedChangeAtTerminal(core, setSendPolicy(core, 'chat'), {
+        env: { CLAUDECODE: '1' },
+        output: { json: true, color: false },
+        command: shellCommand(words, 'win32'),
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof CommsError && error.code === 'APPROVAL_PENDING', String(error));
+        const approvalId = String((error.details as { approvalId?: string }).approvalId);
+        const run = `\`agentcomms attach roots add <path> --approval ${approvalId}\` (<path> is ${JSON.stringify(folder)}, written as JSON: type it in yourself, quoted for your shell — no quoting reads the same in cmd.exe and PowerShell)`;
+        assert.ok(error.hint?.endsWith(`run ${run}.`), `${policy}: ${error.hint}`);
+        assert.doesNotMatch(String(error.hint).split(' (<path> is')[0] ?? '', /50%/, 'the folder is in nothing to run');
+        return true;
+      },
+    );
+    // Elsewhere the folder goes in single quotes, and there is nothing to type by hand.
+    await assert.rejects(
+      gatedChangeAtTerminal(core, setSendPolicy(core, 'chat'), {
+        env: { CLAUDECODE: '1' },
+        output: { json: true, color: false },
+        command: shellCommand(words, 'linux'),
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof CommsError);
+        const approvalId = String((error.details as { approvalId?: string }).approvalId);
+        assert.ok(
+          error.hint?.endsWith(`run \`agentcomms attach roots add '${folder}' --approval ${approvalId}\`.`),
+          `${policy}: ${error.hint}`,
+        );
+        return true;
+      },
+    );
+  }
 });
 
 test('a command whose --approval is taken by another change names the flag that carries this one', async () => {

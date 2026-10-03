@@ -672,7 +672,8 @@ function registrationChecks(input: DoctorInput): Check[] {
         ? `also registered: ${others.map(describeOtherSlackServer).join(', ')}; an agent can post through those without any approval here`
         : // What a config-file scan cannot see, said rather than implied away.
           'none in the MCP clients’ config files (servers added by plugins, claude.ai connectors or bridges are not visible from here)',
-    fix: others.length > 0 ? others.map(otherSlackServerRemoval).join(' && ') : null,
+    // Called with the server alone: handed to `map` directly, its index would be taken for the shell to quote for.
+    fix: others.length > 0 ? others.map((server) => otherSlackServerRemoval(server)).join(' && ') : null,
     workspace: null,
   });
 

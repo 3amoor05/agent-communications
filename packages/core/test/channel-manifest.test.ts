@@ -232,9 +232,38 @@ test('a command that removes another server gives its name as one word, quoted f
     ['codex', 'codex'],
   ] as const) {
     const helper = entry({ name: 'Slack Helper', client, command: 'node', args: ['/opt/helper.js'] });
-    assert.equal(otherSlackServerRemoval(helper), shellCommand([binary, 'mcp', 'remove', 'Slack Helper']));
+    assert.equal(otherSlackServerRemoval(helper), shellCommand([binary, 'mcp', 'remove', 'Slack Helper']).line);
     const rival = entry({ name: 'old gmail', client, args: ['-y', '@artymclabin/gmail-mcp'] });
-    assert.equal(findUngatedGmailServers([rival])[0]?.removal, shellCommand([binary, 'mcp', 'remove', 'old gmail']));
+    assert.equal(
+      findUngatedGmailServers([rival])[0]?.removal,
+      shellCommand([binary, 'mcp', 'remove', 'old gmail']).line,
+    );
+  }
+});
+
+test('a name Windows cannot print in a removal is a placeholder, with the name beside it as JSON (CUE-306)', () => {
+  /*
+   * A client's file may name an entry anything, and this is printed for a person to paste. Quoted for PowerShell, a
+   * name like `$x&whoami&` came out as `'$x&whoami&'`, and pasted into cmd.exe it ran `whoami`.
+   */
+  const name = '$x&whoami&';
+  const note = `<name> is ${JSON.stringify(name)}, written as JSON: type it in yourself, quoted for your shell`;
+  for (const [client, binary] of [
+    ['claude-code', 'claude'],
+    ['codex', 'codex'],
+  ] as const) {
+    const helper = entry({ name, client, command: 'node', args: ['/opt/slack-helper.js'] });
+    const rival = entry({ name, client, args: ['-y', '@artymclabin/gmail-mcp'] });
+    for (const removal of [
+      otherSlackServerRemoval(helper, 'win32'),
+      findUngatedGmailServers([rival], 'win32')[0]?.removal,
+    ]) {
+      assert.ok(removal?.startsWith(`${binary} mcp remove <name> (${note}`), String(removal));
+      assert.doesNotMatch(String(removal).split(' (')[0] ?? '', /whoami/, 'the name is in nothing to run');
+    }
+    // A POSIX shell takes it in single quotes, whole.
+    assert.equal(otherSlackServerRemoval(helper, 'linux'), `${binary} mcp remove '${name}'`);
+    assert.equal(findUngatedGmailServers([rival], 'darwin')[0]?.removal, `${binary} mcp remove '${name}'`);
   }
 });
 

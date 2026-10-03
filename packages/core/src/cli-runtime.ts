@@ -63,6 +63,33 @@ export function paint(color: boolean, format: Parameters<typeof styleText>[0], t
 }
 
 /**
+ * One word of a command to print. A plain string is a word of the command itself, or a value that may as well be
+ * called after the option before it; a value with a `label` is called that — `<name>`, `<path>` — if it has to be
+ * typed by hand (see `shellCommand`).
+ */
+export type ShellWord = string | { readonly value: string; readonly label: string };
+
+/** A word no quoting could make safe to paste, and the placeholder printed in its place. */
+export interface TypedByHand {
+  /** `<name>`, `<path>`, `<workspace>`: what stands for the word in `ShellCommand.line`. */
+  readonly placeholder: string;
+  readonly value: string;
+}
+
+/**
+ * A command for a person to copy and run, as `shellCommand` prints it.
+ *
+ * Never a bare string, so that no printer can show `line` and forget `byHand`: a line with a placeholder in it is not
+ * the command, and whoever reads it has to be told what goes in the gap — `inlineCommand` and `commandText` say it.
+ */
+export interface ShellCommand {
+  /** The words as the shell will read them, or a placeholder in angle brackets for each that no quoting makes safe. */
+  readonly line: string;
+  /** The words a person has to type in themselves, one per placeholder in `line`; empty when `line` runs as it is. */
+  readonly byHand: readonly TypedByHand[];
+}
+
+/**
  * A command line for a person to copy and run, each word quoted only where the shell it is pasted into would need it.
  * Every command this package prints to be run — a change to run again with its approval, a folder to take out, an
  * entry to register again or remove — is quoted here, so no printer quotes for a shell of its own.
@@ -70,37 +97,93 @@ export function paint(color: boolean, format: Parameters<typeof styleText>[0], t
  * Everywhere but Windows that shell is a POSIX one, and a word goes in single quotes, inside which nothing is special
  * but the quote itself. Windows has two shells, and neither reads single quotes that way: cmd.exe does not take them
  * as quotes at all, so `'C:\Profiles\First Last\outgoing'` reached the command as two words, quote marks and all, and
- * PowerShell does, but escapes a quote inside them by doubling it rather than as `'\''`. So on Windows (CUE-306):
+ * PowerShell does, but escapes a quote inside them by doubling it rather than as `'\''`. A command printed on Windows
+ * has to be safe in both, because nothing says which one it will be pasted into (CUE-306):
  *
  * - A word of letters, digits and `_ + = : . / \ -`, with `@` anywhere but first, is left as it is: neither shell
  *   reads anything in it, and a backslash is an ordinary character to both. A first `@` is splatting to PowerShell, a
- *   `,` its array operator — two words — and a `%` names a variable to cmd.exe, so a word with any of them is quoted.
- * - Any other word goes in double quotes, which keep a space, `&`, `|`, `;`, `'` and the rest inside one word in both
- *   shells. Backslashes at its end are doubled: before a closing quote, a program's own argument parser (Node's, the
- *   C runtime's) takes them as escapes, and `"C:\First Last\"` would end in a quote mark rather than the folder.
- * - A word with a `$`, a backtick or a double quote — or a curly double quote, which PowerShell reads as one — has no
- *   quoting both shells read alike: inside double quotes PowerShell expands `$name` and escapes with the backtick, and
- *   cmd.exe does neither. Such a word is quoted for PowerShell, the shell Windows Terminal opens by default: in single
- *   quotes, inside which nothing is special but a quote mark, each one doubled — `'` and the curly single quotes
- *   PowerShell also reads as one. Pasted into cmd.exe that word is wrong, and Windows PowerShell 5.1 hands a program a
- *   double quote inside a word unescaped, so the program loses it; PowerShell 7.3 and later do not. A Windows path can
- *   hold a `$` or a backtick, though seldom does, and never a double quote.
+ *   `,` its array operator — two words — so a word with either is quoted.
+ * - A word that double quotes keep whole and unexpanded in both shells goes in double quotes. Inside them cmd.exe
+ *   reads `& | < > ^ ( )` and spaces as ordinary characters, and PowerShell reads everything as ordinary but `$`, the
+ *   backtick and a double quote. What is left special in one or the other is kept out: a double quote, which ends the
+ *   quoting in both — and PowerShell takes the curly ones, `“ ” „`, for one too; `$` and the backtick, PowerShell's
+ *   expansion and escape; `%`, which cmd.exe expands as `%NAME%` before it looks at quotes at all; `!`, which it
+ *   expands as `!NAME!` inside quotes too wherever delayed expansion is on, and which then makes a `^` inside quotes an
+ *   escape; and any control or formatting character — a line break ends the command in cmd.exe even inside quotes, a
+ *   tab pasted into cmd.exe can complete a file name, and a right-to-left override shows a line other than the one
+ *   that runs. Backslashes at the word's end are doubled: before a closing quote, a program's own argument parser
+ *   (Node's, the C runtime's) takes them as escapes, and `"C:\First Last\"` would end in a quote mark rather than the
+ *   folder. (Windows PowerShell 5.1 drops an empty `""` rather than pass it on; it keeps every other such word.)
+ * - Any other word has no quoting both shells read alike, so no command is printed with it in. It was quoted for
+ *   PowerShell in its single quotes, which cmd.exe takes as ordinary characters: a server named `$x&whoami&` printed
+ *   as `'$x&whoami&'`, and in cmd.exe that ran `whoami`. Such a word is printed as a placeholder — `<name>`, after its
+ *   `label`, or the option before it, or `<value>` — listed in `byHand` with the word it stands for, for the printer
+ *   to give separately as data. PowerShell refuses the line before it runs anything, `<` being reserved; cmd.exe
+ *   reads `<name>` as input from a file called `name`, and runs nothing when the folder has none.
  *
- * cmd.exe expands `%NAME%` even inside double quotes, where PowerShell expands nothing; no quoting stops it that
- * PowerShell would read as the same word, so a `%` is left to PowerShell's reading too.
+ * Everywhere else `byHand` is empty: single quotes make any word safe.
  */
-export function shellCommand(words: readonly string[], platform: NodeJS.Platform = process.platform): string {
-  return words.map((word) => (platform === 'win32' ? windowsShellWord(word) : posixShellWord(word))).join(' ');
+export function shellCommand(words: readonly ShellWord[], platform: NodeJS.Platform = process.platform): ShellCommand {
+  const byHand: TypedByHand[] = [];
+  /** The words given each label so far: one word twice is one placeholder, and two words are `<name>`, `<name-2>`. */
+  const labelled = new Map<string, string[]>();
+  const printed = words.map((word, index) => {
+    const value = typeof word === 'string' ? word : word.value;
+    if (platform !== 'win32') return posixShellWord(value);
+    const quoted = windowsShellWord(value);
+    if (quoted !== null) return quoted;
+    const before = words[index - 1];
+    const option = typeof before === 'string' ? /^--([a-z][a-z-]*)$/.exec(before)?.[1] : undefined;
+    const label = typeof word === 'string' ? (option ?? 'value') : word.label;
+    const values = labelled.get(label) ?? [];
+    labelled.set(label, values);
+    const seen = values.indexOf(value);
+    const position = seen === -1 ? values.push(value) : seen + 1;
+    const placeholder = position === 1 ? `<${label}>` : `<${label}-${position}>`;
+    if (seen === -1) byHand.push({ placeholder, value });
+    return placeholder;
+  });
+  return { line: printed.join(' '), byHand };
 }
 
 function posixShellWord(word: string): string {
   return /^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replace(/'/g, `'\\''`)}'`;
 }
 
-function windowsShellWord(word: string): string {
+/** The word as both Windows shells read it, or null when no quoting makes it so. */
+function windowsShellWord(word: string): string | null {
   if (/^[\w+=:./\\-][\w@+=:./\\-]*$/.test(word)) return word;
-  if (/["$`\u201C-\u201E]/.test(word)) return `'${word.replace(/['\u2018-\u201B]/g, (quote) => quote + quote)}'`;
+  if (/["$`%!\u201C-\u201E]|[\p{C}\p{Zl}\p{Zp}]/u.test(word)) return null;
   return `"${word.replace(/\\+$/, (slashes) => slashes + slashes)}"`;
+}
+
+/**
+ * What to type in place of each placeholder in `commands`, as a clause; empty when every word was printed.
+ *
+ * The word itself is given as JSON — in quotes, with a line break or a quote mark inside written as an escape — and
+ * named as JSON, so that nobody takes it for something to paste: pasted into cmd.exe as it is, `$x&whoami&` runs
+ * `whoami`. How to quote it is left to the person, who knows which shell they are in.
+ */
+export function typeByHand(...commands: readonly ShellCommand[]): string {
+  const words = new Map<string, TypedByHand>();
+  for (const word of commands.flatMap((command) => command.byHand))
+    words.set(`${word.placeholder}\n${word.value}`, word);
+  if (words.size === 0) return '';
+  const each = [...words.values()].map((word) => `${word.placeholder} is ${JSON.stringify(word.value)}`);
+  const list = each.length === 1 ? each[0] : `${each.slice(0, -1).join(', ')} and ${each.at(-1)}`;
+  return `${list}, written as JSON: type ${each.length === 1 ? 'it' : 'them'} in yourself, quoted for your shell — no quoting reads the same in cmd.exe and PowerShell`;
+}
+
+/** A command in backticks, for a sentence — and after it, when a word could not be printed, what to type in its place. */
+export function inlineCommand(command: ShellCommand): string {
+  const byHand = typeByHand(command);
+  return byHand === '' ? `\`${command.line}\`` : `\`${command.line}\` (${byHand})`;
+}
+
+/** A command as text of its own — a list's line, a field's value — with what to type in place of any placeholder. */
+export function commandText(command: ShellCommand): string {
+  const byHand = typeByHand(command);
+  return byHand === '' ? command.line : `${command.line} (${byHand})`;
 }
 
 /** Writes a successful result: the envelope with --json, otherwise the human rendering. */

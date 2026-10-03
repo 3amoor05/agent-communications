@@ -3,6 +3,7 @@ import { parseArgs } from 'node:util';
 import { approveChangeAtTerminal, gatedChangeAtTerminal, refuseUnclaimedApproval } from './change-flow.ts';
 import {
   colorEnabled,
+  commandText,
   defaultStreams,
   type OutputOptions,
   runCommand,
@@ -371,7 +372,7 @@ export async function main(
         }
         const result = await gatedChangeAtTerminal(core, attachChange(core, env, { kind, path }, 'cli'), {
           ...approval,
-          command: shellCommand(['agentcomms', 'attach', list, action as string, path]),
+          command: shellCommand(['agentcomms', 'attach', list, action as string, { value: path, label: 'path' }]),
         });
         writeResult(result, output, renderAttachChange);
         return;
@@ -613,7 +614,8 @@ function renderAttachEntries(entries: readonly AttachEntry[]): string[] {
   );
 }
 
-function renderAttach(report: AttachReport): string {
+/** Exported for its test, which asks for Windows' quoting by name. */
+export function renderAttach(report: AttachReport, platform: NodeJS.Platform = process.platform): string {
   return [
     'Files may be attached from under:',
     ...renderAttachEntries(report.roots),
@@ -625,8 +627,12 @@ function renderAttach(report: AttachReport): string {
           'Listed, but allowing nothing — they do not say which drive or folder they are on. To take one out, run the',
           'command shown for it:',
           // The whole command, quoted for the shell it is pasted into (`shellCommand`): the entry as written, a space
-          // at either end or nothing at all, and never a `$HOME` or a `$(…)` the shell would expand or run.
-          ...report.ignored.map((root) => `  ${shellCommand(['agentcomms', 'attach', 'roots', 'remove', root])}`),
+          // at either end or nothing at all, and never a `$HOME` or a `$(…)` the shell would expand or run. An entry
+          // no quoting makes safe on Windows — a `%USERPROFILE%`, say — is a placeholder, with the entry beside it.
+          ...report.ignored.map(
+            (root) =>
+              `  ${commandText(shellCommand(['agentcomms', 'attach', 'roots', 'remove', { value: root, label: 'entry' }], platform))}`,
+          ),
         ]),
     '',
     'Never from, by your own entries:',

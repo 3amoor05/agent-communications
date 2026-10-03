@@ -1,6 +1,6 @@
 import type { ChannelManifest, ChannelRivalPackage } from './channel-manifest.ts';
 import { CHANNEL_SNAPSHOT } from './channels.generated.ts';
-import { shellCommand } from './cli-runtime.ts';
+import { commandText, shellCommand } from './cli-runtime.ts';
 import { displayUrl, type RegisteredServer } from './mcp-clients.ts';
 import { isProductServer, type McpProduct } from './mcp-install.ts';
 
@@ -53,14 +53,23 @@ function rivalsOf(channel: string): NonNullable<ChannelManifest['rivals']> {
   return CHANNEL_SNAPSHOT.find((entry) => entry.manifest.channel === channel)?.manifest.rivals ?? {};
 }
 
-function gmailRemoval({ client, name: server, path, scope }: RegisteredServer): string {
+/**
+ * The command that removes a registered server, in its client's own terms — the name as the client's file has it,
+ * which may be anything, so on Windows it can come back as a placeholder with the name given beside it to type by
+ * hand (`shellCommand`).
+ */
+function removalCommand(client: 'claude' | 'codex', name: string, platform: NodeJS.Platform): string {
+  return commandText(shellCommand([client, 'mcp', 'remove', { value: name, label: 'name' }], platform));
+}
+
+function gmailRemoval({ client, name: server, path, scope }: RegisteredServer, platform: NodeJS.Platform): string {
   // A project's entry is out of reach of the user-scope commands below, run from wherever `doctor` was.
   if (scope === 'project') return `remove "${server}" from the project entry in ${path} by hand`;
   switch (client) {
     case 'claude-code':
-      return shellCommand(['claude', 'mcp', 'remove', server]);
+      return removalCommand('claude', server, platform);
     case 'codex':
-      return shellCommand(['codex', 'mcp', 'remove', server]);
+      return removalCommand('codex', server, platform);
     default:
       // The file named, not "the file above": this is printed under a different client's install, and by
       // `doctor` in a list of several, where the file above is somebody else's.
@@ -70,11 +79,12 @@ function gmailRemoval({ client, name: server, path, scope }: RegisteredServer): 
 
 /**
  * Registered servers that are one of `packages` — another server for the same service whose send tools no approval
- * step gates — each with why it matters and how to remove it.
+ * step gates — each with why it matters and how to remove it. `platform` is the shell the removal is quoted for.
  */
 export function findRivalPackageServers(
   servers: readonly RegisteredServer[],
   packages: readonly ChannelRivalPackage[],
+  platform: NodeJS.Platform = process.platform,
 ): LegacyServerFinding[] {
   const patterns = rivalPatterns(packages);
   const findings: LegacyServerFinding[] = [];
@@ -86,7 +96,7 @@ export function findRivalPackageServers(
       ...server,
       packageName: known.name,
       reason: `${known.name} exposes send tools that no approval step gates`,
-      removal: gmailRemoval(server),
+      removal: gmailRemoval(server, platform),
     });
   }
   return findings;
@@ -104,8 +114,11 @@ export function rivalPackageWarnings(
 }
 
 /** Registered servers known to send mail with no approval step, each with why it matters and how to remove it. */
-export function findUngatedGmailServers(servers: readonly RegisteredServer[]): LegacyServerFinding[] {
-  return findRivalPackageServers(servers, rivalsOf('gmail').packages ?? []);
+export function findUngatedGmailServers(
+  servers: readonly RegisteredServer[],
+  platform: NodeJS.Platform = process.platform,
+): LegacyServerFinding[] {
+  return findRivalPackageServers(servers, rivalsOf('gmail').packages ?? [], platform);
 }
 
 /** What registering the Gmail server says about them: one line each. */
@@ -162,15 +175,18 @@ export function describeOtherSlackServer(server: RegisteredServer): string {
   return `"${server.name}" in ${server.client}${what ? ` (${what})` : ''}`;
 }
 
-/** How to remove another Slack server, in the client's own terms. */
-export function otherSlackServerRemoval(server: RegisteredServer): string {
+/** How to remove another Slack server, in the client's own terms. `platform` is the shell it is quoted for. */
+export function otherSlackServerRemoval(
+  server: RegisteredServer,
+  platform: NodeJS.Platform = process.platform,
+): string {
   // A project's entry is out of reach of the user-scope commands below, run from wherever `doctor` was.
   if (server.scope === 'project') return `remove "${server.name}" from the project entry in ${server.path} by hand`;
   switch (server.client) {
     case 'claude-code':
-      return shellCommand(['claude', 'mcp', 'remove', server.name]);
+      return removalCommand('claude', server.name, platform);
     case 'codex':
-      return shellCommand(['codex', 'mcp', 'remove', server.name]);
+      return removalCommand('codex', server.name, platform);
     default:
       return `remove "${server.name}" from ${server.path}, then restart ${server.client}`;
   }

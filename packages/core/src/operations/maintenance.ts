@@ -4,7 +4,7 @@ import type { AuditRecord } from '../audit.ts';
 import { revokeChange } from '../changes.ts';
 import { type Channel, channelServer } from '../channel-servers.ts';
 import { listed, manifestOf } from '../channel-words.ts';
-import { shellCommand } from '../cli-runtime.ts';
+import { commandText, inlineCommand, shellCommand } from '../cli-runtime.ts';
 import { type Config, emptyConfig, secretsStoreOf } from '../config.ts';
 import type { Core } from '../core.ts';
 import { CommsError } from '../errors.ts';
@@ -61,6 +61,8 @@ export interface DoctorOptions {
    * and a test must never touch it. `null` is a machine without the module. Left out, the real module is loaded.
    */
   keyring?: KeyringModule | null | undefined;
+  /** The shell the commands it prints are quoted for: this machine's, unless a test asks for another by name. */
+  platform?: NodeJS.Platform | undefined;
 }
 
 /**
@@ -69,6 +71,7 @@ export interface DoctorOptions {
  */
 export async function doctor(core: Core, env: NodeJS.ProcessEnv, options: DoctorOptions = {}): Promise<DoctorReport> {
   const checks: DoctorCheck[] = [];
+  const platform = options.platform ?? process.platform;
   const [major = 0, minor = 0] = process.versions.node.split('.').map(Number);
   const nodeOk = major > 22 || (major === 22 && minor >= 12);
   checks.push({
@@ -89,7 +92,9 @@ export async function doctor(core: Core, env: NodeJS.ProcessEnv, options: Doctor
         name,
         ok: !loose,
         detail: dir,
-        ...(loose ? { fix: shellCommand(['chmod', '700', dir]) } : {}),
+        ...(loose
+          ? { fix: commandText(shellCommand(['chmod', '700', { value: dir, label: 'folder' }], platform)) }
+          : {}),
       });
     } catch {
       checks.push({ name, ok: true, detail: `${dir} (not created yet — created on first use)` });
@@ -161,7 +166,7 @@ export async function doctor(core: Core, env: NodeJS.ProcessEnv, options: Doctor
     detail: config.secrets?.store ?? 'not chosen yet (keychain by default)',
   });
   checks.push(await updateCheckLine(core, env));
-  checks.push(...(await registrationChecks(core, env, readable ? config : null)));
+  checks.push(...(await registrationChecks(core, env, readable ? config : null, platform)));
   return { checks, ok: checks.every((c) => c.ok) };
 }
 
@@ -222,7 +227,12 @@ async function updateCheckLine(core: Core, env: NodeJS.ProcessEnv): Promise<Doct
  *
  * `config` is null when it could not be read: the check above says so, and no channel is said to have accounts.
  */
-async function registrationChecks(core: Core, env: NodeJS.ProcessEnv, config: Config | null): Promise<DoctorCheck[]> {
+async function registrationChecks(
+  core: Core,
+  env: NodeJS.ProcessEnv,
+  config: Config | null,
+  platform: NodeJS.Platform,
+): Promise<DoctorCheck[]> {
   const report = await channelsAvailable(core, env);
   const checks: DoctorCheck[] = report.unreadable.map((file) => ({
     name: 'client config',
@@ -242,7 +252,7 @@ async function registrationChecks(core: Core, env: NodeJS.ProcessEnv, config: Co
         name,
         ok: false,
         detail: `registered with ${where(entry)}, but ${entry.missing} is no longer there, so ${entry.client} cannot start it`,
-        fix: registerAgain(channel.channel, entry),
+        fix: registerAgain(channel.channel, entry, platform),
       });
     }
     const working = channel.registered.filter((entry) => entry.missing === null);
@@ -282,7 +292,7 @@ function accountsOf(config: Config, channel: Channel): string[] {
  * the flags `mcp install`'s own hint repeats when it refuses to replace an entry without `--force`, so following it
  * narrows or widens nothing. A project's entry is not one `mcp install` writes, and is said to be where it is instead.
  */
-function registerAgain(channel: Channel, entry: ChannelRegistration): string {
+function registerAgain(channel: Channel, entry: ChannelRegistration, platform: NodeJS.Platform): string {
   if (entry.scope === 'project') {
     return `It is registered for one project, in ${entry.path}, and \`mcp install\` registers at user scope only: remove it or register it again there, with ${entry.client}'s own command.`;
   }
@@ -292,7 +302,8 @@ function registerAgain(channel: Channel, entry: ChannelRegistration): string {
   words.push(...entry.narrowing);
   if (entry.launcher === 'npx' || entry.launcher === 'local') words.push('--launcher', entry.launcher);
   words.push('--force');
-  return `Register it again: \`${shellCommand(words)}\`.`;
+  // The entry's name and pins are read from the client's file, which may hold anything: see `shellCommand`.
+  return `Register it again: ${inlineCommand(shellCommand(words, platform))}.`;
 }
 
 /** An inbox's id from its name — the current one, so a former name is answered with what it is called now. */

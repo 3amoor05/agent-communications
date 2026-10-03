@@ -835,6 +835,56 @@ test('a refusal hint repeats every flag that narrows the server, so following it
   assert.doesNotMatch(elsewhere, /--force/);
 });
 
+test('a refusal hint gives a pin Windows cannot print as a placeholder, with the pin beside it to type (CUE-306)', async () => {
+  /*
+   * A pin kept from the entry being replaced is read from the client's file, which may hold anything. Quoted for
+   * PowerShell, a word with a `$` or a `%` came out in single quotes, which cmd.exe reads as characters. Asked for
+   * Windows by name, each of the refusal's hints prints a placeholder for it, and gives it apart as JSON.
+   */
+  const data = tempDir();
+  const home = tempDir();
+  const windows: InstallContext = { ...context(data, home), platform: 'win32' };
+  const cursor = knownClientConfigs(windows.env).find((file) => file.client === 'cursor')?.path ?? '';
+  const runtime = managedRuntimeEntry(data, '@agentcomms/example', '0.0.0');
+  const typed =
+    '(<inbox> is "acme/50%", written as JSON: type it in yourself, quoted for your shell — no quoting reads the same in cmd.exe and PowerShell)';
+  const hintOf = async (options: Parameters<typeof mcpInstall>[2]) =>
+    mcpInstall(windows, pinnedProduct(), options).then(
+      () => assert.fail('it was not refused'),
+      (error: { hint?: string }) => String(error.hint),
+    );
+
+  // Ours, pinned in the file to what no quoting makes safe on Windows: the command that replaces it as it is.
+  writeConfig(
+    cursor,
+    JSON.stringify({ mcpServers: { example: { command: 'node', args: [runtime, 'mcp', '--inbox', 'acme/50%'] } } }),
+  );
+  assert.equal(
+    await hintOf({ client: 'cursor', launcher: 'npx', noVerify: true }),
+    `Pass --force to replace it — that is how an upgrade reaches a client: \`agent-example mcp install --client cursor --inbox <inbox> --launcher npx --force\` ${typed}.`,
+  );
+
+  // Somebody else's under the name asked for: register this one under another.
+  writeConfig(cursor, JSON.stringify({ mcpServers: { theirs: { command: 'npx', args: ['x'] } } }));
+  const elsewhere = await hintOf({ client: 'cursor', name: 'theirs', inbox: 'acme/50%', noVerify: true });
+  assert.ok(
+    elsewhere.startsWith(
+      `Register this one under another name: \`agent-example mcp install --client cursor --name agent-example --inbox <inbox>\` ${typed}. `,
+    ),
+    elsewhere,
+  );
+
+  // Ours, serving another mailbox: a second entry under a name of its own.
+  writeConfig(
+    cursor,
+    JSON.stringify({ mcpServers: { example: { command: 'node', args: [runtime, 'mcp', '--inbox', 'acme/work'] } } }),
+  );
+  assert.equal(
+    await hintOf({ client: 'cursor', inbox: 'acme/50%', noVerify: true }),
+    `That entry serves acme/work; to serve acme/50% as well, register a second entry under its own name: \`agent-example mcp install --client cursor --name example-acme --inbox <inbox>\` ${typed}.`,
+  );
+});
+
 test('an entry that was checked and failed to start says so, and ends the command non-zero', async () => {
   // A checkout whose command exits at once — 0.4.0's npx entry without `mcp` did exactly this.
   const checkout = tempDir();

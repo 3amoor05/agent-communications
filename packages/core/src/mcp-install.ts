@@ -2,7 +2,7 @@ import { execFile, spawn } from 'node:child_process';
 import { access, constants, lstat, mkdir, readdir, readFile, realpath, rm, stat } from 'node:fs/promises';
 import { delimiter, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { shellCommand } from './cli-runtime.ts';
+import { inlineCommand, type ShellCommand, shellCommand } from './cli-runtime.ts';
 import { CommsError, EXIT_CODES } from './errors.ts';
 import { appendPrivateLine, replaceFileInPlace, writeFileAtomic } from './fs.ts';
 import {
@@ -284,6 +284,8 @@ function minimalEnv(context: InstallContext, node: string): Record<string, strin
 export interface InstallContext {
   env: NodeJS.ProcessEnv;
   core: { paths: { dataDir: string; configDir: string } };
+  /** The shell the commands it prints are quoted for: this machine's, unless a test asks for another by name. */
+  platform?: NodeJS.Platform | undefined;
 }
 
 function unscoped(packageName: string): string {
@@ -661,6 +663,7 @@ function claimName(
   options: InstallOptions,
   name: string,
   existing: readonly RegisteredServer[],
+  platform: NodeJS.Platform | undefined,
 ): RegisteredServer[] {
   const taken = existing.filter(
     (server) => server.client === options.client && server.name === name && server.scope !== 'project',
@@ -677,7 +680,7 @@ function claimName(
       'CONFIG',
       `${options.client} already has an MCP server called "${name}", and it is not this one (it runs ${what})`,
       {
-        hint: `Register this one under another name: \`${installCommand(product, options, other)}\`. --force does not replace a server this did not install.`,
+        hint: `Register this one under another name: ${inlineCommand(installCommand(product, options, other, [], platform))}. --force does not replace a server this did not install.`,
       },
     );
   }
@@ -693,7 +696,7 @@ function claimName(
       if (!wanted || !served || served === wanted) continue;
       const second = `${product.defaultServerName}-${wanted.split('/')[0]}`;
       throw new CommsError('CONFIG', `${options.client} already has this server registered as "${name}"`, {
-        hint: `That entry serves ${served}; to serve ${wanted} as well, register a second entry under its own name: \`${installCommand(product, options, second === name ? `${name}-2` : second)}\`.`,
+        hint: `That entry serves ${served}; to serve ${wanted} as well, register a second entry under its own name: ${inlineCommand(installCommand(product, options, second === name ? `${name}-2` : second, [], platform))}.`,
       });
     }
     /*
@@ -707,7 +710,7 @@ function claimName(
       launcher: options.launcher ?? (npx ? ('npx' as const) : undefined),
     };
     throw new CommsError('CONFIG', `${options.client} already has this server registered as "${name}"`, {
-      hint: `Pass --force to replace it — that is how an upgrade reaches a client: \`${installCommand(product, again, name, ['--force'])}\`.`,
+      hint: `Pass --force to replace it — that is how an upgrade reaches a client: ${inlineCommand(installCommand(product, again, name, ['--force'], platform))}.`,
     });
   }
   return taken;
@@ -748,14 +751,23 @@ function keepNarrowing(
  * workspace on the machine; for Gmail it dropped `--inbox` and `--read-only` the same way. Doctor's repair already
  * rebuilds these flags for exactly that reason. The product's `serverArgs` are the install command's own flags for
  * the pin and the narrowing, so they are repeated as they are.
+ *
+ * A pin kept from the entry being replaced was read from the client's file, which may hold anything, so the command
+ * can come back with a placeholder to type by hand; every hint gives it with `inlineCommand`, which says so.
  */
-function installCommand(product: McpProduct, options: InstallOptions, name: string, extra: string[] = []): string {
+function installCommand(
+  product: McpProduct,
+  options: InstallOptions,
+  name: string,
+  extra: string[],
+  platform: NodeJS.Platform | undefined,
+): ShellCommand {
   const words = [product.binary, 'mcp', 'install', '--client', options.client];
   if (name !== product.defaultServerName) words.push('--name', name);
   words.push(...product.serverArgs(options));
   if (options.launcher && options.launcher !== 'managed') words.push('--launcher', options.launcher);
   words.push(...extra);
-  return shellCommand(words);
+  return shellCommand(words, platform);
 }
 
 /**
@@ -798,10 +810,11 @@ async function codexRegistration(
   binary: string,
   name: string,
   path: string,
+  platform: NodeJS.Platform | undefined,
 ): Promise<RegisteredServer | null> {
   const unknown = () =>
     new CommsError('CONFIG', `codex would not say what it has registered as "${name}", so nothing was written`, {
-      hint: `Look with \`${shellCommand(['codex', 'mcp', 'get', name])}\`. If it is not an older copy of this server, choose another --name; \`--print\` shows the entry to add by hand.`,
+      hint: `Look with ${inlineCommand(shellCommand(['codex', 'mcp', 'get', { value: name, label: 'name' }], platform))}. If it is not an older copy of this server, choose another --name; \`--print\` shows the entry to add by hand.`,
     });
   let answer: Awaited<ReturnType<typeof capture>>;
   try {
@@ -989,10 +1002,10 @@ export async function preflightInstall(
       );
     }
   }
-  let previous = writes ? claimName(product, options, name, existing) : [];
+  let previous = writes ? claimName(product, options, name, existing, context.platform) : [];
   if (writes && binary && options.client === 'codex') {
-    const reported = await codexRegistration(context.env, binary, name, configPath ?? 'codex');
-    if (reported) previous = claimName(product, options, name, [reported]);
+    const reported = await codexRegistration(context.env, binary, name, configPath ?? 'codex', context.platform);
+    if (reported) previous = claimName(product, options, name, [reported], context.platform);
   }
   const { options: effective, kept } = keepNarrowing(product, options, previous);
   // After the client's own CLI is looked for, so that look stays the first this makes of PATH.
@@ -1200,9 +1213,14 @@ export async function mcpInstall(
   if (kept.length > 0) {
     const removal =
       options.client === 'claude-code'
-        ? `\`${shellCommand(['claude', 'mcp', 'remove', name, '--scope', 'user'])}\``
+        ? inlineCommand(
+            shellCommand(
+              ['claude', 'mcp', 'remove', { value: name, label: 'name' }, '--scope', 'user'],
+              context.platform,
+            ),
+          )
         : options.client === 'codex'
-          ? `\`${shellCommand(['codex', 'mcp', 'remove', name])}\``
+          ? inlineCommand(shellCommand(['codex', 'mcp', 'remove', { value: name, label: 'name' }], context.platform))
           : `delete "${name}" from ${configPath}`;
     warnings.push(
       `Kept ${kept.join(' ')} from the "${name}" entry this replaced, because this install did not say otherwise. To register it wider on purpose, remove that entry first (${removal}), then install without them.`,
@@ -1330,7 +1348,7 @@ export async function mcpInstall(
           {
             hint: restored
               ? 'Check the client is not running, then try again.'
-              : `Re-register it with \`${installCommand(product, effective, name)}\`. The old entry is in ${backupPath}.`,
+              : `Re-register it with ${inlineCommand(installCommand(product, effective, name, [], context.platform))}. The old entry is in ${backupPath}.`,
             cause: error,
           },
         );
@@ -1346,7 +1364,7 @@ export async function mcpInstall(
             'CONFIG',
             `${cliName} already has an MCP server called "${name}", somewhere this could not read`,
             {
-              hint: `Look at it with \`${shellCommand([cliName, 'mcp', 'get', name])}\`. If it is an older ${product.binary}, remove it with \`${shellCommand([cliName, 'mcp', 'remove', name])}\` and run this again; if not, choose another --name.`,
+              hint: `Look at it with ${inlineCommand(shellCommand([cliName, 'mcp', 'get', { value: name, label: 'name' }], context.platform))}. If it is an older ${product.binary}, remove it with ${inlineCommand(shellCommand([cliName, 'mcp', 'remove', { value: name, label: 'name' }], context.platform))} and run this again; if not, choose another --name.`,
               cause: error,
             },
           );
