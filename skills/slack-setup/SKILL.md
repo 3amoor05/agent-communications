@@ -36,6 +36,13 @@ There is no shared app to install. A person creates one in their own workspace f
 prints, which means the scopes are visible to them before anything is granted and the workspace's admins keep
 control of it.
 
+An organisation may already have made its apps — one for reading, one for posting — and handed its members a
+profile, a small `.agentcomms.json` file. `agentcomms org add <file>` (`comms_org_add` from a chat) records
+those apps here: the workspace, each app's Client ID and the port. In this release `workspace add` does not use
+the profile by itself; that comes in a later release. Until then, rather than make a second app, connect
+through the organisation's read app by hand: `agentcomms org show <organisation>` lists its Client ID and port,
+and `workspace add` takes them as below.
+
 ```sh
 agent-slack manifest --mode read --port 51234
 ```

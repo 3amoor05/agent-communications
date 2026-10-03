@@ -143,10 +143,17 @@ send policy?" either: `gmail_inboxes_list` answers that in one call.
 
 ## Prerequisites
 
-1. **A Google account, and a Cloud project you may edit.** The OAuth client is created by the user in
-   their own project; there is no shared client to borrow, and the 100-user lifetime cap on one project
-   makes a shared one a bad idea anyway.
-   **Complete when:** the user has named the project, or agreed to create one.
+1. **A Google account, and a Cloud project you may edit — unless their organisation provides the client.**
+   Otherwise the OAuth client is created by the user in their own project; there is no stranger's client
+   to borrow, and the 100-user lifetime cap on one project makes a widely shared one a bad idea anyway.
+   An organisation can make one client for its members and hand them a profile, a small
+   `.agentcomms.json` file: `agentcomms org add <file>` (`comms_org_add` from a chat, a change they
+   approve) registers its client here as `<organisation>-1`, and no Cloud project is needed. In this
+   release setup does not pick that client by itself yet: connect each mailbox through it with
+   `agent-gmail inbox add <name> --client <organisation>-1` (`client` in `gmail_inbox_add`), the name
+   `agentcomms org show <organisation>` gives as active.
+   **Complete when:** the user has named the project, agreed to create one, or added their organisation's
+   profile.
 2. **A browser the user can reach.** Consent happens in a browser, on Google's own screen. Neither this
    package nor you can grant it: no flag makes it headless, and `--url` only lets the user paste the
    address bar back from a machine that has no browser of its own. Hand the link over and wait.
