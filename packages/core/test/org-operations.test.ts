@@ -1198,3 +1198,86 @@ async function readable(m: Machine): Promise<Config> {
   return m.core.config.load();
 }
 void readable;
+
+// ── Review round: what a reactivated client carries, narrowing at once, failures on the way out, races ────────────
+
+test('an earlier owned client made active again takes the profile’s serves and project, and its row follows', async () => {
+  const m = machine();
+  writeProfile(m, profile());
+  await add(m);
+  writeProfile(m, profile({ gmail: gmail({ clientId: CLIENT_B, clientSecret: SECRET_B }) }));
+  await update(m);
+  // Back to A, with what the organisation now says about it: Internal, and a renamed project.
+  writeProfile(m, profile({ gmail: gmail({ serves: { domains: ['acme.test'] }, projectId: 'acme-renamed' }) }));
+  const { prepared, result } = await update(m);
+  const preview = prepared?.preview ?? '';
+  assert.equal(result.gmail.action, 'reactivated');
+  assert.match(preview, /\("acme-1"\), an earlier client of acme, made active again, for addresses at acme\.test/);
+  assert.match(preview, /who "acme-1" serves: any address → addresses at acme\.test/);
+  assert.match(preview, /Google Cloud project of "acme-1": acme-agent-comms → acme-renamed/);
+  assert.doesNotMatch(preview, /rewrites "acme-1"|store on this machine/, 'the row follows the profile: no rebuild');
+  const generation = (await record(m))?.gmail?.generations.find((entry) => entry.name === 'acme-1');
+  assert.deepEqual(generation?.serves, { domains: ['acme.test'] }, 'not the serves it had when it was last active');
+  assert.equal(generation?.projectId, 'acme-renamed');
+  assert.equal((await config(m)).clients['acme-1']?.projectId, 'acme-renamed', 'the owned row follows the profile');
+  assert.deepEqual((await orgShow(m.core, 'acme')).drift, []);
+});
+
+test('an earlier adopted client made active again: the generation takes the profile’s values, the row stays the person’s', async () => {
+  const m = machine({
+    secrets: { store: 'file' },
+    clients: { desktop: personsRow(CLIENT_A, 'desktop', { projectId: 'acme-agent-comms' }) },
+  });
+  writeProfile(m, profile());
+  await add(m);
+  writeProfile(m, profile({ gmail: gmail({ clientId: CLIENT_B, clientSecret: SECRET_B }) }));
+  await update(m);
+  writeProfile(m, profile({ gmail: gmail({ serves: { domains: ['acme.test'] }, projectId: 'acme-renamed' }) }));
+  const { result } = await update(m);
+  assert.equal(result.gmail.client, 'desktop');
+  const generation = (await record(m))?.gmail?.generations.find((entry) => entry.name === 'desktop');
+  assert.deepEqual(generation?.serves, { domains: ['acme.test'] });
+  assert.equal(generation?.projectId, 'acme-renamed');
+  assert.equal((await config(m)).clients.desktop?.projectId, 'acme-agent-comms', 'the person’s row is left alone');
+  assert.match(
+    result.reported.join('\n'),
+    /"desktop" is a client you registered yourself, so its own project id is left/,
+  );
+});
+
+test('Gmail removed and re-added with other metadata: the generation made active again carries the new values', async () => {
+  const m = machine();
+  writeProfile(m, profile());
+  await add(m);
+  writeProfile(m, profile({ gmail: undefined }));
+  await update(m);
+  writeProfile(
+    m,
+    profile({ gmail: gmail({ serves: { domains: ['acme.test', 'acme.example'] }, projectId: undefined }) }),
+  );
+  const { prepared } = await update(m);
+  assert.match(
+    prepared?.preview ?? '',
+    /Google client: none → .*made active again, for addresses at acme\.test, acme\.example/,
+  );
+  assert.match(prepared?.preview ?? '', /Google Cloud project of "acme-1": acme-agent-comms → none/);
+  const generation = (await record(m))?.gmail?.generations[0];
+  assert.deepEqual(generation?.serves, { domains: ['acme.test', 'acme.example'] });
+  assert.equal(generation?.projectId, undefined);
+  assert.equal((await config(m)).clients['acme-1']?.projectId, undefined);
+});
+
+test('a preview names what is added in full: a Google client’s serves and project, a Slack workspace’s port', async () => {
+  const m = machine();
+  writeProfile(m, profile({ gmail: undefined, slack: undefined }));
+  await add(m);
+  writeProfile(m, profile({ gmail: gmail({ serves: { domains: ['acme.test'] } }) }));
+  const { prepared } = await update(m);
+  const preview = prepared?.preview ?? '';
+  assert.match(
+    preview,
+    /Google client: none → .* \(Google Cloud project acme-agent-comms\), for addresses at acme\.test, registered as/,
+  );
+  assert.match(preview, /Slack: none → workspace TACME0001 \(Acme Test Org\), signing in on port 51234/);
+  assert.match(preview, /Slack read app: none → client id 1111\.2222/);
+});

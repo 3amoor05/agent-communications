@@ -385,7 +385,7 @@ async function planProfile(config: Config, input: PlanInput): Promise<ProfilePla
       else {
         gmail = { action: 'reactivated', client: target.name };
         changes.push(
-          `Google client: ${before ? named(before) : 'none'} → ${named(target)}, an earlier client of ${organisation}, made active again`,
+          `Google client: ${before ? named(before) : 'none'} → ${named(target)}, an earlier client of ${organisation}, made active again, for ${servesText(pg.serves)}`,
         );
       }
     } else {
@@ -421,7 +421,7 @@ async function planProfile(config: Config, input: PlanInput): Promise<ProfilePla
         // which the rule below makes it.
         const project = pg.projectId ? ` (Google Cloud project ${pg.projectId})` : '';
         changes.push(
-          `Google client: ${before ? named(before) : 'none'} → ${pg.clientId}${project}, ${
+          `Google client: ${before ? named(before) : 'none'} → ${pg.clientId}${project}, for ${servesText(pg.serves)}, ${
             resolution.kind === 'adopt'
               ? adopted
               : `registered as the OAuth client "${name}", owned by this profile; client secret: included`
@@ -429,7 +429,14 @@ async function planProfile(config: Config, input: PlanInput): Promise<ProfilePla
         );
       }
     }
-    if (before !== undefined && target.name === before.name) {
+    if (resolution.kind === 'reactivate') {
+      /*
+       * The profile's metadata applies to the generation it selects, whatever that generation's history: the active
+       * one, or an earlier one made active again (A → B → A, or Gmail removed and re-added). A reactivated generation
+       * still holds the `serves` and project it had when it was last active, and routing new mailboxes by those would
+       * route them by a statement the organisation has since withdrawn. Each difference is a line of its own, before
+       * → after, so the person approves the values that will be used.
+       */
       if (!sameServes(target.serves, pg.serves)) {
         changes.push(`who "${target.name}" serves: ${servesText(target.serves)} → ${servesText(pg.serves)}`);
         target.serves = structuredClone(pg.serves);
@@ -472,7 +479,10 @@ async function planProfile(config: Config, input: PlanInput): Promise<ProfilePla
       } else if ((row.projectId ?? null) !== (target.projectId ?? null)) {
         // The profile's new project id, carried to the row with it (§D8) — or a row whose project somebody changed,
         // which is row (b) again.
-        const followsProfile = before?.name === target.name && (row.projectId ?? null) === (before.projectId ?? null);
+        // Measured against the selected generation as the record held it before this plan — the active one, or the
+        // earlier one being made active again — since the line above already gave the generation the profile's value.
+        const recorded = resolution.kind === 'reactivate' ? resolution.generation.projectId : undefined;
+        const followsProfile = resolution.kind === 'reactivate' && (row.projectId ?? null) === (recorded ?? null);
         if (followsProfile) rows[target.name] = wanted;
         else write(`rewrites "${target.name}" from the profile: its project id had been changed`);
       }
@@ -569,8 +579,11 @@ async function planProfile(config: Config, input: PlanInput): Promise<ProfilePla
     }
     slack = { ...(rs ?? {}), ...slackRecordFrom(ps, rs) };
     if (input.mode === 'update') {
-      if (!rs) changes.push(`Slack: none → workspace ${ps.workspace} (${shownText(ps.workspaceName, 80)})`);
-      else {
+      if (!rs) {
+        changes.push(
+          `Slack: none → workspace ${ps.workspace} (${shownText(ps.workspaceName, 80)}), signing in on port ${ps.redirectPort}`,
+        );
+      } else {
         if (rs.workspace !== ps.workspace) changes.push(`Slack workspace: ${rs.workspace} → ${ps.workspace}`);
         if (rs.workspaceName !== ps.workspaceName) {
           changes.push(`Slack workspace name: ${shownText(rs.workspaceName, 80)} → ${shownText(ps.workspaceName, 80)}`);
