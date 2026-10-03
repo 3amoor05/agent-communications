@@ -121,6 +121,22 @@ test('six accounts asking at once share one budget: two requests a second from t
 });
 
 /**
+ * Puts the next holder's body in place, or leaves the lock as it is for this turn when Windows will not.
+ *
+ * Windows refuses to rename over a file another process has open, with EPERM (or EACCES or EBUSY), and the waiter under
+ * test opens the lock to read its token many times a second — the first Windows release run met it at once. A turn
+ * skipped is a hand-over 50 ms later than planned, which changes nothing either test asserts; the next tick tries again.
+ */
+function replaceLock(next: string, lock: string): void {
+  try {
+    renameSync(next, lock);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'EPERM' && code !== 'EACCES' && code !== 'EBUSY') throw error;
+  }
+}
+
+/**
  * Stands in for other callers ahead in line on the throttle's lock: a new holder's token in it every 50 ms, never
  * leaving it free in between, until `stop`. Renamed into place, so a waiter never reads half a body.
  */
@@ -131,7 +147,7 @@ function lineAhead(throttle: Throttle): { stop: () => void } {
   const handOn = () => {
     holders += 1;
     writeFileSync(`${lock}.next`, JSON.stringify({ pid: 1, at: new Date().toISOString(), token: `holder-${holders}` }));
-    renameSync(`${lock}.next`, lock);
+    replaceLock(`${lock}.next`, lock);
   };
   handOn();
   const timer = setInterval(handOn, 50);

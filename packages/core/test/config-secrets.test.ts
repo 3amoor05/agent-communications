@@ -514,6 +514,22 @@ test('a holder that stopped renewing is still taken over, so a crash does not we
 });
 
 /**
+ * Puts the next holder's body in place, or leaves the lock as it is for this turn when Windows will not.
+ *
+ * Windows refuses to rename over a file another process has open, with EPERM (or EACCES or EBUSY), and the waiter under
+ * test opens the lock to read its token many times a second — the first Windows release run met it at once. A turn
+ * skipped is a hand-over 50 ms later than planned, which changes nothing either test asserts; the next tick tries again.
+ */
+function replaceLock(next: string, lock: string): void {
+  try {
+    renameSync(next, lock);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'EPERM' && code !== 'EACCES' && code !== 'EBUSY') throw error;
+  }
+}
+
+/**
  * Stands in for a line of other callers: puts a new holder's token in the lock every `everyMs`, and never leaves it
  * free in between, so a waiter sees the lock handed on again and again and never gets a turn until `stop`. Renamed
  * into place, so a waiter never reads half a body.
@@ -524,7 +540,7 @@ function handedOnRepeatedly(path: string, everyMs: number): { stop: () => void }
     holders += 1;
     const next = `${path}.next`;
     writeFileSync(next, JSON.stringify({ pid: 1, at: new Date().toISOString(), token: `holder-${holders}` }));
-    renameSync(next, path);
+    replaceLock(next, path);
   };
   handOn();
   const timer = setInterval(handOn, everyMs);
