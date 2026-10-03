@@ -2,6 +2,7 @@ import {
   type ClientConfig,
   CommsError,
   type Core,
+  clientSecretRef,
   type InboxConfig,
   inlineCommand,
   type SecretStore,
@@ -11,9 +12,11 @@ import type { GoogleEndpoints } from './endpoints.ts';
 import { oauthError } from './oauth.ts';
 import { parseGrantedScopes } from './scopes.ts';
 
-export function clientSecretRef(name: string): string {
-  return `client:${name}:secret`;
-}
+/*
+ * Where a client's secret is kept is the core's to say (`oauth-client-records.ts`): an organisation profile writes a
+ * client's secret too, and the session has to find it under the same reference whoever wrote it.
+ */
+export { clientSecretRef };
 
 export function refreshTokenRef(inboxId: string): string {
   return `gmail:refresh:${inboxId}`;

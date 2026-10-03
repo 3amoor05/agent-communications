@@ -52,6 +52,14 @@ export interface ClientConfig {
   projectId?: string | undefined;
   secretRef: string;
   addedAt: string;
+  /**
+   * The organisation profile that made this row and owns it (design 2026-10-02 §D4) — absent on a row a person
+   * registered, or one a profile adopted. A row carrying it is the profile's to change: `org update` and `org remove`
+   * change it, and `client add --replace` and `client remove` refuse it while its organisation has a record.
+   *
+   * Additive: client rows are loose, so a release that does not know the key keeps it through its writes.
+   */
+  organisation?: string | undefined;
 }
 
 export interface InboxConfig {
@@ -254,6 +262,9 @@ const clientSchema = z.looseObject({
   projectId: z.string().optional(),
   secretRef: z.string().min(1),
   addedAt: z.string(),
+  // Any string, not the organisation grammar: a marker nothing here would write is drift for `doctor` to report and
+  // `org update` to clear, never a reason for the whole configuration to stop being readable.
+  organisation: z.string().optional(),
 });
 
 const inboxSchema = z.looseObject({

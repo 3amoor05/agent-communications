@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { CommsError } from '@agentcomms/core';
+import { CommsError, isGoogleClientId } from '@agentcomms/core';
 import type { GoogleEndpoints } from './endpoints.ts';
 import { parseGrantedScopes } from './scopes.ts';
 
@@ -228,7 +228,7 @@ export function parseClientJson(text: string): InstalledClient {
   const installed = json.installed as Record<string, unknown> | undefined;
   const clientId = installed?.client_id;
   const clientSecret = installed?.client_secret;
-  if (typeof clientId !== 'string' || !clientId.endsWith('.apps.googleusercontent.com')) {
+  if (!isGoogleClientId(clientId)) {
     throw new CommsError('BAD_DATA', 'the client file has no Desktop client id');
   }
   if (typeof clientSecret !== 'string' || !clientSecret) {

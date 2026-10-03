@@ -4,23 +4,24 @@ import {
   type ClientConfig,
   CommsError,
   type Config,
+  chooseSecretStore,
+  clientSecretRef,
   committedSecretsStore,
   expandHome,
   type GatedChange,
+  gmailClientRow,
   homeDirectory,
   inlineCommand,
   keepAndReport,
   type LooseningConsent,
-  probeKeychain,
   type StoreKind,
-  secretsStoreFor,
   secretsStoreOf,
   shellCommand,
   withCredentialsLock,
   writeOutcome,
+  writeSecretWithRestore,
 } from '@agentcomms/core';
 import { type InstalledClient, parseClientJson, probeClientCredentials } from '../auth/oauth.ts';
-import { clientSecretRef } from '../auth/session.ts';
 import type { GmailContext } from '../context.ts';
 import { clearSetupProgress } from './setup-progress.ts';
 import { MAX_CLIENT_BYTES, readSmallFile } from './small-file.ts';
@@ -164,13 +165,12 @@ export function clientAddChange(context: GmailContext, request: ClientAddRequest
       const existing = config.clients[name];
       const after = structuredClone(config);
       after.secrets = { store };
-      after.clients[name] = {
-        provider: 'gmail',
+      after.clients[name] = gmailClientRow({
+        name,
         clientId: read.client.clientId,
         projectId: read.client.projectId,
-        secretRef: clientSecretRef(name),
         addedAt: existing?.addedAt ?? context.now().toISOString(),
-      };
+      });
       const project = read.client.projectId ? ` from the Google Cloud project ${read.client.projectId}` : '';
       return {
         before: config,
@@ -258,88 +258,58 @@ async function registerClient(
         hint: 'Run the command again to see what is there now.',
       });
     }
-    // Kept, so a write that does not land can put the reference back as it was: the row would otherwise name this
-    // client while the secret under it belongs to another — or a stray secret would be left under a name nothing uses.
-    const previous = await secrets.get(secretRef);
-
-    const row: ClientConfig = {
-      provider: 'gmail',
+    const row: ClientConfig = gmailClientRow({
+      name,
       clientId: parsed.clientId,
       projectId: parsed.projectId,
-      secretRef,
       addedAt: existing?.addedAt ?? context.now().toISOString(),
-    };
-    // Whether the write refused itself rather than failing around itself: re-registering the same client with the
-    // same secret changes nothing, so a refusal would otherwise look exactly like a write that landed.
-    let refused = false;
-    try {
+    });
+    /*
+     * The secret and the row, by the core's one procedure for it (`writeSecretWithRestore`): what the reference holds
+     * now is kept, so a write that does not land puts it back as it was — the row would otherwise name this client
+     * while the secret under it belongs to another, or a stray secret would be left under a name nothing uses.
+     */
+    await writeSecretWithRestore({
+      secrets,
+      secretRef,
+      secret: parsed.clientSecret,
+      commit: async (refuse) => {
+        await context.core.config.update(
+          (current) => {
+            refuse(true);
+            // Never switch the store: only `secrets migrate` changes it, and it moves the secrets with it.
+            if ((committedSecretsStore(current) ?? chosen) !== chosen) {
+              throw new CommsError('TRANSIENT', 'the secret store was changed while this ran', {
+                hint: 'Run the command again.',
+              });
+            }
+            // The users are re-checked here as well as above: a sign-in completing between the two would otherwise
+            // attach a mailbox to the client being replaced, and its token would not survive the replacement.
+            const held = current.clients[name];
+            if (held && held.clientId !== parsed.clientId && inboxesOf(current.inboxes, name).length > 0) {
+              throw new CommsError('CONFIG', `"${name}" is a different OAuth client, and mailboxes use it`, {
+                hint: 'Add the new client under another name, then `inbox reauth` each mailbox onto it.',
+              });
+            }
+            refuse(false);
+            return { ...current, secrets: { store: chosen }, clients: { ...current.clients, [name]: row } };
+          },
+          options.consent ? { consent: options.consent } : {},
+        );
+      },
       /*
-       * Inside the boundary that puts it back: a keychain write can land after it has reported a timeout, so even a
-       * failed write has to be reconciled rather than assumed not to have happened.
+       * "Committed" has to mean *this* write. Rotating one client's secret writes a row identical to the one already
+       * there, so the row must match completely — and the core then checks the store holds the new secret, read
+       * fresh: a secret write that failed before storing would otherwise read as success, and `--move` would then
+       * delete the only copy of the new secret.
        */
-      await secrets.set(secretRef, parsed.clientSecret);
-      const stored = await secrets.get(secretRef);
-      if (stored !== parsed.clientSecret) {
-        throw new CommsError('SECRET_STORE_UNAVAILABLE', 'the secret did not read back the way it was written', {
-          hint: 'Try again with `--store file` to keep secrets in owner-only files instead of the system keychain.',
-        });
-      }
-      await context.core.config.update(
-        (current) => {
-          refused = true;
-          // Never switch the store: only `secrets migrate` changes it, and it moves the secrets with it.
-          if ((committedSecretsStore(current) ?? chosen) !== chosen) {
-            throw new CommsError('TRANSIENT', 'the secret store was changed while this ran', {
-              hint: 'Run the command again.',
-            });
-          }
-          // The users are re-checked here as well as above: a sign-in completing between the two would otherwise
-          // attach a mailbox to the client being replaced, and its token would not survive the replacement.
-          const held = current.clients[name];
-          if (held && held.clientId !== parsed.clientId && inboxesOf(current.inboxes, name).length > 0) {
-            throw new CommsError('CONFIG', `"${name}" is a different OAuth client, and mailboxes use it`, {
-              hint: 'Add the new client under another name, then `inbox reauth` each mailbox onto it.',
-            });
-          }
-          refused = false;
-          return { ...current, secrets: { store: chosen }, clients: { ...current.clients, [name]: row } };
-        },
-        options.consent ? { consent: options.consent } : {},
-      );
-    } catch (error) {
-      /*
-       * A rejected write may have committed (see `writeOutcome` in core) — but "committed" has to mean *this* write.
-       *
-       * Rotating one client's secret writes a row identical to the one already there, so asking whether a row with
-       * this client id exists is answered "yes" before anything happens: a secret write that failed before storing
-       * would read as success, the error would be swallowed, and `--move` would then delete the only copy of the new
-       * secret. So the row must match completely *and* the store must hold the new secret, read fresh.
-       */
-      const landed = refused
-        ? ('absent' as const)
-        : await writeOutcome(async () => {
-            const held = (await context.config()).clients[name];
-            if (!held || JSON.stringify(held) !== JSON.stringify(row)) return false;
-            secrets.invalidate(secretRef);
-            return (await secrets.get(secretRef)) === parsed.clientSecret;
-          });
-      if (landed === 'unknown') throw keepAndReport(error, secretRef, 'Run `agent-gmail client list`.');
-      if (landed === 'absent') {
-        // Exactly as it was: the previous secret, or nothing when there was none.
-        try {
-          if (previous === null) await secrets.delete(secretRef);
-          else await secrets.set(secretRef, previous);
-        } catch (restoreError) {
-          const base = error instanceof CommsError ? error : new CommsError('UNEXPECTED', String(error));
-          throw new CommsError(base.code, base.message, {
-            hint: `${base.hint ? `${base.hint} ` : ''}The secret store could not be put back as it was: register the client again with \`agent-gmail client add <its JSON> --replace\`.`,
-            details: { secretNotRestored: secretRef, restoreError: (restoreError as Error).message },
-            cause: error,
-          });
-        }
-      }
-      if (landed !== 'present') throw error;
-    }
+      landed: async () => {
+        const held = (await context.config()).clients[name];
+        return held !== undefined && JSON.stringify(held) === JSON.stringify(row);
+      },
+      howToCheck: 'Run `agent-gmail client list`.',
+      restoreHint: 'register the client again with `agent-gmail client add <its JSON> --replace`.',
+    });
     return row;
   });
 
@@ -373,17 +343,7 @@ async function registerClient(
  * before anybody is asked to approve it (`secretsStoreFor`): switching here would record a store and move nothing.
  */
 async function chooseStore(context: GmailContext, requested: StoreKind | undefined): Promise<StoreKind> {
-  const { store: chosen, choosing } = secretsStoreFor(await context.config(), requested, context.platform);
-  if (!choosing) return chosen;
-  if (chosen === 'keychain') {
-    const probe = await probeKeychain();
-    if (!probe.ok) {
-      throw new CommsError('SECRET_STORE_UNAVAILABLE', `the system keychain cannot be used here: ${probe.reason}`, {
-        hint: 'Run the command again with `--store file` to keep secrets in owner-only files in the config directory.',
-      });
-    }
-  }
-  return chosen;
+  return (await chooseSecretStore(await context.config(), requested, { platform: context.platform })).store;
 }
 
 export async function clientList(context: GmailContext): Promise<ClientView[]> {
