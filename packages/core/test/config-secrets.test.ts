@@ -556,18 +556,22 @@ test('with timeoutPerHolder a waiter keeps its place while the lock keeps changi
   /*
    * Six callers on one lock at the same moment, on a machine slow enough, used to time the last of them out: its
    * five seconds were a budget for every holder ahead of it, though the lock was being handed on as it should be.
-   * Scaled down: a line of holders lasting a second and a half, each a moment long, against a timeout of one
-   * second — and of 300ms for the caller that keeps the old rule, which is still the default.
+   * Scaled down: a line of holders lasting six seconds, each a moment long, against a timeout of five seconds — and
+   * of 300ms for the caller that keeps the old rule, which is still the default.
+   *
+   * Seconds, not tenths: the waiter and the stand-in line run in one process, so a stall of that process — the
+   * pre-push verify runs every package's tests at once, and a load of 89 stalled it past a second — stops the line
+   * handing on while the waiter's clock keeps going, and a budget of one second read the stall as a stuck holder.
    */
   const path = join(tempDir(), 'queue.lock');
   const line = handedOnRepeatedly(path, 50);
-  const ended = setTimeout(line.stop, 1_500);
+  const ended = setTimeout(line.stop, 6_000);
   const started = Date.now();
   try {
     const [patient, plain] = await Promise.allSettled([
       // An overall limit far past the line, so that only the per-holder rule is under test here.
       withFileLock(path, async () => Date.now() - started, {
-        timeoutMs: 1_000,
+        timeoutMs: 5_000,
         timeoutPerHolder: true,
         maxWaitMs: 60_000,
       }),
@@ -578,7 +582,7 @@ test('with timeoutPerHolder a waiter keeps its place while the lock keeps changi
       'fulfilled',
       `it gave up in the line: ${String((patient as PromiseRejectedResult).reason)}`,
     );
-    assert.ok(patient.value > 1_000, `it had its turn only once the line ahead had gone, after ${patient.value}ms`);
+    assert.ok(patient.value > 5_000, `it had its turn only once the line ahead had gone, after ${patient.value}ms`);
     assert.ok(
       plain.status === 'rejected' && plain.reason instanceof CommsError && plain.reason.code === 'LOCK_TIMEOUT',
       'without the option the timeout still counts the whole line: the default has not changed',
@@ -612,18 +616,19 @@ test('with timeoutPerHolder, a lock that keeps changing hands past a waiter stil
   /*
    * The lock is polled, not queued: whoever looks first after a release takes it. So a waiter can lose it to caller
    * after caller arriving later, and per holder its timeout starts again at every hand-over — alone, a wait with no
-   * end. Here the line never ends while the waiter is in it: a new holder every 50 ms, against one second for each
-   * holder (never reached) and an overall limit of 600 ms (reached). The line stops after eight seconds only so that
-   * a waiter that never gives up gets its turn and fails the test, rather than hanging it.
+   * end. Here the line never ends while the waiter is in it: a new holder every 50 ms, against ten seconds for each
+   * holder (never reached, even with the process stalled) and an overall limit of 600 ms (reached). The line stops
+   * after twelve seconds only so that a waiter that never gives up gets its turn and fails the test, rather than
+   * hanging it.
    */
   const path = join(tempDir(), 'overtaken.lock');
   const line = handedOnRepeatedly(path, 50);
-  const ended = setTimeout(line.stop, 8_000);
+  const ended = setTimeout(line.stop, 12_000);
   const started = Date.now();
   try {
     await assert.rejects(
       withFileLock(path, async () => `had a turn after ${Date.now() - started}ms`, {
-        timeoutMs: 2_000,
+        timeoutMs: 10_000,
         timeoutPerHolder: true,
         maxWaitMs: 600,
       }),

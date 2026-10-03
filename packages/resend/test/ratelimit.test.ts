@@ -164,17 +164,21 @@ test('a reservation, and a stop Resend asked for, wait out a line on the lock wh
    * Every Resend request on this machine takes the throttle's one lock, so six accounts asking at once are a line of
    * six on it. The lock's timeout used to count from when each caller began to wait, so the test above, on a machine
    * at a load of 97, refused the last of the six with "another process is holding" while the lock was being handed
-   * on as it should be. Scaled down: a line lasting a second and a half, against one second for each holder.
+   * on as it should be. Scaled down: a line lasting six seconds, against five seconds for each holder.
+   *
+   * Seconds, not tenths: the waiter and the stand-in line run in one process, so a stall of that process — the
+   * pre-push verify runs every package's tests at once, and a load of 89 stalled it past a second — stops the line
+   * handing on while the waiter's clock keeps going, and a budget of one second read the stall as a stuck holder.
    */
   const now = 7_000_000;
   const waits: number[] = [];
-  const options = { now: () => now, sleep: async (ms: number) => void waits.push(ms), lockTimeoutMs: 1_000 };
+  const options = { now: () => now, sleep: async (ms: number) => void waits.push(ms), lockTimeoutMs: 5_000 };
   const reserving = new Throttle(tempDir('agent-resend-throttle-'), options);
   const stopping = new Throttle(tempDir('agent-resend-throttle-'), options);
   const lines = [lineAhead(reserving), lineAhead(stopping)];
   const ended = setTimeout(() => {
     for (const line of lines) line.stop();
-  }, 1_500);
+  }, 6_000);
   try {
     const [reserved, stopped] = await Promise.allSettled([
       reserving.before(),
@@ -204,17 +208,18 @@ test('a reservation, and a stop Resend asked for, give up once the lock has kept
   /*
    * The lock is polled, not queued, so a request can lose it to later ones for as long as later ones keep coming, and
    * the per-holder timeout starts again at every hand-over: alone, a wait with no end. The throttle's overall limit
-   * ends it. Scaled down: a line that never ends while they wait, a new holder every 50 ms, against two seconds for
-   * each holder (never reached) and an overall limit of 600 ms. The line stops after eight seconds only so that a
-   * request that never gives up gets its turn and fails the test, rather than hanging it.
+   * ends it. Scaled down: a line that never ends while they wait, a new holder every 50 ms, against ten seconds for
+   * each holder (never reached, even with the process stalled) and an overall limit of 600 ms. The line stops after
+   * twelve seconds only so that a request that never gives up gets its turn and fails the test, rather than hanging
+   * it.
    */
-  const options = { now: () => 7_000_000, sleep: async () => undefined, lockTimeoutMs: 2_000, lockMaxWaitMs: 600 };
+  const options = { now: () => 7_000_000, sleep: async () => undefined, lockTimeoutMs: 10_000, lockMaxWaitMs: 600 };
   const reserving = new Throttle(tempDir('agent-resend-throttle-'), options);
   const stopping = new Throttle(tempDir('agent-resend-throttle-'), options);
   const lines = [lineAhead(reserving), lineAhead(stopping)];
   const ended = setTimeout(() => {
     for (const line of lines) line.stop();
-  }, 8_000);
+  }, 12_000);
   try {
     const outcomes = await Promise.allSettled([
       reserving.before(),
