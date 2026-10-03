@@ -323,6 +323,12 @@ export interface DownloadOptions extends DownloadAnswer {
    * passes it; a test does, to fail the mark as a disk without extended attributes would.
    */
   mark?: ((path: string) => Promise<InternetMark>) | undefined;
+  /**
+   * Gives up on the download when it aborts: the attachment being fetched stops there, and the download ends as any
+   * that stops part-way does, recording what it saved. Neither surface passes one yet — the MCP tool could pass its
+   * request's, as `gmail_inbox_finish` does for a sign-in — so for now only a test does.
+   */
+  signal?: AbortSignal | undefined;
 }
 
 export const DEFAULT_MAX_FILES = 50;
@@ -568,7 +574,12 @@ export async function downloadAttachments(
         skipped.push({ messageId, partId: part.partId, reason: `more than ${maxBytes} bytes in one batch` });
         continue;
       }
-      const bytes = await transport.getAttachment(messageId, part.attachmentId);
+      // Named by its part, and allowed the time its size is worth: Gmail's figure, used for time alone.
+      const bytes = await transport.getAttachment(messageId, part.attachmentId, {
+        partId: part.partId,
+        size: part.size,
+        signal: options.signal,
+      });
       const sha256 = createHash('sha256').update(bytes).digest('hex');
       const envelope: FieldEnvelope = { boundary, inbox: alias, id: messageId };
       const same = writtenAs.get(`${name}\u0000${sha256}`);

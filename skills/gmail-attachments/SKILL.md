@@ -199,7 +199,11 @@ answer "is this email real" — that is `gmail-security`, and a file's risk flag
    so its `path` points at that one copy rather than a second; the same bytes under another name are saved under
    that name. Read `skipped` too: a part holding no bytes, an unknown part id, or a batch that hit its cap each
    land there with a reason. A download that stopped part-way ends in an error saying what was saved; its manifest
-   lists the rest under `skipped`, as `stopped` — ask only for those.
+   lists the rest under `skipped`, as `stopped` — ask only for those. A download does not wait for ever: Gmail going
+   silent for 30 seconds, or a file arriving too slowly for its size (two minutes at least, longer for a larger
+   file), stops it with `TRANSIENT` (exit 75) and a message naming the attachment by `<message id>/<part id>` and
+   saying which — "stopped sending", or "took longer to arrive than a file of its size is allowed" (`details.why`
+   `stalled` or `too-slow` in the CLI's `--json`). Ask for the rest again; for a slow one, on a faster connection.
    **Complete when:** the user has the folder and a line per file saying what it is, who sent it and where it went.
 
 8. **Attach only what the user named.** Attaching happens through the draft tools —

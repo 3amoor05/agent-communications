@@ -4,6 +4,13 @@ import { type people_v1, people as peopleApi } from '@googleapis/people';
 import { OAuth2Client } from 'google-auth-library';
 import type { GoogleEndpoints } from '../auth/endpoints.ts';
 import type { TokenSource } from '../auth/session.ts';
+import {
+  type AttachmentAbout,
+  DOWNLOAD_IDLE_MS,
+  DOWNLOAD_PACE,
+  type DownloadLimits,
+  downloadAttachment,
+} from './download.ts';
 import { describeGoogleError, mapGoogleError } from './errors.ts';
 import { createLimiter, type RetryMode, withRetry } from './retry.ts';
 
@@ -33,8 +40,14 @@ export interface GmailTransport {
    * reports attachments has to ask for `full` and drop the bodies with a partial response instead.
    */
   getMessageMetadata(messageId: string): Promise<RawMessage>;
-  /** The bytes of one attachment. The id is resolved fresh from the message: Gmail's can change between fetches. */
-  getAttachment(messageId: string, attachmentId: string): Promise<Buffer>;
+  /**
+   * The bytes of one attachment. The id is resolved fresh from the message: Gmail's can change between fetches.
+   *
+   * Bounded in time, by a limit on silence and one on the whole answer for the size given (`download.ts`), and
+   * stopped by the caller's signal. What else the caller knows — the part, its size — makes both the error and the
+   * limit more exact; without them the attachment is named by its message, and allowed what the largest could need.
+   */
+  getAttachment(messageId: string, attachmentId: string, about?: AttachmentAbout): Promise<Buffer>;
   /** People the user has saved, and people they have corresponded with. Needs the contacts permission. */
   searchContacts(query: string): Promise<ContactMatch[]>;
   /** The message exactly as it arrived, for an `.eml` export. */
@@ -144,6 +157,8 @@ export interface TransportOptions {
   /** Concurrency cap per inbox: Gmail's per-user quota, not the network, is the limit worth respecting. */
   concurrency?: number;
   retry?: { attempts?: number; sleep?: (ms: number) => Promise<void>; random?: () => number };
+  /** How long an attachment download may go silent, and how slowly it may arrive. Tests set it; production does not. */
+  download?: Partial<DownloadLimits> | undefined;
 }
 
 /** Builds the list parameters, omitting the page token entirely when there is none. */
@@ -225,6 +240,7 @@ export class GoogleGmailTransport implements GmailTransport {
   readonly #endpoints: GoogleEndpoints;
   readonly #limit: <T>(task: () => Promise<T>) => Promise<T>;
   readonly #retry: TransportOptions['retry'];
+  readonly #download: DownloadLimits;
   #gmail: gmail_v1.Gmail | null = null;
   #people: people_v1.People | null = null;
   #oauth: OAuth2Client | null = null;
@@ -238,6 +254,10 @@ export class GoogleGmailTransport implements GmailTransport {
     this.#endpoints = options.endpoints;
     this.#limit = createLimiter(options.concurrency ?? 5);
     this.#retry = options.retry;
+    this.#download = {
+      idleMs: options.download?.idleMs ?? DOWNLOAD_IDLE_MS,
+      pace: options.download?.pace ?? DOWNLOAD_PACE,
+    };
   }
 
   /**
@@ -375,11 +395,29 @@ export class GoogleGmailTransport implements GmailTransport {
     return data;
   }
 
-  async getAttachment(messageId: string, attachmentId: string): Promise<Buffer> {
-    const { data } = await this.call('download an attachment', () =>
-      this.gmail().users.messages.attachments.get({ userId: 'me', messageId, id: attachmentId }),
-    );
-    return Buffer.from(data.data ?? '', 'base64url');
+  async getAttachment(messageId: string, attachmentId: string, about: AttachmentAbout = {}): Promise<Buffer> {
+    return this.call('download an attachment', async () => {
+      /*
+       * The access token first, before either limit starts. They measure Gmail, and a token being refreshed — from
+       * the secret store, through a keychain prompt a person is still answering — is not Gmail going silent. With a
+       * fresh one held here, the library's own refresh hands it straight back.
+       */
+      await this.#tokens.accessToken();
+      return downloadAttachment(
+        (signal) =>
+          this.gmail().users.messages.attachments.get(
+            { userId: 'me', messageId, id: attachmentId },
+            /*
+             * The answer as a stream, so that `downloadAttachment` can hear each piece arrive, and every status as an
+             * answer rather than an error, so that a refusal's body is read under the same limits as the file's. Each
+             * attempt the retry policy makes gets limits of its own; a limit reached is not one it repeats.
+             */
+            { responseType: 'stream', signal, validateStatus: () => true },
+          ),
+        { ...about, messageId },
+        this.#download,
+      );
+    });
   }
 
   /**

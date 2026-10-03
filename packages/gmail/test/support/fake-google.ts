@@ -54,6 +54,50 @@ export interface FakeMessage {
   payload?: unknown;
 }
 
+/**
+ * A connection that is open but not answering as it should: what a limit on time exists for, and what nothing else in
+ * this fake can stand in for, since every other answer it gives arrives at once.
+ *
+ * - `silent` — the request is read and never answered: no status, no headers, the connection held open.
+ * - `paced` — the real answer, its status and headers at once and then its body cut into `pieces`, one every
+ *   `everyMs`. With `stallAfter`, the host falls silent after that many pieces, the connection still open.
+ *
+ * Whatever is held open is closed when the fake is.
+ */
+export type SlowAnswer =
+  | { readonly kind: 'silent' }
+  | { readonly kind: 'paced'; readonly pieces: number; readonly everyMs: number; readonly stallAfter?: number };
+
+/**
+ * Sends the answer `response` is about to end with slowly, as `slow` says, instead of in one piece.
+ *
+ * Every route here ends its answer with one `end`, so the end is where the answer is taken over: the status and the
+ * headers have been set by then, and the body is all there is left to send.
+ */
+function paceAnswer(response: ServerResponse, slow: Extract<SlowAnswer, { kind: 'paced' }>): void {
+  const end = response.end.bind(response) as (chunk?: unknown) => ServerResponse;
+  response.end = ((chunk?: unknown) => {
+    const body = typeof chunk === 'string' ? Buffer.from(chunk) : Buffer.from((chunk as Uint8Array | undefined) ?? []);
+    const size = Math.max(1, Math.ceil(body.byteLength / slow.pieces));
+    response.flushHeaders();
+    let sent = 0;
+    const next = (): void => {
+      // A client that gave up, or a fake that closed: nothing more to send.
+      if (response.destroyed || response.writableEnded) return;
+      if (slow.stallAfter !== undefined && sent >= slow.stallAfter) return;
+      if (sent * size >= body.byteLength) {
+        end();
+        return;
+      }
+      response.write(body.subarray(sent * size, (sent + 1) * size));
+      sent += 1;
+      setTimeout(next, slow.everyMs);
+    };
+    setTimeout(next, slow.everyMs);
+    return response;
+  }) as ServerResponse['end'];
+}
+
 export interface FakeGoogleOptions {
   clientId?: string;
   clientSecret?: string;
@@ -87,6 +131,8 @@ export interface FakeGoogle {
   tokens: Map<string, GrantedToken>;
   /** Makes the next N calls to a path fail with this status (and optional Google error `reason`). */
   failNext(path: string, times: number, status: number, reason?: string, retryAfter?: string): void;
+  /** Makes the next call to a path answer slowly, or not at all, with the connection held open: {@link SlowAnswer}. */
+  slowNext(path: string, answer: SlowAnswer): void;
   /** Turns a stored refresh token into one Google refuses, as revocation or a Testing-app expiry would. */
   revoke(refreshToken: string): void;
   /** Completes a consent the way a browser would, returning the redirect URL with `code` and `state`. */
@@ -356,6 +402,7 @@ export async function startFakeGoogle(options: FakeGoogleOptions = {}): Promise<
     path: string,
   ): { status: number; reason?: string | undefined; retryAfter?: string | undefined } | undefined =>
     failures.get(path)?.shift();
+  const slow = new Map<string, SlowAnswer[]>();
 
   const accountOf = (request: IncomingMessage): { sub: string; scopes: string[] } | null => {
     const header = request.headers.authorization ?? '';
@@ -394,6 +441,11 @@ export async function startFakeGoogle(options: FakeGoogleOptions = {}): Promise<
         });
         return;
       }
+
+      const slowly = slow.get(url.pathname)?.shift();
+      // Read, recorded, and never answered: the connection stays open until the client gives up or the fake closes.
+      if (slowly?.kind === 'silent') return;
+      if (slowly?.kind === 'paced') paceAnswer(response, slowly);
 
       // ---- OAuth ----------------------------------------------------------------
       if (url.pathname === '/token') {
@@ -759,6 +811,9 @@ export async function startFakeGoogle(options: FakeGoogleOptions = {}): Promise<
       for (let i = 0; i < times; i++) list.push({ status, reason, retryAfter });
       failures.set(path, list);
     },
+    slowNext(path, answer) {
+      slow.set(path, [...(slow.get(path) ?? []), answer]);
+    },
     revoke(refreshToken) {
       const grant = tokens.get(refreshToken);
       if (grant) grant.revoked = true;
@@ -794,6 +849,8 @@ export async function startFakeGoogle(options: FakeGoogleOptions = {}): Promise<
       return redirect.toString();
     },
     async close() {
+      // A connection held open by a slow answer would otherwise keep `close` waiting for as long as it stayed open.
+      server.closeAllConnections();
       await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
     },
   };
