@@ -11,6 +11,12 @@ import type { AddressInfo } from 'node:net';
  * client secret is rejected, and refresh tokens can be made to fail with `invalid_grant`.
  */
 
+/**
+ * The endpoint Gmail sends a draft through. Named here, in a file the send-path guard allows, so a test that scripts its
+ * answer imports it rather than spelling a send endpoint out itself (test/send-path.test.mjs).
+ */
+export const DRAFT_SEND_PATH = '/gmail/v1/users/me/drafts/send';
+
 export interface FakeAccount {
   sub: string;
   email: string;
@@ -726,7 +732,7 @@ export async function startFakeGoogle(options: FakeGoogleOptions = {}): Promise<
         return;
       }
       // Sending a draft: it leaves Drafts, gains SENT, and Gmail files it in the thread it was replying to.
-      if (url.pathname === '/gmail/v1/users/me/drafts/send' && request.method === 'POST') {
+      if (url.pathname === DRAFT_SEND_PATH && request.method === 'POST') {
         const parsed = JSON.parse(body || '{}') as { id?: string };
         const draft = parsed.id ? account?.drafts?.[parsed.id] : undefined;
         if (!draft) {

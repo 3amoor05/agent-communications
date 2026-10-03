@@ -6,6 +6,7 @@ import { GmailContext } from '../src/context.ts';
 import { mapGoogleError, sendCertainlyRefused } from '../src/gmail-api/errors.ts';
 import { createDraft } from '../src/operations/drafts.ts';
 import { executeSend, prepareSend } from '../src/operations/send.ts';
+import { DRAFT_SEND_PATH } from './support/fake-google.ts';
 import { type Harness, newHarness } from './support/harness.ts';
 
 /**
@@ -99,7 +100,7 @@ test('only Gmail responses documented as pre-action refusals mark the approval f
     await t.test(String(status), async () => {
       const setup = await world();
       const { send, state } = await prepared(setup);
-      setup.harness.google.failNext('/gmail/v1/users/me/drafts/send', 1, status);
+      setup.harness.google.failNext(DRAFT_SEND_PATH, 1, status);
 
       const error = await send().then(
         () => assert.fail(`${status} was reported as a send`),
@@ -122,7 +123,7 @@ test('only Gmail responses documented as pre-action refusals mark the approval f
   await t.test('422 is not one of Gmail’s documented responses', async () => {
     const setup = await world();
     const { send, state } = await prepared(setup);
-    setup.harness.google.failNext('/gmail/v1/users/me/drafts/send', 1, 422);
+    setup.harness.google.failNext(DRAFT_SEND_PATH, 1, 422);
 
     const error = await send().then(
       () => assert.fail('422 was reported as a send'),
