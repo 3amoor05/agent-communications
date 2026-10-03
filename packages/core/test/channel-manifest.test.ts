@@ -247,7 +247,7 @@ test('a name Windows cannot print in a removal is a placeholder, with the name b
    * name like `$x&whoami&` came out as `'$x&whoami&'`, and pasted into cmd.exe it ran `whoami`.
    */
   const name = '$x&whoami&';
-  const note = `<name> is ${JSON.stringify(name)}, written as JSON: type it in yourself, quoted for your shell`;
+  const note = `NAME is ${JSON.stringify(name)}, written as JSON: type it in yourself, quoted for your shell`;
   for (const [client, binary] of [
     ['claude-code', 'claude'],
     ['codex', 'codex'],
@@ -258,7 +258,7 @@ test('a name Windows cannot print in a removal is a placeholder, with the name b
       otherSlackServerRemoval(helper, 'win32'),
       findUngatedGmailServers([rival], 'win32')[0]?.removal,
     ]) {
-      assert.ok(removal?.startsWith(`${binary} mcp remove <name> (${note}`), String(removal));
+      assert.ok(removal?.startsWith(`${binary} mcp remove NAME (${note}`), String(removal));
       assert.doesNotMatch(String(removal).split(' (')[0] ?? '', /whoami/, 'the name is in nothing to run');
     }
     // A POSIX shell takes it in single quotes, whole.

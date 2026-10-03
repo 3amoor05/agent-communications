@@ -1120,8 +1120,8 @@ test('on Windows a printed command reaches the program as the words it was given
       `${shown}: nothing either shell expands`,
     );
     if (printed.byHand.length > 0) {
-      assert.deepEqual(printed.byHand, [{ placeholder: '<value>', value: word }], shown);
-      assert.equal(printed.line, 'agentcomms attach roots add <value>', shown);
+      assert.deepEqual(printed.byHand, [{ placeholder: 'VALUE', value: word }], shown);
+      assert.equal(printed.line, 'agentcomms attach roots add VALUE', shown);
       assert.ok(UNSAFE_ON_WINDOWS.includes(word), `${shown} could have been printed`);
       continue;
     }
@@ -1133,7 +1133,7 @@ test('on Windows a printed command reaches the program as the words it was given
 });
 
 test('on Windows a word that cannot be printed is a placeholder, named for it, and given apart as JSON (CUE-306)', () => {
-  // Named by its label, or by the option before it, or `<value>`; one word twice is one placeholder, two are numbered.
+  // Named by its label, or by the option before it, or `VALUE`; one word twice is one placeholder, two are numbered.
   const printed = shellCommand(
     [
       'agent-slack',
@@ -1150,31 +1150,28 @@ test('on Windows a word that cannot be printed is a placeholder, named for it, a
     ],
     'win32',
   );
-  assert.equal(
-    printed.line,
-    'agent-slack mcp install --name <name> --workspace <workspace> <value> <value-2> <name> <name-2>',
-  );
+  assert.equal(printed.line, 'agent-slack mcp install --name NAME --workspace WORKSPACE VALUE VALUE-2 NAME NAME-2');
   assert.deepEqual(printed.byHand, [
-    { placeholder: '<name>', value: '$x&whoami&' },
-    { placeholder: '<workspace>', value: 'acme/50%' },
-    { placeholder: '<value>', value: '!x!' },
-    { placeholder: '<value-2>', value: 'a`b' },
-    { placeholder: '<name-2>', value: 'other$' },
+    { placeholder: 'NAME', value: '$x&whoami&' },
+    { placeholder: 'WORKSPACE', value: 'acme/50%' },
+    { placeholder: 'VALUE', value: '!x!' },
+    { placeholder: 'VALUE-2', value: 'a`b' },
+    { placeholder: 'NAME-2', value: 'other$' },
   ]);
 
   // What a printer says beside it: the word as JSON, so a line break or a quote mark is visible and nothing is pasted.
   const remove = shellCommand(['claude', 'mcp', 'remove', { value: 'a"b\nc', label: 'name' }], 'win32');
   const note =
-    '<name> is "a\\"b\\nc", written as JSON: type it in yourself, quoted for your shell — no quoting reads the same in cmd.exe and PowerShell';
+    'NAME is "a\\"b\\nc", written as JSON: type it in yourself, quoted for your shell — no quoting reads the same in cmd.exe and PowerShell';
   assert.equal(typeByHand(remove), note);
-  assert.equal(inlineCommand(remove), `\`claude mcp remove <name>\` (${note})`);
-  assert.equal(commandText(remove), `claude mcp remove <name> (${note})`);
+  assert.equal(inlineCommand(remove), `\`claude mcp remove NAME\` (${note})`);
+  assert.equal(commandText(remove), `claude mcp remove NAME (${note})`);
   // Several commands, one note: each placeholder once.
   const get = shellCommand(['claude', 'mcp', 'get', { value: 'a"b\nc', label: 'name' }], 'win32');
   assert.equal(typeByHand(get, remove), note);
   assert.match(
     typeByHand(printed),
-    /^<name> is "\$x&whoami&", <workspace> is "acme\/50%", .* and <name-2> is "other\$", written as JSON: type them in yourself/,
+    /^NAME is "\$x&whoami&", WORKSPACE is "acme\/50%", .* and NAME-2 is "other\$", written as JSON: type them in yourself/,
   );
   // And nothing to say when every word was printed.
   const plain = shellCommand(['claude', 'mcp', 'remove', 'old gmail'], 'win32');
@@ -1193,7 +1190,7 @@ test('the list of entries to take out gives one Windows cannot print as a placeh
   const shown = renderAttach(report, 'win32');
   assert.ok(
     shown.includes(
-      '\n  agentcomms attach roots remove <entry> (<entry> is "%USERPROFILE%\\\\outgoing", written as JSON: type it in yourself',
+      '\n  agentcomms attach roots remove ENTRY (ENTRY is "%USERPROFILE%\\\\outgoing", written as JSON: type it in yourself',
     ),
     shown,
   );

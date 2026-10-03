@@ -191,9 +191,9 @@ test('a command to run again with a word Windows cannot print says to type it by
       (error: unknown) => {
         assert.ok(error instanceof CommsError && error.code === 'APPROVAL_PENDING', String(error));
         const approvalId = String((error.details as { approvalId?: string }).approvalId);
-        const run = `\`agentcomms attach roots add <path> --approval ${approvalId}\` (<path> is ${JSON.stringify(folder)}, written as JSON: type it in yourself, quoted for your shell — no quoting reads the same in cmd.exe and PowerShell)`;
+        const run = `\`agentcomms attach roots add PATH --approval ${approvalId}\` (PATH is ${JSON.stringify(folder)}, written as JSON: type it in yourself, quoted for your shell — no quoting reads the same in cmd.exe and PowerShell)`;
         assert.ok(error.hint?.endsWith(`run ${run}.`), `${policy}: ${error.hint}`);
-        assert.doesNotMatch(String(error.hint).split(' (<path> is')[0] ?? '', /50%/, 'the folder is in nothing to run');
+        assert.doesNotMatch(String(error.hint).split(' (PATH is')[0] ?? '', /50%/, 'the folder is in nothing to run');
         return true;
       },
     );

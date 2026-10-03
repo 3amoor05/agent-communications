@@ -847,7 +847,7 @@ test('a refusal hint gives a pin Windows cannot print as a placeholder, with the
   const cursor = knownClientConfigs(windows.env).find((file) => file.client === 'cursor')?.path ?? '';
   const runtime = managedRuntimeEntry(data, '@agentcomms/example', '0.0.0');
   const typed =
-    '(<inbox> is "acme/50%", written as JSON: type it in yourself, quoted for your shell — no quoting reads the same in cmd.exe and PowerShell)';
+    '(INBOX is "acme/50%", written as JSON: type it in yourself, quoted for your shell — no quoting reads the same in cmd.exe and PowerShell)';
   const hintOf = async (options: Parameters<typeof mcpInstall>[2]) =>
     mcpInstall(windows, pinnedProduct(), options).then(
       () => assert.fail('it was not refused'),
@@ -861,7 +861,7 @@ test('a refusal hint gives a pin Windows cannot print as a placeholder, with the
   );
   assert.equal(
     await hintOf({ client: 'cursor', launcher: 'npx', noVerify: true }),
-    `Pass --force to replace it — that is how an upgrade reaches a client: \`agent-example mcp install --client cursor --inbox <inbox> --launcher npx --force\` ${typed}.`,
+    `Pass --force to replace it — that is how an upgrade reaches a client: \`agent-example mcp install --client cursor --inbox INBOX --launcher npx --force\` ${typed}.`,
   );
 
   // Somebody else's under the name asked for: register this one under another.
@@ -869,7 +869,7 @@ test('a refusal hint gives a pin Windows cannot print as a placeholder, with the
   const elsewhere = await hintOf({ client: 'cursor', name: 'theirs', inbox: 'acme/50%', noVerify: true });
   assert.ok(
     elsewhere.startsWith(
-      `Register this one under another name: \`agent-example mcp install --client cursor --name agent-example --inbox <inbox>\` ${typed}. `,
+      `Register this one under another name: \`agent-example mcp install --client cursor --name agent-example --inbox INBOX\` ${typed}. `,
     ),
     elsewhere,
   );
@@ -881,7 +881,7 @@ test('a refusal hint gives a pin Windows cannot print as a placeholder, with the
   );
   assert.equal(
     await hintOf({ client: 'cursor', inbox: 'acme/50%', noVerify: true }),
-    `That entry serves acme/work; to serve acme/50% as well, register a second entry under its own name: \`agent-example mcp install --client cursor --name example-acme --inbox <inbox>\` ${typed}.`,
+    `That entry serves acme/work; to serve acme/50% as well, register a second entry under its own name: \`agent-example mcp install --client cursor --name example-acme --inbox INBOX\` ${typed}.`,
   );
 });
 

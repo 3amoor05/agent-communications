@@ -64,14 +64,14 @@ export function paint(color: boolean, format: Parameters<typeof styleText>[0], t
 
 /**
  * One word of a command to print. A plain string is a word of the command itself, or a value that may as well be
- * called after the option before it; a value with a `label` is called that — `<name>`, `<path>` — if it has to be
+ * called after the option before it; a value with a `label` is called that — `NAME`, `PATH` — if it has to be
  * typed by hand (see `shellCommand`).
  */
 export type ShellWord = string | { readonly value: string; readonly label: string };
 
 /** A word no quoting could make safe to paste, and the placeholder printed in its place. */
 export interface TypedByHand {
-  /** `<name>`, `<path>`, `<workspace>`: what stands for the word in `ShellCommand.line`. */
+  /** `NAME`, `PATH`, `WORKSPACE`: what stands for the word in `ShellCommand.line`. */
   readonly placeholder: string;
   readonly value: string;
 }
@@ -83,7 +83,7 @@ export interface TypedByHand {
  * the command, and whoever reads it has to be told what goes in the gap — `inlineCommand` and `commandText` say it.
  */
 export interface ShellCommand {
-  /** The words as the shell will read them, or a placeholder in angle brackets for each that no quoting makes safe. */
+  /** The words as the shell will read them, or a capitalised placeholder for each that no quoting makes safe. */
   readonly line: string;
   /** The words a person has to type in themselves, one per placeholder in `line`; empty when `line` runs as it is. */
   readonly byHand: readonly TypedByHand[];
@@ -116,16 +116,18 @@ export interface ShellCommand {
  *   folder. (Windows PowerShell 5.1 drops an empty `""` rather than pass it on; it keeps every other such word.)
  * - Any other word has no quoting both shells read alike, so no command is printed with it in. It was quoted for
  *   PowerShell in its single quotes, which cmd.exe takes as ordinary characters: a server named `$x&whoami&` printed
- *   as `'$x&whoami&'`, and in cmd.exe that ran `whoami`. Such a word is printed as a placeholder — `<name>`, after its
- *   `label`, or the option before it, or `<value>` — listed in `byHand` with the word it stands for, for the printer
- *   to give separately as data. PowerShell refuses the line before it runs anything, `<` being reserved; cmd.exe
- *   reads `<name>` as input from a file called `name`, and runs nothing when the folder has none.
+ *   as `'$x&whoami&'`, and in cmd.exe that ran `whoami`. Such a word is printed as a placeholder — named after its
+ *   `label`, or the option before it, or `VALUE` — in capitals: `NAME`, `PATH`, `NAME-2` — listed in `byHand` with the
+ *   word it stands for, for the printer to give separately as data. A plain word, because it has to be inert in both
+ *   shells: an earlier `<name>` was refused by PowerShell, but cmd.exe read `<` and `>` as redirections — input from a
+ *   file called `name`, output to a file named after the next word — so a line pasted in a folder that had such a file
+ *   ran, and wrote a file. A capitalised word runs nothing it should not; at worst it names a thing that is not there.
  *
  * Everywhere else `byHand` is empty: single quotes make any word safe.
  */
 export function shellCommand(words: readonly ShellWord[], platform: NodeJS.Platform = process.platform): ShellCommand {
   const byHand: TypedByHand[] = [];
-  /** The words given each label so far: one word twice is one placeholder, and two words are `<name>`, `<name-2>`. */
+  /** The words given each label so far: one word twice is one placeholder, and two words are `NAME`, `NAME-2`. */
   const labelled = new Map<string, string[]>();
   const printed = words.map((word, index) => {
     const value = typeof word === 'string' ? word : word.value;
@@ -139,7 +141,8 @@ export function shellCommand(words: readonly ShellWord[], platform: NodeJS.Platf
     labelled.set(label, values);
     const seen = values.indexOf(value);
     const position = seen === -1 ? values.push(value) : seen + 1;
-    const placeholder = position === 1 ? `<${label}>` : `<${label}-${position}>`;
+    const capitals = label.toUpperCase();
+    const placeholder = position === 1 ? capitals : `${capitals}-${position}`;
     if (seen === -1) byHand.push({ placeholder, value });
     return placeholder;
   });

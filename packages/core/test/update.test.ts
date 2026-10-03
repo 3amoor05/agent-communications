@@ -591,20 +591,20 @@ test('a name Windows cannot print in a command to register again is a placeholde
   );
   const { ok, close } = await connect(m, { update: { ...fakes(m), platform: 'win32' } });
   const typed = (name: string) =>
-    `(<name> is ${JSON.stringify(name)}, written as JSON: type it in yourself, quoted for your shell — no quoting reads the same in cmd.exe and PowerShell)`;
+    `(NAME is ${JSON.stringify(name)}, written as JSON: type it in yourself, quoted for your shell — no quoting reads the same in cmd.exe and PowerShell)`;
   try {
     const registrations = of((await ok('comms_update', { check: true })).behind, 'registration');
     const hand = registrations.find((item) => item.client === 'cursor');
     assert.ok(
       String(hand?.reason).endsWith(
-        `register it again with \`agent-gmail mcp install --client cursor --name <name> --read-only --force\` ${typed('$x&whoami&')}`,
+        `register it again with \`agent-gmail mcp install --client cursor --name NAME --read-only --force\` ${typed('$x&whoami&')}`,
       ),
       String(hand?.reason),
     );
     const noClaude = registrations.find((item) => item.client === 'claude-code');
     assert.ok(
       String(noClaude?.reason).endsWith(
-        `run \`agent-slack mcp install --client claude-code --name <name> --force\` ${typed('slack 50%')} where it is`,
+        `run \`agent-slack mcp install --client claude-code --name NAME --force\` ${typed('slack 50%')} where it is`,
       ),
       String(noClaude?.reason),
     );

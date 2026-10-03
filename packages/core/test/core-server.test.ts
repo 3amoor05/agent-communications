@@ -497,7 +497,7 @@ test('the doctor gives a name Windows cannot print as a placeholder, with the na
   const report = await doctor(m.core, m.env, { keyring: null, platform: 'win32' });
   assert.equal(
     report.checks.find((check) => check.name === 'slack server')?.fix,
-    'Register it again: `agent-slack mcp install --client claude-code --name <name> --workspace acme/slack --force` (<name> is "$x&whoami&", written as JSON: type it in yourself, quoted for your shell — no quoting reads the same in cmd.exe and PowerShell).',
+    'Register it again: `agent-slack mcp install --client claude-code --name NAME --workspace acme/slack --force` (NAME is "$x&whoami&", written as JSON: type it in yourself, quoted for your shell — no quoting reads the same in cmd.exe and PowerShell).',
   );
 });
 
@@ -514,7 +514,7 @@ test(
     const report = await doctor(openCore({ env }), env, { keyring: null, platform: 'win32' });
     assert.equal(
       report.checks.find((check) => check.name === 'config dir')?.fix,
-      `chmod 700 <folder> (<folder> is ${JSON.stringify(configDir)}, written as JSON: type it in yourself, quoted for your shell — no quoting reads the same in cmd.exe and PowerShell)`,
+      `chmod 700 FOLDER (FOLDER is ${JSON.stringify(configDir)}, written as JSON: type it in yourself, quoted for your shell — no quoting reads the same in cmd.exe and PowerShell)`,
     );
   },
 );
