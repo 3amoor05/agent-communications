@@ -665,13 +665,17 @@ export function organisationDrift(config: Config, organisation: string): Organis
       });
       continue;
     }
+    // A row that lost its mark may have lost its project with it — what marking it again puts back, and says so.
+    const row = own(config.clients, name);
+    const projectLost = state === 'unmarked' && (row?.projectId ?? null) !== (generation.projectId ?? null);
+    const putBack = projectLost ? `, puts back its Google Cloud project (${generation.projectId ?? 'none'})` : '';
     if (isActive) {
       const detail = {
         missing: `"${name}", the client ${organisation} gives new mailboxes, has gone`,
         'name-reused': `the name "${name}", the client ${organisation} gives new mailboxes, now holds a client that is not ${organisation}'s`,
         replaced: `"${name}", marked as ${organisation}'s, holds another client id than the profile's`,
         altered: `"${name}", the client ${organisation} gives new mailboxes, was changed: another secret reference or project`,
-        unmarked: `"${name}", the client ${organisation} gives new mailboxes, has lost its mark as ${organisation}'s (an older release's \`client add --replace\` drops it)`,
+        unmarked: `"${name}", the client ${organisation} gives new mailboxes, has lost its mark as ${organisation}'s${projectLost ? ' and its project' : ''} (an older release's \`client add --replace\` drops it)`,
       }[state as 'missing' | 'name-reused' | 'replaced' | 'altered' | 'unmarked'];
       drift.push({
         kind: 'repair',
@@ -679,7 +683,10 @@ export function organisationDrift(config: Config, organisation: string): Organis
         active: true,
         state,
         detail,
-        fix: `${update} It rebuilds the client from the profile.`,
+        fix:
+          state === 'unmarked'
+            ? `${update} It marks the client as ${organisation}'s again${putBack}, and holds its secret to the profile's.`
+            : `${update} It rebuilds the client from the profile.`,
       });
       continue;
     }
@@ -700,8 +707,8 @@ export function organisationDrift(config: Config, organisation: string): Organis
         client: name,
         active: false,
         state,
-        detail: `"${name}", an earlier client of ${organisation}, has lost its mark as ${organisation}'s`,
-        fix: `${update} It marks the client as ${organisation}'s again, leaving it and its secret as they are.`,
+        detail: `"${name}", an earlier client of ${organisation}, has lost its mark as ${organisation}'s${projectLost ? ' and its project' : ''}`,
+        fix: `${update} It marks the client as ${organisation}'s again${putBack}, and leaves its secret as it is.`,
       });
       continue;
     }

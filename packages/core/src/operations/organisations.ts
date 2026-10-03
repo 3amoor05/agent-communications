@@ -318,6 +318,16 @@ interface ProfilePlan {
   gmail: { action: GmailAction | null; client: string | null };
 }
 
+/**
+ * What a re-marked row's line adds when its project id goes back to the generation's: nothing when the row already has
+ * it. Marking a row again writes the recorded project too (see the unmarked repairs in `planProfile`), and a repair the
+ * line does not name is one the person was not told about.
+ */
+function projectPutBack(row: ClientConfig, generation: Pick<OrganisationGeneration, 'projectId'>): string {
+  if ((row.projectId ?? null) === (generation.projectId ?? null)) return '';
+  return `, and puts back its Google Cloud project, ${generation.projectId ?? 'none'} (the row had ${row.projectId ?? 'none'})`;
+}
+
 /** A generation as a preview names it: `332…googleusercontent.com ("rgc-1")`. */
 function named(generation: Pick<OrganisationGeneration, 'name' | 'clientId'>): string {
   return `${generation.clientId} ("${generation.name}")`;
@@ -394,7 +404,7 @@ async function planProfile(config: Config, input: PlanInput): Promise<ProfilePla
       else {
         gmail = { action: 'reactivated', client: target.name };
         changes.push(
-          `Google client: ${before ? named(before) : 'none'} → ${named(target)}, an earlier client of ${organisation}, made active again, for ${servesText(pg.serves)}`,
+          `Google client: ${before ? named(before) : 'none'} → ${named(target)}, an earlier client of ${organisation}, made active again (Google Cloud project ${pg.projectId ?? 'none named'}), for ${servesText(pg.serves)}`,
         );
       }
     } else {
@@ -480,7 +490,11 @@ async function planProfile(config: Config, input: PlanInput): Promise<ProfilePla
         // Unmarked (`generationState`): the same client, its mark dropped by an older release's `client add
         // --replace`. Marked again; the secret is then held to the profile's by the check below, as for any owned row.
         rows[target.name] = wanted;
-        repairs.push(`marks "${target.name}" as ${organisation}'s again: an older release had dropped the mark`);
+        // Every repair is listed (§D8): the row is written with the generation's project, so a project the older
+        // release's write left out or changed is put back — and the line says so, not only that the mark was.
+        repairs.push(
+          `marks "${target.name}" as ${organisation}'s again: an older release had dropped the mark${projectPutBack(row, target)}`,
+        );
       } else if (row.provider !== 'gmail' || row.secretRef !== clientSecretRef(target.name)) {
         // Row (b): rebuilt by snapshot and restore, since a secret reference that is not the canonical one says
         // nothing about what the canonical reference holds now.
@@ -548,7 +562,9 @@ async function planProfile(config: Config, input: PlanInput): Promise<ProfilePla
         projectId: generation.projectId,
         organisation,
       } as ClientConfig;
-      repairs.push(`marks "${generation.name}", an earlier client of ${organisation}, as ${organisation}'s again`);
+      repairs.push(
+        `marks "${generation.name}", an earlier client of ${organisation}, as ${organisation}'s again${projectPutBack(row, generation)}`,
+      );
       continue;
     }
     if (generation.ownership === 'owned' && (state === 'replaced' || state === 'altered')) {

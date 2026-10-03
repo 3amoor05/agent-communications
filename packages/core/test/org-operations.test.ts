@@ -1212,7 +1212,10 @@ test('an earlier owned client made active again takes the profile’s serves and
   const { prepared, result } = await update(m);
   const preview = prepared?.preview ?? '';
   assert.equal(result.gmail.action, 'reactivated');
-  assert.match(preview, /\("acme-1"\), an earlier client of acme, made active again, for addresses at acme\.test/);
+  assert.match(
+    preview,
+    /\("acme-1"\), an earlier client of acme, made active again \(Google Cloud project acme-renamed\), for addresses at acme\.test/,
+  );
   assert.match(preview, /who "acme-1" serves: any address → addresses at acme\.test/);
   assert.match(preview, /Google Cloud project of "acme-1": acme-agent-comms → acme-renamed/);
   assert.doesNotMatch(preview, /rewrites "acme-1"|store on this machine/, 'the row follows the profile: no rebuild');
@@ -1258,7 +1261,7 @@ test('Gmail removed and re-added with other metadata: the generation made active
   const { prepared } = await update(m);
   assert.match(
     prepared?.preview ?? '',
-    /Google client: none → .*made active again, for addresses at acme\.test, acme\.example/,
+    /Google client: none → .*made active again \(Google Cloud project none named\), for addresses at acme\.test, acme\.example/,
   );
   assert.match(prepared?.preview ?? '', /Google Cloud project of "acme-1": acme-agent-comms → none/);
   const generation = (await record(m))?.gmail?.generations[0];
@@ -1551,5 +1554,51 @@ test('an adopted client made active again is held to the profile’s secret: a r
     );
     const stored = await (await m.core.secrets('file')).get(clientSecretRef('desktop'));
     assert.equal(stored, which === 'rotated' ? SECRET_A : null, 'the person’s secret is never changed by a profile');
+  }
+});
+
+test('a client made active again names its project even when the project does not change', async () => {
+  const m = machine();
+  writeProfile(m, profile());
+  await add(m);
+  writeProfile(m, profile({ gmail: gmail({ clientId: CLIENT_B, clientSecret: SECRET_B }) }));
+  await update(m);
+  writeProfile(m, profile());
+  const { prepared } = await update(m);
+  const preview = prepared?.preview ?? '';
+  assert.match(preview, /made active again \(Google Cloud project acme-agent-comms\), for any address/);
+  assert.doesNotMatch(preview, /Google Cloud project of "acme-1"/, 'no change line: the project is the same');
+});
+
+test('marking a client again says when its project goes back too, in the result and in doctor', async () => {
+  for (const which of ['active', 'earlier'] as const) {
+    const m = machine();
+    writeProfile(m, profile());
+    await add(m);
+    if (which === 'earlier') {
+      writeProfile(m, profile({ gmail: gmail({ clientId: CLIENT_B, clientSecret: SECRET_B }) }));
+      await update(m);
+    }
+    // 0.12.1's `client add --replace` from a file without `project_id`: no mark, and no project.
+    const path = join(m.configDir, 'config.json');
+    writeFileSync(
+      path,
+      writeAsReleased0121(readFileSync(path, 'utf8'), (raw) =>
+        clientAddReplaceAsReleased0121(raw, 'acme-1', { clientId: CLIENT_A, addedAt: CREATED }),
+      ),
+    );
+    const checks = (await doctor(m.core, m.env, { keyring: null })).checks.filter(
+      (check) => check.name === 'organisation acme',
+    );
+    const drift = checks.find((check) => /lost its mark/.test(check.detail));
+    assert.match(drift?.detail ?? '', /has lost its mark as acme's and its project/, which);
+    assert.match(drift?.fix ?? '', /puts back its Google Cloud project \(acme-agent-comms\)/, which);
+    const { result } = await update(m);
+    assert.match(
+      result.applied.join('\n'),
+      /marks "acme-1".* as acme's again.*, and puts back its Google Cloud project, acme-agent-comms \(the row had none\)/,
+      which,
+    );
+    assert.equal((await config(m)).clients['acme-1']?.projectId, 'acme-agent-comms', which);
   }
 });
