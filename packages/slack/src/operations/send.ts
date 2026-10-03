@@ -737,8 +737,7 @@ export async function postPrepared(
 
   // Posted. Nothing from here records the approval as failed, or throws: see `recordPosted`.
   const ts = typeof response.ts === 'string' ? response.ts : '';
-  const late = deps.signal?.aborted ? POSTED_ANYWAY : undefined;
-  const unrecorded = await recordPosted(deps, approvalId, ts, { channel: payload.channel, ts }, late);
+  const { late, unrecorded } = await recordPosted(deps, approvalId, ts, { channel: payload.channel, ts });
   const note = noteOf([late, ...unrecorded]);
   return { approvalId, channel: payload.channel, ts, ...(note === undefined ? {} : { note }) };
 }
@@ -840,20 +839,27 @@ async function recordMaybePosted(
  * is said beside the post it is about: in the result's note, and — for the approval — in the audit record. An approval
  * that could not be marked used stays in `sending`, read as `unknown` later: true of the record, if not of the post, and
  * the audit record says which post it was all the same.
+ *
+ * Whether the call was cancelled too late ({@link POSTED_ANYWAY}) is decided here too, after the approval is written and
+ * immediately before the audit record — not as the answer arrives. The completion can wait, on the store's lock, and a
+ * cancellation during that wait was decided too early to count: the result and the audit record left it out, although
+ * the audit record is the one place a person can still learn that what they tried to stop was posted. `aborted` never
+ * goes back once set, so this one look sees a cancellation that came at any moment from the request going out until
+ * now: it latches every abort over the stretch without a listener to add and take away.
  */
 async function recordPosted(
   deps: PostDeps,
   approvalId: string,
   sentMessageId: string,
   ids: Record<string, string | string[]>,
-  late: string | undefined,
-): Promise<string[]> {
+): Promise<{ late: string | undefined; unrecorded: string[] }> {
   const unrecorded: string[] = [];
   try {
     await deps.approvals.complete(approvalId, { sentMessageId });
   } catch (error) {
     unrecorded.push(`the approval could not be marked used (${messageOf(error)}), so it will read as unknown`);
   }
+  const late = deps.signal?.aborted ? POSTED_ANYWAY : undefined;
   const reason = noteOf([late, ...unrecorded]);
   try {
     await deps.audit?.append({
@@ -869,7 +875,7 @@ async function recordPosted(
   } catch (error) {
     unrecorded.push(`the audit log could not record it (${messageOf(error)})`);
   }
-  return unrecorded;
+  return { late, unrecorded };
 }
 
 /** The call that makes uploaded files visible, and so the one a file post's permit is opened for. */
@@ -1076,8 +1082,7 @@ async function postFiles(
   const first = posted[0]?.id ?? '';
   const { ts, note: unshared } = await messageTsOf(deps.call, first, payload.channel);
   // The looks above are not cut short by a cancellation: the post has happened, and its ts is part of the record.
-  const late = deps.signal?.aborted ? POSTED_ANYWAY : undefined;
-  const unrecorded = await recordPosted(
+  const { late, unrecorded } = await recordPosted(
     deps,
     approvalId,
     ts ?? posted.map((file) => file.id).join(','),
@@ -1090,7 +1095,6 @@ async function postFiles(
       fileSizes: posted.map((file) => String(file.size)),
       fileSha256: posted.map((file) => file.sha256),
     },
-    late,
   );
   const note = noteOf([unshared, late, ...unrecorded]);
   return { approvalId, channel: payload.channel, ts, files: posted, ...(note === undefined ? {} : { note }) };

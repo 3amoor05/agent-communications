@@ -120,7 +120,10 @@ async function holdLock(store: ApprovalStore, approvalId: string): Promise<{ rel
 }
 
 /** Resolves when `method` of the store is next called — before it does anything — and lets the call go on as it was. */
-function whenCalled<K extends 'claimForSend' | 'claimForDownload'>(store: ApprovalStore, method: K): Promise<void> {
+function whenCalled<K extends 'claimForSend' | 'claimForDownload' | 'complete'>(
+  store: ApprovalStore,
+  method: K,
+): Promise<void> {
   return new Promise((entered) => {
     const original = store[method].bind(store) as (...args: unknown[]) => Promise<unknown>;
     (store as unknown as Record<K, unknown>)[method] = (...args: unknown[]) => {
@@ -527,4 +530,42 @@ test('a post with files cancelled while they are being shared is posted, and the
   const [record] = await audited(harness, 'slack.post');
   assert.equal(record?.outcome, 'ok');
   assert.equal(record?.reason, late);
+});
+
+test('a post cancelled while its approval is being recorded as used says so in the audit record, with or without files', async (t) => {
+  for (const withFiles of [false, true]) {
+    const what = withFiles ? 'with files' : 'words alone';
+    const { harness, fake, report } = await postWorld(t);
+    const { draft, send, state } = await prepared(harness, fake.fetch, withFiles ? [report] : []);
+    const store = harness.core.approvals;
+    /*
+     * Slack takes the post and answers, and then the approval's completion is held: another process has the store's
+     * lock, as it may at any time. The person cancels while the completion waits for it. Before the change the note was
+     * decided before the completion, so this cancellation reached neither the result nor the audit record — the one
+     * place the person can still learn that what they tried to stop was posted.
+     */
+    let lock: Awaited<ReturnType<typeof holdLock>> | undefined;
+    const sharing = withFiles ? '/files.completeUploadExternal' : '/chat.postMessage';
+    const through: FakeSlack['fetch'] = async (input, init) => {
+      const answer = await fake.fetch(input, init);
+      if (urlOf(input).endsWith(sharing)) lock = await holdLock(store, draft.approvalId);
+      return answer;
+    };
+    const completing = whenCalled(store, 'complete');
+    const cancel = new AbortController();
+    const sending = send(cancel.signal, through);
+    await completing;
+    await new Promise((settle) => setTimeout(settle, 100));
+    cancel.abort();
+    await lock?.release();
+
+    const result = await sending;
+    const late = 'the call was cancelled too late to stop it: Slack accepted the post, and a post cannot be taken back';
+    assert.ok(lock, `${what}: the completion was not held`);
+    assert.equal(await state(), 'used', what);
+    const [record] = await audited(harness, 'slack.post');
+    assert.equal(record?.outcome, 'ok', what);
+    assert.equal(record?.reason, late, `${what}: the audit record does not say the call was cancelled too late`);
+    assert.equal(result.note, late, what);
+  }
 });
