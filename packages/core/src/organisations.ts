@@ -375,7 +375,16 @@ export function generationState(
   const row = own(config.clients, generation.name);
   if (!row) return 'missing';
   if (generation.ownership === 'owned') {
-    if (row.organisation === undefined && row.clientId === generation.clientId) return 'unmarked';
+    // Only the mark missing: the provider and the canonical secret reference are what `client add --replace` writes,
+    // and a row without them is not one marking again would make the generation's.
+    if (
+      row.organisation === undefined &&
+      row.clientId === generation.clientId &&
+      row.provider === 'gmail' &&
+      row.secretRef === clientSecretRef(generation.name)
+    ) {
+      return 'unmarked';
+    }
     if (row.organisation !== organisation) return 'name-reused';
     if (row.clientId !== generation.clientId) return 'replaced';
     const altered =

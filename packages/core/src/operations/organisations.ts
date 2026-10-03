@@ -514,10 +514,21 @@ async function planProfile(config: Config, input: PlanInput): Promise<ProfilePla
     if (generation.name === active || Object.hasOwn(rows, generation.name)) continue;
     const state = generationState(config, organisation, generation);
     if (generation.ownership === 'owned' && state === 'unmarked') {
-      // An earlier client's mark, dropped by an older release: marked again, and nothing else touched — the profile
-      // holds only the current client's secret, so this one's is left as the person's store has it.
+      /*
+       * An earlier client's mark, dropped by an older release: marked again, and its secret left as the person's store
+       * has it — the profile holds only the current client's secret.
+       *
+       * The project id goes back to the generation's too. `client add --replace` writes the row from whatever file it
+       * was given, and one without `project_id` leaves none; marked again with that, the row would read as altered on
+       * the next update (row (e)), lose its mark, read as unmarked on the one after, and so on for ever. The project is
+       * the client's own, recorded on the generation, and putting it back touches nothing a sign-in uses.
+       */
       const row = own(config.clients, generation.name) as ClientConfig;
-      rows[generation.name] = { ...row, organisation } as ClientConfig;
+      rows[generation.name] = {
+        ...row,
+        projectId: generation.projectId,
+        organisation,
+      } as ClientConfig;
       repairs.push(`marks "${generation.name}", an earlier client of ${organisation}, as ${organisation}'s again`);
       continue;
     }

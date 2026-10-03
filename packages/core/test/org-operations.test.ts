@@ -1281,3 +1281,45 @@ test('a preview names what is added in full: a Google client’s serves and proj
   assert.match(preview, /Slack: none → workspace TACME0001 \(Acme Test Org\), signing in on port 51234/);
   assert.match(preview, /Slack read app: none → client id 1111\.2222/);
 });
+
+test('an earlier client marked again stays marked: its project id comes back with the mark, so nothing flips', async () => {
+  const m = machine();
+  writeProfile(m, profile());
+  await add(m);
+  writeProfile(m, profile({ gmail: gmail({ clientId: CLIENT_B, clientSecret: SECRET_B }) }));
+  await update(m);
+  // 0.12.1's `client add --replace` from a client file without `project_id`: the row afresh, no mark, no project.
+  const path = join(m.configDir, 'config.json');
+  writeFileSync(
+    path,
+    writeAsReleased0121(readFileSync(path, 'utf8'), (raw) =>
+      clientAddReplaceAsReleased0121(raw, 'acme-1', { clientId: CLIENT_A, addedAt: CREATED }),
+    ),
+  );
+  await update(m);
+  assert.equal((await config(m)).clients['acme-1']?.projectId, 'acme-agent-comms');
+  for (let round = 0; round < 2; round += 1) {
+    const again = await update(m);
+    assert.equal(again.result.changed, false, `round ${round}: ${JSON.stringify(again.result.applied)}`);
+    assert.equal((await config(m)).clients['acme-1']?.organisation, 'acme');
+  }
+});
+
+test('an earlier client’s unmarked row that is not the generation’s own is not marked again, now or on the next update', async () => {
+  const m = machine();
+  writeProfile(m, profile());
+  await add(m);
+  writeProfile(m, profile({ gmail: gmail({ clientId: CLIENT_B, clientSecret: SECRET_B }) }));
+  await update(m);
+  // The same client id, no mark, and a secret reference of somebody else's: not a row marking would make the
+  // generation's again, so it is the person's, reported — and stays so.
+  await edit(m, (raw) => {
+    raw.clients['acme-1'] = personsRow(CLIENT_A, 'acme-1', { secretRef: 'client:elsewhere:secret' });
+  });
+  for (let round = 0; round < 2; round += 1) {
+    const { result } = await update(m);
+    assert.equal(result.changed, false, `round ${round}: ${JSON.stringify(result.applied)}`);
+    assert.match(result.reported.join('\n'), /the name "acme-1".*now holds a client that is not acme's/);
+    assert.equal((await config(m)).clients['acme-1']?.organisation, undefined);
+  }
+});
