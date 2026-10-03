@@ -658,7 +658,7 @@ export function organisationDrift(config: Config, organisation: string): Organis
         detail:
           state === 'held'
             ? `"${name}", which you registered and ${organisation} uses, is claimed by another organisation now`
-            : `"${name}", which you registered and ${organisation} uses, no longer holds its client ${generation.clientId}: it was ${state === 'missing' ? 'removed' : 'replaced'}`,
+            : `"${name}", which you registered and ${organisation} uses, no longer holds its client ${shownText(generation.clientId, 120)}: it was ${state === 'missing' ? 'removed' : 'replaced'}`,
         fix: isActive
           ? `${update} It finds or registers the profile's client again.`
           : `Nothing to repair: it was yours to change.${move}`,
@@ -668,7 +668,9 @@ export function organisationDrift(config: Config, organisation: string): Organis
     // A row that lost its mark may have lost its project with it — what marking it again puts back, and says so.
     const row = own(config.clients, name);
     const projectLost = state === 'unmarked' && (row?.projectId ?? null) !== (generation.projectId ?? null);
-    const putBack = projectLost ? `, puts back its Google Cloud project (${generation.projectId ?? 'none'})` : '';
+    const putBack = projectLost
+      ? `, puts back its Google Cloud project (${generation.projectId === undefined ? 'none' : shownText(generation.projectId, 120)})`
+      : '';
     if (isActive) {
       const detail = {
         missing: `"${name}", the client ${organisation} gives new mailboxes, has gone`,

@@ -325,12 +325,24 @@ interface ProfilePlan {
  */
 function projectPutBack(row: ClientConfig, generation: Pick<OrganisationGeneration, 'projectId'>): string {
   if ((row.projectId ?? null) === (generation.projectId ?? null)) return '';
-  return `, and puts back its Google Cloud project, ${generation.projectId ?? 'none'} (the row had ${row.projectId ?? 'none'})`;
+  return `, and puts back its Google Cloud project, ${recorded(generation.projectId)} (the row had ${recorded(row.projectId)})`;
+}
+
+/**
+ * A value read back from the configuration, as a line shows it: neutralised and on one line, or `none`.
+ *
+ * Only the profile itself passes the strict grammar. A client row's project id is whatever the client file said —
+ * `client add` takes any `project_id` string, line breaks and chat-template tokens included — and the record is a file
+ * an older release or a hand can write. So anything a line takes from either, rather than from the profile just read,
+ * is shown as every other untrusted string is.
+ */
+function recorded(value: string | undefined): string {
+  return value === undefined ? 'none' : shownText(value, 120);
 }
 
 /** A generation as a preview names it: `332…googleusercontent.com ("rgc-1")`. */
 function named(generation: Pick<OrganisationGeneration, 'name' | 'clientId'>): string {
-  return `${generation.clientId} ("${generation.name}")`;
+  return `${recorded(generation.clientId)} ("${generation.name}")`;
 }
 
 function sameServes(a: OrganisationGeneration['serves'], b: OrganisationGeneration['serves']): boolean {
@@ -462,7 +474,7 @@ async function planProfile(config: Config, input: PlanInput): Promise<ProfilePla
       }
       if ((target.projectId ?? null) !== (pg.projectId ?? null)) {
         changes.push(
-          `Google Cloud project of "${target.name}": ${target.projectId ?? 'none'} → ${pg.projectId ?? 'none'}`,
+          `Google Cloud project of "${target.name}": ${recorded(target.projectId)} → ${pg.projectId ?? 'none'}`,
         );
         if (pg.projectId === undefined) delete target.projectId;
         else target.projectId = pg.projectId;
@@ -582,7 +594,7 @@ async function planProfile(config: Config, input: PlanInput): Promise<ProfilePla
           : '';
       reports.push(
         generation.ownership === 'adopted'
-          ? `"${generation.name}", which you registered and ${organisation} used, no longer holds the client ${generation.clientId}${move}`
+          ? `"${generation.name}", which you registered and ${organisation} used, no longer holds the client ${recorded(generation.clientId)}${move}`
           : state === 'missing'
             ? `"${generation.name}", an earlier client of ${organisation}, has gone and cannot be rebuilt without its old client file${move}`
             : `the name "${generation.name}", an earlier client of ${organisation}, now holds a client that is not ${organisation}'s${move}`,
@@ -630,7 +642,7 @@ async function planProfile(config: Config, input: PlanInput): Promise<ProfilePla
           `Slack: none → workspace ${ps.workspace} (${shownText(ps.workspaceName, 80)}), signing in on port ${ps.redirectPort}`,
         );
       } else {
-        if (rs.workspace !== ps.workspace) changes.push(`Slack workspace: ${rs.workspace} → ${ps.workspace}`);
+        if (rs.workspace !== ps.workspace) changes.push(`Slack workspace: ${recorded(rs.workspace)} → ${ps.workspace}`);
         if (rs.workspaceName !== ps.workspaceName) {
           changes.push(`Slack workspace name: ${shownText(rs.workspaceName, 80)} → ${shownText(ps.workspaceName, 80)}`);
         }
@@ -641,7 +653,7 @@ async function planProfile(config: Config, input: PlanInput): Promise<ProfilePla
         const was = rs?.apps[role];
         const now = ps.apps[role];
         const appText = (app: { clientId: string; appId?: string | undefined } | undefined) =>
-          app ? `client id ${app.clientId}${app.appId ? `, app id ${app.appId}` : ''}` : 'none';
+          app ? `client id ${recorded(app.clientId)}${app.appId ? `, app id ${recorded(app.appId)}` : ''}` : 'none';
         if (
           canonical(was ? { clientId: was.clientId, appId: was.appId } : null) ===
           canonical(now ? { clientId: now.clientId, appId: now.appId } : null)
@@ -1204,10 +1216,10 @@ export function orgRemoveChange(
           `forgets the organisation profile "${organisation}" (${shownText(record.label, 64)}), read from ${shownPath(record.source.path)}, profile SHA-256 ${record.sha256}`,
           ...removal.remove.map(
             ({ name, clientId }) =>
-              `removes the OAuth client "${name}" (${clientId}), which this profile made, and deletes its secret from this machine`,
+              `removes the OAuth client "${name}" (${recorded(clientId)}), which this profile made, and deletes its secret from this machine`,
           ),
           ...removal.kept.map((name) => `leaves "${name}" as it is: it is a client of your own`),
-          ...(record.slack ? [`forgets its Slack apps in the workspace ${record.slack.workspace}`] : []),
+          ...(record.slack ? [`forgets its Slack apps in the workspace ${recorded(record.slack.workspace)}`] : []),
         ],
       };
     },
