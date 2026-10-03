@@ -33,6 +33,16 @@ import {
 } from './operations/change-policy.ts';
 import { auditTail, corePaths, doctor, listApprovals, revokeApproval } from './operations/maintenance.ts';
 import { namesDryRun, namesMigration } from './operations/names-migrate.ts';
+import {
+  type OrganisationView,
+  type OrgChangeResult,
+  type OrgRemoveResult,
+  orgAddChange,
+  orgList,
+  orgRemoveChange,
+  orgShow,
+  orgUpdateChange,
+} from './operations/organisations.ts';
 import { migrationLeftoversError, secretsMigration } from './operations/secrets-migrate.ts';
 import {
   type ChannelsReport,
@@ -47,6 +57,7 @@ import {
   updateAutoChange,
   updateLaterChange,
 } from './operations/update-settings.ts';
+import { profileSourcePath } from './organisations.ts';
 import { renderDoctor, renderInstall, renderPrune, renderUpdate, renderUpdateCheck } from './render.ts';
 import { runUpdateCheckChild, terminalUpdateHooks, UPDATE_CHECK_CHILD_COMMAND } from './update-check.ts';
 import { CHANGE_CLAIM, exemptFromUpdateGate, updateGateAtTerminal } from './update-gate.ts';
@@ -87,6 +98,17 @@ Usage:
   agentcomms attach deny remove <path> [--approval <id>]
                                            take one of your own deny entries away: approved first
   agentcomms channels                      which channel servers exist, which are installed, and where they are registered
+  agentcomms org add <file> [--for-other-addresses] [--adopt <client>] [--store keychain|file] [--approval <id>]
+                                           add an organisation's profile — its Google client and Slack apps,
+                                           beside what is here: approved first
+  agentcomms org list                      the organisation profiles added here
+  agentcomms org show <organisation>       one profile: its clients, which mailboxes use them, and any drift
+  agentcomms org update <organisation> [--source <file>] [--for-other-addresses on|off] [--adopt <client>]
+                                           [--store keychain|file] [--approval <id>]
+                                           read a profile again and repair drift: a changed profile, a new
+                                           source and --for-other-addresses on are approved first
+  agentcomms org remove <organisation> [--approval <id>]
+                                           forget a profile and the clients it made: approved first
   agentcomms mcp                           run the core MCP server on stdio (what an MCP client starts)
   agentcomms mcp install --client <client> [--name <name>] [--launcher managed|npx|local] [--force]
                                            [--print] [--no-verify] [--approval <id>]
@@ -104,11 +126,11 @@ Usage:
   agentcomms names migrate [--rename <old>=<new>] [--dry-run] [--approval <id>]
 
 A change that loosens something or cannot be taken back — policy chat, attach roots add, attach deny remove, mcp
-install and prune, update, secrets and names migrate — is shown before it happens. At a terminal you approve it there;
-anything else gets the preview and an approval id (exit 10), and runs the command again with --approval <id> once the
-person has agreed: in the chat under the \`chat\` change policy, with \`agentcomms approve\` under \`confirm\`. A
-tightening — policy confirm, attach roots remove, attach deny add — applies at once and asks nobody, and a --dry-run
-changes nothing.
+install and prune, update, secrets and names migrate, org add, update and remove — is shown before it happens. At a
+terminal you approve it there; anything else gets the preview and an approval id (exit 10), and runs the command again
+with --approval <id> once the person has agreed: in the chat under the \`chat\` change policy, with \`agentcomms
+approve\` under \`confirm\`. A tightening — policy confirm, attach roots remove, attach deny add — applies at once and
+asks nobody, and a --dry-run changes nothing.
 
 Once a day this machine asks npm whether a newer release is out. When one is, every command but update, doctor,
 paths, approve and approvals stops first: at a terminal it asks "Update now, later today, or cancel?"; anywhere else
@@ -135,6 +157,8 @@ function parse(argv: string[]) {
     args: argv,
     allowPositionals: true,
     strict: true,
+    // Where each option and word was, so `org update --for-other-addresses on` can take the word after the flag.
+    tokens: true,
     options: {
       json: { type: 'boolean', default: false },
       'no-color': { type: 'boolean', default: false },
@@ -161,8 +185,33 @@ function parse(argv: string[]) {
       check: { type: 'boolean', default: false },
       later: { type: 'boolean', default: false },
       auto: { type: 'string' },
+      // A flag on `org add`, and on `org update` the flag and the word after it — `on` or `off` — read from the tokens.
+      'for-other-addresses': { type: 'boolean', default: false },
+      adopt: { type: 'string' },
+      store: { type: 'string' },
+      source: { type: 'string' },
     },
   });
+}
+
+/**
+ * The words of the command line with the one after `--for-other-addresses` taken out, and that word.
+ *
+ * `org add` takes the flag alone; `org update` takes `on` or `off` after it. One option cannot be both a flag and a
+ * string to `parseArgs`, and a string option would swallow the file in `org add --for-other-addresses ./rgc.json`. So it
+ * is a flag, and the word right after it, where there is one, is read from the tokens.
+ */
+function forOtherAddressesWord(parsed: ReturnType<typeof parse>): { positionals: string[]; word: string | undefined } {
+  const tokens = parsed.tokens ?? [];
+  const at = tokens.findIndex((token) => token.kind === 'option' && token.name === 'for-other-addresses');
+  const next = at === -1 ? undefined : tokens[at + 1];
+  if (next?.kind !== 'positional' || (next.value !== 'on' && next.value !== 'off')) {
+    return { positionals: parsed.positionals, word: undefined };
+  }
+  return {
+    positionals: tokens.flatMap((token) => (token.kind === 'positional' && token !== next ? [token.value] : [])),
+    word: next.value,
+  };
 }
 
 const CLIENT_NAMES = ['claude-code', 'claude-desktop', 'codex', 'cursor', 'gemini', 'vscode', 'json'];
@@ -184,6 +233,8 @@ function takesApproval(command: string | undefined, sub: string | undefined): bo
       return sub === 'migrate';
     case 'update':
       return true;
+    case 'org':
+      return sub === 'add' || sub === 'update' || sub === 'remove';
     default:
       return false;
   }
@@ -203,8 +254,36 @@ function refuseApprovalNotTaken(command: string | undefined, sub: string | undef
   if (command === 'policy') refuseApprovalWithoutChange(String(approvalId));
   const typed = ['agentcomms', command, sub].filter((word) => word !== undefined).join(' ');
   throw new CommsError('USAGE', `\`${typed}\` takes no --approval: it makes no change a person approves`, {
-    hint: 'An approval goes with the change it was prepared for — policy chat|confirm, attach roots|deny add|remove, mcp install, mcp prune, names migrate, secrets migrate or update — run again exactly as the preview named it. Nothing was run.',
+    hint: 'An approval goes with the change it was prepared for — policy chat|confirm, attach roots|deny add|remove, org add|update|remove, mcp install, mcp prune, names migrate, secrets migrate or update — run again exactly as the preview named it. Nothing was run.',
   });
+}
+
+/**
+ * Refuses `org`'s own options on any other command, as USAGE, before anything runs.
+ *
+ * One parser reads every command's options, so `--store` was known to `secrets migrate` too, and taken there without
+ * a word — beside `--to`, which is what that command reads. An option a command does not read is refused, as every
+ * channel's command refuses one, rather than quietly doing nothing.
+ */
+function refuseOrgOptionsElsewhere(
+  command: string | undefined,
+  values: { 'for-other-addresses'?: boolean; adopt?: string; store?: string; source?: string },
+): void {
+  if (command === 'org') return;
+  const given = [
+    ...(values['for-other-addresses'] ? ['--for-other-addresses'] : []),
+    ...(values.adopt !== undefined ? ['--adopt'] : []),
+    ...(values.store !== undefined ? ['--store'] : []),
+    ...(values.source !== undefined ? ['--source'] : []),
+  ];
+  if (given.length === 0) return;
+  throw new CommsError(
+    'USAGE',
+    `${given.join(', ')} ${given.length === 1 ? 'is an option' : 'are options'} of \`agentcomms org\` only`,
+    {
+      hint: 'Run `agentcomms --help` for what each command takes. Nothing was run.',
+    },
+  );
 }
 
 export async function main(
@@ -246,6 +325,7 @@ export async function main(
   const [command, sub, arg] = positionals;
   try {
     refuseApprovalNotTaken(command, sub, values.approval);
+    refuseOrgOptionsElsewhere(command, values);
   } catch (error) {
     return writeError(error as CommsError, output);
   }
@@ -388,6 +468,114 @@ export async function main(
         });
         writeResult(result, output, (change) => renderAttachChange(change, platform));
         return;
+      }
+      case 'org': {
+        const { positionals: words, word } = forOtherAddressesWord(parsed);
+        const [, , target, ...extra] = words;
+        const orgOptions = { env, surface: 'cli' as const };
+        const flagsOf = (taken: readonly string[]) => {
+          const given = (
+            [
+              ['for-other-addresses', values['for-other-addresses']],
+              ['adopt', values.adopt !== undefined],
+              ['store', values.store !== undefined],
+              ['source', values.source !== undefined],
+            ] as const
+          )
+            .filter(([, on]) => on)
+            .map(([flag]) => flag);
+          const wrong = given.filter((flag) => !taken.includes(flag));
+          if (wrong.length > 0) throw usage(`\`agentcomms org ${sub}\` takes no --${wrong.join(', --')}`);
+        };
+        if (sub === 'list') {
+          if (target !== undefined) throw usage('usage: agentcomms org list');
+          flagsOf([]);
+          writeResult(await orgList(core), output, renderOrgList);
+          return;
+        }
+        if (sub === 'show') {
+          if (target === undefined || extra.length > 0) throw usage('usage: agentcomms org show <organisation>');
+          flagsOf([]);
+          writeResult(await orgShow(core, target), output, renderOrg);
+          return;
+        }
+        if (sub === 'add') {
+          if (target === undefined || extra.length > 0 || word !== undefined) {
+            throw usage(
+              'usage: agentcomms org add <file> [--for-other-addresses] [--adopt <client>] [--store keychain|file]',
+            );
+          }
+          flagsOf(['for-other-addresses', 'adopt', 'store']);
+          // The file as it will be read, absolute: the command run again from another directory reads the same file.
+          const command = ['agentcomms', 'org', 'add', profileSourcePath(target, env)];
+          if (values['for-other-addresses']) command.push('--for-other-addresses');
+          if (values.adopt !== undefined) command.push('--adopt', values.adopt);
+          if (values.store !== undefined) command.push('--store', values.store);
+          const result = await gatedChangeAtTerminal(
+            core,
+            orgAddChange(
+              core,
+              {
+                file: target,
+                forOtherAddresses: values['for-other-addresses'],
+                adopt: values.adopt,
+                store: values.store,
+                approvalId: values.approval,
+              },
+              orgOptions,
+            ),
+            { ...approval, command: shellCommand(command) },
+          );
+          writeResult(result, output, renderOrgChange);
+          return;
+        }
+        if (sub === 'update') {
+          if (target === undefined || extra.length > 0 || (values['for-other-addresses'] && word === undefined)) {
+            throw usage(
+              'usage: agentcomms org update <organisation> [--source <file>] [--for-other-addresses on|off] [--adopt <client>] [--store keychain|file]',
+            );
+          }
+          flagsOf(['for-other-addresses', 'adopt', 'store', 'source']);
+          const command = ['agentcomms', 'org', 'update', target];
+          // The source as it will be read, absolute: the command run again from another directory reads the same file.
+          if (values.source !== undefined) command.push('--source', profileSourcePath(values.source, env));
+          if (word !== undefined) command.push('--for-other-addresses', word);
+          if (values.adopt !== undefined) command.push('--adopt', values.adopt);
+          if (values.store !== undefined) command.push('--store', values.store);
+          const result = await gatedChangeAtTerminal(
+            core,
+            orgUpdateChange(
+              core,
+              {
+                organisation: target,
+                source: values.source,
+                forOtherAddresses: word,
+                adopt: values.adopt,
+                store: values.store,
+                approvalId: values.approval,
+              },
+              orgOptions,
+            ),
+            { ...approval, command: shellCommand(command) },
+          );
+          writeResult(result, output, renderOrgChange);
+          return;
+        }
+        if (sub === 'remove') {
+          if (target === undefined || extra.length > 0) throw usage('usage: agentcomms org remove <organisation>');
+          flagsOf([]);
+          const result = await gatedChangeAtTerminal(
+            core,
+            orgRemoveChange(core, { organisation: target }, orgOptions),
+            {
+              ...approval,
+              command: shellCommand(['agentcomms', 'org', 'remove', target]),
+            },
+          );
+          writeResult(result, output, renderOrgRemove);
+          return;
+        }
+        throw usage('usage: agentcomms org add|list|show|update|remove');
       }
       case 'channels': {
         if (sub !== undefined) throw usage('usage: agentcomms channels');
@@ -662,6 +850,72 @@ export function renderAttach(report: AttachReport, platform: NodeJS.Platform = p
 function renderAttachChange(result: AttachChangeResult, platform: NodeJS.Platform): string {
   const done = result.changed ? 'Done.' : 'Nothing was changed.';
   return [result.note ?? done, '', renderAttach(result, platform)].join('\n');
+}
+
+/** One profile at a terminal. Every string in a view that came from a profile is already neutralised and on one line. */
+function renderOrg(view: OrganisationView): string {
+  const lines = [
+    `${view.organisation} — ${view.label}`,
+    `  source       ${view.source.path}`,
+    `  SHA-256      ${view.sha256} (read ${view.readAt})`,
+    `  other addresses  ${view.forOtherAddresses ? (view.routesOtherAddresses ? 'on' : 'on, but there is no Google client to route them to') : 'off'}`,
+  ];
+  if (view.gmail === null) lines.push('  Google       none');
+  else {
+    lines.push(
+      `  Google       ${view.gmail.active === null ? 'no active client' : `new mailboxes get "${view.gmail.active}"`}`,
+    );
+    for (const generation of view.gmail.generations) {
+      const flags = [
+        generation.ownership,
+        ...(generation.active ? ['active'] : []),
+        ...(generation.state === 'ok' ? [] : [generation.state]),
+      ];
+      lines.push(
+        `    ${generation.name.padEnd(12)} ${generation.clientId}  (${flags.join(', ')}; serves ${generation.serves})${generation.mailboxes.length > 0 ? ` — ${generation.mailboxes.join(', ')}` : ''}`,
+      );
+    }
+  }
+  if (view.slack === null) lines.push('  Slack        none');
+  else {
+    lines.push(`  Slack        ${view.slack.workspace} (${view.slack.workspaceName}), port ${view.slack.redirectPort}`);
+    for (const role of ['read', 'send'] as const) {
+      const app = view.slack.apps[role];
+      lines.push(
+        `    ${role.padEnd(12)} ${app ? `client id ${app.clientId}${app.appId ? `, app id ${app.appId}` : ''}` : 'none'}`,
+      );
+    }
+  }
+  if (view.accounts.length > 0) lines.push(`  accounts     ${view.accounts.join(', ')}`);
+  for (const drift of view.drift) lines.push(`  ! ${drift.detail}. ${drift.fix}`);
+  for (const note of view.notes) lines.push(`  ${note}`);
+  return lines.join('\n');
+}
+
+function renderOrgList(views: readonly OrganisationView[]): string {
+  if (views.length === 0)
+    return 'No organisation profiles have been added here. Add one with `agentcomms org add <file>`.';
+  return views.map(renderOrg).join('\n\n');
+}
+
+function renderOrgChange(result: OrgChangeResult): string {
+  const lines = [result.changed ? 'Done.' : `Nothing to change: ${result.organisation} matches its profile.`];
+  for (const line of result.applied) lines.push(`  - ${line}`);
+  if (result.reported.length > 0) lines.push('', 'Left as it is:', ...result.reported.map((line) => `  - ${line}`));
+  lines.push('', renderOrg(result.profile));
+  return lines.join('\n');
+}
+
+function renderOrgRemove(result: OrgRemoveResult): string {
+  const lines = [`Removed the organisation profile ${result.organisation}.`];
+  if (result.removed.length > 0) lines.push(`Removed its clients, with their secrets: ${result.removed.join(', ')}.`);
+  if (result.kept.length > 0) lines.push(`Left as they are, as clients of your own: ${result.kept.join(', ')}.`);
+  if (result.secretsLeft.length > 0) {
+    lines.push(
+      `These secrets could not be deleted: delete them from your secret store: ${result.secretsLeft.join(', ')}.`,
+    );
+  }
+  return lines.join('\n');
 }
 
 function renderLater(result: UpdateLaterResult): string {

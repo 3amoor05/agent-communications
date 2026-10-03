@@ -15,6 +15,7 @@ import {
 } from '../operations/change-policy.ts';
 import { auditTail, corePaths, doctor, listApprovals, revokeApproval } from '../operations/maintenance.ts';
 import { namesDryRun, namesMigration } from '../operations/names-migrate.ts';
+import { orgAddChange, orgList, orgRemoveChange, orgShow, orgUpdateChange } from '../operations/organisations.ts';
 import { migrationLeftoversError, secretsMigration } from '../operations/secrets-migrate.ts';
 import {
   CLIENTS,
@@ -179,6 +180,9 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
         comms_server_prune: CHANGE_CLAIM,
         comms_names_migrate: CHANGE_CLAIM,
         comms_secrets_migrate: CHANGE_CLAIM,
+        comms_org_add: CHANGE_CLAIM,
+        comms_org_update: CHANGE_CLAIM,
+        comms_org_remove: CHANGE_CLAIM,
       },
       refresh: () => checkForUpdates(core, env, { deps: updateDeps, now: updateDeps.now }),
       now: updateDeps.now,
@@ -379,6 +383,149 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
       const [kind] = asked as [(typeof ATTACH_CHANGE_KINDS)[number]];
       return change(() => attachChange(core, env, { kind, path: String(args[kind]) }, 'mcp'), args.approvalId);
     },
+  );
+
+  // ── Organisation profiles ────────────────────────────────────────────────────────────────────────────────────
+
+  /*
+   * An organisation's apps — its Google OAuth client, its Slack apps — added from the small document it provides, beside
+   * whatever the person already has (design 2026-10-02). No tool here returns a client secret or a profile's bytes.
+   */
+  const orgOptions = {
+    env,
+    surface: 'mcp' as const,
+    ...(options.keyring !== undefined ? { keyring: options.keyring } : {}),
+  };
+  const storeArg = z
+    .enum(['keychain', 'file'])
+    .optional()
+    .describe('where secrets are kept, only when this writes the first one here: keychain (default) or file');
+  const adoptArg = z
+    .string()
+    .optional()
+    .describe(
+      'the OAuth client already registered here to use as the organisation’s, when its client id is registered under more than one name',
+    );
+
+  server.registerTool(
+    'comms_orgs_list',
+    {
+      title: 'List organisation profiles',
+      description:
+        'The organisation profiles added here: each one’s label, where it was read from and its SHA-256, its Google clients (which is active, which mailboxes use each) and its Slack apps, and any drift with the call that repairs it. Never includes a client secret or the profile’s contents.',
+      inputSchema: {},
+      annotations: readsLocal,
+    },
+    async () => read(async () => ({ organisations: await orgList(core) })),
+  );
+
+  server.registerTool(
+    'comms_org_show',
+    {
+      title: 'Show an organisation profile',
+      description:
+        'One organisation profile: its label, source and SHA-256, its Google clients and their mailboxes, its Slack apps, and any drift from what was approved, each with the call that repairs it. Never includes a client secret or the profile’s contents.',
+      inputSchema: {
+        organisation: z.string().describe('the organisation, as the first half of its account names: `rgc`'),
+      },
+      annotations: readsLocal,
+    },
+    async (args) => read(() => orgShow(core, args.organisation)),
+  );
+
+  server.registerTool(
+    'comms_org_add',
+    {
+      title: 'Add an organisation profile',
+      description:
+        'Add an organisation’s profile — the small JSON file naming its Google OAuth client and Slack apps — so its members’ accounts can use them, beside whatever is here already. Pass the file’s path on this machine; never ask for its contents in the conversation, and never read it yourself. A change: the first call returns the preview — the organisation, the file and its SHA-256, the Google client and the name it gets or the client it uses, the Slack workspace and apps — and an approvalId; call again with it once the person agrees. If the file changes in between, the claim is refused and the change is prepared again. The client secret is never shown or returned.',
+      inputSchema: {
+        file: z
+          .string()
+          .min(1)
+          .describe('where the profile file is on this machine, e.g. ~/src/rgc-agentcomms/rgc.agentcomms.json'),
+        forOtherAddresses: z
+          .boolean()
+          .optional()
+          .describe('also let this organisation’s client serve the person’s mailboxes outside it — only when they ask'),
+        adopt: adoptArg,
+        store: storeArg,
+        ...approvalArg,
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async (args) =>
+      change(
+        () =>
+          orgAddChange(
+            core,
+            {
+              file: args.file,
+              forOtherAddresses: args.forOtherAddresses,
+              adopt: args.adopt,
+              store: args.store,
+              approvalId: args.approvalId,
+            },
+            orgOptions,
+          ),
+        args.approvalId,
+      ),
+  );
+
+  server.registerTool(
+    'comms_org_update',
+    {
+      title: 'Update an organisation profile',
+      description:
+        'Read an organisation profile again from its file, apply what changed in it, and repair drift — a client of the organisation’s that was removed or changed here. A changed profile, a new `source`, and `forOtherAddresses: "on"` are a change: the first call returns the preview listing each change before → after ("secret changed" for a new client secret) and an approvalId; call again with it once the person agrees. Repairing drift, and `forOtherAddresses: "off"`, apply at once and are listed in the result.',
+      inputSchema: {
+        organisation: z.string().describe('the organisation, as the first half of its account names: `rgc`'),
+        source: z.string().min(1).optional().describe('read the profile from this file from now on'),
+        forOtherAddresses: z
+          .enum(['on', 'off'])
+          .optional()
+          .describe(
+            '`on` lets its client serve the person’s other mailboxes too (approved first); `off` applies at once',
+          ),
+        adopt: adoptArg,
+        store: storeArg,
+        ...approvalArg,
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async (args) =>
+      change(
+        () =>
+          orgUpdateChange(
+            core,
+            {
+              organisation: args.organisation,
+              source: args.source,
+              forOtherAddresses: args.forOtherAddresses,
+              adopt: args.adopt,
+              store: args.store,
+              approvalId: args.approvalId,
+            },
+            orgOptions,
+          ),
+        args.approvalId,
+      ),
+  );
+
+  server.registerTool(
+    'comms_org_remove',
+    {
+      title: 'Remove an organisation profile',
+      description:
+        'Forget an organisation profile, and delete the OAuth clients it made here with their secrets; clients the person registered themselves are left as they are. Refused while a mailbox signs in through one of its clients, or a client still marked as its own no longer matches it — the refusal says what to run first. A change that cannot be taken back: the first call returns the preview naming every client it removes and an approvalId.',
+      inputSchema: {
+        organisation: z.string().describe('the organisation, as the first half of its account names: `rgc`'),
+        ...approvalArg,
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+    },
+    async (args) =>
+      change(() => orgRemoveChange(core, { organisation: args.organisation }, orgOptions), args.approvalId),
   );
 
   // ── Changing ─────────────────────────────────────────────────────────────────────────────────────────────────

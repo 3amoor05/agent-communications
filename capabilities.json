@@ -154,6 +154,57 @@
       "operation": "channelsAvailable"
     },
     {
+      "id": "core.org.add",
+      "package": "core",
+      "cli": "org add",
+      "mcp": "comms_org_add",
+      "status": "both",
+      "operation": "orgAddChange",
+      "argv": ["parity.agentcomms.json"],
+      "args": { "file": "parity.agentcomms.json" },
+      "reason": "Adding an organisation's profile — its Google client and Slack apps, beside what is here — is a change the person approves, bound to the profile's SHA-256 (design 2026-10-02 §D5)."
+    },
+    {
+      "id": "core.org.list",
+      "package": "core",
+      "cli": "org list",
+      "mcp": "comms_orgs_list",
+      "status": "both",
+      "operation": "orgList"
+    },
+    {
+      "id": "core.org.show",
+      "package": "core",
+      "cli": "org show",
+      "mcp": "comms_org_show",
+      "status": "both",
+      "operation": "orgShow",
+      "argv": ["parity"],
+      "args": { "organisation": "parity" }
+    },
+    {
+      "id": "core.org.update",
+      "package": "core",
+      "cli": "org update",
+      "mcp": "comms_org_update",
+      "status": "both",
+      "operation": "orgUpdateChange",
+      "argv": ["parity"],
+      "args": { "organisation": "parity" },
+      "reason": "Reading a profile again: a changed profile, a new source and serving other addresses are approved first; repairing drift, and turning other addresses off, apply at once (design 2026-10-02 §D8)."
+    },
+    {
+      "id": "core.org.remove",
+      "package": "core",
+      "cli": "org remove",
+      "mcp": "comms_org_remove",
+      "status": "both",
+      "operation": "orgRemoveChange",
+      "argv": ["parity"],
+      "args": { "organisation": "parity" },
+      "reason": "Forgetting a profile deletes the clients it made, with their secrets, and cannot be taken back: approved first, bound to the rows it removes (design 2026-10-02 §D8)."
+    },
+    {
       "id": "core.update",
       "package": "core",
       "cli": "update",

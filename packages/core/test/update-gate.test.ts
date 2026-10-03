@@ -17,6 +17,7 @@ import { type Core, openCore } from '../src/core.ts';
 import { CommsError } from '../src/errors.ts';
 import { type CoreMcpOptions, createCoreMcpServer } from '../src/mcp/server.ts';
 import { changePolicyChange } from '../src/operations/change-policy.ts';
+import { orgAddChange, orgRemoveChange } from '../src/operations/organisations.ts';
 import {
   type RegistrationItem,
   type UpdateDeps,
@@ -1962,6 +1963,8 @@ test('agentcomms: an approval a command claims is one still waiting, prepared as
     ['approve', forThis],
     ['policy'],
     ['mcp'],
+    ['org', 'list'],
+    ['org', 'show', 'acme'],
   ]) {
     const refused = run([...args, '--json', '--approval', forThis]);
     assert.equal(refused.status, 64, `${args.join(' ')}: ${refused.stdout}${refused.stderr}`);
@@ -1970,6 +1973,54 @@ test('agentcomms: an approval a command claims is one still waiting, prepared as
   }
   assert.equal(run(['channels', '--json']).status, 11, 'without it, the command is stopped as before');
   assert.equal((await m.core.approvals.get(forThis))?.state, 'pending', 'nothing claimed or approved it');
+});
+
+test('an organisation profile change carries its approval past the stop, from the command and from the tool', async () => {
+  /*
+   * `org add`, `org update` and `org remove` claim a change with their approval, as every core change does: the CLI's
+   * routing (`takesApproval`) and the server's (`approvals`) both have to know them, or a person's yes given moments
+   * before the check landed would be stopped — and `org list` and `org show`, which read, would carry an id past it.
+   */
+  const m = machine();
+  const file = join(m.home, 'acme.agentcomms.json');
+  writeFileSync(
+    file,
+    JSON.stringify({
+      agentcomms: 'organisation-profile',
+      version: 1,
+      organisation: 'acme',
+      label: 'Acme',
+      slack: {
+        workspace: 'TACME0001',
+        workspaceName: 'Acme',
+        redirectPort: 51234,
+        apps: { read: { clientId: '1.2' } },
+      },
+    }),
+  );
+  const orgOptions = { env: m.env, surface: 'mcp' as const, keyring: null };
+  const { 'a send': send } = await spentApprovals(m);
+  const adding = await preparedFor(m, orgAddChange(m.core, { file }, orgOptions));
+  await seed(m, { latest: LATEST, behind: true });
+  const run = (args: string[]) =>
+    spawnSync(process.execPath, [...NODE_FLAGS, CLI, ...args], { encoding: 'utf8', env: m.env });
+  assert.equal(run(['org', 'add', file, '--json']).status, 11, 'without the approval: stopped');
+  const added = run(['org', 'add', file, '--approval', adding, '--json']);
+  assert.equal(added.status, 0, added.stdout + added.stderr);
+  assert.equal(run(['org', 'list', '--json']).status, 11, 'a read is stopped like any new request');
+
+  const { call, close } = await connect(m);
+  try {
+    assert.ok(stopped(await call('comms_org_remove', { organisation: 'acme' })), 'a new change is stopped');
+    // A send's approval, still waiting, is no claim to a change: the tool says which kind it takes.
+    assert.ok(stopped(await call('comms_org_remove', { organisation: 'acme', approvalId: send })), 'a send’s id');
+    const removing = await preparedFor(m, orgRemoveChange(m.core, { organisation: 'acme' }, orgOptions));
+    const removed = await call('comms_org_remove', { organisation: 'acme', approvalId: removing });
+    assert.ok(!stopped(removed), JSON.stringify(removed.structuredContent));
+    assert.equal(removed.isError, undefined, JSON.stringify(removed.structuredContent));
+  } finally {
+    await close();
+  }
 });
 
 test('a dry run, or a migration with nothing to rename, takes no approval: the id is refused as usage, and nothing is shown or claimed', async () => {
