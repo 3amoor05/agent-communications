@@ -77,15 +77,17 @@ function codeFor(status: number, name: string): { code: ErrorCode; message: stri
   return { code: 'BAD_DATA', message: 'Resend refused the request' };
 }
 
-/**
- * Whether a failed write can have taken effect.
- *
- * A 4xx is Resend refusing to act — except 409, which means another request with this idempotency key exists or is
- * in flight, so something may already have gone. A 5xx, a timeout or a dropped connection says nothing either way.
+/*
+ * The answers Resend documents before it acts: malformed requests (400 and 422), a key or permission it refuses (401
+ * and 403), a thing that is not there (404), and a rate or quota limit (429). Kept as an allowlist because another
+ * status says nothing about whether the email was accepted. In particular, 409 means an idempotency-key request
+ * already exists or is in flight, so it stays unknown: the conflicting request may be the email this one was sending.
  */
-function outcomeOf(status: number | undefined): WriteOutcome {
-  if (status === undefined) return 'unknown';
-  return status >= 400 && status < 500 && status !== 409 && status !== 408 ? 'not-sent' : 'unknown';
+const REFUSED_BEFORE_ACTING: ReadonlySet<number> = new Set([400, 401, 403, 404, 422, 429]);
+
+/** Whether a failed write can have taken effect. */
+export function writeOutcomeOf(status: number | undefined): WriteOutcome {
+  return status !== undefined && REFUSED_BEFORE_ACTING.has(status) ? 'not-sent' : 'unknown';
 }
 
 export interface RequestOptions {
@@ -189,7 +191,7 @@ export async function resendRequest<T>(
       resendError: name,
       stage: 'http',
       ...(stopFor !== null ? { retryAfterSeconds: stopFor } : {}),
-      ...(writing ? { outcome: outcomeOf(response.status) } : {}),
+      ...(writing ? { outcome: writeOutcomeOf(response.status) } : {}),
     } satisfies ResendErrorDetails,
   });
 }

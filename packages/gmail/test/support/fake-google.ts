@@ -133,6 +133,8 @@ export interface FakeGoogle {
   failNext(path: string, times: number, status: number, reason?: string, retryAfter?: string): void;
   /** Makes the next call to a path answer slowly, or not at all, with the connection held open: {@link SlowAnswer}. */
   slowNext(path: string, answer: SlowAnswer): void;
+  /** Called after a draft has become a sent message, to lose or replace the answer to that send. */
+  afterSend: ((message: FakeMessage) => { status: number; body?: unknown; drop?: boolean } | undefined) | null;
   /** Turns a stored refresh token into one Google refuses, as revocation or a Testing-app expiry would. */
   revoke(refreshToken: string): void;
   /** Completes a consent the way a browser would, returning the redirect URL with `code` and `state`. */
@@ -397,6 +399,7 @@ export async function startFakeGoogle(options: FakeGoogleOptions = {}): Promise<
     Array<{ status: number; reason?: string | undefined; retryAfter?: string | undefined }>
   >();
   const requests: FakeGoogle['requests'] = [];
+  let afterSend: FakeGoogle['afterSend'] = null;
 
   const fail = (
     path: string,
@@ -740,6 +743,15 @@ export async function startFakeGoogle(options: FakeGoogleOptions = {}): Promise<
           account.messages = { ...(account.messages ?? {}), [messageId]: message };
           delete account.drafts?.[parsed.id ?? ''];
         }
+        const answer = afterSend?.(message);
+        if (answer?.drop) {
+          request.socket.destroy();
+          return;
+        }
+        if (answer) {
+          json(response, answer.status, answer.body ?? {});
+          return;
+        }
         json(response, 200, { id: message.id, threadId: message.threadId, labelIds: message.labelIds });
         return;
       }
@@ -806,6 +818,12 @@ export async function startFakeGoogle(options: FakeGoogleOptions = {}): Promise<
     requests,
     accounts,
     tokens,
+    get afterSend() {
+      return afterSend;
+    },
+    set afterSend(value) {
+      afterSend = value;
+    },
     failNext(path, times, status, reason, retryAfter) {
       const list = failures.get(path) ?? [];
       for (let i = 0; i < times; i++) list.push({ status, reason, retryAfter });

@@ -2232,6 +2232,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
             .object({ threadId: z.string().nullable(), labelIds: z.array(z.string()) })
             .nullable()
             .describe('what the mailbox says about the message it filed, read back after the send'),
+          note: z.string().optional().describe('bookkeeping that could not be written after Gmail sent the message'),
         }),
         annotations: {
           readOnlyHint: false,

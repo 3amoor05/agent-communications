@@ -14,6 +14,7 @@ import {
 } from '@agentcomms/core';
 import type { GmailContext, ResolvedInbox } from '../context.ts';
 import { analyseDraft, type DraftAnalysis, type Unsendable, unsendable } from '../domain/outbound.ts';
+import { sendCertainlyRefused } from '../gmail-api/errors.ts';
 import type { GmailTransport } from '../gmail-api/transport.ts';
 
 /**
@@ -60,6 +61,8 @@ export interface SendResult {
   subject: string;
   /** What Gmail says about the message it filed in Sent, read back after the send. */
   verified: { threadId: string | undefined; labelIds: string[] } | null;
+  /** Bookkeeping that could not be written after Gmail confirmed the send. */
+  note?: string | undefined;
 }
 
 const LOOKALIKE_DISTANCE = 2;
@@ -90,7 +93,7 @@ function describeState(state: ApprovalRecord['state']): string {
     case 'sending':
       return 'this approval is being sent by another process right now';
     case 'failed':
-      return 'the send under this approval failed; whether it arrived is not known from here';
+      return 'the send under this approval was refused; nothing was sent';
     case 'unknown':
       return 'a process died mid-send under this approval; whether the message went is not known';
     case 'expired':
@@ -565,24 +568,60 @@ export async function executeSend(
   try {
     sent = await transport.sendDraft(options.draftId);
   } catch (error) {
-    await context.core.ledger.release(resolved.inbox.id, options.approvalId);
-    await context.core.approvals.complete(options.approvalId, {
-      error: error instanceof Error ? error.message : String(error),
-    });
-    await context.core.audit.append({
-      inboxId: resolved.inbox.id,
-      alias,
-      operation: 'send.execute',
-      outcome: 'failed',
-      surface: context.surface,
-      ids: { approvalIds: [options.approvalId], draftIds: [options.draftId] },
-      reason: error instanceof Error ? error.message : 'send failed',
-    });
-    throw error;
+    const said = error instanceof Error ? error.message : String(error);
+    const ids = { approvalIds: [options.approvalId], draftIds: [options.draftId] };
+    if (sendCertainlyRefused(error)) {
+      await context.core.ledger.release(resolved.inbox.id, options.approvalId);
+      await context.core.approvals.complete(options.approvalId, { error: said });
+      await context.core.audit.append({
+        inboxId: resolved.inbox.id,
+        alias,
+        operation: 'send.execute',
+        outcome: 'failed',
+        surface: context.surface,
+        ids,
+        reason: said,
+      });
+      throw error;
+    }
+
+    let unaudited = '';
+    try {
+      await context.core.audit.append({
+        inboxId: resolved.inbox.id,
+        alias,
+        operation: 'send.execute',
+        outcome: 'failed',
+        surface: context.surface,
+        ids,
+        reason: `outcome unknown: ${said}`,
+      });
+    } catch (failure) {
+      unaudited = ` The audit log could not record this either (${failure instanceof Error ? failure.message : String(failure)}).`;
+    }
+    throw new CommsError(
+      error instanceof CommsError ? error.code : 'TRANSIENT',
+      `whether the email was sent is not known: ${said}`,
+      {
+        hint: `Check the Sent folder before anything else: Gmail may have sent it. Prepare the draft again only if it is not there — this approval is not used again.${unaudited}`,
+        details: {
+          ...(error instanceof CommsError ? error.details : {}),
+          approvalId: options.approvalId,
+          outcome: 'unknown',
+        },
+      },
+    );
   }
 
   const sentMessageId = sent.id;
-  await context.core.approvals.complete(options.approvalId, { sentMessageId });
+  const unrecorded: string[] = [];
+  try {
+    await context.core.approvals.complete(options.approvalId, { sentMessageId });
+  } catch (error) {
+    unrecorded.push(
+      `the approval could not be marked used (${error instanceof Error ? error.message : String(error)}), so it will read as unknown`,
+    );
+  }
 
   // Read the sent message back: it is the only evidence that what went out is what was approved, and the only way to
   // catch a reply that Gmail filed outside the conversation it was meant for.
@@ -594,18 +633,25 @@ export async function executeSend(
     // The mail has gone either way; not being able to read it back is worth reporting, not worth failing.
   }
 
-  await context.core.audit.append({
-    inboxId: resolved.inbox.id,
-    alias,
-    operation: 'send.execute',
-    outcome: 'ok',
-    surface: context.surface,
-    ids: { approvalIds: [options.approvalId], draftIds: [options.draftId], messageIds: [sentMessageId] },
-    // From the record, not from what the caller claimed: the two are checked to be equal, but the record is the
-    // one a person approved, and an audit line is worth having only if it says what actually happened.
-    recipients: [...claimed.expect.to, ...claimed.expect.cc, ...claimed.expect.bcc].map(canonicalAddress),
-    reason: `digest ${claimed.digest.slice(0, 12)} · policy ${livePolicy} · ${claimed.approvedVia ?? 'chat'}`,
-  });
+  try {
+    await context.core.audit.append({
+      inboxId: resolved.inbox.id,
+      alias,
+      operation: 'send.execute',
+      outcome: 'ok',
+      surface: context.surface,
+      ids: { approvalIds: [options.approvalId], draftIds: [options.draftId], messageIds: [sentMessageId] },
+      // From the record, not from what the caller claimed: the two are checked to be equal, but the record is the
+      // one a person approved, and an audit line is worth having only if it says what actually happened.
+      recipients: [...claimed.expect.to, ...claimed.expect.cc, ...claimed.expect.bcc].map(canonicalAddress),
+      reason: [
+        `digest ${claimed.digest.slice(0, 12)} · policy ${livePolicy} · ${claimed.approvedVia ?? 'chat'}`,
+        ...unrecorded,
+      ].join(' · '),
+    });
+  } catch (error) {
+    unrecorded.push(`the audit log could not record it (${error instanceof Error ? error.message : String(error)})`);
+  }
 
   return {
     inbox: alias,
@@ -618,6 +664,7 @@ export async function executeSend(
     bcc: claimed.expect.bcc,
     subject: claimed.expect.subject,
     verified,
+    ...(unrecorded.length > 0 ? { note: unrecorded.join('; ') } : {}),
   };
 }
 

@@ -83,9 +83,11 @@ export function renderPrepared(result: SendPreparation): string {
 }
 
 export function renderSent(result: SendResult): string {
-  return result.state === 'scheduled'
-    ? `Scheduled for ${result.scheduledAt ?? '?'} as ${result.resendId}, to ${truncateDisplay(result.to.join(', '), 200)}.`
-    : `Sent as ${result.resendId}, to ${truncateDisplay(result.to.join(', '), 200)}.`;
+  const sent =
+    result.state === 'scheduled'
+      ? `Scheduled for ${result.scheduledAt ?? '?'} as ${result.resendId}, to ${truncateDisplay(result.to.join(', '), 200)}.`
+      : `Sent as ${result.resendId}, to ${truncateDisplay(result.to.join(', '), 200)}.`;
+  return result.note ? `${sent}\nNote: ${escapeForDisplay(result.note)}.` : sent;
 }
 
 export function renderStatus(result: SendStatus): string {

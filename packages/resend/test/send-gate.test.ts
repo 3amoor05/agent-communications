@@ -292,7 +292,7 @@ test('an outcome that cannot be known is never retried: it is recorded, reported
     },
   );
   assert.equal(harness.fake.sends().length, 1, 'one request, never a second');
-  assert.equal((await harness.core.approvals.get(prepared.approvalId))?.state, 'failed');
+  assert.equal((await harness.core.approvals.get(prepared.approvalId))?.state, 'sending');
   await assert.rejects(
     executeSend(context, 'acme/resend', { approvalId: prepared.approvalId, expect: prepared.expect }),
     refusal('APPROVAL_VOID'),

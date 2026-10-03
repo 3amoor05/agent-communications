@@ -76,6 +76,8 @@ export interface SendResult {
   cc: string[];
   bcc: string[];
   subject: string;
+  /** Bookkeeping that could not be written after Resend confirmed the send. */
+  note?: string | undefined;
 }
 
 /** A send's approval as the one account that may use it, or a refusal that does not touch it. */
@@ -416,7 +418,7 @@ function describeState(state: ApprovalRecord['state']): string {
     case 'sending':
       return 'this approval is being sent by another process right now';
     case 'failed':
-      return 'the send under this approval failed or its outcome is unknown; it is never sent again under it';
+      return 'the send under this approval was refused; nothing was sent';
     case 'unknown':
       return 'a process stopped mid-send under this approval; whether the email went is not known';
     case 'expired':
@@ -445,7 +447,7 @@ export async function executeSend(
   if (known.state !== 'pending' && known.state !== 'approved') {
     throw new CommsError('APPROVAL_VOID', `nothing was sent: ${describeState(known.state)}`, {
       hint:
-        known.state === 'failed' || known.state === 'unknown'
+        known.state === 'unknown'
           ? `Check what happened with \`agent-resend send status ${options.approvalId} --account ${name}\` before anything else.`
           : 'Prepare the send again if it should still go.',
       details: { approvalId: options.approvalId, state: known.state },
@@ -531,47 +533,81 @@ export async function executeSend(
           ? 'not-sent'
           : 'unknown';
     const said = error instanceof Error ? error.message : String(error);
-    await context.core.approvals.complete(options.approvalId, {
-      error: outcome === 'unknown' ? `outcome unknown: ${said}` : said,
-    });
-    if (outcome === 'not-sent') await records.release(named.account.id, options.approvalId);
-    await records.record(named.account.id, {
-      approvalId: options.approvalId,
-      event: outcome === 'unknown' ? 'unknown' : 'failed',
-      error: said.slice(0, 300),
-    });
-    await context.core.audit.append({
-      inboxId: named.account.id,
-      alias: name,
-      operation: 'resend.send.execute',
-      outcome: 'failed',
-      surface: context.surface,
-      approvalId: options.approvalId,
-      reason: outcome === 'unknown' ? `outcome unknown: ${said.slice(0, 200)}` : said.slice(0, 200),
-    });
+    if (outcome === 'not-sent') {
+      await context.core.approvals.complete(options.approvalId, { error: said });
+      await records.release(named.account.id, options.approvalId);
+    }
+    const unrecorded: string[] = [];
+    try {
+      await records.record(named.account.id, {
+        approvalId: options.approvalId,
+        event: outcome === 'unknown' ? 'unknown' : 'failed',
+        error: said.slice(0, 300),
+      });
+    } catch (failure) {
+      unrecorded.push(
+        `the send record could not record this (${failure instanceof Error ? failure.message : String(failure)})`,
+      );
+    }
+    try {
+      await context.core.audit.append({
+        inboxId: named.account.id,
+        alias: name,
+        operation: 'resend.send.execute',
+        outcome: 'failed',
+        surface: context.surface,
+        approvalId: options.approvalId,
+        reason: outcome === 'unknown' ? `outcome unknown: ${said.slice(0, 200)}` : said.slice(0, 200),
+      });
+    } catch (failure) {
+      unrecorded.push(
+        `the audit log could not record this (${failure instanceof Error ? failure.message : String(failure)})`,
+      );
+    }
     if (outcome === 'unknown') {
       throw new CommsError('TRANSIENT', `whether the email was sent is not known: ${said}`, {
-        hint: `Do not send it again. Check with \`agent-resend send status ${options.approvalId} --account ${name}\`; Resend would also refuse a repeat under this approval for 24 hours.`,
+        hint: [
+          `Do not send it again. Check the Resend dashboard or ask the recipient, and check with \`agent-resend send status ${options.approvalId} --account ${name}\`; this approval is not used again.`,
+          ...unrecorded,
+        ].join(' '),
         details: { approvalId: options.approvalId, outcome: 'unknown' },
       });
     }
     throw error;
   }
 
-  await context.core.approvals.complete(options.approvalId, { sentMessageId: resendId });
-  await records.record(named.account.id, { approvalId: options.approvalId, event: 'sent', resendId });
-  await context.core.audit.append({
-    inboxId: named.account.id,
-    alias: name,
-    operation: 'resend.send.execute',
-    outcome: 'ok',
-    surface: context.surface,
-    approvalId: options.approvalId,
-    ids: { resendIds: [resendId] },
-    // From the record a person approved, not from what the caller restated: the two are checked equal.
-    recipients: [...claimed.expect.to, ...claimed.expect.cc, ...claimed.expect.bcc].map(canonicalAddress),
-    reason: `digest ${digest.slice(0, 12)} · policy ${livePolicy} · ${claimed.approvedVia ?? 'chat'}`,
-  });
+  const unrecorded: string[] = [];
+  try {
+    await context.core.approvals.complete(options.approvalId, { sentMessageId: resendId });
+  } catch (error) {
+    unrecorded.push(
+      `the approval could not be marked used (${error instanceof Error ? error.message : String(error)}), so it will read as unknown`,
+    );
+  }
+  try {
+    await records.record(named.account.id, { approvalId: options.approvalId, event: 'sent', resendId });
+  } catch (error) {
+    unrecorded.push(`the send record could not record it (${error instanceof Error ? error.message : String(error)})`);
+  }
+  try {
+    await context.core.audit.append({
+      inboxId: named.account.id,
+      alias: name,
+      operation: 'resend.send.execute',
+      outcome: 'ok',
+      surface: context.surface,
+      approvalId: options.approvalId,
+      ids: { resendIds: [resendId] },
+      // From the record a person approved, not from what the caller restated: the two are checked equal.
+      recipients: [...claimed.expect.to, ...claimed.expect.cc, ...claimed.expect.bcc].map(canonicalAddress),
+      reason: [
+        `digest ${digest.slice(0, 12)} · policy ${livePolicy} · ${claimed.approvedVia ?? 'chat'}`,
+        ...unrecorded,
+      ].join(' · '),
+    });
+  } catch (error) {
+    unrecorded.push(`the audit log could not record it (${error instanceof Error ? error.message : String(error)})`);
+  }
   return {
     account: name,
     approvalId: options.approvalId,
@@ -582,6 +618,7 @@ export async function executeSend(
     cc: claimed.expect.cc,
     bcc: claimed.expect.bcc,
     subject: claimed.expect.subject,
+    ...(unrecorded.length > 0 ? { note: unrecorded.join('; ') } : {}),
   };
 }
 

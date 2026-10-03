@@ -81,6 +81,24 @@ const RATE_LIMIT_REASONS = new Set([
   'UNAVAILABLE',
 ]);
 
+/*
+ * The status answers Gmail documents before a send can happen, and nothing else.
+ *
+ * 400 is a malformed request; 401 and 403 reject the credentials, permission or account policy; 404 means the draft
+ * is not there; and 429 refuses work at a rate or quota limit. Gmail's error reference does not document 422 for this
+ * API, so it is deliberately absent. A status outside this list, no status, or an answer that cannot be read does not
+ * prove Gmail did nothing — recording one as failed would invite the same mail to be sent again.
+ */
+const SEND_REFUSED_BEFORE_ACTING: ReadonlySet<number> = new Set([400, 401, 403, 404, 429]);
+
+/** Whether a failed send request certainly did nothing at Gmail. */
+export function sendCertainlyRefused(error: unknown): boolean {
+  if (error instanceof CommsError && error.code === 'SEND_REFUSED') return true;
+  const cause = error instanceof Error ? error.cause : undefined;
+  const status = describeGoogleError(cause ?? error).status;
+  return status !== undefined && SEND_REFUSED_BEFORE_ACTING.has(status);
+}
+
 /** True when the same request may be sent again (the caller still decides whether the operation is safe to repeat). */
 export function isRetryable(shape: GoogleErrorShape): boolean {
   if (shape.status === 429) return true;

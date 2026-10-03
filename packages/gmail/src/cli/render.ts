@@ -685,6 +685,7 @@ export function renderSent(result: SendResult, color: boolean): string {
   } else {
     lines.push(paint(color, 'yellow', 'The message was sent but could not be read back to confirm where it landed.'));
   }
+  if (result.note) lines.push(paint(color, 'yellow', `Note: ${result.note}.`));
   return lines.join('\n');
 }
 
