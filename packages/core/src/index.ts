@@ -44,6 +44,23 @@ export {
   updateAutoChange,
   updateLaterChange,
 } from './operations/update-settings.ts';
+/*
+ * Organisation profiles (design 2026-10-02): what a channel needs to read the record — whether a client row is an
+ * organisation's, and the generations of its client. The core writes the record; nothing else does.
+ */
+export {
+  activeGeneration,
+  GENERATION_LIMIT,
+  type GenerationState,
+  generationState,
+  managingOrganisation,
+  type OrganisationProfile,
+  organisationProfileSchema,
+  organisationsOf,
+  PROFILE_ORGANISATION_MAX,
+  parseProfile,
+  recordOf,
+} from './organisations.ts';
 export * from './other-servers.ts';
 export * from './output.ts';
 export * from './paths.ts';

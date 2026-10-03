@@ -10,7 +10,7 @@ import { CommsError } from './errors.ts';
 import { FILE_MODE, writeFileAtomic } from './fs.ts';
 import { namesItsPlace } from './jail.ts';
 import { withCredentialsLock, withFileLock } from './lock.ts';
-import { NAME_MESSAGE, NAME_PATTERN, parseName } from './name-grammar.ts';
+import { NAME_MESSAGE, NAME_PATTERN, ORGANISATION_PATTERN, parseName } from './name-grammar.ts';
 import { expandHome } from './paths.ts';
 import { namesMigrationEnabled } from './release-gate.ts';
 
@@ -222,9 +222,65 @@ export interface FormerNames {
   accounts: Record<string, FormerName>;
 }
 
+/** Who an organisation's Google client is for, as its administrator states it (design 2026-10-02 §D2). */
+export type OrganisationServes = 'any' | { domains: string[] };
+
+/**
+ * One Google client an organisation profile brought here: a *generation* (design 2026-10-02 §D4).
+ *
+ * `owned` — the profile made the client row `name` (`rgc-1`), which carries `organisation`, and its secret is the
+ * profile's to rewrite. `adopted` — the row was already here under a name a person chose (they ran `client add` with
+ * the organisation's file), and stays theirs: no `org` command changes or removes it. `serves` is per generation,
+ * because it is a fact about one client, not about the organisation.
+ */
+export interface OrganisationGeneration {
+  name: string;
+  clientId: string;
+  projectId?: string | undefined;
+  ownership: 'owned' | 'adopted';
+  serves: OrganisationServes;
+  addedAt: string;
+}
+
+export interface OrganisationSlackApp {
+  clientId: string;
+  appId?: string | undefined;
+}
+
+/**
+ * What this machine records of one organisation profile: never its bytes and never its secret — where it was read
+ * from, the SHA-256 of what was read and when, the generations of its Google client, and its Slack apps.
+ */
+export interface OrganisationRecord {
+  label: string;
+  /** Read again, from this absolute path, by every `org update`. `file` is the one kind version 1 knows (§D3). */
+  source: { kind: string; path: string };
+  sha256: string;
+  readAt: string;
+  addedAt: string;
+  /** Whether the member asked for this organisation's client to serve addresses outside it too (§D6). */
+  forOtherAddresses: boolean;
+  /** `active` names the generation new mailboxes get — none once a profile stops naming a Google client. */
+  gmail?: { active: string | null; generations: OrganisationGeneration[] } | undefined;
+  slack?:
+    | {
+        workspace: string;
+        workspaceName: string;
+        redirectPort: number;
+        apps: { read?: OrganisationSlackApp | undefined; send?: OrganisationSlackApp | undefined };
+      }
+    | undefined;
+}
+
 export interface ConfigV2 extends ConfigBody {
   version: 2;
   formerNames: FormerNames;
+  /**
+   * The organisation profiles added here, by organisation word (design 2026-10-02 §D4). Absent reads as none, and
+   * stays absent until the first `org add`: a key the schema filled in would be written into every file by the next
+   * unrelated change.
+   */
+  organisations?: Record<string, OrganisationRecord> | undefined;
 }
 
 export type Config = ConfigV1 | ConfigV2;
@@ -374,6 +430,41 @@ export const configV1Schema: z.ZodType<ConfigV1, unknown> = z
     checkWithinMaps(config, ctx);
   });
 
+/*
+ * The organisations record. Loose at every level, as the rest of the file is: a later release adds keys inside it — a
+ * Slack app id learned at sign-in, a source kind that is not a file — and this one must keep them through its writes,
+ * not drop them or refuse the file. The organisation is a key, so it is held to the grammar a name's first half is.
+ */
+const servesSchema = z.union([z.literal('any'), z.looseObject({ domains: z.array(z.string().min(1)).min(1) })]);
+const generationSchema = z.looseObject({
+  name: aliasSchema,
+  clientId: z.string().min(1),
+  projectId: z.string().optional(),
+  ownership: z.enum(['owned', 'adopted']),
+  serves: servesSchema,
+  addedAt: z.string(),
+});
+const slackAppRecordSchema = z.looseObject({ clientId: z.string().min(1), appId: z.string().min(1).optional() });
+const organisationRecordSchema = z.looseObject({
+  label: z.string(),
+  source: z.looseObject({ kind: z.string().min(1), path: z.string().min(1) }),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/, 'a SHA-256 is 64 lowercase hex digits'),
+  readAt: z.string(),
+  addedAt: z.string(),
+  forOtherAddresses: z.boolean().default(false),
+  gmail: z
+    .looseObject({ active: aliasSchema.nullable().default(null), generations: z.array(generationSchema).default([]) })
+    .optional(),
+  slack: z
+    .looseObject({
+      workspace: z.string().min(1),
+      workspaceName: z.string(),
+      redirectPort: z.number().int().min(1).max(65535),
+      apps: z.looseObject({ read: slackAppRecordSchema.optional(), send: slackAppRecordSchema.optional() }).default({}),
+    })
+    .optional(),
+});
+
 const formerNameSchema = z.looseObject({ name: nameSchema, id: z.string().min(1) });
 // A former name is whatever the account was called before: a version-1 alias, or an earlier version-2 name.
 const formerKeySchema = z.string().refine((key) => ALIAS_PATTERN.test(key) || NAME_PATTERN.test(key), {
@@ -404,6 +495,12 @@ export const configV2Schema: z.ZodType<ConfigV2, unknown> = z
         accounts: z.record(formerKeySchema, formerNameSchema).default({}),
       })
       .default({ inboxes: {}, accounts: {} }),
+    organisations: z
+      .record(
+        z.string().regex(ORGANISATION_PATTERN, 'an organisation is a name’s first half'),
+        organisationRecordSchema,
+      )
+      .optional(),
   })
   .superRefine((config, ctx) => {
     checkWithinMaps(config, ctx);
