@@ -4,7 +4,7 @@ import { readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import type { Streams } from '../src/cli-runtime.ts';
+import { type Streams, shellCommand } from '../src/cli-runtime.ts';
 import { secretsStoreOf } from '../src/config.ts';
 import { CommsError } from '../src/errors.ts';
 import { isInside } from '../src/jail.ts';
@@ -969,4 +969,82 @@ test('approve is refused to an agent and to anything without a terminal, touches
   const noId = run(['approve', '--json'], { AGENT_COMMS_CONFIG_DIR: config });
   assert.equal(noId.status, 64);
   assert.match(run(['--help']).stdout, /agentcomms approve <approvalId>/);
+});
+
+// ── Commands printed to be run ──────────────────────────────────────────────────────────────────────────────────
+
+/*
+ * Every command core prints for a person to copy — a change to run again with its approval, a folder to take out, an
+ * entry to register again or remove — is quoted by `shellCommand`, for the shell it will be pasted into. Each platform
+ * is asked for by name, so the Windows rules are held on a Mac and the POSIX ones on Windows.
+ */
+
+test('a command printed to be run is quoted for a POSIX shell everywhere but Windows', () => {
+  for (const platform of ['darwin', 'linux'] as const) {
+    assert.equal(shellCommand(['agentcomms', 'update', '--auto', 'off'], platform), 'agentcomms update --auto off');
+    assert.equal(
+      shellCommand(['agentcomms', 'attach', 'roots', 'add', '/srv/First Last/outgoing'], platform),
+      "agentcomms attach roots add '/srv/First Last/outgoing'",
+    );
+    assert.equal(
+      shellCommand(["it's", '$HOME', '~/outgoing', 'C:\\Profiles\\outgoing', 'a,b', '@name', ''], platform),
+      "'it'\\''s' '$HOME' '~/outgoing' 'C:\\Profiles\\outgoing' a,b @name ''",
+    );
+  }
+});
+
+test('on Windows a command printed to be run is one cmd.exe and PowerShell both read, or PowerShell where they cannot agree (CUE-306)', () => {
+  const win = (...words: string[]) => shellCommand(words, 'win32');
+  // A folder with a space is one word to both shells. In single quotes cmd.exe took it as two, quote marks and all.
+  assert.equal(
+    win('agentcomms', 'attach', 'roots', 'add', 'C:\\Profiles\\First Last\\outgoing'),
+    'agentcomms attach roots add "C:\\Profiles\\First Last\\outgoing"',
+  );
+  // A backslash is nothing to either shell: a path with no space in it is left as it is, and so is an ordinary word.
+  assert.equal(
+    win('C:\\Profiles\\outgoing', '\\outgoing', 'C:outgoing', 'acme/gmail', '--name=x', 'pkg@1.2.3'),
+    'C:\\Profiles\\outgoing \\outgoing C:outgoing acme/gmail --name=x pkg@1.2.3',
+  );
+  // What either shell would read is put in double quotes: a first @ (splatting), a comma (an array), a % (cmd.exe's
+  // variables, and PowerShell's --%), a ~, a space at either end, nothing at all, and the rest of both shells' syntax.
+  const quoted = ['@name', 'a,b', '50%', '--%', '~/outgoing', ' outgoing ', '', 'a&b', 'a|b', 'a^b', 'a;b'];
+  const more = ['#a', '(a)', '{a}', 'a<b>', "it's", 'it’s here'];
+  for (const word of [...quoted, ...more]) assert.equal(win(word), `"${word}"`, word);
+  // Backslashes before the closing quote are doubled: a program's argument parser reads `\"` as a quote mark.
+  assert.equal(win('C:\\Profiles\\First Last\\'), '"C:\\Profiles\\First Last\\\\"');
+  assert.equal(win('C:\\Profiles\\First Last\\\\'), '"C:\\Profiles\\First Last\\\\\\\\"');
+  assert.equal(win('C:\\Profiles\\First Last\\x'), '"C:\\Profiles\\First Last\\x"', 'only at the end');
+  // A $, a backtick or a double quote means something to PowerShell inside double quotes and nothing to cmd.exe:
+  // PowerShell's reading, in its single quotes, with each quote mark in the word doubled.
+  assert.equal(win('$HOME\\outgoing'), "'$HOME\\outgoing'");
+  assert.equal(win('$(calc)'), "'$(calc)'");
+  assert.equal(win('a`b'), "'a`b'");
+  assert.equal(win('say "hi"'), `'say "hi"'`);
+  assert.equal(win("it's $5"), "'it''s $5'");
+  // PowerShell takes the curly quotes for quote marks too.
+  assert.equal(win('say “hi” „there”'), "'say “hi” „there”'");
+  assert.equal(win('it’s $5 ‘or’ ‚so‛'), "'it’’s $5 ‘‘or’’ ‚‚so‛‛'");
+});
+
+test('core quotes a command to be run in one place, and pastes no word into one unquoted', () => {
+  /*
+   * A second quoter is a second set of rules to drift: `mcp install`'s hints carried a copy of the POSIX one, and the
+   * update's and the doctor's "register it again" quoted nothing at all. So the POSIX escape for a quote, `'\''`,
+   * appears in `cli-runtime.ts` alone, and no `mcp get`, `mcp remove` or `mcp install` is built by pasting a word into
+   * a template — each goes through `shellCommand`.
+   */
+  const src = fileURLToPath(new URL('../src/', import.meta.url));
+  const files = (readdirSync(src, { recursive: true }) as string[]).filter((file) => file.endsWith('.ts'));
+  assert.ok(files.length > 50, 'the sources were found');
+  const quoters: string[] = [];
+  const pasted: string[] = [];
+  for (const file of files) {
+    const source = readFileSync(join(src, file), 'utf8');
+    if (source.includes("'\\\\''") && file !== 'cli-runtime.ts') quoters.push(file);
+    for (const line of source.split('\n')) {
+      if (/mcp (?:get|remove|install)[^`'"\n]*\$\{/.test(line)) pasted.push(`${file}: ${line.trim()}`);
+    }
+  }
+  assert.deepEqual(quoters, []);
+  assert.deepEqual(pasted, []);
 });

@@ -62,6 +62,47 @@ export function paint(color: boolean, format: Parameters<typeof styleText>[0], t
   return color ? styleText(format, text, { validateStream: false }) : text;
 }
 
+/**
+ * A command line for a person to copy and run, each word quoted only where the shell it is pasted into would need it.
+ * Every command this package prints to be run — a change to run again with its approval, a folder to take out, an
+ * entry to register again or remove — is quoted here, so no printer quotes for a shell of its own.
+ *
+ * Everywhere but Windows that shell is a POSIX one, and a word goes in single quotes, inside which nothing is special
+ * but the quote itself. Windows has two shells, and neither reads single quotes that way: cmd.exe does not take them
+ * as quotes at all, so `'C:\Profiles\First Last\outgoing'` reached the command as two words, quote marks and all, and
+ * PowerShell does, but escapes a quote inside them by doubling it rather than as `'\''`. So on Windows (CUE-306):
+ *
+ * - A word of letters, digits and `_ + = : . / \ -`, with `@` anywhere but first, is left as it is: neither shell
+ *   reads anything in it, and a backslash is an ordinary character to both. A first `@` is splatting to PowerShell, a
+ *   `,` its array operator — two words — and a `%` names a variable to cmd.exe, so a word with any of them is quoted.
+ * - Any other word goes in double quotes, which keep a space, `&`, `|`, `;`, `'` and the rest inside one word in both
+ *   shells. Backslashes at its end are doubled: before a closing quote, a program's own argument parser (Node's, the
+ *   C runtime's) takes them as escapes, and `"C:\First Last\"` would end in a quote mark rather than the folder.
+ * - A word with a `$`, a backtick or a double quote — or a curly double quote, which PowerShell reads as one — has no
+ *   quoting both shells read alike: inside double quotes PowerShell expands `$name` and escapes with the backtick, and
+ *   cmd.exe does neither. Such a word is quoted for PowerShell, the shell Windows Terminal opens by default: in single
+ *   quotes, inside which nothing is special but a quote mark, each one doubled — `'` and the curly single quotes
+ *   PowerShell also reads as one. Pasted into cmd.exe that word is wrong, and Windows PowerShell 5.1 hands a program a
+ *   double quote inside a word unescaped, so the program loses it; PowerShell 7.3 and later do not. A Windows path can
+ *   hold a `$` or a backtick, though seldom does, and never a double quote.
+ *
+ * cmd.exe expands `%NAME%` even inside double quotes, where PowerShell expands nothing; no quoting stops it that
+ * PowerShell would read as the same word, so a `%` is left to PowerShell's reading too.
+ */
+export function shellCommand(words: readonly string[], platform: NodeJS.Platform = process.platform): string {
+  return words.map((word) => (platform === 'win32' ? windowsShellWord(word) : posixShellWord(word))).join(' ');
+}
+
+function posixShellWord(word: string): string {
+  return /^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replace(/'/g, `'\\''`)}'`;
+}
+
+function windowsShellWord(word: string): string {
+  if (/^[\w+=:./\\-][\w@+=:./\\-]*$/.test(word)) return word;
+  if (/["$`\u201C-\u201E]/.test(word)) return `'${word.replace(/['\u2018-\u201B]/g, (quote) => quote + quote)}'`;
+  return `"${word.replace(/\\+$/, (slashes) => slashes + slashes)}"`;
+}
+
 /** Writes a successful result: the envelope with --json, otherwise the human rendering. */
 export function writeResult<T>(
   data: T,

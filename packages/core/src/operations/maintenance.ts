@@ -4,6 +4,7 @@ import type { AuditRecord } from '../audit.ts';
 import { revokeChange } from '../changes.ts';
 import { type Channel, channelServer } from '../channel-servers.ts';
 import { listed, manifestOf } from '../channel-words.ts';
+import { shellCommand } from '../cli-runtime.ts';
 import { type Config, emptyConfig, secretsStoreOf } from '../config.ts';
 import type { Core } from '../core.ts';
 import { CommsError } from '../errors.ts';
@@ -88,7 +89,7 @@ export async function doctor(core: Core, env: NodeJS.ProcessEnv, options: Doctor
         name,
         ok: !loose,
         detail: dir,
-        ...(loose ? { fix: `chmod 700 ${dir}` } : {}),
+        ...(loose ? { fix: shellCommand(['chmod', '700', dir]) } : {}),
       });
     } catch {
       checks.push({ name, ok: true, detail: `${dir} (not created yet — created on first use)` });
@@ -291,7 +292,7 @@ function registerAgain(channel: Channel, entry: ChannelRegistration): string {
   words.push(...entry.narrowing);
   if (entry.launcher === 'npx' || entry.launcher === 'local') words.push('--launcher', entry.launcher);
   words.push('--force');
-  return `Register it again: \`${words.join(' ')}\`.`;
+  return `Register it again: \`${shellCommand(words)}\`.`;
 }
 
 /** An inbox's id from its name — the current one, so a former name is answered with what it is called now. */

@@ -11,6 +11,7 @@ import {
   narrowingFromArgs,
 } from '../src/channel-servers.ts';
 import { CHANNEL_SNAPSHOT } from '../src/channels.generated.ts';
+import { shellCommand } from '../src/cli-runtime.ts';
 import type { RegisteredServer } from '../src/mcp-clients.ts';
 import { type InstallOptions, isProductServer, managedRuntimeEntry, type SupportedClient } from '../src/mcp-install.ts';
 import {
@@ -221,6 +222,19 @@ test('the doctors’ detectors, now read from the manifests, find and describe w
   for (const fixture of FIXTURES) {
     assert.equal(describeOtherSlackServer(fixture), golden.describeOtherSlackServer(fixture));
     assert.equal(otherSlackServerRemoval(fixture), golden.otherSlackServerRemoval(fixture));
+  }
+});
+
+test('a command that removes another server gives its name as one word, quoted for the shell (CUE-306)', () => {
+  // The hand-written table pasted the name in as it was: none of its fixtures has a space where a command is printed.
+  for (const [client, binary] of [
+    ['claude-code', 'claude'],
+    ['codex', 'codex'],
+  ] as const) {
+    const helper = entry({ name: 'Slack Helper', client, command: 'node', args: ['/opt/helper.js'] });
+    assert.equal(otherSlackServerRemoval(helper), shellCommand([binary, 'mcp', 'remove', 'Slack Helper']));
+    const rival = entry({ name: 'old gmail', client, args: ['-y', '@artymclabin/gmail-mcp'] });
+    assert.equal(findUngatedGmailServers([rival])[0]?.removal, shellCommand([binary, 'mcp', 'remove', 'old gmail']));
   }
 });
 

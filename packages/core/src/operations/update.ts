@@ -1,6 +1,7 @@
 import type { GatedChange } from '../change-flow.ts';
 import { CHANNELS, type Channel, channelLabel, channelServer, requireChannelManifest } from '../channel-servers.ts';
 import { accountNoun, listed, pinOption } from '../channel-words.ts';
+import { shellCommand } from '../cli-runtime.ts';
 import type { Config } from '../config.ts';
 import type { Core } from '../core.ts';
 import { CommsError, toCommsError } from '../errors.ts';
@@ -267,7 +268,7 @@ function installCommand(item: RegistrationItem): string {
   const words = [facts.binary, 'mcp', 'install', '--client', item.client];
   if (item.name !== facts.defaultServerName) words.push('--name', item.name);
   words.push(...item.narrowing, '--force');
-  return words.join(' ');
+  return shellCommand(words);
 }
 
 /**

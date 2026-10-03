@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { CHANNEL_SERVERS } from '../src/channel-servers.ts';
+import { shellCommand } from '../src/cli-runtime.ts';
 import type { AccountConfig, InboxConfig } from '../src/config.ts';
 import { type Core, openCore } from '../src/core.ts';
 import { type CoreMcpOptions, createCoreMcpServer } from '../src/mcp/server.ts';
@@ -556,6 +557,21 @@ test('an entry pinned to a renamed account, or written by hand, is behind and le
     assert.equal(result.next, null);
     assert.deepEqual(await m.core.approvals.list(), []);
     assert.equal(readFileSync(config, 'utf8'), untouched);
+  } finally {
+    await close();
+  }
+});
+
+test('the command that registers an entry again by hand gives its name as one word, quoted for the shell (CUE-306)', async () => {
+  // A client's configuration may name an entry anything. Pasted into a command unquoted, this one was three words.
+  const m = machine();
+  cursor(m, { 'gmail by hand': { command: 'npx', args: ['-y', `${PACKAGES.gmail}@${OLD}`, 'mcp', '--read-only'] } });
+  const { ok, close } = await connect(m, { update: fakes(m) });
+  try {
+    const [hand] = of((await ok('comms_update', { check: true })).behind, 'registration');
+    const words = ['agent-gmail', 'mcp', 'install', '--client', 'cursor', '--name', 'gmail by hand', '--read-only'];
+    assert.ok(String(hand?.reason).includes(`\`${shellCommand([...words, '--force'])}\``), String(hand?.reason));
+    assert.doesNotMatch(String(hand?.reason), /--name gmail by hand/);
   } finally {
     await close();
   }

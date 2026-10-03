@@ -1,5 +1,6 @@
 import type { ChannelManifest, ChannelRivalPackage } from './channel-manifest.ts';
 import { CHANNEL_SNAPSHOT } from './channels.generated.ts';
+import { shellCommand } from './cli-runtime.ts';
 import { displayUrl, type RegisteredServer } from './mcp-clients.ts';
 import { isProductServer, type McpProduct } from './mcp-install.ts';
 
@@ -57,9 +58,9 @@ function gmailRemoval({ client, name: server, path, scope }: RegisteredServer): 
   if (scope === 'project') return `remove "${server}" from the project entry in ${path} by hand`;
   switch (client) {
     case 'claude-code':
-      return `claude mcp remove ${server}`;
+      return shellCommand(['claude', 'mcp', 'remove', server]);
     case 'codex':
-      return `codex mcp remove ${server}`;
+      return shellCommand(['codex', 'mcp', 'remove', server]);
     default:
       // The file named, not "the file above": this is printed under a different client's install, and by
       // `doctor` in a list of several, where the file above is somebody else's.
@@ -167,9 +168,9 @@ export function otherSlackServerRemoval(server: RegisteredServer): string {
   if (server.scope === 'project') return `remove "${server.name}" from the project entry in ${server.path} by hand`;
   switch (server.client) {
     case 'claude-code':
-      return `claude mcp remove ${server.name}`;
+      return shellCommand(['claude', 'mcp', 'remove', server.name]);
     case 'codex':
-      return `codex mcp remove ${server.name}`;
+      return shellCommand(['codex', 'mcp', 'remove', server.name]);
     default:
       return `remove "${server.name}" from ${server.path}, then restart ${server.client}`;
   }

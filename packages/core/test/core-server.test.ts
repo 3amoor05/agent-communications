@@ -9,6 +9,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { gatedChange } from '../src/change-flow.ts';
 import { beginChangeApproval, finishChangeApproval } from '../src/changes.ts';
 import { CHANNEL_SERVERS } from '../src/channel-servers.ts';
+import { shellCommand } from '../src/cli-runtime.ts';
 import type { AccountConfig, InboxConfig } from '../src/config.ts';
 import { type Core, openCore } from '../src/core.ts';
 import { CommsError, ERROR_REGISTRY, EXIT_CODES } from '../src/errors.ts';
@@ -446,6 +447,38 @@ test('the doctor fails a registration whose runtime has gone, and says what regi
   ]);
   assert.equal(report.ok, false, 'a server a client cannot start is a failure');
   assert.match(renderDoctor(report), /^FAIL slack server {5}registered with claude-code/m);
+});
+
+test(
+  'the doctor gives a loose directory to `chmod` as one word, a space in its path included (CUE-306)',
+  process.platform === 'win32' ? { skip: 'Windows has no mode bits for the doctor to find loose' } : {},
+  async () => {
+    const m = machine();
+    const configDir = join(m.home, 'agent comms');
+    mkdirSync(configDir);
+    chmodSync(configDir, 0o755);
+    const env = { ...m.env, AGENT_COMMS_CONFIG_DIR: configDir };
+    const { checks } = await doctorChecks({ ...m, configDir, env, core: openCore({ env }) });
+    assert.equal(checks.find((check) => check.name === 'config dir')?.fix, `chmod 700 '${configDir}'`);
+  },
+);
+
+test('the doctor gives the name of an entry to register again as one word, quoted for the shell (CUE-306)', async () => {
+  // A client's configuration may name an entry anything. Pasted into the command unquoted, this one was two words.
+  const m = doctorMachine();
+  const gone = managedRuntimeEntry(m.core.paths.dataDir, '@agentcomms/slack', VERSION);
+  writeFileSync(
+    join(m.home, '.claude.json'),
+    JSON.stringify({
+      mcpServers: { 'slack acme': { command: process.execPath, args: [gone, 'mcp', '--workspace', 'acme/slack'] } },
+    }),
+  );
+  const { checks } = await doctorChecks(m);
+  const words = ['agent-slack', 'mcp', 'install', '--client', 'claude-code', '--name', 'slack acme'];
+  assert.equal(
+    checks.find((check) => check.name === 'slack server')?.fix,
+    `Register it again: \`${shellCommand([...words, '--workspace', 'acme/slack', '--force'])}\`.`,
+  );
 });
 
 // ── The change policy ───────────────────────────────────────────────────────────────────────────────────────────

@@ -2,6 +2,7 @@ import { execFile, spawn } from 'node:child_process';
 import { access, constants, lstat, mkdir, readdir, readFile, realpath, rm, stat } from 'node:fs/promises';
 import { delimiter, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { shellCommand } from './cli-runtime.ts';
 import { CommsError, EXIT_CODES } from './errors.ts';
 import { appendPrivateLine, replaceFileInPlace, writeFileAtomic } from './fs.ts';
 import {
@@ -754,7 +755,7 @@ function installCommand(product: McpProduct, options: InstallOptions, name: stri
   words.push(...product.serverArgs(options));
   if (options.launcher && options.launcher !== 'managed') words.push('--launcher', options.launcher);
   words.push(...extra);
-  return words.map((word) => (/^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replace(/'/g, `'\\''`)}'`)).join(' ');
+  return shellCommand(words);
 }
 
 /**
@@ -800,7 +801,7 @@ async function codexRegistration(
 ): Promise<RegisteredServer | null> {
   const unknown = () =>
     new CommsError('CONFIG', `codex would not say what it has registered as "${name}", so nothing was written`, {
-      hint: `Look with \`codex mcp get ${name}\`. If it is not an older copy of this server, choose another --name; \`--print\` shows the entry to add by hand.`,
+      hint: `Look with \`${shellCommand(['codex', 'mcp', 'get', name])}\`. If it is not an older copy of this server, choose another --name; \`--print\` shows the entry to add by hand.`,
     });
   let answer: Awaited<ReturnType<typeof capture>>;
   try {
@@ -1199,9 +1200,9 @@ export async function mcpInstall(
   if (kept.length > 0) {
     const removal =
       options.client === 'claude-code'
-        ? `\`claude mcp remove ${name} --scope user\``
+        ? `\`${shellCommand(['claude', 'mcp', 'remove', name, '--scope', 'user'])}\``
         : options.client === 'codex'
-          ? `\`codex mcp remove ${name}\``
+          ? `\`${shellCommand(['codex', 'mcp', 'remove', name])}\``
           : `delete "${name}" from ${configPath}`;
     warnings.push(
       `Kept ${kept.join(' ')} from the "${name}" entry this replaced, because this install did not say otherwise. To register it wider on purpose, remove that entry first (${removal}), then install without them.`,
@@ -1345,7 +1346,7 @@ export async function mcpInstall(
             'CONFIG',
             `${cliName} already has an MCP server called "${name}", somewhere this could not read`,
             {
-              hint: `Look at it with \`${cliName} mcp get ${name}\`. If it is an older ${product.binary}, remove it with \`${cliName} mcp remove ${name}\` and run this again; if not, choose another --name.`,
+              hint: `Look at it with \`${shellCommand([cliName, 'mcp', 'get', name])}\`. If it is an older ${product.binary}, remove it with \`${shellCommand([cliName, 'mcp', 'remove', name])}\` and run this again; if not, choose another --name.`,
               cause: error,
             },
           );

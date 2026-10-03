@@ -6,6 +6,7 @@ import {
   defaultStreams,
   type OutputOptions,
   runCommand,
+  shellCommand,
   writeError,
   writeResult,
 } from './cli-runtime.ts';
@@ -126,11 +127,6 @@ Exit codes: 0 ok · 1 unexpected · 10 approval required · 11 an update is out:
 
 function usage(message: string): CommsError {
   return new CommsError('USAGE', message, { hint: 'Run `agentcomms --help`.' });
-}
-
-/** A command line to run again, each word quoted only where a shell would need it. */
-function shellCommand(words: readonly string[]): string {
-  return words.map((word) => (/^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replace(/'/g, `'\\''`)}'`)).join(' ');
 }
 
 function parse(argv: string[]) {
@@ -628,8 +624,8 @@ function renderAttach(report: AttachReport): string {
           '',
           'Listed, but allowing nothing — they do not say which drive or folder they are on. To take one out, run the',
           'command shown for it:',
-          // The whole command, quoted for a shell: the entry as written, a space at either end or nothing at all, and
-          // never a `$HOME` or a `$(…)` the shell would expand or run when it is pasted.
+          // The whole command, quoted for the shell it is pasted into (`shellCommand`): the entry as written, a space
+          // at either end or nothing at all, and never a `$HOME` or a `$(…)` the shell would expand or run.
           ...report.ignored.map((root) => `  ${shellCommand(['agentcomms', 'attach', 'roots', 'remove', root])}`),
         ]),
     '',

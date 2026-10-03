@@ -356,10 +356,11 @@ test('the report shows a listed folder that names no place apart: it allows noth
 test('an entry is taken out exactly as it is listed: spaces at either end, or nothing at all, from both surfaces', async () => {
   const m = machine({ attachRoots: ['~', ' outgoing ', ''] });
   const shown = cli(m, ['attach']);
-  assert.match(
-    shown.stdout,
-    /\n {2}agentcomms attach roots remove ' outgoing '\n {2}agentcomms attach roots remove ''\n/,
-    'the spaces and the empty entry are not visible',
+  // Quoted for the shell it is pasted into (`shellCommand`): single quotes for a POSIX one, double quotes on Windows.
+  const [spaced, empty] = process.platform === 'win32' ? ['" outgoing "', '""'] : ["' outgoing '", "''"];
+  assert.ok(
+    shown.stdout.includes(`\n  agentcomms attach roots remove ${spaced}\n  agentcomms attach roots remove ${empty}\n`),
+    `the spaces and the empty entry are not visible: ${shown.stdout}`,
   );
   const { ok, error, close } = await connect(m);
   try {
