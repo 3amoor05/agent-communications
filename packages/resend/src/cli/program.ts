@@ -21,10 +21,12 @@ import {
   runCommand,
   runUpdateCheckChild,
   SEND_LOOKUP,
+  type ShellCommand,
   type Streams,
   type SupportedClient,
   serverInstallChange,
   serverPruneChange,
+  shellCommand,
   terminalUpdateHooks,
   UPDATE_CHECK_CHILD_COMMAND,
   updateGateAtTerminal,
@@ -98,6 +100,7 @@ import {
 
 export interface CliDeps extends ResendContextOptions {
   streams?: Streams | undefined;
+  platform?: NodeJS.Platform | undefined;
 }
 
 type Options = Record<string, unknown>;
@@ -128,6 +131,7 @@ function expectList(raw: unknown, flag: string): string[] {
 export async function run(argv: readonly string[], deps: CliDeps = {}): Promise<number> {
   const streams: Streams = deps.streams ?? { stdout: process.stdout, stderr: process.stderr, stdin: process.stdin };
   const env = deps.env ?? process.env;
+  const platform = deps.platform ?? process.platform;
   const program = new Command();
   let exitCode = 0;
   let ran = false;
@@ -224,7 +228,12 @@ is out: update first, or put it off (agentcomms update, agentcomms update --late
     };
 
   /** A change the way every changing command runs one: core's `gatedChangeAtTerminal`. */
-  const changeAt = <T>(context: ResendContext, change: GatedChange<T>, flags: Options, command: string): Promise<T> =>
+  const changeAt = <T>(
+    context: ResendContext,
+    change: GatedChange<T>,
+    flags: Options,
+    command: ShellCommand,
+  ): Promise<T> =>
     gatedChangeAtTerminal(context.core, change, {
       approvalId: flags.approval === undefined ? undefined : String(flags.approval),
       env,
@@ -266,9 +275,18 @@ is out: update first, or put it off (agentcomms update, agentcomms update --late
   ).action(
     act(async (context, options, name: string, flags: Options) => {
       const mode = modeOf(flags.mode);
-      const command = `agent-resend account add ${name}${mode ? ` --mode ${mode}` : ''}${
-        flags.send ? ` --send ${String(flags.send)}` : ''
-      }${flags.domain ? ` --domain ${String(flags.domain)}` : ''}`;
+      const command = shellCommand(
+        [
+          'agent-resend',
+          'account',
+          'add',
+          name,
+          ...(mode ? ['--mode', mode] : []),
+          ...(flags.send ? ['--send', String(flags.send)] : []),
+          ...(flags.domain ? ['--domain', String(flags.domain)] : []),
+        ],
+        platform,
+      );
       // The name first: a name that cannot be taken is refused before anybody types a key for it.
       checkNewName(await context.config(), name);
       const key = await readApiKey(env, streams, { json: options.json, command });
@@ -322,7 +340,7 @@ is out: update first, or put it off (agentcomms update, agentcomms update --late
         context,
         removeAccountChange(context, name),
         flags,
-        `agent-resend account remove ${name}`,
+        shellCommand(['agent-resend', 'account', 'remove', name], platform),
       );
       writeResult(removed, output(), renderRemoved, streams);
     }),
@@ -348,9 +366,18 @@ is out: update first, or put it off (agentcomms update, agentcomms update --late
             context,
             policyChange(context, name, wanted),
             flags,
-            `agent-resend account policy ${name}${wanted.send ? ` --send ${wanted.send}` : ''}${
-              wanted.mode ? ` --mode ${wanted.mode}` : ''
-            }${wanted.change ? ` --change ${wanted.change}` : ''}`,
+            shellCommand(
+              [
+                'agent-resend',
+                'account',
+                'policy',
+                name,
+                ...(wanted.send ? ['--send', wanted.send] : []),
+                ...(wanted.mode ? ['--mode', wanted.mode] : []),
+                ...(wanted.change ? ['--change', wanted.change] : []),
+              ],
+              platform,
+            ),
           );
       writeResult(result, output(), renderPolicy, streams);
     }),
@@ -568,7 +595,7 @@ is out: update first, or put it off (agentcomms update, agentcomms update --late
         context,
         cancelScheduledChange(context, String(flags.account), id),
         flags,
-        `agent-resend scheduled cancel ${id} --account ${String(flags.account)}`,
+        shellCommand(['agent-resend', 'scheduled', 'cancel', id, '--account', String(flags.account)], platform),
       );
       writeResult(cancelled, output(), renderCancelled, streams);
     }),
@@ -672,24 +699,21 @@ is out: update first, or put it off (agentcomms update, agentcomms update --late
         const pinned = (flags.account ?? mcp.opts().account) as string | undefined;
         const launcher = flags.launcher as 'managed' | 'npx' | 'local' | undefined;
         const name = flags.name as string | undefined;
-        /*
-         * The change `comms_server_install` makes, with this package's own product for its version and its code: an
-         * approval from the tool is claimed here with `--approval`, and one from here by the tool. The command to run
-         * again is word for word, nothing quoted: every word is fixed, a choice Commander checked, a server name the
-         * change refuses unless it is plain, or an account it refuses unless it is connected.
-         */
-        const again = [
-          'agent-resend',
-          'mcp',
-          'install',
-          '--client',
-          String(flags.client),
-          ...(name !== undefined && name !== 'resend' ? ['--name', name] : []),
-          ...(pinned !== undefined ? ['--account', pinned] : []),
-          ...(launcher !== undefined ? ['--launcher', launcher] : []),
-          ...(flags.verify === false ? ['--no-verify'] : []),
-          ...(flags.force === true ? ['--force'] : []),
-        ].join(' ');
+        const again = shellCommand(
+          [
+            'agent-resend',
+            'mcp',
+            'install',
+            '--client',
+            String(flags.client),
+            ...(name !== undefined && name !== 'resend' ? ['--name', name] : []),
+            ...(pinned !== undefined ? ['--account', pinned] : []),
+            ...(launcher !== undefined ? ['--launcher', launcher] : []),
+            ...(flags.verify === false ? ['--no-verify'] : []),
+            ...(flags.force === true ? ['--force'] : []),
+          ],
+          platform,
+        );
         const result = await changeAt(
           context,
           serverInstallChange(
@@ -741,7 +765,10 @@ is out: update first, or put it off (agentcomms update, agentcomms update --late
             RESEND_MCP,
           ),
           flags,
-          `agent-resend mcp prune${flags.includePrinted === true ? ' --include-printed' : ''}`,
+          shellCommand(
+            ['agent-resend', 'mcp', 'prune', ...(flags.includePrinted === true ? ['--include-printed'] : [])],
+            platform,
+          ),
         );
         writeResult(result, output(), () => renderPrune(result, options.color), streams);
       }),

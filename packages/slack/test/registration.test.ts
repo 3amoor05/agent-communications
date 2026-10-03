@@ -36,7 +36,7 @@ interface Ran {
 }
 
 /** The CLI in-process, as an agent runs it: no terminal, so a change waiting for a person comes back with its id. */
-async function cli(harness: Harness, argv: string[], env: NodeJS.ProcessEnv): Promise<Ran> {
+async function cli(harness: Harness, argv: string[], env: NodeJS.ProcessEnv, platform?: NodeJS.Platform): Promise<Ran> {
   let stdout = '';
   let stderr = '';
   const out = new PassThrough();
@@ -50,6 +50,7 @@ async function cli(harness: Harness, argv: string[], env: NodeJS.ProcessEnv): Pr
   const code = await run(argv, {
     core: harness.core,
     env: { ...harness.env, ...env },
+    ...(platform === undefined ? {} : { platform }),
     streams: {
       stdout: Object.assign(out, { isTTY: false }),
       stderr: Object.assign(err, { isTTY: false }),
@@ -266,6 +267,31 @@ test('a server name that could rewrite the preview is refused by `agent-slack mc
   assert.match(String(ran.envelope().error?.message), /a server name is 1 to 64 letters/);
   assert.deepEqual(await harness.core.approvals.list(), [], 'nobody was asked');
   assert.equal(existsSync(join(home, '.cursor', 'mcp.json')), false);
+});
+
+test('commands to run again are quoted for the named POSIX or Windows platform (CUE-398)', async () => {
+  const first = await machine();
+  const posix = await cli(
+    first.harness,
+    ['workspace', 'add', 'other', '--mode', 'send', '--client-id', 'client id', '--port', '51234', '--json'],
+    first.env,
+    'darwin',
+  );
+  assert.match(
+    String(posix.envelope().error?.hint),
+    /agent-slack workspace add other --mode send --client-id 'client id' --port 51234 --approval/,
+  );
+
+  const second = await machine();
+  const windows = await cli(
+    second.harness,
+    ['workspace', 'add', 'other', '--mode', 'send', '--client-id', 'client%id', '--port', '51234', '--json'],
+    second.env,
+    'win32',
+  );
+  const hint = String(windows.envelope().error?.hint);
+  assert.match(hint, /\["agent-slack","workspace","add","other","--mode","send","--client-id","client\\u0025id"/);
+  assert.match(hint, /cannot be quoted the same way for cmd\.exe and for PowerShell/);
 });
 
 test('`agent-slack mcp install` and comms_server_install warn about the same other Slack servers', async () => {

@@ -1,4 +1,4 @@
-import { isCommsError } from '@agentcomms/core';
+import { isCommsError, shellCommand } from '@agentcomms/core';
 import { chatRefOf } from '../chat-ref.ts';
 import type { WhatsAppAccount } from '../config.ts';
 import type { WhatsAppContext } from '../context.ts';
@@ -94,7 +94,19 @@ async function change(
   request: { account?: string | undefined; chat?: string | undefined },
   next: (lists: ChatLists, chatId: string | undefined) => ChatLists,
 ): Promise<ChatListsResult> {
-  refuseAnAgent(context, command, 'changes which chats an agent may see');
+  refuseAnAgent(
+    context,
+    shellCommand(
+      [
+        'agent-whatsapp',
+        command,
+        ...(request.chat === undefined ? [] : [request.chat]),
+        ...(request.account === undefined ? [] : ['--account', request.account]),
+      ],
+      context.platform,
+    ),
+    'changes which chats an agent may see',
+  );
   const chatId = request.chat === undefined ? undefined : chatRefOf(request.chat, { international: true }).id;
   const { name, account } = await context.account(request.account);
   const { before, after } = await context.lists.update(account.id, (lists) => next(lists, chatId));

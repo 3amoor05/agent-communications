@@ -917,6 +917,11 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
       try {
         const alias = targetInbox(inbox);
         const targets = messageIds.map((messageId) => ({ messageId, partId }));
+        const download = (options: {
+          maxFiles?: unknown;
+          saveTo?: string | undefined;
+          choiceId?: string | undefined;
+        }) => downloadAttachments(context, alias, targets, { ...options, signal: ctx.mcpReq.signal });
         /*
          * Under a `confirm` change policy the answer cannot come in these arguments: the operation refuses one, and
          * names the terminal command that answers it. A client trusted to show approval forms — the same list a send
@@ -974,10 +979,10 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
             );
             await answerDownloadInForm(context.core, choiceId, content ?? {}, context.env);
             // The person's answer is the one on the question now: an answer in the arguments is left out.
-            return reply(await downloadAttachments(context, alias, targets, { maxFiles, choiceId }));
+            return reply(await download({ maxFiles, choiceId }));
           }
         }
-        const result = await downloadAttachments(context, alias, targets, { maxFiles, saveTo, choiceId });
+        const result = await download({ maxFiles, saveTo, choiceId });
         return reply(result);
       } catch (error) {
         return fail(error);

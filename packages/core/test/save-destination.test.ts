@@ -17,7 +17,7 @@ import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { ApprovalStore, type DownloadBinding, type DownloadRequest, downloadDigest } from '../src/approvals.ts';
 import { beginChangeApproval } from '../src/changes.ts';
-import type { Streams } from '../src/cli-runtime.ts';
+import { type Streams, shellCommand } from '../src/cli-runtime.ts';
 import { type Core, openCore } from '../src/core.ts';
 import { CommsError } from '../src/errors.ts';
 import {
@@ -621,6 +621,24 @@ test('an agent, or no terminal, gets the question and its choice id, exit 10, an
     // Printed for an agent reading plain output; with --json it is in the envelope's details instead.
     assert.equal(/Where should the 2 files/.test(term.out()), !json, label);
   }
+});
+
+test('a download command with no common Windows quoting is shown as words, not as a line', async () => {
+  const { core, env, home } = machine();
+  const { download } = recorder(core, env, home);
+  const thrown = await downloadAtTerminal({
+    core,
+    download,
+    env,
+    output: { color: false },
+    command: shellCommand(['agent-gmail', 'attachments', 'download', 'report 100%.pdf'], 'win32'),
+    approveCommand: 'agent-gmail approve',
+    render,
+    streams: terminal([], false).streams,
+  }).catch((error: unknown) => error);
+  assert.ok(thrown instanceof CommsError);
+  assert.match(thrown.hint ?? '', /\["agent-gmail","attachments","download","report 100\\u0025\.pdf"/);
+  assert.match(thrown.hint ?? '', /cannot be quoted the same way for cmd\.exe and for PowerShell/);
 });
 
 test('under confirm, an agent is told the person answers at their own terminal, and to come back with the id alone', async () => {

@@ -1,5 +1,15 @@
 import { rm } from 'node:fs/promises';
-import { agentMarker, CommsError, lookupName, nameAvailable, nameShapeProblem, withFileLock } from '@agentcomms/core';
+import {
+  agentMarker,
+  CommsError,
+  inlineCommand,
+  lookupName,
+  nameAvailable,
+  nameShapeProblem,
+  type ShellCommand,
+  shellCommand,
+  withFileLock,
+} from '@agentcomms/core';
 import {
   newWhatsAppAccount,
   PLATFORM,
@@ -26,11 +36,11 @@ import { probeStore } from '../source/snapshot.ts';
  */
 
 /** Refuses a command that is the person's to run, when an agent is running it — or when it is not at a terminal. */
-export function refuseAnAgent(context: WhatsAppContext, command: string, what: string): void {
+export function refuseAnAgent(context: WhatsAppContext, command: ShellCommand, what: string): void {
   const marker = agentMarker(context.env);
   if (marker !== null || context.surface !== 'cli') {
     throw new CommsError('LOOSENING_REFUSED', `only a person ${what}`, {
-      hint: `Ask the person to run \`agent-whatsapp ${command}\` in their own terminal.`,
+      hint: `Ask the person to run ${inlineCommand(command)} in their own terminal.`,
       ...(marker === null ? {} : { details: { marker } }),
     });
   }
@@ -47,7 +57,14 @@ export async function addAccount(
   context: WhatsAppContext,
   request: { name: string; source?: string | undefined },
 ): Promise<AddedAccount> {
-  refuseAnAgent(context, `add ${request.name}`, 'chooses which WhatsApp store an agent may read');
+  refuseAnAgent(
+    context,
+    shellCommand(
+      ['agent-whatsapp', 'add', request.name, ...(request.source === undefined ? [] : ['--source', request.source])],
+      context.platform,
+    ),
+    'chooses which WhatsApp store an agent may read',
+  );
   const problem = nameShapeProblem(request.name, PLATFORM);
   if (problem) throw new CommsError('USAGE', problem);
   const isDefault = request.source === undefined;
@@ -110,7 +127,11 @@ export interface RemovedAccount {
 const REMOVE_WAIT_MS = 60_000;
 
 export async function removeAccount(context: WhatsAppContext, request: { name: string }): Promise<RemovedAccount> {
-  refuseAnAgent(context, `remove ${request.name}`, 'removes a WhatsApp account');
+  refuseAnAgent(
+    context,
+    shellCommand(['agent-whatsapp', 'remove', request.name], context.platform),
+    'removes a WhatsApp account',
+  );
   const { account } = requireAccount(await context.config(), request.name);
   // The sync's lock: a sync running now finishes first, and its index is deleted with the rest; one that starts
   // after finds the account gone.

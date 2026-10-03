@@ -25,9 +25,11 @@ import {
   renderPrune,
   runCommand,
   runUpdateCheckChild,
+  type ShellCommand,
   type Streams,
   serverInstallChange,
   serverPruneChange,
+  shellCommand,
   terminalUpdateHooks,
   UPDATE_CHECK_CHILD_COMMAND,
   updateGateAtTerminal,
@@ -127,6 +129,7 @@ import {
 
 export interface CliDeps extends SlackContextOptions {
   streams?: Streams;
+  platform?: NodeJS.Platform | undefined;
   /** Command used to start the detached sign-in listener; the tests point it at the source entry. */
   listenerCommand?: ListenerEntry;
   /** Opens the browser. Injected so a test does not. */
@@ -185,6 +188,7 @@ const FINISH_TAKES_NO_APPROVAL = {
 export async function run(argv: readonly string[], deps: CliDeps = {}): Promise<number> {
   const streams: Streams = deps.streams ?? { stdout: process.stdout, stderr: process.stderr, stdin: process.stdin };
   const env = deps.env ?? process.env;
+  const platform = deps.platform ?? process.platform;
   const open = deps.openBrowser ?? openInBrowser;
   /** Best effort: the link is already printed, so a browser that will not start is not a failed sign-in. */
   const tryOpen = (url: string): void => {
@@ -406,7 +410,10 @@ configuration problem.`,
             );
             return readConfigurationToken(env, streams, {
               json: globals().json,
-              command: `agent-slack app update ${found.alias} --mode ${mode} --port ${port}`,
+              command: shellCommand(
+                ['agent-slack', 'app', 'update', found.alias, '--mode', mode, '--port', String(port)],
+                platform,
+              ),
             });
           },
           transport: { fetch: deps.appConfig, baseUrl: deps.slackBaseUrl },
@@ -438,7 +445,19 @@ configuration problem.`,
           askToken: () =>
             readConfigurationToken(env, streams, {
               json: globals().json,
-              command: `agent-slack app create${alias === undefined ? '' : ` ${alias}`} --mode ${mode} --port ${port}`,
+              command: shellCommand(
+                [
+                  'agent-slack',
+                  'app',
+                  'create',
+                  ...(alias === undefined ? [] : [alias]),
+                  '--mode',
+                  mode,
+                  '--port',
+                  String(port),
+                ],
+                platform,
+              ),
             }),
           transport: { fetch: deps.appConfig, baseUrl: deps.slackBaseUrl },
           audit: context.core.audit,
@@ -477,7 +496,12 @@ configuration problem.`,
    * post waiting for approval does. This replaced a typed challenge that refused agents outright: since 2026-09-25 an
    * agent may make these changes, once a person has approved each one.
    */
-  const changeAt = <T>(context: SlackContext, change: GatedChange<T>, flags: Options, command: string): Promise<T> =>
+  const changeAt = <T>(
+    context: SlackContext,
+    change: GatedChange<T>,
+    flags: Options,
+    command: ShellCommand,
+  ): Promise<T> =>
     gatedChangeAtTerminal(context.core, change, {
       approvalId: flags.approval === undefined ? undefined : String(flags.approval),
       env,
@@ -488,13 +512,11 @@ configuration problem.`,
     });
 
   /** The parts of a command line that were given, for the command an agent is told to run again. */
-  const given = (flags: Options, names: readonly ('port' | 'start')[]): string =>
-    names
-      .map((name) => {
-        if (name === 'start') return flags.start === true ? ' --start' : '';
-        return flags.port === undefined ? '' : ` --port ${String(flags.port)}`;
-      })
-      .join('');
+  const given = (flags: Options, names: readonly ('port' | 'start')[]): string[] =>
+    names.flatMap((name) => {
+      if (name === 'start') return flags.start === true ? ['--start'] : [];
+      return flags.port === undefined ? [] : ['--port', String(flags.port)];
+    });
 
   approvalOption(
     signInOptions(workspace.command('add [alias]'))
@@ -534,7 +556,20 @@ configuration problem.`,
           listenerCommand: deps.listenerCommand,
         }),
         flags,
-        `agent-slack workspace add ${alias} --mode ${mode} --client-id ${String(flags.clientId)}${given(flags, ['port', 'start'])}`,
+        shellCommand(
+          [
+            'agent-slack',
+            'workspace',
+            'add',
+            alias,
+            '--mode',
+            mode,
+            '--client-id',
+            String(flags.clientId),
+            ...given(flags, ['port', 'start']),
+          ],
+          platform,
+        ),
       );
       await presentSignIn(started, false, options, { start: flags.start === true, browser: flags.browser !== false });
     }),
@@ -612,7 +647,10 @@ configuration problem.`,
             context,
             planned.change,
             flags,
-            `agent-slack workspace mode ${alias} send --app-updated${given(flags, ['port', 'start'])}`,
+            shellCommand(
+              ['agent-slack', 'workspace', 'mode', alias, 'send', '--app-updated', ...given(flags, ['port', 'start'])],
+              platform,
+            ),
           );
           await presentSignIn(started, true, options, {
             start: flags.start === true,
@@ -634,7 +672,7 @@ configuration problem.`,
         context,
         removeWorkspaceChange(context, alias),
         flags,
-        `agent-slack workspace remove ${alias}`,
+        shellCommand(['agent-slack', 'workspace', 'remove', alias], platform),
       );
       writeResult(removed, output(), () => renderRemoved(alias), streams);
     }),
@@ -686,7 +724,17 @@ configuration problem.`,
           listenerCommand: deps.listenerCommand,
         }),
         flags,
-        `agent-slack workspace reauth ${alias}${mode === undefined ? '' : ` --mode ${mode}`}${given(flags, ['port', 'start'])}`,
+        shellCommand(
+          [
+            'agent-slack',
+            'workspace',
+            'reauth',
+            alias,
+            ...(mode === undefined ? [] : ['--mode', mode]),
+            ...given(flags, ['port', 'start']),
+          ],
+          platform,
+        ),
       );
       await presentSignIn(started, true, options, { start: flags.start === true, browser: flags.browser !== false });
     }),
@@ -716,9 +764,17 @@ configuration problem.`,
             context,
             policyChange(context, alias, wanted),
             flags,
-            `agent-slack workspace policy ${alias}${wanted.send ? ` --send ${wanted.send}` : ''}${
-              wanted.change ? ` --change ${wanted.change}` : ''
-            }`,
+            shellCommand(
+              [
+                'agent-slack',
+                'workspace',
+                'policy',
+                alias,
+                ...(wanted.send ? ['--send', wanted.send] : []),
+                ...(wanted.change ? ['--change', wanted.change] : []),
+              ],
+              platform,
+            ),
           );
       writeResult(result, output(), () => renderPolicies(result, options.color), streams);
     }),
@@ -938,15 +994,21 @@ configuration problem.`,
           choice,
           env,
           output: output(),
-          command: [
-            'agent-slack files download',
-            `--workspace ${workspace}`,
-            ...(request.fileIds === undefined ? [] : [`--file ${request.fileIds.join(' ')}`]),
-            ...(message === undefined ? [] : [`--message ${message.join(' ')}`]),
-            ...(message === undefined && channel !== undefined ? [`--channel ${channel}`] : []),
-            ...(request.since === undefined ? [] : [`--since ${request.since}`]),
-            ...(request.maxFiles === undefined ? [] : [`--max-files ${String(request.maxFiles)}`]),
-          ].join(' '),
+          command: shellCommand(
+            [
+              'agent-slack',
+              'files',
+              'download',
+              '--workspace',
+              workspace,
+              ...(request.fileIds === undefined ? [] : ['--file', ...request.fileIds]),
+              ...(message === undefined ? [] : ['--message', ...message]),
+              ...(message === undefined && channel !== undefined ? ['--channel', channel] : []),
+              ...(request.since === undefined ? [] : ['--since', request.since]),
+              ...(request.maxFiles === undefined ? [] : ['--max-files', String(request.maxFiles)]),
+            ],
+            platform,
+          ),
           approveCommand: 'agent-slack approve',
           render: (question) => renderFileDownloadQuestion(question, options.color),
           streams,
@@ -1309,23 +1371,21 @@ configuration problem.`,
          * operation, refused on one surface and not the other. An approval from the tool is claimed here with
          * `--approval`, and one from here by the tool. `--print` and `--client json` write nothing, and ask nobody.
          */
-        /*
-         * The command to run again, word for word, with nothing quoted: every word is a fixed one, a choice Commander
-         * checked, a server name the change refuses unless it is plain (`checkServerName`), or a workspace it refuses
-         * unless it is connected — and so named by the name grammar. None of it is used unless all of that held.
-         */
-        const again = [
-          'agent-slack',
-          'mcp',
-          'install',
-          '--client',
-          String(flags.client),
-          ...(name !== undefined && name !== 'slack' ? ['--name', name] : []),
-          ...(pinned !== undefined ? ['--workspace', pinned] : []),
-          ...(launcher !== undefined ? ['--launcher', launcher] : []),
-          ...(flags.verify === false ? ['--no-verify'] : []),
-          ...(flags.force === true ? ['--force'] : []),
-        ].join(' ');
+        const again = shellCommand(
+          [
+            'agent-slack',
+            'mcp',
+            'install',
+            '--client',
+            String(flags.client),
+            ...(name !== undefined && name !== 'slack' ? ['--name', name] : []),
+            ...(pinned !== undefined ? ['--workspace', pinned] : []),
+            ...(launcher !== undefined ? ['--launcher', launcher] : []),
+            ...(flags.verify === false ? ['--no-verify'] : []),
+            ...(flags.force === true ? ['--force'] : []),
+          ],
+          platform,
+        );
         const result = await changeAt(
           context,
           serverInstallChange(
@@ -1379,7 +1439,10 @@ configuration problem.`,
             SLACK_MCP,
           ),
           flags,
-          `agent-slack mcp prune${flags.includePrinted === true ? ' --include-printed' : ''}`,
+          shellCommand(
+            ['agent-slack', 'mcp', 'prune', ...(flags.includePrinted === true ? ['--include-printed'] : [])],
+            platform,
+          ),
         );
         writeResult(result, output(), () => renderPrune(result, options.color), streams);
       }),

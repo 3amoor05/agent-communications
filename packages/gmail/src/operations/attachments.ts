@@ -550,6 +550,7 @@ export async function downloadAttachments(
     approveCommand: APPROVE_COMMAND,
     surface: context.surface,
     env: context.env,
+    signal: options.signal,
   });
   const files: DownloadedFile[] = [];
   // The same file twice — the same name and the same bytes — is written once. The same bytes under another name are

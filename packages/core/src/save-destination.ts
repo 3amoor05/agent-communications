@@ -10,7 +10,16 @@ import {
   type ListedFile,
   type RecordedSaveAnswer,
 } from './approvals.ts';
-import { agentMarker, canPrompt, defaultStreams, paint, type Streams } from './cli-runtime.ts';
+import {
+  agentMarker,
+  canPrompt,
+  defaultStreams,
+  inlineCommand,
+  paint,
+  type ShellCommand,
+  type Streams,
+  withWords,
+} from './cli-runtime.ts';
 import type { ChangePolicy } from './config.ts';
 import type { Core } from './core.ts';
 import { CommsError } from './errors.ts';
@@ -997,7 +1006,7 @@ export interface DownloadAtTerminalOptions<Q extends DestinationQuestion> {
   output: { json?: boolean | undefined; color: boolean };
   noInput?: boolean | undefined;
   /** The command to run again, for the hint an agent gets: `agent-gmail attachments download … --inbox acme/gmail`. */
-  command: string;
+  command: string | ShellCommand;
   /** The channel's command that answers a question at a terminal: `agent-gmail approve`. */
   approveCommand: string;
   /** The question with its files, as a person reads it. */
@@ -1038,11 +1047,15 @@ export async function downloadAtTerminal<Q extends DestinationQuestion>(
   if (!personAtTerminal(env, streams, { json: options.output.json, noInput: options.noInput })) {
     // The question is what the agent has to show the person, so it is printed, not only tucked into the envelope.
     if (options.output.json !== true) streams.stdout.write(`${options.render(question)}\n\n`);
+    const runWith = (...words: string[]) =>
+      typeof options.command === 'string'
+        ? `\`${options.command} ${words.join(' ')}\``
+        : inlineCommand(withWords(options.command, ...words));
     throw new CommsError('APPROVAL_PENDING', 'nothing was saved: where to save the files is the person’s to say', {
       hint:
         question.policy === 'chat'
-          ? `Show the person the question and the files. Once they answer, run \`${options.command} --to <downloads|current|folder> --choice ${question.choiceId}\`.`
-          : `The change policy is confirm: ask the person to run \`${options.approveCommand} ${question.choiceId}\` in their own terminal and answer there. Then run \`${options.command} --choice ${question.choiceId}\`.`,
+          ? `Show the person the question and the files. Once they answer, run ${runWith('--to', '<downloads|current|folder>', '--choice', question.choiceId)}.`
+          : `The change policy is confirm: ask the person to run \`${options.approveCommand} ${question.choiceId}\` in their own terminal and answer there. Then run ${runWith('--choice', question.choiceId)}.`,
       details: { ...(question as unknown as Record<string, unknown>) },
     });
   }

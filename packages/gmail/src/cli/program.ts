@@ -9,6 +9,7 @@ import {
   canPrompt,
   colorEnabled,
   commandPathOf,
+  commandText,
   DOWNLOAD_CLAIM,
   downloadAtTerminal,
   EXIT_CODES,
@@ -26,13 +27,16 @@ import {
   runCommand,
   runUpdateCheckChild,
   type ServerInstallResult,
+  type ShellCommand,
   type Streams,
   serverInstallChange,
   serverPruneChange,
+  shellCommand,
   terminalUpdateHooks,
   toCommsError,
   UPDATE_CHECK_CHILD_COMMAND,
   updateGateAtTerminal,
+  withWords,
   writeResult,
 } from '@agentcomms/core';
 import { Command, CommanderError, Option } from 'commander';
@@ -129,6 +133,7 @@ import {
 
 export interface CliDeps extends GmailContextOptions {
   streams?: Streams;
+  platform?: NodeJS.Platform | undefined;
   /** Command used to start the detached sign-in listener; the tests point it at the source entry. */
   listenerCommand?: { command: string; args: string[] };
 }
@@ -148,6 +153,7 @@ type Options = Record<string, unknown>;
 export async function run(argv: readonly string[], deps: CliDeps = {}): Promise<number> {
   const streams: Streams = deps.streams ?? { stdout: process.stdout, stderr: process.stderr, stdin: process.stdin };
   const env = deps.env ?? process.env;
+  const platform = deps.platform ?? process.platform;
   const program = new Command();
   let exitCode = 0;
   let ran = false;
@@ -362,7 +368,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
    * — `--rename`, `--dir`, `--revoke` — and running it again prepares nothing new: it claims the approval for the
    * same change. `setup` leaves out its `--mcp-approval` too, the second approval it can carry.
    */
-  const again = (approvalFlags: readonly string[] = ['--approval']): string => {
+  const again = (approvalFlags: readonly string[] = ['--approval']): ShellCommand => {
     const kept: string[] = [];
     for (let index = 0; index < argv.length; index++) {
       const arg = argv[index] ?? '';
@@ -373,10 +379,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
       if (approvalFlags.some((flag) => arg.startsWith(`${flag}=`))) continue;
       kept.push(arg);
     }
-    // Quoted for a POSIX shell wherever it holds anything a shell would read differently, `~` included: a path the
-    // person quoted to keep it literal must stay literal when it is pasted back.
-    const quoted = kept.map((arg) => (/^[\w@%+=:,./-]+$/.test(arg) ? arg : `'${arg.replaceAll("'", "'\\''")}'`));
-    return ['agent-gmail', ...quoted].join(' ');
+    return shellCommand(['agent-gmail', ...kept], platform);
   };
 
   /**
@@ -475,14 +478,20 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
     }
     const pin = await pinFor(client, connected.alias);
     // `mcp install` with what `setup` was given: the request `setupRegistration` makes, and so the same change.
-    const install = [
-      'agent-gmail mcp install --client',
-      client,
-      ...(intent.launcher ? ['--launcher', intent.launcher] : []),
-      ...(pin ? ['--inbox', pin] : []),
-      // Without it the claim's own preflight refuses the entry the prepared change replaces: not the same change.
-      ...(replace ? ['--force'] : []),
-    ].join(' ');
+    const install = shellCommand(
+      [
+        'agent-gmail',
+        'mcp',
+        'install',
+        '--client',
+        client,
+        ...(intent.launcher ? ['--launcher', intent.launcher] : []),
+        ...(pin ? ['--inbox', pin] : []),
+        // Without it the claim's own preflight refuses the entry the prepared change replaces: not the same change.
+        ...(replace ? ['--force'] : []),
+      ],
+      platform,
+    );
     const person =
       agentMarker(env) === null &&
       canPrompt(env, streams, { json: globalOptions.json, noInput: globalOptions.noInput });
@@ -513,7 +522,8 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
         });
         if (outcome.status === 'approval-required') {
           const { prepared } = outcome;
-          const claim = `${install} --approval ${prepared.approvalId}`;
+          const claimCommand = withWords(install, '--approval', prepared.approvalId);
+          const claim = commandText(claimCommand);
           softExit = EXIT_CODES.APPROVAL;
           return {
             client,
@@ -524,7 +534,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
             preview: prepared.preview,
             expiresAt: prepared.expiresAt,
             claim,
-            hint: approvalHint(prepared, claim, 'agent-gmail approve'),
+            hint: approvalHint(prepared, claimCommand, 'agent-gmail approve'),
           };
         }
         result = outcome.result;
@@ -1008,13 +1018,19 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
           env,
           output: output(),
           noInput: globalOptions.noInput,
-          command: [
-            'agent-gmail attachments download',
-            ...messageIds,
-            `--inbox ${inbox}`,
-            ...(part === undefined ? [] : [`--part ${part}`]),
-            ...(options.maxFiles === undefined ? [] : [`--max-files ${String(options.maxFiles)}`]),
-          ].join(' '),
+          command: shellCommand(
+            [
+              'agent-gmail',
+              'attachments',
+              'download',
+              ...messageIds,
+              '--inbox',
+              inbox,
+              ...(part === undefined ? [] : ['--part', part]),
+              ...(options.maxFiles === undefined ? [] : ['--max-files', String(options.maxFiles)]),
+            ],
+            platform,
+          ),
           approveCommand: 'agent-gmail approve',
           render: (question) => renderDownloadQuestion(question, globalOptions.color),
           streams,
@@ -1955,7 +1971,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
                   needs: `a person's approval to register the server with ${which}`,
                   hint: approvalHint(
                     prepared,
-                    `${againForMcp()} --mcp-approval ${prepared.approvalId}`,
+                    withWords(againForMcp(), '--mcp-approval', prepared.approvalId),
                     'agent-gmail approve',
                   ),
                   approvalId: prepared.approvalId,
@@ -2267,7 +2283,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
               output: { json: globalOptions.json || globalOptions.noInput, color: globalOptions.color },
               // The client picked from the list is named in the command to run again: `--mcp-approval` is claimed
               // only for a client named with `--mcp-client`, and refused without one.
-              command: named ? againForMcp() : `${againForMcp()} --mcp-client ${which}`,
+              command: named ? againForMcp() : withWords(againForMcp(), '--mcp-client', which),
               approvalFlag: '--mcp-approval',
               approveCommand: 'agent-gmail approve',
               answered: named === '',

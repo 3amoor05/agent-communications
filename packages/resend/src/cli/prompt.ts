@@ -1,6 +1,6 @@
 import { createInterface } from 'node:readline/promises';
 import { Writable } from 'node:stream';
-import { agentMarker, CommsError, canPrompt, type Streams } from '@agentcomms/core';
+import { agentMarker, CommsError, canPrompt, inlineCommand, type ShellCommand, type Streams } from '@agentcomms/core';
 
 /**
  * Asking a person at the terminal: a question, and a key that is not shown as it is typed.
@@ -69,7 +69,7 @@ const KEY_SHAPE = /^re_[A-Za-z0-9_]{8,200}$/;
 export async function readApiKey(
   env: NodeJS.ProcessEnv,
   streams: Streams,
-  options: { json: boolean; command: string },
+  options: { json: boolean; command: ShellCommand },
 ): Promise<string> {
   const marker = agentMarker(env);
   if (marker) {
@@ -77,7 +77,7 @@ export async function readApiKey(
       'AUTH_REQUIRED',
       'a Resend API key is added by a person at their own terminal, not by an agent',
       {
-        hint: `Ask the user to run \`${options.command}\` in their own terminal. Never paste a key into a chat: the transcript keeps it.`,
+        hint: `Ask the user to run ${inlineCommand(options.command)} in their own terminal. Never paste a key into a chat: the transcript keeps it.`,
         details: { marker },
       },
     );
@@ -86,7 +86,7 @@ export async function readApiKey(
   if (key === '') {
     if (!canPrompt(env, streams, { json: options.json })) {
       throw new CommsError('AUTH_REQUIRED', 'a Resend API key is needed, and there is no terminal to ask for it', {
-        hint: `A person runs \`${options.command}\` in a terminal, which asks for the key without showing it, or sets ${KEY_ENV} for that one command.`,
+        hint: `A person runs ${inlineCommand(options.command)} in a terminal, which asks for the key without showing it, or sets ${KEY_ENV} for that one command.`,
       });
     }
     key = (

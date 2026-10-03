@@ -20,10 +20,12 @@ import {
   renderInstall,
   renderPrune,
   runCommand,
+  type ShellCommand,
   type Streams,
   type SupportedClient,
   serverInstallChange,
   serverPruneChange,
+  shellCommand,
   updateGateAtTerminal,
   writeResult,
 } from '@agentcomms/core';
@@ -439,7 +441,12 @@ a macOS dialog may be waiting) · 77 permission needed (macOS privacy) · 78 con
       }),
     );
 
-  const changeAt = <T>(context: WhatsAppContext, change: GatedChange<T>, flags: Options, command: string): Promise<T> =>
+  const changeAt = <T>(
+    context: WhatsAppContext,
+    change: GatedChange<T>,
+    flags: Options,
+    command: ShellCommand,
+  ): Promise<T> =>
     gatedChangeAtTerminal(context.core, change, {
       approvalId: flags.approval === undefined ? undefined : String(flags.approval),
       env,
@@ -514,24 +521,25 @@ a macOS dialog may be waiting) · 77 permission needed (macOS privacy) · 78 con
         const name = flags.name as string | undefined;
         /*
          * Registering a server is a change a person approves, and this is the change `comms_server_install` makes
-         * with `channel: "whatsapp"`: one change, so an approval prepared by either is claimed by the other. Every word
-         * of the command below is fixed, a choice Commander checked, a server name the change refuses unless it is
-         * plain, or an account it refuses unless it is connected — so none of it needs quoting.
+         * with `channel: "whatsapp"`: one change, so an approval prepared by either is claimed by the other.
          */
         // The pin is checked against `config.json` by core, so the spike's accounts have to be there first.
         await context.migration();
-        const again = [
-          'agent-whatsapp',
-          'mcp',
-          'install',
-          '--client',
-          String(flags.client),
-          ...(name !== undefined && name !== 'whatsapp' ? ['--name', name] : []),
-          ...(pinned !== undefined ? ['--account', pinned] : []),
-          ...(launcher !== undefined ? ['--launcher', launcher] : []),
-          ...(flags.verify === false ? ['--no-verify'] : []),
-          ...(flags.force === true ? ['--force'] : []),
-        ].join(' ');
+        const again = shellCommand(
+          [
+            'agent-whatsapp',
+            'mcp',
+            'install',
+            '--client',
+            String(flags.client),
+            ...(name !== undefined && name !== 'whatsapp' ? ['--name', name] : []),
+            ...(pinned !== undefined ? ['--account', pinned] : []),
+            ...(launcher !== undefined ? ['--launcher', launcher] : []),
+            ...(flags.verify === false ? ['--no-verify'] : []),
+            ...(flags.force === true ? ['--force'] : []),
+          ],
+          context.platform,
+        );
         const result = await changeAt(
           context,
           serverInstallChange(
@@ -583,7 +591,10 @@ a macOS dialog may be waiting) · 77 permission needed (macOS privacy) · 78 con
             WHATSAPP_MCP,
           ),
           flags,
-          `agent-whatsapp mcp prune${flags.includePrinted === true ? ' --include-printed' : ''}`,
+          shellCommand(
+            ['agent-whatsapp', 'mcp', 'prune', ...(flags.includePrinted === true ? ['--include-printed'] : [])],
+            context.platform,
+          ),
         );
         writeResult(result, output(), () => renderPrune(result, options.color), streams);
       }),

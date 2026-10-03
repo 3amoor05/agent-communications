@@ -44,6 +44,7 @@ export class WhatsAppContext {
   readonly env: NodeJS.ProcessEnv;
   readonly now: () => Date;
   readonly surface: 'cli' | 'mcp';
+  readonly platform: NodeJS.Platform;
   readonly core: Core;
   readonly lists: ChatListStore;
   /** The name a pinned server was started for, as given. */
@@ -61,11 +62,12 @@ export class WhatsAppContext {
     this.env = options.env ?? process.env;
     this.now = options.now ?? (() => new Date());
     this.surface = options.surface ?? 'cli';
+    this.platform = options.platform ?? process.platform;
     this.core = openCore({ env: this.env, now: this.now });
     this.lists = new ChatListStore(this.core.paths.configDir);
     this.pinned = options.account;
     this.#log = options.log;
-    this.#source = { io: options.sourceIo, timeoutMs: options.sourceTimeoutMs, platform: options.platform };
+    this.#source = { io: options.sourceIo, timeoutMs: options.sourceTimeoutMs, platform: this.platform };
   }
 
   /** The spike's accounts moved in, once per process; what happened, when there was a spike file to move. */

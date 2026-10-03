@@ -84,6 +84,21 @@ test('add and remove are a person’s: refused to an agent, before anything is r
   assert.deepEqual(Object.keys(harness.coreConfig().accounts), [ACCOUNT], 'still there');
 });
 
+test('the command an agent is asked to hand over is quoted for the named POSIX or Windows platform (CUE-398)', async () => {
+  const harness = await newHarness({ env: { CLAUDECODE: '1' } });
+  const posix = await harness.cli(['add', 'two words', '--source', '/tmp/store path', '--json'], {
+    platform: 'darwin',
+  });
+  assert.match(String(posix.json().error?.hint), /agent-whatsapp add 'two words' --source '\/tmp\/store path'/);
+
+  const windows = await harness.cli(['add', 'client%name', '--source', '/tmp/store', '--json'], {
+    platform: 'win32',
+  });
+  const hint = String(windows.json().error?.hint);
+  assert.match(hint, /\["agent-whatsapp","add","client\\u0025name","--source","\/tmp\/store"\]/);
+  assert.match(hint, /cannot be quoted the same way for cmd\.exe and for PowerShell/);
+});
+
 test('a version-1 configuration gets no WhatsApp account until its names are migrated', async () => {
   const harness = await newHarness();
   writeFileSync(
