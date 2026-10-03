@@ -641,6 +641,30 @@ test('a download command with no common Windows quoting is shown as words, not a
   assert.match(thrown.hint ?? '', /cannot be quoted the same way for cmd\.exe and for PowerShell/);
 });
 
+test('the answer to fill in follows the printed line as written, on Windows and elsewhere: never quoted as a word', async () => {
+  for (const platform of ['win32', 'darwin'] as const) {
+    const { core, env, home } = machine();
+    const { download } = recorder(core, env, home);
+    const thrown = await downloadAtTerminal({
+      core,
+      download,
+      env,
+      output: { color: false },
+      command: shellCommand(['agent-gmail', 'attachments', 'download', 'm1', '--inbox', 'work'], platform),
+      approveCommand: 'agent-gmail approve',
+      render,
+      streams: terminal([], false).streams,
+    }).catch((error: unknown) => error);
+    assert.ok(thrown instanceof CommsError);
+    // Quoted as a word, the placeholder would read as the value itself; on Windows its `<` and `|` would leave no line.
+    assert.match(
+      thrown.hint ?? '',
+      /run `agent-gmail attachments download m1 --inbox work --to <downloads\|current\|folder> --choice ap_\w+`/,
+      platform,
+    );
+  }
+});
+
 test('under confirm, an agent is told the person answers at their own terminal, and to come back with the id alone', async () => {
   const { core, env, home } = machine();
   const { download } = recorder(core, env, home, 'confirm');

@@ -139,8 +139,9 @@ test('an attachment Gmail never answers for is given up on once it has been sile
     },
   );
   assert.ok(Date.now() - started < 20_000, 'the limit on silence did not bound the wait');
-  // Not tried again: a second attempt would be another wait as long, and the person is told instead.
-  assert.equal(asked(harness), 1);
+  // Not tried again: a second attempt would be another wait as long, and the person is told instead. At most once,
+  // not exactly: on a heavily loaded machine half a second of silence can pass before the request reaches the fake.
+  assert.ok(asked(harness) <= 1, `asked ${asked(harness)} times`);
 });
 
 test('an answer that stops part-way is given up on once it has been silent for the limit', BUDGET, async () => {

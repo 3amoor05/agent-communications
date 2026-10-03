@@ -1047,10 +1047,18 @@ export async function downloadAtTerminal<Q extends DestinationQuestion>(
   if (!personAtTerminal(env, streams, { json: options.output.json, noInput: options.noInput })) {
     // The question is what the agent has to show the person, so it is printed, not only tucked into the envelope.
     if (options.output.json !== true) streams.stdout.write(`${options.render(question)}\n\n`);
-    const runWith = (...words: string[]) =>
-      typeof options.command === 'string'
-        ? `\`${options.command} ${words.join(' ')}\``
-        : inlineCommand(withWords(options.command, ...words));
+    /*
+     * What follows the command is the agent's to fill in — `--to <downloads|current|folder>` stands for the person's
+     * answer — so it goes after the printed line as written, never quoted as a word: quoted, the placeholder reads as
+     * the value itself, and on Windows its `<` and `|` would leave no line to print at all. A command whose own words
+     * cannot be printed safely is still shown as its words in JSON, with these after them.
+     */
+    const runWith = (...words: string[]) => {
+      if (typeof options.command === 'string') return `\`${options.command} ${words.join(' ')}\``;
+      return options.command.line === null
+        ? inlineCommand(withWords(options.command, ...words))
+        : `\`${options.command.line} ${words.join(' ')}\``;
+    };
     throw new CommsError('APPROVAL_PENDING', 'nothing was saved: where to save the files is the person’s to say', {
       hint:
         question.policy === 'chat'
