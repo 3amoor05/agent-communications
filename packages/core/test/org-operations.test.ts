@@ -1308,6 +1308,45 @@ test('turning other addresses off applies at once, even when the rest of the upd
   assert.equal((await record(m))?.forOtherAddresses, false);
 });
 
+test('org remove whose secret store cannot be opened removes nothing, and says why', async () => {
+  const m = machine();
+  writeProfile(m, profile());
+  await add(m);
+  const first = await gatedChange(m.core, orgRemoveChange(m.core, { organisation: 'acme' }, options(m)), {
+    surface: 'mcp',
+  });
+  const { approvalId } = (first as { prepared: PreparedChange }).prepared;
+  const secrets = m.core.secrets.bind(m.core);
+  m.core.secrets = async () => {
+    throw new CommsError('SECRET_STORE_UNAVAILABLE', 'the keychain module is missing');
+  };
+  await assert.rejects(
+    gatedChange(m.core, orgRemoveChange(m.core, { organisation: 'acme' }, options(m)), { surface: 'mcp', approvalId }),
+    is('SECRET_STORE_UNAVAILABLE', /could not be opened, so nothing was removed/),
+  );
+  m.core.secrets = secrets;
+  assert.ok(await record(m), 'the record is kept');
+  assert.equal((await config(m)).clients['acme-1']?.organisation, 'acme', 'and the row');
+  assert.equal(await storedSecret(m, 'acme-1'), SECRET_A, 'and its secret');
+});
+
+test('org remove names every secret it could not delete, once the rows are gone', async () => {
+  const m = machine();
+  writeProfile(m, profile());
+  await add(m);
+  const store = await m.core.secrets('file');
+  const remove0 = store.delete.bind(store);
+  store.delete = async (ref) => {
+    if (ref === clientSecretRef('acme-1')) throw new Error('the keychain is locked');
+    return remove0(ref);
+  };
+  const { result } = await remove(m);
+  store.delete = remove0;
+  assert.deepEqual(result.removed, ['acme-1']);
+  assert.deepEqual(result.secretsLeft, [clientSecretRef('acme-1')]);
+  assert.equal((await config(m)).organisations, undefined);
+});
+
 test('an earlier client marked again stays marked: its project id comes back with the mark, so nothing flips', async () => {
   const m = machine();
   writeProfile(m, profile());

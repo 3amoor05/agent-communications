@@ -11,7 +11,7 @@ import {
   type StoreKind,
 } from '../config.ts';
 import type { Core } from '../core.ts';
-import { CommsError } from '../errors.ts';
+import { CommsError, toCommsError } from '../errors.ts';
 import { withCredentialsLock } from '../lock.ts';
 import { organisationProblem } from '../name-grammar.ts';
 import { chooseSecretStore, clientSecretRef, gmailClientRow, writeSecretWithRestore } from '../oauth-client-records.ts';
@@ -37,7 +37,7 @@ import {
   unmanagedSlackAccounts,
 } from '../organisations.ts';
 import { writeOutcome } from '../reconcile.ts';
-import type { KeyringModule } from '../secrets.ts';
+import type { KeyringModule, SecretStore } from '../secrets.ts';
 
 /**
  * `agentcomms org add | list | show | update | remove` and `comms_org_add`, `comms_orgs_list`, `comms_org_show`,
@@ -1165,6 +1165,30 @@ export function orgRemoveChange(
         // The final check of identity and use, under the lock: a mailbox connected or a row changed since the plan is
         // another configuration, and nothing is removed from it.
         if (inputsOf(await core.config.load()) !== inputs) throw changedWhileRunning();
+        /*
+         * The store is opened before anything is removed. Opened after the config write, a store that could not be
+         * opened — a keychain module missing, a locked keychain — threw with the rows already gone and their secrets
+         * still stored, and the result that names what is left behind was never returned. Refused here, nothing has
+         * changed; once open, each deletion that fails is named in `secretsLeft`.
+         */
+        let secrets: SecretStore | null = null;
+        if (removal.remove.length > 0) {
+          try {
+            secrets = await core.secrets();
+          } catch (error) {
+            const base = toCommsError(error);
+            throw new CommsError(
+              base.code,
+              `the secret store could not be opened, so nothing was removed: ${base.message}`,
+              {
+                hint:
+                  base.hint ??
+                  'Run `agentcomms doctor` to see what is wrong with the secret store, then run this again.',
+                cause: error,
+              },
+            );
+          }
+        }
         try {
           await core.config.update((current) => {
             if (inputsOf(current) !== inputs) throw changedWhileRunning();
@@ -1180,14 +1204,12 @@ export function orgRemoveChange(
           if (gone !== 'present') throw error;
         }
         const secretsLeft: string[] = [];
-        if (removal.remove.length > 0) {
-          const secrets = await core.secrets();
-          for (const { name } of removal.remove) {
-            try {
-              await secrets.delete(clientSecretRef(name));
-            } catch {
-              secretsLeft.push(clientSecretRef(name));
-            }
+        for (const { name } of removal.remove) {
+          try {
+            if (secrets === null) throw new Error('no secret store');
+            await secrets.delete(clientSecretRef(name));
+          } catch {
+            secretsLeft.push(clientSecretRef(name));
           }
         }
         await core.audit.append({
