@@ -1,3 +1,4 @@
+import type { ApprovalRecord, ApprovalState } from '../approvals.ts';
 import type { GatedChange } from '../change-flow.ts';
 import { CHANNELS, type Channel, channelLabel, channelServer, requireChannelManifest } from '../channel-servers.ts';
 import { accountNoun, listed, pinOption } from '../channel-words.ts';
@@ -5,6 +6,7 @@ import { inlineCommand, type ShellCommand, shellCommand } from '../cli-runtime.t
 import type { Config } from '../config.ts';
 import type { Core } from '../core.ts';
 import { CommsError, toCommsError } from '../errors.ts';
+import { APPROVAL_ID_PATTERN } from '../ids.ts';
 import { type RegisteredServer, scanRegisteredServers, type UnreadableConfig } from '../mcp-clients.ts';
 import {
   clientCliSearch,
@@ -830,20 +832,24 @@ export function updateChange(
  * and it is usually claimed minutes later; meanwhile another session, or the person at a terminal, may have applied
  * the update. Then nothing is behind, calling again applies nothing, and "applies at once" read as an update about to
  * happen. So this says what is so: there is nothing to apply — nothing behind at all, or nothing that can be updated
- * from here — and the approval was not used, with what had become of it when the store says.
+ * from here — and the approval was not used, with what had become of it.
+ *
+ * The store is asked as it is. Its `get` answers null for an approval it does not have, and throws for anything else:
+ * an id that is not one, a record it cannot read or parse. Every one of those was caught and said as "not used" with
+ * nothing more, so a corrupt approval file or a permissions problem read as an approval that was simply not there.
+ * Now a record that cannot be read goes up as itself, as it would from any other call that reads an approval, and an
+ * id that is not one is said to be that.
  */
 async function nothingToApply(core: Core, approvalId: string, planned: Planned): Promise<CommsError> {
-  // A malformed id is refused by the store before it looks; that says nothing about the update, so it is left unsaid.
-  const record = await core.approvals.get(approvalId).catch(() => null);
-  const became =
-    record?.state === 'expired'
-      ? ` (it had expired at ${record.expiresAt})`
-      : record?.state === 'used'
-        ? ' (it had been spent already)'
-        : record?.state === 'revoked'
-          ? ' (it had been revoked)'
-          : '';
-  const unused = `so there is nothing to apply; the approval ${approvalId} was not used${became}`;
+  // Refused before the store is asked, in a change's words: the store's own refusal of it begins "nothing was sent".
+  if (!APPROVAL_ID_PATTERN.test(approvalId)) {
+    return new CommsError('USAGE', `nothing was changed: "${approvalId}" is not an approval id`, {
+      hint: 'An approval id is the `approvalId` a call that needs approval returns, and nothing here needs one: a check — comms_update with `check`, or `agentcomms update --check` at a terminal — shows what is behind.',
+      details: { approvalId },
+    });
+  }
+  const record = await core.approvals.get(approvalId);
+  const unused = `so there is nothing to apply; the approval ${approvalId} was not used (${whatBecameOf(record)})`;
   const details = { approvalId, ...(record ? { state: record.state } : {}) };
   if (planned.nothingBehind) {
     return new CommsError('USAGE', `nothing was changed: nothing is behind the latest release, ${unused}`, {
@@ -855,6 +861,29 @@ async function nothingToApply(core: Core, approvalId: string, planned: Planned):
     hint: 'Each is left for a person: a check — comms_update with `check`, or `agentcomms update --check` at a terminal — lists them, with why and what to run. The same call without the approval reports them too, and changes nothing.',
     details,
   });
+}
+
+/**
+ * What had become of an approval, for `nothingToApply`: none at all, or each state an approval can be in, by name.
+ *
+ * A record, so that a state added to the store is a type error here rather than a refusal that says nothing. The
+ * send states are here too: any approval's id can be handed to an update, a send's among them, and this reads the
+ * record before anything looks at its kind.
+ */
+function whatBecameOf(record: ApprovalRecord | null): string {
+  if (record === null) return 'there is no approval by that id';
+  const states: Record<ApprovalState, string> = {
+    pending: `it was still waiting to be approved, and lapses at ${record.expiresAt}`,
+    approved: `it had been approved, and lapses unspent at ${record.expiresAt}`,
+    sending: 'it is an approval to send, and that send is under way',
+    used: 'it had been spent already',
+    failed: 'it had been spent on a send that failed',
+    unknown: 'it had been spent on a send whose outcome was never recorded',
+    expired: `it had expired at ${record.expiresAt}`,
+    revoked: 'it had been revoked',
+  };
+  // A record written by a later version, or by hand, can hold a state this one has never heard of: named as it is.
+  return states[record.state] ?? `it is ${JSON.stringify(record.state)}, a state this version does not know`;
 }
 
 /** The product a runtime of `packageName` is installed as: the channel whose package it is. */

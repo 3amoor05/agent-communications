@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { delimiter, dirname, join } from 'node:path';
@@ -1023,9 +1023,16 @@ test('an approval is good only for the update it showed: a newer release, or ano
   }
 });
 
-/** The refusal of an approval handed to an update with nothing left to apply, as CUE-303 asked for it. */
-const nothingBehind = (approvalId: unknown, became = '') =>
-  `nothing was changed: nothing is behind the latest release, so there is nothing to apply; the approval ${approvalId} was not used${became}`;
+/**
+ * The refusal of an approval handed to an update with nothing left to apply, as CUE-303 asked for it, with what had
+ * become of the approval: always said, whatever it was.
+ */
+const nothingBehind = (approvalId: unknown, became: string) =>
+  `nothing was changed: nothing is behind the latest release, so there is nothing to apply; the approval ${approvalId} was not used (${became})`;
+
+/** What the refusal says of an approval still waiting for its yes. */
+const waiting = async (core: Core, approvalId: unknown) =>
+  `it was still waiting to be approved, and lapses at ${(await core.approvals.get(String(approvalId)))?.expiresAt}`;
 
 test('an approval for an update applied meanwhile says nothing is left to apply, never that calling again applies it (CUE-303)', async () => {
   /*
@@ -1047,16 +1054,16 @@ test('an approval for an update applied meanwhile says nothing is left to apply,
 
     const late = await refused('comms_update', { noVerify: true, approvalId: stale });
     assert.equal(late.code, 'USAGE');
-    assert.equal(late.message, nothingBehind(stale));
+    assert.equal(late.message, nothingBehind(stale, await waiting(m.core, stale)));
     assert.doesNotMatch(String(late.hint), /applies at once/);
     assert.match(String(late.hint), /comms_update with `check`, or `agentcomms update --check` at a terminal/);
     assert.equal((await m.core.approvals.get(stale))?.state, 'pending', 'the approval was claimed');
 
     // What had become of it, when that is why it could not have been used anyway.
     const again = await refused('comms_update', { noVerify: true, approvalId: other.approvalId });
-    assert.equal(again.message, nothingBehind(other.approvalId, ' (it had been spent already)'));
+    assert.equal(again.message, nothingBehind(other.approvalId, 'it had been spent already'));
     const revoked = await refused('comms_update', { noVerify: true, approvalId: refusedByPerson });
-    assert.equal(revoked.message, nothingBehind(refusedByPerson, ' (it had been revoked)'));
+    assert.equal(revoked.message, nothingBehind(refusedByPerson, 'it had been revoked'));
   } finally {
     await close();
   }
@@ -1068,9 +1075,102 @@ test('an approval for an update applied meanwhile says nothing is left to apply,
     const record = await later.approvals.get(stale);
     assert.equal(record?.state, 'expired');
     const late = await expired.refused('comms_update', { approvalId: stale });
-    assert.equal(late.message, nothingBehind(stale, ` (it had expired at ${record?.expiresAt})`));
+    assert.equal(late.message, nothingBehind(stale, `it had expired at ${record?.expiresAt}`));
   } finally {
     await expired.close();
+  }
+});
+
+test('an approval handed to an update with nothing to apply is named in every state it can be in, and when there is none', async () => {
+  /*
+   * The refusal said what had become of the approval for expired, spent and revoked, and nothing for the rest — a
+   * failed or unknown send, one under way, one still waiting or approved, and an id with no approval at all, which all
+   * read the same. Any approval's id can be handed in, a send's among them, so each state is written into the record.
+   */
+  const m = machine();
+  cursor(m, { gmail: npx('gmail', OLD, ['--inbox', 'acme/gmail']) });
+  const { ok, refused, close } = await connect(m, { update: fakes(m) });
+  try {
+    const handed = String((await ok('comms_update', { noVerify: true })).approvalId);
+    const other = await ok('comms_update', { noVerify: true });
+    assert.equal(
+      ((await ok('comms_update', { noVerify: true, approvalId: other.approvalId })).result as Item).status,
+      'updated',
+    );
+    const file = join(m.core.approvals.directory, `${handed}.json`);
+    const stored = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
+    const lapses = String(stored.expiresAt);
+    const said: Record<string, string> = {
+      pending: `it was still waiting to be approved, and lapses at ${lapses}`,
+      approved: `it had been approved, and lapses unspent at ${lapses}`,
+      sending: 'it is an approval to send, and that send is under way',
+      used: 'it had been spent already',
+      failed: 'it had been spent on a send that failed',
+      unknown: 'it had been spent on a send whose outcome was never recorded',
+      expired: `it had expired at ${lapses}`,
+      revoked: 'it had been revoked',
+    };
+    for (const [state, words] of Object.entries(said)) {
+      // `updatedAt` now, so that a send under way is not taken for one whose process died.
+      writeFileSync(file, JSON.stringify({ ...stored, state, updatedAt: new Date().toISOString() }));
+      const late = await refused('comms_update', { noVerify: true, approvalId: handed });
+      assert.equal(late.code, 'USAGE', state);
+      assert.equal(late.message, nothingBehind(handed, words), state);
+    }
+    // A state this version has never heard of — written by a later one, or by hand — is named as it is.
+    writeFileSync(file, JSON.stringify({ ...stored, state: 'mislaid' }));
+    assert.equal(
+      (await refused('comms_update', { noVerify: true, approvalId: handed })).message,
+      nothingBehind(handed, 'it is "mislaid", a state this version does not know'),
+    );
+    // An id of the right shape that no approval has.
+    const none = `ap_${'0'.repeat(26)}`;
+    assert.equal(
+      (await refused('comms_update', { noVerify: true, approvalId: none })).message,
+      nothingBehind(none, 'there is no approval by that id'),
+    );
+  } finally {
+    await close();
+  }
+});
+
+test('an approval the store cannot read is reported as that, never as an approval that was not used', async () => {
+  /*
+   * The refusal asked the store for the approval and took any failure for "not there": a record that would not parse
+   * and an id that is not one both came back as "the approval … was not used", saying nothing of what had gone wrong.
+   */
+  const m = machine();
+  cursor(m, { gmail: npx('gmail', OLD, ['--inbox', 'acme/gmail']) });
+  const { ok, refused, close } = await connect(m, { update: fakes(m) });
+  try {
+    const handed = String((await ok('comms_update', { noVerify: true })).approvalId);
+    const other = await ok('comms_update', { noVerify: true });
+    assert.equal(
+      ((await ok('comms_update', { noVerify: true, approvalId: other.approvalId })).result as Item).status,
+      'updated',
+    );
+
+    writeFileSync(join(m.core.approvals.directory, `${handed}.json`), '{ not json');
+    const corrupt = await refused('comms_update', { noVerify: true, approvalId: handed });
+    assert.equal(corrupt.code, 'UNEXPECTED', JSON.stringify(corrupt));
+    assert.match(corrupt.message, /JSON/);
+    assert.doesNotMatch(corrupt.message, /not used|nothing to apply/);
+
+    // A record that cannot be read at all — here a folder where the file should be — goes up as that, too.
+    rmSync(join(m.core.approvals.directory, `${handed}.json`));
+    mkdirSync(join(m.core.approvals.directory, `${handed}.json`));
+    const unreadable = await refused('comms_update', { noVerify: true, approvalId: handed });
+    assert.equal(unreadable.code, 'UNEXPECTED', JSON.stringify(unreadable));
+    // EISDIR here; whatever a platform calls it, it is the file system's answer, not a refusal of the approval.
+    assert.doesNotMatch(unreadable.message, /not used|nothing to apply/);
+
+    const malformed = await refused('comms_update', { noVerify: true, approvalId: 'not-an-approval' });
+    assert.deepEqual(
+      { code: malformed.code, message: malformed.message },
+      { code: 'USAGE', message: 'nothing was changed: "not-an-approval" is not an approval id' },
+    );
+  } finally {
+    await close();
   }
 });
 
@@ -1089,7 +1189,7 @@ test('an approval for an update whose every step is now left for a person says t
     assert.equal(late.code, 'USAGE');
     assert.equal(
       late.message,
-      `nothing was changed: what is behind cannot be updated from here, so there is nothing to apply; the approval ${first.approvalId} was not used`,
+      `nothing was changed: what is behind cannot be updated from here, so there is nothing to apply; the approval ${first.approvalId} was not used (${await waiting(m.core, first.approvalId)})`,
     );
     assert.doesNotMatch(String(late.hint), /applies at once/);
     assert.match(String(late.hint), /changes nothing/);
@@ -1313,7 +1413,7 @@ test('`agentcomms update --approval` with an update applied meanwhile gives the 
     assert.equal(late.status, 64, late.stdout + late.stderr);
     const byCommand = late.json().error as { code: string; message: string; hint: string };
     assert.equal(byCommand.code, 'USAGE');
-    assert.equal(byCommand.message, nothingBehind(stale));
+    assert.equal(byCommand.message, nothingBehind(stale, await waiting(m.core, stale)));
     const byTool = await refused('comms_update', { approvalId: stale });
     assert.deepEqual(
       { code: byTool.code, message: byTool.message, hint: byTool.hint },
