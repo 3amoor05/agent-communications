@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as sleepFor } from 'node:timers/promises';
-import { CommsError, withFileLock, writeFileAtomic } from '@agentcomms/core';
+import { CommsError, type LockOptions, withFileLock, writeFileAtomic } from '@agentcomms/core';
 
 /**
  * How often this machine may ask Resend anything — and when it must stop asking.
@@ -40,6 +40,8 @@ export interface ThrottleOptions {
   sleep?: (ms: number) => Promise<void>;
   /** Tests shorten this; nothing a person or an agent passes can. */
   intervalMs?: number;
+  /** How long one holder of the lock may keep everyone else waiting. Tests shorten this too. */
+  lockTimeoutMs?: number;
 }
 
 export class Throttle {
@@ -47,6 +49,23 @@ export class Throttle {
   readonly #now: () => number;
   readonly #sleep: (ms: number) => Promise<void>;
   readonly #interval: number;
+  /**
+   * Five seconds **for each holder** of the lock, not for the whole line of callers ahead.
+   *
+   * Every Resend request on this machine takes this one lock, and an agent asking six accounts at once puts six
+   * callers on it at the same moment. With the timeout counted from when each began to wait, the sixth had to see
+   * five holders through inside one five-second budget; on a heavily loaded machine (a load of 97 on ten cores, in
+   * the pre-push run that showed it) the read and the fsynced write under the lock slow down with everything else,
+   * and it gave up with "another process is holding" while the lock was being handed on exactly as it should be. A
+   * person with several accounts and a busy machine would have had requests refused for no reason but the queue.
+   * Counted per holder, a caller gives up only once one holder has kept the lock for five seconds: the stuck lock
+   * the timeout is there for.
+   *
+   * Waiting as long as the lock moves is safe here because the line is only as long as the requests already in
+   * flight: each takes the lock once, to reserve its slot, and does its waiting outside it. `after` waits the same
+   * way, because a stop it gave up on recording is a 429 that every other account carries on into.
+   */
+  readonly #lock: LockOptions;
 
   /** Takes no account on purpose: see above. Every throttle on a state directory is the same one. */
   constructor(stateDir: string, options: ThrottleOptions = {}) {
@@ -54,6 +73,10 @@ export class Throttle {
     this.#now = options.now ?? Date.now;
     this.#sleep = options.sleep ?? ((ms) => sleepFor(ms).then(() => undefined));
     this.#interval = options.intervalMs ?? DEFAULT_INTERVAL_MS;
+    this.#lock = {
+      timeoutPerHolder: true,
+      ...(options.lockTimeoutMs === undefined ? {} : { timeoutMs: options.lockTimeoutMs }),
+    };
   }
 
   async #read(): Promise<ThrottleFile> {
@@ -69,6 +92,11 @@ export class Throttle {
       }
       throw error;
     }
+  }
+
+  /** Runs `fn` holding the machine's one throttle lock, waiting for it as `#lock` says. */
+  #locked<T>(fn: () => Promise<T>): Promise<T> {
+    return withFileLock(`${this.path}.lock`, fn, this.#lock);
   }
 
   /** When Resend will next be asked anything from this machine, or null when it is not holding off. */
@@ -97,7 +125,7 @@ export class Throttle {
    * later.
    */
   async before(): Promise<void> {
-    const wait = await withFileLock(`${this.path}.lock`, async () => {
+    const wait = await this.#locked(async () => {
       const state = await this.#read();
       this.#refuseIfHeld(state);
       const now = this.#now();
@@ -126,7 +154,7 @@ export class Throttle {
     else if (seconds('ratelimit-remaining') === 0) stopFor = seconds('ratelimit-reset') ?? 1;
     if (stopFor === null) return null;
     const until = this.#now() + Math.max(1, stopFor) * 1000;
-    await withFileLock(`${this.path}.lock`, async () => {
+    await this.#locked(async () => {
       const state = await this.#read();
       await writeFileAtomic(this.path, JSON.stringify({ ...state, blockedUntil: Math.max(state.blockedUntil, until) }));
     });

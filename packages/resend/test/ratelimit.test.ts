@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { afterEach, test } from 'node:test';
 import { CommsError } from '@agentcomms/core';
 import { redact } from '../src/api/client.ts';
@@ -115,6 +117,70 @@ test('six accounts asking at once share one budget: two requests a second from t
   for (const start of reserved) {
     const inOneSecond = reserved.filter((slot) => slot >= start && slot < start + 1000).length;
     assert.ok(inOneSecond <= 2, `${inOneSecond} requests in the second from ${start} ms`);
+  }
+});
+
+/**
+ * Stands in for other callers ahead in line on the throttle's lock: a new holder's token in it every 50 ms, never
+ * leaving it free in between, until `stop`. Renamed into place, so a waiter never reads half a body.
+ */
+function lineAhead(throttle: Throttle): { stop: () => void } {
+  const lock = `${throttle.path}.lock`;
+  mkdirSync(dirname(lock), { recursive: true, mode: 0o700 });
+  let holders = 0;
+  const handOn = () => {
+    holders += 1;
+    writeFileSync(`${lock}.next`, JSON.stringify({ pid: 1, at: new Date().toISOString(), token: `holder-${holders}` }));
+    renameSync(`${lock}.next`, lock);
+  };
+  handOn();
+  const timer = setInterval(handOn, 50);
+  return {
+    stop: () => {
+      clearInterval(timer);
+      rmSync(lock, { force: true });
+    },
+  };
+}
+
+test('a reservation, and a stop Resend asked for, wait out a line on the lock for as long as it keeps moving', async () => {
+  /*
+   * Every Resend request on this machine takes the throttle's one lock, so six accounts asking at once are a line of
+   * six on it. The lock's timeout used to count from when each caller began to wait, so the test above, on a machine
+   * at a load of 97, refused the last of the six with "another process is holding" while the lock was being handed
+   * on as it should be. Scaled down: a line lasting a second and a half, against one second for each holder.
+   */
+  const now = 7_000_000;
+  const waits: number[] = [];
+  const options = { now: () => now, sleep: async (ms: number) => void waits.push(ms), lockTimeoutMs: 1_000 };
+  const reserving = new Throttle(tempDir('agent-resend-throttle-'), options);
+  const stopping = new Throttle(tempDir('agent-resend-throttle-'), options);
+  const lines = [lineAhead(reserving), lineAhead(stopping)];
+  const ended = setTimeout(() => {
+    for (const line of lines) line.stop();
+  }, 1_500);
+  try {
+    const [reserved, stopped] = await Promise.allSettled([
+      reserving.before(),
+      stopping.after(429, new Headers({ 'retry-after': '60' })),
+    ]);
+    assert.equal(
+      reserved.status,
+      'fulfilled',
+      `refused in the line: ${String((reserved as PromiseRejectedResult).reason)}`,
+    );
+    assert.equal(
+      stopped.status,
+      'fulfilled',
+      `refused in the line: ${String((stopped as PromiseRejectedResult).reason)}`,
+    );
+    assert.equal(stopped.value, 60);
+    assert.ok(await stopping.blockedUntil(), 'the stop was recorded, so every other account is held by it too');
+    await reserving.before();
+    assert.deepEqual(waits, [500], 'and the reservation was recorded: the next request waits its 500 ms');
+  } finally {
+    clearTimeout(ended);
+    for (const line of lines) line.stop();
   }
 });
 

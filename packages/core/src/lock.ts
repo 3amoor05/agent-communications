@@ -19,6 +19,19 @@ export interface LockOptions {
    * exists to prevent.
    */
   renewMs?: number;
+  /**
+   * Count `timeoutMs` from the last time the lock changed hands, rather than from when this caller began to wait.
+   *
+   * Opt-in, for a lock that is a queue: many callers arriving at the same moment, each holding it for a moment.
+   * Counted from the start, the timeout is a budget for the whole queue ahead, so on a machine slow enough the last
+   * caller in line gives up — "another process is holding" — while the lock is being handed on exactly as it should
+   * be. Counted per holder, a waiter gives up only once one holder has kept the lock for the whole timeout, which is
+   * the stuck lock the timeout is there to catch. A waiter sees a hand-over as a different token in the lock file.
+   *
+   * Not the default, because it lets a waiter wait for as long as the lock keeps changing hands: right for a queue
+   * that is only as long as the callers already in it, wrong for a lock that callers can keep arriving at.
+   */
+  timeoutPerHolder?: boolean;
 }
 
 /**
@@ -118,9 +131,11 @@ async function takeOverStale(lockPath: string, staleMs: number): Promise<void> {
 export async function withFileLock<T>(lockPath: string, fn: () => Promise<T>, options: LockOptions = {}): Promise<T> {
   const timeoutMs = options.timeoutMs ?? 5000;
   const staleMs = options.staleMs ?? 30_000;
-  const deadline = Date.now() + timeoutMs;
+  let deadline = Date.now() + timeoutMs;
   const token = randomBytes(12).toString('hex');
   let lastCode = 'EEXIST';
+  /** For `timeoutPerHolder`: the token of the holder this caller saw last. */
+  let holder: string | undefined;
   await ensurePrivateDir(dirname(lockPath));
   for (;;) {
     try {
@@ -134,9 +149,18 @@ export async function withFileLock<T>(lockPath: string, fn: () => Promise<T>, op
       lastCode = code ?? lastCode;
       // Only EEXIST tells us the file is really there and can be read; under the Windows codes there is nothing to
       // read yet, so back off and look again rather than deciding it is abandoned.
-      if (code === 'EEXIST' && (await isStale(lockPath, await readLock(lockPath), staleMs))) {
-        await takeOverStale(lockPath, staleMs);
-        continue;
+      if (code === 'EEXIST') {
+        const body = await readLock(lockPath);
+        if (await isStale(lockPath, body, staleMs)) {
+          await takeOverStale(lockPath, staleMs);
+          continue;
+        }
+        // A body not yet written, or one without a token, says nothing about who holds it: wait for the next look.
+        const seen = typeof body?.token === 'string' ? body.token : undefined;
+        if (options.timeoutPerHolder && seen !== undefined && seen !== holder) {
+          holder = seen;
+          deadline = Date.now() + timeoutMs;
+        }
       }
       if (Date.now() > deadline) {
         throw new CommsError('LOCK_TIMEOUT', `another agent-communications process is holding ${lockPath}`, {

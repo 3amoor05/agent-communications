@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { platform } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -511,4 +511,75 @@ test('a holder that stopped renewing is still taken over, so a crash does not we
     { staleMs: 150, timeoutMs: 2_000 },
   );
   assert.equal(ran, true);
+});
+
+/**
+ * Stands in for a line of other callers: puts a new holder's token in the lock every `everyMs`, and never leaves it
+ * free in between, so a waiter sees the lock handed on again and again and never gets a turn until `stop`. Renamed
+ * into place, so a waiter never reads half a body.
+ */
+function handedOnRepeatedly(path: string, everyMs: number): { stop: () => void } {
+  let holders = 0;
+  const handOn = () => {
+    holders += 1;
+    const next = `${path}.next`;
+    writeFileSync(next, JSON.stringify({ pid: 1, at: new Date().toISOString(), token: `holder-${holders}` }));
+    renameSync(next, path);
+  };
+  handOn();
+  const timer = setInterval(handOn, everyMs);
+  return {
+    stop: () => {
+      clearInterval(timer);
+      rmSync(path, { force: true });
+    },
+  };
+}
+
+test('with timeoutPerHolder a waiter keeps its place while the lock keeps changing hands; without, it gives up', async () => {
+  /*
+   * Six callers on one lock at the same moment, on a machine slow enough, used to time the last of them out: its
+   * five seconds were a budget for every holder ahead of it, though the lock was being handed on as it should be.
+   * Scaled down: a line of holders lasting a second and a half, each a moment long, against a timeout of one
+   * second — and of 300ms for the caller that keeps the old rule, which is still the default.
+   */
+  const path = join(tempDir(), 'queue.lock');
+  const line = handedOnRepeatedly(path, 50);
+  const ended = setTimeout(line.stop, 1_500);
+  const started = Date.now();
+  try {
+    const [patient, plain] = await Promise.allSettled([
+      withFileLock(path, async () => Date.now() - started, { timeoutMs: 1_000, timeoutPerHolder: true }),
+      withFileLock(path, async () => Date.now() - started, { timeoutMs: 300 }),
+    ]);
+    assert.equal(
+      patient.status,
+      'fulfilled',
+      `it gave up in the line: ${String((patient as PromiseRejectedResult).reason)}`,
+    );
+    assert.ok(patient.value > 1_000, `it had its turn only once the line ahead had gone, after ${patient.value}ms`);
+    assert.ok(
+      plain.status === 'rejected' && plain.reason instanceof CommsError && plain.reason.code === 'LOCK_TIMEOUT',
+      'without the option the timeout still counts the whole line: the default has not changed',
+    );
+  } finally {
+    clearTimeout(ended);
+    line.stop();
+  }
+});
+
+test('with timeoutPerHolder, one holder that keeps the lock still makes a waiter give up', async () => {
+  // The other half: per holder is not for ever. A lock that never changes hands is the stuck lock the timeout is for.
+  const path = join(tempDir(), 'stuck.lock');
+  writeFileSync(path, JSON.stringify({ pid: 1, at: new Date().toISOString(), token: 'stuck' }));
+  // Released long after the timeout, only so that a waiter that never gives up ends the test rather than hanging it.
+  const released = setTimeout(() => rmSync(path, { force: true }), 3_000);
+  try {
+    await assert.rejects(
+      withFileLock(path, async () => 'had a turn', { timeoutMs: 300, timeoutPerHolder: true }),
+      (error: unknown) => error instanceof CommsError && error.code === 'LOCK_TIMEOUT',
+    );
+  } finally {
+    clearTimeout(released);
+  }
 });
