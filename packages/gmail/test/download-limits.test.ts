@@ -14,6 +14,17 @@ import type { FakeMessage } from './support/fake-google.ts';
 import { type Harness, newHarness, tempDir } from './support/harness.ts';
 
 /**
+ * How long one test here may run before it is ended: three minutes.
+ *
+ * Every test in this file waits on a limit it injects — 400 ms of silence, a ceiling of a second or two — so on a quiet
+ * machine none takes more than a few seconds. The budget exists for the case those limits are gone (a regression, or
+ * the mutations these tests were watched failing under): a download with no limit waits for ever, and this ends it.
+ * It was 30 seconds, and on a busy machine — the pre-push verify runs every package's suite at once, beside whatever
+ * else is running — a test that does nothing wrong was ended at 30 seconds with a load average of 188.
+ */
+const BUDGET = { timeout: 180_000 };
+
+/**
  * How long an attachment download may take: CUE-304.
  *
  * Nothing bounded it. `users.messages.attachments.get` went out with no timeout and no signal, so a connection Google
@@ -113,9 +124,7 @@ const TIGHT: DownloadPace = { floorMs: 200, bytesPerSecond: 3000 };
 
 // ── Silence ────────────────────────────────────────────────────────────────────────────────────────────────────
 
-test('an attachment Gmail never answers for is given up on once it has been silent for the limit', {
-  timeout: 30_000,
-}, async () => {
+test('an attachment Gmail never answers for is given up on once it has been silent for the limit', BUDGET, async () => {
   const harness = await mailbox();
   const transport = await transportOf(harness, { idleMs: 500, pace: UNHURRIED });
   harness.google.slowNext(ATTACHMENT_PATH, { kind: 'silent' });
@@ -134,9 +143,7 @@ test('an attachment Gmail never answers for is given up on once it has been sile
   assert.equal(asked(harness), 1);
 });
 
-test('an answer that stops part-way is given up on once it has been silent for the limit', {
-  timeout: 30_000,
-}, async () => {
+test('an answer that stops part-way is given up on once it has been silent for the limit', BUDGET, async () => {
   const harness = await mailbox();
   const transport = await transportOf(harness, { idleMs: 500, pace: UNHURRIED });
   harness.google.slowNext(ATTACHMENT_PATH, { kind: 'paced', pieces: 20, everyMs: 20, stallAfter: 3 });
@@ -150,7 +157,7 @@ test('an answer that stops part-way is given up on once it has been silent for t
   assert.equal(asked(harness), 1);
 });
 
-test('the limit on silence holds when garbage is collected while the answer stalls', { timeout: 30_000 }, async () => {
+test('the limit on silence holds when garbage is collected while the answer stalls', BUDGET, async () => {
   /*
    * Slack's download found that a timeout handed to `fetch` alone could be lost when garbage was collected mid-stall,
    * and the read then waited for ever. Collection is forced here while the answer stalls, so a deadline that wakes the
@@ -169,9 +176,7 @@ test('the limit on silence holds when garbage is collected while the answer stal
   }
 });
 
-test('a slow answer that keeps arriving is waited for, long past the limit on silence', {
-  timeout: 30_000,
-}, async () => {
+test('a slow answer that keeps arriving is waited for, long past the limit on silence', BUDGET, async () => {
   /*
    * Twenty pieces, three fortieths of a second apart: a second and a half in all, three times the silence allowed.
    * Silence is what is limited, and there never is any — every piece that arrives starts the limit again.
@@ -183,7 +188,7 @@ test('a slow answer that keeps arriving is waited for, long past the limit on si
   assert.equal(bytes.toString('utf8'), CONTENT);
 });
 
-test('a token being refreshed is not counted as Gmail going silent', { timeout: 30_000 }, async () => {
+test('a token being refreshed is not counted as Gmail going silent', BUDGET, async () => {
   /*
    * The first call on a transport refreshes its access token, and that can take a while: a secret store to read, a
    * keychain prompt a person is still answering, Google's token endpoint. None of it is Gmail going silent. Here the
@@ -216,9 +221,7 @@ test('the time a whole attachment is allowed grows with its size: two minutes at
   assert.equal(attachmentCeilingMs(12_000, TIGHT), 5334);
 });
 
-test('an attachment that trickles is given up on once it has taken longer than its size allows', {
-  timeout: 30_000,
-}, async () => {
+test('an attachment that trickles is given up on once it has taken longer than its size allows', BUDGET, async () => {
   /*
    * Twenty pieces, a twentieth of a second apart: never silent for long, and a second in all — five times the fifth of
    * a second a file Gmail says is ten bytes is allowed at this pace. The refusal says which limit it was, and what to
@@ -237,24 +240,24 @@ test('an attachment that trickles is given up on once it has taken longer than i
   });
 });
 
-test('the same trickle arrives whole when the attachment’s size allows it the time, or its size is not known', {
-  timeout: 30_000,
-}, async () => {
-  const harness = await mailbox();
-  const transport = await transportOf(harness, { idleMs: 400, pace: TIGHT });
-  // 12,000 bytes are allowed over five seconds at this pace; the second the trickle takes is well inside it.
-  harness.google.slowNext(ATTACHMENT_PATH, { kind: 'paced', pieces: 20, everyMs: 50 });
-  const sized = await transport.getAttachment('m1', ATTACHMENT_ID, { partId: '1', size: 12_000 });
-  assert.equal(sized.toString('utf8'), CONTENT);
-  // With no size at all, the largest an attachment can be: never the floor, which would refuse a large file.
-  harness.google.slowNext(ATTACHMENT_PATH, { kind: 'paced', pieces: 20, everyMs: 50 });
-  const unsized = await transport.getAttachment('m1', ATTACHMENT_ID);
-  assert.equal(unsized.toString('utf8'), CONTENT);
-});
+test(
+  'the same trickle arrives whole when the attachment’s size allows it the time, or its size is not known',
+  BUDGET,
+  async () => {
+    const harness = await mailbox();
+    const transport = await transportOf(harness, { idleMs: 400, pace: TIGHT });
+    // 12,000 bytes are allowed over five seconds at this pace; the second the trickle takes is well inside it.
+    harness.google.slowNext(ATTACHMENT_PATH, { kind: 'paced', pieces: 20, everyMs: 50 });
+    const sized = await transport.getAttachment('m1', ATTACHMENT_ID, { partId: '1', size: 12_000 });
+    assert.equal(sized.toString('utf8'), CONTENT);
+    // With no size at all, the largest an attachment can be: never the floor, which would refuse a large file.
+    harness.google.slowNext(ATTACHMENT_PATH, { kind: 'paced', pieces: 20, everyMs: 50 });
+    const unsized = await transport.getAttachment('m1', ATTACHMENT_ID);
+    assert.equal(unsized.toString('utf8'), CONTENT);
+  },
+);
 
-test('an attachment named by its message alone says so, when the caller had no part to name', {
-  timeout: 30_000,
-}, async () => {
+test('an attachment named by its message alone says so, when the caller had no part to name', BUDGET, async () => {
   const harness = await mailbox();
   const transport = await transportOf(harness, { idleMs: 500, pace: UNHURRIED });
   harness.google.slowNext(ATTACHMENT_PATH, { kind: 'silent' });
@@ -266,9 +269,7 @@ test('an attachment named by its message alone says so, when the caller had no p
 
 // ── The caller giving up ───────────────────────────────────────────────────────────────────────────────────────
 
-test('a caller’s signal stops an attachment download, before it starts or while it waits', {
-  timeout: 30_000,
-}, async () => {
+test('a caller’s signal stops an attachment download, before it starts or while it waits', BUDGET, async () => {
   const harness = await mailbox();
   const transport = await transportOf(harness, { idleMs: 60_000, pace: UNHURRIED });
 
@@ -292,34 +293,34 @@ test('a caller’s signal stops an attachment download, before it starts or whil
 
 // ── What else a streamed answer has to keep ────────────────────────────────────────────────────────────────────
 
-test('Google’s refusals of an attachment keep their meaning: a rate limit is retried, a missing one is not found', {
-  timeout: 30_000,
-}, async () => {
-  /*
-   * The answer is read here, a piece at a time, rather than by the library — so a refusal is too, and it has to reach
-   * the retry policy and the error mapping in the shape they read: its status, its `Retry-After`, and Google's reasons.
-   * A 403 is retried only for the reason that says it is a rate limit.
-   */
-  const harness = await mailbox();
-  const transport = await transportOf(harness, {});
-  harness.google.failNext(ATTACHMENT_PATH, 1, 403, 'userRateLimitExceeded');
-  harness.google.failNext(ATTACHMENT_PATH, 1, 429, 'rateLimitExceeded', '1');
-  assert.equal((await transport.getAttachment('m1', ATTACHMENT_ID, { partId: '1' })).toString('utf8'), CONTENT);
-  assert.equal(asked(harness), 3);
+test(
+  'Google’s refusals of an attachment keep their meaning: a rate limit is retried, a missing one is not found',
+  BUDGET,
+  async () => {
+    /*
+     * The answer is read here, a piece at a time, rather than by the library — so a refusal is too, and it has to reach
+     * the retry policy and the error mapping in the shape they read: its status, its `Retry-After`, and Google's reasons.
+     * A 403 is retried only for the reason that says it is a rate limit.
+     */
+    const harness = await mailbox();
+    const transport = await transportOf(harness, {});
+    harness.google.failNext(ATTACHMENT_PATH, 1, 403, 'userRateLimitExceeded');
+    harness.google.failNext(ATTACHMENT_PATH, 1, 429, 'rateLimitExceeded', '1');
+    assert.equal((await transport.getAttachment('m1', ATTACHMENT_ID, { partId: '1' })).toString('utf8'), CONTENT);
+    assert.equal(asked(harness), 3);
 
-  const missing = '/gmail/v1/users/me/messages/m1/attachments/gone';
-  await assert.rejects(transport.getAttachment('m1', 'gone', { partId: '1' }), (error: unknown) => {
-    assert.ok(error instanceof CommsError);
-    assert.equal(error.code, 'NOT_FOUND');
-    assert.equal(error.message, 'Not Found');
-    return true;
-  });
-  assert.equal(asked(harness, missing), 1);
-});
+    const missing = '/gmail/v1/users/me/messages/m1/attachments/gone';
+    await assert.rejects(transport.getAttachment('m1', 'gone', { partId: '1' }), (error: unknown) => {
+      assert.ok(error instanceof CommsError);
+      assert.equal(error.code, 'NOT_FOUND');
+      assert.equal(error.message, 'Not Found');
+      return true;
+    });
+    assert.equal(asked(harness, missing), 1);
+  },
+);
 
-test('an answer that is not the attachment is refused by name, never saved as an empty file', {
-  timeout: 30_000,
-}, async () => {
+test('an answer that is not the attachment is refused by name, never saved as an empty file', BUDGET, async () => {
   // Read by the library, an answer that was not JSON became an attachment of no bytes, and the download said it saved.
   const garbage = createServer((_request, response) => {
     response.writeHead(200, { 'content-type': 'text/html' });
@@ -352,7 +353,7 @@ test('an answer that is not the attachment is refused by name, never saved as an
   }
 });
 
-test('a finished download leaves no timer behind', { timeout: 30_000 }, async () => {
+test('a finished download leaves no timer behind', BUDGET, async () => {
   /*
    * Both limits are timers that would keep a process alive for as long as they had left to run: thirty seconds after
    * a download from the terminal had finished, or two minutes and more. However a download ends, both are let go.
@@ -405,24 +406,29 @@ async function twoAttachments(download: Partial<DownloadLimits>, secondSize = CO
   return { harness, cwd, save };
 }
 
-test('a download that runs out of time stops there, keeps what it saved, and names the part and the limit', {
-  timeout: 30_000,
-}, async () => {
-  const { harness, save } = await twoAttachments({ idleMs: 500, pace: UNHURRIED });
-  harness.google.slowNext('/gmail/v1/users/me/messages/m2/attachments/a2', { kind: 'silent' });
-  await assert.rejects(save(), (error: unknown) => {
-    assert.ok(error instanceof CommsError);
-    assert.equal(error.code, 'TRANSIENT');
-    assert.equal(error.message, 'the download stopped part-way: Gmail stopped sending attachment m2/1 for 0.5 seconds');
-    assert.match(error.hint ?? '', /^Check the network, then try again\. 1 file was saved before it stopped/);
-    assert.equal(error.details?.why, 'stalled');
-    assert.equal(error.details?.saved, 1);
-    assert.deepEqual(error.details?.stoppedBefore, ['m2/1']);
-    return true;
-  });
-});
+test(
+  'a download that runs out of time stops there, keeps what it saved, and names the part and the limit',
+  BUDGET,
+  async () => {
+    const { harness, save } = await twoAttachments({ idleMs: 500, pace: UNHURRIED });
+    harness.google.slowNext('/gmail/v1/users/me/messages/m2/attachments/a2', { kind: 'silent' });
+    await assert.rejects(save(), (error: unknown) => {
+      assert.ok(error instanceof CommsError);
+      assert.equal(error.code, 'TRANSIENT');
+      assert.equal(
+        error.message,
+        'the download stopped part-way: Gmail stopped sending attachment m2/1 for 0.5 seconds',
+      );
+      assert.match(error.hint ?? '', /^Check the network, then try again\. 1 file was saved before it stopped/);
+      assert.equal(error.details?.why, 'stalled');
+      assert.equal(error.details?.saved, 1);
+      assert.deepEqual(error.details?.stoppedBefore, ['m2/1']);
+      return true;
+    });
+  },
+);
 
-test('a download allows each attachment the time the size Gmail gives it is worth', { timeout: 30_000 }, async () => {
+test('a download allows each attachment the time the size Gmail gives it is worth', BUDGET, async () => {
   // Gmail says the second weighs ten bytes; it arrives as a second's trickle, five times what ten bytes are allowed.
   const { harness, save } = await twoAttachments({ idleMs: 400, pace: TIGHT }, 10);
   harness.google.slowNext('/gmail/v1/users/me/messages/m2/attachments/a2', { kind: 'paced', pieces: 20, everyMs: 50 });
@@ -434,7 +440,7 @@ test('a download allows each attachment the time the size Gmail gives it is wort
   });
 });
 
-test('a download stops when its caller gives up on it', { timeout: 30_000 }, async () => {
+test('a download stops when its caller gives up on it', BUDGET, async () => {
   const { harness, save } = await twoAttachments({ idleMs: 60_000, pace: UNHURRIED });
   const second = '/gmail/v1/users/me/messages/m2/attachments/a2';
   harness.google.slowNext(second, { kind: 'silent' });
