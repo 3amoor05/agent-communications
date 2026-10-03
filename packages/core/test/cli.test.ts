@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { renderAttach } from '../src/cli.ts';
-import { commandText, inlineCommand, type Streams, shellCommand, typeByHand } from '../src/cli-runtime.ts';
+import { commandAsJson, commandText, inlineCommand, type Streams, shellCommand } from '../src/cli-runtime.ts';
 import { secretsStoreOf } from '../src/config.ts';
 import { CommsError } from '../src/errors.ts';
 import { isInside } from '../src/jail.ts';
@@ -1010,8 +1010,9 @@ test('a command printed to be run is quoted for a POSIX shell everywhere but Win
   for (const platform of ['darwin', 'linux'] as const) {
     const posix = (...words: string[]) => shellCommand(words, platform);
     assert.deepEqual(posix('agentcomms', 'update', '--auto', 'off'), {
+      words: ['agentcomms', 'update', '--auto', 'off'],
       line: 'agentcomms update --auto off',
-      byHand: [],
+      platform,
     });
     assert.equal(
       posix('agentcomms', 'attach', 'roots', 'add', '/srv/First Last/outgoing').line,
@@ -1024,7 +1025,6 @@ test('a command printed to be run is quoted for a POSIX shell everywhere but Win
     // What Windows cannot print, a POSIX shell takes in single quotes, inside which nothing is special but the quote.
     for (const word of UNSAFE_ON_WINDOWS) {
       const printed = posix('claude', 'mcp', 'remove', word);
-      assert.deepEqual(printed.byHand, [], `${platform}: ${JSON.stringify(word)}`);
       // `%` is nothing to a POSIX shell, so those two are left as they are.
       const quoted = ['50%', '--%'].includes(word) ? word : `'${word.replace(/'/g, "'\\''")}'`;
       assert.equal(printed.line, `claude mcp remove ${quoted}`, `${platform}: ${JSON.stringify(word)}`);
@@ -1035,7 +1035,7 @@ test('a command printed to be run is quoted for a POSIX shell everywhere but Win
 test('on Windows a command printed to be run is one cmd.exe and PowerShell both read alike (CUE-306)', () => {
   const win = (...words: string[]) => {
     const printed = shellCommand(words, 'win32');
-    assert.deepEqual(printed.byHand, [], `${JSON.stringify(words)} were printed whole`);
+    assert.notEqual(printed.line, null, `${JSON.stringify(words)} were printed whole`);
     return printed.line;
   };
   // A folder with a space is one word to both shells. In single quotes cmd.exe took it as two, quote marks and all.
@@ -1166,33 +1166,27 @@ test('on Windows a printed command reaches the program as the words it was given
     ...UNSAFE_ON_WINDOWS,
   ];
   for (const word of words) {
-    const printed = shellCommand(['agentcomms', 'attach', 'roots', 'add', word], 'win32');
+    const argv = ['agentcomms', 'attach', 'roots', 'add', word];
+    const { line } = shellCommand(argv, 'win32');
     const shown = JSON.stringify(word);
-    let outside = '';
-    let inside = '';
-    for (const [index, part] of printed.line.split('"').entries()) {
-      if (index % 2 === 0) outside += part;
-      else inside += part;
-    }
-    assert.equal(printed.line.split('"').length % 2, 1, `${shown}: every quote is closed`);
-    assert.doesNotMatch(
-      printed.line,
-      /[%!$`\u201C-\u201E]|[\p{C}\p{Zl}\p{Zp}]/u,
-      `${shown}: nothing either shell expands`,
-    );
-    if (printed.byHand.length > 0) {
-      assert.deepEqual(printed.byHand, [{ placeholder: 'VALUE', value: word }], shown);
-      assert.equal(printed.line, 'agentcomms attach roots add VALUE', shown);
+    if (line === null) {
       assert.ok(UNSAFE_ON_WINDOWS.includes(word), `${shown} could have been printed`);
       continue;
     }
     assert.ok(!UNSAFE_ON_WINDOWS.includes(word), `${shown} was printed`);
+    let outside = '';
+    let inside = '';
+    for (const [index, part] of line.split('"').entries()) {
+      if (index % 2 === 0) outside += part;
+      else inside += part;
+    }
+    assert.equal(line.split('"').length % 2, 1, `${shown}: every quote is closed`);
+    assert.doesNotMatch(line, /[%!$`\u201C-\u201E]|[\p{C}\p{Zl}\p{Zp}]/u, `${shown}: nothing either shell expands`);
     assert.doesNotMatch(outside, /[&|<>^();,{}#'‘’‚‛@]/, `${shown}: nothing outside the quotes for either shell`);
     assert.doesNotMatch(inside, /["\u201C-\u201E]/, `${shown}: no quote mark inside the quotes`);
-    const argv = ['agentcomms', 'attach', 'roots', 'add', word];
-    assert.ok(!cmdActsOn(printed.line), `${shown}: cmd.exe hands the line on as it is`);
-    assert.deepEqual(windowsArgv(printed.line), argv, `${shown}: from cmd.exe`);
-    const read = powershellWords(printed.line);
+    assert.ok(!cmdActsOn(line), `${shown}: cmd.exe hands the line on as it is`);
+    assert.deepEqual(windowsArgv(line), argv, `${shown}: from cmd.exe`);
+    const read = powershellWords(line);
     assert.deepEqual(read, argv, `${shown}: as PowerShell reads it`);
     assert.deepEqual(windowsArgv(legacyCommandLine(read)), argv, `${shown}: from Windows PowerShell`);
     assert.deepEqual(windowsArgv(standardCommandLine(read)), argv, `${shown}: from PowerShell 7`);
@@ -1265,7 +1259,8 @@ test(
     /*
      * The readers `shellCommand` reasons about, run for real: each printed line through cmd.exe, Windows PowerShell and
      * PowerShell 7, to a program — Node, which splits its command line as the C runtime does — and to a `.cmd` script in
-     * front of it, as npm installs every command printed here. Each has to receive exactly the words.
+     * front of it, as npm installs every command printed here. Each has to receive exactly the words. And a command that
+     * is shown as JSON instead, because a word in it cannot be printed, runs nothing when the JSON is pasted.
      */
     const dir = tempDir();
     const { script, env } = argumentDumper(dir);
@@ -1295,85 +1290,103 @@ test(
     let runs = 0;
     for (const shell of windowsShells()) {
       for (const program of [['node', script], ['argdump']]) {
-        const printed = shellCommand([...program, ...words], 'win32');
-        assert.deepEqual(printed.byHand, [], `every word was printed: ${printed.line}`);
+        const { line } = shellCommand([...program, ...words], 'win32');
+        assert.ok(line !== null, 'every word was printed');
         const out = join(dir, `argv-${runs++}.json`);
-        const result = shell.run(printed.line, { ...env, ARGDUMP_OUT: out });
-        assert.deepEqual(dumped(out), words, `${shell.name}, ${program[0]}: ${printed.line}\n${result.stderr}`);
+        const result = shell.run(line, { ...env, ARGDUMP_OUT: out });
+        assert.deepEqual(dumped(out), words, `${shell.name}, ${program[0]}: ${line}\n${result.stderr}`);
       }
     }
     assert.ok(runs >= 4, 'cmd.exe and Windows PowerShell, at the least');
-    // And what none of them would receive alike is not printed at all.
-    for (const word of ['C:\\Profiles\\First Last\\', '', '50%', 'a&b', 'x|y', 'a^b', '(a)', '$x&whoami&']) {
-      assert.notDeepEqual(shellCommand(['node', script, word], 'win32').byHand, [], JSON.stringify(word));
+    // What none of them would receive alike has no line, and its JSON, pasted, starts nothing and fails.
+    const unprintable = ['C:\\Profiles\\First Last\\', '', '50%', '%PATH%', 'a&b', 'x|y', 'a^b', '(a)', '$x&whoami&'];
+    // `argdump injected`, if cmd.exe ever ran it, would write ["injected"] where the test looks.
+    const more = ['a"&argdump injected&"b', '!x!', 'a`b', 'line\nbreak', 'say “hi” & bye'];
+    for (const shell of windowsShells()) {
+      for (const program of [['node', script], ['argdump']]) {
+        for (const word of [...unprintable, ...more]) {
+          const command = shellCommand([...program, word], 'win32');
+          assert.equal(command.line, null, JSON.stringify(word));
+          const json = commandAsJson(command.words);
+          const out = join(dir, `argv-${runs++}.json`);
+          const result = shell.run(json, { ...env, ARGDUMP_OUT: out });
+          assert.equal(dumped(out), null, `${shell.name} ran ${json}`);
+          // Refused: cmd.exe finds no program called `["node"`, and PowerShell cannot parse it.
+          const refused = result.status !== 0 || String(result.stderr).trim() !== '';
+          assert.ok(refused, `${shell.name} took ${json} for a command that worked`);
+        }
+      }
     }
   },
 );
 
-test('on Windows a word that cannot be printed is a placeholder, named for it, and given apart as JSON (CUE-306)', () => {
-  // Named by its label, or by the option before it, or `VALUE`; one word twice is one placeholder, two are numbered.
-  const printed = shellCommand(
-    [
-      'agent-slack',
-      'mcp',
-      'install',
-      '--name',
-      { value: '$x&whoami&', label: 'name' },
-      '--workspace',
-      'acme/50%',
-      '!x!',
-      'a`b',
-      { value: '$x&whoami&', label: 'name' },
-      { value: 'other$', label: 'name' },
-    ],
-    'win32',
-  );
-  assert.equal(printed.line, 'agent-slack mcp install --name NAME --workspace WORKSPACE VALUE VALUE-2 NAME NAME-2');
-  assert.deepEqual(printed.byHand, [
-    { placeholder: 'NAME', value: '$x&whoami&' },
-    { placeholder: 'WORKSPACE', value: 'acme/50%' },
-    { placeholder: 'VALUE', value: '!x!' },
-    { placeholder: 'VALUE-2', value: 'a`b' },
-    { placeholder: 'NAME-2', value: 'other$' },
-  ]);
-
-  // What a printer says beside it: the word as JSON, so a line break or a quote mark is visible and nothing is pasted.
-  const remove = shellCommand(['claude', 'mcp', 'remove', { value: 'a"b\nc', label: 'name' }], 'win32');
-  const note =
-    'NAME is "a\\"b\\nc", written as JSON: type it in yourself, quoted for your shell — no quoting reads the same in cmd.exe and PowerShell';
-  assert.equal(typeByHand(remove), note);
-  assert.equal(inlineCommand(remove), `\`claude mcp remove NAME\` (${note})`);
-  assert.equal(commandText(remove), `claude mcp remove NAME (${note})`);
-  // Several commands, one note: each placeholder once.
-  const get = shellCommand(['claude', 'mcp', 'get', { value: 'a"b\nc', label: 'name' }], 'win32');
-  assert.equal(typeByHand(get, remove), note);
-  assert.match(
-    typeByHand(printed),
-    /^NAME is "\$x&whoami&", WORKSPACE is "acme\/50%", .* and NAME-2 is "other\$", written as JSON: type them in yourself/,
-  );
-  // And nothing to say when every word was printed.
+test('on Windows a command with a word that cannot be printed has no line, and is shown as its words in JSON (CUE-306)', () => {
+  /*
+   * A placeholder in the word's place still left a command that ran: `claude mcp remove NAME` removed an entry called
+   * `NAME`, and an install hint's `--force` replaced one. So there is no line at all, and the printers show the words.
+   */
+  const words = ['agent-gmail', 'mcp', 'install', '--name', '$x&whoami&', '--force'];
+  const command = shellCommand(words, 'win32');
+  assert.deepEqual(command, { words, line: null, platform: 'win32' });
+  const json = '["agent-gmail","mcp","install","--name","\\u0024x&whoami&","--force"]';
+  assert.equal(commandAsJson(words), json);
+  const said =
+    "the command's words, written as JSON: one of them cannot be quoted the same way for cmd.exe and for PowerShell, so type the command yourself, with that word quoted for the shell you use";
+  assert.equal(inlineCommand(command), `\`${json}\` (${said})`);
+  assert.equal(commandText(command), `${json} (${said})`);
+  // With a line, it is the line, and nothing is said.
   const plain = shellCommand(['claude', 'mcp', 'remove', 'old gmail'], 'win32');
-  assert.equal(typeByHand(plain), '');
   assert.equal(inlineCommand(plain), '`claude mcp remove "old gmail"`');
   assert.equal(commandText(plain), 'claude mcp remove "old gmail"');
 });
 
-test('the list of entries to take out gives one Windows cannot print as a placeholder, with the entry beside it', () => {
+test('a command shown as JSON gives back its words, and nothing in it is anything either Windows shell acts on (CUE-306)', () => {
+  /*
+   * Read back, it is the words exactly: something an agent can parse and a person can read. Pasted, it has to run
+   * nothing (the Windows-only test above pastes it): its only quotes are the JSON's own, in pairs, with nothing cmd.exe
+   * acts on outside them and no `%` or `!` anywhere; no `$` or backtick for PowerShell; and nothing outside printable
+   * ASCII, so no line break, curly quote or right-to-left override. A double quote inside a word, which JSON writes as
+   * `\"`, is written as `\u0022` instead: cmd.exe takes no backslash as an escape, so `\"` would end its quoting and
+   * leave the rest of the word — `&calc&` — outside it.
+   */
+  const words = [
+    'agentcomms',
+    ...UNSAFE_ON_WINDOWS,
+    'a"&calc&"b',
+    'C:\\Profiles\\First Last\\',
+    'naïve',
+    '\u{1F600}',
+    '\u2028',
+    "it's",
+  ];
+  const json = commandAsJson(words);
+  assert.deepEqual(JSON.parse(json), words);
+  assert.match(json, /^\["agentcomms",/);
+  assert.doesNotMatch(json, /[^\x20-\x7e]/, 'printable ASCII only');
+  assert.doesNotMatch(json, /[%!$`]/, 'nothing either shell expands');
+  const parts = json.split('"');
+  assert.equal(parts.length % 2, 1, 'every quote is closed');
+  const outside = parts.filter((_, index) => index % 2 === 0).join('');
+  assert.match(outside, /^[[,\]]*$/, 'outside the quotes, only the brackets and commas of the array');
+  assert.ok(!cmdActsOn(json), 'cmd.exe acts on nothing in it');
+});
+
+test('the list of entries to take out shows one Windows cannot print as its words, never as a line', () => {
   const report = {
     roots: [],
     deny: [],
     builtIn: [],
-    ignored: ['%USERPROFILE%\\outgoing', 'outgoing'],
+    ignored: ['%USERPROFILE%\\outgoing', '', 'outgoing'],
   } as unknown as Parameters<typeof renderAttach>[0];
   const shown = renderAttach(report, 'win32');
+  const said = "(the command's words, written as JSON: one of them cannot be quoted the same way";
   assert.ok(
-    shown.includes(
-      '\n  agentcomms attach roots remove ENTRY (ENTRY is "%USERPROFILE%\\\\outgoing", written as JSON: type it in yourself',
-    ),
+    shown.includes(`\n  ["agentcomms","attach","roots","remove","\\u0025USERPROFILE\\u0025\\\\outgoing"] ${said}`),
     shown,
   );
+  assert.ok(shown.includes(`\n  ["agentcomms","attach","roots","remove",""] ${said}`), shown);
   assert.ok(shown.includes('\n  agentcomms attach roots remove outgoing\n'), shown);
-  assert.doesNotMatch(shown, /remove "?%USERPROFILE%/, 'never as a command to paste');
+  assert.doesNotMatch(shown, /\n {2}agentcomms attach roots remove (?!outgoing\n)/, 'no other line to paste');
   assert.ok(renderAttach(report, 'linux').includes("\n  agentcomms attach roots remove '%USERPROFILE%\\outgoing'\n"));
 });
 

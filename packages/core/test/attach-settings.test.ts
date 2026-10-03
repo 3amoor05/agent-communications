@@ -358,12 +358,12 @@ test('an entry is taken out exactly as it is listed: spaces at either end, or no
   const m = machine({ attachRoots: ['~', ' outgoing ', ''] });
   const shown = cli(m, ['attach']);
   // Quoted for the shell it is pasted into (`shellCommand`): single quotes for a POSIX one, double quotes on Windows —
-  // where the empty entry cannot be printed so that every shell passes it on, and is given apart to type by hand.
+  // where no printing of the empty entry reaches the program from every shell, so the command is shown as its words.
   const [spaced, empty] =
     process.platform === 'win32'
       ? [
           'agentcomms attach roots remove " outgoing "',
-          commandText(shellCommand(['agentcomms', 'attach', 'roots', 'remove', { value: '', label: 'entry' }])),
+          commandText(shellCommand(['agentcomms', 'attach', 'roots', 'remove', ''])),
         ]
       : ["agentcomms attach roots remove ' outgoing '", "agentcomms attach roots remove ''"];
   assert.ok(

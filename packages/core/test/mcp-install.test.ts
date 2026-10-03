@@ -835,19 +835,19 @@ test('a refusal hint repeats every flag that narrows the server, so following it
   assert.doesNotMatch(elsewhere, /--force/);
 });
 
-test('a refusal hint gives a pin Windows cannot print as a placeholder, with the pin beside it to type (CUE-306)', async () => {
+test('a refusal hint with a pin Windows cannot print shows the command as its words, never as a line (CUE-306)', async () => {
   /*
    * A pin kept from the entry being replaced is read from the client's file, which may hold anything. Quoted for
    * PowerShell, a word with a `$` or a `%` came out in single quotes, which cmd.exe reads as characters. Asked for
-   * Windows by name, each of the refusal's hints prints a placeholder for it, and gives it apart as JSON.
+   * Windows by name, each of the refusal's hints shows the command's words instead, and no line that would run.
    */
   const data = tempDir();
   const home = tempDir();
   const windows: InstallContext = { ...context(data, home), platform: 'win32' };
   const cursor = knownClientConfigs(windows.env).find((file) => file.client === 'cursor')?.path ?? '';
   const runtime = managedRuntimeEntry(data, '@agentcomms/example', '0.0.0');
-  const typed =
-    '(INBOX is "acme/50%", written as JSON: type it in yourself, quoted for your shell — no quoting reads the same in cmd.exe and PowerShell)';
+  const said =
+    "(the command's words, written as JSON: one of them cannot be quoted the same way for cmd.exe and for PowerShell, so type the command yourself, with that word quoted for the shell you use)";
   const hintOf = async (options: Parameters<typeof mcpInstall>[2]) =>
     mcpInstall(windows, pinnedProduct(), options).then(
       () => assert.fail('it was not refused'),
@@ -861,7 +861,7 @@ test('a refusal hint gives a pin Windows cannot print as a placeholder, with the
   );
   assert.equal(
     await hintOf({ client: 'cursor', launcher: 'npx', noVerify: true }),
-    `Pass --force to replace it — that is how an upgrade reaches a client: \`agent-example mcp install --client cursor --inbox INBOX --launcher npx --force\` ${typed}.`,
+    `Pass --force to replace it — that is how an upgrade reaches a client: \`["agent-example","mcp","install","--client","cursor","--inbox","acme/50\\u0025","--launcher","npx","--force"]\` ${said}.`,
   );
 
   // Somebody else's under the name asked for: register this one under another.
@@ -869,7 +869,7 @@ test('a refusal hint gives a pin Windows cannot print as a placeholder, with the
   const elsewhere = await hintOf({ client: 'cursor', name: 'theirs', inbox: 'acme/50%', noVerify: true });
   assert.ok(
     elsewhere.startsWith(
-      `Register this one under another name: \`agent-example mcp install --client cursor --name agent-example --inbox INBOX\` ${typed}. `,
+      `Register this one under another name: \`["agent-example","mcp","install","--client","cursor","--name","agent-example","--inbox","acme/50\\u0025"]\` ${said}. `,
     ),
     elsewhere,
   );
@@ -881,7 +881,7 @@ test('a refusal hint gives a pin Windows cannot print as a placeholder, with the
   );
   assert.equal(
     await hintOf({ client: 'cursor', inbox: 'acme/50%', noVerify: true }),
-    `That entry serves acme/work; to serve acme/50% as well, register a second entry under its own name: \`agent-example mcp install --client cursor --name example-acme --inbox INBOX\` ${typed}.`,
+    `That entry serves acme/work; to serve acme/50% as well, register a second entry under its own name: \`["agent-example","mcp","install","--client","cursor","--name","example-acme","--inbox","acme/50\\u0025"]\` ${said}.`,
   );
 });
 

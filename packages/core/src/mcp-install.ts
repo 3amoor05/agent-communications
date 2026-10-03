@@ -752,8 +752,8 @@ function keepNarrowing(
  * rebuilds these flags for exactly that reason. The product's `serverArgs` are the install command's own flags for
  * the pin and the narrowing, so they are repeated as they are.
  *
- * A pin kept from the entry being replaced was read from the client's file, which may hold anything, so the command
- * can come back with a placeholder to type by hand; every hint gives it with `inlineCommand`, which says so.
+ * A pin kept from the entry being replaced was read from the client's file, which may hold anything, so on Windows the
+ * command can come back with no line to paste; every hint gives it with `inlineCommand`, which shows it as words then.
  */
 function installCommand(
   product: McpProduct,
@@ -814,7 +814,7 @@ async function codexRegistration(
 ): Promise<RegisteredServer | null> {
   const unknown = () =>
     new CommsError('CONFIG', `codex would not say what it has registered as "${name}", so nothing was written`, {
-      hint: `Look with ${inlineCommand(shellCommand(['codex', 'mcp', 'get', { value: name, label: 'name' }], platform))}. If it is not an older copy of this server, choose another --name; \`--print\` shows the entry to add by hand.`,
+      hint: `Look with ${inlineCommand(shellCommand(['codex', 'mcp', 'get', name], platform))}. If it is not an older copy of this server, choose another --name; \`--print\` shows the entry to add by hand.`,
     });
   let answer: Awaited<ReturnType<typeof capture>>;
   try {
@@ -1213,14 +1213,9 @@ export async function mcpInstall(
   if (kept.length > 0) {
     const removal =
       options.client === 'claude-code'
-        ? inlineCommand(
-            shellCommand(
-              ['claude', 'mcp', 'remove', { value: name, label: 'name' }, '--scope', 'user'],
-              context.platform,
-            ),
-          )
+        ? inlineCommand(shellCommand(['claude', 'mcp', 'remove', name, '--scope', 'user'], context.platform))
         : options.client === 'codex'
-          ? inlineCommand(shellCommand(['codex', 'mcp', 'remove', { value: name, label: 'name' }], context.platform))
+          ? inlineCommand(shellCommand(['codex', 'mcp', 'remove', name], context.platform))
           : `delete "${name}" from ${configPath}`;
     warnings.push(
       `Kept ${kept.join(' ')} from the "${name}" entry this replaced, because this install did not say otherwise. To register it wider on purpose, remove that entry first (${removal}), then install without them.`,
@@ -1364,7 +1359,7 @@ export async function mcpInstall(
             'CONFIG',
             `${cliName} already has an MCP server called "${name}", somewhere this could not read`,
             {
-              hint: `Look at it with ${inlineCommand(shellCommand([cliName, 'mcp', 'get', { value: name, label: 'name' }], context.platform))}. If it is an older ${product.binary}, remove it with ${inlineCommand(shellCommand([cliName, 'mcp', 'remove', { value: name, label: 'name' }], context.platform))} and run this again; if not, choose another --name.`,
+              hint: `Look at it with ${inlineCommand(shellCommand([cliName, 'mcp', 'get', name], context.platform))}. If it is an older ${product.binary}, remove it with ${inlineCommand(shellCommand([cliName, 'mcp', 'remove', name], context.platform))} and run this again; if not, choose another --name.`,
               cause: error,
             },
           );

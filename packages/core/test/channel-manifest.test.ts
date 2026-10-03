@@ -241,13 +241,13 @@ test('a command that removes another server gives its name as one word, quoted f
   }
 });
 
-test('a name Windows cannot print in a removal is a placeholder, with the name beside it as JSON (CUE-306)', () => {
+test('a removal with a name Windows cannot print is shown as its words in JSON, never as a line (CUE-306)', () => {
   /*
    * A client's file may name an entry anything, and this is printed for a person to paste. Quoted for PowerShell, a
-   * name like `$x&whoami&` came out as `'$x&whoami&'`, and pasted into cmd.exe it ran `whoami`.
+   * name like `$x&whoami&` came out as `'$x&whoami&'`, and pasted into cmd.exe it ran `whoami`; with a placeholder in
+   * its place, `claude mcp remove NAME` removed whatever entry was called `NAME`.
    */
   const name = '$x&whoami&';
-  const note = `NAME is ${JSON.stringify(name)}, written as JSON: type it in yourself, quoted for your shell`;
   for (const [client, binary] of [
     ['claude-code', 'claude'],
     ['codex', 'codex'],
@@ -258,8 +258,11 @@ test('a name Windows cannot print in a removal is a placeholder, with the name b
       otherSlackServerRemoval(helper, 'win32'),
       findUngatedGmailServers([rival], 'win32')[0]?.removal,
     ]) {
-      assert.ok(removal?.startsWith(`${binary} mcp remove NAME (${note}`), String(removal));
-      assert.doesNotMatch(String(removal).split(' (')[0] ?? '', /whoami/, 'the name is in nothing to run');
+      assert.equal(
+        removal,
+        `["${binary}","mcp","remove","\\u0024x&whoami&"] (the command's words, written as JSON: one of them cannot be quoted the same way for cmd.exe and for PowerShell, so type the command yourself, with that word quoted for the shell you use)`,
+      );
+      assert.doesNotMatch(String(removal), /mcp remove /, 'and no line to run');
     }
     // A POSIX shell takes it in single quotes, whole.
     assert.equal(otherSlackServerRemoval(helper, 'linux'), `${binary} mcp remove '${name}'`);

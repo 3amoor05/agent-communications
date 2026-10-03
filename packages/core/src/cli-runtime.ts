@@ -63,30 +63,17 @@ export function paint(color: boolean, format: Parameters<typeof styleText>[0], t
 }
 
 /**
- * One word of a command to print. A plain string is a word of the command itself, or a value that may as well be
- * called after the option before it; a value with a `label` is called that — `NAME`, `PATH` — if it has to be
- * typed by hand (see `shellCommand`).
- */
-export type ShellWord = string | { readonly value: string; readonly label: string };
-
-/** A word no quoting could make safe to paste, and the placeholder printed in its place. */
-export interface TypedByHand {
-  /** `NAME`, `PATH`, `WORKSPACE`: what stands for the word in `ShellCommand.line`. */
-  readonly placeholder: string;
-  readonly value: string;
-}
-
-/**
- * A command for a person to copy and run, as `shellCommand` prints it.
+ * A command for a person to copy and run, as `shellCommand` prints it — or, on Windows, cannot.
  *
- * Never a bare string, so that no printer can show `line` and forget `byHand`: a line with a placeholder in it is not
- * the command, and whoever reads it has to be told what goes in the gap — `inlineCommand` and `commandText` say it.
+ * Never a bare string, so that no printer can show a line where there must be none: `inlineCommand` and `commandText`
+ * render it, as the line to paste, or as its words in JSON with what to do instead.
  */
 export interface ShellCommand {
-  /** The words as the shell will read them, or a capitalised placeholder for each that no quoting makes safe. */
-  readonly line: string;
-  /** The words a person has to type in themselves, one per placeholder in `line`; empty when `line` runs as it is. */
-  readonly byHand: readonly TypedByHand[];
+  /** The words, as the program is to receive them. */
+  readonly words: readonly string[];
+  /** The line to paste; null when one of `words` has no printing that every Windows shell passes on alike. */
+  readonly line: string | null;
+  readonly platform: NodeJS.Platform;
 }
 
 /**
@@ -125,39 +112,23 @@ export interface ShellCommand {
  *   backslash, which the C runtime reads with the closing quote as `\"` — and doubled for it, PowerShell 7 passes both
  *   backslashes on where cmd.exe and Windows PowerShell pass one; and a word with `& | < > ^ ( )` but no whitespace,
  *   which PowerShell passes to a `.cmd` script unquoted, for cmd.exe to run `&whoami` from or to split at `|`.
- * - Any other word has no printing all three read alike, so no command is printed with it in. It was quoted for
- *   PowerShell in its single quotes, which cmd.exe takes as ordinary characters: a server named `$x&whoami&` printed
- *   as `'$x&whoami&'`, and in cmd.exe that ran `whoami`. Such a word is printed as a placeholder — named after its
- *   `label`, or the option before it, or `VALUE` — in capitals: `NAME`, `PATH`, `NAME-2` — listed in `byHand` with the
- *   word it stands for, for the printer to give separately as data. A plain word, because it has to be inert in both
- *   shells: an earlier `<name>` was refused by PowerShell, but cmd.exe read `<` and `>` as redirections — input from a
- *   file called `name`, output to a file named after the next word — so a line pasted in a folder that had such a file
- *   ran, and wrote a file. A capitalised word runs nothing it should not; at worst it names a thing that is not there.
+ * - With any other word in it, no line is printed at all (`line` is null), and the printers show the command's words
+ *   as JSON instead, saying it has to be typed. Not a line with the word left out: a placeholder in its place was
+ *   still a command that ran — `claude mcp remove NAME` removed whatever entry was called `NAME`, and an install
+ *   hint's `--force` replaced it — and before that, a word quoted for PowerShell's single quotes, which cmd.exe reads
+ *   as characters, ran `whoami` from a server named `$x&whoami&`. See `commandAsJson` for why the JSON runs nothing.
  *
- * Everywhere else `byHand` is empty: single quotes make any word safe.
+ * Everywhere else there is always a line: single quotes make any word safe.
  */
-export function shellCommand(words: readonly ShellWord[], platform: NodeJS.Platform = process.platform): ShellCommand {
-  const byHand: TypedByHand[] = [];
-  /** The words given each label so far: one word twice is one placeholder, and two words are `NAME`, `NAME-2`. */
-  const labelled = new Map<string, string[]>();
-  const printed = words.map((word, index) => {
-    const value = typeof word === 'string' ? word : word.value;
-    if (platform !== 'win32') return posixShellWord(value);
-    const quoted = windowsShellWord(value);
-    if (quoted !== null) return quoted;
-    const before = words[index - 1];
-    const option = typeof before === 'string' ? /^--([a-z][a-z-]*)$/.exec(before)?.[1] : undefined;
-    const label = typeof word === 'string' ? (option ?? 'value') : word.label;
-    const values = labelled.get(label) ?? [];
-    labelled.set(label, values);
-    const seen = values.indexOf(value);
-    const position = seen === -1 ? values.push(value) : seen + 1;
-    const capitals = label.toUpperCase();
-    const placeholder = position === 1 ? capitals : `${capitals}-${position}`;
-    if (seen === -1) byHand.push({ placeholder, value });
-    return placeholder;
-  });
-  return { line: printed.join(' '), byHand };
+export function shellCommand(words: readonly string[], platform: NodeJS.Platform = process.platform): ShellCommand {
+  if (platform !== 'win32') return { words, line: words.map(posixShellWord).join(' '), platform };
+  const printed = words.map(windowsShellWord);
+  return { words, line: printed.includes(null) ? null : printed.join(' '), platform };
+}
+
+/** The same command with more words at its end — the approval it is to be run again with — for the same shell. */
+export function withWords(command: ShellCommand, ...more: readonly string[]): ShellCommand {
+  return shellCommand([...command.words, ...more], command.platform);
 }
 
 function posixShellWord(word: string): string {
@@ -177,32 +148,45 @@ function windowsShellWord(word: string): string | null {
 }
 
 /**
- * What to type in place of each placeholder in `commands`, as a clause; empty when every word was printed.
+ * The words of a command as a JSON array, for a command that cannot be printed as a line: something to read, and to
+ * parse, and nothing to run.
  *
- * The word itself is given as JSON — in quotes, with a line break or a quote mark inside written as an escape — and
- * named as JSON, so that nobody takes it for something to paste: pasted into cmd.exe as it is, `$x&whoami&` runs
- * `whoami`. How to quote it is left to the person, who knows which shell they are in.
+ * Pasted into either Windows shell by mistake, it runs nothing. PowerShell refuses it before running anything: a `[`
+ * opens a type name, and a quoted string is none. cmd.exe looks for a program called `["agentcomms"` or the like, and
+ * finds none — and nothing in the line is anything else to it: every character it acts on, inside quotes or out (`%`,
+ * `!`), is written as a `\u` escape, and so is every double quote inside a word, so the quotes cmd.exe sees are the
+ * JSON's own, in pairs, and `&`, `|`, `<`, `>`, `^` and the parentheses are only ever inside them, where it reads them
+ * as characters. `$` and the backtick are escaped too, so that PowerShell would expand nothing even if it read on, and
+ * so is everything outside printable ASCII — a line break, a curly quote, a right-to-left override. A backslash is
+ * doubled, as JSON has it.
  */
-export function typeByHand(...commands: readonly ShellCommand[]): string {
-  const words = new Map<string, TypedByHand>();
-  for (const word of commands.flatMap((command) => command.byHand))
-    words.set(`${word.placeholder}\n${word.value}`, word);
-  if (words.size === 0) return '';
-  const each = [...words.values()].map((word) => `${word.placeholder} is ${JSON.stringify(word.value)}`);
-  const list = each.length === 1 ? each[0] : `${each.slice(0, -1).join(', ')} and ${each.at(-1)}`;
-  return `${list}, written as JSON: type ${each.length === 1 ? 'it' : 'them'} in yourself, quoted for your shell — no quoting reads the same in cmd.exe and PowerShell`;
+export function commandAsJson(words: readonly string[]): string {
+  const word = (text: string) => {
+    let json = '';
+    for (let index = 0; index < text.length; index++) {
+      const code = text.charCodeAt(index);
+      const char = text[index] as string;
+      if (char === '\\') json += '\\\\';
+      else if (code >= 0x20 && code <= 0x7e && !'"%!$`'.includes(char)) json += char;
+      else json += `\\u${code.toString(16).padStart(4, '0')}`;
+    }
+    return `"${json}"`;
+  };
+  return `[${words.map(word).join(',')}]`;
 }
 
-/** A command in backticks, for a sentence — and after it, when a word could not be printed, what to type in its place. */
+/** What is said beside a command shown as JSON. */
+const TO_TYPE =
+  "the command's words, written as JSON: one of them cannot be quoted the same way for cmd.exe and for PowerShell, so type the command yourself, with that word quoted for the shell you use";
+
+/** A command in backticks, for a sentence — as its words in JSON, saying it has to be typed, when it has no line. */
 export function inlineCommand(command: ShellCommand): string {
-  const byHand = typeByHand(command);
-  return byHand === '' ? `\`${command.line}\`` : `\`${command.line}\` (${byHand})`;
+  return command.line === null ? `\`${commandAsJson(command.words)}\` (${TO_TYPE})` : `\`${command.line}\``;
 }
 
-/** A command as text of its own — a list's line, a field's value — with what to type in place of any placeholder. */
+/** A command as text of its own — a list's line, a field's value — or its words in JSON, saying it has to be typed. */
 export function commandText(command: ShellCommand): string {
-  const byHand = typeByHand(command);
-  return byHand === '' ? command.line : `${command.line} (${byHand})`;
+  return command.line === null ? `${commandAsJson(command.words)} (${TO_TYPE})` : command.line;
 }
 
 /** Writes a successful result: the envelope with --json, otherwise the human rendering. */

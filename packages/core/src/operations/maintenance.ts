@@ -92,9 +92,7 @@ export async function doctor(core: Core, env: NodeJS.ProcessEnv, options: Doctor
         name,
         ok: !loose,
         detail: dir,
-        ...(loose
-          ? { fix: commandText(shellCommand(['chmod', '700', { value: dir, label: 'folder' }], platform)) }
-          : {}),
+        ...(loose ? { fix: commandText(shellCommand(['chmod', '700', dir], platform)) } : {}),
       });
     } catch {
       checks.push({ name, ok: true, detail: `${dir} (not created yet — created on first use)` });

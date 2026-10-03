@@ -269,8 +269,8 @@ async function latestReleases(
 /**
  * How to register an entry again by hand: its channel's own `mcp install`, with every flag that decides its reach.
  *
- * The entry's name and pins are read from the client's file, which may hold anything, so a word may come back as a
- * placeholder to type by hand: the reasons below give it with `inlineCommand`, which says so.
+ * The entry's name and pins are read from the client's file, which may hold anything, so on Windows the command may
+ * have no line to paste: the reasons below give it with `inlineCommand`, which shows it as words then.
  */
 function installCommand(item: RegistrationItem, platform: NodeJS.Platform | undefined): ShellCommand {
   const facts = channelServer(item.channel);

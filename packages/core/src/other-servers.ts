@@ -55,11 +55,11 @@ function rivalsOf(channel: string): NonNullable<ChannelManifest['rivals']> {
 
 /**
  * The command that removes a registered server, in its client's own terms — the name as the client's file has it,
- * which may be anything, so on Windows it can come back as a placeholder with the name given beside it to type by
- * hand (`shellCommand`).
+ * which may be anything, so on Windows it can have no line to paste, and is shown as its words, to be typed
+ * (`shellCommand`). Never as a line with the name left out: that removed whatever entry had the stand-in's name.
  */
 function removalCommand(client: 'claude' | 'codex', name: string, platform: NodeJS.Platform): string {
-  return commandText(shellCommand([client, 'mcp', 'remove', { value: name, label: 'name' }], platform));
+  return commandText(shellCommand([client, 'mcp', 'remove', name], platform));
 }
 
 function gmailRemoval({ client, name: server, path, scope }: RegisteredServer, platform: NodeJS.Platform): string {

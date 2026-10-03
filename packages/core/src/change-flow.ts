@@ -19,6 +19,7 @@ import {
   refuseUnlessPerson,
   type ShellCommand,
   type Streams,
+  withWords,
 } from './cli-runtime.ts';
 import { type Config, classifyChange, type LooseningConsent } from './config.ts';
 import type { Core } from './core.ts';
@@ -163,7 +164,7 @@ export async function gatedChangeAtTerminal<T>(
     output: { json?: boolean | undefined; color: boolean };
     /**
      * The command to run again with `--approval <id>`, for the message an agent gets: as `shellCommand` printed it, so
-     * that a word it could not print safely is said to be typed by hand, or a fixed string with nobody's words in it.
+     * that one it has no line for is shown as its words, to be typed, or a fixed string with nobody's words in it.
      */
     command: string | ShellCommand;
     /**
@@ -197,12 +198,12 @@ export async function gatedChangeAtTerminal<T>(
      * envelope's details: an agent reading plain output saw "needs approval" and nothing to show.
      */
     if (options.output.json !== true) streams.stdout.write(`${prepared.preview}\n\n`);
-    const carrying = `${options.approvalFlag ?? '--approval'} ${prepared.approvalId}`;
+    const carrying = [options.approvalFlag ?? '--approval', prepared.approvalId];
     const { command } = options;
     throw new CommsError('APPROVAL_PENDING', `this change needs approval first: ${prepared.summary}`, {
       hint: approvalHint(
         prepared,
-        typeof command === 'string' ? `${command} ${carrying}` : { ...command, line: `${command.line} ${carrying}` },
+        typeof command === 'string' ? `${command} ${carrying.join(' ')}` : withWords(command, ...carrying),
         approveCommand,
       ),
       details: {
@@ -242,7 +243,7 @@ export function approvalHint(
   rerun: string | ShellCommand,
   approveCommand?: string | undefined,
 ): string {
-  // A command `shellCommand` printed says what to type by hand in place of a word it could not print safely.
+  // A command `shellCommand` has no line for is shown as its words, saying it has to be typed.
   const run = typeof rerun === 'string' ? `\`${rerun}\`` : inlineCommand(rerun);
   return prepared.policy === 'confirm'
     ? `Show the person the preview. They run \`${approveCommandOf({ approveCommand })} ${prepared.approvalId}\`; then run ${run}.`

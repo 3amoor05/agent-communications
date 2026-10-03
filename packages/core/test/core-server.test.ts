@@ -9,7 +9,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { gatedChange } from '../src/change-flow.ts';
 import { beginChangeApproval, finishChangeApproval } from '../src/changes.ts';
 import { CHANNEL_SERVERS } from '../src/channel-servers.ts';
-import { shellCommand } from '../src/cli-runtime.ts';
+import { commandAsJson, shellCommand } from '../src/cli-runtime.ts';
 import type { AccountConfig, InboxConfig } from '../src/config.ts';
 import { type Core, openCore } from '../src/core.ts';
 import { CommsError, ERROR_REGISTRY, EXIT_CODES } from '../src/errors.ts';
@@ -481,10 +481,10 @@ test('the doctor gives the name of an entry to register again as one word, quote
   );
 });
 
-test('the doctor gives a name Windows cannot print as a placeholder, with the name beside it to type (CUE-306)', async () => {
+test('the doctor shows a repair with a name Windows cannot print as its words, never as a line (CUE-306)', async () => {
   /*
    * Quoted for PowerShell, a name like `$x&whoami&` came out in single quotes, which cmd.exe reads as characters: pasted
-   * there, the repair ran `whoami`. Asked for Windows by name, the doctor prints a placeholder and gives the name apart.
+   * there, the repair ran `whoami`. Asked for Windows by name, the doctor shows the command's words instead.
    */
   const m = doctorMachine();
   const gone = managedRuntimeEntry(m.core.paths.dataDir, '@agentcomms/slack', VERSION);
@@ -497,12 +497,12 @@ test('the doctor gives a name Windows cannot print as a placeholder, with the na
   const report = await doctor(m.core, m.env, { keyring: null, platform: 'win32' });
   assert.equal(
     report.checks.find((check) => check.name === 'slack server')?.fix,
-    'Register it again: `agent-slack mcp install --client claude-code --name NAME --workspace acme/slack --force` (NAME is "$x&whoami&", written as JSON: type it in yourself, quoted for your shell — no quoting reads the same in cmd.exe and PowerShell).',
+    `Register it again: \`["agent-slack","mcp","install","--client","claude-code","--name","\\u0024x&whoami&","--workspace","acme/slack","--force"]\` (the command's words, written as JSON: one of them cannot be quoted the same way for cmd.exe and for PowerShell, so type the command yourself, with that word quoted for the shell you use).`,
   );
 });
 
 test(
-  'the doctor gives a loose directory Windows could not print as a placeholder too, with the path beside it (CUE-306)',
+  'the doctor shows a chmod of a directory Windows could not print as its words too (CUE-306)',
   process.platform === 'win32' ? { skip: 'Windows has no mode bits for the doctor to find loose' } : {},
   async () => {
     // Asked for Windows' quoting by name on a machine with mode bits: a `%` is expanded by cmd.exe inside quotes too.
@@ -514,7 +514,7 @@ test(
     const report = await doctor(openCore({ env }), env, { keyring: null, platform: 'win32' });
     assert.equal(
       report.checks.find((check) => check.name === 'config dir')?.fix,
-      `chmod "700" FOLDER (FOLDER is ${JSON.stringify(configDir)}, written as JSON: type it in yourself, quoted for your shell — no quoting reads the same in cmd.exe and PowerShell)`,
+      `${commandAsJson(['chmod', '700', configDir])} (the command's words, written as JSON: one of them cannot be quoted the same way for cmd.exe and for PowerShell, so type the command yourself, with that word quoted for the shell you use)`,
     );
   },
 );

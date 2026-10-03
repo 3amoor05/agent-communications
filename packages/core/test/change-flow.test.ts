@@ -172,14 +172,14 @@ test('at the CLI an agent gets the preview and the approval id, and exits 10; --
   assert.equal(await gatedChangeAtTerminal(core, change, { ...options, approvalId }), 'chat');
 });
 
-test('a command to run again with a word Windows cannot print says to type it by hand, under either policy (CUE-306)', async () => {
+test('a command to run again with a word Windows cannot print is shown as its words, to type, under either policy (CUE-306)', async () => {
   /*
-   * The agent is told the command to run again with the approval. With a word no quoting makes safe in both Windows
-   * shells — a folder with a `%` in it, which cmd.exe expands even in double quotes — the command is printed with a
-   * placeholder, and the folder given beside it as JSON, under `chat` and under `confirm` alike.
+   * The agent is told the command to run again with the approval. With a word no quoting brings through every Windows
+   * shell alike — a folder with a `%` in it, which cmd.exe expands even in double quotes — there is no line to run:
+   * the command, approval and all, is shown as its words in JSON, under `chat` and under `confirm` alike.
    */
   const folder = 'C:\\Profiles\\50% off';
-  const words = ['agentcomms', 'attach', 'roots', 'add', { value: folder, label: 'path' }];
+  const words = ['agentcomms', 'attach', 'roots', 'add', folder];
   for (const policy of ['chat', 'confirm'] as const) {
     const core = coreWith('never', policy);
     await assert.rejects(
@@ -191,13 +191,18 @@ test('a command to run again with a word Windows cannot print says to type it by
       (error: unknown) => {
         assert.ok(error instanceof CommsError && error.code === 'APPROVAL_PENDING', String(error));
         const approvalId = String((error.details as { approvalId?: string }).approvalId);
-        const run = `\`agentcomms attach roots add PATH --approval ${approvalId}\` (PATH is ${JSON.stringify(folder)}, written as JSON: type it in yourself, quoted for your shell — no quoting reads the same in cmd.exe and PowerShell)`;
-        assert.ok(error.hint?.endsWith(`run ${run}.`), `${policy}: ${error.hint}`);
-        assert.doesNotMatch(String(error.hint).split(' (PATH is')[0] ?? '', /50%/, 'the folder is in nothing to run');
+        const json = `["agentcomms","attach","roots","add","C:\\\\Profiles\\\\50\\u0025 off","--approval","${approvalId}"]`;
+        assert.ok(
+          error.hint?.endsWith(
+            `run \`${json}\` (the command's words, written as JSON: one of them cannot be quoted the same way for cmd.exe and for PowerShell, so type the command yourself, with that word quoted for the shell you use).`,
+          ),
+          `${policy}: ${error.hint}`,
+        );
+        assert.doesNotMatch(String(error.hint), /agentcomms attach/, 'and no line to run');
         return true;
       },
     );
-    // Elsewhere the folder goes in single quotes, and there is nothing to type by hand.
+    // Elsewhere the folder goes in single quotes, and the line is there to run.
     await assert.rejects(
       gatedChangeAtTerminal(core, setSendPolicy(core, 'chat'), {
         env: { CLAUDECODE: '1' },

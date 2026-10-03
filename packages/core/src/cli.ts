@@ -372,7 +372,7 @@ export async function main(
         }
         const result = await gatedChangeAtTerminal(core, attachChange(core, env, { kind, path }, 'cli'), {
           ...approval,
-          command: shellCommand(['agentcomms', 'attach', list, action as string, { value: path, label: 'path' }]),
+          command: shellCommand(['agentcomms', 'attach', list, action as string, path]),
         });
         writeResult(result, output, renderAttachChange);
         return;
@@ -627,11 +627,10 @@ export function renderAttach(report: AttachReport, platform: NodeJS.Platform = p
           'Listed, but allowing nothing — they do not say which drive or folder they are on. To take one out, run the',
           'command shown for it:',
           // The whole command, quoted for the shell it is pasted into (`shellCommand`): the entry as written, a space
-          // at either end or nothing at all, and never a `$HOME` or a `$(…)` the shell would expand or run. An entry
-          // no quoting makes safe on Windows — a `%USERPROFILE%`, say — is a placeholder, with the entry beside it.
+          // at either end or nothing at all, and never a `$HOME` or a `$(…)` the shell would expand or run. On Windows a
+          // command with an entry no quoting brings through — a `%USERPROFILE%`, nothing at all — is shown as words.
           ...report.ignored.map(
-            (root) =>
-              `  ${commandText(shellCommand(['agentcomms', 'attach', 'roots', 'remove', { value: root, label: 'entry' }], platform))}`,
+            (root) => `  ${commandText(shellCommand(['agentcomms', 'attach', 'roots', 'remove', root], platform))}`,
           ),
         ]),
     '',
