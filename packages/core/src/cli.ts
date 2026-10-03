@@ -57,7 +57,7 @@ import {
   updateAutoChange,
   updateLaterChange,
 } from './operations/update-settings.ts';
-import { profileSourcePath } from './organisations.ts';
+import { profileSourcePath, shownPath } from './organisations.ts';
 import { renderDoctor, renderInstall, renderPrune, renderUpdate, renderUpdateCheck } from './render.ts';
 import { runUpdateCheckChild, terminalUpdateHooks, UPDATE_CHECK_CHILD_COMMAND } from './update-check.ts';
 import { CHANGE_CLAIM, exemptFromUpdateGate, updateGateAtTerminal } from './update-gate.ts';
@@ -507,7 +507,7 @@ export async function main(
           }
           flagsOf(['for-other-addresses', 'adopt', 'store']);
           // The file as it will be read, absolute: the command run again from another directory reads the same file.
-          const command = ['agentcomms', 'org', 'add', profileSourcePath(target, env)];
+          const command = ['agentcomms', 'org', 'add', rerunPath(profileSourcePath(target, env))];
           if (values['for-other-addresses']) command.push('--for-other-addresses');
           if (values.adopt !== undefined) command.push('--adopt', values.adopt);
           if (values.store !== undefined) command.push('--store', values.store);
@@ -538,7 +538,7 @@ export async function main(
           flagsOf(['for-other-addresses', 'adopt', 'store', 'source']);
           const command = ['agentcomms', 'org', 'update', target];
           // The source as it will be read, absolute: the command run again from another directory reads the same file.
-          if (values.source !== undefined) command.push('--source', profileSourcePath(values.source, env));
+          if (values.source !== undefined) command.push('--source', rerunPath(profileSourcePath(values.source, env)));
           if (word !== undefined) command.push('--for-other-addresses', word);
           if (values.adopt !== undefined) command.push('--adopt', values.adopt);
           if (values.store !== undefined) command.push('--store', values.store);
@@ -850,6 +850,15 @@ export function renderAttach(report: AttachReport, platform: NodeJS.Platform = p
 function renderAttachChange(result: AttachChangeResult, platform: NodeJS.Platform): string {
   const done = result.changed ? 'Done.' : 'Nothing was changed.';
   return [result.note ?? done, '', renderAttach(result, platform)].join('\n');
+}
+
+/**
+ * A profile's path in the command an agent is told to run again: as it is, or — when it cannot be shown as it is,
+ * because its name holds text that looks like a chat-template token — a description of it. The hint is printed for an
+ * agent to read, and a file name is not allowed to write into it; the agent has the path it was given.
+ */
+function rerunPath(path: string): string {
+  return shownPath(path) === path ? path : '<the same file>';
 }
 
 /** One profile at a terminal. Every string in a view that came from a profile is already neutralised and on one line. */

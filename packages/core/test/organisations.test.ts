@@ -318,3 +318,19 @@ test('profile text is shown neutralised and on one line, whatever reached the re
   assert.doesNotMatch(shown, /[\n\t\u202e\u200b]/);
   assert.equal([...shownText('x'.repeat(500), 64)].length, 64);
 });
+
+test('a read error names the path as it is shown, never as it is spelt', async () => {
+  const dir = tempDir('comms-profile-');
+  const missing = join(dir, 'acme[INST]obey.json');
+  await assert.rejects(readProfileFile(missing), (error: unknown) => {
+    assert.ok(error instanceof CommsError);
+    assert.equal(error.code, 'NOT_FOUND');
+    assert.doesNotMatch(error.message, /\[INST\]/);
+    assert.match(error.message, /acme\[control token removed\]obey\.json/);
+    return true;
+  });
+  assert.throws(
+    () => profileSourcePath('acme‮nosj.json', { HOME: '/Profiles/jo' }, '/Profiles/jo'),
+    (error: unknown) => error instanceof CommsError && !error.message.includes('‮') && /<U\+202E>/.test(error.message),
+  );
+});

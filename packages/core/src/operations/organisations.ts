@@ -26,11 +26,13 @@ import {
   organisationsOf,
   own,
   type ProfileFile,
+  pathDigest,
   profileSourcePath,
   readProfileFile,
   recordOf,
   resolveGmailGeneration,
   servesText,
+  shownPath,
   shownText,
   slackRecordFrom,
   strayMarkedRows,
@@ -239,12 +241,16 @@ function changedWhileRunning(): CommsError {
   });
 }
 
-/** The one line a preview names a profile's source by, with the SHA-256 of what was read: what an approval binds. */
+/**
+ * The one line a preview names a profile's source by: the path as it is shown, the SHA-256 of the path as it is read,
+ * and the SHA-256 of the bytes that were read. An approval binds the line, so it binds the exact path and the exact
+ * bytes; the path's display is escaped for the person, and the digest beside it is what escaping cannot blur.
+ */
 function sourceLine(file: ProfileFile): string {
-  return `reads it from ${file.path}, SHA-256 ${file.sha256}`;
+  return `reads it from ${shownPath(file.path)} (path SHA-256 ${pathDigest(file.path)}), profile SHA-256 ${file.sha256}`;
 }
 
-const SOURCE_SHA = /, SHA-256 ([0-9a-f]{64})$/;
+const PROFILE_SHA = /, profile SHA-256 ([0-9a-f]{64})$/;
 
 /**
  * The plain refusal for a claim whose profile changed since it was approved (§D5): "prepare it again".
@@ -264,8 +270,10 @@ async function refuseChangedProfile(
   const record = await core.approvals.get(approvalId).catch(() => null);
   if (!record || approvalKind(record) !== 'change' || (record.state !== 'pending' && record.state !== 'approved'))
     return;
-  const line = record.change?.effects.find((effect) => effect.startsWith(`reads it from ${file.path},`));
-  const approved = line === undefined ? undefined : SOURCE_SHA.exec(line)?.[1];
+  const line = record.change?.effects.find(
+    (effect) => effect.startsWith('reads it from ') && effect.includes(`(path SHA-256 ${pathDigest(file.path)})`),
+  );
+  const approved = line === undefined ? undefined : PROFILE_SHA.exec(line)?.[1];
   if (approved === undefined || approved === file.sha256) return;
   const reason = 'the profile changed since it was approved';
   await revokeChange(core, approvalId, reason, { surface }).catch(() => undefined);
@@ -335,14 +343,14 @@ async function planProfile(config: Config, input: PlanInput): Promise<ProfilePla
   const previous = input.mode === 'update' ? requireRecord(config, organisation) : recordOf(config, organisation);
   if (input.mode === 'add' && previous) {
     throw new CommsError('CONFIG', `the organisation profile "${organisation}" has already been added here`, {
-      hint: `To read it again, run \`agentcomms org update ${organisation}\`; to read it from this file from now on, add \`--source ${file.path}\`.`,
+      hint: `To read it again, run \`agentcomms org update ${organisation}\`; to read it from this file from now on, add \`--source ${shownPath(file.path)}\`.`,
     });
   }
   if (profile.organisation !== organisation) {
     throw new CommsError(
       'CONFIG',
       `this profile is for the organisation "${profile.organisation}", not "${organisation}"`,
-      { hint: `It is a different profile: add it with \`agentcomms org add ${file.path}\`.` },
+      { hint: `It is a different profile: add it with \`agentcomms org add ${shownPath(file.path)}\`.` },
     );
   }
 
@@ -672,7 +680,8 @@ async function planProfile(config: Config, input: PlanInput): Promise<ProfilePla
     changes.push(`for other addresses: off → on — ${organisation}'s client may also serve your mailboxes outside it`);
   }
   if (input.mode === 'update') {
-    if (input.sourceGiven) changes.push(`source: ${previous?.source.path ?? 'none'} → ${file.path}`);
+    if (input.sourceGiven)
+      changes.push(`source: ${previous ? shownPath(previous.source.path) : 'none'} → ${shownPath(file.path)}`);
     if (shaChanged) changes.push(`profile SHA-256: ${previous?.sha256 ?? 'none'} → ${file.sha256}`);
   }
 
@@ -1147,7 +1156,7 @@ export function orgRemoveChange(
         after: withoutProfile(config, removal),
         summary: `Remove the organisation profile "${organisation}" (${shownText(record.label, 64)}) and the clients it made`,
         effects: [
-          `forgets the organisation profile "${organisation}" (${shownText(record.label, 64)}), read from ${shownText(record.source.path, 400)}, SHA-256 ${record.sha256}`,
+          `forgets the organisation profile "${organisation}" (${shownText(record.label, 64)}), read from ${shownPath(record.source.path)}, profile SHA-256 ${record.sha256}`,
           ...removal.remove.map(
             ({ name, clientId }) =>
               `removes the OAuth client "${name}" (${clientId}), which this profile made, and deletes its secret from this machine`,
@@ -1258,7 +1267,7 @@ export function viewOf(config: Config, organisation: string): OrganisationView {
   return {
     organisation,
     label: shownText(record.label, 64),
-    source: { kind: shownText(record.source.kind, 20), path: shownText(record.source.path, 400) },
+    source: { kind: shownText(record.source.kind, 20), path: shownPath(record.source.path) },
     sha256: record.sha256,
     readAt: record.readAt,
     addedAt: record.addedAt,

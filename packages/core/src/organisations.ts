@@ -234,6 +234,29 @@ export function profileSourcePath(given: unknown, env: NodeJS.ProcessEnv, cwd: s
       hint: 'For example: `agentcomms org add ./rgc.agentcomms.json`.',
     });
   }
+  /*
+   * A path a person cannot read is one they cannot approve. A line break, a terminal control, a bidi override or a
+   * zero-width character in the name would be shown escaped — `<U+202E>` — and the person would approve something
+   * that is not the file's name as it is spelt; no profile needs a name like that. So it is refused, and the name is
+   * repeated only as it is shown. (What remains, visible text that looks like a chat-template token, is neutralised
+   * wherever the path is shown; a preview binds the path by its own SHA-256, so the display cannot weaken that.)
+   */
+  if ([...value].some((char) => char === '\n' || char === '\t' || isDangerous(char.codePointAt(0) ?? 0))) {
+    // Shown with each such character made visible, `<U+202E>`, so the person can see which one to rename away —
+    // `shownPath` strips invisible characters, which would show a name that looks fine.
+    const visible = [...value]
+      .map((char) =>
+        char === '\n' || char === '\t'
+          ? `<U+${(char.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, '0')}>`
+          : char,
+      )
+      .join('');
+    throw new CommsError(
+      'USAGE',
+      `the profile's path holds a control, invisible or line-break character: ${neutralise(truncateDisplay(visible, 400)).text}`,
+      { hint: 'Rename the file to a plain name, and pass that path.' },
+    );
+  }
   const scheme = URL_LIKE.exec(value.trim());
   if (scheme) {
     throw new CommsError(
@@ -245,6 +268,23 @@ export function profileSourcePath(given: unknown, env: NodeJS.ProcessEnv, cwd: s
     );
   }
   return resolve(cwd, expandHome(value, homeDirectory(env)));
+}
+
+/**
+ * A profile's path as it is shown — in a preview, an error, a command's output: neutralised and on one line, as every
+ * other string a person did not write themselves. The path is chosen by whoever named the file — a repository, a
+ * message with an attachment — and its name is text like any other.
+ */
+export function shownPath(path: string): string {
+  return shownText(path, 400);
+}
+
+/**
+ * The SHA-256 of a profile's path exactly as it is read, which a preview names beside the path as it is shown. An
+ * approval is bound to this, not to the display: two paths that read alike once neutralised are still two paths.
+ */
+export function pathDigest(path: string): string {
+  return createHash('sha256').update(path, 'utf8').digest('hex');
 }
 
 /** A profile as it was read: from where, the SHA-256 of the exact bytes, and what they say. Never the bytes. */
@@ -265,25 +305,25 @@ export async function readProfileFile(path: string): Promise<ProfileFile> {
   try {
     handle = await open(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
   } catch {
-    throw new CommsError('NOT_FOUND', `no profile file at ${path}`, {
+    throw new CommsError('NOT_FOUND', `no profile file at ${shownPath(path)}`, {
       hint: 'Pass the path of your organisation’s .agentcomms.json file — after `git pull` in its repository, if it came from one.',
     });
   }
   let bytes: Buffer;
   try {
     const info = await handle.stat();
-    if (!info.isFile()) throw new CommsError('USAGE', `${path} is not a file`);
+    if (!info.isFile()) throw new CommsError('USAGE', `${shownPath(path)} is not a file`);
     const buffer = Buffer.allocUnsafe(PROFILE_MAX_BYTES + 1);
     const { bytesRead } = await handle.read(buffer, 0, PROFILE_MAX_BYTES + 1, 0);
     if (bytesRead > PROFILE_MAX_BYTES) {
-      throw new CommsError('BAD_DATA', `${path} is larger than a profile can be (64 KiB)`, {
+      throw new CommsError('BAD_DATA', `${shownPath(path)} is larger than a profile can be (64 KiB)`, {
         hint: 'A profile is a few hundred bytes of JSON. Check this is the file your organisation sent.',
       });
     }
     bytes = Buffer.from(buffer.subarray(0, bytesRead));
   } catch (error) {
     if (error instanceof CommsError) throw error;
-    throw new CommsError('NOT_FOUND', `the profile at ${path} could not be read`, { cause: error });
+    throw new CommsError('NOT_FOUND', `the profile at ${shownPath(path)} could not be read`, { cause: error });
   } finally {
     await handle.close();
   }
