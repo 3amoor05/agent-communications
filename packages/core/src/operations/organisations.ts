@@ -506,12 +506,22 @@ async function planProfile(config: Config, input: PlanInput): Promise<ProfilePla
           else repairs.push(`writes the profile's client secret to "${target.name}" again: the store did not hold it`);
         }
       }
-    } else if (before !== undefined && target.name === before.name && shaChanged) {
+    } else if (shaChanged || gmail.action === 'reactivated' || gmail.action === 'adopted') {
+      /*
+       * An adopted client's secret is the person's, and no `org` command changes it (§D4) — but whenever a changed
+       * profile selects one, or one becomes the client new mailboxes get, whether its secret is the profile's is said.
+       * This was asked only of the generation already active, and only of a secret that was there: A → B → A made an
+       * adopted client active again with a rotated secret, or none at all, and said nothing, so the first sign-in
+       * through it was the first anybody heard. A secret that is not stored is a mismatch like any other.
+       */
       const row = own(config.clients, target.name);
       const stored = row ? await input.readSecret(row.secretRef) : null;
-      if (stored !== null && stored !== pg.clientSecret) {
+      const fix = `to use the profile's, run \`agent-gmail client add <its client file> --name ${target.name} --replace\``;
+      if (stored === null) {
+        reports.push(`"${target.name}", which you registered yourself, has no secret stored on this machine; ${fix}`);
+      } else if (stored !== pg.clientSecret) {
         reports.push(
-          `the profile carries another secret for "${target.name}", which you registered yourself and which is left as it is; to use it, run \`agent-gmail client add <its client file> --name ${target.name} --replace\``,
+          `the profile carries another secret for "${target.name}", which you registered yourself and which is left as it is; ${fix}`,
         );
       }
     }

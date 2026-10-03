@@ -1523,3 +1523,33 @@ test('other addresses off alone is reported as what this call did', async () => 
   assert.equal(result.changed, true);
   assert.deepEqual(result.applied, ['for other addresses: on → off']);
 });
+
+test('an adopted client made active again is held to the profile’s secret: a rotated one and a missing one are reported', async () => {
+  for (const which of ['rotated', 'missing'] as const) {
+    const m = machine({ secrets: { store: 'file' }, clients: { desktop: personsRow(CLIENT_A, 'desktop') } });
+    await (await m.core.secrets('file')).set(clientSecretRef('desktop'), SECRET_A);
+    writeProfile(m, profile());
+    const added = await add(m);
+    assert.deepEqual(
+      added.result.reported.filter((line) => line.includes('desktop')),
+      [],
+      'the same secret: nothing to say',
+    );
+    writeProfile(m, profile({ gmail: gmail({ clientId: CLIENT_B, clientSecret: SECRET_B }) }));
+    await update(m);
+    // Meanwhile the organisation rotated A's secret — or the person's store lost theirs.
+    if (which === 'missing') await (await m.core.secrets('file')).delete(clientSecretRef('desktop'));
+    writeProfile(m, profile({ gmail: gmail({ clientSecret: which === 'rotated' ? SECRET_A2 : SECRET_A }) }));
+    const { result } = await update(m);
+    assert.equal(result.gmail.action, 'reactivated', which);
+    assert.match(
+      result.reported.join('\n'),
+      which === 'rotated'
+        ? /the profile carries another secret for "desktop".*agent-gmail client add <its client file> --name desktop --replace/
+        : /"desktop", which you registered yourself, has no secret stored on this machine.*--name desktop --replace/,
+      which,
+    );
+    const stored = await (await m.core.secrets('file')).get(clientSecretRef('desktop'));
+    assert.equal(stored, which === 'rotated' ? SECRET_A : null, 'the person’s secret is never changed by a profile');
+  }
+});
