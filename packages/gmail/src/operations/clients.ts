@@ -14,6 +14,7 @@ import {
   inlineCommand,
   keepAndReport,
   type LooseningConsent,
+  managingOrganisation,
   type StoreKind,
   secretsStoreOf,
   shellCommand,
@@ -124,6 +125,7 @@ function refuseClientConflict(
   platform: NodeJS.Platform,
 ): void {
   const existing = config.clients[name];
+  refuseOrganisationRow(config, name, 'replace');
   if (existing && !replace) {
     throw new CommsError('CONFIG', `an OAuth client called "${name}" is already registered`, {
       hint:
@@ -140,6 +142,33 @@ function refuseClientConflict(
       });
     }
   }
+}
+
+/**
+ * Refuses to replace or remove a client an organisation profile made and owns (design 2026-10-02 §D4).
+ *
+ * Its row carries `organisation`, and it changes with the profile: `org update` rotates its secret or rebuilds it, and
+ * `org remove` removes it. Replaced here, the profile would rebuild it over the person's client on its next update, or
+ * removal would leave a record naming a client that is gone — so the refusal points at the command that does it. A
+ * mark naming an organisation with no record here refuses nothing: no `org` command could change that row, and a row
+ * no command can change is the one outcome the design rules out.
+ */
+function refuseOrganisationRow(config: Config, name: string, act: 'replace' | 'remove'): void {
+  const organisation = managingOrganisation(
+    config,
+    Object.hasOwn(config.clients, name) ? config.clients[name] : undefined,
+  );
+  if (organisation === null) return;
+  throw new CommsError(
+    'CONFIG',
+    `the OAuth client "${name}" belongs to the organisation profile "${organisation}", so ${act === 'replace' ? 'it is replaced' : 'it is removed'} with the profile`,
+    {
+      hint:
+        act === 'replace'
+          ? `To read the profile again — a new secret, a repaired client — run \`agentcomms org update ${organisation}\`. To register a client of your own, choose another name with --name.`
+          : `To stop using the organisation's apps, run \`agentcomms org remove ${organisation}\`; if the client has drifted from the profile, \`agentcomms org update ${organisation}\` repairs it.`,
+    },
+  );
 }
 
 /**
@@ -242,6 +271,8 @@ async function registerClient(
       });
     }
     const held = fresh.clients[name];
+    // Re-checked under the lock: an `org add` may have made this name its own since the change was planned.
+    refuseOrganisationRow(fresh, name, 'replace');
     if (held && !options.replace) {
       throw new CommsError('CONFIG', `an OAuth client called "${name}" was registered while this ran`, {
         hint: 'Run the command again to see what is there now.',
@@ -283,6 +314,7 @@ async function registerClient(
                 hint: 'Run the command again.',
               });
             }
+            refuseOrganisationRow(current, name, 'replace');
             // The users are re-checked here as well as above: a sign-in completing between the two would otherwise
             // attach a mailbox to the client being replaced, and its token would not survive the replacement.
             const held = current.clients[name];
@@ -406,6 +438,7 @@ function requireRemovableClient(config: Config, name: string): ClientConfig {
         : 'None are registered yet.',
     });
   }
+  refuseOrganisationRow(config, name, 'remove');
   const users = inboxesOf(config.inboxes, name);
   if (users.length > 0) {
     throw new CommsError('CONFIG', `${users.length} inbox(es) still sign in through "${name}"`, {
@@ -428,6 +461,7 @@ async function removeClientLocked(
   }
   try {
     await context.core.config.update((current) => {
+      refuseOrganisationRow(current, name, 'remove');
       // The row this read, not whatever holds the name now.
       if (current.clients[name]?.clientId !== client.clientId) {
         throw new CommsError('CONFIG', `the OAuth client "${name}" changed while it was being removed`, {
