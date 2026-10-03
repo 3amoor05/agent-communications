@@ -769,7 +769,9 @@ export function slackRecordFrom(
 
 /**
  * Accounts named after this organisation that are connected to its Slack workspace through an app of their own — not
- * the profile's. `org add` is refused while there is one (§D5): it is reported, never touched.
+ * the profile's. `org add` reports each and goes on (§D5, as decided in implementation): early members connected that
+ * way before profiles existed, and adding the profile must not make them disconnect Slack first. The account is left
+ * exactly as it is — it carries no provenance, so nothing treats it as the profile's.
  */
 export function unmanagedSlackAccounts(config: Config, organisation: string, workspace: string): string[] {
   return Object.entries(config.accounts)

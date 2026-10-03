@@ -1102,8 +1102,8 @@ async function applyProfile(
  * `agentcomms org add <file>` and `comms_org_add`: adding an organisation's profile, as one approved change (§D5).
  *
  * Refused on a version-1 configuration, for a profile that is not valid, for an organisation already added (`org
- * update` is the way), for an ambiguous adoption, and while one of its accounts is connected to its Slack workspace
- * through an app of the person's own.
+ * update` is the way), and for an ambiguous adoption. An account of the organisation already connected to its Slack
+ * workspace through an app of the person's own is reported, and left exactly as it is.
  */
 export function orgAddChange(core: Core, request: OrgAddRequest, options: OrgOptions): GatedChange<OrgChangeResult> {
   // Checked before anything is read, so a word that is no store is refused before any approval is prepared.
