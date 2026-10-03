@@ -143,7 +143,7 @@ function lineAhead(throttle: Throttle): { stop: () => void } {
   };
 }
 
-test('a reservation, and a stop Resend asked for, wait out a line on the lock for as long as it keeps moving', async () => {
+test('a reservation, and a stop Resend asked for, wait out a line on the lock while it keeps moving', async () => {
   /*
    * Every Resend request on this machine takes the throttle's one lock, so six accounts asking at once are a line of
    * six on it. The lock's timeout used to count from when each caller began to wait, so the test above, on a machine
@@ -178,6 +178,39 @@ test('a reservation, and a stop Resend asked for, wait out a line on the lock fo
     assert.ok(await stopping.blockedUntil(), 'the stop was recorded, so every other account is held by it too');
     await reserving.before();
     assert.deepEqual(waits, [500], 'and the reservation was recorded: the next request waits its 500 ms');
+  } finally {
+    clearTimeout(ended);
+    for (const line of lines) line.stop();
+  }
+});
+
+test('a reservation, and a stop Resend asked for, give up once the lock has kept changing hands past them for too long', async () => {
+  /*
+   * The lock is polled, not queued, so a request can lose it to later ones for as long as later ones keep coming, and
+   * the per-holder timeout starts again at every hand-over: alone, a wait with no end. The throttle's overall limit
+   * ends it. Scaled down: a line that never ends while they wait, a new holder every 50 ms, against two seconds for
+   * each holder (never reached) and an overall limit of 600 ms. The line stops after eight seconds only so that a
+   * request that never gives up gets its turn and fails the test, rather than hanging it.
+   */
+  const options = { now: () => 7_000_000, sleep: async () => undefined, lockTimeoutMs: 2_000, lockMaxWaitMs: 600 };
+  const reserving = new Throttle(tempDir('agent-resend-throttle-'), options);
+  const stopping = new Throttle(tempDir('agent-resend-throttle-'), options);
+  const lines = [lineAhead(reserving), lineAhead(stopping)];
+  const ended = setTimeout(() => {
+    for (const line of lines) line.stop();
+  }, 8_000);
+  try {
+    const outcomes = await Promise.allSettled([
+      reserving.before(),
+      stopping.after(429, new Headers({ 'retry-after': '60' })),
+    ]);
+    for (const [index, outcome] of outcomes.entries()) {
+      const lock = `${(index === 0 ? reserving : stopping).path}.lock`;
+      assert.equal(outcome.status, 'rejected', `${index === 0 ? 'the reservation' : 'the stop'} waited for its turn`);
+      const reason = (outcome as PromiseRejectedResult).reason;
+      assert.ok(reason instanceof CommsError && reason.code === 'LOCK_TIMEOUT', String(reason));
+      assert.equal(reason.message, `gave up waiting for ${lock}: the wait hit its overall limit of 0.6 s`);
+    }
   } finally {
     clearTimeout(ended);
     for (const line of lines) line.stop();

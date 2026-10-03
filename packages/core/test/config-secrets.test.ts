@@ -549,7 +549,12 @@ test('with timeoutPerHolder a waiter keeps its place while the lock keeps changi
   const started = Date.now();
   try {
     const [patient, plain] = await Promise.allSettled([
-      withFileLock(path, async () => Date.now() - started, { timeoutMs: 1_000, timeoutPerHolder: true }),
+      // An overall limit far past the line, so that only the per-holder rule is under test here.
+      withFileLock(path, async () => Date.now() - started, {
+        timeoutMs: 1_000,
+        timeoutPerHolder: true,
+        maxWaitMs: 60_000,
+      }),
       withFileLock(path, async () => Date.now() - started, { timeoutMs: 300 }),
     ]);
     assert.equal(
@@ -576,8 +581,61 @@ test('with timeoutPerHolder, one holder that keeps the lock still makes a waiter
   const released = setTimeout(() => rmSync(path, { force: true }), 3_000);
   try {
     await assert.rejects(
-      withFileLock(path, async () => 'had a turn', { timeoutMs: 300, timeoutPerHolder: true }),
-      (error: unknown) => error instanceof CommsError && error.code === 'LOCK_TIMEOUT',
+      withFileLock(path, async () => 'had a turn', { timeoutMs: 300, timeoutPerHolder: true, maxWaitMs: 60_000 }),
+      (error: unknown) =>
+        error instanceof CommsError &&
+        error.code === 'LOCK_TIMEOUT' &&
+        /another agent-communications process is holding/.test(error.message),
+    );
+  } finally {
+    clearTimeout(released);
+  }
+});
+
+test('with timeoutPerHolder, a lock that keeps changing hands past a waiter still ends its wait, at maxWaitMs', async () => {
+  /*
+   * The lock is polled, not queued: whoever looks first after a release takes it. So a waiter can lose it to caller
+   * after caller arriving later, and per holder its timeout starts again at every hand-over — alone, a wait with no
+   * end. Here the line never ends while the waiter is in it: a new holder every 50 ms, against one second for each
+   * holder (never reached) and an overall limit of 600 ms (reached). The line stops after eight seconds only so that
+   * a waiter that never gives up gets its turn and fails the test, rather than hanging it.
+   */
+  const path = join(tempDir(), 'overtaken.lock');
+  const line = handedOnRepeatedly(path, 50);
+  const ended = setTimeout(line.stop, 8_000);
+  const started = Date.now();
+  try {
+    await assert.rejects(
+      withFileLock(path, async () => `had a turn after ${Date.now() - started}ms`, {
+        timeoutMs: 2_000,
+        timeoutPerHolder: true,
+        maxWaitMs: 600,
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof CommsError, String(error));
+        assert.equal(error.code, 'LOCK_TIMEOUT');
+        assert.equal(error.message, `gave up waiting for ${path}: the wait hit its overall limit of 0.6 s`);
+        assert.match(String(error.hint), /changed hands \d+ time\(s\) while this waited/, 'and says it was busy');
+        return true;
+      },
+    );
+    assert.ok(Date.now() - started >= 600, `it gave up at the limit, not before: after ${Date.now() - started}ms`);
+  } finally {
+    clearTimeout(ended);
+    line.stop();
+  }
+});
+
+test('maxWaitMs bounds a wait on a stuck lock too, before its timeout', async () => {
+  // Fixed when the wait begins: an overall limit shorter than the timeout ends the wait first, whatever the lock does.
+  const path = join(tempDir(), 'stuck-short.lock');
+  writeFileSync(path, JSON.stringify({ pid: 1, at: new Date().toISOString(), token: 'stuck' }));
+  const released = setTimeout(() => rmSync(path, { force: true }), 8_000);
+  try {
+    await assert.rejects(
+      withFileLock(path, async () => 'had a turn', { timeoutMs: 5_000, maxWaitMs: 300 }),
+      (error: unknown) =>
+        error instanceof CommsError && error.code === 'LOCK_TIMEOUT' && /overall limit of 0\.3 s/.test(error.message),
     );
   } finally {
     clearTimeout(released);

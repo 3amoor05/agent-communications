@@ -28,6 +28,19 @@ import { CommsError, type LockOptions, withFileLock, writeFileAtomic } from '@ag
 
 export const DEFAULT_INTERVAL_MS = 500;
 
+/**
+ * The longest any one request waits for the throttle's lock, however often it changes hands: thirty seconds.
+ *
+ * The lock is polled, not queued, so a request can keep losing it to later ones for as long as later ones keep
+ * coming; without this a request could wait for ever (see `#lock`). Thirty seconds is a line of about thirty holders
+ * on the slowest machine seen, where five holders took more than five seconds (a load of 97 on ten cores): each
+ * holds it only for one read and one fsynced write, and the line is one request per account an agent asks at once —
+ * six in the run that showed it — so thirty is several times any line seen. And it leaves room inside the minute an
+ * MCP client waits for a tool call by default (the SDK's `DEFAULT_REQUEST_TIMEOUT_MSEC`), with the slot itself still
+ * to wait for and the request still to make: a request that waited longer would answer a client that had gone.
+ */
+export const LOCK_MAX_WAIT_MS = 30_000;
+
 interface ThrottleFile {
   /** The earliest time, in ms since the epoch, the next request may leave. */
   next: number;
@@ -42,6 +55,8 @@ export interface ThrottleOptions {
   intervalMs?: number;
   /** How long one holder of the lock may keep everyone else waiting. Tests shorten this too. */
   lockTimeoutMs?: number;
+  /** How long a request may wait for the lock in all: `LOCK_MAX_WAIT_MS`. Tests shorten this too. */
+  lockMaxWaitMs?: number;
 }
 
 export class Throttle {
@@ -61,9 +76,13 @@ export class Throttle {
    * Counted per holder, a caller gives up only once one holder has kept the lock for five seconds: the stuck lock
    * the timeout is there for.
    *
-   * Waiting as long as the lock moves is safe here because the line is only as long as the requests already in
-   * flight: each takes the lock once, to reserve its slot, and does its waiting outside it. `after` waits the same
-   * way, because a stop it gave up on recording is a 429 that every other account carries on into.
+   * Each request takes the lock once, to reserve its slot, and does its waiting outside it, so the line is only the
+   * requests in flight. But the lock is polled, not queued: whoever looks first after a release takes it, and a
+   * request that keeps looking at the wrong moment watches later ones go ahead of it, for as long as later ones keep
+   * arriving — and several servers each paging through sent mail keep them arriving. So the wait also has an end
+   * that no hand-over moves, `LOCK_MAX_WAIT_MS`, and past it the request is refused as a busy lock rather than left
+   * hanging. `after` waits the same way, because a stop it gave up on recording is a 429 that every other account
+   * carries on into.
    */
   readonly #lock: LockOptions;
 
@@ -75,6 +94,7 @@ export class Throttle {
     this.#interval = options.intervalMs ?? DEFAULT_INTERVAL_MS;
     this.#lock = {
       timeoutPerHolder: true,
+      maxWaitMs: options.lockMaxWaitMs ?? LOCK_MAX_WAIT_MS,
       ...(options.lockTimeoutMs === undefined ? {} : { timeoutMs: options.lockTimeoutMs }),
     };
   }

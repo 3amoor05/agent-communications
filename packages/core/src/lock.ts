@@ -5,7 +5,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { CommsError } from './errors.ts';
 import { ensurePrivateDir } from './fs.ts';
 
-export interface LockOptions {
+interface LockTimings {
   /** Give up after this long. */
   timeoutMs?: number;
   /** A lock whose recorded time is older than this is assumed abandoned by a crashed process. */
@@ -20,19 +20,45 @@ export interface LockOptions {
    */
   renewMs?: number;
   /**
-   * Count `timeoutMs` from the last time the lock changed hands, rather than from when this caller began to wait.
+   * Give up after waiting this long in all, however often the lock has changed hands meanwhile.
    *
-   * Opt-in, for a lock that is a queue: many callers arriving at the same moment, each holding it for a moment.
-   * Counted from the start, the timeout is a budget for the whole queue ahead, so on a machine slow enough the last
-   * caller in line gives up — "another process is holding" — while the lock is being handed on exactly as it should
-   * be. Counted per holder, a waiter gives up only once one holder has kept the lock for the whole timeout, which is
-   * the stuck lock the timeout is there to catch. A waiter sees a hand-over as a different token in the lock file.
-   *
-   * Not the default, because it lets a waiter wait for as long as the lock keeps changing hands: right for a queue
-   * that is only as long as the callers already in it, wrong for a lock that callers can keep arriving at.
+   * Counted from when this caller began to wait, and never restarted. It is what bounds `timeoutPerHolder`, which
+   * restarts the timeout at every hand-over and so, alone, bounds nothing: the lock is not a queue that serves its
+   * callers in turn. Every waiter polls, and whoever looks first after a release takes it, so a waiter that keeps
+   * looking at the wrong moment can watch caller after caller arrive later and go first — for as long as callers
+   * keep arriving.
    */
-  timeoutPerHolder?: boolean;
+  maxWaitMs?: number;
 }
+
+/**
+ * How `withFileLock` takes its lock: how long it waits, when a lock counts as abandoned, and how a holder keeps one.
+ *
+ * `timeoutPerHolder` comes only with `maxWaitMs`, so that no caller can ask for a wait with no end.
+ */
+export type LockOptions = LockTimings &
+  (
+    | { timeoutPerHolder?: false }
+    | {
+        /**
+         * Count `timeoutMs` from the last time the lock changed hands, rather than from when this caller began to
+         * wait.
+         *
+         * Opt-in, for a lock that is a queue: many callers arriving at the same moment, each holding it for a moment.
+         * Counted from the start, the timeout is a budget for the whole queue ahead, so on a machine slow enough the
+         * last caller in line gives up — "another process is holding" — while the lock is being handed on exactly as
+         * it should be. Counted per holder, a waiter gives up only once one holder has kept the lock for the whole
+         * timeout, which is the stuck lock the timeout is there to catch. A waiter sees a hand-over as a different
+         * token in the lock file.
+         *
+         * Not the default, and never without `maxWaitMs`: on its own it lets a waiter wait for as long as the lock
+         * keeps changing hands, and a lock that is polled rather than queued can keep changing hands past one waiter
+         * for ever.
+         */
+        timeoutPerHolder: true;
+        maxWaitMs: number;
+      }
+  );
 
 /**
  * Opening `wx` failed because someone else holds the path — retry, rather than failing the command.
@@ -131,11 +157,15 @@ async function takeOverStale(lockPath: string, staleMs: number): Promise<void> {
 export async function withFileLock<T>(lockPath: string, fn: () => Promise<T>, options: LockOptions = {}): Promise<T> {
   const timeoutMs = options.timeoutMs ?? 5000;
   const staleMs = options.staleMs ?? 30_000;
-  let deadline = Date.now() + timeoutMs;
+  const started = Date.now();
+  let deadline = started + timeoutMs;
+  /** `maxWaitMs`'s end: fixed when the wait begins, whatever the lock does. */
+  const limit = options.maxWaitMs === undefined ? Number.POSITIVE_INFINITY : started + options.maxWaitMs;
   const token = randomBytes(12).toString('hex');
   let lastCode = 'EEXIST';
-  /** For `timeoutPerHolder`: the token of the holder this caller saw last. */
+  /** The token of the holder this caller saw last, and how many times it has seen the lock change hands. */
   let holder: string | undefined;
+  let handOvers = 0;
   await ensurePrivateDir(dirname(lockPath));
   for (;;) {
     try {
@@ -157,10 +187,24 @@ export async function withFileLock<T>(lockPath: string, fn: () => Promise<T>, op
         }
         // A body not yet written, or one without a token, says nothing about who holds it: wait for the next look.
         const seen = typeof body?.token === 'string' ? body.token : undefined;
-        if (options.timeoutPerHolder && seen !== undefined && seen !== holder) {
+        if (seen !== undefined && seen !== holder) {
+          if (holder !== undefined) handOvers += 1;
           holder = seen;
-          deadline = Date.now() + timeoutMs;
+          if (options.timeoutPerHolder) deadline = Date.now() + timeoutMs;
         }
+      }
+      if (Date.now() > limit) {
+        throw new CommsError(
+          'LOCK_TIMEOUT',
+          `gave up waiting for ${lockPath}: the wait hit its overall limit of ${(limit - started) / 1000} s`,
+          {
+            hint:
+              (handOvers > 0
+                ? `It changed hands ${handOvers} time(s) while this waited, never to this process: busy rather than stuck. Retry in a moment.`
+                : 'Retry in a moment. If it persists and no other process is running, delete the lock file.') +
+              (lastCode === 'EEXIST' ? '' : ` (last error: ${lastCode})`),
+          },
+        );
       }
       if (Date.now() > deadline) {
         throw new CommsError('LOCK_TIMEOUT', `another agent-communications process is holding ${lockPath}`, {
