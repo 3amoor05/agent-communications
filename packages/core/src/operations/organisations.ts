@@ -1,6 +1,6 @@
 import { approvalKind } from '../approvals.ts';
 import type { GatedChange } from '../change-flow.ts';
-import { type ChangeRequest, type ChangeSurface, revokeChange } from '../changes.ts';
+import { type ChangeRequest, type ChangeSurface, DONE_AT_ONCE, revokeChange } from '../changes.ts';
 import {
   type ClientConfig,
   type Config,
@@ -911,7 +911,7 @@ function profileChange(
  * one of the approval's effects so that the claim, which plans from a record already off, can find it in the approval
  * and list it in its result.
  */
-const NARROWED_WHEN_PREPARED = 'for other addresses: on → off — done at once, as this was prepared';
+const NARROWED_WHEN_PREPARED = `for other addresses: on → off${DONE_AT_ONCE}`;
 
 /** Whether the approval being claimed was prepared by a call that narrowed: it carries the line that says so. */
 async function approvalRecordsNarrowing(core: Core, approvalId: string | undefined): Promise<boolean> {

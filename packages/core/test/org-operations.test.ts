@@ -3,7 +3,7 @@ import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync }
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { type GatedChange, gatedChange } from '../src/change-flow.ts';
-import type { PreparedChange } from '../src/changes.ts';
+import { beginChangeApproval, type PreparedChange } from '../src/changes.ts';
 import type { AccountConfig, ClientConfig, Config, ConfigV2, InboxConfig } from '../src/config.ts';
 import { type Core, openCore } from '../src/core.ts';
 import { CommsError } from '../src/errors.ts';
@@ -1665,4 +1665,32 @@ test('an update claimed with no narrowing in its preparation lists none, though 
   const { prepared, result } = await update(m, { forOtherAddresses: 'off' });
   assert.doesNotMatch(prepared?.preview ?? '', /for other addresses/, 'it was never on');
   assert.ok(!result.applied.some((line) => /for other addresses/.test(line)), JSON.stringify(result.applied));
+});
+
+test('a preview that carries something done at once does not claim nothing has changed; every other keeps its header', async () => {
+  const m = machine();
+  writeProfile(m, profile());
+  await add(m, { forOtherAddresses: true });
+  writeProfile(m, profile({ label: 'Acme Renamed' }));
+  const combined = await gatedChange(
+    m.core,
+    orgUpdateChange(m.core, { organisation: 'acme', forOtherAddresses: 'off' }, options(m)),
+    { surface: 'mcp' },
+  );
+  const { preview, approvalId } = (combined as { prepared: PreparedChange }).prepared;
+  assert.match(preview, /for other addresses: on → off — done at once, as this was prepared/);
+  assert.doesNotMatch(preview, /nothing has been changed/, 'the narrowing has been made');
+  assert.match(preview, /what is marked done at once is done already; the rest has not been changed/);
+  // A person approving at a terminal reads the same header from the record.
+  const atTerminal = await beginChangeApproval(m.core, approvalId, { surface: 'cli' });
+  assert.doesNotMatch(atTerminal.preview, /nothing has been changed/);
+
+  // The rest alone, with nothing done at once: the header every preview has always had.
+  await m.core.approvals.revoke(approvalId, 'the person said no');
+  const plain = await gatedChange(m.core, orgUpdateChange(m.core, { organisation: 'acme' }, options(m)), {
+    surface: 'mcp',
+  });
+  const { preview: rest } = (plain as { prepared: PreparedChange }).prepared;
+  assert.match(rest, / · nothing has been changed — approving does not change it\n/);
+  assert.doesNotMatch(rest, /done at once/);
 });

@@ -593,8 +593,19 @@ function describeLoosening(loosening: Loosening): string {
 }
 
 /**
+ * How an effect line ends when it says what was done at once as the approval was prepared, rather than what approving
+ * does. A narrowing never waits for an approval (design 2026-10-02 §D8): `org update --for-other-addresses off` beside
+ * a change that needs one turns that off first, and the approval's preview says so with a line ending in this.
+ */
+export const DONE_AT_ONCE: string = ' — done at once, as this was prepared';
+
+/**
  * The change as a person reads it before agreeing: what it is for, every setting it loosens from → to in words, and
  * what it does outside the configuration.
+ *
+ * The header says nothing has been changed — true of every preview but one whose effects include a line marked done
+ * at once. There it says what is true: that line is done already, and the rest is what waits for the approval. Every
+ * other preview's header is word for word what it was.
  */
 export function renderChangePreview(
   record: Pick<ApprovalRecord, 'approvalId' | 'requiredPolicy'> & { change: ChangeBinding },
@@ -606,12 +617,15 @@ export function renderChangePreview(
     target === null
       ? 'the whole configuration'
       : `${target.kind} ${target.name}${target.id === undefined ? ', which this change connects' : ''}`;
+  const doneAlready = change.effects.some((effect) => effect.endsWith(DONE_AT_ONCE));
   return [
     [
       'CHANGE PREVIEW',
       `approval ${record.approvalId}`,
       `approved by ${how}`,
-      'nothing has been changed — approving does not change it',
+      doneAlready
+        ? 'what is marked done at once is done already; the rest has not been changed, and approving changes only the rest'
+        : 'nothing has been changed — approving does not change it',
     ].join(' · '),
     truncateDisplay(change.summary, 200),
     `For: ${truncateDisplay(about, 200)}`,
