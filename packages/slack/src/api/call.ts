@@ -146,29 +146,144 @@ function body(params: Record<string, string | number | boolean | undefined>): st
 /** What Slack says about a token that no longer works — the rejections a renewed token can fix. */
 const RENEWABLE: ReadonlySet<string> = new Set(['invalid_auth', 'token_expired', 'token_revoked']);
 
-/**
- * The refusals that do not say nothing happened.
+/** The methods that post, and so the ones a failure can leave not knowing whether a post happened. */
+export type PostingMethod = 'chat.postMessage' | 'files.completeUploadExternal';
+
+/*
+ * The errors each posting method answers before it has acted: an allowlist, method by method, and nothing else.
  *
- * Slack documents these two with the same sentence: "It's possible some aspect of the operation succeeded before the
- * error was raised." `unknown_error` is this module's stand-in for an answer that was neither a success nor a named
- * refusal (see `callOnce`), which says nothing either way.
+ * Taken from the Errors table of each method's page in Slack's reference (docs.slack.dev/reference/methods/<method>),
+ * keeping only the errors that by their own description are decided before anything is posted. That means the token,
+ * its scopes and its access; the room, and whether this account may post in it; the arguments, the payload and its
+ * limits; a workspace or admin policy that forbids the post; a rate limit; a method that is gone. Left out on purpose:
+ * `internal_error` and `fatal_error`, which Slack says may follow a partial success ("It's possible some aspect of the
+ * operation succeeded before the error was raised"); `service_unavailable`, `request_timeout` and the migration errors
+ * (`team_added_to_org`, `org_login_required`), which describe Slack's state rather than the request; `file_update_failed`,
+ * a failure during the work; whatever belongs to features nothing here sends (drafts, `client_msg_id`, metadata); and
+ * `msg_too_long`, which the page no longer lists — it says long text is truncated instead — so what it means now is not
+ * something this can read off Slack's own words.
+ *
+ * An allowlist, and not a list of the errors that may follow a success, because both pages say their lists are not
+ * exhaustive: "other errors can be returned in the case where the service is down or other unexpected factors affect
+ * processing." A refusal recorded as failed when Slack had acted is the record that invites the post again, so an
+ * error this does not know — new, undocumented, or listed for the other method only — is one whose outcome is not known.
+ * Adding to a list is a decision about one error, made by reading what Slack says it means.
  */
-const MAY_HAVE_ACTED: ReadonlySet<string> = new Set(['internal_error', 'fatal_error', 'unknown_error']);
+const REFUSED_BEFORE_ACTING: Readonly<Record<PostingMethod, ReadonlySet<string>>> = {
+  'chat.postMessage': new Set([
+    // The token, its scopes, and its access.
+    'not_authed',
+    'invalid_auth',
+    'account_inactive',
+    'token_revoked',
+    'token_expired',
+    'not_allowed_token_type',
+    'missing_scope',
+    'no_permission',
+    'team_access_not_granted',
+    'access_denied',
+    'accesslimited',
+    'app_access_restricted',
+    'enterprise_is_restricted',
+    'two_factor_setup_required',
+    // The room, and whether this account may post in it.
+    'channel_not_found',
+    'not_in_channel',
+    'is_archived',
+    'cannot_reply_to_message',
+    'team_not_found',
+    // A workspace or admin policy that forbids the post.
+    'restricted_action',
+    'restricted_action_read_only_channel',
+    'restricted_action_thread_only_channel',
+    'restricted_action_non_threadable_channel',
+    'restricted_action_thread_locked',
+    'ekm_access_denied',
+    'messages_tab_disabled',
+    'slack_connect_file_link_sharing_blocked',
+    'slack_connect_canvas_sharing_blocked',
+    'slack_connect_lists_sharing_blocked',
+    // The arguments and the payload.
+    'no_text',
+    'msg_blocks_too_long',
+    'invalid_blocks',
+    'invalid_blocks_format',
+    'too_many_attachments',
+    'attachment_payload_limit_exceeded',
+    'too_many_contact_cards',
+    'markdown_text_conflict',
+    'as_user_not_supported',
+    'invalid_arguments',
+    'invalid_arg_name',
+    'invalid_array_arg',
+    'invalid_charset',
+    'invalid_form_data',
+    'invalid_post_type',
+    'missing_post_type',
+    // A rate limit, and a method that is gone.
+    'ratelimited',
+    'rate_limited',
+    'message_limit_exceeded',
+    'deprecated_endpoint',
+    'method_deprecated',
+  ]),
+  'files.completeUploadExternal': new Set([
+    // The token, its scopes, and its access.
+    'not_authed',
+    'invalid_auth',
+    'account_inactive',
+    'token_revoked',
+    'token_expired',
+    'not_allowed_token_type',
+    'missing_scope',
+    'no_permission',
+    'team_access_not_granted',
+    'access_denied',
+    'accesslimited',
+    'enterprise_is_restricted',
+    'two_factor_setup_required',
+    'user_is_external_guest',
+    // The room, and whether this account may post in it.
+    'channel_not_found',
+    'invalid_channel',
+    'not_in_channel',
+    'posting_to_channel_denied',
+    'channels_limit_exceeded',
+    // The files, and a workspace or admin policy that forbids them.
+    'file_not_found',
+    'file_type_not_allowed',
+    'file_uploads_except_images_disabled',
+    'ekm_access_denied',
+    // The arguments.
+    'invalid_blocks',
+    'invalid_arguments',
+    'invalid_arg_name',
+    'invalid_array_arg',
+    'invalid_charset',
+    'invalid_form_data',
+    'invalid_post_type',
+    'missing_post_type',
+    // A rate limit, and a method that is gone.
+    'ratelimited',
+    'deprecated_endpoint',
+    'method_deprecated',
+  ]),
+};
 
 /**
- * Whether a write that failed certainly did nothing at Slack.
+ * Whether a posting request that failed certainly did nothing at Slack.
  *
- * True for a refusal before the request left — the guard's, which is `SEND_REFUSED` — for Slack's own refusal in so many
- * words, an `ok: false` naming any error but the ones above, and for a 429, which Slack answers instead of acting.
- * False for everything else after the request was handed over: a connection that failed or dropped, a call's own time
+ * True for a refusal before the request left — the guard's, which is `SEND_REFUSED`; for an `ok: false` naming an error
+ * on `method`'s allowlist above; and for a 429, which Slack answers instead of acting. False for everything else after
+ * the request was handed over: any other error Slack names, a connection that failed or dropped, a call's own time
  * running out, a 5xx, an answer that could not be read. Those say nothing about whether Slack acted, and a post that may
  * be in the channel must never be recorded as one that is not — that is how a person is invited to post it twice.
  */
-export function certainlyRefused(error: unknown): boolean {
+export function certainlyRefused(error: unknown, method: PostingMethod): boolean {
   if (!(error instanceof CommsError)) return false;
   if (error.code === 'SEND_REFUSED') return true;
   const slackError = error.details?.slackError;
-  if (typeof slackError === 'string') return !MAY_HAVE_ACTED.has(slackError);
+  if (typeof slackError === 'string') return REFUSED_BEFORE_ACTING[method].has(slackError);
   // The 429 in `callOnce` is the one failure that carries this, with or without a number in it.
   return error.details !== undefined && 'retryAfterSeconds' in error.details;
 }

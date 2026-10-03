@@ -731,7 +731,7 @@ export async function postPrepared(
       }),
     );
   } catch (error) {
-    if (certainlyRefused(error)) throw await recordNotPosted(deps, approvalId, where, error);
+    if (certainlyRefused(error, 'chat.postMessage')) throw await recordNotPosted(deps, approvalId, where, error);
     throw await recordMaybePosted(deps, approvalId, where, error, 'it was posted');
   }
 
@@ -1068,7 +1068,7 @@ async function postFiles(
         : {}),
     };
     // The call that shares the files went out and came back as neither a success nor a refusal: they may be posted.
-    if (stage === 'complete' && !certainlyRefused(error)) {
+    if (stage === 'complete' && !certainlyRefused(error, PUBLISH_FILES)) {
       throw await recordMaybePosted(deps, approvalId, ids, error, 'the files were posted', {
         stage,
         uploaded: [...uploaded],

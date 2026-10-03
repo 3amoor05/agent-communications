@@ -116,13 +116,31 @@ test('a post Slack took whose answer was lost on the way back is left to read un
 
 test('what Slack answered decides the record: a refusal is a failure, anything that may have posted is not', async (t) => {
   /*
-   * Each answer to the request that posts, and what the approval should say after it. Slack's refusals in so many words
-   * — and its 429, which it sends instead of acting — posted nothing. A 5xx after Slack took the request, and the two
-   * errors Slack itself says may follow a partial success, may have posted.
+   * Each answer to the request that posts, and what the approval should say after it. Only an error on the method's own
+   * allowlist of refusals made before acting — and a 429, which Slack sends instead of acting — posted nothing. Anything
+   * else may have posted: a 5xx after Slack took the request, the errors Slack itself says may follow a partial
+   * success, one that describes Slack's state rather than the request, one documented for the other posting method
+   * only, and one Slack has never documented at all — its lists say they are not exhaustive.
    */
   const cases: { what: string; slack?: unknown; status?: number; asked?: boolean; state: string }[] = [
     { what: 'Slack refusing: channel_not_found', slack: { ok: false, error: 'channel_not_found' }, state: 'failed' },
+    { what: 'Slack refusing: restricted_action', slack: { ok: false, error: 'restricted_action' }, state: 'failed' },
     { what: 'Slack’s own maybe: internal_error', slack: { ok: false, error: 'internal_error' }, state: 'sending' },
+    {
+      what: 'Slack’s state: service_unavailable',
+      slack: { ok: false, error: 'service_unavailable' },
+      state: 'sending',
+    },
+    {
+      what: 'an error Slack never documented',
+      slack: { ok: false, error: 'something_new_went_wrong' },
+      state: 'sending',
+    },
+    {
+      what: 'a refusal listed for sharing files only: posting_to_channel_denied',
+      slack: { ok: false, error: 'posting_to_channel_denied' },
+      state: 'sending',
+    },
     { what: 'a 429, which Slack sends instead of acting', status: 429, asked: false, state: 'failed' },
     { what: 'a 503 after Slack took the request', status: 503, asked: true, state: 'sending' },
   ];
@@ -154,14 +172,30 @@ test('what Slack answered decides the record: a refusal is a failure, anything t
   }
 });
 
-test('a post with files whose share was taken and then answered with a lost connection, or a maybe, is left to read unknown', async (t) => {
-  for (const [what, answer] of [
-    ['a dropped connection', () => DROP],
-    ['internal_error', () => ({ ok: false, error: 'internal_error' })],
-  ] as const) {
+test('what Slack answered the share of a post with files decides the record, by that method’s own refusals', async (t) => {
+  const cases: { what: string; answer: () => unknown; state: 'sending' | 'failed' }[] = [
+    { what: 'a dropped connection', answer: () => DROP, state: 'sending' },
+    { what: 'internal_error', answer: () => ({ ok: false, error: 'internal_error' }), state: 'sending' },
+    {
+      what: 'an error Slack never documented',
+      answer: () => ({ ok: false, error: 'something_new_went_wrong' }),
+      state: 'sending',
+    },
+    {
+      what: 'a refusal listed for messages only: restricted_action',
+      answer: () => ({ ok: false, error: 'restricted_action' }),
+      state: 'sending',
+    },
+    {
+      what: 'Slack refusing: posting_to_channel_denied',
+      answer: () => ({ ok: false, error: 'posting_to_channel_denied' }),
+      state: 'failed',
+    },
+  ];
+  for (const { what, answer, state: expected } of cases) {
     const { harness, fake, uploads, report } = await world(t);
     const { send, state } = await prepared(harness, fake.fetch, [report]);
-    // The share is recorded — Slack has made the files visible — and then answered with this case's answer.
+    // The share is recorded — for all a test can tell, Slack has made the files visible — and answered with this case.
     const share = fake.script['files.completeUploadExternal'];
     fake.script['files.completeUploadExternal'] = (seen) => {
       share?.(seen);
@@ -174,17 +208,23 @@ test('a post with files whose share was taken and then answered with a lost conn
       (thrown: unknown) => thrown,
     );
     assert.ok(error instanceof CommsError, `${what}: ${String(error)}`);
-    assert.match(error.message, /^whether the files were posted is not known: /, what);
-    assert.equal(error.details?.outcome, 'unknown', what);
-    assert.deepEqual(error.details?.uploaded, [{ id: uploads.issued[0]?.fileId, name: 'report.pdf' }], what);
     assert.equal(uploads.completed.length, 1, `${what}: the files were not shared`);
-    // Before the change, `failed`: files that may be in the channel, recorded as a post that did not happen.
-    assert.deepEqual(outcomes, [], `${what}: an outcome nobody knows was recorded`);
-    assert.equal(await state(), 'sending', what);
+    assert.equal(await state(), expected, what);
     const [record] = await audited(harness);
     assert.equal(record?.outcome, 'failed', what);
-    assert.match(record?.reason ?? '', /^outcome unknown: /, what);
     assert.deepEqual(record?.ids?.files, [uploads.issued[0]?.fileId], what);
+    if (expected === 'sending') {
+      assert.match(error.message, /^whether the files were posted is not known: /, what);
+      assert.equal(error.details?.outcome, 'unknown', what);
+      assert.deepEqual(error.details?.uploaded, [{ id: uploads.issued[0]?.fileId, name: 'report.pdf' }], what);
+      // Before the change, `failed`: files that may be in the channel, recorded as a post that did not happen.
+      assert.deepEqual(outcomes, [], `${what}: an outcome nobody knows was recorded`);
+      assert.match(record?.reason ?? '', /^outcome unknown: /, what);
+    } else {
+      assert.match(error.message, /^the post failed: /, what);
+      assert.deepEqual(outcomes, ['failed'], what);
+      assert.doesNotMatch(record?.reason ?? '', /unknown/, what);
+    }
   }
 });
 
