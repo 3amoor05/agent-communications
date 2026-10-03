@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { getDefaultAutoSelectFamilyAttemptTimeout } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -7,6 +8,7 @@ import type { CommsError } from '@agentcomms/core';
 import { buildAuthorizeUrl } from '../src/auth/authorize.ts';
 import { type FlowStore, fillMarker, newFlowId, openFlowStore, type SlackFlow } from '../src/auth/flow.ts';
 import { startLoopback } from '../src/auth/listener.ts';
+import { fetchListener } from './support/listener.ts';
 
 /**
  * The sign-in that outlives the process which started it.
@@ -141,7 +143,7 @@ test('the redirect is received and the code handed back', async () => {
     about: { alias: 'acme', mode: 'read', reauth: false },
   });
   try {
-    const response = await fetch(`${listener.redirectUrl}?state=st-1&code=abc`);
+    const response = await fetchListener(`${listener.redirectUrl}?state=st-1&code=abc`);
     assert.equal(response.status, 200);
     assert.deepEqual(await listener.result, { kind: 'code', code: 'abc' });
   } finally {
@@ -156,7 +158,7 @@ test('the page says what it knows, and does not claim the workspace is connected
     about: { alias: 'acme', mode: 'read', reauth: false },
   });
   try {
-    const html = await (await fetch(`${listener.redirectUrl}?state=st-2&code=abc`)).text();
+    const html = await (await fetchListener(`${listener.redirectUrl}?state=st-2&code=abc`)).text();
     assert.match(html, /agent-slack/);
     assert.match(html, /Connecting/);
     assert.match(html, /acme/);
@@ -177,7 +179,7 @@ test('a reauth page says so rather than saying it is connecting something new', 
     about: { alias: 'acme', mode: 'send', reauth: true },
   });
   try {
-    const html = await (await fetch(`${listener.redirectUrl}?state=st-3&code=abc`)).text();
+    const html = await (await fetchListener(`${listener.redirectUrl}?state=st-3&code=abc`)).text();
     assert.match(html, /Re-authorising/);
     assert.doesNotMatch(html, /Connecting/);
   } finally {
@@ -192,7 +194,7 @@ test('an alias is escaped, because it comes from a flag', async () => {
     about: { alias: '<img src=x onerror=alert(1)>', mode: 'read', reauth: false },
   });
   try {
-    const html = await (await fetch(`${listener.redirectUrl}?state=st-4&code=abc`)).text();
+    const html = await (await fetchListener(`${listener.redirectUrl}?state=st-4&code=abc`)).text();
     assert.doesNotMatch(html, /<img src=x/);
     assert.match(html, /&lt;img src=x/);
   } finally {
@@ -207,13 +209,13 @@ test('a redirect with the wrong state does not end the sign-in, and is told noth
     about: { alias: 'acme', mode: 'read', reauth: false },
   });
   try {
-    const response = await fetch(`${listener.redirectUrl}?state=somebody-else&code=abc`);
+    const response = await fetchListener(`${listener.redirectUrl}?state=somebody-else&code=abc`);
     assert.equal(response.status, 400);
     const html = await response.text();
     assert.doesNotMatch(html, /acme/, 'a stray request was told which workspace is being connected');
 
     // The real one still works afterwards: the stray request must not have settled anything.
-    await fetch(`${listener.redirectUrl}?state=st-5&code=real`);
+    await fetchListener(`${listener.redirectUrl}?state=st-5&code=real`);
     assert.deepEqual(await listener.result, { kind: 'code', code: 'real' });
   } finally {
     await listener.close();
@@ -223,9 +225,38 @@ test('a redirect with the wrong state does not end the sign-in, and is told noth
 test('a refusal in Slack comes back as a denial, with its reason', async () => {
   const listener = await startLoopback({ state: 'st-6', timeoutMs: 5_000 });
   try {
-    await fetch(`${listener.redirectUrl}?state=st-6&error=access_denied&error_description=nope`);
+    await fetchListener(`${listener.redirectUrl}?state=st-6&error=access_denied&error_description=nope`);
     assert.deepEqual(await listener.result, { kind: 'denied', error: 'access_denied', description: 'nope' });
   } finally {
+    await listener.close();
+  }
+});
+
+test('the tests reach the listener where it is bound, even when this process stalls past each connect attempt', async () => {
+  /*
+   * What `fetchListener` is for, held to the failure it was written after.
+   *
+   * The listener binds the first address `localhost` resolves to. A `fetch` by name races every address and gives
+   * each Node's per-address budget, and the timer that ends an attempt runs before the connection it was waiting for
+   * is noticed whenever the process stalls in between. A release run on a busy Mac lost that race once: `connect
+   * ETIMEDOUT ::1`, then `ECONNREFUSED 127.0.0.1`. Here the stall is made on purpose, after every turn of the event
+   * loop and longer than the budget — blocked rather than spinning, so it adds no load of its own — and a request
+   * that still raced would fail every time wherever `localhost` has a second address to fall back to, a Mac among them.
+   */
+  const listener = await startLoopback({ state: 'st-busy', timeoutMs: 30_000 });
+  const stallMs = getDefaultAutoSelectFamilyAttemptTimeout() + 50;
+  let stall: NodeJS.Immediate | undefined;
+  const busy = () => {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, stallMs);
+    stall = setImmediate(busy);
+  };
+  try {
+    stall = setImmediate(busy);
+    const response = await fetchListener(`${listener.redirectUrl}?state=st-busy&code=abc`);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await listener.result, { kind: 'code', code: 'abc' });
+  } finally {
+    clearImmediate(stall);
     await listener.close();
   }
 });
@@ -342,7 +373,7 @@ test('only a GET is treated as the browser coming back', async () => {
    */
   const listener = await startLoopback({ state: 'st-post', timeoutMs: 5_000 });
   try {
-    const response = await fetch(`${listener.redirectUrl}?state=st-post&code=abc`, { method: 'POST' });
+    const response = await fetchListener(`${listener.redirectUrl}?state=st-post&code=abc`, { method: 'POST' });
     assert.equal(response.status, 405);
 
     // And the sign-in is still waiting, not finished by it.

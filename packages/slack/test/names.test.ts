@@ -22,6 +22,7 @@ import { doctor } from '../src/operations/doctor.ts';
 import { finishSignIn, type StartedSignIn, startSignIn } from '../src/operations/signin.ts';
 import { listWorkspaces, removeWorkspace, requireWorkspace } from '../src/operations/workspaces.ts';
 import { type Harness, newHarness, slackOk, TEST_CLIENT_ID } from './support/harness.ts';
+import { fetchListener } from './support/listener.ts';
 
 /**
  * Organisation/platform names through the Slack package.
@@ -55,7 +56,7 @@ async function redirectTo(authUrl: string): Promise<void> {
   const back = new URL(url.searchParams.get('redirect_uri') as string);
   back.searchParams.set('state', url.searchParams.get('state') as string);
   back.searchParams.set('code', 'fake-authorisation-code');
-  await fetch(back);
+  await fetchListener(back);
 }
 
 function contextFor(harness: Harness): SlackContext {

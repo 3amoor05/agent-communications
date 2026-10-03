@@ -1,3 +1,4 @@
+import { lookup } from 'node:dns/promises';
 import { fileURLToPath } from 'node:url';
 import type { ListenerEntry } from '../../src/operations/signin.ts';
 
@@ -55,4 +56,31 @@ export async function stopListeners(pids: readonly number[]): Promise<void> {
       // it went between the look and the kill
     }
   }
+}
+
+/**
+ * A redirect address with `localhost` replaced by the address the sign-in listener is actually bound to.
+ *
+ * The listener binds `localhost`, and `server.listen` resolves that name once and binds the first answer alone: `::1`
+ * on a Mac, with nothing on `127.0.0.1`. `fetch` asked for `http://localhost:…` resolves both and races them, giving
+ * each 250 ms before it moves on to the next. On a busy machine this process can stall for longer than that after
+ * the connection to `::1` has been made but before it has noticed, so the attempt is abandoned and `127.0.0.1`
+ * refuses: `connect ETIMEDOUT ::1`, then `ECONNREFUSED 127.0.0.1`. A release run failed on it once. A browser has no
+ * such budget, which is why sign-in itself was fine and only the tests were not.
+ *
+ * So the name is resolved here the way the listener resolved it — one lookup, its first answer — and the request goes
+ * to that literal address: one connection, with no per-address timer to lose to. Any other host is left alone; the
+ * fake Slack, for one, already listens on a literal address.
+ */
+export async function boundAddress(address: string | URL): Promise<URL> {
+  const url = new URL(address);
+  if (url.hostname !== 'localhost') return url;
+  const found = await lookup(url.hostname);
+  url.hostname = found.family === 6 ? `[${found.address}]` : found.address;
+  return url;
+}
+
+/** The browser's last step: a request to the sign-in listener, at the address it is bound to ({@link boundAddress}). */
+export async function fetchListener(address: string | URL, init?: RequestInit): Promise<Response> {
+  return fetch(await boundAddress(address), init);
 }

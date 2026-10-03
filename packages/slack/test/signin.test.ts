@@ -17,7 +17,7 @@ import {
   startSignIn,
 } from '../src/operations/signin.ts';
 import { newHarness, slackOk, TEST_CLIENT_ID, tempDir } from './support/harness.ts';
-import { running, stopListeners } from './support/listener.ts';
+import { fetchListener, running, stopListeners } from './support/listener.ts';
 
 /*
  * The listener entry, in the layout that breaks it.
@@ -365,7 +365,7 @@ async function redirectTo(authUrl: string): Promise<void> {
   const back = new URL(url.searchParams.get('redirect_uri') as string);
   back.searchParams.set('state', url.searchParams.get('state') as string);
   back.searchParams.set('code', 'fake-authorisation-code');
-  await fetch(back);
+  await fetchListener(back);
 }
 
 test('two finishers racing one sign-in: one exchanges, the loser leaves the winner alone', async () => {

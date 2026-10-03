@@ -12,7 +12,7 @@ import { scopesForMode } from '../src/manifest.ts';
 import { createSlackMcpServer } from '../src/mcp/server.ts';
 import { createDraft } from '../src/operations/drafts.ts';
 import { type Harness, newHarness, slackOk, TEST_CLIENT_ID } from './support/harness.ts';
-import { LISTENER_COMMAND, stopListeners } from './support/listener.ts';
+import { fetchListener, LISTENER_COMMAND, stopListeners } from './support/listener.ts';
 
 /**
  * Changing a workspace from a chat: connecting, signing in again, moving the mode, setting its policies, removing it.
@@ -130,7 +130,7 @@ async function approveInSlack(started: Started): Promise<void> {
   const back = new URL(url.searchParams.get('redirect_uri') as string);
   back.searchParams.set('state', url.searchParams.get('state') as string);
   back.searchParams.set('code', 'fake-authorisation-code');
-  await fetch(back);
+  await fetchListener(back);
 }
 
 /** Approves a change at a terminal the way `agentcomms approve` does, for the `confirm` change policy. */

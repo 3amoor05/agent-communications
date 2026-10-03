@@ -10,7 +10,7 @@ import { openFlowStore } from '../src/auth/flow.ts';
 import { run } from '../src/cli/program.ts';
 import { scopesForMode } from '../src/manifest.ts';
 import { type Harness, newHarness, slackOk, TEST_CLIENT_ID, tempDir } from './support/harness.ts';
-import { LISTENER_COMMAND, stopListeners } from './support/listener.ts';
+import { fetchListener, LISTENER_COMMAND, stopListeners } from './support/listener.ts';
 
 /**
  * The command, end to end.
@@ -160,7 +160,7 @@ async function redirect(authUrl: string, over: Record<string, string> = {}): Pro
   back.searchParams.set('state', url.searchParams.get('state') as string);
   if (!('error' in over)) back.searchParams.set('code', 'fake-authorisation-code');
   for (const [key, value] of Object.entries(over)) back.searchParams.set(key, value);
-  await fetch(back);
+  await fetchListener(back);
 }
 
 /** Waits for the CLI to print the authorisation link, then plays the browser. */
