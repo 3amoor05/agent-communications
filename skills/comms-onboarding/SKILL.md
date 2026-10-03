@@ -64,6 +64,24 @@ tools below (`gmail_…`, `slack_…`, `resend_…`, `whatsapp_…`) exist only 
 `claude --continue`. If you can run commands, you may instead carry on in this session with the
 commands in "Without the MCP tools", and leave the restart to the end.
 
+## An organisation's apps
+
+If the person's organisation provides a profile — a small `.agentcomms.json` file, from its repository
+or sent inside the organisation — add it before connecting their accounts, so they make no Google client
+or Slack app of their own. `comms_org_add` with the file's **path** (never its contents): a change, so
+preview, yes, `approvalId`. The preview names the organisation, the file and its SHA-256, the Google
+client and the name it gets here (`<organisation>-1`), and the Slack apps; the client secret is never
+shown. Pass `forOtherAddresses: true` only if they ask for the organisation's client to serve their
+other addresses too. It is added beside what they have; nothing of theirs is replaced, and
+`comms_orgs_list` lists every profile added on this machine.
+
+In this release the profile's client is not picked by itself yet: connect each mailbox with
+`gmail_inbox_add` and `client` set to the active client `comms_org_show` names. Its Slack apps are
+recorded, not used by `slack_workspace_add` yet: connect Slack as step 3 says, with the profile's read
+app Client ID and port from `comms_org_show`, rather than a new app. When the organisation changes its
+file, `comms_org_update` reads it again — a changed profile is approved first, a repair applies at once
+— and `comms_org_remove` stops using it.
+
 ## 3. Connect each account
 
 - **Gmail:** `gmail_setup` says what is missing. With no OAuth client registered, making one in
@@ -119,6 +137,7 @@ Every step has a command, for a person at a terminal or an agent that can run co
 | Step | Command |
 |---|---|
 | What is there | `agentcomms channels` |
+| An organisation's profile | `agentcomms org add <file>`, then `agentcomms org show <organisation>` for its client's name; later `agentcomms org update <organisation>` or `agentcomms org remove <organisation>` |
 | Register a server | `agent-gmail mcp install --client <client>`, and the same with `agent-slack`, `agent-resend` or `agent-whatsapp` |
 | Gmail, in one command | `agent-gmail setup` — the Google Cloud screens, the client, a mailbox and the registration. With `--json` it acts only on the flags it is given (`--client-json <path>`, `--inbox <name>`, `--email <address>`, `--mcp-client <client>`) and names the one it needs next |
 | Gmail, step by step | `agent-gmail client add <path>`, then `agent-gmail inbox add <name> --tier <tier> --start`, then `agent-gmail inbox add --finish <flowId>` |

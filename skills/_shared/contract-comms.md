@@ -7,7 +7,8 @@ one wins.
 ## 1. A change is shown, then approved, then applied.
 
 Connecting a Slack workspace in `send`, letting an account post or send more freely, adding an OAuth
-client, trusting a client, registering a server, removing an account, migrating names or secrets:
+client or an organisation's profile, trusting a client, registering a server, removing an account,
+migrating names or secrets:
 each is a **change**, and a change reaches the configuration only through an approval bound to exactly
 what was shown. Connecting a mailbox, or a workspace in `read`, is not one: its sign-in starts at once,
 and the consent screen is the person's (§2).
