@@ -1,6 +1,6 @@
 import { approvalKind } from '../approvals.ts';
 import type { GatedChange } from '../change-flow.ts';
-import { type ChangeRequest, type ChangeSurface, DONE_AT_ONCE, revokeChange } from '../changes.ts';
+import { type ChangeRequest, type ChangeSurface, revokeChange } from '../changes.ts';
 import {
   type ClientConfig,
   type Config,
@@ -885,9 +885,7 @@ function profileChange(
       planned = { plan: profilePlan, file, inputs: inputsOf(config), store, now, narrowed };
       const { organisation } = profilePlan;
       const label = shownText(file.profile.label, 64);
-      const effects = profilePlan.needsApproval
-        ? [...previewLines(spec.mode, profilePlan, file, store), ...(narrowed ? [NARROWED_WHEN_PREPARED] : [])]
-        : [];
+      const effects = profilePlan.needsApproval ? previewLines(spec.mode, profilePlan, file, store) : [];
       return {
         before: config,
         after: withPlan(config, profilePlan, store),
@@ -896,6 +894,7 @@ function profileChange(
             ? `Add the organisation profile "${organisation}" (${label}): its apps beside what you have`
             : `Update the organisation profile "${organisation}" (${label})${narrowed ? '; for other addresses was turned off at once' : ''}`,
         effects,
+        ...(narrowed && profilePlan.needsApproval ? { doneAtOnce: [NARROWED_WHEN_PREPARED] } : {}),
       };
     },
     apply: async (consent) => {
@@ -907,20 +906,20 @@ function profileChange(
 }
 
 /**
- * The preview line of a narrowing done as the approval was prepared: what it did, not what the approval permits. It is
- * one of the approval's effects so that the claim, which plans from a record already off, can find it in the approval
- * and list it in its result.
+ * What a narrowing done as the approval was prepared is recorded as, in the approval's `doneAtOnce` — not among its
+ * effects, which are what approving does and can carry a profile's text. The claim, which plans from a record already
+ * off, finds it there and lists it in its result.
  */
-const NARROWED_WHEN_PREPARED = `for other addresses: on → off${DONE_AT_ONCE}`;
+const NARROWED_WHEN_PREPARED = 'for other addresses: on → off';
 
-/** Whether the approval being claimed was prepared by a call that narrowed: it carries the line that says so. */
+/** Whether the approval being claimed was prepared by a call that narrowed: its `doneAtOnce` says so. */
 async function approvalRecordsNarrowing(core: Core, approvalId: string | undefined): Promise<boolean> {
   if (approvalId === undefined) return false;
   const record = await core.approvals.get(approvalId).catch(() => null);
   return (
     record !== null &&
     approvalKind(record) === 'change' &&
-    record.change?.effects.includes(NARROWED_WHEN_PREPARED) === true
+    record.change?.doneAtOnce?.includes(NARROWED_WHEN_PREPARED) === true
   );
 }
 

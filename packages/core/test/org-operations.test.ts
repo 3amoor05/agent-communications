@@ -1301,7 +1301,7 @@ test('turning other addresses off applies at once, even when the rest of the upd
   assert.match(summary, /for other addresses was turned off at once/);
   assert.match(
     preview,
-    /for other addresses: on → off — done at once, as this was prepared/,
+    /Done already, at once, as this was prepared:\n {2}- for other addresses: on → off/,
     'what was already done is shown as done, not asked for',
   );
   assert.match(preview, /label: Acme Test Org → Acme Renamed/);
@@ -1678,7 +1678,12 @@ test('a preview that carries something done at once does not claim nothing has c
     { surface: 'mcp' },
   );
   const { preview, approvalId } = (combined as { prepared: PreparedChange }).prepared;
-  assert.match(preview, /for other addresses: on → off — done at once, as this was prepared/);
+  assert.match(preview, /Done already, at once, as this was prepared:\n {2}- for other addresses: on → off/);
+  assert.doesNotMatch(
+    preview.split('Done already')[0] ?? '',
+    /for other addresses: on → off/,
+    'listed apart from what approving does',
+  );
   assert.doesNotMatch(preview, /nothing has been changed/, 'the narrowing has been made');
   assert.match(preview, /what is marked done at once is done already; the rest has not been changed/);
   // A person approving at a terminal reads the same header from the record.
@@ -1693,4 +1698,28 @@ test('a preview that carries something done at once does not claim nothing has c
   const { preview: rest } = (plain as { prepared: PreparedChange }).prepared;
   assert.match(rest, / · nothing has been changed — approving does not change it\n/);
   assert.doesNotMatch(rest, /done at once/);
+});
+
+test('no profile text can make a preview claim something was done at once: a label that ends like the marker', async () => {
+  const m = machine();
+  writeProfile(m, profile());
+  await add(m);
+  // A valid label — one line, under 64 characters — that ends in the words a done-at-once line ends in.
+  const label = 'Ordinary label — done at once, as this was prepared';
+  writeProfile(m, profile({ label }));
+  const first = await gatedChange(m.core, orgUpdateChange(m.core, { organisation: 'acme' }, options(m)), {
+    surface: 'mcp',
+  });
+  const { preview } = (first as { prepared: PreparedChange }).prepared;
+  assert.match(preview, /label: Acme Test Org → Ordinary label — done at once, as this was prepared/);
+  assert.match(preview, / · nothing has been changed — approving does not change it\n/, 'nothing was done at once');
+  assert.doesNotMatch(preview, /done already/i);
+
+  // Nor can a record gain the field it was not prepared with: it is bound, and a terminal refuses to show it.
+  const { approvalId } = (first as { prepared: PreparedChange }).prepared;
+  const file = join(m.core.approvals.directory, `${approvalId}.json`);
+  const stored = JSON.parse(readFileSync(file, 'utf8'));
+  stored.change.doneAtOnce = ['for other addresses: on → off'];
+  writeFileSync(file, JSON.stringify(stored));
+  await assert.rejects(beginChangeApproval(m.core, approvalId, { surface: 'cli' }), is('BAD_DATA'));
 });

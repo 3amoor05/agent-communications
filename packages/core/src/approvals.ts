@@ -80,6 +80,16 @@ export interface ChangeBinding {
   settings?: SettingChange[] | undefined;
   /** What it does outside the configuration, in words: a sign-in, a registration, files removed. */
   effects: string[];
+  /**
+   * What the call that prepared it already did at once, because it never waits for an approval — a narrowing beside
+   * the change (design 2026-10-02 §D8). Not what approving does: the preview lists these apart, and its header says
+   * the rest is what waits. A field of its own rather than words in `effects`, so no text a change carries — a label
+   * a profile chose, say — can make a preview claim something was done.
+   *
+   * Bound when present, so a record cannot gain one it was not prepared with; absent reads as none, and leaves the
+   * digest of every other change exactly what it was.
+   */
+  doneAtOnce?: string[] | undefined;
 }
 
 /**
@@ -223,7 +233,9 @@ export function approvalKind(record: Pick<ApprovalRecord, 'kind'>): ApprovalKind
  * The loosenings and the settings are sorted, because their order is an implementation detail and the same change must
  * digest the same however it is listed. The effects are not: they are what the person read, in the order they read it.
  */
-export function changeDigest(change: Pick<ChangeBinding, 'target' | 'loosened' | 'settings' | 'effects'>): string {
+export function changeDigest(
+  change: Pick<ChangeBinding, 'target' | 'loosened' | 'settings' | 'effects' | 'doneAtOnce'>,
+): string {
   const target = change.target;
   return sha256Hex(
     canonicalJson({
@@ -233,6 +245,10 @@ export function changeDigest(change: Pick<ChangeBinding, 'target' | 'loosened' |
       // The same four fields a loosening has, in the same canonical form.
       settings: (change.settings ?? []).map(canonicalLoosening).sort(),
       effects: [...change.effects],
+      // Only when there is something: every change without one digests exactly as it did before the field existed.
+      ...(change.doneAtOnce !== undefined && change.doneAtOnce.length > 0
+        ? { doneAtOnce: [...change.doneAtOnce] }
+        : {}),
     }),
   );
 }
@@ -266,6 +282,9 @@ export function changeDrift(approved: ChangeBinding, now: ChangeBinding): string
   if (unset) return `it would not set ${unset.path} the way that was approved`;
   if (canonicalJson(approved.effects) !== canonicalJson(now.effects)) {
     return 'what it does outside the configuration is not what was approved';
+  }
+  if (canonicalJson(approved.doneAtOnce ?? []) !== canonicalJson(now.doneAtOnce ?? [])) {
+    return 'what was done at once when it was prepared is not what this call says';
   }
   return 'the change is not the one that was approved';
 }
@@ -809,6 +828,9 @@ export class ApprovalStore {
       loosened: input.change.loosened.map((loosening) => ({ ...loosening })),
       settings: (input.change.settings ?? []).map((setting) => ({ ...setting })),
       effects: [...input.change.effects],
+      ...(input.change.doneAtOnce !== undefined && input.change.doneAtOnce.length > 0
+        ? { doneAtOnce: [...input.change.doneAtOnce] }
+        : {}),
     };
     const digest = changeDigest(change);
     const record: ApprovalRecord = {

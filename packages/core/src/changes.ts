@@ -58,6 +58,11 @@ export interface ChangeSpec {
    * taken back — removing an account, migrating secrets or names, pruning — asks for the same approval.
    */
   effects?: readonly string[] | undefined;
+  /**
+   * What the call already did at once, as it prepared this — a narrowing that never waits (`ChangeBinding.doneAtOnce`).
+   * Shown apart from the effects, and bound, so the claim has to say the same. Only a caller that did something sets it.
+   */
+  doneAtOnce?: readonly string[] | undefined;
 }
 
 export interface ChangeRequest extends ChangeSpec {
@@ -178,6 +183,7 @@ function bindChange(spec: ChangeSpec, summary: string): ChangeBinding {
       hint: 'Pass each effect as one plain sentence, or leave it out.',
     });
   }
+  const doneAtOnce = (spec.doneAtOnce ?? []).map((line) => line.trim()).filter((line) => line !== '');
   return {
     summary,
     target,
@@ -185,6 +191,7 @@ function bindChange(spec: ChangeSpec, summary: string): ChangeBinding {
     // Every setting it writes, tightenings too: what the preview shows is what the claim has to be.
     settings: changedSettings(spec.before, spec.after),
     effects,
+    ...(doneAtOnce.length > 0 ? { doneAtOnce } : {}),
   };
 }
 
@@ -593,19 +600,13 @@ function describeLoosening(loosening: Loosening): string {
 }
 
 /**
- * How an effect line ends when it says what was done at once as the approval was prepared, rather than what approving
- * does. A narrowing never waits for an approval (design 2026-10-02 §D8): `org update --for-other-addresses off` beside
- * a change that needs one turns that off first, and the approval's preview says so with a line ending in this.
- */
-export const DONE_AT_ONCE: string = ' — done at once, as this was prepared';
-
-/**
  * The change as a person reads it before agreeing: what it is for, every setting it loosens from → to in words, and
  * what it does outside the configuration.
  *
- * The header says nothing has been changed — true of every preview but one whose effects include a line marked done
- * at once. There it says what is true: that line is done already, and the rest is what waits for the approval. Every
- * other preview's header is word for word what it was.
+ * The header says nothing has been changed — true of every preview but one whose change records something done at
+ * once as it was prepared (`doneAtOnce`). There it says what is true: those lines, listed apart, are done already, and
+ * the rest is what waits for the approval. Decided by that field alone, never by the words of an effect, which can
+ * carry text a person or a profile chose; every other preview's header is word for word what it was.
  */
 export function renderChangePreview(
   record: Pick<ApprovalRecord, 'approvalId' | 'requiredPolicy'> & { change: ChangeBinding },
@@ -617,7 +618,7 @@ export function renderChangePreview(
     target === null
       ? 'the whole configuration'
       : `${target.kind} ${target.name}${target.id === undefined ? ', which this change connects' : ''}`;
-  const doneAlready = change.effects.some((effect) => effect.endsWith(DONE_AT_ONCE));
+  const doneAlready = (change.doneAtOnce ?? []).length > 0;
   return [
     [
       'CHANGE PREVIEW',
@@ -635,6 +636,13 @@ export function renderChangePreview(
       : ['It loosens no safety setting.']),
     ...(change.effects.length > 0
       ? ['', 'It also:', ...change.effects.map((effect) => `  - ${truncateDisplay(effect, 300)}`)]
+      : []),
+    ...(doneAlready
+      ? [
+          '',
+          'Done already, at once, as this was prepared:',
+          ...(change.doneAtOnce ?? []).map((line) => `  - ${truncateDisplay(line, 300)}`),
+        ]
       : []),
   ].join('\n');
 }
