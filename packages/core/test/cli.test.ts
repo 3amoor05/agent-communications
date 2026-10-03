@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -995,6 +995,15 @@ const UNSAFE_ON_WINDOWS = [
   'line\nbreak', // ends the command in cmd.exe, quotes or none
   'tab\there',
   'right\u202Eleft', // shows a line other than the one that runs
+  // And what no printing brings to the program alike through cmd.exe, Windows PowerShell and PowerShell 7:
+  '', // dropped by Windows PowerShell
+  'C:\\Profiles\\First Last\\', // `\"` to the C runtime; doubled for it, two backslashes from PowerShell 7
+  'a&b', // passed to a `.cmd` script unquoted by PowerShell, where cmd.exe runs `b`
+  'a&whoami&',
+  'x|y',
+  'a^b',
+  '(a)',
+  'a<b>',
 ];
 
 test('a command printed to be run is quoted for a POSIX shell everywhere but Windows, where any word can be quoted', () => {
@@ -1034,20 +1043,29 @@ test('on Windows a command printed to be run is one cmd.exe and PowerShell both 
     win('agentcomms', 'attach', 'roots', 'add', 'C:\\Profiles\\First Last\\outgoing'),
     'agentcomms attach roots add "C:\\Profiles\\First Last\\outgoing"',
   );
-  // A backslash is nothing to either shell: a path with no space in it is left as it is, and so is an ordinary word.
+  // A backslash is nothing to any reader: a path with no space in it is left as it is, at its end too, and so is an
+  // ordinary word or a plain option.
   assert.equal(
-    win('C:\\Profiles\\outgoing', '\\outgoing', 'C:outgoing', 'acme/gmail', '--name=x', 'pkg@1.2.3'),
-    'C:\\Profiles\\outgoing \\outgoing C:outgoing acme/gmail --name=x pkg@1.2.3',
+    win(
+      'C:\\Profiles\\outgoing',
+      '\\outgoing',
+      'C:outgoing',
+      'C:\\Profiles\\',
+      'acme/gmail',
+      'pkg@1.2.3',
+      '--force',
+      '-x',
+    ),
+    'C:\\Profiles\\outgoing \\outgoing C:outgoing C:\\Profiles\\ acme/gmail pkg@1.2.3 --force -x',
   );
   // What either shell would read is put in double quotes: a first @ (splatting), a comma (an array), a ~, a space at
-  // either end, nothing at all, a single quote of either kind, and the rest of both shells' syntax.
-  const quoted = ['@name', 'a,b', '~/outgoing', ' outgoing ', '', 'a&b', 'a|b', 'a^b', 'a;b', 'a&whoami&'];
-  const more = ['#a', '(a)', '{a}', 'a<b>', "it's", 'it’s here', 'café', 'a — b'];
+  // either end, a single quote of either kind, the rest of both shells' syntax with a space beside it, a word that
+  // starts like a number, and one that starts with `-` but is not a plain option.
+  const quoted = ['@name', 'a,b', '~/outgoing', ' outgoing ', 'a & b', 'x | y', 'a ^ b', 'a;b', '(a b)', 'a <b>'];
+  const more = ['#a', '{a}', "it's", 'it’s here', 'café', 'a — b', '1kb', '0x10', '.5', '-name.x', '--name=x'];
   for (const word of [...quoted, ...more]) assert.equal(win(word), `"${word}"`, word);
-  // Backslashes before the closing quote are doubled: a program's argument parser reads `\"` as a quote mark.
-  assert.equal(win('C:\\Profiles\\First Last\\'), '"C:\\Profiles\\First Last\\\\"');
-  assert.equal(win('C:\\Profiles\\First Last\\\\'), '"C:\\Profiles\\First Last\\\\\\\\"');
-  assert.equal(win('C:\\Profiles\\First Last\\x'), '"C:\\Profiles\\First Last\\x"', 'only at the end');
+  // A backslash inside a quoted word is left alone: only one before the closing quote would be read as an escape.
+  assert.equal(win('C:\\Profiles\\First Last\\x'), '"C:\\Profiles\\First Last\\x"');
 });
 
 /**
@@ -1087,21 +1105,64 @@ function windowsArgv(line: string): string[] {
   return words;
 }
 
+/** The words PowerShell reads from a line `shellCommand` printed: each bare, or in double quotes as it stands. */
+function powershellWords(line: string): string[] {
+  return [...line.matchAll(/"([^"]*)"|(\S+)/g)].map((match) => match[1] ?? match[2] ?? '');
+}
+
+/**
+ * The command line Windows PowerShell 5.1 writes for a program ("Legacy"), and PowerShell 7 for a `.cmd` script: a
+ * word with whitespace in double quotes, as it is; an empty word left out.
+ */
+function legacyCommandLine(words: readonly string[]): string {
+  return words
+    .filter((word) => word !== '')
+    .map((word) => (/\s/.test(word) ? `"${word}"` : word))
+    .join(' ');
+}
+
+/**
+ * The command line PowerShell 7.3 and later write for a program ("Standard", .NET's own): a word that is empty or
+ * holds whitespace or a quote in double quotes, with each run of backslashes before a quote, or before the closing
+ * quote, doubled.
+ */
+function standardCommandLine(words: readonly string[]): string {
+  return words
+    .map((word) => {
+      if (word !== '' && !/[\s"]/.test(word)) return word;
+      const escaped = word
+        .replace(/(\\*)"/g, (_, slashes: string) => `${slashes}${slashes}\\"`)
+        .replace(/(\\+)$/, (_, slashes: string) => slashes + slashes);
+      return `"${escaped}"`;
+    })
+    .join(' ');
+}
+
+/** Whether cmd.exe would act on anything in `line`: `%` or `!` anywhere, or its syntax outside double quotes. */
+function cmdActsOn(line: string): boolean {
+  const parts = line.split('"');
+  const outside = parts.filter((_, index) => index % 2 === 0);
+  return /[%!]/.test(line) || outside.some((part) => /[&|<>^()]/.test(part)) || parts.length % 2 === 0;
+}
+
 test('on Windows a printed command reaches the program as the words it was given, or does not run (CUE-306)', () => {
   /*
-   * Read as both shells would read it. Outside double quotes, nothing either shell acts on; inside them, nothing cmd.exe
-   * expands before it looks at quotes (`%`, `!`) and nothing PowerShell expands or escapes in them (`$`, the backtick, a
-   * quote mark of any kind); so cmd.exe hands the program the line as it is, and the program's own parser gives back
-   * the words. A word that cannot be printed so is a placeholder in angle brackets, which neither shell runs.
+   * Read as each reader would read it (see `shellCommand`). cmd.exe hands the program the line as it is, so nothing in
+   * it may be anything cmd.exe acts on, and the program's own parser has to give back the words. PowerShell reads the
+   * words itself and writes a new line: Windows PowerShell's way and PowerShell 7's for a program, both of which have
+   * to give back the words too, and the old way for a `.cmd` script, which cmd.exe then reads. A word no printing
+   * brings through all of them is not printed.
    */
   const words = [
     'C:\\Profiles\\First Last\\outgoing',
-    'C:\\Profiles\\First Last\\',
+    'C:\\Profiles\\',
     ' outgoing ',
-    'a&b|c^d<e>(f);g,h#i{j}',
+    'a&b|c^d<e>(f);g,h#i{j} k',
     "it's ‘so’",
     '@name',
-    '',
+    'café',
+    '1kb',
+    '-name.x',
     ...UNSAFE_ON_WINDOWS,
   ];
   for (const word of words) {
@@ -1128,9 +1189,126 @@ test('on Windows a printed command reaches the program as the words it was given
     assert.ok(!UNSAFE_ON_WINDOWS.includes(word), `${shown} was printed`);
     assert.doesNotMatch(outside, /[&|<>^();,{}#'‘’‚‛@]/, `${shown}: nothing outside the quotes for either shell`);
     assert.doesNotMatch(inside, /["\u201C-\u201E]/, `${shown}: no quote mark inside the quotes`);
-    assert.deepEqual(windowsArgv(printed.line), ['agentcomms', 'attach', 'roots', 'add', word], shown);
+    const argv = ['agentcomms', 'attach', 'roots', 'add', word];
+    assert.ok(!cmdActsOn(printed.line), `${shown}: cmd.exe hands the line on as it is`);
+    assert.deepEqual(windowsArgv(printed.line), argv, `${shown}: from cmd.exe`);
+    const read = powershellWords(printed.line);
+    assert.deepEqual(read, argv, `${shown}: as PowerShell reads it`);
+    assert.deepEqual(windowsArgv(legacyCommandLine(read)), argv, `${shown}: from Windows PowerShell`);
+    assert.deepEqual(windowsArgv(standardCommandLine(read)), argv, `${shown}: from PowerShell 7`);
+    assert.ok(!cmdActsOn(legacyCommandLine(read)), `${shown}: through a .cmd script, which cmd.exe reads`);
   }
 });
+
+/** Only where cmd.exe and PowerShell are to be had: the release run's windows-latest legs. */
+const ON_WINDOWS = process.platform === 'win32' ? {} : { skip: 'needs cmd.exe and PowerShell, so Windows' };
+
+interface PastedInto {
+  name: string;
+  run: (line: string, env: NodeJS.ProcessEnv) => ReturnType<typeof spawnSync>;
+}
+
+/**
+ * The shells a person on Windows pastes a command into, each running one line. cmd.exe gets it as a typed line —
+ * `/s /c "…"` strips the outer quotes and leaves the rest as it is, and `/d` keeps AutoRun commands out — and each
+ * PowerShell gets it encoded, so that nothing on its own command line can change it on the way in. PowerShell 7 only
+ * where it is installed, as it is on windows-latest.
+ */
+function windowsShells(): PastedInto[] {
+  const encoded = (line: string) => Buffer.from(line, 'utf16le').toString('base64');
+  const options = (env: NodeJS.ProcessEnv) => ({ env, encoding: 'utf8' as const, timeout: 120_000 });
+  const powershell =
+    (program: string): PastedInto['run'] =>
+    (line, env) =>
+      spawnSync(program, ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded(line)], options(env));
+  const shells: PastedInto[] = [
+    {
+      name: 'cmd.exe',
+      run: (line, env) =>
+        spawnSync('cmd.exe', ['/d', '/s', '/c', `"${line}"`], { ...options(env), windowsVerbatimArguments: true }),
+    },
+    { name: 'Windows PowerShell', run: powershell('powershell.exe') },
+  ];
+  if (spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', 'exit 0'], { timeout: 120_000 }).status === 0) {
+    shells.push({ name: 'PowerShell 7', run: powershell('pwsh') });
+  }
+  return shells;
+}
+
+/**
+ * A program that writes the words it was given to the file `ARGDUMP_OUT` names, and the `.cmd` script npm would put
+ * in front of it — what `agentcomms`, `claude` and `codex` are on Windows — both in `dir`, with an environment that
+ * finds `node` and `argdump` there.
+ */
+function argumentDumper(dir: string): { script: string; env: NodeJS.ProcessEnv } {
+  const script = join(dir, 'argdump.cjs');
+  writeFileSync(
+    script,
+    "require('node:fs').writeFileSync(process.env.ARGDUMP_OUT, JSON.stringify(process.argv.slice(2)));\n",
+  );
+  writeFileSync(join(dir, 'argdump.cmd'), '@node "%~dp0argdump.cjs" %*\r\n');
+  // Windows names it `Path`; a second key that differs only in case would leave which one wins to chance.
+  const pathKey = Object.keys(process.env).find((key) => key.toUpperCase() === 'PATH') ?? 'PATH';
+  const path = [dir, dirname(process.execPath), process.env[pathKey]].join(';');
+  return { script, env: { ...process.env, [pathKey]: path } };
+}
+
+/** What the dumper last wrote to `out`, or null when it was not run. */
+function dumped(out: string): unknown {
+  return existsSync(out) ? JSON.parse(readFileSync(out, 'utf8')) : null;
+}
+
+test(
+  'on Windows a printed command brings its words to a program and to a .cmd script, from cmd.exe and both PowerShells',
+  ON_WINDOWS,
+  () => {
+    /*
+     * The readers `shellCommand` reasons about, run for real: each printed line through cmd.exe, Windows PowerShell and
+     * PowerShell 7, to a program — Node, which splits its command line as the C runtime does — and to a `.cmd` script in
+     * front of it, as npm installs every command printed here. Each has to receive exactly the words.
+     */
+    const dir = tempDir();
+    const { script, env } = argumentDumper(dir);
+    const words = [
+      'plain',
+      'C:\\Profiles\\First Last\\outgoing',
+      'C:\\Profiles\\',
+      ' outgoing ',
+      'a & b',
+      'x | y',
+      'a ^ b',
+      '(a b)',
+      'a;b',
+      'a,b',
+      '@name',
+      "it's",
+      'café',
+      'naïve résumé',
+      '1kb',
+      '0x10',
+      '-name.x',
+      '--name=x',
+      '~/outgoing',
+      '#a',
+      '{a}',
+    ];
+    let runs = 0;
+    for (const shell of windowsShells()) {
+      for (const program of [['node', script], ['argdump']]) {
+        const printed = shellCommand([...program, ...words], 'win32');
+        assert.deepEqual(printed.byHand, [], `every word was printed: ${printed.line}`);
+        const out = join(dir, `argv-${runs++}.json`);
+        const result = shell.run(printed.line, { ...env, ARGDUMP_OUT: out });
+        assert.deepEqual(dumped(out), words, `${shell.name}, ${program[0]}: ${printed.line}\n${result.stderr}`);
+      }
+    }
+    assert.ok(runs >= 4, 'cmd.exe and Windows PowerShell, at the least');
+    // And what none of them would receive alike is not printed at all.
+    for (const word of ['C:\\Profiles\\First Last\\', '', '50%', 'a&b', 'x|y', 'a^b', '(a)', '$x&whoami&']) {
+      assert.notDeepEqual(shellCommand(['node', script, word], 'win32').byHand, [], JSON.stringify(word));
+    }
+  },
+);
 
 test('on Windows a word that cannot be printed is a placeholder, named for it, and given apart as JSON (CUE-306)', () => {
   // Named by its label, or by the option before it, or `VALUE`; one word twice is one placeholder, two are numbered.

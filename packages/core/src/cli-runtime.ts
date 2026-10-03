@@ -98,23 +98,34 @@ export interface ShellCommand {
  * but the quote itself. Windows has two shells, and neither reads single quotes that way: cmd.exe does not take them
  * as quotes at all, so `'C:\Profiles\First Last\outgoing'` reached the command as two words, quote marks and all, and
  * PowerShell does, but escapes a quote inside them by doubling it rather than as `'\''`. A command printed on Windows
- * has to be safe in both, because nothing says which one it will be pasted into (CUE-306):
+ * has to be safe in both, because nothing says which one it will be pasted into (CUE-306) — and safe is not enough:
+ * the program has to receive the same words from either. Three readers stand between the line and the program. cmd.exe
+ * hands the program the line as it is, and the program's own parser (the C runtime's, Node's) splits it. PowerShell
+ * reads the line itself, a double-quoted word with its backslashes as plain characters, and then writes a new command
+ * line for the program: Windows PowerShell 5.1 the old way ("Legacy" in about_Parsing, "Passing arguments to native
+ * applications") — a word quoted only when it holds whitespace, as it is, and an empty word dropped — and PowerShell
+ * 7.3 and later its own way ("Standard") — quoted when it must be, with every backslash before a quote doubled. For a
+ * `.cmd` script, which is how npm installs `agentcomms`, `claude` and `codex` on Windows, PowerShell 7 goes back to the
+ * old way, and cmd.exe then reads that new line. So on Windows:
  *
- * - A word of letters, digits and `_ + = : . / \ -`, with `@` anywhere but first, is left as it is: neither shell
- *   reads anything in it, and a backslash is an ordinary character to both. A first `@` is splatting to PowerShell, a
- *   `,` its array operator — two words — so a word with either is quoted.
- * - A word that double quotes keep whole and unexpanded in both shells goes in double quotes. Inside them cmd.exe
- *   reads `& | < > ^ ( )` and spaces as ordinary characters, and PowerShell reads everything as ordinary but `$`, the
+ * - A word of letters, digits and `_ + = : . / \`, with `@` and `-` anywhere but first, is left as it is: no reader
+ *   does anything with it, and a backslash is an ordinary character to all of them, at the end too. A first `@` is
+ *   splatting to PowerShell, and a `,` its array operator — two words — so a word with either is quoted. So is a word
+ *   that starts with a digit, which PowerShell may read as a number (`1kb`, `0x10`), and one that starts with `-` but
+ *   is not a plain option, which PowerShell may read as a parameter of its own and split (`-name.x`).
+ * - A word that double quotes bring through all three readers whole goes in double quotes. Inside them cmd.exe reads
+ *   `& | < > ^ ( )` and spaces as ordinary characters, and PowerShell reads everything as ordinary but `$`, the
  *   backtick and a double quote. What is left special in one or the other is kept out: a double quote, which ends the
  *   quoting in both — and PowerShell takes the curly ones, `“ ” „`, for one too; `$` and the backtick, PowerShell's
  *   expansion and escape; `%`, which cmd.exe expands as `%NAME%` before it looks at quotes at all; `!`, which it
  *   expands as `!NAME!` inside quotes too wherever delayed expansion is on, and which then makes a `^` inside quotes an
  *   escape; and any control or formatting character — a line break ends the command in cmd.exe even inside quotes, a
  *   tab pasted into cmd.exe can complete a file name, and a right-to-left override shows a line other than the one
- *   that runs. Backslashes at the word's end are doubled: before a closing quote, a program's own argument parser
- *   (Node's, the C runtime's) takes them as escapes, and `"C:\First Last\"` would end in a quote mark rather than the
- *   folder. (Windows PowerShell 5.1 drops an empty `""` rather than pass it on; it keeps every other such word.)
- * - Any other word has no quoting both shells read alike, so no command is printed with it in. It was quoted for
+ *   that runs. Three more cannot come through: an empty word, which Windows PowerShell drops; a word ending in a
+ *   backslash, which the C runtime reads with the closing quote as `\"` — and doubled for it, PowerShell 7 passes both
+ *   backslashes on where cmd.exe and Windows PowerShell pass one; and a word with `& | < > ^ ( )` but no whitespace,
+ *   which PowerShell passes to a `.cmd` script unquoted, for cmd.exe to run `&whoami` from or to split at `|`.
+ * - Any other word has no printing all three read alike, so no command is printed with it in. It was quoted for
  *   PowerShell in its single quotes, which cmd.exe takes as ordinary characters: a server named `$x&whoami&` printed
  *   as `'$x&whoami&'`, and in cmd.exe that ran `whoami`. Such a word is printed as a placeholder — named after its
  *   `label`, or the option before it, or `VALUE` — in capitals: `NAME`, `PATH`, `NAME-2` — listed in `byHand` with the
@@ -153,11 +164,16 @@ function posixShellWord(word: string): string {
   return /^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replace(/'/g, `'\\''`)}'`;
 }
 
-/** The word as both Windows shells read it, or null when no quoting makes it so. */
+/**
+ * The word as cmd.exe, Windows PowerShell and PowerShell 7 all hand it to a program, or null when no printing of it
+ * does (see `shellCommand`). Bare: a plain option, or ordinary characters that do not start like a number.
+ */
 function windowsShellWord(word: string): string | null {
-  if (/^[\w+=:./\\-][\w@+=:./\\-]*$/.test(word)) return word;
+  if (/^(?:--?[A-Za-z][A-Za-z0-9-]*|(?!\+?\.?\d)[\w+=:./\\][\w@+=:./\\-]*)$/.test(word)) return word;
+  if (word === '' || word.endsWith('\\')) return null;
   if (/["$`%!\u201C-\u201E]|[\p{C}\p{Zl}\p{Zp}]/u.test(word)) return null;
-  return `"${word.replace(/\\+$/, (slashes) => slashes + slashes)}"`;
+  if (/[&|<>^()]/.test(word) && !/\s/.test(word)) return null;
+  return `"${word}"`;
 }
 
 /**

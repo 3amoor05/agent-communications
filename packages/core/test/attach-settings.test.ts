@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
+import { commandText, shellCommand } from '../src/cli-runtime.ts';
 import { type Core, openCore } from '../src/core.ts';
 import { defaultAttachDeny } from '../src/jail.ts';
 import { createCoreMcpServer } from '../src/mcp/server.ts';
@@ -356,10 +357,17 @@ test('the report shows a listed folder that names no place apart: it allows noth
 test('an entry is taken out exactly as it is listed: spaces at either end, or nothing at all, from both surfaces', async () => {
   const m = machine({ attachRoots: ['~', ' outgoing ', ''] });
   const shown = cli(m, ['attach']);
-  // Quoted for the shell it is pasted into (`shellCommand`): single quotes for a POSIX one, double quotes on Windows.
-  const [spaced, empty] = process.platform === 'win32' ? ['" outgoing "', '""'] : ["' outgoing '", "''"];
+  // Quoted for the shell it is pasted into (`shellCommand`): single quotes for a POSIX one, double quotes on Windows —
+  // where the empty entry cannot be printed so that every shell passes it on, and is given apart to type by hand.
+  const [spaced, empty] =
+    process.platform === 'win32'
+      ? [
+          'agentcomms attach roots remove " outgoing "',
+          commandText(shellCommand(['agentcomms', 'attach', 'roots', 'remove', { value: '', label: 'entry' }])),
+        ]
+      : ["agentcomms attach roots remove ' outgoing '", "agentcomms attach roots remove ''"];
   assert.ok(
-    shown.stdout.includes(`\n  agentcomms attach roots remove ${spaced}\n  agentcomms attach roots remove ${empty}\n`),
+    shown.stdout.includes(`\n  ${spaced}\n  ${empty}\n`),
     `the spaces and the empty entry are not visible: ${shown.stdout}`,
   );
   const { ok, error, close } = await connect(m);

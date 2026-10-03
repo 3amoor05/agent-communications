@@ -514,7 +514,7 @@ test(
     const report = await doctor(openCore({ env }), env, { keyring: null, platform: 'win32' });
     assert.equal(
       report.checks.find((check) => check.name === 'config dir')?.fix,
-      `chmod 700 FOLDER (FOLDER is ${JSON.stringify(configDir)}, written as JSON: type it in yourself, quoted for your shell — no quoting reads the same in cmd.exe and PowerShell)`,
+      `chmod "700" FOLDER (FOLDER is ${JSON.stringify(configDir)}, written as JSON: type it in yourself, quoted for your shell — no quoting reads the same in cmd.exe and PowerShell)`,
     );
   },
 );
