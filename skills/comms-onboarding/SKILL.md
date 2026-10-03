@@ -70,15 +70,15 @@ If the person's organisation provides a profile — a small `.agentcomms.json` f
 or sent inside the organisation — add it before connecting their accounts, so they make no Google client
 or Slack app of their own. `comms_org_add` with the file's **path** (never its contents): a change, so
 preview, yes, `approvalId`. The preview names the organisation, the file and its SHA-256, the Google
-client and the name it gets here (`<organisation>-1`), and the Slack apps; the client secret is never
-shown. Pass `forOtherAddresses: true` only if they ask for the organisation's client to serve their
+client and the client name it gets here — or the client of theirs it uses — and the Slack apps; the
+client secret is never shown. Pass `forOtherAddresses: true` only if they ask for the organisation's client to serve their
 other addresses too. It is added beside what they have; nothing of theirs is replaced, and
 `comms_orgs_list` lists every profile added on this machine.
 
 In this release the profile's client is not picked by itself yet: connect each mailbox with
 `gmail_inbox_add` and `client` set to the active client `comms_org_show` names. Its Slack apps are
-recorded, not used by `slack_workspace_add` yet: connect Slack as step 3 says, with the profile's read
-app Client ID and port from `comms_org_show`, rather than a new app. When the organisation changes its
+recorded, not used by `slack_workspace_add` yet: connect Slack as step 3 says for a profile, through the
+organisation's app, rather than a new app. When the organisation changes its
 file, `comms_org_update` reads it again — a changed profile is approved first, a repair applies at once
 — and `comms_org_remove` stops using it.
 
@@ -89,7 +89,12 @@ file, `comms_org_update` reads it again — a changed profile is approved first,
   Then `gmail_client_add` with the downloaded client JSON's **path** (never its contents) — a change,
   so preview, yes, `approvalId`. `gmail_inbox_add` with the tier returns a Google link; give it to
   them, and `gmail_inbox_finish` once they are back.
-- **Slack:** a workspace needs its own Slack app, and creating it is the person's step.
+- **Slack, with an organisation profile added:** do not create an app. Connect through the organisation's
+  read app — or its send app, for `send` — with `slack_workspace_add`, that app's Client ID and the
+  profile's port, both of which `comms_org_show` lists; for `send` it is a change and asks for approval
+  before the sign-in starts. A `slack_workspace_add` that uses the profile by itself comes in a later
+  release.
+- **Slack, without one:** a workspace needs its own Slack app, and creating it is the person's step.
   `slack_manifest` with the mode and a `port` you choose (51234, say; it is required for a new app)
   returns the manifest. Tell them: open https://api.slack.com/apps, **Create New App** → **From a
   manifest**, pick the workspace, paste the JSON, create it, and copy the **Client ID** from **Basic

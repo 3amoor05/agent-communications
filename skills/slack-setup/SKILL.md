@@ -32,16 +32,17 @@ rather than implying one sentence covers both.
 
 ## Bring your own Slack app
 
-There is no shared app to install. A person creates one in their own workspace from a manifest this package
-prints, which means the scopes are visible to them before anything is granted and the workspace's admins keep
-control of it.
+**First, is there an organisation profile?** An organisation may already have made its apps — one for reading,
+one for posting — and handed its members a profile, a small `.agentcomms.json` file. `agentcomms org add <file>`
+(`comms_org_add` from a chat) records those apps here: the workspace, each app's Client ID and the port;
+`agentcomms org show <organisation>` (`comms_org_show`) lists them. With a profile, **do not create an app**:
+connect through the organisation's read app — or its send app, for `send` — with `workspace add`, its Client ID
+and the profile's port, as below. In this release `workspace add` does not use the profile by itself; that comes
+in a later release.
 
-An organisation may already have made its apps — one for reading, one for posting — and handed its members a
-profile, a small `.agentcomms.json` file. `agentcomms org add <file>` (`comms_org_add` from a chat) records
-those apps here: the workspace, each app's Client ID and the port. In this release `workspace add` does not use
-the profile by itself; that comes in a later release. Until then, rather than make a second app, connect
-through the organisation's read app by hand: `agentcomms org show <organisation>` lists its Client ID and port,
-and `workspace add` takes them as below.
+**Without one**, there is no shared app to install. A person creates one in their own workspace from a manifest
+this package prints, which means the scopes are visible to them before anything is granted and the workspace's
+admins keep control of it.
 
 ```sh
 agent-slack manifest --mode read --port 51234

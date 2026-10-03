@@ -148,10 +148,12 @@ send policy?" either: `gmail_inboxes_list` answers that in one call.
    to borrow, and the 100-user lifetime cap on one project makes a widely shared one a bad idea anyway.
    An organisation can make one client for its members and hand them a profile, a small
    `.agentcomms.json` file: `agentcomms org add <file>` (`comms_org_add` from a chat, a change they
-   approve) registers its client here as `<organisation>-1`, and no Cloud project is needed. In this
-   release setup does not pick that client by itself yet: connect each mailbox through it with
-   `agent-gmail inbox add <name> --client <organisation>-1` (`client` in `gmail_inbox_add`), the name
-   `agentcomms org show <organisation>` gives as active.
+   approve) registers its client here, and no Cloud project is needed. Do not guess the client's name:
+   it is often `<organisation>-1`, but another number when that name is taken, or a name of the
+   person's own when they had registered the same client already. In this release setup does not pick
+   that client by itself yet: connect each mailbox through it with
+   `agent-gmail inbox add <name> --client <client>` (`client` in `gmail_inbox_add`), where `<client>` is
+   the active client `agentcomms org show <organisation>` (`comms_org_show`) reports.
    **Complete when:** the user has named the project, agreed to create one, or added their organisation's
    profile.
 2. **A browser the user can reach.** Consent happens in a browser, on Google's own screen. Neither this
