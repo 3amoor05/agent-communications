@@ -356,6 +356,17 @@ export interface ClaimOptions {
    * names no product at all rather than the wrong one.
    */
   pendingHint?: string | undefined;
+  /**
+   * The caller's cancellation — an MCP request's signal — asked under the record's lock, immediately before the claim
+   * would change the record.
+   *
+   * A claim can wait: for the lock, while another process holds it. A caller that looked at its signal before calling
+   * and found it clear could be cancelled during that wait, and the claim then went through all the same, spending an
+   * approval on a call nobody was waiting for any more — whose outcome its caller then had to record as a failure,
+   * since a claim cannot be put back. Asked here, a cancellation that lands before the record changes leaves it exactly
+   * as it was, for the same call made again; one that lands after is the caller's to handle, as it always was.
+   */
+  signal?: AbortSignal | undefined;
 }
 
 /**
@@ -414,6 +425,27 @@ function refuseDownload(code: ErrorCode, reason: string, record?: ApprovalRecord
 function refusalFor(record: ApprovalRecord): typeof refuse {
   const kind = approvalKind(record);
   return kind === 'change' ? refuseChange : kind === 'download' ? refuseDownload : refuse;
+}
+
+/**
+ * A claim whose caller was cancelled before it changed anything (`ClaimOptions.signal`).
+ *
+ * `USAGE` and `cancelled:`, the words every cancellation in this repository is reported in, with `details.reason`
+ * saying so for a caller that branches on it — and in the record's own kind: a question is not an approval, and
+ * nothing is sent by answering one. The record is as it was, and the hint says so.
+ */
+function cancelledClaim(record: ApprovalRecord): CommsError {
+  const kind = approvalKind(record);
+  if (kind === 'download') {
+    return new CommsError('USAGE', 'cancelled: nothing was saved', {
+      hint: 'The question was not used: the same call, made again with the same answer, can still use it until it expires.',
+      details: { choiceId: record.approvalId, state: record.state, reason: 'cancelled' },
+    });
+  }
+  return new CommsError('USAGE', `cancelled: ${kind === 'change' ? 'nothing was changed' : 'nothing was sent'}`, {
+    hint: 'The approval was not used: the same call, made again, can still use it until it expires.',
+    details: { approvalId: record.approvalId, state: record.state, reason: 'cancelled' },
+  });
 }
 
 /** The record as it may be shown to anyone, agents included: never the challenge hash. */
@@ -674,6 +706,12 @@ export class ApprovalStore {
       // would otherwise be judged — and voided — as a send that went wrong.
       this.#requireKind(current, 'send');
       if (current.state !== 'pending' && current.state !== 'approved') throw this.#stateError(current);
+      /*
+       * Cancelled while the claim waited for the lock: nothing written, the record as it was. Here, before every branch
+       * below that writes, and with nothing awaited between this look and the write that changes the record — so no
+       * cancellation can land in between.
+       */
+      if (options.signal?.aborted) throw cancelledClaim(current);
       const voidWith = (code: ErrorCode, reason: string): ApprovalRecord => {
         failure = { code, reason };
         return { ...current, state: 'revoked', reason };
@@ -807,6 +845,8 @@ export class ApprovalStore {
     const result = await this.#transition(approvalId, (current) => {
       this.#requireKind(current, 'change');
       if (current.state !== 'pending' && current.state !== 'approved') throw this.#stateError(current);
+      // As for a send: a cancellation that landed while this waited for the lock writes nothing.
+      if (options.signal?.aborted) throw cancelledClaim(current);
       const voidWith = (reason: string): ApprovalRecord => {
         failure = { code: 'APPROVAL_VOID', reason };
         return { ...current, state: 'revoked', reason };
@@ -948,17 +988,25 @@ export class ApprovalStore {
    * gave it in the conversation. Under `confirm`, only a question the person answered at a terminal or in a trusted
    * form can be claimed; a pending one is refused, and left as it is, so they can still answer it. One used, voided or
    * expired is refused as an approval in that state is.
+   *
+   * `options.signal` is the download's cancellation, asked under the lock as a send's is (`ClaimOptions.signal`): a
+   * download cancelled while this waited saves nothing and leaves the question open, the answer still unused.
    */
   async claimForDownload(
     approvalId: string,
     live: DownloadRequest,
-    options: { policy?: ChangePolicy | undefined; pendingHint?: string | undefined } = {},
+    options: {
+      policy?: ChangePolicy | undefined;
+      pendingHint?: string | undefined;
+      signal?: AbortSignal | undefined;
+    } = {},
   ): Promise<ApprovalRecord & { download: DownloadBinding }> {
     const digest = downloadDigest(live);
     let failure: Failure | null = null;
     const result = await this.#transition(approvalId, (current) => {
       this.#requireKind(current, 'download');
       if (current.state !== 'pending' && current.state !== 'approved') throw this.#stateError(current);
+      if (options.signal?.aborted) throw cancelledClaim(current);
       const voidWith = (reason: string): ApprovalRecord => {
         failure = { code: 'APPROVAL_VOID', reason };
         return { ...current, state: 'revoked', reason };

@@ -587,6 +587,9 @@ function isCancelledPost(error: unknown): boolean {
   return error instanceof CommsError && error.details?.reason === 'cancelled';
 }
 
+/** Before the claim has changed the record, a cancellation spends nothing. */
+const NOT_USED = 'The approval was not used: it can still post this draft until it expires.';
+
 /** After the claim, a cancellation spends the approval: a claim is single use, and cannot be put back. */
 const SPENT_BY_CANCEL =
   'The approval was used up by the attempt. If it should still be posted, prepare the draft again and approve the new preview.';
@@ -605,6 +608,13 @@ const POSTED_ANYWAY =
  *
  * The hint is prose for whoever reads it. An agent relaying the step to a person should not have to dig a command out
  * of a sentence, so the wait carries it in `details.command` too — from both surfaces, because both come through here.
+ *
+ * The call's signal goes to the store, which asks it under the record's lock just before the claim changes anything. A
+ * look here, before the call, would miss a cancellation that came while the claim waited for the lock — another
+ * process's claim or completion holding it — and that claim then went through and spent the approval, which the post
+ * then had to record as failed. The store's cancellation goes out in a post's words, with the same hint as one
+ * caught before the claim, because it is the same outcome: nothing was posted, and the approval is unused.
+ *
  * Everything else the claim throws goes out exactly as the store threw it.
  */
 async function claimOrHandOver(
@@ -614,8 +624,9 @@ async function claimOrHandOver(
   pendingHint: string,
 ): Promise<void> {
   try {
-    await deps.approvals.claimForSend(approvalId, live, { pendingHint });
+    await deps.approvals.claimForSend(approvalId, live, { pendingHint, signal: deps.signal });
   } catch (error) {
+    if (isCancelledPost(error)) throw cancelledPost(NOT_USED);
     if (!(error instanceof CommsError) || error.code !== 'APPROVAL_PENDING') throw error;
     throw new CommsError(error.code, error.message, {
       ...(error.hint === undefined ? {} : { hint: error.hint }),
@@ -633,7 +644,8 @@ async function claimOrHandOver(
  * throws halfway leaves no door open behind it.
  *
  * A cancelled call (`deps.signal`, CUE-305) is honoured up to the request that posts, in three stretches. Before the
- * claim it posts nothing and spends nothing: the approval is as it was, as though the call had never been made. After
+ * claim has changed the approval — while it waits for the store's lock, too — it posts nothing and spends nothing: the
+ * approval is as it was, as though the call had never been made. After
  * the claim and before Slack has the post it posts nothing, and the approval is recorded as failed, saying it was
  * cancelled — the outcome of any attempt that posted nothing, since a claim cannot be put back. Once the request that
  * posts has gone out it is never abandoned: Slack may already have acted on it, and abandoning it would record as
@@ -675,10 +687,8 @@ export async function postPrepared(
   // The payload sent below is this one: checked against the file, previewed, and the one the digest is taken over.
   const { preview, digest, payload } = await viewPost(deps, draft, book);
 
-  // The last moment a cancellation costs nothing: the room has just been looked up, and the claim is next.
-  if (deps.signal?.aborted) {
-    throw cancelledPost('The approval was not used: it can still post this draft until it expires.');
-  }
+  // Cancelled while the room was looked up: the claim is next, and is not made. The store asks again as it claims.
+  if (deps.signal?.aborted) throw cancelledPost(NOT_USED);
   await claimOrHandOver(
     deps,
     approvalId,

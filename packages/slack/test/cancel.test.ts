@@ -3,7 +3,7 @@ import { realpathSync, writeFileSync } from 'node:fs';
 import { mkdir, readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { type TestContext, test } from 'node:test';
-import { type AuditRecord, CommsError } from '@agentcomms/core';
+import { type ApprovalStore, type AuditRecord, CommsError, withFileLock } from '@agentcomms/core';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { SlackContext } from '../src/context.ts';
@@ -91,6 +91,43 @@ function isCancellation(message: RegExp) {
     assert.equal(error.details?.reason, 'cancelled');
     return true;
   };
+}
+
+/**
+ * Holds an approval's lock, as another process part-way through a claim or a completion of it would, until `release`.
+ * Resolves once the lock is held, so a claim made after it has to wait.
+ */
+async function holdLock(store: ApprovalStore, approvalId: string): Promise<{ release: () => Promise<void> }> {
+  let release!: () => void;
+  const released = new Promise<void>((settle) => {
+    release = settle;
+  });
+  let held!: () => void;
+  const holding = new Promise<void>((settle) => {
+    held = settle;
+  });
+  const done = withFileLock(join(store.directory, `${approvalId}.json.lock`), async () => {
+    held();
+    await released;
+  });
+  await holding;
+  return {
+    release: async () => {
+      release();
+      await done;
+    },
+  };
+}
+
+/** Resolves when `method` of the store is next called — before it does anything — and lets the call go on as it was. */
+function whenCalled<K extends 'claimForSend' | 'claimForDownload'>(store: ApprovalStore, method: K): Promise<void> {
+  return new Promise((entered) => {
+    const original = store[method].bind(store) as (...args: unknown[]) => Promise<unknown>;
+    (store as unknown as Record<K, unknown>)[method] = (...args: unknown[]) => {
+      entered();
+      return original(...args);
+    };
+  });
 }
 
 // ── Downloads ──────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -215,6 +252,44 @@ test('a download cancelled before the person’s answer is claimed saves nothing
   assert.deepEqual(await listing(downloads), ['next.pdf', 'slow.pdf']);
 });
 
+test('a download cancelled while the claim of the answer waits for the approval store saves nothing, and leaves the answer to use', async (t) => {
+  const { harness, fake, downloads, fetched } = await downloadWorld(t);
+  fake.files[`${TEAM}-F0SLOW`] = () => ({ body: '%PDF-1.7 slow', headers: { 'content-type': 'application/pdf' } });
+  const context = new SlackContext({ core: harness.core, env: harness.env, surface: 'mcp' });
+  const session = await openWorkspace(context, 'acme', { fetch: fake.fetch });
+  const request = { fileIds: ['F0SLOW', 'F0NEXT'], surface: 'mcp' as const };
+  const asked = (await downloadFiles(context, session, request)) as FileDownloadQuestion;
+  const answer = { ...request, saveTo: 'downloads', choiceId: asked.choiceId };
+
+  /*
+   * Another process holds the question's lock as the claim arrives, and the person cancels while the claim waits for it:
+   * the signal was clear when the download last looked. Before the change the claim went through once the lock was let
+   * go, and the answer was spent on a run that then stopped before its first file.
+   */
+  const store = harness.core.approvals;
+  const lock = await holdLock(store, asked.choiceId);
+  const claiming = whenCalled(store, 'claimForDownload');
+  const cancel = new AbortController();
+  const run = downloadFiles(context, session, answer, { signal: cancel.signal });
+  await claiming;
+  await new Promise((settle) => setTimeout(settle, 100));
+  cancel.abort();
+  await lock.release();
+
+  await assert.rejects(run, isCancellation(/^cancelled: nothing was saved$/));
+  assert.equal((await store.get(asked.choiceId))?.state, 'pending', 'the answer was spent');
+  assert.deepEqual(fetched(), []);
+  assert.deepEqual(await audited(harness, 'files.download'), [], 'a run that never started was recorded');
+
+  // The same answer, again, saves the files.
+  const saved = (await downloadFiles(context, session, answer)) as FileDownloadResult;
+  assert.deepEqual(
+    saved.files.map((entry) => entry.fileId),
+    ['F0SLOW', 'F0NEXT'],
+  );
+  assert.deepEqual(await listing(downloads), ['next.pdf', 'slow.pdf']);
+});
+
 // ── Posts ──────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /** A workspace that can post under `chat`, and a Slack that takes posts and files. */
@@ -317,6 +392,45 @@ test('a post cancelled before its approval is claimed posts nothing, and the app
 
   // The same approval posts it, once, when the call is not cancelled.
   fake.script['conversations.info'] = room as NonNullable<typeof room>;
+  assert.deepEqual(await send(), { approvalId: draft.approvalId, channel: 'C1', ts: TS });
+  assert.equal(await state(), 'used');
+  assert.equal(posted(), 1);
+});
+
+test('a post cancelled while its claim waits for the approval store posts nothing, and the approval is left as it was', async (t) => {
+  const { harness, fake, posted } = await postWorld(t);
+  const { send, state, draft } = await prepared(harness, fake.fetch);
+  const store = harness.core.approvals;
+  // Approved by a person at a terminal, so "as it was" is a state no claim could put back by itself.
+  const record = await store.get(draft.approvalId);
+  assert.ok(record);
+  const live = { draftMessageId: record.draftMessageId, digest: record.digest };
+  await store.approve(draft.approvalId, 'terminal', live, await store.issueChallenge(draft.approvalId));
+
+  /*
+   * Another process holds the approval's lock as the claim arrives, and the person cancels while the claim waits for
+   * it: the post had looked at its signal, clear, just before. Before the change the claim went through once the lock
+   * was let go — and the approval, spent on a post that never happened, was recorded as failed.
+   */
+  const lock = await holdLock(store, draft.approvalId);
+  const claiming = whenCalled(store, 'claimForSend');
+  const cancel = new AbortController();
+  const sending = send(cancel.signal);
+  await claiming;
+  await new Promise((settle) => setTimeout(settle, 100));
+  cancel.abort();
+  await lock.release();
+
+  await assert.rejects(sending, (error: unknown) => {
+    isCancellation(/^cancelled: nothing was posted$/)(error);
+    assert.match((error as CommsError).hint ?? '', /^The approval was not used/);
+    return true;
+  });
+  assert.equal(await state(), 'approved', 'the approval was claimed');
+  assert.equal(posted(), 0);
+  assert.deepEqual(await audited(harness, 'slack.post'), []);
+
+  // The same approval posts it, once, when the call is not cancelled.
   assert.deepEqual(await send(), { approvalId: draft.approvalId, channel: 'C1', ts: TS });
   assert.equal(await state(), 'used');
   assert.equal(posted(), 1);

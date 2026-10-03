@@ -793,13 +793,12 @@ export async function downloadFiles(
    * Before the answer is claimed, the last moment a cancellation costs nothing. Claimed, the answer is spent whether or
    * not a file follows — and the files are looked up again first, one call each, which is where a cancellation is most
    * likely to arrive. So it is asked here, and the person's answer is left for the same call made again.
+   *
+   * And asked again by the store, under the question's lock as it claims (`ClaimOptions.signal`): a look here alone
+   * missed a cancellation that came while the claim waited for that lock, and the answer was spent on a run that then
+   * stopped before its first file. Either way it is the same outcome, in the same words.
    */
-  if (signal?.aborted) {
-    throw new CommsError('USAGE', 'cancelled: nothing was saved', {
-      hint: 'Nothing was fetched, and the person’s answer was not used: call again with the same arguments to save the files.',
-      details: { reason: 'cancelled' },
-    });
-  }
+  if (signal?.aborted) throw notStarted();
   const destination = await settleDestination(context.core, {
     answer,
     request: binding,
@@ -808,6 +807,9 @@ export async function downloadFiles(
     approveCommand: APPROVE_COMMAND,
     surface: context.surface,
     env: context.env,
+    signal,
+  }).catch((error: unknown) => {
+    throw isCancellation(error) ? notStarted() : error;
   });
 
   const saved: SavedSlackFile[] = [];
@@ -1061,6 +1063,14 @@ function messageOf(error: unknown): string {
 /** Whether a run stopped because its call was cancelled: the stop `downloadFiles` throws for it says so in `details`. */
 function isCancellation(error: unknown): boolean {
   return error instanceof CommsError && error.details?.reason === 'cancelled';
+}
+
+/** A download cancelled before the person's answer was used: nothing fetched, nothing saved, the answer left to use. */
+function notStarted(): CommsError {
+  return new CommsError('USAGE', 'cancelled: nothing was saved', {
+    hint: 'Nothing was fetched, and the person’s answer was not used: call again with the same arguments to save the files.',
+    details: { reason: 'cancelled' },
+  });
 }
 
 /**

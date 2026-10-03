@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { setTimeout as sleep } from 'node:timers/promises';
 import {
   type ApprovalRecord,
   ApprovalStore,
@@ -12,6 +13,7 @@ import {
 } from '../src/approvals.ts';
 import { CommsError } from '../src/errors.ts';
 import { APPROVAL_ID_PATTERN } from '../src/ids.ts';
+import { withFileLock } from '../src/lock.ts';
 import { tempDir } from './helpers/temp.ts';
 
 const INBOX = 'ibx_AAAAAAAAAAAAAAAA';
@@ -369,4 +371,114 @@ test('a change approval is bound to a digest the store computes, of the change i
   );
   const reworded: ChangeBinding = { ...CHANGE, summary: 'worded differently' };
   assert.equal(changeDigest(CHANGE), changeDigest(reworded), 'the summary is not bound');
+});
+
+// ── A claim whose caller is cancelled while it waits ────────────────────────────────────────────────────────────
+
+/**
+ * Holds a record's lock, as another process part-way through a transition of it would, until `release` is called.
+ * Resolves once the lock is held, so a claim made after it has to wait.
+ */
+async function holdLock(store: ApprovalStore, approvalId: string): Promise<{ release: () => Promise<void> }> {
+  let release!: () => void;
+  const released = new Promise<void>((settle) => {
+    release = settle;
+  });
+  let held!: () => void;
+  const holding = new Promise<void>((settle) => {
+    held = settle;
+  });
+  const done = withFileLock(join(store.directory, `${approvalId}.json.lock`), async () => {
+    held();
+    await released;
+  });
+  await holding;
+  return {
+    release: async () => {
+      release();
+      await done;
+    },
+  };
+}
+
+/**
+ * A claim started with its signal clear, which is then cancelled while the claim waits for the lock, and the lock let
+ * go: what the claim does next is what the tests below are about.
+ */
+async function cancelledWhileWaiting<T>(
+  store: ApprovalStore,
+  approvalId: string,
+  claim: (signal: AbortSignal) => Promise<T>,
+) {
+  const lock = await holdLock(store, approvalId);
+  const cancel = new AbortController();
+  const claiming = claim(cancel.signal);
+  // Long enough for the claim to be waiting on the lock rather than on its way to it; either way, it waits.
+  await sleep(100);
+  cancel.abort();
+  await lock.release();
+  return claiming;
+}
+
+function isCancelled(message: RegExp) {
+  return (e: unknown) =>
+    e instanceof CommsError && e.code === 'USAGE' && message.test(e.message) && e.details?.reason === 'cancelled';
+}
+
+test('a send claim cancelled while it waits for the lock writes nothing: the record is as it was, for the same call again', async () => {
+  const { store, record } = await setup('confirm');
+  await humanApproves(store, record.approvalId);
+  const claim = (signal?: AbortSignal) =>
+    store.claimForSend(record.approvalId, live({ policy: 'confirm' }), signal ? { signal } : {});
+
+  await assert.rejects(
+    cancelledWhileWaiting(store, record.approvalId, claim),
+    isCancelled(/^cancelled: nothing was sent$/),
+  );
+  // Still approved, and with no claim marker: before the change it was `sending`, spent on a call nobody awaited.
+  assert.equal((await store.get(record.approvalId))?.state, 'approved');
+  assert.equal((await claim()).state, 'sending');
+});
+
+test('a change claim cancelled while it waits for the lock writes nothing, and the approval can still be claimed', async () => {
+  const { store } = await setup();
+  const change = await store.createChange({ change: CHANGE, policy: 'chat' });
+  const claim = (signal?: AbortSignal) =>
+    store.claimForChange(change.approvalId, { change: CHANGE, policy: 'chat' }, signal ? { signal } : {});
+
+  await assert.rejects(
+    cancelledWhileWaiting(store, change.approvalId, claim),
+    isCancelled(/^cancelled: nothing was changed$/),
+  );
+  assert.equal((await store.get(change.approvalId))?.state, 'pending');
+  assert.equal((await claim()).state, 'used');
+});
+
+test('a download’s question claimed by a call cancelled while it waits for the lock stays open, and the answer unused', async () => {
+  const store = new ApprovalStore(tempDir(), { now: clock().now });
+  const request = {
+    target: { kind: 'account' as const, name: 'acme/slack', id: 'acc_AAAAAAAAAAAAAAAA' },
+    operation: 'files.download',
+    request: { selection: { kind: 'files', fileIds: ['F01'] }, maxFiles: 50 },
+    files: ['F01'],
+    names: ['report.pdf'],
+  };
+  const question = await store.createDownload({
+    download: {
+      ...request,
+      summary: 'where to save 1 file from acme/slack',
+      folders: { downloads: '/d', current: '/c' },
+    },
+    policy: 'chat',
+  });
+  const claim = (signal?: AbortSignal) =>
+    store.claimForDownload(question.approvalId, request, signal ? { policy: 'chat', signal } : { policy: 'chat' });
+
+  await assert.rejects(cancelledWhileWaiting(store, question.approvalId, claim), (e: unknown) => {
+    assert.ok(isCancelled(/^cancelled: nothing was saved$/)(e), String(e));
+    assert.equal((e as CommsError).details?.choiceId, question.approvalId);
+    return true;
+  });
+  assert.equal((await store.get(question.approvalId))?.state, 'pending');
+  assert.equal((await claim()).state, 'used');
 });

@@ -782,6 +782,11 @@ export interface SettleInput {
   surface: DownloadSurface;
   env: NodeJS.ProcessEnv;
   platform?: NodeJS.Platform | undefined;
+  /**
+   * The download's cancellation, for the claim to ask under the approval store's lock: a call cancelled while the claim
+   * waits for it saves nothing and leaves the question unused (see `ClaimOptions.signal`). Absent from a command line.
+   */
+  signal?: AbortSignal | undefined;
 }
 
 /** Whether a relayed answer is the one the person recorded: the same choice, and for a folder the same folder. */
@@ -879,6 +884,7 @@ export async function settleDestination(core: Core, input: SettleInput): Promise
   const claimed = await core.approvals.claimForDownload(answer.choiceId, input.request, {
     policy: input.policy,
     pendingHint,
+    signal: input.signal,
   });
   // The person's recorded answer wins over a relayed one: it is theirs, given where no agent could give it.
   const chosen = claimed.download.answer ?? answer.answer;
