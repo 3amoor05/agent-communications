@@ -3,6 +3,50 @@
 All notable changes to this project are recorded here, newest first. Every package in this repository is released
 together under one version.
 
+## 0.12.2
+
+**Using several Resend accounts on a busy machine no longer gets requests refused.** Every Resend request on a machine
+waits its turn on one rate-limit lock. The wait was capped at five seconds in total. So when several accounts asked at
+once on a heavily loaded computer, the last one in line gave up with "another agent-communications process is holding
+…", although the lock was being passed on normally. Now the five seconds count from the last time the lock changed
+hands. A request waits its turn, and gives up only if one holder keeps the lock for five seconds, or the whole wait
+reaches 30 seconds (CUE-307).
+
+**Gmail attachment downloads can no longer hang.** A download now stops if Gmail sends nothing for 30 seconds, or if
+the file takes longer than its size allows: at least two minutes, and about two and a half minutes for 15 MiB. The
+error says which limit stopped it, and names the message and part. Before, a stalled connection kept the call open
+for ever, and the agent waiting on it. A reply that turns out not to be the attachment is now refused, instead of
+being saved as an empty file (CUE-304).
+
+**Cancelling a Slack download or post stops it.** If you cancel `slack_file_download` or `slack_post_send` in your
+client, the transfer now stops; files already saved in full are kept. A post cancelled before Slack has it posts
+nothing, and its approval is still yours to use. Once the post is on its way it is not abandoned, and the result
+says the cancellation came too late (CUE-305).
+
+**A Slack post is no longer recorded as failed when it may have gone out.** If the connection drops after the post
+was sent, or Slack answers with an error that doesn't certainly mean nothing was posted, the approval now reads
+*unknown* rather than *failed*, and the message says to look in the channel before posting again. A post Slack
+accepted is never recorded as failed, even if recording it afterwards goes wrong.
+
+**Also**
+- **On Windows, commands printed for you to copy now run the same in cmd.exe, Windows PowerShell and PowerShell 7**,
+  so a folder with a space in its name works as shown. When a value can't be written safely for all three, no
+  runnable line is printed: the command is shown as its words in JSON, for you to type with that value quoted for
+  your shell (CUE-306).
+- **An approval handed to `comms_update` that is no longer needed is reported as such.** When nothing is behind any
+  more, it says there is nothing to apply, that the approval was not used, and what had become of it. Before, it told
+  you to call again and the change would apply at once (CUE-303).
+- **Two kinds of test that could fail a release on a busy machine are fixed.** Slack's sign-in tests no longer race
+  the two `localhost` addresses. Slack's test files get ten minutes each, as Resend's and WhatsApp's do (CUE-302,
+  CUE-383).
+
+What it means for you: a patch release.
+- If you use several Resend accounts, or download large Gmail attachments, update.
+- Nothing changes in how sends or changes are approved. A Slack post whose outcome is uncertain now reads *unknown*:
+  look in the channel before posting it again.
+- To get 0.12.2: your servers will say an update is out. Run `agentcomms update` (or say "update my comms"), then
+  restart your client.
+
 ## 0.12.1
 
 **`agent-gmail setup` finds the client file you just downloaded.** The last Google Cloud step is downloading the client
