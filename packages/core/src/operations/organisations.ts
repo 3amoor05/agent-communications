@@ -748,6 +748,8 @@ interface Planned {
   inputs: string;
   store: StoreKind | null;
   now: string;
+  /** Whether this call turned `forOtherAddresses` off before planning: written already, and reported with the rest. */
+  narrowed: boolean;
 }
 
 /**
@@ -805,26 +807,26 @@ function profileChange(
   return {
     plan: async (given): Promise<ChangeRequest> => {
       let config = given;
+      /*
+       * A narrowing applies at once, whatever else the call asks for and whatever becomes of it (§D8). So
+       * `--for-other-addresses off` is written first, on its own, under the credentials lock — before the profile is
+       * read, checked or planned, and before a secret store is chosen or opened. Done after them, an unreadable or
+       * invalid profile, or a store that could not be opened, refused the call with the organisation's client still
+       * serving the person's other addresses; done with the plan, it waited for whatever approval the rest needed.
+       * The rest is then planned from what the narrowing left, and refused or approved as before.
+       */
+      let narrowed = false;
+      if (spec.mode === 'update' && spec.forOtherAddresses === 'off' && spec.organisation !== undefined) {
+        const outcome = await narrowAtOnce(core, options, spec.organisation);
+        config = outcome.config;
+        narrowed = outcome.changed;
+      }
       const file = await readProfileFile(spec.path(config));
       await refuseChangedProfile(core, spec.approvalId, file, options.surface);
       const now = (options.now?.() ?? new Date()).toISOString();
-      let profilePlan = await plan(config, file, now);
-      let store = await storeFor(config, profilePlan);
-      /*
-       * A narrowing applies at once, whatever else the call asks for (§D8). `--for-other-addresses off` beside a
-       * changed profile was planned with it, and the whole plan then waited for the approval the rest needed — so a
-       * person who said "stop serving my other addresses" kept serving them until somebody approved something else,
-       * or for good when they never did. It is written now, on its own, under the credentials lock; the rest is planned
-       * again from what that left and asks for its approval as before.
-       */
-      let narrowed = false;
-      if (profilePlan.needsApproval && profilePlan.immediate.length > 0) {
-        config = await narrowAtOnce(core, options, profilePlan.organisation);
-        narrowed = true;
-        profilePlan = await plan(config, file, now);
-        store = await storeFor(config, profilePlan);
-      }
-      planned = { plan: profilePlan, file, inputs: inputsOf(config), store, now };
+      const profilePlan = await plan(config, file, now);
+      const store = await storeFor(config, profilePlan);
+      planned = { plan: profilePlan, file, inputs: inputsOf(config), store, now, narrowed };
       const { organisation } = profilePlan;
       const label = shownText(file.profile.label, 64);
       const effects = profilePlan.needsApproval ? previewLines(spec.mode, profilePlan, file, store) : [];
@@ -848,26 +850,35 @@ function profileChange(
 
 /**
  * `--for-other-addresses off`, written on its own under the credentials lock: the configuration it leaves, which the
- * rest of the call is planned again from. Nothing else of the record moves, and a record already off is left alone.
+ * rest of the call is planned from, and whether it changed anything. Nothing else of the record moves; a record that is
+ * off already, or none at all, is left alone, and what is refused about it is the rest of the call's to say.
  */
-async function narrowAtOnce(core: Core, options: OrgOptions, organisation: string): Promise<Config> {
+async function narrowAtOnce(
+  core: Core,
+  options: OrgOptions,
+  organisation: string,
+): Promise<{ config: Config; changed: boolean }> {
   return withCredentialsLock(core.paths.configDir, async () => {
+    let changed = false;
     const written = await core.config.update((current) => {
       const record = recordOf(current, organisation);
       if (current.version !== 2 || !record?.forOtherAddresses) return current;
+      changed = true;
       return {
         ...current,
         organisations: { ...organisationsOf(current), [organisation]: { ...record, forOtherAddresses: false } },
       };
     });
-    await core.audit.append({
-      inboxId: '',
-      operation: 'org.update',
-      outcome: 'ok',
-      surface: options.surface,
-      reason: `${organisation}: for other addresses off`,
-    });
-    return written;
+    if (changed) {
+      await core.audit.append({
+        inboxId: '',
+        operation: 'org.update',
+        outcome: 'ok',
+        surface: options.surface,
+        reason: `${organisation}: for other addresses off`,
+      });
+    }
+    return { config: written, changed };
   });
 }
 
@@ -923,6 +934,7 @@ async function applyProfile(
 ): Promise<OrgChangeResult> {
   const { plan, file, store } = planned;
   const { organisation } = plan;
+  const narrowing = planned.narrowed ? ['for other addresses: on → off'] : [];
   const done = async (changed: boolean): Promise<OrgChangeResult> => {
     if (changed) {
       await core.audit.append({
@@ -935,8 +947,8 @@ async function applyProfile(
     }
     return {
       organisation,
-      changed,
-      applied: [...plan.changes, ...plan.immediate, ...plan.repairs],
+      changed: changed || planned.narrowed,
+      applied: [...narrowing, ...plan.changes, ...plan.immediate, ...plan.repairs],
       reported: plan.reports,
       gmail: plan.gmail,
       store: plan.secret ? store : null,

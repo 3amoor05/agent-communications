@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { type GatedChange, gatedChange } from '../src/change-flow.ts';
@@ -1475,4 +1475,51 @@ test('an earlier client’s unmarked row that is not the generation’s own is n
     assert.match(result.reported.join('\n'), /the name "acme-1".*now holds a client that is not acme's/);
     assert.equal((await config(m)).clients['acme-1']?.organisation, undefined);
   }
+});
+
+// ── Review round 2 ───────────────────────────────────────────────────────────────────────────────────────────────
+
+test('other addresses off is written before anything is read or planned: an unreadable, invalid or unopenable profile still narrows', async () => {
+  const cases: [string, (m: Machine, path: string) => void, string][] = [
+    ['an unreadable profile', (_m, path) => rmSync(path), 'NOT_FOUND'],
+    [
+      'an invalid profile',
+      (_m, path) => writeFileSync(path, '{"agentcomms": "organisation-profile", "version": 7}'),
+      'BAD_DATA',
+    ],
+    [
+      'a secret store that cannot be opened',
+      (m) => {
+        m.core.secrets = async () => {
+          throw new CommsError('SECRET_STORE_UNAVAILABLE', 'the keychain is locked');
+        };
+      },
+      'SECRET_STORE_UNAVAILABLE',
+    ],
+  ];
+  for (const [what, breakIt, code] of cases) {
+    const m = machine();
+    const path = writeProfile(m, profile());
+    await add(m, { forOtherAddresses: true });
+    breakIt(m, path);
+    await assert.rejects(
+      gatedChange(m.core, orgUpdateChange(m.core, { organisation: 'acme', forOtherAddresses: 'off' }, options(m)), {
+        surface: 'mcp',
+      }),
+      is(code),
+      what,
+    );
+    const after = JSON.parse(readFileSync(join(m.configDir, 'config.json'), 'utf8')) as ConfigV2;
+    assert.equal(after.organisations?.acme?.forOtherAddresses, false, `${what}: still serving other addresses`);
+  }
+});
+
+test('other addresses off alone is reported as what this call did', async () => {
+  const m = machine();
+  writeProfile(m, profile());
+  await add(m, { forOtherAddresses: true });
+  const { prepared, result } = await update(m, { forOtherAddresses: 'off' });
+  assert.equal(prepared, null);
+  assert.equal(result.changed, true);
+  assert.deepEqual(result.applied, ['for other addresses: on → off']);
 });
