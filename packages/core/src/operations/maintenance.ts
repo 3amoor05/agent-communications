@@ -10,6 +10,7 @@ import type { Core } from '../core.ts';
 import { CommsError } from '../errors.ts';
 import { isGroupOrWorldAccessible } from '../fs.ts';
 import { resolveName } from '../names.ts';
+import { organisationDrift, organisationsOf, orphanMarkedRows, shownText } from '../organisations.ts';
 import type { ResolvedPaths } from '../paths.ts';
 import { type KeyringModule, keychainNamespace, loadKeyringModule, probeKeychain } from '../secrets.ts';
 import {
@@ -144,6 +145,8 @@ export async function doctor(core: Core, env: NodeJS.ProcessEnv, options: Doctor
       : {}),
   });
 
+  if (readable) checks.push(...organisationChecks(config));
+
   const keyring = options.keyring !== undefined ? options.keyring : await loadKeyringModule();
   // `probeKeychain` loads the real module when handed none, so a machine without it is answered here instead.
   const probe = keyring
@@ -166,6 +169,55 @@ export async function doctor(core: Core, env: NodeJS.ProcessEnv, options: Doctor
   checks.push(await updateCheckLine(core, env));
   checks.push(...(await registrationChecks(core, env, readable ? config : null, platform)));
   return { checks, ok: checks.every((c) => c.ok) };
+}
+
+/**
+ * Organisation profiles against the configuration (design 2026-10-02 §D4): one line per profile, and one per drift
+ * with the command that puts it right.
+ *
+ * Older releases share this file and know nothing of a profile's rules — one can `client remove` a row a profile owns
+ * — and the daily update check that keeps mixed releases short-lived can be turned off, so nothing here assumes the
+ * record is intact. What `org update` repairs fails the check: it is a configuration that has drifted from what was
+ * approved, and new mailboxes are refused the organisation's client until it is repaired. What nothing here can rebuild
+ * — an earlier client gone with its secret — is something to look at, with the way to move its mailboxes. A mark naming
+ * an organisation with no record is something to look at too: the row is an ordinary client again.
+ *
+ * Nothing at all is said on a machine with no profile, so every other doctor reads as it always did.
+ */
+function organisationChecks(config: Config): DoctorCheck[] {
+  const checks: DoctorCheck[] = [];
+  for (const organisation of Object.keys(organisationsOf(config)).sort()) {
+    const drift = organisationDrift(config, organisation);
+    const record = organisationsOf(config)[organisation];
+    const active = record?.gmail?.active ?? null;
+    if (drift.length === 0) {
+      checks.push({
+        name: `organisation ${organisation}`,
+        ok: true,
+        detail: `${shownText(record?.label ?? '', 64)}: ${active === null ? 'no Google client' : `new mailboxes get "${active}"`}${record?.slack ? `; Slack workspace ${shownText(record.slack.workspace, 40)}` : ''}`,
+      });
+      continue;
+    }
+    for (const item of drift) {
+      checks.push({
+        name: `organisation ${organisation}`,
+        ok: item.kind === 'report',
+        ...(item.kind === 'report' ? { warn: true as const } : {}),
+        detail: item.detail,
+        fix: item.fix,
+      });
+    }
+  }
+  for (const { client, organisation } of orphanMarkedRows(config)) {
+    checks.push({
+      name: 'organisation mark',
+      ok: true,
+      warn: true,
+      detail: `the OAuth client "${client}" is marked as belonging to "${shownText(organisation, 40)}", which has no profile here`,
+      fix: `It is treated as a client of your own: \`agent-gmail client\` commands can change or remove it. To give it back to the organisation, add its profile with \`agentcomms org add <file>\`.`,
+    });
+  }
+  return checks;
 }
 
 /**

@@ -8,6 +8,7 @@ import type { AccountConfig, ClientConfig, Config, ConfigV2, InboxConfig } from 
 import { type Core, openCore } from '../src/core.ts';
 import { CommsError } from '../src/errors.ts';
 import { clientSecretRef } from '../src/oauth-client-records.ts';
+import { doctor } from '../src/operations/maintenance.ts';
 import {
   type OrgAddRequest,
   type OrgOptions,
@@ -1071,7 +1072,7 @@ test('an approval to remove a profile is not spent on a configuration that moved
   assert.ok(await record(m));
 });
 
-// ── Older releases ───────────────────────────────────────────────────────────────────────────────
+// ── Older releases, and the doctor ───────────────────────────────────────────────────────────────────────────────
 
 test('a write by the release before this one keeps the record and the marks, and this one reads them back', async () => {
   const m = machine();
@@ -1090,6 +1091,30 @@ test('a write by the release before this one keeps the record and the marks, and
   assert.deepEqual(after.organisations?.acme, before);
   assert.equal(after.clients['acme-1']?.organisation, 'acme');
   assert.equal(after.clients.desktop?.clientId, CLIENT_B);
+});
+
+test('doctor reports drift with the command that repairs it, and nothing at all with no profile', async () => {
+  const none = machine();
+  const plain = await doctor(none.core, none.env, { keyring: null });
+  assert.ok(!plain.checks.some((check) => check.name.startsWith('organisation')));
+
+  const m = machine();
+  writeProfile(m, profile());
+  await add(m);
+  const healthy = await doctor(m.core, m.env, { keyring: null });
+  assert.ok(healthy.checks.some((check) => check.name === 'organisation acme' && check.ok));
+  await edit(m, (raw) => {
+    delete raw.clients['acme-1'];
+    raw.clients.stray = personsRow(CLIENT_B, 'stray', { organisation: 'gone' });
+  });
+  const drifted = await doctor(m.core, m.env, { keyring: null });
+  const failing = drifted.checks.find((check) => check.name === 'organisation acme' && !check.ok);
+  assert.match(failing?.detail ?? '', /"acme-1".*has gone/);
+  assert.match(failing?.fix ?? '', /agentcomms org update acme/);
+  assert.equal(drifted.ok, false);
+  const orphan = drifted.checks.find((check) => check.name === 'organisation mark');
+  assert.equal(orphan?.warn, true);
+  assert.match(orphan?.detail ?? '', /"stray" is marked as belonging to "gone", which has no profile here/);
 });
 
 test('org list and org show read only, and show profile text neutralised whatever reached the record', async () => {
