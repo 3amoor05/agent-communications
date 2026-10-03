@@ -971,6 +971,82 @@ test('an approval is good only for the update it showed: a newer release, or ano
   }
 });
 
+/** The refusal of an approval handed to an update with nothing left to apply, as CUE-303 asked for it. */
+const nothingBehind = (approvalId: unknown, became = '') =>
+  `nothing was changed: nothing is behind the latest release, so there is nothing to apply; the approval ${approvalId} was not used${became}`;
+
+test('an approval for an update applied meanwhile says nothing is left to apply, never that calling again applies it (CUE-303)', async () => {
+  /*
+   * As seen live: an update prepared, not claimed; the same update applied by another session; then the first
+   * session's approval handed in, after it had expired. Nothing was behind any more, and the answer said the change
+   * "applies at once" if called again without the approval — which applies nothing.
+   */
+  const m = machine();
+  cursor(m, { gmail: npx('gmail', OLD, ['--inbox', 'acme/gmail']) });
+  const { ok, refused, close } = await connect(m, { update: fakes(m) });
+  let stale = '';
+  try {
+    stale = String((await ok('comms_update', { noVerify: true })).approvalId);
+    const refusedByPerson = String((await ok('comms_update', { noVerify: true })).approvalId);
+    await ok('comms_approval_revoke', { approvalId: refusedByPerson });
+    const other = await ok('comms_update', { noVerify: true });
+    const done = await ok('comms_update', { noVerify: true, approvalId: other.approvalId });
+    assert.equal((done.result as Item).status, 'updated');
+
+    const late = await refused('comms_update', { noVerify: true, approvalId: stale });
+    assert.equal(late.code, 'USAGE');
+    assert.equal(late.message, nothingBehind(stale));
+    assert.doesNotMatch(String(late.hint), /applies at once/);
+    assert.match(String(late.hint), /comms_update with `check`, or `agentcomms update --check` at a terminal/);
+    assert.equal((await m.core.approvals.get(stale))?.state, 'pending', 'the approval was claimed');
+
+    // What had become of it, when that is why it could not have been used anyway.
+    const again = await refused('comms_update', { noVerify: true, approvalId: other.approvalId });
+    assert.equal(again.message, nothingBehind(other.approvalId, ' (it had been spent already)'));
+    const revoked = await refused('comms_update', { noVerify: true, approvalId: refusedByPerson });
+    assert.equal(revoked.message, nothingBehind(refusedByPerson, ' (it had been revoked)'));
+  } finally {
+    await close();
+  }
+
+  // Eleven minutes on, past its ten: the same, and that it had expired.
+  const later = openCore({ env: m.env, now: () => new Date(Date.now() + 11 * 60 * 1000) });
+  const expired = await connect({ ...m, core: later }, { update: fakes(m) });
+  try {
+    const record = await later.approvals.get(stale);
+    assert.equal(record?.state, 'expired');
+    const late = await expired.refused('comms_update', { approvalId: stale });
+    assert.equal(late.message, nothingBehind(stale, ` (it had expired at ${record?.expiresAt})`));
+  } finally {
+    await expired.close();
+  }
+});
+
+test('an approval for an update whose every step is now left for a person says that nothing can be applied from here', async () => {
+  const m = machine();
+  makeRuntime(m, PACKAGES.gmail, OLD);
+  const config = cursor(m, { gmail: managed(m, PACKAGES.gmail, OLD, ['--inbox', 'acme/gmail']) });
+  const { ok, refused, close } = await connect(m, { update: fakes(m) });
+  try {
+    const first = await ok('comms_update', { noVerify: true });
+    assert.equal(first.approvalRequired, true);
+    // Rewritten by hand since: still behind, and no longer an entry the update can register again.
+    cursor(m, { gmail: { command: 'npx', args: ['-y', `${PACKAGES.gmail}@${OLD}`, 'mcp', '--inbox', 'acme/gmail'] } });
+    const untouched = readFileSync(config, 'utf8');
+    const late = await refused('comms_update', { noVerify: true, approvalId: first.approvalId });
+    assert.equal(late.code, 'USAGE');
+    assert.equal(
+      late.message,
+      `nothing was changed: what is behind cannot be updated from here, so there is nothing to apply; the approval ${first.approvalId} was not used`,
+    );
+    assert.doesNotMatch(String(late.hint), /applies at once/);
+    assert.match(String(late.hint), /changes nothing/);
+    assert.equal(readFileSync(config, 'utf8'), untouched);
+  } finally {
+    await close();
+  }
+});
+
 /** A stand-in for `codex` that records its calls and answers `mcp get <name>` with `answer`. */
 function fakeCodex(bin: string, answer: Record<string, unknown>): () => string[] {
   const log = join(bin, 'codex.log');
@@ -1149,6 +1225,48 @@ test('`agentcomms update` gives the tool’s check and preview, and claims the a
     assert.equal((done.json().data as Record<string, unknown>).status, 'updated');
     assert.deepEqual(cursorEntries(m).gmail?.args, ['-y', `${PACKAGES.gmailMcp}@${LATEST}`, '--inbox', 'acme/gmail']);
     assert.equal(readFileSync(config, 'utf8').includes(`@${OLD}`), false);
+  } finally {
+    await close();
+    await served.close();
+  }
+});
+
+test('`agentcomms update --approval` with an update applied meanwhile gives the tool’s answer: nothing to apply (CUE-303)', async () => {
+  const m = machine();
+  cursor(m, { gmail: npx('gmail', OLD, ['--inbox', 'acme/gmail']) });
+  // An npx first on both PATHs, as in the test above: the tool and the command then plan the same change.
+  writeFileSync(join(m.bin, process.platform === 'win32' ? 'npx.exe' : 'npx'), '', { mode: 0o755 });
+  const served = await loopbackRegistry(EVERYTHING_LATEST);
+  const prefix = join(m.home, 'npm-global');
+  mkdirSync(join(prefix, 'lib', 'node_modules'), { recursive: true });
+  mkdirSync(join(prefix, 'node_modules'), { recursive: true });
+  const extra = {
+    npm_config_registry: served.url,
+    npm_config_prefix: prefix,
+    npm_config_update_notifier: 'false',
+    CLAUDECODE: '1',
+  };
+  const { refused, close } = await connect({ ...m, env: { ...m.env, ...extra } });
+  try {
+    const approvalOf = (result: Awaited<ReturnType<typeof cli>>) =>
+      (result.json().error as { details: { approvalId: string } }).details.approvalId;
+    const asked = await cli(m, ['update', '--json'], extra);
+    assert.equal(asked.status, 10, asked.stderr);
+    const stale = approvalOf(asked);
+    const other = approvalOf(await cli(m, ['update', '--json'], extra));
+    const done = await cli(m, ['update', '--no-verify', '--approval', other, '--json'], extra);
+    assert.equal(done.status, 0, done.stdout + done.stderr);
+
+    const late = await cli(m, ['update', '--approval', stale, '--json'], extra);
+    assert.equal(late.status, 64, late.stdout + late.stderr);
+    const byCommand = late.json().error as { code: string; message: string; hint: string };
+    assert.equal(byCommand.code, 'USAGE');
+    assert.equal(byCommand.message, nothingBehind(stale));
+    const byTool = await refused('comms_update', { approvalId: stale });
+    assert.deepEqual(
+      { code: byTool.code, message: byTool.message, hint: byTool.hint },
+      { code: byCommand.code, message: byCommand.message, hint: byCommand.hint },
+    );
   } finally {
     await close();
     await served.close();

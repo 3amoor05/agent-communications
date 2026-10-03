@@ -31,6 +31,16 @@ export interface GatedChange<T> {
   plan: (config: Config) => ChangeRequest | Promise<ChangeRequest>;
   /** Applies it. `consent` is what `ConfigStore.update` needs for a loosening; undefined when nothing loosens. */
   apply: (consent: LooseningConsent | undefined, request: ChangeRequest) => Promise<T>;
+  /**
+   * The refusal for an approval handed to this change when, as things stand, it needs none — in the change's own
+   * words. Left out, it is the general one, which says to make the same call again without the approval because it
+   * then applies at once. That is true of a tightening, and not of a change that needs none because nothing is left to
+   * do: the update, once another call has brought everything to the latest release, applies nothing however it is
+   * called, and "applies at once" sent an agent to apply an update that was no longer there (CUE-303).
+   *
+   * Only the words are the change's. It is refused whatever this returns, and the approval is not claimed.
+   */
+  refuseApproval?: ((approvalId: string) => CommsError | Promise<CommsError>) | undefined;
 }
 
 export type GatedOutcome<T> =
@@ -42,11 +52,11 @@ export type GatedOutcome<T> =
  * it on the second call, with its id.
  *
  * A change that loosens no setting and does nothing irreversible is applied directly: asking a person to agree to
- * something that needs no agreement teaches them to agree without reading. It refuses an approval id, as a report
- * refuses one (`refuseApprovalWithoutChange`), rather than applying and dropping it: the update check's stop lets a
- * call claiming an approval through (design 2026-09-28 §2), and one that is then never claimed would carry any
- * approval the store holds — one an agent had just had prepared for "not now", say — past the stop, to a tightening
- * or a cancellation made where the call itself was stopped.
+ * something that needs no agreement teaches them to agree without reading. It refuses an approval id — in the change's
+ * own words when it has them (`refuseApproval`) — as a report refuses one (`refuseApprovalWithoutChange`), rather than
+ * applying and dropping it: the update check's stop lets a call claiming an approval through (design 2026-09-28 §2),
+ * and one that is then never claimed would carry any approval the store holds — one an agent had just had prepared for
+ * "not now", say — past the stop, to a tightening or a cancellation made where the call itself was stopped.
  */
 export async function gatedChange<T>(
   core: Core,
@@ -58,6 +68,8 @@ export async function gatedChange<T>(
   const acts = (request.effects ?? []).length > 0;
   if (!loosens && !acts) {
     if (options.approvalId) {
+      const refusal = await change.refuseApproval?.(options.approvalId);
+      if (refusal !== undefined) throw refusal;
       throw new CommsError(
         'USAGE',
         'nothing was changed: as things stand this change needs no approval, so it takes none',

@@ -807,7 +807,46 @@ export function updateChange(
       await recordFound(core, env, planned.report, deps, result);
       return result;
     },
+    refuseApproval: (approvalId) => {
+      if (planned === null) throw new CommsError('UNEXPECTED', 'the update was refused before it was planned');
+      return nothingToApply(core, approvalId, planned);
+    },
   };
+}
+
+/**
+ * The refusal for an approval handed to an update with no step left in it (CUE-303).
+ *
+ * An update needs an approval only for its steps, so one with none takes no approval, and the general refusal said to
+ * call again without it, as "it applies at once". An approval is prepared for an update while something is behind,
+ * and it is usually claimed minutes later; meanwhile another session, or the person at a terminal, may have applied
+ * the update. Then nothing is behind, calling again applies nothing, and "applies at once" read as an update about to
+ * happen. So this says what is so: there is nothing to apply — nothing behind at all, or nothing that can be updated
+ * from here — and the approval was not used, with what had become of it when the store says.
+ */
+async function nothingToApply(core: Core, approvalId: string, planned: Planned): Promise<CommsError> {
+  // A malformed id is refused by the store before it looks; that says nothing about the update, so it is left unsaid.
+  const record = await core.approvals.get(approvalId).catch(() => null);
+  const became =
+    record?.state === 'expired'
+      ? ` (it had expired at ${record.expiresAt})`
+      : record?.state === 'used'
+        ? ' (it had been spent already)'
+        : record?.state === 'revoked'
+          ? ' (it had been revoked)'
+          : '';
+  const unused = `so there is nothing to apply; the approval ${approvalId} was not used${became}`;
+  const details = { approvalId, ...(record ? { state: record.state } : {}) };
+  if (planned.nothingBehind) {
+    return new CommsError('USAGE', `nothing was changed: nothing is behind the latest release, ${unused}`, {
+      hint: 'Nothing needs doing: a check — comms_update with `check`, or `agentcomms update --check` at a terminal — shows everything here up to date. A release published later is another update, with a preview and an approval of its own.',
+      details,
+    });
+  }
+  return new CommsError('USAGE', `nothing was changed: what is behind cannot be updated from here, ${unused}`, {
+    hint: 'Each is left for a person: a check — comms_update with `check`, or `agentcomms update --check` at a terminal — lists them, with why and what to run. The same call without the approval reports them too, and changes nothing.',
+    details,
+  });
 }
 
 /** The product a runtime of `packageName` is installed as: the channel whose package it is. */
