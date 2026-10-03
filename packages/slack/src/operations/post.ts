@@ -14,6 +14,7 @@ import {
   preparePost,
   prepareReaction,
   type ReactionOptions,
+  type ReactionResult,
   reactPrepared,
 } from './send.ts';
 import type { SessionDeps } from './session.ts';
@@ -162,7 +163,7 @@ export async function react(
   wanted: ReactionOptions,
   approvalId: string | undefined,
   slack: SessionDeps = {},
-): Promise<{ approvalId: string }> {
+): Promise<ReactionResult> {
   const gate = await gateDepsFor(context, alias, slack);
   const claiming = approvalId ?? (await prepareReaction(gate, wanted)).approvalId;
   return reactPrepared(gate, claiming, wanted);

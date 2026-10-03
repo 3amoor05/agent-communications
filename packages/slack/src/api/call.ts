@@ -146,8 +146,8 @@ function body(params: Record<string, string | number | boolean | undefined>): st
 /** What Slack says about a token that no longer works — the rejections a renewed token can fix. */
 const RENEWABLE: ReadonlySet<string> = new Set(['invalid_auth', 'token_expired', 'token_revoked']);
 
-/** The methods that post, and so the ones a failure can leave not knowing whether a post happened. */
-export type PostingMethod = 'chat.postMessage' | 'files.completeUploadExternal';
+/** The methods that post or react, and so the ones a failure can leave not knowing whether Slack acted. */
+export type PostingMethod = 'chat.postMessage' | 'files.completeUploadExternal' | 'reactions.add' | 'reactions.remove';
 
 /*
  * The errors each posting method answers before it has acted: an allowlist, method by method, and nothing else.
@@ -163,7 +163,7 @@ export type PostingMethod = 'chat.postMessage' | 'files.completeUploadExternal';
  * `msg_too_long`, which the page no longer lists — it says long text is truncated instead — so what it means now is not
  * something this can read off Slack's own words.
  *
- * An allowlist, and not a list of the errors that may follow a success, because both pages say their lists are not
+ * An allowlist, and not a list of the errors that may follow a success, because the pages say their lists are not
  * exhaustive: "other errors can be returned in the case where the service is down or other unexpected factors affect
  * processing." A refusal recorded as failed when Slack had acted is the record that invites the post again, so an
  * error this does not know — new, undocumented, or listed for the other method only — is one whose outcome is not known.
@@ -256,6 +256,87 @@ const REFUSED_BEFORE_ACTING: Readonly<Record<PostingMethod, ReadonlySet<string>>
     'ekm_access_denied',
     // The arguments.
     'invalid_blocks',
+    'invalid_arguments',
+    'invalid_arg_name',
+    'invalid_array_arg',
+    'invalid_charset',
+    'invalid_form_data',
+    'invalid_post_type',
+    'missing_post_type',
+    // A rate limit, and a method that is gone.
+    'ratelimited',
+    'deprecated_endpoint',
+    'method_deprecated',
+  ]),
+  'reactions.add': new Set([
+    // The token, its scopes, and its access.
+    'not_authed',
+    'invalid_auth',
+    'account_inactive',
+    'token_revoked',
+    'token_expired',
+    'not_allowed_token_type',
+    'missing_scope',
+    'no_permission',
+    'team_access_not_granted',
+    'access_denied',
+    'accesslimited',
+    'enterprise_is_restricted',
+    'two_factor_setup_required',
+    // The message, and whether this account may react to it.
+    'channel_not_found',
+    'is_archived',
+    'message_not_found',
+    'no_access',
+    'thread_locked',
+    'ekm_access_denied',
+    // The reaction and the arguments.
+    'invalid_name',
+    'too_many_emoji',
+    'too_many_reactions',
+    'not_reactable',
+    'bad_timestamp',
+    'no_item_specified',
+    'invalid_arguments',
+    'invalid_arg_name',
+    'invalid_array_arg',
+    'invalid_charset',
+    'invalid_form_data',
+    'invalid_post_type',
+    'missing_post_type',
+    // A rate limit, and a method that is gone.
+    'ratelimited',
+    'deprecated_endpoint',
+    'method_deprecated',
+  ]),
+  'reactions.remove': new Set([
+    // The token, its scopes, and its access.
+    'not_authed',
+    'invalid_auth',
+    'account_inactive',
+    'token_revoked',
+    'token_expired',
+    'not_allowed_token_type',
+    'missing_scope',
+    'no_permission',
+    'team_access_not_granted',
+    'access_denied',
+    'accesslimited',
+    'enterprise_is_restricted',
+    'two_factor_setup_required',
+    // The item, and whether this account may remove its reaction from it.
+    'channel_not_found',
+    'message_not_found',
+    'file_not_found',
+    'file_comment_not_found',
+    'no_access',
+    'no_reaction',
+    'thread_locked',
+    'ekm_access_denied',
+    // The reaction and the arguments.
+    'invalid_name',
+    'bad_timestamp',
+    'no_item_specified',
     'invalid_arguments',
     'invalid_arg_name',
     'invalid_array_arg',

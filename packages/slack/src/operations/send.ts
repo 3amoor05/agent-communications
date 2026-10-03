@@ -14,7 +14,7 @@ import {
   stricterPolicy,
   truncateDisplay,
 } from '@agentcomms/core';
-import { callSlack, certainlyRefused, type SlackCall, type SlackResponse } from '../api/call.ts';
+import { callSlack, certainlyRefused, type PostingMethod, type SlackCall, type SlackResponse } from '../api/call.ts';
 import { spendOn, type WritePermit } from '../api/guard.ts';
 import { slackFileUpload } from '../api/upload.ts';
 import { type ComposedPayload, payloadOf } from '../compose/blocks.ts';
@@ -1183,6 +1183,11 @@ export interface ReactionOptions {
   readonly remove?: boolean | undefined;
 }
 
+export interface ReactionResult {
+  readonly approvalId: string;
+  readonly note?: string | undefined;
+}
+
 function reactionExpectation(options: ReactionOptions): Expectation {
   return { to: [options.channel], cc: [], bcc: [], subject: `:${options.name}: on ${options.ts}` };
 }
@@ -1257,12 +1262,133 @@ export async function prepareReaction(deps: PrepareDeps, options: ReactionOption
   };
 }
 
+function reactionOperation(options: ReactionOptions): 'slack.reaction.add' | 'slack.reaction.remove' {
+  return options.remove ? 'slack.reaction.remove' : 'slack.reaction.add';
+}
+
+function reactionIds(options: ReactionOptions): Record<string, string> {
+  return { channel: options.channel, ts: options.ts, emoji: options.name };
+}
+
+/** Keeps Slack's refusal as the error, adding only what failed while this tried to record it. */
+function refusalWithBookkeeping(error: CommsError, unrecorded: readonly string[]): CommsError {
+  if (unrecorded.length === 0) return error;
+  const said = unrecorded.join('; ');
+  const sentence = `${said.slice(0, 1).toUpperCase()}${said.slice(1)}.`;
+  return new CommsError(error.code, error.message, {
+    hint: [error.hint, sentence].filter((part) => part !== undefined).join(' '),
+    ...(error.details === undefined ? {} : { details: error.details }),
+    cause: error,
+  });
+}
+
+/** Records a reaction Slack certainly refused, without letting either record replace Slack's refusal. */
+async function recordReactionRefused(
+  deps: PostDeps,
+  approvalId: string,
+  options: ReactionOptions,
+  error: CommsError,
+): Promise<CommsError> {
+  const unrecorded: string[] = [];
+  const reason = messageOf(error);
+  try {
+    await deps.approvals.complete(approvalId, { error: reason });
+  } catch (failure) {
+    unrecorded.push(`the approval could not be marked failed (${messageOf(failure)})`);
+  }
+  try {
+    await deps.audit?.append({
+      inboxId: deps.accountId,
+      alias: deps.workspaceName,
+      operation: reactionOperation(options),
+      outcome: 'failed',
+      ids: reactionIds(options),
+      approvalId,
+      reason: [reason, ...unrecorded].join('; '),
+      ...(deps.surface ? { surface: deps.surface } : {}),
+    });
+  } catch (failure) {
+    unrecorded.push(`the audit log could not record the refusal (${messageOf(failure)})`);
+  }
+  return refusalWithBookkeeping(error, unrecorded);
+}
+
+/** Records a reaction request whose answer does not say whether Slack acted, and returns what to throw. */
+async function recordReactionUnknown(
+  deps: PostDeps,
+  approvalId: string,
+  options: ReactionOptions,
+  error: unknown,
+): Promise<CommsError> {
+  const said = messageOf(error);
+  let unaudited = '';
+  try {
+    await deps.audit?.append({
+      inboxId: deps.accountId,
+      alias: deps.workspaceName,
+      operation: reactionOperation(options),
+      outcome: 'failed',
+      ids: reactionIds(options),
+      approvalId,
+      reason: `outcome unknown: ${said}`,
+      ...(deps.surface ? { surface: deps.surface } : {}),
+    });
+  } catch (failure) {
+    unaudited = ` The audit log could not record this either (${messageOf(failure)}).`;
+  }
+  const act = options.remove ? 'removed' : 'added';
+  return new CommsError(
+    error instanceof CommsError ? error.code : 'TRANSIENT',
+    `whether the reaction was ${act} is not known: ${said}`,
+    {
+      hint: `Look at the message before anything else: Slack may have ${act} the reaction. Try again only if its state is not what the person asked for — this approval is not used again.${unaudited}`,
+      details: {
+        ...(error instanceof CommsError ? error.details : {}),
+        approvalId,
+        outcome: 'unknown',
+      },
+    },
+  );
+}
+
+/** Records a reaction whose requested state is known to hold, without letting bookkeeping rewrite that success. */
+async function recordReactionChanged(
+  deps: PostDeps,
+  approvalId: string,
+  options: ReactionOptions,
+  known?: string | undefined,
+): Promise<ReactionResult> {
+  const unrecorded: string[] = [];
+  try {
+    await deps.approvals.complete(approvalId, { sentMessageId: options.ts });
+  } catch (error) {
+    unrecorded.push(`the approval could not be marked used (${messageOf(error)}), so it will read as unknown`);
+  }
+  const reason = noteOf([known, ...unrecorded]);
+  try {
+    await deps.audit?.append({
+      inboxId: deps.accountId,
+      alias: deps.workspaceName,
+      operation: reactionOperation(options),
+      outcome: 'ok',
+      ids: reactionIds(options),
+      approvalId,
+      ...(reason === undefined ? {} : { reason }),
+      ...(deps.surface ? { surface: deps.surface } : {}),
+    });
+  } catch (error) {
+    unrecorded.push(`the audit log could not record it (${messageOf(error)})`);
+  }
+  const note = noteOf([known, ...unrecorded]);
+  return { approvalId, ...(note === undefined ? {} : { note }) };
+}
+
 /** Applies one prepared reaction, once, through the permit. */
 export async function reactPrepared(
   deps: PostDeps,
   approvalId: string,
   options: ReactionOptions,
-): Promise<{ approvalId: string }> {
+): Promise<ReactionResult> {
   const digest = reactionDigest(deps, options);
   await claimOrHandOver(
     deps,
@@ -1277,7 +1403,7 @@ export async function reactPrepared(
     },
     waitingHint('reaction', deps.surface, approvalId),
   );
-  const method = options.remove ? 'reactions.remove' : 'reactions.add';
+  const method: PostingMethod = options.remove ? 'reactions.remove' : 'reactions.add';
   try {
     await spendOn(deps.permit, approvalId, method, () =>
       callSlack({ ...deps.call, permit: deps.permit }, method, {
@@ -1286,19 +1412,18 @@ export async function reactPrepared(
         name: options.name,
       }),
     );
-    await deps.approvals.complete(approvalId, { sentMessageId: options.ts });
-    await deps.audit?.append({
-      inboxId: deps.accountId,
-      alias: deps.workspaceName,
-      operation: options.remove ? 'slack.reaction.remove' : 'slack.reaction.add',
-      outcome: 'ok',
-      ids: { channel: options.channel, ts: options.ts, emoji: options.name },
-      approvalId,
-      ...(deps.surface ? { surface: deps.surface } : {}),
-    });
-    return { approvalId };
   } catch (error) {
-    await deps.approvals.complete(approvalId, { error: (error as Error).message });
-    throw error;
+    /*
+     * `already_reacted` means the state this approval asked for already holds. Recording it as failed would tell a
+     * caller to try the same outward act again, so it is used and audited as success, with Slack's answer in the note.
+     */
+    if (method === 'reactions.add' && error instanceof CommsError && error.details?.slackError === 'already_reacted') {
+      return recordReactionChanged(deps, approvalId, options, 'Slack says this account had already added the reaction');
+    }
+    if (error instanceof CommsError && certainlyRefused(error, method)) {
+      throw await recordReactionRefused(deps, approvalId, options, error);
+    }
+    throw await recordReactionUnknown(deps, approvalId, options, error);
   }
+  return recordReactionChanged(deps, approvalId, options);
 }

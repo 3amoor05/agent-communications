@@ -1139,7 +1139,13 @@ configuration problem.`,
           flags.approval ? String(flags.approval) : undefined,
           { fetch: deps.read, baseUrl: deps.slackBaseUrl },
         );
-        writeResult(done, output(), () => `:${wanted.name}: on ${wanted.ts}.`, streams);
+        writeResult(
+          done,
+          output(),
+          () =>
+            `:${wanted.name}: on ${wanted.ts}.${done.note === undefined ? '' : ` ${done.note.charAt(0).toUpperCase()}${done.note.slice(1)}.`}`,
+          streams,
+        );
       }),
     );
 
