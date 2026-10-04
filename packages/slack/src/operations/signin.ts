@@ -1355,6 +1355,7 @@ export async function completeSignIn(
           if (landed === 'absent') {
             throw await withdrawStaged(secrets, secretRef, explainRefusedConsent(error, flow, context.platform));
           }
+          if (landed === 'present') configCommitted = true;
         });
       } catch (recoveryError) {
         if (!recoveryEntered) {
@@ -1414,6 +1415,7 @@ export async function completeSignIn(
   } finally {
     // Only the owner may stop the listener or discard the flow; a cancelled or losing finisher does neither.
     stopListener(flow, context.now());
+    // The result was built before this deletion; an interrupt here leaves the saved sign-in and its result accurate.
     await context.flows.discard(flowId);
   }
 }

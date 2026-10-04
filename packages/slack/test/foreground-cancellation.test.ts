@@ -264,97 +264,117 @@ for (const account of ['profile', 'own-app'] as const) {
   }
 }
 
-test('an interrupt during postcommit profile revocation finishes cleanup without rolling back the saved app switch', {
-  timeout: 10000,
-}, async (t) => {
-  const probe = createServer();
-  await new Promise<void>((done) => probe.listen(0, 'localhost', done));
-  const port = (probe.address() as { port: number }).port;
-  await new Promise<void>((done) => probe.close(() => done()));
-  const harness = await newOrganisationHarness({ port, readAppId: 'A0READ' });
-  const source = await harness.addWorkspace({
-    alias: 'rgc/slack',
-    workspaceId: 'TRGC0001',
-    oauthClientId: TEST_CLIENT_ID,
-    appId: 'A0OLD',
-    redirectPort: port,
+for (const configOutcome of ['resolved', 'recovered'] as const)
+  test(configOutcome === 'recovered'
+    ? 'a recovered config commit interrupted during profile revocation reports the saved app switch'
+    : 'an interrupt during postcommit profile revocation finishes cleanup without rolling back the saved app switch', {
+    timeout: 10000,
+  }, async (t) => {
+    const probe = createServer();
+    await new Promise<void>((done) => probe.listen(0, 'localhost', done));
+    const port = (probe.address() as { port: number }).port;
+    await new Promise<void>((done) => probe.close(() => done()));
+    const harness = await newOrganisationHarness({ port, readAppId: 'A0READ' });
+    const source = await harness.addWorkspace({
+      alias: 'rgc/slack',
+      workspaceId: 'TRGC0001',
+      oauthClientId: TEST_CLIENT_ID,
+      appId: 'A0OLD',
+      redirectPort: port,
+    });
+    await harness.updateConfig((config) => {
+      const account = config.accounts['rgc/slack'];
+      assert.ok(account);
+      Object.assign(account, { organisation: 'rgc', profileApp: 'read' });
+    });
+    const update = harness.core.config.update.bind(harness.core.config);
+    let lockReleaseFailed = false;
+    if (configOutcome === 'recovered') {
+      t.mock.method(harness.core.config, 'update', async (...args: Parameters<typeof update>) => {
+        const written = await update(...args);
+        if (!lockReleaseFailed && written.accounts['rgc/slack']?.secretRef !== source.secretRef) {
+          lockReleaseFailed = true;
+          throw new Error('EPERM: the committed config lock could not be released');
+        }
+        return written;
+      });
+    }
+    const secrets = await harness.core.secrets('file');
+    const host = new EventEmitter();
+    const ready = deferred<string>();
+    const revoking = deferred();
+    const release = deferred();
+    const exited = deferred();
+    t.after(() => release.resolve());
+    const stdout = new PassThrough();
+    let output = '';
+    let outputAtExit = '';
+    let revokes = 0;
+    let revokesAtExit = 0;
+    stdout.on('data', (chunk) => {
+      output += String(chunk);
+    });
+    const action = run(['--json', 'workspace', 'reauth', 'rgc/slack'], {
+      core: harness.core,
+      env: harness.env,
+      platform: 'darwin',
+      streams: { stdout, stderr: new PassThrough(), stdin: new PassThrough() },
+      openBrowser: (url) => ready.resolve(url),
+      exchange: async () => slackOk({ team: { id: 'TRGC0001', name: 'RGC' }, app_id: 'A0READ' }),
+      fetch: async () => {
+        revokes++;
+        if (revokes === 1) {
+          assert.notEqual((await harness.core.config.load()).accounts['rgc/slack']?.secretRef, source.secretRef);
+          host.emit('SIGINT');
+          revoking.resolve();
+          await release.promise;
+        }
+        return new Response(JSON.stringify({ ok: true, revoked: true }));
+      },
+      signals: {
+        host: Object.assign(host, {
+          pid: process.pid,
+          kill() {
+            outputAtExit = output;
+            revokesAtExit = revokes;
+            exited.resolve();
+          },
+        }),
+        exit: () => undefined,
+      },
+    });
+    void action.catch((error) => ready.reject(error));
+    const auth = new URL(await ready.promise);
+    const callback = new URL(`http://localhost:${port}/slack/callback`);
+    callback.searchParams.set('state', auth.searchParams.get('state') ?? '');
+    callback.searchParams.set('code', 'fake-code');
+    await fetchListener(callback);
+    await revoking.promise;
+    release.resolve();
+    await exited.promise;
+    const config = await harness.core.config.load();
+    const saved = config.accounts['rgc/slack'];
+    assert.ok(saved);
+    assert.equal(saved?.appId, 'A0READ');
+    assert.equal(
+      lockReleaseFailed,
+      configOutcome === 'recovered',
+      'the postcommit recovery path was not exercised exactly when requested',
+    );
+    assert.notEqual(saved?.secretRef, source.secretRef);
+    assert.ok(await secrets.get(saved.secretRef));
+    assert.equal(await secrets.get(source.secretRef), null);
+    assert.deepEqual(config.pendingRevocations ?? [], []);
+    assert.equal(revokesAtExit, 2, 'exit preceded postcommit cleanup');
+    assert.equal(
+      JSON.parse(outputAtExit).data.cleanup.cleaned,
+      true,
+      'the completed cleanup was not reported before exit',
+    );
+    // The interrupt arrived after the switch was saved, during its cleanup: the result says it was saved before.
+    assert.equal(
+      JSON.parse(outputAtExit).data.committedBeforeAbort,
+      true,
+      'a sign-in saved before an interrupt during cleanup was reported as an ordinary success',
+    );
   });
-  await harness.updateConfig((config) => {
-    const account = config.accounts['rgc/slack'];
-    assert.ok(account);
-    Object.assign(account, { organisation: 'rgc', profileApp: 'read' });
-  });
-  const secrets = await harness.core.secrets('file');
-  const host = new EventEmitter();
-  const ready = deferred<string>();
-  const revoking = deferred();
-  const release = deferred();
-  const exited = deferred();
-  t.after(() => release.resolve());
-  const stdout = new PassThrough();
-  let output = '';
-  let outputAtExit = '';
-  let revokes = 0;
-  let revokesAtExit = 0;
-  stdout.on('data', (chunk) => {
-    output += String(chunk);
-  });
-  const action = run(['--json', 'workspace', 'reauth', 'rgc/slack'], {
-    core: harness.core,
-    env: harness.env,
-    platform: 'darwin',
-    streams: { stdout, stderr: new PassThrough(), stdin: new PassThrough() },
-    openBrowser: (url) => ready.resolve(url),
-    exchange: async () => slackOk({ team: { id: 'TRGC0001', name: 'RGC' }, app_id: 'A0READ' }),
-    fetch: async () => {
-      revokes++;
-      if (revokes === 1) {
-        assert.notEqual((await harness.core.config.load()).accounts['rgc/slack']?.secretRef, source.secretRef);
-        host.emit('SIGINT');
-        revoking.resolve();
-        await release.promise;
-      }
-      return new Response(JSON.stringify({ ok: true, revoked: true }));
-    },
-    signals: {
-      host: Object.assign(host, {
-        pid: process.pid,
-        kill() {
-          outputAtExit = output;
-          revokesAtExit = revokes;
-          exited.resolve();
-        },
-      }),
-      exit: () => undefined,
-    },
-  });
-  void action.catch((error) => ready.reject(error));
-  const auth = new URL(await ready.promise);
-  const callback = new URL(`http://localhost:${port}/slack/callback`);
-  callback.searchParams.set('state', auth.searchParams.get('state') ?? '');
-  callback.searchParams.set('code', 'fake-code');
-  await fetchListener(callback);
-  await revoking.promise;
-  release.resolve();
-  await exited.promise;
-  const config = await harness.core.config.load();
-  const saved = config.accounts['rgc/slack'];
-  assert.ok(saved);
-  assert.equal(saved?.appId, 'A0READ');
-  assert.notEqual(saved?.secretRef, source.secretRef);
-  assert.ok(await secrets.get(saved.secretRef));
-  assert.equal(await secrets.get(source.secretRef), null);
-  assert.deepEqual(config.pendingRevocations ?? [], []);
-  assert.equal(revokesAtExit, 2, 'exit preceded postcommit cleanup');
-  assert.equal(
-    JSON.parse(outputAtExit).data.cleanup.cleaned,
-    true,
-    'the completed cleanup was not reported before exit',
-  );
-  // The interrupt arrived after the switch was saved, during its cleanup: the result says it was saved before.
-  assert.equal(
-    JSON.parse(outputAtExit).data.committedBeforeAbort,
-    true,
-    'a sign-in saved before an interrupt during cleanup was reported as an ordinary success',
-  );
-});
