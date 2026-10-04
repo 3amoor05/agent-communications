@@ -244,7 +244,7 @@ configuration problem.`,
       color: colorEnabled(env, streams.stdout, options.color as boolean | undefined),
     };
   };
-  const output = (): OutputOptions => ({ json: globals().json, color: globals().color });
+  const output = (): OutputOptions => ({ json: globals().json, color: globals().color, platform });
 
   /**
    * A command that succeeded but wants a non-zero exit code — `doctor` finding something broken, where the

@@ -99,7 +99,7 @@ async function statusOf(context: WhatsAppContext, named: string, check: boolean)
   }
   let index: AccountStatus['index'] = { synced: false };
   try {
-    const opened = await WhatsAppIndex.open(context.accountDir(account), name, new Visibility(lists));
+    const opened = await WhatsAppIndex.open(context.accountDir(account), name, new Visibility(lists), context.platform);
     try {
       const stats = opened.stats();
       index = {

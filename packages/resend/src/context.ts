@@ -52,7 +52,7 @@ export class ResendContext {
     this.now = options.now ?? (() => new Date());
     this.platform = options.platform ?? process.platform;
     this.surface = options.surface ?? 'cli';
-    this.accounts = new AccountStore(() => this.core.config.load());
+    this.accounts = new AccountStore(() => this.core.config.load(), this.platform);
     this.#fetch = options.fetch;
     this.#throttle = new Throttle(this.core.paths.stateDir, options.throttle);
   }

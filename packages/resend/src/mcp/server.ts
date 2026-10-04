@@ -194,7 +194,12 @@ export async function createResendMcpServer(options: ResendMcpOptions = {}): Pro
 
   const runChange = async <T>(change: GatedChange<T>, approvalId: string | undefined) =>
     changeToolResult(
-      await gatedChange(context.core, change, { surface: 'mcp', approvalId, approveCommand: 'agent-resend approve' }),
+      await gatedChange(context.core, change, {
+        surface: 'mcp',
+        approvalId,
+        approveCommand: 'agent-resend approve',
+        platform: context.platform,
+      }),
     );
 
   const readsResend = { readOnlyHint: true, openWorldHint: true } as const;

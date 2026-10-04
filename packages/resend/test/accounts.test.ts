@@ -239,6 +239,26 @@ test('a record with a mode outside read and send is refused, never read as somet
   assert.equal(harness.fake.sends().length, 0);
 });
 
+test('an invalid account renders its repair for the selected shell platform', async () => {
+  harness = await newHarness();
+  await harness.addAccount({ name: '7/resend', mode: 'read' });
+  await harness.core.config.update(
+    (config) => {
+      const held = config.accounts['7/resend'];
+      assert.ok(held);
+      return { ...config, accounts: { ...config.accounts, '7/resend': { ...held, mode: 'post', tier: 'post' } } };
+    },
+    { consent: { kind: 'loosening-consent', paths: ['accounts.7/resend.mode'] } },
+  );
+  await assert.rejects(harness.context('cli', 'win32').accounts.require('7/resend'), (error: CommsError) => {
+    assert.match(error.hint ?? '', /agent-resend account remove "7\/resend"/);
+    return true;
+  });
+  const shown = await harness.cli(['--json', 'account', 'show', '7/resend'], { platform: 'win32' });
+  assert.equal(shown.code, 78, shown.stdout);
+  assert.match(String(shown.json().error?.hint), /agent-resend account remove "7\/resend"/);
+});
+
 test('show and doctor say plainly that read-only is this package’s promise, not the key’s', async () => {
   harness = await newHarness();
   await harness.addAccount({ name: 'acme/resend', mode: 'read' });

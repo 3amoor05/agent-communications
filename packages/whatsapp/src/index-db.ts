@@ -296,13 +296,18 @@ export class WhatsAppIndex {
   }
 
   /** Every read opens the index through here, and cannot without the account's lists. */
-  static async open(directory: string, accountName: string, visibility: Visibility): Promise<WhatsAppIndex> {
+  static async open(
+    directory: string,
+    accountName: string,
+    visibility: Visibility,
+    platform: NodeJS.Platform = process.platform,
+  ): Promise<WhatsAppIndex> {
     const path = join(directory, INDEX_FILE);
     try {
       await stat(path);
     } catch {
       throw new CommsError('NOT_FOUND', `"${accountName}" has not been synced yet, so there is nothing to read`, {
-        hint: `Run ${inlineCommand(shellCommand(['agent-whatsapp', 'sync', '--account', accountName]))} (or the whatsapp_sync tool) first.`,
+        hint: `Run ${inlineCommand(shellCommand(['agent-whatsapp', 'sync', '--account', accountName], platform))} (or the whatsapp_sync tool) first.`,
         details: { reason: 'NOT_SYNCED' },
       });
     }
@@ -314,7 +319,7 @@ export class WhatsAppIndex {
     if (format !== String(INDEX_FORMAT)) {
       db.close();
       throw new CommsError('CONFIG', `the index for "${accountName}" was written by another version of this package`, {
-        hint: `Run ${inlineCommand(shellCommand(['agent-whatsapp', 'sync', '--account', accountName]))} to rebuild it.`,
+        hint: `Run ${inlineCommand(shellCommand(['agent-whatsapp', 'sync', '--account', accountName], platform))} to rebuild it.`,
       });
     }
     // The lists, as SQL can ask them: every query below filters with these, so none can forget to.

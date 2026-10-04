@@ -1130,7 +1130,12 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
   const runChange = async <T>(change: GatedChange<T>, approvalId: string | undefined, name: string) => {
     await ownApproval(approvalId, name);
     return changeToolResult(
-      await gatedChange(context.core, change, { surface: 'mcp', approvalId, approveCommand: 'agent-slack approve' }),
+      await gatedChange(context.core, change, {
+        surface: 'mcp',
+        approvalId,
+        approveCommand: 'agent-slack approve',
+        platform: context.platform,
+      }),
     );
   };
   const runSignIn = async (
@@ -1144,6 +1149,7 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
       surface: 'mcp',
       approvalId,
       approveCommand: 'agent-slack approve',
+      platform: context.platform,
     });
     return changeToolResult(
       outcome.status === 'applied'

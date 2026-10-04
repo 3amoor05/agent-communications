@@ -257,6 +257,14 @@ test('a read before any sync says to sync first', async () => {
   assert.match(String(result.json().error?.hint), /agent-whatsapp sync --account acme\/whatsapp/);
 });
 
+test('a read before any sync renders its repair for the selected shell platform', async () => {
+  const harness = await newHarness();
+  await harness.cli(['add', '7/whatsapp']);
+  const result = await harness.cli(['chats', '--account', '7/whatsapp', '--json'], { platform: 'win32' });
+  assert.equal(result.code, 66);
+  assert.match(String(result.json().error?.hint), /agent-whatsapp sync --account "7\/whatsapp"/);
+});
+
 test('an account is named organisation/whatsapp, by core’s grammar, and there is no default', async () => {
   const harness = await newHarness();
   for (const name of ['acme', 'acme/slack', 'Acme/whatsapp', 'con/whatsapp']) {

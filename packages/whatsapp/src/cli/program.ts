@@ -90,6 +90,7 @@ type Options = Record<string, unknown>;
 export async function run(argv: readonly string[], deps: CliDeps = {}): Promise<number> {
   const streams: Streams = deps.streams ?? { stdout: process.stdout, stderr: process.stderr, stdin: process.stdin };
   const env = deps.env ?? process.env;
+  const platform = deps.platform ?? process.platform;
   const open = deps.open ?? openLink;
   const program = new Command();
   let exitCode = 0;
@@ -133,6 +134,7 @@ a macOS dialog may be waiting) · 77 permission needed (macOS privacy) · 78 con
     return {
       json: Boolean(options.json),
       color: colorEnabled(env, streams.stdout, options.color as boolean | undefined),
+      platform,
     };
   };
 

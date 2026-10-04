@@ -227,6 +227,21 @@ test('an expired refresh token sends you to reauth instead of trying', async () 
   });
 });
 
+test('an expired refresh token renders reauth for the selected shell platform', async () => {
+  const secrets = store(
+    serialiseBundle(
+      bundle({ accessExpiresAt: '2026-09-22T12:01:00.000Z', refreshExpiresAt: '2026-09-01T00:00:00.000Z' }),
+    ),
+  );
+  const d = await deps(secrets, async () => assert.fail('it tried to use an expired refresh token'));
+  d.alias = '7';
+  d.platform = 'win32';
+  await assert.rejects(accessTokenFor(d, ACCOUNT, REF), (error: CommsError) => {
+    assert.match(error.hint ?? '', /agent-slack workspace reauth "7"/);
+    return true;
+  });
+});
+
 test('a store that fails after Slack answered is retried against the store, never against Slack', async () => {
   /*
    * Slack has already issued the new credential, so the old refresh token is spent. Calling Slack again to fix a

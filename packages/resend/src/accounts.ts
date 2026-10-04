@@ -79,7 +79,11 @@ export function keyPermissionOf(account: Pick<AccountConfig, 'grantedScopes'>): 
  * wrong. Core's schema reads any mode word so that one odd account cannot make the whole file unreadable; acting on
  * one is refused here, as Slack refuses its own.
  */
-export function checkedAccount(name: string, account: AccountConfig): ResendAccount {
+export function checkedAccount(
+  name: string,
+  account: AccountConfig,
+  platform: NodeJS.Platform = process.platform,
+): ResendAccount {
   const problem = (() => {
     if (account.platform !== PLATFORM) return `it is a ${account.platform} account`;
     if (!(MODES as readonly string[]).includes(String(account.mode))) {
@@ -94,7 +98,7 @@ export function checkedAccount(name: string, account: AccountConfig): ResendAcco
   })();
   if (problem !== null) {
     throw new CommsError('CONFIG', `"${name}" is not a Resend account this release can act on: ${problem}`, {
-      hint: `Remove it with ${inlineCommand(shellCommand(['agent-resend', 'account', 'remove', name]))} and add it again, or fix it in the configuration file.`,
+      hint: `Remove it with ${inlineCommand(shellCommand(['agent-resend', 'account', 'remove', name], platform))} and add it again, or fix it in the configuration file.`,
     });
   }
   return account as ResendAccount;
@@ -108,10 +112,10 @@ function notFound(name: string): () => CommsError {
 }
 
 /** Every Resend account in `config`, checked, by name. */
-export function resendAccounts(config: Config): NamedAccount[] {
+export function resendAccounts(config: Config, platform: NodeJS.Platform = process.platform): NamedAccount[] {
   return Object.entries(config.accounts)
     .filter(([, account]) => account.platform === PLATFORM)
-    .map(([name, account]) => ({ name, account: checkedAccount(name, account) }))
+    .map(([name, account]) => ({ name, account: checkedAccount(name, account, platform) }))
     .sort((a, b) => (a.name < b.name ? -1 : 1));
 }
 
@@ -119,36 +123,48 @@ export function resendAccounts(config: Config): NamedAccount[] {
  * The account by name, or a refusal that says what to do — through core's `resolveName`, so a name that was replaced
  * is refused with the one it has now rather than reported as unknown.
  */
-export function requireAccount(config: Config, name: string): NamedAccount {
+export function requireAccount(
+  config: Config,
+  name: string,
+  platform: NodeJS.Platform = process.platform,
+): NamedAccount {
   const { alias, account } = resolveName(config, 'account', name, notFound(name));
   if (account.platform !== PLATFORM) throw notFound(name)();
-  return { name: alias, account: checkedAccount(alias, account) };
+  return { name: alias, account: checkedAccount(alias, account, platform) };
 }
 
 /** The account under exactly this name, or null: no former names, no refusal. */
-export function lookupAccount(config: Config, name: string): NamedAccount | null {
+export function lookupAccount(
+  config: Config,
+  name: string,
+  platform: NodeJS.Platform = process.platform,
+): NamedAccount | null {
   const account = lookupName(config, 'account', name);
   if (!account || account.platform !== PLATFORM) return null;
-  return { name, account: checkedAccount(name, account) };
+  return { name, account: checkedAccount(name, account, platform) };
 }
 
 /** The account by its immutable id, under whatever name it has now. */
-export function accountById(config: Config, id: string): NamedAccount | null {
+export function accountById(
+  config: Config,
+  id: string,
+  platform: NodeJS.Platform = process.platform,
+): NamedAccount | null {
   const found = findById(config, 'account', id);
   if (!found || found.account.platform !== PLATFORM) return null;
-  return { name: found.alias, account: checkedAccount(found.alias, found.account) };
+  return { name: found.alias, account: checkedAccount(found.alias, found.account, platform) };
 }
 
 /**
  * Refuses a name a new account cannot take — core's rule, for either config version: the grammar and the platform,
  * free in both maps, and never a former name — with this package's own hint for one already connected.
  */
-export function checkNewName(config: Config, name: string): void {
+export function checkNewName(config: Config, name: string, platform: NodeJS.Platform = process.platform): void {
   const check = nameAvailable(config, 'account', name, PLATFORM);
   if (check.ok) return;
   if (lookupName(config, 'account', name) || lookupName(config, 'inbox', name)) {
     throw new CommsError('USAGE', `there is already an account called "${name}"`, {
-      hint: `Choose another name, or remove that one first with ${inlineCommand(shellCommand(['agent-resend', 'account', 'remove', name]))}.`,
+      hint: `Choose another name, or remove that one first with ${inlineCommand(shellCommand(['agent-resend', 'account', 'remove', name], platform))}.`,
     });
   }
   throw check.error;
@@ -182,24 +198,26 @@ export function changePolicyIn(config: Config, account: ResendAccount): ChangePo
  */
 export class AccountStore {
   readonly #load: () => Promise<Config>;
+  readonly #platform: NodeJS.Platform;
 
-  constructor(load: () => Promise<Config>) {
+  constructor(load: () => Promise<Config>, platform: NodeJS.Platform = process.platform) {
     this.#load = load;
+    this.#platform = platform;
   }
 
   async list(): Promise<NamedAccount[]> {
-    return resendAccounts(await this.#load());
+    return resendAccounts(await this.#load(), this.#platform);
   }
 
   async find(name: string): Promise<NamedAccount | null> {
-    return lookupAccount(await this.#load(), name);
+    return lookupAccount(await this.#load(), name, this.#platform);
   }
 
   async findById(id: string): Promise<NamedAccount | null> {
-    return accountById(await this.#load(), id);
+    return accountById(await this.#load(), id, this.#platform);
   }
 
   async require(name: string): Promise<NamedAccount> {
-    return requireAccount(await this.#load(), name);
+    return requireAccount(await this.#load(), name, this.#platform);
   }
 }

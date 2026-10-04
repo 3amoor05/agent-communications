@@ -154,7 +154,7 @@ export async function draftMessage(
   for (const { name, account, lists } of scope) {
     let index: WhatsAppIndex;
     try {
-      index = await WhatsAppIndex.open(context.accountDir(account), name, new Visibility(lists));
+      index = await WhatsAppIndex.open(context.accountDir(account), name, new Visibility(lists), context.platform);
     } catch (error) {
       // An account never synced holds no chat; named alone, it says so, which gives away nothing about the lists.
       if (scope.length > 1 && isCommsError(error) && error.details?.reason === 'NOT_SYNCED') continue;

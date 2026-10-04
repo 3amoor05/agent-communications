@@ -67,7 +67,7 @@ async function named(
 ): Promise<Pick<ChatListsResult, 'chat' | 'warning'>> {
   let index: WhatsAppIndex;
   try {
-    index = await WhatsAppIndex.open(context.accountDir(account), name, new Visibility(undefined));
+    index = await WhatsAppIndex.open(context.accountDir(account), name, new Visibility(undefined), context.platform);
   } catch (error) {
     if (!isCommsError(error) || error.details?.reason !== 'NOT_SYNCED') throw error;
     return {

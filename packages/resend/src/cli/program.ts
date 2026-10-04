@@ -175,7 +175,7 @@ is out: update first, or put it off (agentcomms update, agentcomms update --late
       color: colorEnabled(env, streams.stdout, options.color as boolean | undefined),
     };
   };
-  const output = (): OutputOptions => ({ json: globals().json, color: globals().color });
+  const output = (): OutputOptions => ({ json: globals().json, color: globals().color, platform });
 
   /*
    * The daily update check (design 2026-09-28 §3), before any command but the exempt ones: an update that is out
@@ -289,7 +289,7 @@ is out: update first, or put it off (agentcomms update, agentcomms update --late
         platform,
       );
       // The name first: a name that cannot be taken is refused before anybody types a key for it.
-      checkNewName(await context.config(), name);
+      checkNewName(await context.config(), name, context.platform);
       const key = await readApiKey(env, streams, { json: options.json, command });
       // Through the machine's one throttle, like every other request: the key is on some team's budget already.
       const inspection = await inspectKey(context, key);

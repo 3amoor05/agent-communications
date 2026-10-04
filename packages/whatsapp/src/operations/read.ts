@@ -40,7 +40,7 @@ function kindsOf(kind: string | undefined): readonly ChatKind[] {
 /** The account's index, seen through its allow and deny lists. Every read here opens it this way. */
 async function openIndex(context: WhatsAppContext, accountName: string | undefined) {
   const { name, account, lists } = await context.account(accountName);
-  const index = await WhatsAppIndex.open(context.accountDir(account), name, new Visibility(lists));
+  const index = await WhatsAppIndex.open(context.accountDir(account), name, new Visibility(lists), context.platform);
   return { name, index };
 }
 

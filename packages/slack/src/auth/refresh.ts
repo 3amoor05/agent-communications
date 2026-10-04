@@ -133,7 +133,14 @@ const FORCED_RENEWAL_MIN_AGE_MS = 10 * 60_000;
  * account, a caller holding the new credential that arrived during a refresh of the old one was handed the old one's
  * token.
  */
-const inFlight = new Map<string, { readonly work: Promise<TokenBundle>; readonly alias: string | undefined }>();
+const inFlight = new Map<
+  string,
+  {
+    readonly work: Promise<TokenBundle>;
+    readonly alias: string | undefined;
+    readonly platform: NodeJS.Platform | undefined;
+  }
+>();
 
 /**
  * A result this process holds and could not write down, per account.
@@ -221,7 +228,7 @@ async function withInFlight(
      */
     if (!pendingWrites.has(accountId)) {
       deps.secrets.invalidate(secretRef);
-      const current = requireBundle(await deps.secrets.get(secretRef), deps.alias);
+      const current = requireBundle(await deps.secrets.get(secretRef), deps.alias, deps.platform);
       /*
        * A token that still works is used, whatever state the bundle is in.
        *
@@ -258,7 +265,7 @@ async function withInFlight(
     );
   })();
 
-  inFlight.set(secretRef, { work, alias: deps.alias });
+  inFlight.set(secretRef, { work, alias: deps.alias, platform: deps.platform });
   try {
     return await work;
   } finally {
@@ -285,11 +292,11 @@ function keptTokenUsable(pending: PendingWrite, rejected: string | undefined, no
   );
 }
 
-function requireBundle(raw: string | null, alias?: string): TokenBundle {
+function requireBundle(raw: string | null, alias?: string, platform?: NodeJS.Platform): TokenBundle {
   const bundle = parseBundle(raw);
   if (!bundle) {
     throw new CommsError('AUTH_REQUIRED', 'this workspace has no stored credential', {
-      hint: alias ? reauthHint(alias) : 'Connect it with `agent-slack workspace add`.',
+      hint: alias ? reauthHint(alias, platform) : 'Connect it with `agent-slack workspace add`.',
     });
   }
   return bundle;
@@ -327,7 +334,7 @@ async function refreshUnderLock(
     if (pending?.secretRef === secretRef && keptTokenUsable(pending, rejected, now)) return pending.bundle;
     throw error;
   }
-  let current = requireBundle(raw, deps.alias);
+  let current = requireBundle(raw, deps.alias, deps.platform);
 
   if (pending) {
     const outcome = await settlePending(deps.secrets, accountId, secretRef, pending, current);
@@ -346,7 +353,7 @@ async function refreshUnderLock(
         {
           hint: renewed
             ? 'This process holds the only copy of the renewed token. Fix the secret store (run `agentcomms doctor`) ' +
-              `and try again from this same session; if it has ended, ${reauthHint(deps.alias).toLowerCase()}`
+              `and try again from this same session; if it has ended, ${reauthHint(deps.alias, deps.platform).toLowerCase()}`
             : 'Fix the secret store (run `agentcomms doctor`), then try again.',
           details: { stage: 'store' },
           cause: outcome.error,
@@ -362,7 +369,7 @@ async function refreshUnderLock(
     if (forced) return current;
     const details = reasonDetails(current);
     throw new CommsError('AUTH_REQUIRED', uncertainMessage(current), {
-      hint: `Slack refresh tokens are single-use. ${reauthHint(deps.alias)}`,
+      hint: `Slack refresh tokens are single-use. ${reauthHint(deps.alias, deps.platform)}`,
       ...(details ? { details } : {}),
     });
   }
@@ -391,7 +398,7 @@ async function refreshUnderLock(
       }),
     );
     throw new CommsError('AUTH_REQUIRED', 'a token refresh was interrupted and cannot be retried safely', {
-      hint: `Slack refresh tokens are single-use. ${reauthHint(deps.alias)}`,
+      hint: `Slack refresh tokens are single-use. ${reauthHint(deps.alias, deps.platform)}`,
       details: { reason: 'interrupted' },
     });
   }
@@ -407,20 +414,22 @@ async function refreshUnderLock(
   if (current.state !== 'ready') {
     if (forced) return current;
     throw new CommsError('AUTH_REQUIRED', `the stored credential is in a state this version does not know`, {
-      hint: `Upgrade agent-slack, or ${reauthHint(deps.alias).toLowerCase()}`,
+      hint: `Upgrade agent-slack, or ${reauthHint(deps.alias, deps.platform).toLowerCase()}`,
       details: { state: String(current.state) },
     });
   }
 
   if (!current.refreshToken) {
     if (forced) return current;
-    throw new CommsError('AUTH_REQUIRED', 'this credential cannot be refreshed', { hint: reauthHint(deps.alias) });
+    throw new CommsError('AUTH_REQUIRED', 'this credential cannot be refreshed', {
+      hint: reauthHint(deps.alias, deps.platform),
+    });
   }
   if (refreshExpired(current, now)) {
     if (forced) return current;
     // 30 days on a PKCE app. No refresh recovers from this; only a new authorisation does.
     throw new CommsError('AUTH_REQUIRED', 'the refresh token for this workspace has expired', {
-      hint: `Slack expires them 30 days after they are issued. ${reauthHint(deps.alias)}`,
+      hint: `Slack expires them 30 days after they are issued. ${reauthHint(deps.alias, deps.platform)}`,
     });
   }
   if (forced && now.getTime() - Date.parse(current.issuedAt) < FORCED_RENEWAL_MIN_AGE_MS) return current;
@@ -659,9 +668,9 @@ export async function settleRefreshes(timeoutMs: number): Promise<UnsettledRefre
     );
   }
   return [
-    ...[...inFlight.values()].map(({ alias }) => unsettled(alias, 'running')),
+    ...[...inFlight.values()].map(({ alias, platform }) => unsettled(alias, 'running', platform)),
     ...[...pendingWrites.values()].map(({ deps, renewed }) =>
-      unsettled(deps.alias, renewed ? 'renewed' : 'unrecorded'),
+      unsettled(deps.alias, renewed ? 'renewed' : 'unrecorded', deps.platform),
     ),
   ];
 }
@@ -673,7 +682,11 @@ export async function settleRefreshes(timeoutMs: number): Promise<UnsettledRefre
  * token refresh was interrupted" — the marker this process leaves behind — so the warning names that, and the one
  * way out of it.
  */
-function unsettled(alias: string | undefined, kind: UnsettledRefresh['kind']): UnsettledRefresh {
+function unsettled(
+  alias: string | undefined,
+  kind: UnsettledRefresh['kind'],
+  platform: NodeJS.Platform = process.platform,
+): UnsettledRefresh {
   const name = alias ? `“${alias}”` : 'a workspace';
   const what = {
     renewed: `could not save the renewed Slack credential for ${name}, and it may be lost as this process exits`,
@@ -681,7 +694,7 @@ function unsettled(alias: string | undefined, kind: UnsettledRefresh['kind']): U
     running: `a token refresh for ${name} was still running when this process exited`,
   }[kind];
   const next = 'If a later command says a refresh was interrupted, the workspace needs signing in again.';
-  return { workspace: alias, kind, message: `agent-slack: ${what}. ${next} ${reauthHint(alias)}` };
+  return { workspace: alias, kind, message: `agent-slack: ${what}. ${next} ${reauthHint(alias, platform)}` };
 }
 
 // ── Classifying a failed exchange ──────────────────────────────────────────────────────────────────────────────
