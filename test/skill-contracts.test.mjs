@@ -166,7 +166,7 @@ test('Slack mode guidance keeps each account path and consent step in its own se
       text: between(send, 'For an account with organisation provenance', "For a person's own app", 'profile send'),
       required: [
         /profile's send app/i,
-        /approv/i,
+        /send app after approval/i,
         /Slack consent/i,
         /slack_workspace_finish/,
         /No manifest edit.*app update.*--app-updated/is,
