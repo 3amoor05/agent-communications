@@ -1,11 +1,97 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { CommsError } from '@agentcomms/core';
-import type { TokenBundle } from '../src/auth/bundle.ts';
+import { serialiseBundle, type TokenBundle } from '../src/auth/bundle.ts';
 import { SlackContext } from '../src/context.ts';
 import { openWorkspace } from '../src/operations/session.ts';
 import { newHarness, slackOk, TEST_CLIENT_ID } from './support/harness.ts';
 import { contextFor, expired, stored } from './support/refresh.ts';
+
+test('a live session follows a replacement ref instead of refreshing the pending old credential', async () => {
+  const harness = await newHarness();
+  const account = await harness.addWorkspace({ alias: 'acme' });
+  const context = contextFor(harness);
+  const session = await openWorkspace(context, 'acme');
+  const secrets = await harness.core.secrets('file');
+  const bundle = await stored(harness, account.secretRef);
+  assert.ok(bundle);
+  const nextRef = `${account.secretRef}/replacement`;
+  await secrets.set(
+    nextRef,
+    serialiseBundle({ ...bundle, accessToken: 'fake-replacement-access', refreshToken: 'fake-replacement-refresh' }),
+  );
+  await harness.core.config.update((config) => ({
+    ...config,
+    accounts: { ...config.accounts, acme: { ...account, secretRef: nextRef, oauthClientId: '9999.7777' } },
+    pendingRevocations: [
+      {
+        ref: account.secretRef,
+        store: 'file',
+        platform: 'slack',
+        workspace: account.workspace,
+        createdAt: new Date().toISOString(),
+        tokens: { access: { status: 'pending', deadline: bundle.accessExpiresAt } },
+      },
+    ],
+  }));
+  assert.equal(await session.call.renew?.(session.call.token), 'fake-replacement-access');
+  assert.equal(harness.calls.length, 0, 'the pending old reference must never be refreshed');
+  assert.ok(await secrets.get(account.secretRef));
+});
+
+for (const due of [false, true]) {
+  test(`a session racing an app hand-off follows the new ref with ${due ? 'expired' : 'live'} old access`, async () => {
+    const harness = await newHarness();
+    const account = await harness.addWorkspace({
+      alias: 'acme',
+      ...(due ? { bundle: { accessExpiresAt: new Date(0).toISOString() } } : {}),
+    });
+    const context = contextFor(harness);
+    const real = await harness.core.secrets('file');
+    const bundle = await stored(harness, account.secretRef);
+    assert.ok(bundle);
+    const nextRef = `${account.secretRef}/replacement`;
+    await real.set(
+      nextRef,
+      serialiseBundle({
+        ...bundle,
+        accessToken: 'fake-replacement-access',
+        refreshToken: 'fake-replacement-refresh',
+        accessExpiresAt: new Date(Date.now() + 3600000).toISOString(),
+      }),
+    );
+    let switched = false;
+    context.secrets = async () => ({
+      kind: real.kind,
+      set: (r, v) => real.set(r, v),
+      delete: (r) => real.delete(r),
+      invalidate: (r) => real.invalidate(r),
+      async get(ref) {
+        if (ref === account.secretRef && !switched) {
+          switched = true;
+          await harness.core.config.update((config) => ({
+            ...config,
+            accounts: { ...config.accounts, acme: { ...account, secretRef: nextRef, oauthClientId: '9999.7777' } },
+            pendingRevocations: [
+              {
+                ref: account.secretRef,
+                store: 'file',
+                platform: 'slack',
+                workspace: account.workspace,
+                createdAt: new Date().toISOString(),
+                tokens: { access: { status: 'pending', deadline: bundle.accessExpiresAt } },
+              },
+            ],
+          }));
+        }
+        return real.get(ref);
+      },
+    });
+    const session = await openWorkspace(context, 'acme');
+    assert.equal(session.call.token, 'fake-replacement-access');
+    assert.equal(harness.calls.length, 0, 'never refresh the superseded credential');
+  });
+}
 
 /**
  * What a refresh sends, and how Slack's reply is read.

@@ -20,6 +20,7 @@ import { BUNDLE_VERSION, serialiseBundle, type TokenBundle } from '../auth/bundl
 import type { SlackFlow } from '../auth/flow.ts';
 import type { InstallMode } from '../manifest.ts';
 import { OUTWARD_SCOPES } from './mode.ts';
+import type { PendingRevocationResult } from './revocations.ts';
 
 /**
  * Connecting, inspecting and disconnecting workspaces.
@@ -44,6 +45,8 @@ export interface WorkspaceView {
   readonly organisation?: string | undefined;
   readonly profileApp?: 'read' | 'send' | undefined;
   readonly createdAt: string;
+  /** Present after switching profile apps; each old token's cleanup state is reported separately. */
+  readonly cleanup?: PendingRevocationResult | undefined;
 }
 
 /**
@@ -137,6 +140,21 @@ export function validateExchange(options: {
 }): void {
   const { token, mode, flow, existing } = options;
   const platform = options.platform ?? process.platform;
+  const profileTransition = flow.transition === 'profile-app';
+  if (
+    profileTransition &&
+    (!flow.profile ||
+      !flow.expect?.secretRef ||
+      !existing ||
+      existing.alias !== flow.alias ||
+      existing.account.id !== flow.expect.accountId ||
+      existing.account.secretRef !== flow.expect.secretRef ||
+      existing.account.organisation !== flow.profile.organisation ||
+      existing.account.oauthClientId !== flow.expect.oauthClientId ||
+      existing.account.appId !== flow.expect.appId)
+  ) {
+    throw new CommsError('CONFIG', 'the source account changed during the profile sign-in');
+  }
 
   if (flow.profile) {
     const profile = flow.profile;
@@ -245,7 +263,7 @@ export function validateExchange(options: {
         hint: 'Sign in as the same person, or connect the other account separately with `workspace add`.',
       });
     }
-    if (expected.oauthClientId && flow.clientId !== expected.oauthClientId) {
+    if (!profileTransition && expected.oauthClientId && flow.clientId !== expected.oauthClientId) {
       // The Gmail bug, in its Slack form: a reauth through a different app changes what the account can do.
       throw new CommsError('CONFIG', `"${flow.alias}" was connected through a different Slack app`, {
         hint: 'Re-authorise through the same app, or remove and add the workspace again.',
@@ -258,7 +276,7 @@ export function validateExchange(options: {
      * binding and passed — and a silent way to skip a check is worse than not having it, because the check is
      * still written down and still believed.
      */
-    if (expected.appId && token.appId !== expected.appId) {
+    if (!profileTransition && expected.appId && token.appId !== expected.appId) {
       throw new CommsError('CONFIG', `that sign-in is from a different Slack app than "${flow.alias}" uses`, {
         hint: 'Re-authorise through the same app, or remove and add the workspace again.',
       });
@@ -277,12 +295,12 @@ export function validateExchange(options: {
         hint: 'Sign in as the same person, or connect the other account separately with `workspace add`.',
       });
     }
-    if (account.oauthClientId && flow.clientId !== account.oauthClientId) {
+    if (!profileTransition && account.oauthClientId && flow.clientId !== account.oauthClientId) {
       throw new CommsError('CONFIG', `"${existing.alias}" was connected through a different Slack app`, {
         hint: 'Re-authorise through the same app, or remove and add the workspace again.',
       });
     }
-    if (account.appId && token.appId !== account.appId) {
+    if (!profileTransition && account.appId && token.appId !== account.appId) {
       throw new CommsError('CONFIG', `that sign-in is from a different Slack app than "${existing.alias}" uses`, {
         hint: 'Re-authorise through the same app, or remove and add the workspace again.',
       });

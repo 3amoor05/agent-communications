@@ -48,12 +48,25 @@ export function modeReport(
     mode,
     outwardScopes,
     canActOutward: outwardScopes.length > 0,
-    toSend: mode === 'send' ? [] : wideningSteps(alias, port, account.appId, platform),
+    toSend:
+      mode === 'send'
+        ? []
+        : account.organisation
+          ? profileMoveSteps(alias, 'send', platform)
+          : wideningSteps(alias, port, account.appId, platform),
     toRead:
       mode === 'read' && outwardScopes.length === 0
         ? []
-        : narrowingSteps(alias, port, { knowsItsApp: account.oauthClientId !== undefined }, platform),
+        : account.organisation
+          ? profileMoveSteps(alias, 'read', platform)
+          : narrowingSteps(alias, port, { knowsItsApp: account.oauthClientId !== undefined }, platform),
   };
+}
+
+export function profileMoveSteps(alias: string, mode: InstallMode, platform: NodeJS.Platform): string[] {
+  return [
+    `Sign in through the organisation's ${mode} app with ${inlineCommand(shellCommand(['agent-slack', 'workspace', 'mode', alias, mode], platform))}.`,
+  ];
 }
 
 const portText = (port: number | undefined): string => (port === undefined ? '<port>' : String(port));

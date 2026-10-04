@@ -21,7 +21,7 @@ import {
 import type { SlackContext } from '../context.ts';
 import { type InstallMode, parseMode } from '../manifest.ts';
 import { checkedPort, type ManifestResult, manifestFor, modeWanted } from './manifest.ts';
-import { type ModeReport, modeReport, narrowingSteps, wideningSteps } from './mode.ts';
+import { type ModeReport, modeReport, narrowingSteps, profileMoveSteps, wideningSteps } from './mode.ts';
 import { type ListenerEntry, type StartedSignIn, startSignIn } from './signin.ts';
 import { checkAliasFree, type RemovedWorkspace, removeWorkspace, requireWorkspace } from './workspaces.ts';
 
@@ -242,6 +242,20 @@ function reauthTarget(config: Config, input: ReauthInput, platform: NodeJS.Platf
   }
   // Checked, not assumed: a stored mode that is neither would otherwise be read as `send`, or skip the approval.
   const was = parseMode(found.account.mode ?? found.account.tier, `"${found.alias}"`);
+  if (found.account.organisation) {
+    const role = modeWanted(input.mode) ?? found.account.profileApp;
+    if (!role) throw new CommsError('CONFIG', 'the profile account does not record its app role');
+    if (input.port !== undefined) {
+      throw new CommsError('USAGE', 'a profile sign-in uses the profile port');
+    }
+    const target = resolveProfileSlackTarget(config, found.account.organisation, role, platform);
+    const profile = {
+      ...target,
+      label: neutralise(target.label).text,
+      workspaceName: neutralise(target.workspaceName).text,
+    };
+    return { found, clientId: target.clientId, was, mode: role, port: target.redirectPort, profile };
+  }
   return {
     found,
     clientId,
@@ -256,15 +270,15 @@ function reauthTarget(config: Config, input: ReauthInput, platform: NodeJS.Platf
  *
  * Renewing in the same mode, or narrowing to `read`, loosens nothing and starts at once. `read` → `send` is a
  * widening, approved before the sign-in starts, as connecting in `send` is. Either way the sign-in is bound to this
- * account — the same person, the same workspace, the same app — so a browser signed in as somebody else is refused
- * rather than recorded under this name.
+ * account — the same person and workspace. Own-app renewals keep their app; profile renewals select the recorded
+ * role's current app, or the explicitly requested role, and snapshot that exact target before opening the browser.
  */
 export function reauthWorkspace(context: SlackContext, input: ReauthInput): GatedChange<StartedSignIn> {
   // Refused before the workspace is looked up, as `connectWorkspace` refuses it.
   modeWanted(input.mode);
   return {
     plan: (config) => {
-      const { found, was, mode } = reauthTarget(config, input, context.platform);
+      const { found, was, mode, profile } = reauthTarget(config, input, context.platform);
       const after = structuredClone(config);
       after.accounts = { ...after.accounts, [found.alias]: { ...found.account, tier: mode, mode } };
       const widens = was === 'read' && mode === 'send';
@@ -273,12 +287,12 @@ export function reauthWorkspace(context: SlackContext, input: ReauthInput): Gate
         before: config,
         after,
         summary: widens ? `Let ${found.alias} post to Slack` : `Sign ${found.alias} in to Slack again, in ${mode} mode`,
-        effects: widens ? [postingSignIn(found.alias)] : [],
+        effects: widens ? [postingSignIn(found.alias), ...(profile ? profileSignInEffects(profile) : [])] : [],
       };
     },
     apply: async (consent, request) => {
       // From the configuration the approval was claimed against, so the account signed in is the one approved.
-      const { found, clientId, mode, port } = reauthTarget(request.before, input, context.platform);
+      const { found, clientId, mode, port, profile } = reauthTarget(request.before, input, context.platform);
       const { account } = found;
       return startSignIn(context, {
         alias: found.alias,
@@ -286,11 +300,12 @@ export function reauthWorkspace(context: SlackContext, input: ReauthInput): Gate
         clientId,
         port,
         detached: input.detached,
+        ...(profile ? { profile, transition: 'profile-app' as const } : {}),
         expect: {
           accountId: account.id,
           workspaceId: account.workspace,
           userId: account.userId,
-          oauthClientId: clientId,
+          oauthClientId: account.oauthClientId,
           ...(account.appId ? { appId: account.appId } : {}),
           // The credential it replaces: the renewal keeps the id, so this is what says another renewal came first.
           secretRef: account.secretRef,
@@ -360,6 +375,7 @@ export interface ModeSetOptions extends SignInSurface {
  * What `workspace mode <name> [read|send]` and `slack_mode_set` do, decided before anything is done.
  *
  * - The mode it already has, or none asked for: the report.
+ * - A profile account changing mode: sign in through the requested role's app, approving only a widening.
  * - `read` from `send`: the procedure, and nothing changes. Slack never removes a scope from a token; only removing
  *   the app's installation in Slack's own settings does, and that is a person's step.
  * - `send` from `read`, while the recorded grant cannot show the app offers posting and the person has not said it
@@ -389,10 +405,25 @@ async function modeSetPlan(
   options: ModeSetOptions,
 ): Promise<ModeSetPlan> {
   const target = modeWanted(wanted);
-  const found = requireWorkspace(await context.config(), alias);
+  const config = await context.config();
+  const found = requireWorkspace(config, alias);
   const asked = options.port === undefined ? undefined : checkedPort(options.port);
   const report = modeReport(found.alias, found.account, asked, context.platform);
   if (target === undefined || target === report.mode) return { kind: 'report', report };
+  if (found.account.organisation) {
+    const input = { alias: found.alias, mode: target, ...options };
+    reauthTarget(config, input, context.platform);
+    return {
+      kind: 'change',
+      change: reauthWorkspace(context, input),
+      steps: {
+        alias: found.alias,
+        mode: report.mode,
+        changed: false,
+        steps: profileMoveSteps(found.alias, target, context.platform),
+      },
+    };
+  }
   if (target === 'read') {
     // The port is in two of the steps: the one asked for, else the one this workspace last signed in with.
     const steps = narrowingSteps(

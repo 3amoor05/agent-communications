@@ -13,19 +13,22 @@ import {
   type LooseningConsent,
   learnProfileSlackAppId,
   newAccountId,
+  type PendingRevocation,
   type ProfileSlackTarget,
   readWholeNumber,
   type SecretStore,
   secretsStoreOf,
   shellCommand,
+  withCredentialsLock,
 } from '@agentcomms/core';
 import { buildAuthorizeUrl, readExchange } from '../auth/authorize.ts';
-import { serialiseBundle } from '../auth/bundle.ts';
+import { parseBundle, serialiseBundle } from '../auth/bundle.ts';
 import { FLOW_TTL_MS, newFlowId, type SlackFlow } from '../auth/flow.ts';
 import { startLoopback } from '../auth/listener.ts';
 import { sameState } from '../auth/pkce.ts';
 import type { SlackContext } from '../context.ts';
 import type { InstallMode } from '../manifest.ts';
+import { createPendingRevocation, pendingRevocationResult, revokePendingEntry } from './revocations.ts';
 import {
   accountFrom,
   bundleFrom,
@@ -63,6 +66,7 @@ export interface StartOptions {
   readonly alias: string;
   readonly clientId: string;
   readonly profile?: ProfileSlackTarget | undefined;
+  readonly transition?: SlackFlow['transition'];
   /** Matching the one in the manifest. Slack compares redirect URLs exactly, so this is not negotiable. */
   readonly port: number;
   /** False keeps the listener in this process: the interactive flow, which waits. */
@@ -135,6 +139,7 @@ export async function startSignIn(context: SlackContext, options: StartOptions):
     ...(options.consent ? { consent: options.consent } : {}),
     clientId: options.clientId,
     ...(options.profile ? { profile: options.profile } : {}),
+    ...(options.transition ? { transition: options.transition } : {}),
     verifier: request.pkce.verifier,
     state: request.state,
     redirectUrl: request.redirectUrl,
@@ -931,8 +936,8 @@ export async function completeSignIn(context: SlackContext, flowId: string, code
      * pointer in a single config write, and only then deleting the old, means the old credential is
      * authoritative until the exact moment the new one is.
      *
-     * **The account keeps its id.** A renewal is the same person in the same workspace through the same app —
-     * `validateExchange` has just refused anything else — and the reference is what has to be new, not the account.
+     * **The account keeps its id.** A renewal is the same person in the same workspace. `validateExchange` permits
+     * an app change only for the exact profile target; the reference is what has to be new, not the account.
      * Minting an id for it, as this once did, moved everything filed under the old one out from under it: an MCP
      * server pinned to the workspace refused every call as "no longer connected" until it was restarted, and the
      * workspace's drafts and pending approvals belonged to nobody. Gmail's reauth keeps its inbox id for the same
@@ -955,6 +960,7 @@ export async function completeSignIn(context: SlackContext, flowId: string, code
     let written: AccountConfig = account;
     let writtenAlias = flow.alias;
     let replacedRef: string | undefined;
+    let pendingRevocation: PendingRevocation | undefined;
     try {
       /*
        * The write is inside the boundary that takes it back, not before it.
@@ -967,103 +973,140 @@ export async function completeSignIn(context: SlackContext, flowId: string, code
        * the write has settled and is authoritative about it.
        */
       await secrets.set(secretRef, serialiseBundle(bundleFrom(token, at)));
-      await writeWithConsent(
-        context,
-        flow,
-        existing?.alias,
-        () => writtenAlias,
-        (current) => {
-          /*
-           * The check that counts, because this one runs under the lock.
-           *
-           * Everything above was validated against a snapshot read before the network call. Two sign-ins
-           * completing at once both pass those checks, both store a credential, and the second config write
-           * simply overwrites the first — leaving a live Slack token that nothing names. So the assumption each
-           * one made is re-stated here, where the file cannot move underneath it.
-           */
-          /*
-           * The backend this credential went into must still be the one in force.
-           *
-           * `agentcomms secrets migrate` copies every credential to a new backend outside the lock and then
-           * switches. A sign-in that picked its store before the switch and writes after it would put the token
-           * in a backend nothing reads any more, and the config would name a credential the runtime cannot find.
-           * The migration checks the same thing from its side; this is the half that belongs here.
-           */
-          if (secretsStoreOf(current) !== secrets.kind) {
-            throw new CommsError('TRANSIENT', 'the secret store was changed while this sign-in was completing', {
-              hint: 'Nothing was saved. Sign in again.',
-            });
-          }
-          // Validate the bound target again under the lock. A concurrent first sign-in may have learned an app id.
-          if (flow.profile) {
-            validateExchange({ token, mode: flow.mode, flow, config: current, platform: context.platform });
-          }
-          const held = flow.expect ? findById(current, 'account', flow.expect.accountId)?.account : undefined;
-          if (flow.expect) {
+      const switchAccount = async () => {
+        if (
+          flow.transition === 'profile-app' &&
+          existing &&
+          (existing.account.oauthClientId !== account.oauthClientId ||
+            existing.account.appId !== account.appId ||
+            existing.account.profileApp !== account.profileApp)
+        ) {
+          const source = renewing(context, await context.config(), flow);
+          secrets.invalidate(source.account.secretRef);
+          const bundle = parseBundle(await secrets.get(source.account.secretRef));
+          if (!bundle)
+            throw new CommsError('CONFIG', 'the source credential is missing; the profile sign-in was not saved');
+          pendingRevocation = createPendingRevocation({
+            ref: source.account.secretRef,
+            store: secrets.kind,
+            workspace: source.account.workspace,
+            createdAt: at.toISOString(),
+            bundle,
+          });
+        }
+        await writeWithConsent(
+          context,
+          flow,
+          existing?.alias,
+          () => writtenAlias,
+          (current) => {
             /*
-             * Compared against the flow, not against the snapshot read a moment ago.
+             * The check that counts, because this one runs under the lock.
              *
-             * `existing` was read *after* the exchange and is as stale as everything else here. Comparing
-             * against it only asks "has the alias changed since I looked", which two reauths of the same
-             * account both answer yes to — so the second, started first and finishing second, would overwrite
-             * a credential minted in between and strand it. `flow.expect` is what this sign-in set out to renew —
-             * the account, and the credential it held — written before the browser opened and unchangeable since.
-             * The credential is the half that answers now: a renewal keeps the id, so only the credential says
-             * another one landed first.
+             * Everything above was validated against a snapshot read before the network call. Two sign-ins
+             * completing at once both pass those checks, both store a credential, and the second config write
+             * simply overwrites the first — leaving a live Slack token that nothing names. So the assumption each
+             * one made is re-stated here, where the file cannot move underneath it.
              */
-            if (!stillRenewing(held, flow)) {
-              throw new CommsError('CONFIG', `"${flow.alias}" changed while this sign-in was being completed`, {
-                // `list`, not `show <the name it started with>`: after a migration that name is refused, so the
-                // command in the hint would answer with a second refusal rather than with the workspace.
-                hint: `Check it with ${listStep(context)}, then re-authorise if it is still yours.`,
+            /*
+             * The backend this credential went into must still be the one in force.
+             *
+             * `agentcomms secrets migrate` copies every credential to a new backend outside the lock and then
+             * switches. A sign-in that picked its store before the switch and writes after it would put the token
+             * in a backend nothing reads any more, and the config would name a credential the runtime cannot find.
+             * The migration checks the same thing from its side; this is the half that belongs here.
+             */
+            if (secretsStoreOf(current) !== secrets.kind) {
+              throw new CommsError('TRANSIENT', 'the secret store was changed while this sign-in was completing', {
+                hint: 'Nothing was saved. Sign in again.',
               });
             }
-          } else {
+            // Validate the bound target again under the lock. A concurrent first sign-in may have learned an app id.
+            if (flow.profile) {
+              validateExchange({
+                token,
+                mode: flow.mode,
+                flow,
+                config: current,
+                existing: flow.expect ? renewing(context, current, flow) : undefined,
+                platform: context.platform,
+              });
+            }
+            const held = flow.expect ? findById(current, 'account', flow.expect.accountId)?.account : undefined;
+            if (flow.expect) {
+              /*
+               * Compared against the flow, not against the snapshot read a moment ago.
+               *
+               * `existing` was read *after* the exchange and is as stale as everything else here. Comparing
+               * against it only asks "has the alias changed since I looked", which two reauths of the same
+               * account both answer yes to — so the second, started first and finishing second, would overwrite
+               * a credential minted in between and strand it. `flow.expect` is what this sign-in set out to renew —
+               * the account, and the credential it held — written before the browser opened and unchangeable since.
+               * The credential is the half that answers now: a renewal keeps the id, so only the credential says
+               * another one landed first.
+               */
+              if (!stillRenewing(held, flow)) {
+                throw new CommsError('CONFIG', `"${flow.alias}" changed while this sign-in was being completed`, {
+                  // `list`, not `show <the name it started with>`: after a migration that name is refused, so the
+                  // command in the hint would answer with a second refusal rather than with the workspace.
+                  hint: `Check it with ${listStep(context)}, then re-authorise if it is still yours.`,
+                });
+              }
+            } else {
+              /*
+               * The same checks `add` made before the network call, re-run where they hold.
+               *
+               * `held` alone is not the question. `checkAliasFree` also covers the `inboxes` map, which shares
+               * one namespace with `accounts`, and `validateExchange` refuses the same workspace-and-person
+               * under a second name — both of which a concurrent command can make true in the gap.
+               */
+              checkAliasFree(current, flow.alias);
+              validateExchange({ token, mode: flow.mode, flow, config: current, platform: context.platform });
+            }
             /*
-             * The same checks `add` made before the network call, re-run where they hold.
+             * The grant owns what it sets; everything else carries over.
              *
-             * `held` alone is not the question. `checkAliasFree` also covers the `inboxes` map, which shares
-             * one namespace with `accounts`, and `validateExchange` refuses the same workspace-and-person
-             * under a second name — both of which a concurrent command can make true in the gap.
+             * `accountFrom` builds a record from the token alone, so writing it whole on a reauth threw away every
+             * setting the person had made since — most importantly `sendPolicy`. An explicit `never` became the
+             * default `chat`, and because reauth then rotated the account id, the loosening check read the result as
+             * a brand-new account and asked nobody. Spreading the held record first keeps any field the grant does
+             * not speak to, including fields a later version adds that this one has never heard of.
              */
-            checkAliasFree(current, flow.alias);
-            validateExchange({ token, mode: flow.mode, flow, config: current, platform: context.platform });
-          }
-          /*
-           * The grant owns what it sets; everything else carries over.
-           *
-           * `accountFrom` builds a record from the token alone, so writing it whole on a reauth threw away every
-           * setting the person had made since — most importantly `sendPolicy`. An explicit `never` became the
-           * default `chat`, and because reauth then rotated the account id, the loosening check read the result as
-           * a brand-new account and asked nobody. Spreading the held record first keeps any field the grant does
-           * not speak to, including fields a later version adds that this one has never heard of.
-           */
-          written = held && flow.expect ? { ...held, ...account, createdAt: held.createdAt } : account;
-          const next = flow.profile
-            ? learnProfileSlackAppId(
-                current,
-                profileTargetFor(flow, current, context.platform),
-                token.appId as string,
-                context.platform,
-              )
-            : current;
-          if (held && flow.expect) {
-            /*
-             * Under the key it has now, by the id it keeps.
-             *
-             * Its former names already point at that id, so a rename since this started is followed and nothing
-             * else about the names moves — `live`, renamed to `cue/slack`, still says what it is called now.
-             */
-            const renewed = findById(current, 'account', held.id);
-            const key = renewed?.alias ?? flow.alias;
-            writtenAlias = key;
-            replacedRef = held.secretRef;
-            return { ...next, accounts: { ...next.accounts, [key]: written } };
-          }
-          writtenAlias = flow.alias;
-          return { ...next, accounts: { ...next.accounts, [flow.alias]: written } };
-        },
-      );
+            written = held && flow.expect ? { ...held, ...account, createdAt: held.createdAt } : account;
+            const next = flow.profile
+              ? learnProfileSlackAppId(
+                  current,
+                  profileTargetFor(flow, current, context.platform),
+                  token.appId as string,
+                  context.platform,
+                )
+              : current;
+            if (held && flow.expect) {
+              /*
+               * Under the key it has now, by the id it keeps.
+               *
+               * An own-app renewal follows a rename. A profile transition also binds the original alias, checked
+               * above, so a rename invalidates that transition before anything is committed.
+               */
+              const renewed = findById(current, 'account', held.id);
+              const key = renewed?.alias ?? flow.alias;
+              writtenAlias = key;
+              replacedRef = held.secretRef;
+              return {
+                ...next,
+                accounts: { ...next.accounts, [key]: written },
+                ...(pendingRevocation
+                  ? { pendingRevocations: [...(next.pendingRevocations ?? []), pendingRevocation] }
+                  : {}),
+              };
+            }
+            writtenAlias = flow.alias;
+            return { ...next, accounts: { ...next.accounts, [flow.alias]: written } };
+          },
+        );
+      };
+      if (flow.transition === 'profile-app') await withCredentialsLock(context.core.paths.configDir, switchAccount);
+      else await switchAccount();
     } catch (error) {
       /*
        * Look before undoing. A rejection does not mean the configuration was not written.
@@ -1084,7 +1127,8 @@ export async function completeSignIn(context: SlackContext, flowId: string, code
     }
 
     /*
-     * The superseded credential, removed last and not allowed to fail the reauth that has already succeeded.
+     * Ordinary same-app renewals remove the superseded credential last. Profile app switches instead retain it
+     * in the durable ledger until both revokes finish, and return cleanup state without failing the saved sign-in.
      *
      * The swallow is deliberate and bounded. By this point the configuration already points at the new
      * credential, so the workspace works; throwing here would report a failure for a sign-in that worked and
@@ -1098,6 +1142,23 @@ export async function completeSignIn(context: SlackContext, flowId: string, code
      */
     // The credential of the row this write actually replaced, read under the lock — not the snapshot's.
     const previousRef = replacedRef ?? existing?.account.secretRef;
+    if (pendingRevocation) {
+      let cleanup: WorkspaceView['cleanup'];
+      try {
+        cleanup = await revokePendingEntry(context, pendingRevocation.ref);
+      } catch (error) {
+        // One token may already have reached a durable final state before its pair's cleanup failed.
+        const saved = await context.config().then(
+          (config) => config.pendingRevocations?.find((entry) => entry.ref === pendingRevocation?.ref),
+          () => undefined,
+        );
+        cleanup = pendingRevocationResult(saved ?? pendingRevocation, false, {
+          code: error instanceof CommsError ? error.code : 'UNEXPECTED',
+          message: 'the app switch was saved; its old credential remains pending cleanup',
+        });
+      }
+      return { ...viewOf(writtenAlias, written), cleanup };
+    }
     if (previousRef && previousRef !== secretRef) {
       await secrets.delete(previousRef).catch(() => undefined);
     }

@@ -49,6 +49,8 @@ export interface SlackFlow {
   readonly clientId: string;
   /** The exact profile app selected at start; absent from own-app and older flows. Display fields are neutralised. */
   readonly profile?: ProfileSlackTarget | undefined;
+  /** Only this bound profile reauth may move away from the source app. */
+  readonly transition?: 'profile-app' | undefined;
   /**
    * The consent a person gave to widen this workspace's access: a change approval claimed as the sign-in started,
    * bound to the values it moves between and the account it moves them on.

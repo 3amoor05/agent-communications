@@ -1,4 +1,4 @@
-import { CommsError, inlineCommand, shellCommand } from '@agentcomms/core';
+import { CommsError, findById, inlineCommand, shellCommand } from '@agentcomms/core';
 import type { SlackCall } from '../api/call.ts';
 import type { FetchLike } from '../api/guard.ts';
 import { accessTokenFor, type PersistPolicy, type RefreshDeps, renewRejectedToken } from '../auth/refresh.ts';
@@ -146,9 +146,22 @@ export async function openWorkspace(
   }
   const secrets = await context.secrets();
   const persist = deps.persist ?? context.persist;
+  const liveAccount = async () => {
+    const live = findById(await context.config(), 'account', account.id);
+    if (!live) throw new CommsError('CONFIG', 'the Slack account is no longer connected');
+    return live;
+  };
   const refresh: RefreshDeps = {
     secrets,
-    openSecrets: () => context.secrets(),
+    openSecrets: async () => {
+      // Called under the credentials lock, before refresh writes a marker or spends a token. A hand-off that
+      // won that lock first has retired this ref; the caller below follows the replacement instead.
+      const current = await context.config();
+      if (current.pendingRevocations?.some((entry) => entry.ref === account.secretRef)) {
+        throw new CommsError('TRANSIENT', 'the Slack credential was replaced before it could be refreshed');
+      }
+      return context.secrets();
+    },
     configDir: context.core.paths.configDir,
     stateDir: context.core.paths.stateDir,
     now: context.now,
@@ -157,7 +170,16 @@ export async function openWorkspace(
     platform: context.platform,
     ...(persist ? { persist } : {}),
   };
-  const { token } = await accessTokenFor(refresh, account.id, account.secretRef);
+  let token: string;
+  try {
+    ({ token } = await accessTokenFor(refresh, account.id, account.secretRef));
+  } catch (error) {
+    const live = await liveAccount();
+    if (live.account.secretRef !== account.secretRef) return openWorkspace(context, live.alias, deps);
+    throw error;
+  }
+  const live = await liveAccount();
+  if (live.account.secretRef !== account.secretRef) return openWorkspace(context, live.alias, deps);
   return {
     name,
     accountId: account.id,
@@ -167,7 +189,23 @@ export async function openWorkspace(
       fetch: deps.fetch,
       baseUrl: deps.baseUrl,
       // A token Slack rejects gets one forced renewal under the refresh locks; see `renewRejectedToken`.
-      renew: (rejected) => renewRejectedToken(refresh, account.id, account.secretRef, rejected),
+      renew: async (rejected) => {
+        // A profile hand-off keeps the account id but puts the old ref in the cleanup ledger. An already-open
+        // session must follow the live account rather than rotate a token that is being revoked.
+        const live = await liveAccount();
+        if (live.account.secretRef !== account.secretRef) {
+          const current = await openWorkspace(context, live.alias, deps);
+          return current.call.token === rejected ? null : current.call.token;
+        }
+        try {
+          return await renewRejectedToken(refresh, account.id, account.secretRef, rejected);
+        } catch (error) {
+          const changed = await liveAccount();
+          if (changed.account.secretRef === account.secretRef) throw error;
+          const current = await openWorkspace(context, changed.alias, deps);
+          return current.call.token === rejected ? null : current.call.token;
+        }
+      },
     },
   };
 }

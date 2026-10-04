@@ -143,7 +143,11 @@ export interface PendingRevocationResult {
   readonly issue?: RevocationIssue | undefined;
 }
 
-function resultOf(entry: PendingRevocation, cleaned: boolean, issue?: RevocationIssue): PendingRevocationResult {
+export function pendingRevocationResult(
+  entry: PendingRevocation,
+  cleaned: boolean,
+  issue?: RevocationIssue,
+): PendingRevocationResult {
   return Object.freeze({
     ref: entry.ref,
     platform: entry.platform,
@@ -153,6 +157,8 @@ function resultOf(entry: PendingRevocation, cleaned: boolean, issue?: Revocation
     ...(issue === undefined ? {} : { issue: Object.freeze(issue) }),
   });
 }
+
+const resultOf = pendingRevocationResult;
 
 function entriesNamed(config: Config, ref: string): Array<{ index: number; entry: PendingRevocation }> {
   const found: Array<{ index: number; entry: PendingRevocation }> = [];
