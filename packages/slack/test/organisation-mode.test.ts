@@ -16,6 +16,7 @@ import { openCore } from '../../core/src/core.ts';
 import { orgUpdateChange } from '../../core/src/operations/organisations.ts';
 import { parseBundle, serialiseBundle } from '../src/auth/bundle.ts';
 import { FLOW_TTL_MS, newFlowId, type SlackFlow } from '../src/auth/flow.ts';
+import { settleRefreshes } from '../src/auth/refresh.ts';
 import { SlackContext } from '../src/context.ts';
 import { type InstallMode, scopesForMode } from '../src/manifest.ts';
 import { planModeSet, reauthWorkspace } from '../src/operations/changes.ts';
@@ -23,6 +24,7 @@ import { openWorkspace } from '../src/operations/session.ts';
 import { completeSignIn } from '../src/operations/signin.ts';
 import { slackOk } from './support/harness.ts';
 import { newOrganisationHarness, READ_CLIENT_ID, SEND_CLIENT_ID } from './support/organisation.ts';
+import { QUICK } from './support/refresh.ts';
 
 function present<T>(value: T | undefined): T {
   assert.notEqual(value, undefined);
@@ -571,3 +573,88 @@ test('the locked hand-off invalidates a cached old bundle before fixing revocati
   await completeSignIn(f.context, flow.flowId, 'move');
   assert.equal((await f.h.core.config.load()).pendingRevocations?.[0]?.tokens.access.deadline, deadline);
 });
+
+for (const state of ['refreshing', 'refresh-uncertain'] as const) {
+  test(`a profile hand-off refuses ${state} until a retained refresh has a durable cleanup owner`, async () => {
+    const f = await fixture();
+    const source = present((await f.h.core.config.load()).accounts[alias]);
+    const real = await f.h.core.secrets('file');
+    const original = parseBundle(await real.get(source.secretRef));
+    assert.ok(original);
+    await real.set(source.secretRef, serialiseBundle({ ...original, accessExpiresAt: new Date(0).toISOString() }));
+    let failPersistence = false;
+    const staged: string[] = [];
+    const store: SecretStore = {
+      kind: real.kind,
+      get: (ref) => real.get(ref),
+      delete: (ref) => real.delete(ref),
+      invalidate: (ref) => real.invalidate(ref),
+      async set(ref, value) {
+        if (ref === source.secretRef && failPersistence) throw new Error('fake retained refresh persistence failure');
+        if (ref !== source.secretRef) staged.push(ref);
+        await real.set(ref, value);
+      },
+    };
+    f.context.secrets = async () => store;
+    f.h.reply = () => {
+      failPersistence = true;
+      return slackOk({ authed_user: { access_token: 'fake-retained-access', refresh_token: 'fake-retained-refresh' } });
+    };
+    const revoked: string[] = [];
+    const signIn = new SlackContext({
+      core: f.h.core,
+      env: f.h.env,
+      exchange: f.context.exchange,
+      fetch: async (_url, init) => {
+        revoked.push(new Headers(init?.headers).get('authorization') ?? '');
+        return new Response(JSON.stringify({ ok: true, revoked: true }));
+      },
+    });
+    signIn.secrets = async () => store;
+    try {
+      const live = await openWorkspace(f.context, alias, { persist: QUICK });
+      assert.equal(live.call.token, 'fake-retained-access');
+      const marker = parseBundle(await real.get(source.secretRef));
+      assert.equal(marker?.state, 'refreshing');
+      assert.ok(marker);
+      if (state === 'refresh-uncertain') {
+        await real.set(
+          source.secretRef,
+          serialiseBundle({
+            ...marker,
+            state,
+            attempt: undefined,
+            reason: { kind: 'interrupted', attemptId: marker.attempt?.id, at: new Date().toISOString() },
+          }),
+        );
+      }
+      const flow = await savedMove(f, 'send');
+      await assert.rejects(completeSignIn(signIn, flow.flowId, 'unsettled'), /refresh.*unresolved|unresolved.*refresh/);
+      const unchanged = await f.h.core.config.load();
+      assert.equal(unchanged.accounts[alias]?.secretRef, source.secretRef);
+      assert.equal(unchanged.accounts[alias]?.mode, 'read');
+      assert.equal(unchanged.pendingRevocations, undefined);
+      assert.equal(staged.length, 1);
+      assert.equal(await real.get(present(staged[0])), null);
+      assert.deepEqual(revoked, [], 'stale stored tokens must not be reported as the whole old app credential');
+
+      // The existing account remains the owner while its process retains the newer result. Once persistence
+      // recovers, normal settlement makes those exact issued tokens durable before another move can retire them.
+      failPersistence = false;
+      assert.deepEqual(await settleRefreshes(5000), []);
+      const settled = parseBundle(await real.get(source.secretRef));
+      assert.equal(settled?.state, 'ready');
+      assert.equal(settled?.accessToken, 'fake-retained-access');
+      assert.equal(settled?.refreshToken, 'fake-retained-refresh');
+      const retry = await completeSignIn(signIn, (await savedMove(f, 'send')).flowId, 'settled');
+      assert.equal(retry.cleanup?.cleaned, true);
+      assert.deepEqual(revoked, ['Bearer fake-retained-access', 'Bearer fake-retained-refresh']);
+      assert.equal(await real.get(source.secretRef), null);
+      assert.equal((await f.h.core.config.load()).pendingRevocations, undefined);
+    } finally {
+      // Keep the module's retained-result registry clean even when running this test against the broken guard.
+      failPersistence = false;
+      await settleRefreshes(5000);
+    }
+  });
+}

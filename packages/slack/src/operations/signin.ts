@@ -986,6 +986,18 @@ export async function completeSignIn(context: SlackContext, flowId: string, code
           const bundle = parseBundle(await secrets.get(source.account.secretRef));
           if (!bundle)
             throw new CommsError('CONFIG', 'the source credential is missing; the profile sign-in was not saved');
+          // An unresolved refresh can have issued replacement tokens that another process still holds because
+          // persistence failed. Retiring only this stored marker would orphan those tokens and block settlement.
+          // Keep the source account authoritative until its complete credential is durable again.
+          if (bundle.state !== 'ready') {
+            throw new CommsError(
+              'TRANSIENT',
+              'the source credential has an unresolved refresh; the app switch was not saved',
+              {
+                hint: 'Let the refresh finish, or restore secret-store access and retry from the session holding its result.',
+              },
+            );
+          }
           pendingRevocation = createPendingRevocation({
             ref: source.account.secretRef,
             store: secrets.kind,
