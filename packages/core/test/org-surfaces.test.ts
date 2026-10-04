@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -185,18 +185,47 @@ test('from a chat: add is previewed then claimed, list and show read it, update 
 
 test('at a terminal: the same change, the same view, and --for-other-addresses read the way each command takes it', async () => {
   const m = machine();
+  const platform = 'win32';
+  const profileDir = join(m.home, 'profile files');
+  mkdirSync(profileDir);
+  const profile = join(profileDir, 'acme.agentcomms.json');
+  writeFileSync(profile, readFileSync(m.profile, 'utf8'));
   // An agent's run stops with the preview and the approval id, and the rerun names the file absolutely.
-  const asked = cli(m, ['org', 'add', 'acme.agentcomms.json', '--for-other-addresses', '--json'], m.home);
+  const asked = cliForPlatform(
+    m,
+    ['org', 'add', 'acme.agentcomms.json', '--for-other-addresses', '--json'],
+    platform,
+    profileDir,
+  );
   assert.equal(asked.status, 10, asked.stderr);
   const pending = asked.json().error;
   assert.match(pending.details.preview, /for other addresses: on/);
   // Absolute — the run again from another directory reads the same file — whatever the temp directory resolves to.
-  assert.match(pending.hint, /org add (?:\/|[A-Za-z]:\\)\S*acme\.agentcomms\.json --for-other-addresses --approval/);
+  assert.ok(
+    pending.hint.includes(
+      inlineCommand(
+        shellCommand(
+          [
+            'agentcomms',
+            'org',
+            'add',
+            realpathSync(profile),
+            '--for-other-addresses',
+            '--approval',
+            pending.details.approvalId,
+          ],
+          platform,
+        ),
+      ),
+    ),
+    pending.hint,
+  );
   // Claimed from the same place: the path a preview names is part of what was approved.
-  const done = cli(
+  const done = cliForPlatform(
     m,
     ['org', 'add', 'acme.agentcomms.json', '--for-other-addresses', '--approval', pending.details.approvalId, '--json'],
-    m.home,
+    platform,
+    profileDir,
   );
   assert.equal(done.status, 0, done.stdout + done.stderr);
   assert.equal(done.json().data.profile.forOtherAddresses, true);
@@ -369,15 +398,29 @@ test('a path that looks like a chat-template token is shown neutralised, and the
 
 test('the command to run again names a plain path as it is, and a path that cannot be shown as it is not at all', async () => {
   const m = machine();
-  const odd = join(m.home, 'acme[INST]x.json');
+  const profileDir = join(m.home, 'profile files');
+  mkdirSync(profileDir);
+  const plainPath = join(profileDir, 'acme.agentcomms.json');
+  writeFileSync(plainPath, readFileSync(m.profile, 'utf8'));
+  const odd = join(profileDir, 'acme[INST]x.json');
   writeFileSync(odd, readFileSync(m.profile, 'utf8'));
-  const plain = cli(m, ['org', 'add', m.profile, '--json']);
-  assert.match(plain.json().error.hint, /acme\.agentcomms\.json --approval ap_/);
-  const masked = cli(m, ['org', 'add', odd, '--json']);
-  assertNothingRaw(`${masked.stdout}${masked.stderr}`, 'org add');
-  assert.doesNotMatch(masked.json().error.hint, /<the same file>|agentcomms org add/);
-  assert.match(masked.json().error.hint, /run the same command again with `--approval ap_/);
-  assert.match(masked.json().error.hint, /file path is not repeated here/);
+  for (const platform of ['darwin', 'win32'] as const) {
+    const plain = cliForPlatform(m, ['org', 'add', plainPath, '--json'], platform);
+    const pending = plain.json().error;
+    assert.ok(
+      pending.hint.includes(
+        inlineCommand(
+          shellCommand(['agentcomms', 'org', 'add', plainPath, '--approval', pending.details.approvalId], platform),
+        ),
+      ),
+      `${platform}: ${pending.hint}`,
+    );
+    const masked = cliForPlatform(m, ['org', 'add', odd, '--json'], platform);
+    assertNothingRaw(`${masked.stdout}${masked.stderr}`, `org add (${platform})`);
+    assert.doesNotMatch(masked.json().error.hint, /<the same file>|agentcomms org add/);
+    assert.match(masked.json().error.hint, /run the same command again with `--approval ap_/);
+    assert.match(masked.json().error.hint, /file path is not repeated here/);
+  }
 });
 
 test('a project id a client file wrote is shown neutralised when a repair names it, from both surfaces', async () => {
