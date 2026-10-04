@@ -110,11 +110,24 @@ export async function newHarness(
     env,
     container,
     fixture,
-    context: (extra = {}) => new WhatsAppContext({ env, ...extra }),
+    context: (extra = {}) =>
+      new WhatsAppContext({
+        env,
+        // Tests that need Windows override this. Operation-result assertions otherwise use stable POSIX text.
+        platform: extra.platform ?? 'darwin',
+        ...extra,
+      }),
     async cli(argv, deps = {}) {
       const stdout = new Capture();
       const stderr = new Capture();
-      const code = await run(argv, { env, streams: { stdout, stderr }, open: () => true, ...deps });
+      const code = await run(argv, {
+        env,
+        streams: { stdout, stderr },
+        open: () => true,
+        // Tests that need Windows override this. Printed-command assertions otherwise use stable POSIX text.
+        platform: deps.platform ?? 'darwin',
+        ...deps,
+      });
       return {
         code,
         stdout: stdout.text,

@@ -810,3 +810,16 @@ test('agentcomms approve: a person reads the change and types the code; Enter ca
   assert.equal(cancelled.state, 'cancelled');
   assert.equal((await core.approvals.get(second.approvalId))?.state, 'revoked');
 });
+
+test('agentcomms approve renders its terminal handoff for the selected shell platform', async () => {
+  const { approveChangeAtTerminal } = await import('../src/change-flow.ts');
+  const { core } = coreWith({});
+  await assert.rejects(
+    approveChangeAtTerminal(core, '7', { CODEX_SANDBOX: '1' }, { color: false, platform: 'win32' }),
+    (error: unknown) => {
+      assert.ok(error instanceof CommsError);
+      assert.match(error.hint ?? '', /agentcomms approve "7"/);
+      return true;
+    },
+  );
+});

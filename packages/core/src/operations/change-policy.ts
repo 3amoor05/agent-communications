@@ -1,4 +1,5 @@
 import type { GatedChange } from '../change-flow.ts';
+import { commandText, shellCommand } from '../cli-runtime.ts';
 import {
   type AccountConfig,
   type ChangePolicy,
@@ -94,7 +95,11 @@ function resolveScope(
   return null;
 }
 
-export function changePolicyReport(config: Config, scope: PolicyScope = {}): ChangePolicyReport {
+export function changePolicyReport(
+  config: Config,
+  scope: PolicyScope = {},
+  platform: NodeJS.Platform = process.platform,
+): ChangePolicyReport {
   const target = resolveScope(config, scope);
   if (target === null) {
     const overrides: PolicyOverride[] = [
@@ -106,7 +111,7 @@ export function changePolicyReport(config: Config, scope: PolicyScope = {}): Cha
       ),
     ];
     const changePolicy = defaultChangePolicy(config);
-    const looser = changePolicy === 'confirm' ? overrides.flatMap(stillChat) : [];
+    const looser = changePolicy === 'confirm' ? overrides.flatMap((override) => stillChat(override, platform)) : [];
     return {
       scope: 'defaults',
       name: null,
@@ -126,7 +131,7 @@ export function changePolicyReport(config: Config, scope: PolicyScope = {}): Cha
 }
 
 /** An override that approves in chat, with how to tighten it; nothing for one that does not. */
-function stillChat(override: PolicyOverride): LooserOverride[] {
+function stillChat(override: PolicyOverride, platform: NodeJS.Platform): LooserOverride[] {
   if (override.changePolicy !== 'chat') return [];
   // Names are held to a grammar of letters, digits, `-` and `/`, so they go into a command line as they are.
   const flag = override.kind === 'inbox' ? '--inbox' : '--account';
@@ -136,7 +141,7 @@ function stillChat(override: PolicyOverride): LooserOverride[] {
       name: override.name,
       changePolicy: 'chat',
       tighten: {
-        command: `agentcomms policy ${flag} ${override.name} confirm`,
+        command: commandText(shellCommand(['agentcomms', 'policy', flag, override.name, 'confirm'], platform)),
         tool: 'comms_change_policy',
         arguments:
           override.kind === 'inbox'
@@ -183,13 +188,18 @@ function withPolicy(config: Config, scope: PolicyScope, to: ChangePolicy): Confi
  * the configuration read inside that lock — so the refusal a loosening meets there, without an approval or with one
  * for a different change, is the store's, not this function's.
  */
-export function changePolicyChange(core: Core, scope: PolicyScope, to: ChangePolicy): GatedChange<ChangePolicyReport> {
+export function changePolicyChange(
+  core: Core,
+  scope: PolicyScope,
+  to: ChangePolicy,
+  platform: NodeJS.Platform = process.platform,
+): GatedChange<ChangePolicyReport> {
   if (!isChangePolicy(to)) {
     throw new CommsError('USAGE', `"${String(to)}" is not a change policy`, { hint: 'Use `chat` or `confirm`.' });
   }
   return {
     plan: (config) => {
-      const before = changePolicyReport(config, scope);
+      const before = changePolicyReport(config, scope, platform);
       const where = before.name === null ? 'the default change policy' : `the change policy of ${before.name}`;
       return {
         ...(before.scope === 'inbox' ? { inbox: before.name ?? undefined } : {}),
@@ -201,7 +211,7 @@ export function changePolicyChange(core: Core, scope: PolicyScope, to: ChangePol
     },
     apply: async (consent) => {
       const written = await core.config.update((config) => withPolicy(config, scope, to), consent ? { consent } : {});
-      return changePolicyReport(written, scope);
+      return changePolicyReport(written, scope, platform);
     },
   };
 }

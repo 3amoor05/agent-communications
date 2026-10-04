@@ -430,7 +430,7 @@ a macOS dialog may be waiting) · 77 permission needed (macOS privacy) · 78 con
           context.core,
           approvalId,
           env,
-          { json: options.json, color: options.color },
+          { json: options.json, color: options.color, platform: context.platform },
           streams,
         );
         streams.stdout.write(

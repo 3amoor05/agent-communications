@@ -984,7 +984,11 @@ test('gmail_inbox_finish connects the mailbox and hands the registration back fo
   const machine = await clientOnly();
   const report = await handedOff(machine);
   const flowId = /--finish (fl_\w+)/.exec(report.handoff.finish)?.[1];
-  const server = await connect({ core: machine.harness.core, env: { ...machine.harness.env, ...machine.env } });
+  const server = await connect({
+    core: machine.harness.core,
+    env: { ...machine.harness.env, ...machine.env },
+    platform: 'darwin',
+  });
   try {
     const result = wire(await server.call('gmail_inbox_finish', { flowId, waitSeconds: 10 }));
     assert.equal(result.alias, 'home');
@@ -1008,7 +1012,11 @@ async function finishedOverMcp(
 ): Promise<Record<string, unknown>> {
   const report = await handedOff(machine, extra);
   const flowId = /--finish (fl_\w+)/.exec(report.handoff.finish)?.[1];
-  const server = await connect({ core: machine.harness.core, env: { ...machine.harness.env, ...machine.env } });
+  const server = await connect({
+    core: machine.harness.core,
+    env: { ...machine.harness.env, ...machine.env },
+    platform: 'darwin',
+  });
   try {
     return wire(await server.call('gmail_inbox_finish', { flowId, waitSeconds: 10 }));
   } finally {
@@ -1034,7 +1042,7 @@ test('gmail_inbox_finish decides `pendingRegistration` by the entry that serves 
   assert.match(String(pending.next), /serves the mailbox other, not this one/);
   assert.match(
     String(pending.next),
-    /`agent-gmail mcp install --client cursor --name gmail-home --inbox home --launcher local`/,
+    /`agent-gmail mcp install --client cursor --launcher local --name gmail-home --inbox home`/,
   );
   assert.equal(await readFile(pinned.cursor, 'utf8'), before);
   // The arguments work as they are given: passed on unchanged, they ask for the second entry, not the taken name.

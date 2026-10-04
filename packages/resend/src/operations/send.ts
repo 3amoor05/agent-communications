@@ -4,14 +4,14 @@ import {
   approvalKind,
   CommsError,
   canonicalAddress,
-  inlineCommand,
   type Expectation,
+  inlineCommand,
   type MessagePreview,
   publicView,
   renderMessagePreview,
   type SendPolicy,
-  shellCommand,
   sha256Hex,
+  shellCommand,
   stricterPolicy,
 } from '@agentcomms/core';
 import { keyPermissionOf, type NamedAccount } from '../accounts.ts';

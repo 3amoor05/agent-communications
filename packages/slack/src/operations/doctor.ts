@@ -1,5 +1,6 @@
 import {
   type Config,
+  commandText,
   describeOtherSlackServer,
   findOtherSlackServers,
   isProductServer,
@@ -10,6 +11,7 @@ import {
   pinnedVersion,
   type RegisteredServer,
   type SecretStore,
+  shellCommand,
   toCommsError,
 } from '@agentcomms/core';
 import { scopeMismatch } from '../auth/authorize.ts';
@@ -65,6 +67,8 @@ export type IdentityProbe =
 export interface DoctorInput {
   readonly config: Config;
   readonly now: Date;
+  /** The shell syntax used for every repair command in the report. */
+  readonly platform?: NodeJS.Platform | undefined;
   /**
    * The stored credential per alias, already read.
    *
@@ -128,6 +132,7 @@ export const IMPLICIT_USER_SCOPES: readonly string[] = ['identify'];
 
 export function doctor(input: DoctorInput): DoctorResult {
   const checks: Check[] = [];
+  const command = (...words: string[]) => commandText(shellCommand(words, input.platform ?? process.platform));
   const workspaces = listWorkspaces(input.config).filter(
     (view) => input.workspace === undefined || view.alias === input.workspace,
   );
@@ -170,7 +175,7 @@ export function doctor(input: DoctorInput): DoctorResult {
           bundle === 'unreadable'
             ? 'the stored credential cannot be read; it is corrupt or from a newer version'
             : 'the configuration names a workspace with no stored token',
-        fix: `agent-slack workspace reauth ${workspace.alias}`,
+        fix: command('agent-slack', 'workspace', 'reauth', workspace.alias),
         workspace: workspace.alias,
       });
       continue;
@@ -209,7 +214,7 @@ export function doctor(input: DoctorInput): DoctorResult {
         title: `Sign-in for ${workspace.alias}`,
         status: 'fail',
         detail: reason?.at ? `${why}; at ${reason.at}` : why,
-        fix: `agent-slack workspace reauth ${workspace.alias}`,
+        fix: command('agent-slack', 'workspace', 'reauth', workspace.alias),
         workspace: workspace.alias,
       });
     } else if (bundle.state === 'refreshing') {
@@ -238,7 +243,7 @@ export function doctor(input: DoctorInput): DoctorResult {
           : expiresAt > input.now.getTime()
             ? `access token valid until ${bundle.accessExpiresAt}`
             : `the access token expired ${bundle.accessExpiresAt}; it is renewed on the next call`,
-        fix: Number.isFinite(expiresAt) ? null : `agent-slack workspace reauth ${workspace.alias}`,
+        fix: Number.isFinite(expiresAt) ? null : command('agent-slack', 'workspace', 'reauth', workspace.alias),
         workspace: workspace.alias,
       });
     }
@@ -270,7 +275,7 @@ export function doctor(input: DoctorInput): DoctorResult {
         title: `Slack's view of ${workspace.alias}`,
         status: 'fail',
         detail: `Slack refused the stored token: ${identity.error}`,
-        fix: `agent-slack workspace reauth ${workspace.alias}`,
+        fix: command('agent-slack', 'workspace', 'reauth', workspace.alias),
         workspace: workspace.alias,
       });
     } else if (identity.workspaceId !== workspace.workspaceId || identity.userId !== workspace.userId) {
@@ -285,7 +290,7 @@ export function doctor(input: DoctorInput): DoctorResult {
         title: `Slack's view of ${workspace.alias}`,
         status: 'fail',
         detail: `the stored token acts as ${identity.userId} in ${identity.workspaceId}, not ${workspace.userId} in ${workspace.workspaceId}`,
-        fix: `agent-slack workspace remove ${workspace.alias}, then add it again`,
+        fix: `${command('agent-slack', 'workspace', 'remove', workspace.alias)}, then add it again`,
         workspace: workspace.alias,
       });
     } else {
@@ -314,7 +319,7 @@ export function doctor(input: DoctorInput): DoctorResult {
           title: `Re-authorisation for ${workspace.alias}`,
           status: 'fail',
           detail: 'the refresh token expired; Slack expires them 30 days after they are issued',
-          fix: `agent-slack workspace reauth ${workspace.alias}`,
+          fix: command('agent-slack', 'workspace', 'reauth', workspace.alias),
           workspace: workspace.alias,
         });
       } else if (remaining <= REFRESH_EXPIRY_WARNING_MS) {
@@ -323,7 +328,7 @@ export function doctor(input: DoctorInput): DoctorResult {
           title: `Re-authorisation for ${workspace.alias}`,
           status: 'warn',
           detail: `the refresh token expires ${bundle.refreshExpiresAt}`,
-          fix: `agent-slack workspace reauth ${workspace.alias}`,
+          fix: command('agent-slack', 'workspace', 'reauth', workspace.alias),
           workspace: workspace.alias,
         });
       }
@@ -347,7 +352,7 @@ export function doctor(input: DoctorInput): DoctorResult {
         title: `Permissions for ${workspace.alias}`,
         status: 'fail',
         detail: `the stored mode "${workspace.mode}" is neither "read" nor "send"`,
-        fix: `agent-slack workspace remove ${workspace.alias}, then add it again`,
+        fix: `${command('agent-slack', 'workspace', 'remove', workspace.alias)}, then add it again`,
         workspace: workspace.alias,
       });
       continue;
@@ -380,7 +385,7 @@ export function doctor(input: DoctorInput): DoctorResult {
         ]
           .filter(Boolean)
           .join('; '),
-        fix: `agent-slack workspace reauth ${workspace.alias} --mode ${mode}`,
+        fix: command('agent-slack', 'workspace', 'reauth', workspace.alias, '--mode', mode),
         workspace: workspace.alias,
       });
     } else {
@@ -428,7 +433,7 @@ export function doctor(input: DoctorInput): DoctorResult {
               title: `Sending files from ${workspace.alias}`,
               status: 'fail',
               detail: 'send mode, but files:write is not granted: it can post words and cannot send files',
-              fix: `agent-slack workspace reauth ${workspace.alias} --mode send`,
+              fix: command('agent-slack', 'workspace', 'reauth', workspace.alias, '--mode', 'send'),
               workspace: workspace.alias,
             },
     );
@@ -602,6 +607,7 @@ export async function runDoctor(context: SlackContext, options: DoctorRun = {}):
   return doctor({
     config,
     now: context.now(),
+    platform: context.platform,
     bundles,
     identities,
     registeredServers,
@@ -617,18 +623,21 @@ export async function runDoctor(context: SlackContext, options: DoctorRun = {}):
  * into the default: every workspace, under another name. That is a widening of what an agent may reach, not a
  * repair — so the flags are read back off the entry that is there.
  */
-function repairCommand(server: RegisteredServer): string {
+function repairCommand(server: RegisteredServer, platform: NodeJS.Platform): string {
   // Every write targets user scope; a project-scoped entry cannot be reached by any flag, so the honest answer
   // is the manual one.
   if (server.scope === 'project') {
     return `remove "${server.name}" from the project entry in ${server.path} by hand, then re-run agent-slack mcp install`;
   }
-  const flags = [`--client ${server.client}`];
-  if (server.name !== SLACK_MCP.defaultServerName) flags.push(`--name ${server.name}`);
+  const words = ['agent-slack', 'mcp', 'install', '--client', server.client];
+  if (server.name !== SLACK_MCP.defaultServerName) words.push('--name', server.name);
   const pinned = server.args[server.args.indexOf('--workspace') + 1];
-  if (server.args.includes('--workspace') && pinned) flags.push(`--workspace ${pinned}`);
-  if (server.args.some((argument) => argument.startsWith(`${SLACK_MCP.npxPackage}@`))) flags.push('--launcher npx');
-  return `agent-slack mcp install ${flags.join(' ')} --force`;
+  if (server.args.includes('--workspace') && pinned) words.push('--workspace', pinned);
+  if (server.args.some((argument) => argument.startsWith(`${SLACK_MCP.npxPackage}@`))) {
+    words.push('--launcher', 'npx');
+  }
+  words.push('--force');
+  return commandText(shellCommand(words, platform));
 }
 
 /**
@@ -710,7 +719,7 @@ function registrationChecks(input: DoctorInput): Check[] {
           : `this release, ${VERSION}`,
     fix:
       stale.length > 0
-        ? stale.map((entry) => repairCommand(entry.server)).join(' && ')
+        ? stale.map((entry) => repairCommand(entry.server, input.platform ?? process.platform)).join(' && ')
         : none
           ? 'agent-slack mcp install --client <client>'
           : null,
@@ -724,7 +733,7 @@ function registrationChecks(input: DoctorInput): Check[] {
       title: `MCP entry "${server.name}" (${server.client})`,
       status: missing ? 'fail' : 'ok',
       detail: missing ? `${missing} is not there any more` : [server.command, ...server.args].join(' '),
-      fix: missing ? repairCommand(server) : null,
+      fix: missing ? repairCommand(server, input.platform ?? process.platform) : null,
       workspace: null,
     });
   }

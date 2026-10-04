@@ -57,6 +57,7 @@ async function cli(
   const code = await run(argv, {
     core: harness.core,
     env: harness.env,
+    platform: 'darwin',
     exchange: (params) => harness.exchange(params),
     streams: {
       stdout: Object.assign(out, { isTTY: options.tty ?? false }),

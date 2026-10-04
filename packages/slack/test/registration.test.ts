@@ -50,7 +50,8 @@ async function cli(harness: Harness, argv: string[], env: NodeJS.ProcessEnv, pla
   const code = await run(argv, {
     core: harness.core,
     env: { ...harness.env, ...env },
-    ...(platform === undefined ? {} : { platform }),
+    // Individual Windows cases override this. Command-text assertions otherwise use stable POSIX text.
+    platform: platform ?? 'darwin',
     streams: {
       stdout: Object.assign(out, { isTTY: false }),
       stderr: Object.assign(err, { isTTY: false }),

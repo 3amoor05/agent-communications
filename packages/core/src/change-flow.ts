@@ -13,12 +13,14 @@ import {
 import {
   agentMarker,
   canPrompt,
+  commandText,
   defaultStreams,
   inlineCommand,
   paint,
   refuseUnlessPerson,
   type ShellCommand,
   type Streams,
+  shellCommand,
   withWords,
 } from './cli-runtime.ts';
 import { type Config, classifyChange, type LooseningConsent } from './config.ts';
@@ -161,7 +163,7 @@ export async function gatedChangeAtTerminal<T>(
   options: {
     approvalId?: string | undefined;
     env: NodeJS.ProcessEnv;
-    output: { json?: boolean | undefined; color: boolean };
+    output: { json?: boolean | undefined; color: boolean; platform?: NodeJS.Platform | undefined };
     /**
      * The command to run again with `--approval <id>`, for the message an agent gets: as `shellCommand` printed it, so
      * that one it has no line for is shown as its words, to be typed, or a fixed string with nobody's words in it.
@@ -267,14 +269,14 @@ export async function approveChangeAtTerminal(
   core: Core,
   approvalId: string,
   env: NodeJS.ProcessEnv,
-  output: { json?: boolean | undefined; color: boolean },
+  output: { json?: boolean | undefined; color: boolean; platform?: NodeJS.Platform | undefined },
   streams: Streams = defaultStreams,
 ): Promise<{ approvalId: string; state: 'approved' | 'cancelled' }> {
   try {
     refuseUnlessPerson(env, streams, {
       refusedToAgent: 'only a person can approve a change, not an agent',
       refusedWithoutTerminal: 'approving a change needs an interactive terminal',
-      command: `agentcomms approve ${approvalId}`,
+      command: commandText(shellCommand(['agentcomms', 'approve', approvalId], output.platform)),
       color: output.color,
       json: output.json,
     });

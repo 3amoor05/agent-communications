@@ -33,7 +33,12 @@ export interface Connected {
 
 /** Connects an SDK client to a Gmail server, over the same messages a stdio client would exchange. */
 export async function connect(options: Parameters<typeof createGmailMcpServer>[0]): Promise<Connected> {
-  const built = await createGmailMcpServer(options);
+  const configured = options ?? {};
+  const built = await createGmailMcpServer({
+    ...configured,
+    // Tests that need Windows override this. Every other MCP command-text assertion is intentionally POSIX-pinned.
+    platform: configured.platform ?? 'darwin',
+  });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: 'test-client', version: '1.0.0' });
   await Promise.all([built.server.connect(serverTransport), client.connect(clientTransport)]);
@@ -77,6 +82,8 @@ export async function cli(
     endStdin?: boolean;
     env?: NodeJS.ProcessEnv;
     replies?: ReadonlyArray<readonly [RegExp, string]>;
+    /** The shell syntax printed commands use; pinned whenever a test asserts their text. */
+    platform?: NodeJS.Platform;
     /** The folder the command runs in: what a download offers as the current folder. A temporary one, always. */
     cwd?: string;
   } = {},
@@ -117,6 +124,8 @@ export async function cli(
     core: harness.core,
     ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
     env: { ...harness.env, ...options.env },
+    // Tests that need Windows override this. Every other printed-command assertion is intentionally POSIX-pinned.
+    platform: options.platform ?? 'darwin',
     streams: {
       stdout: Object.assign(out, { isTTY: tty }),
       stderr: Object.assign(err, { isTTY: tty }),

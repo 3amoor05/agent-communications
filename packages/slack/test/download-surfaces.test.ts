@@ -138,6 +138,7 @@ async function cli(harness: Harness, argv: string[], options: CliOptions = {}) {
   const code = await run([...(options.json === false ? [] : ['--json']), ...argv], {
     core: harness.core,
     env: { ...harness.env, ...(options.agent === false ? {} : { CLAUDECODE: '1' }) },
+    platform: 'darwin',
     ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
     exchange: (params) => harness.exchange(params),
     streams: {
@@ -174,6 +175,7 @@ async function connect(
     core: harness.core,
     env: harness.env,
     fetch: options.fetch,
+    platform: 'darwin',
     ...(options.cwd ? { cwd: options.cwd } : {}),
     ...(options.download ? { fileDownload: options.download } : {}),
     ...(options.workspace ? { workspace: options.workspace } : {}),

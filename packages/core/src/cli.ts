@@ -210,6 +210,7 @@ function refuseApprovalNotTaken(command: string | undefined, sub: string | undef
 export async function main(
   argv: string[] = process.argv.slice(2),
   env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
 ): Promise<number> {
   let parsed: ReturnType<typeof parse>;
   try {
@@ -219,9 +220,10 @@ export async function main(
     return writeError(usage(error instanceof Error ? error.message : String(error)), { json, color: false });
   }
   const { values, positionals } = parsed;
-  const output: OutputOptions = {
+  const output: OutputOptions & { platform: NodeJS.Platform } = {
     json: values.json,
     color: colorEnabled(env, process.stdout, values['no-color'] ? false : undefined),
+    platform,
   };
   if (values.version) {
     process.stdout.write(`${VERSION}\n`);
@@ -347,14 +349,14 @@ export async function main(
         const scope = { inbox: values.inbox, account: values.account };
         if (sub === undefined) {
           // Reporting takes no --approval: refused with the rest, before the update check's stop.
-          writeResult(changePolicyReport(await core.config.load(), scope), output, renderPolicy);
+          writeResult(changePolicyReport(await core.config.load(), scope, platform), output, renderPolicy);
           return;
         }
         if (!isChangePolicy(sub)) throw usage(`"${sub}" is not a change policy; use chat or confirm`);
         const where = values.account ? ['--account', values.account] : values.inbox ? ['--inbox', values.inbox] : [];
-        const report = await gatedChangeAtTerminal(core, changePolicyChange(core, scope, sub), {
+        const report = await gatedChangeAtTerminal(core, changePolicyChange(core, scope, sub, platform), {
           ...approval,
-          command: shellCommand(['agentcomms', 'policy', ...where, sub]),
+          command: shellCommand(['agentcomms', 'policy', ...where, sub], platform),
         });
         writeResult(report, output, renderPolicy);
         return;

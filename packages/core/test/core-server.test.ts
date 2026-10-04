@@ -15,6 +15,7 @@ import { type Core, openCore } from '../src/core.ts';
 import { CommsError, ERROR_REGISTRY, EXIT_CODES } from '../src/errors.ts';
 import { type CoreMcpOptions, createCoreMcpServer } from '../src/mcp/server.ts';
 import { type McpProduct, managedRuntimeDir, managedRuntimeEntry, pruneManagedRuntimes } from '../src/mcp-install.ts';
+import { changePolicyReport } from '../src/operations/change-policy.ts';
 import { type DoctorCheck, type DoctorReport, doctor } from '../src/operations/maintenance.ts';
 import { serverInstallChange, serverPruneChange } from '../src/operations/servers.ts';
 import { renderDoctor } from '../src/render.ts';
@@ -152,7 +153,14 @@ interface ToolResult {
 }
 
 async function connect(m: Machine, options: Partial<CoreMcpOptions> = {}) {
-  const { server } = await createCoreMcpServer({ core: m.core, env: m.env, keyring: null, ...options });
+  const { server } = await createCoreMcpServer({
+    core: m.core,
+    env: m.env,
+    keyring: null,
+    ...options,
+    // Individual Windows cases override this. Command-text assertions otherwise use stable POSIX text.
+    platform: options.platform ?? 'darwin',
+  });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: 'test', version: '0' });
   await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
@@ -520,6 +528,15 @@ test(
 );
 
 // ── The change policy ───────────────────────────────────────────────────────────────────────────────────────────
+
+test('change-policy repair commands use the selected shell platform', async () => {
+  const m = machine({
+    defaults: { changePolicy: 'confirm' },
+    accounts: { '7/slack': account({ changePolicy: 'chat' }) },
+  });
+  const report = changePolicyReport(await m.core.config.load(), {}, 'win32');
+  assert.equal(report.looser?.[0]?.tighten.command, 'agentcomms policy --account "7/slack" confirm');
+});
 
 test('the change policy: reported the same by the tool and the command, tightened at once', async () => {
   const m = machine({

@@ -88,7 +88,7 @@ test('importing copies the mailboxes, asks Google who they are, and leaves the o
     },
     'creds-broken.json': '{ not json',
   });
-  const context = new GmailContext({ core: harness.core, env: harness.env });
+  const context = new GmailContext({ core: harness.core, env: harness.env, platform: 'darwin' });
 
   const dry = await importLegacy(context, { dir: directory, dryRun: true });
   assert.equal(dry.dryRun, true);
@@ -118,6 +118,28 @@ test('importing copies the mailboxes, asks Google who they are, and leaves the o
   assert.equal(again.imported.length, 0);
   assert.equal(again.skipped.filter((candidate) => candidate.duplicateOf).length, 2);
   assert.equal((await inboxList(context)).length, 2);
+});
+
+test('legacy import renders its re-authorisation step for the selected shell platform', async () => {
+  const harness = await newHarness({ accounts: [{ sub: 'sub-7', email: 'seven@example.test' }] });
+  const directory = await legacyDirectory({
+    'gcp-oauth.keys.json': { installed: { client_id: TEST_CLIENT_ID, client_secret: TEST_CLIENT_SECRET } },
+    'creds-7.json': {
+      tokens: { refresh_token: await mintToken(harness, { sub: 'sub-7' }) },
+      scopes: [SCOPES.gmailReadonly, SCOPES.gmailCompose],
+    },
+  });
+  const context = new GmailContext({ core: harness.core, env: harness.env, platform: 'win32' });
+  const result = await importLegacy(context, { dir: directory, store: 'file' });
+  assert.ok(result.nextSteps.some((step) => step.startsWith('agent-gmail inbox reauth "7" --start')));
+});
+
+test('doctor renders a missing mailbox repair for the selected shell platform', async () => {
+  const harness = await newHarness();
+  const result = await doctor(new GmailContext({ core: harness.core, env: harness.env, platform: 'win32' }), {
+    inbox: '7',
+  });
+  assert.equal(result.checks.find((check) => check.id === 'inbox-known')?.fix, 'agent-gmail inbox add "7" --start');
 });
 
 test('an imported token Google will not renew is skipped with the reason, not written', async () => {

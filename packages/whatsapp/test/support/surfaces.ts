@@ -44,7 +44,7 @@ export const NOBODY = '15555550199@s.whatsapp.net';
 export async function connect(
   harness: Harness,
 ): Promise<{ client: Client; call: Call; close: () => Promise<unknown> }> {
-  const { server } = await createWhatsAppMcpServer({ env: harness.env });
+  const { server } = await createWhatsAppMcpServer({ env: harness.env, platform: 'darwin' });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: 'test', version: '0' });
   await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);

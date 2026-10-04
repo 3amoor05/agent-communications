@@ -1,3 +1,5 @@
+import { commandText, shellCommand } from '@agentcomms/core';
+
 /**
  * Permission tiers and what the granted scopes allow. Every tier also asks for `openid email`, which are non-sensitive
  * and give the stable account id (`sub`) used to key inboxes and to catch sign-ins with the wrong account.
@@ -78,8 +80,10 @@ export function tierOf(granted: readonly string[]): Tier | null {
 }
 
 /** The command that grants a missing capability, for SCOPE_MISSING hints. */
-export function grantHint(alias: string, needed: Capability): string {
-  if (needed === 'contacts') return `agent-gmail inbox reauth ${alias} --contacts`;
+export function grantHint(alias: string, needed: Capability, platform: NodeJS.Platform = process.platform): string {
+  if (needed === 'contacts') {
+    return commandText(shellCommand(['agent-gmail', 'inbox', 'reauth', alias, '--contacts'], platform));
+  }
   const tier: Tier = needed === 'read' ? 'read' : needed === 'draft' ? 'draft' : 'organize';
-  return `agent-gmail inbox reauth ${alias} --tier ${tier}`;
+  return commandText(shellCommand(['agent-gmail', 'inbox', 'reauth', alias, '--tier', tier], platform));
 }

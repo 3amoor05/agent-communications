@@ -1,9 +1,9 @@
 import {
   type AccountConfig,
   type ChangePolicy,
-  commandText,
   CommsError,
   type Config,
+  commandText,
   defaultChangePolicy,
   findById,
   type GatedChange,
@@ -61,13 +61,7 @@ export function signInStarted(context: SlackContext, started: StartedSignIn, rea
       tool: 'slack_workspace_finish',
       command: commandText(
         shellCommand(
-          [
-            'agent-slack',
-            'workspace',
-            ...(reauth ? ['reauth', started.alias] : ['add']),
-            '--finish',
-            started.flowId,
-          ],
+          ['agent-slack', 'workspace', ...(reauth ? ['reauth', started.alias] : ['add']), '--finish', started.flowId],
           context.platform,
         ),
       ),

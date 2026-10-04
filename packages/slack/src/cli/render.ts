@@ -311,13 +311,7 @@ export function renderSignInStarted(
       'Then finish it with:',
       `  ${commandText(
         shellCommand(
-          [
-            'agent-slack',
-            'workspace',
-            ...(reauth ? ['reauth', started.alias] : ['add']),
-            '--finish',
-            started.flowId,
-          ],
+          ['agent-slack', 'workspace', ...(reauth ? ['reauth', started.alias] : ['add']), '--finish', started.flowId],
           platform,
         ),
       )}`,
@@ -394,16 +388,7 @@ export function renderAppUpdateNeeded(
     'Once it is saved:',
     `  ${commandText(
       shellCommand(
-        [
-          'agent-slack',
-          'workspace',
-          'mode',
-          result.alias,
-          'send',
-          '--app-updated',
-          '--port',
-          String(manifest.port),
-        ],
+        ['agent-slack', 'workspace', 'mode', result.alias, 'send', '--app-updated', '--port', String(manifest.port)],
         platform,
       ),
     )}`,
@@ -452,16 +437,7 @@ export function renderManifestHelp(
           'Then connect it:',
           `  ${commandText(
             shellCommand(
-              [
-                'agent-slack',
-                'workspace',
-                'add',
-                '<name>',
-                '--client-id',
-                '<the Client ID>',
-                '--port',
-                String(port),
-              ],
+              ['agent-slack', 'workspace', 'add', '<name>', '--client-id', '<the Client ID>', '--port', String(port)],
               platform,
             ),
           )}`,

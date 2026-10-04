@@ -3,6 +3,7 @@ import { basename, join } from 'node:path';
 import {
   CommsError,
   type Config,
+  commandText,
   committedSecretsStore,
   defaultInternalDomains,
   duplicateInbox,
@@ -22,6 +23,7 @@ import {
   type SecretStore,
   type StoreKind,
   secretsStoreFor,
+  shellCommand,
   withCredentialsLock,
   withdrawStaged,
   writeOutcome,
@@ -468,7 +470,7 @@ export async function importLegacy(context: GmailContext, options: ImportOptions
     imported,
     skipped,
     ungatedServers,
-    nextSteps: nextSteps(imported, ungatedServers, dryRun),
+    nextSteps: nextSteps(imported, ungatedServers, dryRun, context.platform),
   };
 }
 
@@ -485,7 +487,12 @@ function outsideApproval(approved: ApprovedImport, candidate: ImportCandidate): 
   return null;
 }
 
-function nextSteps(imported: ImportCandidate[], ungated: LegacyServerFinding[], dryRun: boolean): string[] {
+function nextSteps(
+  imported: ImportCandidate[],
+  ungated: LegacyServerFinding[],
+  dryRun: boolean,
+  platform: NodeJS.Platform,
+): string[] {
   const steps: string[] = [];
   if (dryRun) {
     steps.push('Run the same command without --dry-run to import these.');
@@ -494,7 +501,9 @@ function nextSteps(imported: ImportCandidate[], ungated: LegacyServerFinding[], 
   const needsUpgrade = imported.filter((candidate) => candidate.tier !== 'organize');
   for (const candidate of needsUpgrade) {
     steps.push(
-      `agent-gmail inbox reauth ${candidate.alias} --start  (to label and archive, and to record which account it is)`,
+      `${commandText(
+        shellCommand(['agent-gmail', 'inbox', 'reauth', candidate.alias, '--start'], platform),
+      )}  (to label and archive, and to record which account it is)`,
     );
   }
   for (const finding of ungated) {

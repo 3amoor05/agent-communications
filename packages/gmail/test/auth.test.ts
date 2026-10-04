@@ -45,8 +45,9 @@ test('tiers map to scopes, and granted scopes map back to capabilities', () => {
     SCOPES.email,
     SCOPES.gmailReadonly,
   ]);
-  assert.match(grantHint('work', 'organize'), /inbox reauth work --tier organize/);
-  assert.match(grantHint('work', 'contacts'), /--contacts/);
+  assert.match(grantHint('work', 'organize', 'darwin'), /inbox reauth work --tier organize/);
+  assert.match(grantHint('work', 'contacts', 'darwin'), /--contacts/);
+  assert.equal(grantHint('7', 'contacts', 'win32'), 'agent-gmail inbox reauth "7" --contacts');
 });
 
 test('the consent URL carries PKCE S256, a state and login_hint, and hd only when asked for', () => {

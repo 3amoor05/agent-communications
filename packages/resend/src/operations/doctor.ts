@@ -1,4 +1,4 @@
-import { commandText, CommsError, secretsStoreOf, shellCommand, toCommsError } from '@agentcomms/core';
+import { CommsError, commandText, secretsStoreOf, shellCommand, toCommsError } from '@agentcomms/core';
 import { keyPermissionOf, type NamedAccount } from '../accounts.ts';
 import { resendRequest } from '../api/client.ts';
 import type { ResendContext } from '../context.ts';
@@ -51,9 +51,7 @@ async function checkAccount(context: ResendContext, named: NamedAccount, offline
             detail: 'the key is missing from the secret store',
             fix: `${commandText(
               shellCommand(['agent-resend', 'account', 'remove', named.name], context.platform),
-            )}, then ${commandText(
-              shellCommand(['agent-resend', 'account', 'add', named.name], context.platform),
-            )}`,
+            )}, then ${commandText(shellCommand(['agent-resend', 'account', 'add', named.name], context.platform))}`,
           },
     );
   } catch (error) {

@@ -73,9 +73,7 @@ test('commands to run again quote a spaced word on POSIX and print words instead
   const posix = await addClient('client secret.json', 'posix-client', 'darwin');
   assert.match(
     posix.hint,
-    new RegExp(
-      `agent-gmail client add '${escapedForRegExp(posix.clientPath)}' --name posix-client --json --approval`,
-    ),
+    new RegExp(`agent-gmail client add '${escapedForRegExp(posix.clientPath)}' --name posix-client --json --approval`),
   );
 
   const windows = await addClient('client 100%.json', 'windows-client', 'win32');

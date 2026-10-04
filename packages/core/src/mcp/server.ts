@@ -53,6 +53,8 @@ import { VERSION } from '../version.ts';
 export interface CoreMcpOptions {
   core?: Core | undefined;
   env?: NodeJS.ProcessEnv | undefined;
+  /** The shell syntax used for commands returned by tools. */
+  platform?: NodeJS.Platform | undefined;
   /** For a test: the keychain module the doctor probes, so a test never touches the real login keychain. */
   keyring?: KeyringModule | null | undefined;
   /** For a test: the stores a secrets migration reads and writes, likewise. */
@@ -118,6 +120,7 @@ async function buildInstructions(core: Core): Promise<string> {
 export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise<CoreMcpServer> {
   const env = options.env ?? process.env;
   const core = options.core ?? openCore({ env });
+  const platform = options.platform ?? process.platform;
   const server = new McpServer(
     { name: 'agentcomms', version: VERSION },
     { instructions: await buildInstructions(core) },
@@ -319,11 +322,14 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
       if (args.set === undefined) {
         return read(async () => {
           refuseApprovalWithoutChange(args.approvalId);
-          return changePolicyReport(await core.config.load(), { inbox: args.inbox, account: args.account });
+          return changePolicyReport(await core.config.load(), { inbox: args.inbox, account: args.account }, platform);
         });
       }
       const to = args.set as (typeof CHANGE_POLICIES)[number];
-      return change(() => changePolicyChange(core, { inbox: args.inbox, account: args.account }, to), args.approvalId);
+      return change(
+        () => changePolicyChange(core, { inbox: args.inbox, account: args.account }, to, platform),
+        args.approvalId,
+      );
     },
   );
 

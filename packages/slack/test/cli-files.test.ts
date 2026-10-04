@@ -4,6 +4,7 @@ import { mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { type TestContext, test } from 'node:test';
+import { commandText, shellCommand } from '@agentcomms/core';
 import { run } from '../src/cli/program.ts';
 import { type FakeSlack, startFakeSlack } from './support/fake-slack.ts';
 import { type Harness, newHarness } from './support/harness.ts';
@@ -71,6 +72,8 @@ async function cli(harness: Harness, fake: FakeSlack, argv: string[]) {
     },
     openBrowser: () => undefined,
     probe: (input, init) => harness.probe(input, init),
+    // This file asserts runnable commands in POSIX form; Windows rendering has its own focused cases.
+    platform: 'darwin',
     // Always the loopback Slack: a test that forgot it would reach the real one.
     read: fake.fetch,
   });
@@ -372,9 +375,18 @@ test('the command a changed-file refusal names can be run as it is written, at p
   const { harness, fake, docs } = await world(t);
   const real = file(docs, 'totals.csv', 'a,b\n1,2\n');
   const created = await data<Drafted>(harness, fake, ['draft', 'create', ...W, '--channel', 'C1', '--file', real]);
-  const expected = `agent-slack draft update ${created.draftId} --workspace acme --file <path…>`;
+  const expected = commandText(
+    shellCommand(
+      ['agent-slack', 'draft', 'update', created.draftId, '--workspace', 'acme', '--file', '<path…>'],
+      'darwin',
+    ),
+  );
   const runAsWritten = async (command: string): Promise<void> => {
-    const argv = command.replace('<path…>', real).split(' ').slice(1);
+    const argv = command
+      .replace('<path…>', real)
+      .split(' ')
+      .slice(1)
+      .map((word) => (word.startsWith("'") && word.endsWith("'") ? word.slice(1, -1) : word));
     const ran = await cli(harness, fake, argv);
     assert.equal(ran.code, 0, `${command}: ${ran.stdout}${ran.stderr}`);
   };

@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import {
   type CommsError,
   type Config,
+  commandText,
   expandHome,
   findById,
   findUngatedGmailServers,
@@ -18,6 +19,7 @@ import {
   probeKeychain,
   type RegisteredServer,
   secretsStoreOf,
+  shellCommand,
 } from '@agentcomms/core';
 import { capabilitiesOf, scopesFor, TIERS, type Tier } from '../auth/scopes.ts';
 import { TokenSource } from '../auth/session.ts';
@@ -41,20 +43,23 @@ import { orphanedSecretsPath } from './inboxes.ts';
  * turns a staleness warning into a widening of what an agent may reach — the opposite of a repair. So the flags
  * are read back off the entry that is actually there.
  */
-function repairCommand(server: RegisteredServer): string {
+function repairCommand(server: RegisteredServer, platform: NodeJS.Platform): string {
   // Every command this package issues targets user scope. Pointing one at a project-scoped entry would remove
   // nothing, add a second entry at user scope, and report success — with the stale one still in force for that
   // project. There is no flag that reaches it, so the honest answer is the manual one.
   if (server.scope === 'project') {
     return `remove "${server.name}" from the project entry in ${server.path} by hand, then re-run mcp install`;
   }
-  const flags = [`--client ${server.client}`];
-  if (server.name && server.name !== 'gmail') flags.push(`--name ${server.name}`);
+  const words = ['agent-gmail', 'mcp', 'install', '--client', server.client];
+  if (server.name && server.name !== 'gmail') words.push('--name', server.name);
   const inbox = server.args[server.args.indexOf('--inbox') + 1];
-  if (server.args.includes('--inbox') && inbox) flags.push(`--inbox ${inbox}`);
-  if (server.args.includes('--read-only')) flags.push('--read-only');
-  if (server.args.some((argument) => argument.startsWith(`${GMAIL_MCP.npxPackage}@`))) flags.push('--launcher npx');
-  return `agent-gmail mcp install ${flags.join(' ')} --force`;
+  if (server.args.includes('--inbox') && inbox) words.push('--inbox', inbox);
+  if (server.args.includes('--read-only')) words.push('--read-only');
+  if (server.args.some((argument) => argument.startsWith(`${GMAIL_MCP.npxPackage}@`))) {
+    words.push('--launcher', 'npx');
+  }
+  words.push('--force');
+  return commandText(shellCommand(words, platform));
 }
 
 export type CheckStatus = 'ok' | 'warn' | 'fail' | 'skipped';
@@ -260,7 +265,9 @@ async function inboxChecks(context: GmailContext, alias: string): Promise<Check[
         title: `Mailbox ${alias}`,
         status: 'fail',
         detail: renamed ? renamed.message : 'no such mailbox',
-        fix: current ? `agent-gmail doctor --inbox ${current}` : `agent-gmail inbox add ${alias} --start`,
+        fix: current
+          ? commandText(shellCommand(['agent-gmail', 'doctor', '--inbox', current], context.platform))
+          : commandText(shellCommand(['agent-gmail', 'inbox', 'add', alias, '--start'], context.platform)),
         inbox: alias,
       },
     ];
@@ -278,7 +285,10 @@ async function inboxChecks(context: GmailContext, alias: string): Promise<Check[
     title: `Permissions for ${alias}`,
     status: missing.length === 0 ? 'ok' : 'warn',
     detail: missing.length === 0 ? `${[...granted].join(', ')}` : `missing: ${missing.join(', ')}`,
-    fix: missing.length === 0 ? undefined : `agent-gmail inbox reauth ${alias}`,
+    fix:
+      missing.length === 0
+        ? undefined
+        : commandText(shellCommand(['agent-gmail', 'inbox', 'reauth', alias], context.platform)),
     inbox: alias,
   });
 
@@ -314,7 +324,7 @@ async function inboxChecks(context: GmailContext, alias: string): Promise<Check[
       title: `Sign-in for ${alias}`,
       status: 'fail',
       detail: failure.message,
-      fix: failure.hint ?? `agent-gmail inbox reauth ${alias}`,
+      fix: failure.hint ?? commandText(shellCommand(['agent-gmail', 'inbox', 'reauth', alias], context.platform)),
       inbox: alias,
     });
   }
@@ -329,7 +339,9 @@ async function inboxChecks(context: GmailContext, alias: string): Promise<Check[
         title: `Mailbox ${alias}`,
         status: matches ? 'ok' : 'warn',
         detail: matches ? profile.emailAddress : `recorded as ${inbox.email}, but Google says ${profile.emailAddress}`,
-        fix: matches ? undefined : `agent-gmail inbox reauth ${alias}`,
+        fix: matches
+          ? undefined
+          : commandText(shellCommand(['agent-gmail', 'inbox', 'reauth', alias], context.platform)),
         inbox: alias,
       });
     } catch (error) {
@@ -355,7 +367,7 @@ async function inboxChecks(context: GmailContext, alias: string): Promise<Check[
         title: `Last used: ${alias}`,
         status: 'warn',
         detail: `${Math.floor(days)} days ago; Google drops a token unused for six months`,
-        fix: `agent-gmail whoami --inbox ${alias}`,
+        fix: commandText(shellCommand(['agent-gmail', 'whoami', '--inbox', alias], context.platform)),
         inbox: alias,
       });
     }
@@ -558,7 +570,10 @@ async function mcpChecks(context: GmailContext, scope: Scope | undefined): Promi
                       `${entry.server.client} runs ${entry.version} as "${entry.server.name}"; this release is ${VERSION}`,
                   )
                   .join('; '),
-          fix: stale.length === 0 ? undefined : stale.map((entry) => repairCommand(entry.server)).join(' && '),
+          fix:
+            stale.length === 0
+              ? undefined
+              : stale.map((entry) => repairCommand(entry.server, context.platform)).join(' && '),
         },
   );
 
@@ -574,7 +589,7 @@ async function mcpChecks(context: GmailContext, scope: Scope | undefined): Promi
       title: `MCP entry "${server.name}" (${server.client})`,
       status: missing ? 'fail' : 'ok',
       detail: missing ? `${missing} is not there any more` : server.command,
-      fix: missing ? repairCommand(server) : undefined,
+      fix: missing ? repairCommand(server, context.platform) : undefined,
     });
   }
   return checks;

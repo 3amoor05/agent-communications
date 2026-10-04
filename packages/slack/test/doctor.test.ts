@@ -64,6 +64,7 @@ test('a healthy install is healthy, and nothing asks to be fixed', () => {
   const result = doctor({
     config: config({ acme: account() }),
     now: NOW,
+    platform: 'darwin',
     bundles: new Map([['acme', bundle()]]),
   });
   assert.equal(result.healthy, true);
@@ -200,7 +201,12 @@ test('scope drift is a failure, in both directions', () => {
 test('whether each workspace can send files: off by choice in read mode, and a send grant without files:write fails', () => {
   const run = (over: Partial<AccountConfig>) =>
     find(
-      doctor({ config: config({ acme: account(over) }), now: NOW, bundles: new Map([['acme', bundle()]]) }),
+      doctor({
+        config: config({ acme: account(over) }),
+        now: NOW,
+        platform: 'darwin',
+        bundles: new Map([['acme', bundle()]]),
+      }),
       'files',
     );
   // A read install that cannot send files is working as chosen: nothing is wrong, and nothing needs fixing.
@@ -242,6 +248,16 @@ test('a stored credential that cannot be read is a different finding from one th
   assert.equal(find(corrupt, 'credential')?.status, 'fail');
   assert.match(find(corrupt, 'credential')?.detail ?? '', /cannot be read/);
   assert.doesNotMatch(find(corrupt, 'credential')?.detail ?? '', /no stored token/);
+});
+
+test('repair commands use the selected shell platform', () => {
+  const result = doctor({
+    config: config({ '7/slack': account() }),
+    now: NOW,
+    platform: 'win32',
+    bundles: new Map([['7/slack', null]]),
+  });
+  assert.equal(find(result, 'credential')?.fix, 'agent-slack workspace reauth "7/slack"');
 });
 
 test('an expired access token is not reported as valid until the moment it expired', () => {
@@ -328,6 +344,7 @@ test('another Slack server on this machine is reported, because it is a second r
   const result = doctor({
     config: config({ acme: account() }),
     now: NOW,
+    platform: 'darwin',
     bundles: new Map([['acme', bundle()]]),
     registeredServers: [
       ours,
@@ -392,6 +409,7 @@ test('a registered Slack server older than this release is reported, with a repa
   const current = doctor({
     config: config({ acme: account() }),
     now: NOW,
+    platform: 'darwin',
     bundles: new Map([['acme', bundle()]]),
     registeredServers: [
       server({ name: 'slack', args: [managedRuntimeEntry('/data', '@agentcomms/slack', VERSION), 'mcp'] }),
@@ -416,6 +434,7 @@ test('a scan that finds none of our servers says so, as something to look at —
     const result = doctor({
       config: config({ acme: account() }),
       now: NOW,
+      platform: 'darwin',
       bundles: new Map([['acme', bundle()]]),
       registeredServers,
     });
@@ -432,6 +451,7 @@ test('a registered entry whose runtime is gone is a failure with the command tha
   const result = doctor({
     config: config({ acme: account() }),
     now: NOW,
+    platform: 'darwin',
     bundles: new Map([['acme', bundle()]]),
     registeredServers: [gone],
     missingFiles: new Map([[gone, gone.args[0] ?? '']]),

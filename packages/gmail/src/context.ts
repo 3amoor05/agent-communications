@@ -98,7 +98,7 @@ export class GmailContext {
   async requireCapability(resolved: ResolvedInbox, capability: Capability): Promise<void> {
     if (capabilitiesOf(resolved.inbox.grantedScopes).has(capability)) return;
     throw new CommsError('SCOPE_MISSING', `${resolved.alias} was not granted permission to ${describe(capability)}`, {
-      hint: `Grant it: \`${grantHint(resolved.alias, capability)}\`.`,
+      hint: `Grant it: ${grantHint(resolved.alias, capability, this.platform)}.`,
       details: { alias: resolved.alias, capability },
     });
   }

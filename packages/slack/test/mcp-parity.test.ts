@@ -64,6 +64,7 @@ async function connect(harness: Harness, options: { workspace?: string; fetch?: 
   const { server } = await createSlackMcpServer({
     core: harness.core,
     env: harness.env,
+    platform: 'darwin',
     exchange: (params) => harness.exchange(params),
     listenerCommand: LISTENER_COMMAND,
     fetch: options.fetch ?? slack(),
@@ -100,6 +101,7 @@ async function cli(harness: Harness, argv: string[], read: FakeFetch = slack()) 
   const code = await run(['--json', ...argv], {
     core: harness.core,
     env: { ...harness.env, CLAUDECODE: '1' },
+    platform: 'darwin',
     exchange: (params) => harness.exchange(params),
     streams: { stdout: out, stderr: new PassThrough(), stdin: new PassThrough() },
     openBrowser: () => undefined,
@@ -119,6 +121,7 @@ async function printed(harness: Harness, argv: string[], read: FakeFetch = slack
   const code = await run(argv, {
     core: harness.core,
     env: harness.env,
+    platform: 'darwin',
     exchange: (params) => harness.exchange(params),
     streams: { stdout: out, stderr: new PassThrough(), stdin: new PassThrough() },
     openBrowser: () => undefined,
@@ -983,7 +986,9 @@ test('a draft is shown as what it would post, by `draft show` and `slack_draft_g
     assert.equal(shown.problem?.reason, 'source-differs');
     assert.match(
       shown.problem?.hint ?? '',
-      new RegExp(`^It was changed outside agent-slack\\..*\`agent-slack draft delete ${draftId} --workspace <name>\``),
+      new RegExp(
+        `^It was changed outside agent-slack\\..*\`agent-slack draft delete ${draftId} --workspace '<name>'\``,
+      ),
     );
     assert.doesNotMatch(JSON.stringify(shown), /lunch/);
 

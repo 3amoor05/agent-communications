@@ -118,11 +118,15 @@ export interface DraftChange {
  * of the words means reading them back. What `draftPayload` writes is user mentions and one broadcast; anything else
  * standing there was not written by it, and the draft is refused as the gate refuses a draft changed by hand.
  */
-function mentionsOf(draft: SlackDraft, text: string): { users: string[]; broadcast: string | undefined } {
+function mentionsOf(
+  draft: SlackDraft,
+  text: string,
+  platform: NodeJS.Platform,
+): { users: string[]; broadcast: string | undefined } {
   const body = escapeForSlack(draft.source);
   const changed = (): CommsError =>
     new CommsError('BAD_DATA', `draft "${draft.draftId}" is not what its source composes to, so it cannot be edited`, {
-      hint: changedOutsideHint(draft.draftId),
+      hint: changedOutsideHint(draft.draftId, platform),
       details: { draftId: draft.draftId, reason: 'source-differs' },
     });
   if (!composedFrom(draft.source, text)) throw changed();
@@ -158,8 +162,8 @@ export async function updateDraft(
   const store = openDraftStore(context.core.paths.stateDir, context.now);
   const draft = await ownDraft(store, account.id, draftId);
   // As the gate would post it, or its refusal: a draft changed outside agent-slack is composed again, not edited.
-  const posted = postedPayload(draft);
-  const kept = mentionsOf(draft, posted.text);
+  const posted = postedPayload(draft, context.platform);
+  const kept = mentionsOf(draft, posted.text, context.platform);
   const next: DraftInput = {
     channel: change.channel ?? posted.channel,
     text: change.text ?? draft.source,
@@ -335,8 +339,8 @@ function kept(draft: SlackDraft): Pick<DraftView, 'revision' | 'accountId' | 'cr
  * `postPrepared` sends, so a draft is refused here exactly when preparing or posting it would be, and is shown as
  * exactly what they would send.
  */
-export function viewDraft(draft: SlackDraft): DraftView {
-  const payload = postedPayload(draft);
+export function viewDraft(draft: SlackDraft, platform: NodeJS.Platform = process.platform): DraftView {
+  const payload = postedPayload(draft, platform);
   const written = composedFrom(draft.source, payload.text);
   return {
     ...heading(draft),
@@ -348,7 +352,7 @@ export function viewDraft(draft: SlackDraft): DraftView {
             code: 'BAD_DATA',
             reason: 'source-differs',
             message: `draft "${draft.draftId}" is not what its source composes to, so the words it keeps as typed are not what it posts`,
-            hint: changedOutsideHint(draft.draftId),
+            hint: changedOutsideHint(draft.draftId, platform),
           },
         }),
     payload,
@@ -362,7 +366,7 @@ export async function showDraft(context: SlackContext, alias: string, draftId: s
   const { account } = requireWorkspace(await context.config(), alias);
   // Whose it is before what it says: another workspace's draft is absent here, refused or not.
   const draft = await ownDraft(openDraftStore(context.core.paths.stateDir, context.now), account.id, draftId);
-  return viewDraft(draft);
+  return viewDraft(draft, context.platform);
 }
 
 /**
@@ -377,7 +381,7 @@ export async function listDrafts(context: SlackContext, alias: string): Promise<
   const drafts = await openDraftStore(context.core.paths.stateDir, context.now).list(account.id);
   return drafts.map((draft) => {
     try {
-      return viewDraft(draft);
+      return viewDraft(draft, context.platform);
     } catch (error) {
       if (!(error instanceof CommsError) || error.details?.reason !== 'not-composed') throw error;
       return {

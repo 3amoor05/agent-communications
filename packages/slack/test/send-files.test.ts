@@ -63,7 +63,7 @@ async function world(
     ...(options.grantedScopes === undefined ? {} : { grantedScopes: options.grantedScopes }),
     ...(options.sendPolicy === undefined ? {} : { sendPolicy: options.sendPolicy }),
   });
-  const context = new SlackContext({ core: harness.core, env: harness.env });
+  const context = new SlackContext({ core: harness.core, env: harness.env, platform: 'darwin' });
   const w = {} as World;
   w.room = { id: 'C1', name: 'eng', num_members: options.members ?? 4, is_member: true };
   const fake = await startFakeSlack({ 'conversations.info': () => ({ ok: true, channel: w.room }) });

@@ -55,10 +55,7 @@ interface Started {
   finish: { tool: string; command: string };
 }
 
-async function connect(
-  harness: Harness,
-  options: { workspace?: string; platform?: NodeJS.Platform } = {},
-) {
+async function connect(harness: Harness, options: { workspace?: string; platform?: NodeJS.Platform } = {}) {
   const { server } = await createSlackMcpServer({
     core: harness.core,
     env: harness.env,
@@ -66,7 +63,8 @@ async function connect(
     listenerCommand: LISTENER_COMMAND,
     // Nothing here reads Slack, and anything that tried would be answered by this rather than by slack.com.
     fetch: async () => new Response(JSON.stringify({ ok: false, error: 'unknown_method' })),
-    platform: options.platform,
+    // The one Windows assertion overrides this; every other command-text assertion is POSIX-pinned.
+    platform: options.platform ?? 'darwin',
     ...(options.workspace ? { workspace: options.workspace } : {}),
   });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();

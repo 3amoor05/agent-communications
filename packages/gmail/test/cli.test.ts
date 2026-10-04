@@ -61,7 +61,8 @@ async function cli(
       command: process.execPath,
       args: ['--experimental-strip-types', '--disable-warning=ExperimentalWarning', CLI_ENTRY],
     },
-    platform: options.platform,
+    // Tests that need Windows override this. Every other printed-command assertion is intentionally POSIX-pinned.
+    platform: options.platform ?? 'darwin',
   });
   return { code, stdout, stderr, json: <T>() => JSON.parse(stdout) as T };
 }
@@ -721,10 +722,7 @@ test('send execute rendering preserves every subject and every recipient list on
           expiresAt: '2026-10-04T12:00:00.000Z',
           nextStep: 'Wait for approval.',
         };
-        const list = (flag: string, values: readonly string[]) => [
-          flag,
-          ...(values.length > 0 ? values : ['none']),
-        ];
+        const list = (flag: string, values: readonly string[]) => [flag, ...(values.length > 0 ? values : ['none'])];
         const words = [
           'agent-gmail',
           'send',
@@ -800,7 +798,11 @@ test('--expect-subject none accepts only an empty, whitespace-only or literal no
       'none',
       '--json',
     ]);
-    assert.equal(sent.code, sends ? EXIT_CODES.OK : EXIT_CODES.APPROVAL, JSON.stringify({ subject, output: sent.stdout }));
+    assert.equal(
+      sent.code,
+      sends ? EXIT_CODES.OK : EXIT_CODES.APPROVAL,
+      JSON.stringify({ subject, output: sent.stdout }),
+    );
     if (!sends) assert.equal(sent.json<Envelope<never>>().error?.code, 'APPROVAL_VOID');
   }
 });

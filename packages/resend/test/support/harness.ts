@@ -111,7 +111,7 @@ export async function newHarness(): Promise<Harness> {
     { id: PENDING_DOMAIN_ID, name: 'pending.test', status: 'pending' },
   ];
 
-  const context = (surface: 'cli' | 'mcp' = 'cli', platform?: NodeJS.Platform) =>
+  const context = (surface: 'cli' | 'mcp' = 'cli', platform: NodeJS.Platform = 'darwin') =>
     new ResendContext({ core, env, fetch: fake.fetch, throttle: { intervalMs: 0 }, surface, platform });
 
   const harness: Harness = {
@@ -178,7 +178,8 @@ export async function newHarness(): Promise<Harness> {
         env: { ...env, ...options.env },
         fetch: fake.fetch,
         throttle: { intervalMs: 0 },
-        platform: options.platform,
+        // Tests that need Windows override this. Every other printed-command assertion is intentionally POSIX-pinned.
+        platform: options.platform ?? 'darwin',
         streams: {
           stdout: Object.assign(out, { isTTY: tty }),
           stderr: Object.assign(err, { isTTY: tty }),
@@ -198,7 +199,8 @@ export async function newHarness(): Promise<Harness> {
         env,
         fetch: fake.fetch,
         throttle: { intervalMs: 0 },
-        platform: options.platform,
+        // Tests that need Windows override this. Every other printed-command assertion is intentionally POSIX-pinned.
+        platform: options.platform ?? 'darwin',
         ...(options.account ? { account: options.account } : {}),
       });
       const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();

@@ -10,8 +10,8 @@ import {
   publicView,
   renderMessagePreview,
   resolveName,
-  shellCommand,
   type SendPolicy,
+  shellCommand,
   stricterPolicy,
 } from '@agentcomms/core';
 import type { GmailContext, ResolvedInbox } from '../context.ts';

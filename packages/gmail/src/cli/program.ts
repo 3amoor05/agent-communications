@@ -1305,7 +1305,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
             context.core,
             approvalId,
             env,
-            { json: globalOptions.json, color: globalOptions.color },
+            { json: globalOptions.json, color: globalOptions.color, platform: context.platform },
             streams,
           );
           streams.stdout.write(
@@ -1946,15 +1946,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
                 authUrl: started.authUrl,
                 finish: commandText(
                   shellCommand(
-                    [
-                      'agent-gmail',
-                      'inbox',
-                      'add',
-                      '--finish',
-                      started.flowId,
-                      '--wait',
-                      String(FINISH_WAIT_SECONDS),
-                    ],
+                    ['agent-gmail', 'inbox', 'add', '--finish', started.flowId, '--wait', String(FINISH_WAIT_SECONDS)],
                     context.platform,
                   ),
                 ),

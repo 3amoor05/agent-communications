@@ -102,7 +102,8 @@ async function cli(
     },
     openBrowser: () => undefined,
     probe: (input, init) => harness.probe(input, init),
-    platform: options.platform,
+    // Tests that need Windows override this. Every other printed-command assertion is intentionally POSIX-pinned.
+    platform: options.platform ?? 'darwin',
     ...(options.read ? { read: options.read } : {}),
     listenerCommand: LISTENER_COMMAND,
   });
@@ -556,7 +557,7 @@ test('the manifest names the other mode and what switching to it takes', async (
   assert.match(read.stdout, /agent-slack manifest --mode send --port 51234/);
   assert.match(read.stdout, /update this same app with it first/);
   const send = await cli(harness, ['manifest', '--mode', 'send', '--port', '51234']);
-  assert.match(send.stdout, /agent-slack workspace mode <name> send --app-updated --port 51234/);
+  assert.match(send.stdout, /agent-slack workspace mode '<name>' send --app-updated --port 51234/);
 });
 
 test('a bot token in the reply is refused, not dropped', async () => {
@@ -1640,11 +1641,9 @@ test('the widening command uses the explicitly selected Windows quoting', async 
   const harness = await newHarness();
   await harness.addWorkspace({ alias: 'acme' });
   const port = String(await freePort());
-  const refused = await cli(
-    harness,
-    ['--json', 'workspace', 'reauth', 'acme', '--mode', 'send', '--port', port],
-    { platform: 'win32' },
-  );
+  const refused = await cli(harness, ['--json', 'workspace', 'reauth', 'acme', '--mode', 'send', '--port', port], {
+    platform: 'win32',
+  });
   const { approvalId } = pendingOf(refused);
   const hint = refused.json<Envelope<never>>().error?.hint ?? '';
   assert.match(

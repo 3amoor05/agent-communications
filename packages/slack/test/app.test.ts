@@ -127,7 +127,8 @@ async function cli(
     probe: (probeInput, init) => harness.probe(probeInput, init),
     read: unreachable,
     appConfig: options.appConfig ?? options.fake?.fetch ?? unreachable,
-    platform: options.platform,
+    // Tests that need Windows override this. Every other printed-command assertion is intentionally POSIX-pinned.
+    platform: options.platform ?? 'darwin',
   });
   return { code, stdout, stderr, json: <T>() => JSON.parse(stdout) as Envelope<T> };
 }

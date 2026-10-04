@@ -53,6 +53,7 @@ test('a CLI command writes down the renewed token it kept, before it returns', a
   const code = await run(['--json', 'channels', '--workspace', 'acme'], {
     core: { ...harness.core, secrets: async () => store },
     env: harness.env,
+    platform: 'darwin',
     exchange: (params) => harness.exchange(params),
     persist: QUICK,
     streams: { stdout: new PassThrough(), stderr: stderr.stream, stdin: new PassThrough() },
@@ -83,6 +84,7 @@ test('a CLI command that cannot write down its renewed token says so on stderr, 
   const code = await run(['--json', 'channels', '--workspace', 'acme'], {
     core: { ...harness.core, secrets: async () => store },
     env: harness.env,
+    platform: 'darwin',
     exchange: (params) => harness.exchange(params),
     persist: QUICK,
     streams: { stdout: stdout.stream, stderr: stderr.stream, stdin: new PassThrough() },
@@ -271,6 +273,7 @@ test('an MCP client that closes the connection without a signal still gets the k
   const { server } = await createSlackMcpServer({
     core: { ...harness.core, secrets: async () => store },
     env: harness.env,
+    platform: 'darwin',
     exchange: (params) => harness.exchange(params),
     persist: QUICK,
     fetch: noChannels,
@@ -311,6 +314,7 @@ test('an MCP client that just closes stdin still gets the kept token written dow
   const { server } = await createSlackMcpServer({
     core: { ...harness.core, secrets: async () => store },
     env: harness.env,
+    platform: 'darwin',
     exchange: (params) => harness.exchange(params),
     persist: QUICK,
     fetch: noChannels,
@@ -370,6 +374,7 @@ test('an MCP server that cannot write down its renewed token at the end says so 
   const { server } = await createSlackMcpServer({
     core: { ...harness.core, secrets: async () => store },
     env: harness.env,
+    platform: 'darwin',
     exchange: (params) => harness.exchange(params),
     persist: QUICK,
     fetch: noChannels,

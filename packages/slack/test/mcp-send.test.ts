@@ -10,6 +10,7 @@ import { run } from '../src/cli/program.ts';
 import { compose } from '../src/compose/blocks.ts';
 import { openDraftStore } from '../src/compose/drafts.ts';
 import { createSlackMcpServer } from '../src/mcp/server.ts';
+import { approveCommand, changedOutsideHint, refileCommand } from '../src/operations/send.ts';
 import { type Harness, newHarness } from './support/harness.ts';
 
 /**
@@ -70,6 +71,7 @@ async function connect(harness: Harness, fetch: FakeFetch, options: { workspace?
     core: harness.core,
     env: harness.env,
     fetch,
+    platform: 'darwin',
     ...(options.workspace ? { workspace: options.workspace } : {}),
   });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -81,6 +83,14 @@ async function connect(harness: Harness, fetch: FakeFetch, options: { workspace?
 }
 
 const failure = (result: ToolResult): Failure => (result.structuredContent as { error: Failure }).error;
+
+test('send handoff commands use the selected shell platform', () => {
+  assert.equal(approveCommand('7', 'win32'), 'agent-slack approve "7"');
+  const refile = refileCommand('8/slack', '9', 'win32');
+  assert.match(refile, /^\["agent-slack","draft","update","9","--workspace","8\/slack","--file",/);
+  assert.match(refile, /the command's words, written as JSON/);
+  assert.match(changedOutsideHint('10', 'win32'), /\["agent-slack","draft","delete","10","--workspace","<name>"\]/);
+});
 
 /** The CLI, as a person at a terminal runs it: the approval code is read off the prompt and typed back. */
 async function cli(
@@ -118,6 +128,7 @@ async function cli(
     },
     openBrowser: () => undefined,
     probe: (probeInput, init) => harness.probe(probeInput, init),
+    platform: 'darwin',
     // Always a scripted Slack: a test that forgot it would reach the real one.
     read: options.read ?? scripted().read,
   });

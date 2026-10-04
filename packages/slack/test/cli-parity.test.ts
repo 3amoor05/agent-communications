@@ -37,6 +37,7 @@ async function cli(harness: Harness, argv: string[], options: { read?: FakeFetch
   const code = await run(argv, {
     core: harness.core,
     env: harness.env,
+    platform: 'darwin',
     exchange: (params) => harness.exchange(params),
     streams: {
       stdout: Object.assign(out, { isTTY: false }),

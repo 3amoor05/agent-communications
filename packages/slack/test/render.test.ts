@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { commandText, shellCommand } from '@agentcomms/core';
-import type { SlackDraft } from '../src/compose/drafts.ts';
 import {
   renderCreatedDraft,
   renderManifestHelp,
@@ -10,6 +9,7 @@ import {
   renderWorkspace,
   renderWorkspaces,
 } from '../src/cli/render.ts';
+import type { SlackDraft } from '../src/compose/drafts.ts';
 import type { WorkspaceView } from '../src/operations/workspaces.ts';
 
 /**
@@ -86,10 +86,7 @@ test('renderer commands use the explicitly selected shell platform', () => {
     renderCreatedDraft(draft, 'two words', 'win32'),
     new RegExp(
       commandText(
-        shellCommand(
-          ['agent-slack', 'post', 'prepare', '--workspace', 'two words', '--draft', 'draft one'],
-          'win32',
-        ),
+        shellCommand(['agent-slack', 'post', 'prepare', '--workspace', 'two words', '--draft', 'draft one'], 'win32'),
       ).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
     ),
   );

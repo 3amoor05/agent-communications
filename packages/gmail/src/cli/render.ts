@@ -1,7 +1,7 @@
 import {
   commandText,
-  inlineCommand,
   type InstallResult,
+  inlineCommand,
   paint,
   renderInstall,
   type ServerInstallResult,

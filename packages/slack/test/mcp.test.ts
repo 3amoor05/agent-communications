@@ -43,6 +43,7 @@ async function connect(harness: Harness, options: { workspace?: string; fetch?: 
     core: harness.core,
     env: harness.env,
     fetch: options.fetch ?? slackReplies(),
+    platform: 'darwin',
     ...(options.workspace ? { workspace: options.workspace } : {}),
   });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -111,7 +112,12 @@ test('the greeting a model reads is scoped to the pinned workspace', async () =>
   await harness.addWorkspace({ alias: 'acme' });
   await harness.addWorkspace({ alias: 'zeta', workspaceId: 'T0002', userId: 'U0002' });
 
-  const { server } = await createSlackMcpServer({ core: harness.core, env: harness.env, workspace: 'acme' });
+  const { server } = await createSlackMcpServer({
+    core: harness.core,
+    env: harness.env,
+    workspace: 'acme',
+    platform: 'darwin',
+  });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: 'test', version: '0' });
   await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
@@ -127,7 +133,12 @@ test('the greeting says how a post is approved under each policy, and that the a
   // posting is wrong about the one thing it most needs to get right.
   const harness = await newHarness();
   await harness.addWorkspace({ alias: 'acme', mode: 'send' });
-  const { server } = await createSlackMcpServer({ core: harness.core, env: harness.env, fetch: slackReplies() });
+  const { server } = await createSlackMcpServer({
+    core: harness.core,
+    env: harness.env,
+    fetch: slackReplies(),
+    platform: 'darwin',
+  });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: 'test', version: '0' });
   await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);

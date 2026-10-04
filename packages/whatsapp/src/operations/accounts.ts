@@ -1,8 +1,8 @@
 import { rm } from 'node:fs/promises';
 import {
   agentMarker,
-  commandText,
   CommsError,
+  commandText,
   inlineCommand,
   lookupName,
   nameAvailable,

@@ -1284,7 +1284,7 @@ configuration problem.`,
             context.core,
             approvalId,
             env,
-            { json: globalOptions.json, color: globalOptions.color },
+            { json: globalOptions.json, color: globalOptions.color, platform: context.platform },
             streams,
           );
           streams.stdout.write(

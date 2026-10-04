@@ -1,4 +1,11 @@
-import { commandText, type AccountConfig, CommsError, inlineCommand, shellCommand, toCommsError } from '@agentcomms/core';
+import {
+  type AccountConfig,
+  CommsError,
+  commandText,
+  inlineCommand,
+  shellCommand,
+  toCommsError,
+} from '@agentcomms/core';
 import { callSlack, type SlackCall, type SlackProblem, type SlackResponse } from '../api/call.ts';
 import { closedPermit, configureWith, type FetchLike } from '../api/guard.ts';
 import { appManifestUrl, buildManifest, type InstallMode, parseMode, type SlackManifest } from '../manifest.ts';

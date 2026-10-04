@@ -271,8 +271,5 @@ test('doctor renders its repair commands for the selected shell platform', async
     { offline: true },
   );
   const missing = result.accounts[0]?.checks.find((check) => check.name === 'key stored');
-  assert.equal(
-    missing?.fix,
-    'agent-resend account remove "7/resend", then agent-resend account add "7/resend"',
-  );
+  assert.equal(missing?.fix, 'agent-resend account remove "7/resend", then agent-resend account add "7/resend"');
 });
