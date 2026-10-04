@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join, relative, sep } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { CommsError } from '@agentcomms/core';
+import * as ts from 'typescript/unstable/ast';
+import { createVirtualFileSystem } from 'typescript/unstable/fs';
+import { API as TypeScriptAPI } from 'typescript/unstable/sync';
 import { callSlack } from '../src/api/call.ts';
 import {
   closedPermit,
@@ -1115,30 +1119,193 @@ test('only the download transport opens a download grant', async () => {
   );
 });
 
+/** Parse with the repository's direct TypeScript dependency, without resolving imports or writing files. */
+function syntaxTrees(files: { path: string; text: string }[]): { path: string; tree: ts.SourceFile }[] {
+  const root = join(tmpdir(), 'agentcomms-slack-source-audit');
+  const config = join(root, 'tsconfig.json');
+  const api = new TypeScriptAPI({
+    fs: createVirtualFileSystem({
+      [config]: JSON.stringify({
+        compilerOptions: { noLib: true, noResolve: true },
+        files: files.map((file) => file.path),
+      }),
+      ...Object.fromEntries(files.map((file) => [join(root, file.path), file.text])),
+    }),
+  });
+  try {
+    const snapshot = api.updateSnapshot({ openProjects: [config] });
+    try {
+      const project = snapshot.getProject(config);
+      assert.ok(project);
+      assert.deepEqual(project.program.getSyntacticDiagnostics(), [], 'source audit requires valid syntax');
+      return files.map((file) => {
+        const tree = project.program.getSourceFile(join(root, file.path));
+        assert.ok(tree);
+        return { path: file.path, tree };
+      });
+    } finally {
+      snapshot.dispose();
+    }
+  } finally {
+    api.close();
+  }
+}
+
+/** Executable syntax, excluding type-only syntax, import names, comments and literal contents. */
+function runtimeNodes(root: ts.Node): ts.Node[] {
+  const nodes: ts.Node[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isTypeNode(node) || ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) return;
+    nodes.push(node);
+    node.forEachChild(visit);
+  };
+  visit(root);
+  return nodes;
+}
+
+function literalText(node: ts.Node | undefined): string | undefined {
+  return node && (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) ? node.text : undefined;
+}
+
+function revocationReach(root: ts.SourceFile): string[] {
+  const found: string[] = [];
+  const guardModule = (node: ts.Node | undefined) => /(?:^|\/)guard(?:\.ts)?$/.test(literalText(node) ?? '');
+  const visit = (node: ts.Node): void => {
+    if (ts.isTypeNode(node)) return;
+    if (ts.isImportDeclaration(node)) {
+      if (node.importClause?.phaseModifier === ts.SyntaxKind.TypeKeyword) return;
+      const names = node.importClause?.namedBindings;
+      if (names && ts.isNamedImports(names)) {
+        if (names.elements.some((name) => !name.isTypeOnly && (name.propertyName ?? name.name).text === 'revokeWith'))
+          found.push('import');
+      } else if (names && guardModule(node.moduleSpecifier)) found.push('namespace import');
+      return;
+    }
+    if (ts.isExportDeclaration(node)) {
+      if (node.isTypeOnly) return;
+      const names = node.exportClause;
+      if (names && ts.isNamedExports(names)) {
+        if (
+          names.elements.some(
+            (name) => !name.isTypeOnly && [name.name.text, name.propertyName?.text].includes('revokeWith'),
+          )
+        )
+          found.push('export');
+      } else if (guardModule(node.moduleSpecifier)) found.push('guard re-export');
+      return;
+    }
+    if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+      if (literalText(node.arguments[0]) === undefined || guardModule(node.arguments[0])) found.push('dynamic import');
+    }
+    if (ts.isIdentifier(node) && node.text === 'revokeWith') {
+      found.push(ts.isCallExpression(node.parent) && node.parent.expression === node ? 'call' : 'reference');
+    }
+    if (ts.isElementAccessExpression(node) && literalText(node.argumentExpression) === 'revokeWith') {
+      found.push('property reference');
+    }
+    node.forEachChild(visit);
+  };
+  visit(root);
+  return found;
+}
+
+function directFetchCalls(root: ts.SourceFile): ts.Node[] {
+  return runtimeNodes(root).filter(
+    (node) =>
+      ts.isCallExpression(node) &&
+      runtimeNodes(node.expression).some(
+        (callee) =>
+          (ts.isIdentifier(callee) && callee.text === 'fetch') ||
+          (ts.isElementAccessExpression(callee) && literalText(callee.argumentExpression) === 'fetch'),
+      ),
+  );
+}
+
+function methodLiteralCount(root: ts.SourceFile, method: string): number {
+  return runtimeNodes(root).filter((node) => literalText(node) === method).length;
+}
+
+test('syntax-aware source scans ignore comments, prose, types and unrelated imports', () => {
+  const [file] = syntaxTrees([
+    {
+      path: 'innocent.ts',
+      text: [
+        "import { closedPermit, guardSlackRequests } from './guard.ts';",
+        "import type { RevokeBinding, revokeWith } from './guard.ts';",
+        "import { type revokeWith as RevokeType } from './guard.ts';",
+        "export type { revokeWith } from './guard.ts';",
+        '// revokeWith(); fetch(url); callSlack(call, `auth.revoke`);',
+        '/* (context.fetch ?? globalThis.fetch)(url); `apps.uninstall` */',
+        'const prose = "revokeWith(); fetch(url); callSlack(call, \'auth.revoke\')";',
+        'const template = `fetch(url); callSlack(call, "apps.uninstall")`;',
+        'const pattern = /revokeWith|auth.revoke|apps.uninstall|fetch/;',
+        'type Example = typeof revokeWith;',
+      ].join('\n'),
+    },
+  ]);
+  assert.ok(file);
+  assert.deepEqual(revocationReach(file.tree), []);
+  assert.deepEqual(directFetchCalls(file.tree), []);
+  assert.equal(methodLiteralCount(file.tree, 'auth.revoke'), 0);
+  assert.equal(methodLiteralCount(file.tree, 'apps.uninstall'), 0);
+});
+
+test('syntax-aware source scans catch ordinary fallback calls, template methods and grant aliases', () => {
+  const examples = [
+    { path: 'direct.ts', text: 'fetch(url);' },
+    { path: 'fallback.ts', text: '(context.fetch ?? globalThis.fetch)(url);' },
+    { path: 'parenthesized.ts', text: '((globalThis.fetch))(url);' },
+    { path: 'property.ts', text: "globalThis['fetch'](url);" },
+    {
+      path: 'methods.ts',
+      text: 'callSlack(call, `auth.revoke`); callSlack(call, `apps.uninstall`);',
+    },
+    {
+      path: 'alias.ts',
+      text: "import { revokeWith } from './guard.ts'; const open = revokeWith; open(permit, method, binding, work);",
+    },
+    {
+      path: 'allowed.ts',
+      text: "import { closedPermit, revokeWith } from './guard.ts'; revokeWith(permit, method, binding, work);",
+    },
+    {
+      path: 'import-alias.ts',
+      text: "import { revokeWith as open } from './guard.ts'; open(permit, method, binding, work);",
+    },
+  ];
+  const files = new Map(syntaxTrees(examples).map((file) => [file.path, file.tree]));
+  const tree = (path: string): ts.SourceFile => {
+    const found = files.get(path);
+    assert.ok(found);
+    return found;
+  };
+  for (const path of ['direct.ts', 'fallback.ts', 'parenthesized.ts', 'property.ts']) {
+    assert.equal(directFetchCalls(tree(path)).length, 1, path);
+  }
+  assert.equal(methodLiteralCount(tree('methods.ts'), 'auth.revoke'), 1);
+  assert.equal(methodLiteralCount(tree('methods.ts'), 'apps.uninstall'), 1);
+  assert.deepEqual(revocationReach(tree('alias.ts')), ['import', 'reference']);
+  assert.deepEqual(revocationReach(tree('import-alias.ts')), ['import']);
+  assert.deepEqual(revocationReach(tree('allowed.ts')), ['import', 'call']);
+});
+
 test('only the durable revocation operation opens a revocation grant', async () => {
-  const files = await sources();
+  const files = syntaxTrees(await sources());
   assert.deepEqual(
     files
-      .filter((file) => file.path !== 'api/guard.ts' && reachOf('revokeWith', file.text).length > 0)
-      .map((file) => [file.path, reachOf('revokeWith', file.text)]),
-    [['operations/revocations.ts', ['names it in an import or export', 'calls it or reads it off an object']]],
-  );
-  const operation = files.find((file) => file.path === 'operations/revocations.ts');
-  assert.ok(operation);
-  assert.equal(
-    [...operation.text.matchAll(/\brevokeWith\s*\(/g)].length,
-    1,
-    'a second production grant caller appeared',
+      .filter((file) => file.path !== 'api/guard.ts' && revocationReach(file.tree).length > 0)
+      .map((file) => [file.path, revocationReach(file.tree)]),
+    [['operations/revocations.ts', ['import', 'call']]],
   );
 });
 
 test('revoke and uninstall method literals stay at their audited boundaries', async () => {
-  const files = await sources();
+  const files = syntaxTrees(await sources());
   const usesOf = (method: string) =>
     files
       .map((file) => ({
         path: file.path,
-        count: [...file.text.matchAll(new RegExp(`['"]${method.replace('.', '\\.')}['"]`, 'g'))].length,
+        count: methodLiteralCount(file.tree, method),
       }))
       .filter((file) => file.count > 0)
       .sort((left, right) => left.path.localeCompare(right.path));
@@ -1149,18 +1316,22 @@ test('revoke and uninstall method literals stay at their audited boundaries', as
   assert.deepEqual(usesOf('apps.uninstall'), [{ path: 'api/methods.ts', count: 1 }]);
   const operation = files.find((file) => file.path === 'operations/revocations.ts');
   assert.ok(operation);
-  assert.match(operation.text, /revokePendingEntry\(context: SlackContext, ref: string\)/);
+  assert.match(operation.tree.text, /revokePendingEntry\(context: SlackContext, ref: string\)/);
 });
 
 test('only guarded transports send requests to Slack', async () => {
-  const files = await sources();
-  // These scans cover ordinary source calls, not computed names or arbitrary run-time indirection.
+  const files = syntaxTrees(await sources());
+  // This follows ordinary callee syntax, including parentheses/fallbacks, not arbitrary run-time indirection.
   assert.deepEqual(
-    files.filter((file) => /\bfetch\s*\(/.test(file.text)).map((file) => file.path),
+    files.filter((file) => directFetchCalls(file.tree).length > 0).map((file) => file.path),
     [],
     'a direct fetch bypassed the guarded transport',
   );
-  const sending = files.filter((file) => /\bsend\s*\(/.test(file.text));
+  const sending = files.filter((file) =>
+    runtimeNodes(file.tree).some(
+      (node) => ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'send',
+    ),
+  );
   assert.deepEqual(sending.map((file) => file.path).sort(), [
     'api/call.ts',
     'api/download.ts',
@@ -1169,7 +1340,19 @@ test('only guarded transports send requests to Slack', async () => {
     'operations/identity.ts',
   ]);
   for (const file of sending) {
-    assert.match(file.text, /const send = guardSlackRequests\(/, `${file.path} sends without the guard`);
+    const bindings = runtimeNodes(file.tree).filter(
+      (node) => ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === 'send',
+    );
+    assert.equal(bindings.length, 1, `${file.path} must have one guarded send binding`);
+    const binding = bindings[0];
+    assert.ok(binding && ts.isVariableDeclaration(binding));
+    assert.ok(
+      binding.initializer &&
+        ts.isCallExpression(binding.initializer) &&
+        ts.isIdentifier(binding.initializer.expression) &&
+        binding.initializer.expression.text === 'guardSlackRequests',
+      `${file.path} sends without the guard`,
+    );
   }
 });
 
