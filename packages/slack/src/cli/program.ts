@@ -305,15 +305,15 @@ configuration problem.`,
         return;
       }
       const interrupted = new AbortController();
-      let foreground: { flowId: string; startup: Promise<void> } | undefined;
+      let foreground: { flowId: string; settled: Promise<void> } | undefined;
       const context = new SlackContext({
         ...deps,
         env,
         surface: 'cli',
         foregroundSignIn: {
           signal: interrupted.signal,
-          register: (flowId, startup) => {
-            foreground = { flowId, startup };
+          register: (flowId, settled) => {
+            foreground = { flowId, settled };
           },
         },
       });
@@ -330,8 +330,8 @@ configuration problem.`,
         beforeExit: async () => {
           interrupted.abort();
           if (foreground) {
-            // A flow write may still be in flight. It must settle before its final removal and signal redelivery.
-            await foreground.startup;
+            // Startup and any accepted callback must finish, including staged-secret withdrawal, before exit.
+            await foreground.settled;
             await context.flows.discard(foreground.flowId);
           }
         },

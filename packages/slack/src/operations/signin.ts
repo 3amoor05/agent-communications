@@ -152,12 +152,12 @@ export async function startSignIn(context: SlackContext, options: StartOptions):
     expiresAt: new Date(startedAt.getTime() + FLOW_TTL_MS).toISOString(),
   };
   const foreground = options.detached === false ? context.foregroundSignIn : undefined;
-  let startupSettled: (() => void) | undefined;
+  let foregroundSettled: (() => void) | undefined;
   if (foreground) {
-    const startup = new Promise<void>((resolve) => {
-      startupSettled = resolve;
+    const settled = new Promise<void>((resolve) => {
+      foregroundSettled = resolve;
     });
-    foreground.register(flow.flowId, startup);
+    foreground.register(flow.flowId, settled);
   }
 
   /*
@@ -174,7 +174,7 @@ export async function startSignIn(context: SlackContext, options: StartOptions):
     foreground?.signal.throwIfAborted();
     listener =
       options.detached === false
-        ? await startInProcess(context, flow, options.listenerTimeoutMs)
+        ? await startInProcess(context, flow, options.listenerTimeoutMs, foreground?.signal)
         : await startDetached(context, flow, options);
     if (foreground?.signal.aborted) {
       await listener?.close();
@@ -189,7 +189,8 @@ export async function startSignIn(context: SlackContext, options: StartOptions):
       cause: error,
     });
   } finally {
-    startupSettled?.();
+    if (listener && foregroundSettled) void listener.result.then(foregroundSettled, foregroundSettled);
+    else foregroundSettled?.();
   }
 
   return {
@@ -207,6 +208,7 @@ async function startInProcess(
   context: SlackContext,
   flow: SlackFlow,
   timeoutMs?: number,
+  signal?: AbortSignal,
 ): Promise<StartedSignIn['listener']> {
   const loopback = await startLoopback({
     state: flow.state,
@@ -217,8 +219,15 @@ async function startInProcess(
       ? (error, description) => listenerFailure(context, flow, error, description)
       : undefined,
   });
+  let cancel: (() => void) | undefined;
+  const interrupted = new Promise<never>((_, reject) => {
+    if (!signal) return;
+    cancel = () => reject(signal.reason);
+    signal.addEventListener('abort', cancel, { once: true });
+    if (signal.aborted) cancel();
+  });
   const result = (async (): Promise<WorkspaceView> => {
-    const outcome = await loopback.result;
+    const outcome = await Promise.race([loopback.result, interrupted]);
     await loopback.close();
     if (outcome.kind === 'timeout') {
       await context.flows.discard(flow.flowId);
@@ -233,8 +242,11 @@ async function startInProcess(
         ? await profileFailure(context, flow, 'AUTH_REQUIRED', outcome.error, outcome.description)
         : slackDenied(outcome.error, outcome.description);
     }
-    return completeSignIn(context, flow.flowId, outcome.code);
-  })();
+    return completeSignIn(context, flow.flowId, outcome.code, undefined, signal);
+  })().finally(async () => {
+    if (cancel) signal?.removeEventListener('abort', cancel);
+    await loopback.close();
+  });
   return { result, close: () => loopback.close() };
 }
 
@@ -1028,6 +1040,8 @@ export async function completeSignIn(
   flowId: string,
   code: string,
   signal?: AbortSignal,
+  /** Foreground interruption also cancels an already claimed callback; detached wait cancellation does not. */
+  completionSignal?: AbortSignal,
 ): Promise<WorkspaceView> {
   // Claimed first, so two `--finish` calls cannot both spend one code. The claim is a file, so it is cleaned up
   // however this ends — the interactive path has no `--finish` above it to do that.
@@ -1137,8 +1151,15 @@ export async function completeSignIn(
        * write is still in flight, so the withdrawal either fails loudly and names the reference, or runs after
        * the write has settled and is authoritative about it.
        */
-      await secrets.set(secretRef, serialiseBundle(bundleFrom(token, at)));
+      const stage = async () => {
+        completionSignal?.throwIfAborted();
+        await secrets.set(secretRef, serialiseBundle(bundleFrom(token, at)));
+      };
+      // Detached finishers retain their existing staging/claim semantics. Foreground interruption fences both
+      // writes under the credentials lock, including callbacks that already own their flow.
+      if (!completionSignal) await stage();
       const switchAccount = async () => {
+        if (completionSignal) await stage();
         if (
           flow.transition === 'profile-app' &&
           existing &&
@@ -1177,6 +1198,7 @@ export async function completeSignIn(
           existing?.alias,
           () => writtenAlias,
           (current) => {
+            completionSignal?.throwIfAborted();
             /*
              * The check that counts, because this one runs under the lock.
              *
@@ -1282,8 +1304,9 @@ export async function completeSignIn(
           },
         );
       };
-      if (flow.transition === 'profile-app') await withCredentialsLock(context.core.paths.configDir, switchAccount);
-      else await switchAccount();
+      if (completionSignal || flow.transition === 'profile-app') {
+        await withCredentialsLock(context.core.paths.configDir, switchAccount);
+      } else await switchAccount();
     } catch (error) {
       /*
        * Look before undoing. A rejection does not mean the configuration was not written.

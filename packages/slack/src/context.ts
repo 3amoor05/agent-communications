@@ -39,7 +39,7 @@ export interface SlackContextOptions {
   foregroundSignIn?:
     | {
         signal: AbortSignal;
-        register(flowId: string, startup: Promise<void>): void;
+        register(flowId: string, settled: Promise<void>): void;
       }
     | undefined;
 }

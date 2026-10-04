@@ -12,7 +12,7 @@ import { slackOk } from './support/harness.ts';
 import { fetchListener, LISTENER_COMMAND, running, stopListeners } from './support/listener.ts';
 import { newOrganisationHarness } from './support/organisation.ts';
 
-async function fixture(platform: NodeJS.Platform = 'darwin') {
+async function fixture(platform: NodeJS.Platform = 'darwin', interrupted?: AbortController) {
   const server = createServer();
   await new Promise<void>((done) => server.listen(0, 'localhost', done));
   const port = (server.address() as { port: number }).port;
@@ -22,8 +22,12 @@ async function fixture(platform: NodeJS.Platform = 'darwin') {
     core: harness.core,
     env: harness.env,
     platform,
+    foregroundSignIn: interrupted
+      ? { signal: interrupted.signal, register: () => assert.fail('a detached listener was registered as foreground') }
+      : undefined,
     exchange: async (params) => {
       harness.calls.push({ params });
+      interrupted?.abort();
       return slackOk({ team: { id: 'TRGC0001', name: 'RGC' }, app_id: 'A0READ' });
     },
   });
@@ -40,6 +44,22 @@ async function fixture(platform: NodeJS.Platform = 'darwin') {
   assert.ok(flow.listenerPid);
   return { harness, context, flow, pid: flow.listenerPid };
 }
+
+test('a detached callback already exchanging is unaffected by the foreground interruption signal', async (t) => {
+  const interrupted = new AbortController();
+  const f = await fixture('darwin', interrupted);
+  t.after(() => stopListeners([f.pid]));
+  const back = new URL(f.flow.redirectUrl);
+  back.searchParams.set('state', f.flow.state);
+  back.searchParams.set('code', 'fake-code');
+  await fetchListener(back);
+  const view = await finishSignIn(f.context, { flowId: f.flow.flowId, waitSeconds: 5, pollMs: 10 });
+  assert.equal(interrupted.signal.aborted, true, 'the exchange never reached its interruption boundary');
+  assert.equal(view.alias, 'rgc/slack');
+  assert.equal(f.harness.calls.length, 1);
+  assert.ok((await f.context.config()).accounts['rgc/slack']);
+  assert.equal(await f.context.flows.peek(f.flow.flowId), null);
+});
 
 function cancelled(error: unknown, flowId: string) {
   assert.ok(error instanceof CommsError);
