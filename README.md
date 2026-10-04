@@ -115,10 +115,9 @@ the code too). No tool approves a change, and none applies a change it did not p
 
 Three independent things ship besides the core server. Take one, or all of them.
 
-First, the part everyone hits: **Gmail's API only accepts calls from a registered OAuth client, and
-you have to be the one who registers it.** There is no shared client to borrow — using somebody
-else's would put your mail behind their consent screen. Which of the three routes below you take
-decides how much of that you actually do.
+First, the part everyone hits: **Gmail's API only accepts calls from a registered OAuth client.** You can register
+one yourself, import the one your existing server used, or add an organisation profile whose client serves your
+mailbox. Which route below you take decides how much console work you do.
 
 | You are | What you do | Console work |
 |---|---|---|
@@ -183,7 +182,8 @@ agreed. `--print` and `--client json` only show the entry, and ask nobody.
 Gemini CLI and anything else that speaks MCP. [MCP tool reference](docs/reference/mcp-tools.md).
 
 **Onboarding works over MCP too**, so an agent asked to "set up Gmail" is not reduced to telling you to go and
-run a CLI. `gmail_setup` says what is missing and changes nothing; `gmail_client_add` registers the OAuth client
+run a CLI. `gmail_setup` says what is missing and can add an organisation `profile` through its own approval;
+`gmail_client_add` registers the OAuth client
 from the path of the JSON you downloaded — the file never passes through the conversation, and no result carries
 its secret; `gmail_inbox_add` returns a sign-in link and stops; `gmail_inbox_finish` completes it once Google
 returns the grant. A server started `--read-only` does not offer any of the writers, nor does one pinned to a

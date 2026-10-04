@@ -4,8 +4,8 @@ import { mkdir, open, symlink, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { test } from 'node:test';
-import type { CommsError } from '@agentcomms/core';
-import { canPrompt } from '@agentcomms/core';
+import { type CommsError, canPrompt, clientSecretRef, openCore } from '@agentcomms/core';
+import { renderSetupPlan } from '../src/cli/render.ts';
 import { interactionFor } from '../src/cli/tui.ts';
 import { GmailContext } from '../src/context.ts';
 import { clientAdd } from '../src/operations/clients.ts';
@@ -28,6 +28,113 @@ function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
 
 /** What Google actually issues. The fixtures used `client_id: 'a'`, which the real parser refuses. */
 const googleId = (prefix: string) => `${prefix}-000000000000.apps.googleusercontent.com`;
+
+async function organisationSetup(options: { active?: boolean; forOtherAddresses?: boolean } = {}) {
+  const configDir = tempDir('agent-gmail-setup-org-');
+  const env: NodeJS.ProcessEnv = {
+    AGENT_COMMS_CONFIG_DIR: configDir,
+    HOME: configDir,
+    USERPROFILE: configDir,
+    NO_COLOR: '1',
+    AGENT_COMMS_UPDATE_CHECK: 'off',
+  };
+  const core = openCore({ env });
+  await (await core.secrets('file')).set(clientSecretRef('acme-1'), TEST_CLIENT_SECRET);
+  await core.config.update((config) => {
+    if (config.version !== 2) throw new Error('a new config is version 2');
+    return {
+      ...config,
+      secrets: { store: 'file' },
+      clients: {
+        ...config.clients,
+        'acme-1': {
+          provider: 'gmail',
+          clientId: TEST_CLIENT_ID,
+          secretRef: clientSecretRef('acme-1'),
+          organisation: 'acme',
+          addedAt: '2026-10-02T12:00:00.000Z',
+        },
+      },
+      organisations: {
+        acme: {
+          label: 'Acme Test Org',
+          source: { kind: 'file', path: '/profiles/acme.json' },
+          sha256: 'a'.repeat(64),
+          readAt: '2026-10-02T12:00:00.000Z',
+          addedAt: '2026-10-02T12:00:00.000Z',
+          forOtherAddresses: options.forOtherAddresses ?? false,
+          gmail: {
+            active: options.active === false ? null : 'acme-1',
+            generations: [
+              {
+                name: 'acme-1',
+                clientId: TEST_CLIENT_ID,
+                ownership: 'owned' as const,
+                serves: { domains: ['acme.test'] },
+                addedAt: '2026-10-02T12:00:00.000Z',
+              },
+            ],
+          },
+        },
+      },
+    };
+  });
+  return new GmailContext({ core, env });
+}
+
+test('setup marks the client step done when the target name’s organisation provides it', async () => {
+  const context = await organisationSetup();
+  const state = await setupState(context, {
+    alias: 'acme/gmail',
+    email: 'jo@acme.test',
+    scanDownloads: false,
+  });
+  assert.equal(state.next, 'inbox');
+  assert.ok(state.done.includes('client'));
+  assert.deepEqual(state.clientChoice, {
+    name: 'acme-1',
+    organisation: 'acme',
+    organisationLabel: 'Acme Test Org',
+  });
+});
+
+test('setup walks the client step when its only registered client belongs to an ineligible profile', async () => {
+  const context = await organisationSetup();
+  const state = await setupState(context, { alias: 'personal/gmail', scanDownloads: false });
+  assert.equal(state.next, 'client');
+  assert.equal(state.done.includes('client'), false);
+  assert.equal(state.clientChoice, null);
+});
+
+test('setup ignores forOtherAddresses when the profile has no active generation', async () => {
+  const context = await organisationSetup({ active: false, forOtherAddresses: true });
+  const state = await setupState(context, { alias: 'personal/gmail', scanDownloads: false });
+  assert.equal(state.next, 'client');
+  assert.equal(state.clientChoice, null);
+});
+
+test('a profile-provided setup says why and omits the Google Cloud walk', () => {
+  const rendered = renderSetupPlan(
+    {
+      next: 'inbox',
+      done: ['client'],
+      clients: ['acme-1'],
+      inboxes: [],
+      registeredWith: [],
+      candidates: [],
+      clientChoice: {
+        name: 'acme-1',
+        organisation: 'acme',
+        organisationLabel: 'Acme Test Org',
+      },
+      nameExample: 'acme/gmail',
+    },
+    CONSOLE_STEPS,
+    false,
+  );
+  assert.match(rendered, /Your organisation, Acme Test Org, provides the Google client/);
+  assert.doesNotMatch(rendered, /Create a project/);
+});
 
 /** A downloads directory with client files of known kinds and known ages. */
 async function downloads(files: { name: string; body: unknown; minutesAgo: number }[]) {

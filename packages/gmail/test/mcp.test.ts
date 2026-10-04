@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { type ConfigV2, renameEntry } from '@agentcomms/core';
+import { type ConfigV2, openCore, renameEntry } from '@agentcomms/core';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { GmailContext } from '../src/context.ts';
@@ -161,6 +161,32 @@ test('a read-only server does not offer the tools that would write', async () =>
       client.callTool({ name: 'gmail_organise', arguments: { inbox: 'work', messageIds: ['m1'], archive: true } }),
       /not found/i,
     );
+  } finally {
+    await close();
+  }
+});
+
+test('read-only gmail_setup refuses its profile-writing arguments', async () => {
+  const configDir = tempDir('agent-gmail-mcp-read-only-setup-');
+  const env: NodeJS.ProcessEnv = {
+    AGENT_COMMS_CONFIG_DIR: configDir,
+    HOME: configDir,
+    USERPROFILE: configDir,
+    AGENT_COMMS_UPDATE_CHECK: 'off',
+  };
+  const core = openCore({ env });
+  const { client, close } = await connect({ core, env, readOnly: true });
+  try {
+    const result = (await client.callTool({
+      name: 'gmail_setup',
+      arguments: { profile: '/profiles/acme.json' },
+    })) as ToolResult;
+    assert.equal(result.isError, true);
+    assert.match(result.content?.[0]?.text ?? '', /read-only/);
+    const config = await core.config.load();
+    assert.equal(config.version, 2);
+    if (config.version !== 2) throw new Error('a new config is version 2');
+    assert.deepEqual(config.organisations, undefined);
   } finally {
     await close();
   }

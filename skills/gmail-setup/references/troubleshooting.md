@@ -90,6 +90,10 @@ mailbox onto it with `agent-gmail inbox reauth <alias> --client <name> --start`.
 --replace` refuses to point an existing name at a *different* client id while mailboxes use it, and
 names the mailboxes it would break.
 
+The same command moves an existing mailbox onto an organisation profile's client. Read the active
+generation from `agentcomms org show <organisation>`, then run
+`agent-gmail inbox reauth <name> --client <organisation>-1 --start` using that actual generation name.
+
 ## `invalid_grant`, at sign-in or on a refresh
 
 **Cause.** Google refused the grant. The same string covers several situations, and the age of the

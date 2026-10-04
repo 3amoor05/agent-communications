@@ -34,8 +34,9 @@ approval id, and registers when run again with `--approval <id>` once you have a
 
 ### Connecting a mailbox from the agent instead
 
-An agent asked to "set up Gmail" need not send you to a terminal: `gmail_setup` says what is missing and changes
-nothing, `gmail_client_add` registers the OAuth client from the path of the JSON you downloaded, `gmail_inbox_add`
+An agent asked to "set up Gmail" need not send you to a terminal: `gmail_setup` says what is missing and, when given
+`profile`, adds that organisation profile through its own `orgApproval`; otherwise it changes nothing.
+`gmail_client_add` registers the OAuth client from the path of the JSON you downloaded, `gmail_inbox_add`
 returns a sign-in link and stops, and `gmail_inbox_finish` completes it once Google returns the grant. The grant is
 still yours to approve in your own browser — this server does not open one and cannot grant it. The client JSON is
 read from its path on your machine, never pasted into the conversation, and no tool returns its secret.
@@ -52,6 +53,10 @@ Everything else `agent-gmail` does to an account is a tool too, each the same op
 | `gmail_inbox_remove` | `inbox remove` |
 | `gmail_clients_list`, `gmail_client_add`, `gmail_client_remove` | `client list\|add\|remove` |
 | `gmail_confirm_clients`, `gmail_confirm_client_add`, `gmail_confirm_client_remove` | `confirm-clients list\|add\|remove` |
+
+To move an existing mailbox onto an organisation profile's active client, read the generation name from
+`comms_org_show`, then call `gmail_inbox_reauth` with that `client` (the terminal form is
+`agent-gmail inbox reauth <name> --client <organisation>-1 --start`) and finish it normally.
 
 ### How a change is approved
 

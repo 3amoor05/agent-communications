@@ -26,6 +26,12 @@ export * from './name-grammar.ts';
 export * from './names.ts';
 export * from './numbers.ts';
 export * from './oauth-client-records.ts';
+export {
+  type OrgAddRequest,
+  type OrgChangeResult,
+  type OrgOptions,
+  orgAddChange,
+} from './operations/organisations.ts';
 /*
  * The registration and pruning changes, for the channels' own `mcp install` and `mcp prune`: the one change the core
  * server's `comms_server_install` and `comms_server_prune` make, so an approval for either is the other's too.
@@ -60,6 +66,7 @@ export {
   PROFILE_ORGANISATION_MAX,
   parseProfile,
   recordOf,
+  requireLiveOrganisationGeneration,
 } from './organisations.ts';
 export * from './other-servers.ts';
 export * from './output.ts';

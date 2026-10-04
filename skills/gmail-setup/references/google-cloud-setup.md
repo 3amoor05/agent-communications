@@ -89,6 +89,11 @@ Incremental authorisation is not available to installed apps, so changing tier l
 consent for the union of scopes — `agent-gmail inbox reauth <alias> --tier <tier> --start`, not a
 top-up.
 
+Reauthorisation is also how an existing mailbox changes OAuth clients. After adding an organisation
+profile, read its active generation from `agentcomms org show <organisation>` and run
+`agent-gmail inbox reauth <name> --client <organisation>-1 --start`, substituting the reported
+generation name.
+
 ## 4. Audience — publish the app
 
 Under **Google Auth Platform → Audience**, press **Publish app**.

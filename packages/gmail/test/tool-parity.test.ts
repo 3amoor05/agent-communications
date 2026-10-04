@@ -3,13 +3,13 @@ import { mkdir, readdir, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { dirname, join } from 'node:path';
 import { afterEach, test } from 'node:test';
-import { type CommsError, managedRuntimeEntry } from '@agentcomms/core';
+import { type CommsError, managedRuntimeEntry, openCore } from '@agentcomms/core';
 import { GmailContext } from '../src/context.ts';
 import { searchContacts } from '../src/operations/contacts.ts';
 import { createDraft, getDraft } from '../src/operations/drafts.ts';
 import { inboxPolicy, orphanedSecretsPath } from '../src/operations/inboxes.ts';
 import { prepareSend } from '../src/operations/send.ts';
-import { type Harness, newHarness } from './support/harness.ts';
+import { type Harness, newHarness, tempDir } from './support/harness.ts';
 import { applied, approvalAsked, cli, connect, toolError, wire } from './support/surfaces.ts';
 
 /*
@@ -1626,5 +1626,62 @@ test('gmail_setup answers with the report `setup --json` makes before it takes a
     assert.deepEqual(answered.clients, ['default']);
   } finally {
     await pinned.close();
+  }
+});
+
+test('gmail_setup adds --profile through its own orgApproval, then reports the routed setup', async () => {
+  const configDir = tempDir('agent-gmail-tool-profile-');
+  const env: NodeJS.ProcessEnv = {
+    AGENT_COMMS_CONFIG_DIR: configDir,
+    HOME: configDir,
+    USERPROFILE: configDir,
+    NO_COLOR: '1',
+    AGENT_COMMS_UPDATE_CHECK: 'off',
+  };
+  const core = openCore({ env });
+  const profile = join(tempDir(), 'acme.agentcomms.json');
+  await writeFile(
+    profile,
+    JSON.stringify({
+      agentcomms: 'organisation-profile',
+      version: 1,
+      organisation: 'acme',
+      label: 'Acme Test Org',
+      gmail: {
+        clientId: '123456789012-acme.apps.googleusercontent.com',
+        clientSecret: 'fake-profile-secret-not-real',
+        serves: { domains: ['acme.test'] },
+      },
+    }),
+  );
+  const { call, close } = await connect({ core, env });
+  try {
+    const asked = approvalAsked(
+      await call('gmail_setup', {
+        profile,
+        inbox: 'acme/gmail',
+        email: 'jo@acme.test',
+        store: 'file',
+      }),
+    );
+    assert.match(asked.preview, /Acme Test Org/);
+    const answer = wire(
+      await call('gmail_setup', {
+        profile,
+        inbox: 'acme/gmail',
+        email: 'jo@acme.test',
+        store: 'file',
+        orgApproval: asked.approvalId,
+      }),
+    );
+    assert.equal(answer.next, 'inbox');
+    assert.deepEqual(answer.clientChoice, {
+      name: 'acme-1',
+      organisation: 'acme',
+      organisationLabel: 'Acme Test Org',
+    });
+    assert.deepEqual(answer.consoleSteps, []);
+  } finally {
+    await close();
   }
 });

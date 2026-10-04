@@ -57,7 +57,7 @@ import {
   prepareSend,
   revokeApproval,
 } from '../operations/send.ts';
-import { CONSOLE_STEPS, setupState } from '../operations/setup.ts';
+import { CONSOLE_STEPS, setupProfileChange, setupState } from '../operations/setup.ts';
 import {
   FINISH_WAIT_SECONDS,
   finishSignIn,
@@ -334,7 +334,9 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
       .string()
       .min(1)
       .optional()
-      .describe('sign in through this OAuth client, by the name gmail_clients_list gives; the first one when left out'),
+      .describe(
+        'sign in through this OAuth client, by the name gmail_clients_list gives; when left out, the mailbox name’s organisation, one opted-in organisation, or an organisation-free client is chosen in that order',
+      ),
     port: mcpInteger()
       .optional()
       .describe(
@@ -506,6 +508,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
     changePolicy: z.string(),
     changePolicyInherited: z.boolean(),
     client: z.string().describe('the OAuth client it signs in through, by name'),
+    organisation: z.string().optional().describe('the organisation whose client this is'),
     identity: z.string(),
     createdAt: z.string(),
     lastRefreshOkAt: z.string().optional(),
@@ -591,6 +594,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
         changePolicy: z.string().describe('how a loosening of its settings is approved: chat or confirm'),
         changePolicyInherited: z.boolean(),
         client: z.string().describe('the OAuth client it signs in through, by name'),
+        organisation: z.string().optional().describe('the organisation whose client this is'),
         identity: z.string(),
         createdAt: z.string(),
         lastRefreshOkAt: z.string().optional(),
@@ -1313,38 +1317,87 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
     {
       title: 'What setup still needs',
       description:
-        'Where this machine is in connecting Gmail, and the one thing to do next: whether an OAuth client is registered, whether any mailbox is connected, which MCP clients the server is registered with, and the Google Cloud steps with their links. Call this when asked to set up Gmail, before anything else. Changes nothing: it is the report `agent-gmail setup` starts from. The steps themselves are gmail_client_add (the client), gmail_inbox_add then gmail_inbox_finish (a mailbox), and the core server’s comms_server_install with channel "gmail" (the agent connection).',
-      inputSchema: z.object({}),
-      outputSchema: z.object({
-        next: z.string().describe('client, inbox, mcp or done — the one thing to do now'),
-        done: z.array(z.string()),
-        clients: z.array(z.string()),
-        inboxes: z.array(z.string()),
-        clientOf: z.record(z.string(), z.string()).describe('the OAuth client each mailbox signs in through'),
-        registeredWith: z.array(z.string()).describe('the MCP clients this server is registered with'),
-        candidates: z
-          .array(z.object({ path: z.string(), kind: z.string(), modifiedAt: z.string() }))
-          .describe(
-            'downloaded client files; kind is desktop, web or unreadable — only desktop is usable. Always empty ' +
-              'on a server pinned to one mailbox, which reports only that mailbox.',
-          ),
-        consoleSteps: z.array(
-          z.object({
-            id: z.string(),
-            title: z.string(),
-            url: z.string(),
-            why: z.string(),
-            actions: z.array(z.string()),
-            avoid: z.array(z.string()),
-          }),
+        'Where this machine is in connecting Gmail, and the one thing to do next: the eligible client for a target mailbox, connected mailboxes, registered MCP clients, and any Google Cloud steps still needed. Call this when asked to set up Gmail, before anything else. With `profile`, it adds that organisation profile through its own `orgApproval`, then continues; without one it changes nothing. The remaining steps are gmail_client_add (a client of one’s own), gmail_inbox_add then gmail_inbox_finish (a mailbox), and the core server’s comms_server_install with channel "gmail" (the agent connection).',
+      inputSchema: z.object({
+        inbox: z.string().min(1).optional().describe('the mailbox name setup is preparing, e.g. acme/gmail'),
+        email: z.string().min(1).optional().describe('the address that mailbox must turn out to be'),
+        client: z.string().min(1).optional().describe('use this OAuth client explicitly'),
+        profile: z.string().min(1).optional().describe('add this organisation profile file before continuing'),
+        orgApproval: approvalArgument.describe(
+          'the approvalId an earlier gmail_setup call returned for adding the organisation profile',
         ),
+        store: z.enum(['keychain', 'file']).optional().describe('where the first secret is kept'),
       }),
-      annotations: { readOnlyHint: true, openWorldHint: false },
+      outputSchema: z.union([
+        z.object({
+          next: z.string().describe('client, inbox, mcp or done — the one thing to do now'),
+          done: z.array(z.string()),
+          clients: z.array(z.string()),
+          inboxes: z.array(z.string()),
+          clientOf: z.record(z.string(), z.string()).describe('the OAuth client each mailbox signs in through'),
+          clientChoice: z
+            .object({
+              name: z.string(),
+              organisation: z.string().optional(),
+              organisationLabel: z.string().optional(),
+            })
+            .nullable(),
+          registeredWith: z.array(z.string()).describe('the MCP clients this server is registered with'),
+          candidates: z
+            .array(z.object({ path: z.string(), kind: z.string(), modifiedAt: z.string() }))
+            .describe(
+              'downloaded client files; kind is desktop, web or unreadable — only desktop is usable. Always empty ' +
+                'on a server pinned to one mailbox, which reports only that mailbox.',
+            ),
+          consoleSteps: z.array(
+            z.object({
+              id: z.string(),
+              title: z.string(),
+              url: z.string(),
+              why: z.string(),
+              actions: z.array(z.string()),
+              avoid: z.array(z.string()),
+            }),
+          ),
+        }),
+        changeOutput(z.unknown()),
+      ]),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
-    async () => {
+    async ({ inbox, email, client, profile, orgApproval, store }) => {
       try {
+        if (profile) {
+          if (options.readOnly) {
+            throw new CommsError(
+              'CONFIG',
+              'this Gmail server is read-only, so setup cannot add an organisation profile',
+              {
+                hint: 'Add the profile with `agent-gmail setup --profile <file>`, or use a Gmail server that is not read-only.',
+              },
+            );
+          }
+          const outcome = await gatedChange(
+            context.core,
+            setupProfileChange(context, {
+              profile,
+              store,
+              ...(orgApproval ? { orgApproval } : {}),
+            }),
+            { surface: 'mcp', approvalId: orgApproval, approveCommand: 'agent-gmail approve' },
+          );
+          if (outcome.status === 'approval-required') return reply(changeToolResult(outcome));
+        } else if (orgApproval !== undefined) {
+          throw new CommsError('USAGE', 'orgApproval goes with profile: this call adds no organisation profile', {
+            hint: 'Call gmail_setup again with profile as well, as the preview named it.',
+          });
+        }
         // A pinned server reports no candidates at all, so there is nothing to scan the downloads for.
-        const state = await setupState(context, { scanDownloads: !pinned });
+        const state = await setupState(context, {
+          scanDownloads: !pinned,
+          ...(inbox ? { alias: inbox } : {}),
+          ...(email ? { email } : {}),
+          ...(client ? { client } : {}),
+        });
         /*
          * A pinned server answers about its own mailbox and nothing else.
          *
@@ -1388,9 +1441,10 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
           clients: pinned ? (pinnedClient ? [pinnedClient] : []) : state.clients,
           inboxes: pinned ? state.inboxes.filter((alias) => alias === pinned) : state.inboxes,
           clientOf: pinned ? (pinnedClient ? { [pinned]: pinnedClient } : {}) : state.clientOf,
+          clientChoice: state.clientChoice,
           registeredWith: state.registeredWith,
           candidates: pinned ? [] : state.candidates,
-          consoleSteps: CONSOLE_STEPS.map((step) => ({
+          consoleSteps: (state.next === 'client' ? CONSOLE_STEPS : []).map((step) => ({
             id: step.id,
             title: step.title,
             url: step.url,
@@ -1461,7 +1515,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
     /*
      * Connecting a mailbox is a write, so a read-only server does not offer it. `gmail_setup` stays outside this
      * block: saying what is missing changes nothing, and a server with no mailboxes should still be able to
-     * explain why.
+     * explain why. Its profile-writing form checks `readOnly` before it opens the profile.
      *
      * A **pinned** server does not offer them either. One started `--inbox work` exists to reach exactly that
      * mailbox, and a tool that adds a second one turns the pin into a suggestion — the person who pinned it
@@ -1543,6 +1597,8 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
             email: z.string(),
             tier: z.string(),
             reauthorised: z.boolean(),
+            client: z.string(),
+            organisation: z.string().optional(),
             missingScopes: z.array(z.string()).describe('boxes they unticked; empty is the good case'),
             inbox: z
               .looseObject({ id: z.string(), email: z.string(), client: z.string(), tier: z.string() })
@@ -1610,6 +1666,8 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
               email: result.inbox.email,
               tier: result.inbox.tier,
               reauthorised: result.reauthorised,
+              client: result.client,
+              ...(result.organisation ? { organisation: result.organisation } : {}),
               missingScopes: result.missingScopes,
               inbox: saved,
               ...(pending ? { pendingRegistration: pending } : {}),

@@ -3,6 +3,13 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { inlineCommand, shellCommand } from '../src/cli-runtime.ts';
+import {
+  type ClientConfig,
+  type ConfigV2,
+  emptyConfig,
+  type OrganisationGeneration,
+  type OrganisationRecord,
+} from '../src/config.ts';
 import { CommsError } from '../src/errors.ts';
 import {
   isValidName,
@@ -13,13 +20,19 @@ import {
   parseName,
   parseOrganisation,
 } from '../src/name-grammar.ts';
-import { GOOGLE_CLIENT_ID_PATTERN, isGoogleClientId } from '../src/oauth-client-records.ts';
+import {
+  clientSecretRef,
+  GOOGLE_CLIENT_ID_PATTERN,
+  gmailClientRow,
+  isGoogleClientId,
+} from '../src/oauth-client-records.ts';
 import {
   PROFILE_MAX_BYTES,
   PROFILE_ORGANISATION_MAX,
   parseProfile,
   profileSourcePath,
   readProfileFile,
+  requireLiveOrganisationGeneration,
   shownText,
 } from '../src/organisations.ts';
 import { tempDir } from './helpers/temp.ts';
@@ -31,6 +44,7 @@ import { tempDir } from './helpers/temp.ts';
  */
 
 const SECRET = 'fake-profile-secret-not-real';
+const CLIENT_ID = '123456789012-abcdefghijklmnop.apps.googleusercontent.com';
 
 function profile(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -52,6 +66,54 @@ function profile(over: Record<string, unknown> = {}): Record<string, unknown> {
     },
     ...over,
   };
+}
+
+function generation(over: Partial<OrganisationGeneration> = {}): OrganisationGeneration {
+  return {
+    name: 'acme-1',
+    clientId: CLIENT_ID,
+    projectId: 'acme-agent-comms',
+    ownership: 'owned',
+    serves: 'any',
+    addedAt: '2026-10-02T12:00:00.000Z',
+    ...over,
+  };
+}
+
+function organisationRecord(generations: OrganisationGeneration[]): OrganisationRecord {
+  return {
+    label: 'Acme Test Org',
+    source: { kind: 'file', path: '/profiles/acme.json' },
+    sha256: 'a'.repeat(64),
+    readAt: '2026-10-02T12:00:00.000Z',
+    addedAt: '2026-10-02T12:00:00.000Z',
+    forOtherAddresses: false,
+    gmail: { active: generations[0]?.name ?? null, generations },
+  };
+}
+
+function generationConfig(gen = generation()): ConfigV2 {
+  const config = emptyConfig();
+  if (config.version !== 2) throw new Error('the current empty config is not version 2');
+  return {
+    ...config,
+    clients: {
+      [gen.name]: gmailClientRow({
+        name: gen.name,
+        clientId: gen.clientId,
+        projectId: gen.projectId,
+        organisation: gen.ownership === 'owned' ? 'acme' : undefined,
+        addedAt: gen.addedAt,
+      }),
+    },
+    organisations: { acme: organisationRecord([gen]) },
+  };
+}
+
+function clientRow(config: ConfigV2, name: string): ClientConfig {
+  const row = config.clients[name];
+  if (!row) throw new Error(`the fixture has the client ${name}`);
+  return row;
 }
 
 function withGmail(over: Record<string, unknown>): Record<string, unknown> {
@@ -346,4 +408,76 @@ test('a read error names the path as it is shown, never as it is spelt', async (
     () => profileSourcePath('acme‮nosj.json', { HOME: '/Profiles/jo' }, '/Profiles/jo', 'darwin'),
     (error: unknown) => error instanceof CommsError && !error.message.includes('‮') && /<U\+202E>/.test(error.message),
   );
+});
+
+// ── A live Gmail generation ──────────────────────────────────────────────────────────────────────────────────────
+
+test('the live-generation validator accepts the exact owned client row and ignores project drift', () => {
+  const gen = generation();
+  const config = generationConfig(gen);
+  config.clients[gen.name] = { ...clientRow(config, gen.name), projectId: 'renamed-project' };
+  assert.equal(requireLiveOrganisationGeneration(config, 'acme', gen), config.clients[gen.name]);
+});
+
+test('the live-generation validator accepts an adopted row only while no other organisation holds it', () => {
+  const gen = generation({ name: 'shared', ownership: 'adopted' });
+  const config = generationConfig(gen);
+  assert.equal(requireLiveOrganisationGeneration(config, 'acme', gen), config.clients.shared);
+
+  if (!config.organisations) throw new Error('the fixture has organisations');
+  config.organisations.other = {
+    ...organisationRecord([{ ...gen }]),
+    label: 'Other Test Org',
+    gmail: { active: gen.name, generations: [{ ...gen }] },
+  };
+  assert.throws(
+    () => requireLiveOrganisationGeneration(config, 'acme', gen),
+    (error: unknown) =>
+      error instanceof CommsError && error.code === 'CONFIG' && /org update acme/.test(error.hint ?? ''),
+  );
+});
+
+test('the live-generation validator refuses every missing or altered part of an owned row', () => {
+  const gen = generation();
+  const cases = [
+    ['missing row', undefined],
+    ['provider', { ...clientRow(generationConfig(gen), gen.name), provider: 'slack' }],
+    ['client id', { ...clientRow(generationConfig(gen), gen.name), clientId: `${CLIENT_ID}-changed` }],
+    ['secret reference', { ...clientRow(generationConfig(gen), gen.name), secretRef: clientSecretRef('other') }],
+    ['organisation marker', { ...clientRow(generationConfig(gen), gen.name), organisation: 'other' }],
+  ] as const;
+  for (const [part, row] of cases) {
+    const config = generationConfig(gen);
+    if (row === undefined) delete config.clients[gen.name];
+    else config.clients[gen.name] = row;
+    assert.throws(
+      () => requireLiveOrganisationGeneration(config, 'acme', gen),
+      (error: unknown) => {
+        assert.ok(error instanceof CommsError, part);
+        assert.equal(error.code, 'CONFIG', part);
+        assert.match(error.message, /cannot use/, part);
+        assert.match(error.hint ?? '', /org update acme/, part);
+        return true;
+      },
+    );
+  }
+});
+
+test('the live-generation validator applies provider, id and canonical-secret checks to adopted rows too', () => {
+  const gen = generation({ name: 'shared', ownership: 'adopted' });
+  const changes = [
+    { provider: 'slack' },
+    { clientId: `${CLIENT_ID}-changed` },
+    { secretRef: clientSecretRef('other') },
+    { organisation: 'other' },
+  ];
+  for (const change of changes) {
+    const config = generationConfig(gen);
+    config.clients.shared = { ...clientRow(config, 'shared'), ...change };
+    assert.throws(
+      () => requireLiveOrganisationGeneration(config, 'acme', gen),
+      (error: unknown) =>
+        error instanceof CommsError && error.code === 'CONFIG' && /org update acme/.test(error.hint ?? ''),
+    );
+  }
 });

@@ -1,4 +1,5 @@
 import {
+  activeGeneration,
   type ClientConfig,
   CommsError,
   type Config,
@@ -10,6 +11,8 @@ import {
   keepAndReport,
   newInboxId,
   PUBLIC_MAILBOX_DOMAINS,
+  recordOf,
+  requireLiveOrganisationGeneration,
   secretsStoreOf,
   shellCommand,
   withCredentialsLock,
@@ -17,11 +20,12 @@ import {
   writeOutcome,
 } from '@agentcomms/core';
 import type { OAuthFlow } from '../auth/flows.ts';
-import { exchangeCode, type TokenResponse } from '../auth/oauth.ts';
+import { exchangeCode, revokeToken, type TokenResponse } from '../auth/oauth.ts';
 import { capabilitiesOf, tierOf } from '../auth/scopes.ts';
 import { refreshTokenRef, TokenSource } from '../auth/session.ts';
 import type { GmailContext } from '../context.ts';
 import { getProfileWithToken } from '../gmail-api/profile.ts';
+import { generationServes, organisationForClient } from './client-choice.ts';
 import { requireNewInboxName } from './inbox-names.ts';
 
 export interface ConsentResult {
@@ -31,6 +35,10 @@ export interface ConsentResult {
   missingScopes: string[];
   /** True when this completed a `reauth` rather than adding an inbox. */
   reauthorised: boolean;
+  /** The OAuth client that issued the refresh token. */
+  client: string;
+  /** The organisation whose generation that client is, when one supplied it. */
+  organisation?: string | undefined;
 }
 
 /**
@@ -44,6 +52,8 @@ export interface ConsentResult {
  *   5. only then store the refresh token, and only then write the registry row.
  */
 export async function completeConsent(context: GmailContext, flow: OAuthFlow, code: string): Promise<ConsentResult> {
+  const starting = await context.config();
+  const expectedClientId = requireSameClient(starting, flow);
   const client = await context.client(flow.clientName);
   const tokens = await exchangeCode({
     client: { clientId: client.clientId, clientSecret: await clientSecret(context, client, flow.clientName) },
@@ -63,11 +73,46 @@ export async function completeConsent(context: GmailContext, flow: OAuthFlow, co
   const missingScopes = flow.scopes.filter((scope) => !granted.includes(scope));
 
   const identity = await verifyIdentity(context, tokens);
+  const expectedGeneration = flow.expect.generation;
+  if (expectedGeneration) {
+    const generation = recordOf(starting, expectedGeneration.organisation)?.gmail?.generations.find(
+      (candidate) => candidate.name === expectedGeneration.name,
+    );
+    if (!generation || !generationServes(generation, identity.email)) {
+      try {
+        await revokeToken(context.endpoints, tokens.refreshToken);
+      } catch {
+        // Best effort by design: a failed withdrawal must not turn a refused account into a stored one (§D6).
+      }
+      throw new CommsError(
+        'CONFIG',
+        `the organisation ${expectedGeneration.organisation} says its Google client "${flow.clientName}" does not serve ${identity.email}; nothing was saved`,
+        {
+          hint:
+            'Run `agent-gmail inbox add ' +
+            flow.alias +
+            ' --client <name> --email ' +
+            identity.email +
+            '` again through a client that serves this address.',
+          details: {
+            alias: flow.alias,
+            client: flow.clientName,
+            organisation: expectedGeneration.organisation,
+            actual: identity.email,
+          },
+        },
+      );
+    }
+  }
   const config = await context.config();
 
-  return flow.mode === 'reauth'
-    ? reauthorise(context, flow, config, tokens, identity, granted, missingScopes, client.clientId)
-    : addInbox(context, flow, config, tokens, identity, granted, missingScopes, client.clientId);
+  const result =
+    flow.mode === 'reauth'
+      ? reauthorise(context, flow, config, tokens, identity, granted, missingScopes, expectedClientId)
+      : addInbox(context, flow, config, tokens, identity, granted, missingScopes, expectedClientId);
+  const completed = await result;
+  const organisation = completed.organisation ?? organisationForClient(config, flow.clientName);
+  return organisation ? { ...completed, organisation } : completed;
 }
 
 async function clientSecret(context: GmailContext, client: ClientConfig, name: string): Promise<string> {
@@ -161,7 +206,7 @@ async function addInbox(
        * one any more, and the flow is refused here rather than writing a name the file no longer allows.
        */
       requireNewInboxName(current, flow.alias, undefined, context.platform);
-      requireSameClient(current, flow.clientName, clientId);
+      requireSameClient(current, flow, clientId);
       // The backend the token went into must still be the one in force: `secrets migrate` switches backends, and a
       // row written after the switch would name a credential that only exists in the store nothing reads any more.
       if (secretsStoreOf(current) !== secrets.kind) {
@@ -201,7 +246,14 @@ async function addInbox(
     surface: context.surface,
   });
   context.forgetTransports();
-  return { alias: flow.alias, inbox, missingScopes, reauthorised: false };
+  return {
+    alias: flow.alias,
+    inbox,
+    missingScopes,
+    reauthorised: false,
+    client: flow.clientName,
+    ...(flow.expect.generation ? { organisation: flow.expect.generation.organisation } : {}),
+  };
 }
 
 async function reauthorise(
@@ -262,7 +314,14 @@ async function reauthorise(
     surface: context.surface,
   });
   context.forgetTransports();
-  return { alias: result.alias, inbox: result.inbox, missingScopes, reauthorised: true };
+  return {
+    alias: result.alias,
+    inbox: result.inbox,
+    missingScopes,
+    reauthorised: true,
+    client: flow.clientName,
+    ...(flow.expect.generation ? { organisation: flow.expect.generation.organisation } : {}),
+  };
 }
 
 function inboxGone(): CommsError {
@@ -359,7 +418,7 @@ async function writeReauth(
       const now = findById(current, 'inbox', inboxId);
       refused = true;
       if (!now) throw inboxGone();
-      requireSameClient(current, flow.clientName, clientId);
+      requireSameClient(current, flow, clientId);
       /*
        * And no other mailbox on this client is the same account.
        *
@@ -476,9 +535,41 @@ async function restorePrevious(
  * `client add --replace` or a `client remove` landing in between would leave a mailbox pointing at a client that
  * cannot renew its token.
  */
-function requireSameClient(config: Config, name: string, clientId: string): void {
+function requireSameClient(config: Config, flow: OAuthFlow, exchangedClientId?: string): string {
+  const name = flow.clientName;
   const held = config.clients[name];
-  if (held?.clientId === clientId) return;
+  const expectedClientId = flow.expect.clientId ?? exchangedClientId ?? held?.clientId;
+  const expectedGeneration = flow.expect.generation;
+  if (expectedGeneration) {
+    const record = recordOf(config, expectedGeneration.organisation);
+    const generation = record?.gmail?.generations.find((candidate) => candidate.name === expectedGeneration.name);
+    if (!generation || generation.clientId !== expectedClientId) {
+      throw new CommsError(
+        'CONFIG',
+        `the organisation ${expectedGeneration.organisation}'s Google client generation changed while this sign-in was being completed`,
+        {
+          hint: `Run \`agentcomms org update ${expectedGeneration.organisation}\`, then start the sign-in again.`,
+        },
+      );
+    }
+    requireLiveOrganisationGeneration(config, expectedGeneration.organisation, generation);
+    if (expectedGeneration.active && activeGeneration(record)?.name !== generation.name) {
+      throw new CommsError(
+        'CONFIG',
+        `the organisation ${expectedGeneration.organisation}'s active Google client changed while this sign-in was being completed`,
+        {
+          hint: `Run \`agentcomms org update ${expectedGeneration.organisation}\`, then start the sign-in again.`,
+        },
+      );
+    }
+  }
+  if (
+    held &&
+    expectedClientId &&
+    held.clientId === expectedClientId &&
+    (exchangedClientId === undefined || exchangedClientId === expectedClientId)
+  )
+    return expectedClientId;
   throw new CommsError('CONFIG', `the OAuth client "${name}" changed while this sign-in was being completed`, {
     hint: held
       ? `Run \`agent-gmail inbox reauth\` for this mailbox again, through the client it should use.`

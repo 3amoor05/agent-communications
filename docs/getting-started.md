@@ -29,9 +29,10 @@ you approve, and the grant is yours to give in your own browser.
 
 ## 1. A Google OAuth client
 
-Gmail's API needs credentials that belong to you. There is no way around this and no shared client to borrow: a
-Google OAuth client is tied to a Google Cloud project, and using somebody else's would put your mail behind their
-consent screen.
+Gmail's API needs an eligible OAuth client. You can create one yourself, or an organisation can provide one through
+an organisation profile. Run `agent-gmail setup --profile <file>` to add that profile through its own approval;
+setup chooses the active client from the mailbox's organisation name and skips the Cloud steps. Without a profile,
+create the client below in a Google Cloud project you control.
 
 **One client covers every mailbox you connect, and everyone you share it with.** This is a once-per-person job, and
 for a team it is a once-per-team job — see [one client, many people](#one-client-many-people) below.
@@ -137,6 +138,15 @@ agent-gmail inbox reauth <alias> --start
 ```
 
 A re-consent keeps the mailbox's existing access tier. It does not widen anything.
+
+To move an already-connected mailbox onto an organisation profile's active client, first read the generation from
+`agentcomms org show <organisation>`, then run:
+
+```bash
+agent-gmail inbox reauth <name> --client <organisation>-1 --start
+```
+
+Use the generation name `org show` reports; `-1` is only the usual first generation.
 
 ## 4. Check it
 

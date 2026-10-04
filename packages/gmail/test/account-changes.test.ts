@@ -5,7 +5,7 @@ import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { after, test } from 'node:test';
-import { approveChangeAtTerminal, type Core } from '@agentcomms/core';
+import { approveChangeAtTerminal, type Core, openCore } from '@agentcomms/core';
 import { buildAuthUrl, exchangeCode, newPkce } from '../src/auth/oauth.ts';
 import { SCOPES } from '../src/auth/scopes.ts';
 import { clientSecretRef, refreshTokenRef } from '../src/auth/session.ts';
@@ -937,6 +937,84 @@ test('inbox import at the CLI asks the same way, and --dry-run asks nobody', asy
   const done = await approving(harness, ['inbox', 'import', '--dir', dir]);
   assert.equal(done.code, 0, done.stdout);
   assert.deepEqual(Object.keys((await harness.core.config.load()).inboxes), ['work']);
+});
+
+test('inbox import keeps its same-client reuse and never applies organisation client choice', async (t) => {
+  const configDir = tempDir('agent-gmail-import-org-');
+  const env: NodeJS.ProcessEnv = {
+    AGENT_COMMS_CONFIG_DIR: configDir,
+    AGENT_COMMS_GOOGLE_ROOT_URL: 'http://127.0.0.1:9',
+    HOME: configDir,
+    USERPROFILE: configDir,
+    NO_COLOR: '1',
+    AGENT_COMMS_UPDATE_CHECK: 'off',
+  };
+  const core = openCore({ env });
+  const dir = join(tempDir(), '.gmail-mcp');
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    join(dir, 'gcp-oauth.keys.json'),
+    JSON.stringify({ installed: { client_id: TEST_CLIENT_ID, client_secret: TEST_CLIENT_SECRET } }),
+  );
+  await writeFile(
+    join(dir, 'creds-work.json'),
+    JSON.stringify({ tokens: { refresh_token: 'test-import-token' }, scopes: [SCOPES.gmailModify] }),
+  );
+  await (await core.secrets('file')).set(clientSecretRef('acme-1'), TEST_CLIENT_SECRET);
+  await core.config.update((config) => {
+    if (config.version !== 2) throw new Error('a new config is version 2');
+    return {
+      ...config,
+      secrets: { store: 'file' },
+      clients: {
+        'acme-1': {
+          provider: 'gmail',
+          clientId: TEST_CLIENT_ID,
+          secretRef: clientSecretRef('acme-1'),
+          organisation: 'acme',
+          addedAt: '2026-10-02T12:00:00.000Z',
+        },
+      },
+      organisations: {
+        acme: {
+          label: 'Acme Test Org',
+          source: { kind: 'file', path: '/profiles/acme.json' },
+          sha256: 'a'.repeat(64),
+          readAt: '2026-10-02T12:00:00.000Z',
+          addedAt: '2026-10-02T12:00:00.000Z',
+          forOtherAddresses: false,
+          gmail: {
+            active: 'acme-1',
+            generations: [
+              {
+                name: 'acme-1',
+                clientId: TEST_CLIENT_ID,
+                ownership: 'owned' as const,
+                serves: { domains: ['acme.test'] },
+                addedAt: '2026-10-02T12:00:00.000Z',
+              },
+            ],
+          },
+        },
+      },
+    };
+  });
+
+  t.mock.method(globalThis, 'fetch', async (input: string | URL | Request) => {
+    const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
+    if (url.pathname === '/token') return Response.json({ access_token: 'test-import-access' });
+    if (url.pathname === '/gmail/v1/users/me/profile') return Response.json({ emailAddress: 'jo@example.test' });
+    return Response.json({ error: 'not_found' }, { status: 404 });
+  });
+
+  const context = new GmailContext({ core, env });
+  const result = await importLegacy(context, { dir, renames: ['work=personal/gmail'], store: 'file' });
+  assert.deepEqual(
+    result.imported.map((item) => item.alias),
+    ['personal/gmail'],
+  );
+  const inbox = (await core.config.load()).inboxes['personal/gmail'];
+  assert.equal(inbox?.client, 'acme-1', 'the imported token reused the client id it was issued to');
 });
 
 test('inbox import refuses a store other than the one credentials are kept in, recorded or not, dry run too', async () => {

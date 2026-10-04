@@ -464,6 +464,45 @@ export function activeGeneration(record: OrganisationRecord | undefined): Organi
   return record?.gmail?.generations.find((generation) => generation.name === active);
 }
 
+/**
+ * Returns the live client row for one organisation generation, or refuses the route (design 2026-10-02 §D6).
+ *
+ * A consent flow must never repair drift as it goes. The organisation operation is the one place that can restore a
+ * missing owned row, its marker or its canonical secret reference, and can decide whether an adopted row is still
+ * safe to use. Gmail therefore calls this one guard for every organisation generation it selects, both before
+ * consent and when the flow completes.
+ */
+export function requireLiveOrganisationGeneration(
+  config: Config,
+  organisation: string,
+  generation: OrganisationGeneration,
+): ClientConfig {
+  const row = own(config.clients, generation.name);
+  const commonMatches =
+    row?.provider === 'gmail' &&
+    row.clientId === generation.clientId &&
+    row.secretRef === clientSecretRef(generation.name);
+  const ownershipMatches =
+    generation.ownership === 'owned'
+      ? row?.organisation === organisation
+      : row !== undefined &&
+        (row.organisation === undefined || row.organisation === organisation) &&
+        !holdersOf(config, generation.name).some((holder) => holder !== organisation);
+  if (!row || !commonMatches || !ownershipMatches) {
+    throw new CommsError(
+      'CONFIG',
+      `the organisation ${organisation} cannot use its Google client "${generation.name}" because its registered row is missing or no longer matches`,
+      {
+        hint:
+          'Run `agentcomms org update ' +
+          organisation +
+          '` (or comms_org_update from a chat) to repair the organisation profile before signing in.',
+      },
+    );
+  }
+  return row;
+}
+
 /** Every client name some organisation's generation uses, live or not: a new owned name never reuses one. */
 function generationNames(config: Config): Set<string> {
   const names = new Set<string>();

@@ -21,6 +21,7 @@ import { startLoopback } from '../auth/loopback.ts';
 import { buildAuthUrl, newPkce, newState, oauthError } from '../auth/oauth.ts';
 import { capabilitiesOf, scopesFor, TIERS, type Tier, tierOf } from '../auth/scopes.ts';
 import type { GmailContext } from '../context.ts';
+import { chooseClientForNewInbox, type GmailClientChoice } from './client-choice.ts';
 import { type ConsentResult, completeConsent } from './consent.ts';
 import { requireNewInboxName } from './inbox-names.ts';
 
@@ -145,6 +146,7 @@ export async function startSignIn(context: GmailContext, options: StartOptions):
   // Resolved per mode, below, and deliberately not before: adding an inbox has no inbox to ask, but re-authorising
   // one does, and `Object.keys(config.clients)[0]` is insertion order rather than an answer to the question.
   let clientName = options.client ?? Object.keys(config.clients)[0] ?? 'default';
+  let choice: GmailClientChoice | undefined;
 
   let tier = parseTier(options.tier);
   let contacts = options.contacts ?? true;
@@ -169,13 +171,40 @@ export async function startSignIn(context: GmailContext, options: StartOptions):
     );
     contacts = options.contacts ?? inbox.contacts;
     expect = { email: options.email ?? inbox.email, sub: inbox.sub, inboxId: inbox.id };
+    choice =
+      chooseClientForNewInbox(config, {
+        alias: options.alias,
+        email: expect.email,
+        client: clientName,
+      }) ?? undefined;
   } else {
     // Before the browser opens, not only when it comes back: a name the file cannot take would otherwise be refused
     // after the person has already been through Google's consent screens.
     requireNewInboxName(config, options.alias, undefined, context.platform);
+    choice =
+      chooseClientForNewInbox(config, {
+        alias: options.alias,
+        email: options.email,
+        client: options.client,
+      }) ?? undefined;
+    if (!choice) throw new CommsError('UNEXPECTED', 'inbox add did not choose a Google client');
+    clientName = choice.name;
   }
 
   const client = await context.client(clientName);
+  expect = {
+    ...expect,
+    clientId: client.clientId,
+    ...(choice?.organisation && choice.generation
+      ? {
+          generation: {
+            organisation: choice.organisation,
+            name: choice.generation.name,
+            active: choice.activeGeneration === true,
+          },
+        }
+      : {}),
+  };
   const pkce = newPkce();
   const scopes = scopesFor(tier, contacts);
   const flow = await context.flows.create({

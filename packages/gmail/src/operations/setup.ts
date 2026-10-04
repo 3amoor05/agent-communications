@@ -1,10 +1,11 @@
 import { lstat, readdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { isProductServer } from '@agentcomms/core';
+import { type GatedChange, isProductServer, type OrgChangeResult, orgAddChange } from '@agentcomms/core';
 import { parseClientJson } from '../auth/oauth.ts';
 import type { GmailContext } from '../context.ts';
 import { clientsRegisteredWith, GMAIL_MCP } from '../mcp/install.ts';
+import { chooseClientForNewInbox } from './client-choice.ts';
 import { readSmallFile } from './small-file.ts';
 
 /**
@@ -194,6 +195,12 @@ export interface SetupState {
   registeredWith: string[];
   /** Downloaded client files: Desktop first, then newest first. Empty is ordinary. */
   candidates: ClientCandidate[];
+  /** The existing client selected for the mailbox setup is adding, or null when setup must make one. */
+  clientChoice: {
+    name: string;
+    organisation?: string | undefined;
+    organisationLabel?: string | undefined;
+  } | null;
 }
 
 /**
@@ -304,6 +311,31 @@ export interface SetupStateOptions {
    * The setup command alone did it five times in a row.
    */
   scanDownloads?: boolean;
+  /** The mailbox setup is about; when present, the §D6 table decides whether the client step is done. */
+  alias?: string | undefined;
+  email?: string | undefined;
+  client?: string | undefined;
+}
+
+/** The organisation-profile step both setup surfaces run before measuring the Gmail steps (§D6). */
+export function setupProfileChange(
+  context: GmailContext,
+  request: { profile: string; store?: string | undefined; orgApproval?: string | undefined },
+): GatedChange<OrgChangeResult> {
+  return orgAddChange(
+    context.core,
+    {
+      file: request.profile,
+      store: request.store,
+      ...(request.orgApproval ? { approvalId: request.orgApproval } : {}),
+    },
+    {
+      env: context.env,
+      surface: context.surface,
+      cwd: context.cwd,
+      now: context.now,
+    },
+  );
 }
 
 /**
@@ -342,15 +374,30 @@ export async function setupState(context: GmailContext, options: SetupStateOptio
 
   // Unreadable client configs are not a setup failure; the MCP step simply cannot be skipped automatically.
   const registeredWith = await clientsRegisteredWith(context.env);
+  const selected = options.alias
+    ? chooseClientForNewInbox(config, {
+        alias: options.alias,
+        email: options.email,
+        client: options.client,
+        allowOwnClient: true,
+      })
+    : undefined;
+  const clientDone = options.alias ? selected !== null : clients.length > 0;
 
   const done: ('client' | 'inbox' | 'mcp')[] = [];
-  if (clients.length > 0) done.push('client');
+  if (clientDone) done.push('client');
   if (inboxes.length > 0) done.push('inbox');
   if (registeredWith.length > 0) done.push('mcp');
 
-  const next =
-    clients.length === 0 ? 'client' : inboxes.length === 0 ? 'inbox' : registeredWith.length === 0 ? 'mcp' : 'done';
+  const next = !clientDone ? 'client' : inboxes.length === 0 ? 'inbox' : registeredWith.length === 0 ? 'mcp' : 'done';
   const candidates = options.scanDownloads === false ? [] : await findClientJson(context.env);
   const clientOf = Object.fromEntries(Object.entries(config.inboxes).map(([alias, inbox]) => [alias, inbox.client]));
-  return { next, done, clients, inboxes, clientOf, registeredWith, candidates };
+  const clientChoice = selected
+    ? {
+        name: selected.name,
+        ...(selected.organisation ? { organisation: selected.organisation } : {}),
+        ...(selected.organisationLabel ? { organisationLabel: selected.organisationLabel } : {}),
+      }
+    : null;
+  return { next, done, clients, inboxes, clientOf, registeredWith, candidates, clientChoice };
 }

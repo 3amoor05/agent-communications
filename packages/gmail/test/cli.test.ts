@@ -4,7 +4,7 @@ import { dirname, isAbsolute, join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { commandText, EXIT_CODES, shellCommand } from '@agentcomms/core';
+import { commandText, EXIT_CODES, openCore, shellCommand } from '@agentcomms/core';
 import { run } from '../src/cli/program.ts';
 import { renderDoctor, renderSendPreparation } from '../src/cli/render.ts';
 import { GmailContext } from '../src/context.ts';
@@ -21,9 +21,24 @@ interface Captured {
   json: <T>() => T;
 }
 
+type CliHarness = Pick<Harness, 'core' | 'env'>;
+
+function offlineCliHarness(): CliHarness {
+  const configDir = tempDir('agent-gmail-cli-offline-');
+  const env: NodeJS.ProcessEnv = {
+    AGENT_COMMS_CONFIG_DIR: configDir,
+    HOME: configDir,
+    USERPROFILE: configDir,
+    NO_COLOR: '1',
+    AGENT_COMMS_CLIENT_CLI_DIRS: '',
+    AGENT_COMMS_UPDATE_CHECK: 'off',
+  };
+  return { core: openCore({ env }), env };
+}
+
 /** Runs the CLI in-process with captured streams, which is what a caller sees minus the process boundary. */
 async function cli(
-  harness: Harness,
+  harness: CliHarness,
   argv: string[],
   options: {
     tty?: boolean;
@@ -200,7 +215,11 @@ test('doctor prefixes every command in a multi-line repair', () => {
  * default `chat` change policy that is the whole of it. A command that needed no approval, or was refused outright,
  * is returned from the first run.
  */
-async function approving(harness: Harness, argv: string[], options: Parameters<typeof cli>[2] = {}): Promise<Captured> {
+async function approving(
+  harness: CliHarness,
+  argv: string[],
+  options: Parameters<typeof cli>[2] = {},
+): Promise<Captured> {
   const first = await cli(harness, [...argv, '--json'], options);
   const error = first.code === EXIT_CODES.APPROVAL ? first.json<Envelope<never>>().error : undefined;
   if (error?.code !== 'APPROVAL_PENDING') return first;
@@ -214,7 +233,7 @@ async function approving(harness: Harness, argv: string[], options: Parameters<t
  * person was shown.
  */
 async function settingUp(
-  harness: Harness,
+  harness: CliHarness,
   argv: string[],
   options: Parameters<typeof cli>[2] = {},
 ): Promise<{ first: Captured; second: Captured }> {
@@ -1032,6 +1051,60 @@ test('setup can choose the file store, and says which store it used', async () =
     report.did.some((entry) => /secret in the file store/.test(entry)),
     `did not report the store it used: ${JSON.stringify(report.did)}`,
   );
+});
+
+test('setup --profile has its own approval, then adds the profile and continues', async () => {
+  const harness = offlineCliHarness();
+  const path = join(tempDir(), 'acme.agentcomms.json');
+  await writeFile(
+    path,
+    JSON.stringify({
+      agentcomms: 'organisation-profile',
+      version: 1,
+      organisation: 'acme',
+      label: 'Acme Test Org',
+      gmail: {
+        clientId: '123456789012-acme.apps.googleusercontent.com',
+        clientSecret: 'fake-profile-secret-not-real',
+        serves: { domains: ['acme.test'] },
+      },
+    }),
+  );
+
+  const first = await cli(harness, ['setup', '--profile', path, '--store', 'file', '--json']);
+  assert.equal(first.code, EXIT_CODES.APPROVAL, first.stdout);
+  const pending = first.json<Envelope<never>>().error;
+  assert.equal(pending?.code, 'APPROVAL_PENDING');
+  assert.match(String(pending?.details?.preview), /Acme Test Org/);
+  const beforeApproval = await harness.core.config.load();
+  assert.equal(beforeApproval.version, 2);
+  if (beforeApproval.version !== 2) throw new Error('the fixture was migrated to version 2');
+  assert.equal(beforeApproval.organisations?.acme, undefined, 'the profile was added before its own approval');
+  const approval = String(pending?.details?.approvalId);
+
+  const second = await cli(harness, [
+    'setup',
+    '--profile',
+    path,
+    '--store',
+    'file',
+    '--org-approval',
+    approval,
+    '--json',
+  ]);
+  assert.equal(second.code, 0, `${second.stdout}${second.stderr}`);
+  const config = await harness.core.config.load();
+  assert.equal(config.version, 2);
+  if (config.version !== 2) throw new Error('the profile was added to version 2');
+  assert.equal(config.organisations?.acme?.label, 'Acme Test Org');
+  assert.equal(second.json<Envelope<{ next: string }>>().data?.next, 'inbox');
+});
+
+test('setup refuses --org-approval without --profile', async () => {
+  const harness = offlineCliHarness();
+  const result = await cli(harness, ['setup', '--org-approval', 'ap_not_for_this_run', '--json']);
+  assert.equal(result.code, EXIT_CODES.USAGE);
+  assert.match(result.json<Envelope<never>>().error?.message ?? '', /goes with --profile/);
 });
 
 test('setup --inbox is honoured when a mailbox already exists', async () => {

@@ -1732,6 +1732,9 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
     .option('--client-json <path>', 'the OAuth client JSON, if you already have it')
     .option('--inbox <alias>', 'the name to connect the first mailbox under')
     .option('--email <address>', 'the address that mailbox must turn out to be')
+    .option('--client <name>', 'sign that mailbox in through this OAuth client')
+    .option('--profile <file>', 'add this organisation profile before continuing setup')
+    .option('--org-approval <id>', 'add the organisation profile this approval was given for')
     .addOption(
       new Option('--mcp-client <client>', 'register with this MCP client when the mailbox is connected').choices([
         'claude-code',
@@ -1773,7 +1776,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
     .option('--no-browser', 'print the links instead of opening them')
     .action(
       act(async (context, globalOptions, options: Options) => {
-        const { setupState, CONSOLE_STEPS } = await import('../operations/setup.ts');
+        const { setupProfileChange, setupState, CONSOLE_STEPS } = await import('../operations/setup.ts');
         const out = streams.stderr;
         const bold = (text: string) => paint(globalOptions.color, 'bold', text);
         const dim = (text: string) => paint(globalOptions.color, 'dim', text);
@@ -1810,7 +1813,66 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
           noTui: options.tui === false,
           canPrompt: canPrompt(env, streams, { json: globalOptions.json, noInput: globalOptions.noInput }),
         });
-        let state = await setupState(context);
+        if (options.profile) {
+          await gatedChangeAtTerminal(
+            context.core,
+            setupProfileChange(context, {
+              profile: String(options.profile),
+              ...(options.store ? { store: String(options.store) } : {}),
+              ...(typeof options.orgApproval === 'string' ? { orgApproval: options.orgApproval } : {}),
+            }),
+            {
+              approvalId: typeof options.orgApproval === 'string' ? options.orgApproval : undefined,
+              env,
+              output: { json: globalOptions.json || globalOptions.noInput, color: globalOptions.color },
+              command: again(['--org-approval']),
+              approvalFlag: '--org-approval',
+              approveCommand: 'agent-gmail approve',
+              streams,
+            },
+          );
+        } else {
+          refuseUnclaimedApproval(options.orgApproval, {
+            message: '--org-approval goes with --profile: without it this run adds no organisation profile',
+            hint: 'Run it again with --profile <file> as well, as the preview named it. Nothing was done.',
+          });
+        }
+
+        /*
+         * A profile makes the mailbox name part of the client step (design 2026-10-02 §D6). Ask it first on a new,
+         * interactive version-2 setup that has profiles, so a personal address does not skip the Cloud walk merely
+         * because an organisation's ineligible client row happens to exist.
+         */
+        const beforeSetup = await context.config();
+        if (
+          mode !== 'none' &&
+          !options.inbox &&
+          Object.keys(beforeSetup.inboxes).length === 0 &&
+          beforeSetup.version === 2 &&
+          Object.keys(beforeSetup.organisations ?? {}).length > 0
+        ) {
+          options.inbox = await askText(mode, streams, {
+            message: 'A name for it: organisation/gmail',
+            placeholder: 'acme/gmail',
+          });
+          if (!options.email) {
+            const address = await askText(mode, streams, {
+              message: 'Which address (blank to choose in the browser)',
+            });
+            if (address) options.email = address;
+          }
+        }
+
+        const setupStateOptions = (scanDownloads = true) => ({
+          scanDownloads,
+          ...(options.inbox ? { alias: String(options.inbox) } : {}),
+          ...(options.email ? { email: String(options.email) } : {}),
+          ...(options.client ? { client: String(options.client) } : {}),
+        });
+        let state = await setupState(context, setupStateOptions());
+        if (mode !== 'none' && state.clientChoice?.organisationLabel) {
+          out.write(`Your organisation, ${state.clientChoice.organisationLabel}, provides the Google client.\n\n`);
+        }
 
         /*
          * Each approval this run carries is refused before anything is done, unless the run reaches the step that
@@ -1908,7 +1970,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
               );
               // Scanned, not skipped: this `state` is folded into the report below, and the report lists what is
               // in the downloads directory.
-              state = await setupState(context);
+              state = await setupState(context, setupStateOptions());
             } else {
               const usable = state.candidates.find((candidate) => candidate.kind === 'desktop');
               blocked = {
@@ -1943,6 +2005,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
                 mode: 'add',
                 alias,
                 ...(options.email ? { email: String(options.email) } : {}),
+                ...(options.client ? { client: String(options.client) } : {}),
                 detached: true,
                 ...(deps.listenerCommand ? { listenerCommand: deps.listenerCommand } : {}),
                 ...(registerWith ? { registerWith } : {}),
@@ -2018,7 +2081,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
                     ...(result.verifyDetail ? { hint: result.verifyDetail } : {}),
                   };
               }
-              state = await setupState(context);
+              state = await setupState(context, setupStateOptions());
             } else {
               blocked = { step: 'mcp', needs: '--mcp-client <client>' };
             }
@@ -2133,7 +2196,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
           if (walkFrom === 0)
             out.write(
               'Gmail only accepts calls from an OAuth client registered to a Google Cloud project, and it has to be\n' +
-                'yours — there is no shared one to borrow. This is once per person, and one client covers every\n' +
+                'yours, unless an organisation profile provides one. This is once per person, and one client covers every\n' +
                 'mailbox you connect and everyone you share it with.\n\n',
             );
           await runConsoleWalk({
@@ -2200,7 +2263,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
           );
           if (added.sourceRemoved) out.write(`${dim('The downloaded JSON has been deleted.')}\n`);
           out.write('\n');
-          state = await setupState(context, { scanDownloads: false });
+          state = await setupState(context, setupStateOptions(false));
         }
 
         // ── 2. A mailbox ──────────────────────────────────────────────────────────────────────────────────────
@@ -2254,6 +2317,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
             mode: 'add',
             alias,
             ...(email ? { email } : {}),
+            ...(options.client ? { client: String(options.client) } : {}),
             detached: false,
             ...(deps.listenerCommand ? { listenerCommand: deps.listenerCommand } : {}),
           });
@@ -2263,7 +2327,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
             const signedIn = await started.listener.result;
             out.write(`\n${renderSignedIn(signedIn, globalOptions.color, context.platform)}\n\n`);
           }
-          state = await setupState(context, { scanDownloads: false });
+          state = await setupState(context, setupStateOptions(false));
           if (!(await askYesNo(mode, streams, { message: 'Connect another mailbox?', defaultYes: false }))) break;
           out.write('\n');
         }
@@ -2316,7 +2380,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
           }
         }
 
-        const final = await setupState(context, { scanDownloads: false });
+        const final = await setupState(context, setupStateOptions(false));
         const [first] = final.inboxes;
         out.write(`\n${bold('Done.')} ${final.inboxes.length} mailbox(es): ${final.inboxes.join(', ')}\n`);
         // A name to copy, or no line at all. The old fallback printed `--inbox work`, which is not a name a config

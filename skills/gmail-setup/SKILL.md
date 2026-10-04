@@ -150,12 +150,17 @@ send policy?" either: `gmail_inboxes_list` answers that in one call.
    `.agentcomms.json` file: `agentcomms org add <file>` (`comms_org_add` from a chat, a change they
    approve) registers its client here, and no Cloud project is needed. Do not guess the client's name:
    it is often `<organisation>-1`, but another number when that name is taken, or a name of the
-   person's own when they had registered the same client already. In this release setup does not pick
-   that client by itself yet: connect each mailbox through it with
-   `agent-gmail inbox add <name> --client <client>` (`client` in `gmail_inbox_add`), where `<client>` is
-   the active client `agentcomms org show <organisation>` (`comms_org_show`) reports.
+   person's own when they had registered the same client already. `setup --profile <file>` adds the
+   profile through its own change approval and then chooses its active client for a mailbox whose name
+   starts with that organisation. `inbox add` and `gmail_inbox_add` make the same choice before consent;
+   pass `--client <name>` / `client` only to override it.
    **Complete when:** the user has named the project, agreed to create one, or added their organisation's
    profile.
+   An existing mailbox stays on the client that issued its refresh token. To move it onto the active
+   organisation generation reported by `agentcomms org show <organisation>`, re-authorise it explicitly:
+   `agent-gmail inbox reauth <name> --client <organisation>-1 --start` (or `gmail_inbox_reauth` with that
+   `client`, then `gmail_inbox_finish`). Use the actual generation name from `org show`; `-1` is the common
+   first generation, not a value to guess.
 2. **A browser the user can reach.** Consent happens in a browser, on Google's own screen. Neither this
    package nor you can grant it: no flag makes it headless, and `--url` only lets the user paste the
    address bar back from a machine that has no browser of its own. Hand the link over and wait.

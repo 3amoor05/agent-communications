@@ -191,6 +191,7 @@ export function renderSignedIn(
         : `Connected ${result.inbox.email} as "${result.alias}".`,
     ),
     `  access: ${result.inbox.tier}${result.inbox.contacts ? ' + contacts' : ''}`,
+    `  client: ${result.client}${result.organisation ? ` (organisation ${result.organisation})` : ''}`,
   ];
   if (result.missingScopes.length > 0) {
     lines.push(
@@ -210,11 +211,12 @@ export function renderInboxList(inboxes: InboxView[], color: boolean): string {
   if (inboxes.length === 0) return 'No mailbox connected yet. Connect one with `agent-gmail inbox add <name>`.';
   return table(
     [
-      ['NAME', 'ADDRESS', 'ACCESS', 'SENDING', 'HEALTH'],
+      ['NAME', 'ADDRESS', 'ACCESS', 'CLIENT', 'SENDING', 'HEALTH'],
       ...inboxes.map((inbox) => [
         inbox.alias,
         inbox.email,
         inbox.tier + (inbox.contacts ? '+contacts' : ''),
+        inbox.client + (inbox.organisation ? ` (${inbox.organisation})` : ''),
         inbox.sendPolicy + (inbox.sendPolicyInherited ? ' (default)' : ''),
         inbox.health === 'ok' ? 'ok' : inbox.health === 'unknown' ? 'not used yet' : 'needs attention',
       ]),
@@ -234,6 +236,7 @@ export function renderInboxShow(
     `  sending:     ${inbox.sendPolicy}${inbox.sendPolicyInherited ? ' (from defaults)' : ''}`,
     `  changes:     ${inbox.changePolicy}${inbox.changePolicyInherited ? ' (from defaults)' : ''}`,
     `  client:      ${inbox.client}`,
+    ...(inbox.organisation ? [`  organisation: ${inbox.organisation}`] : []),
     `  account id:  ${inbox.identity === 'oidc' ? 'known' : 'not known (imported)'}`,
     `  connected:   ${inbox.createdAt}`,
     `  last refresh:${inbox.lastRefreshOkAt ? ` ${inbox.lastRefreshOkAt}` : ' never'}`,
@@ -791,6 +794,11 @@ export function renderSetupPlan(
     clients: string[];
     inboxes: string[];
     registeredWith: string[];
+    clientChoice?: {
+      name: string;
+      organisation?: string | undefined;
+      organisationLabel?: string | undefined;
+    } | null;
     candidates: { path: string; kind: string; modifiedAt: string }[];
     /** What this run changed, when it was driven by flags rather than by questions. */
     did?: readonly string[] | undefined;
@@ -872,7 +880,12 @@ export function renderSetupPlan(
   lines.push('');
   if (state.done.length > 0) lines.push(`Already done: ${state.done.join(', ')}.`);
 
-  if (state.clients.length === 0) {
+  if (state.clientChoice?.organisation && state.clientChoice.organisationLabel) {
+    lines.push('');
+    lines.push(`Your organisation, ${state.clientChoice.organisationLabel}, provides the Google client.`);
+  }
+
+  if (state.next === 'client') {
     lines.push('');
     lines.push(paint(color, 'bold', 'A Google OAuth client — once per person, covers every mailbox'));
     for (const [index, step] of steps.entries()) {

@@ -77,6 +77,10 @@ being deleted. `doctor` says which mailbox and why.
 agent-gmail inbox reauth <alias> --start
 ```
 
+If the mailbox should move onto an organisation profile's client, read the active generation with `agentcomms org
+show <organisation>` and make it explicit: `agent-gmail inbox reauth <name> --client <organisation>-1 --start`.
+Use the generation name that `org show` reports.
+
 ### `doctor` says `missing: openid, …/userinfo.email` on every mailbox
 
 Those two come from a sign-in this tool performed. A mailbox brought over by `inbox import` carries whatever the

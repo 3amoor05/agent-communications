@@ -20,6 +20,7 @@ import {
 import { revokeToken } from '../auth/oauth.ts';
 import { type Capability, capabilitiesOf, tierOf } from '../auth/scopes.ts';
 import type { GmailContext } from '../context.ts';
+import { organisationForClient } from './client-choice.ts';
 import { requireNewInboxName } from './inbox-names.ts';
 
 export interface InboxView {
@@ -37,6 +38,8 @@ export interface InboxView {
   /** True when that comes from `defaults`, not from the inbox itself. */
   changePolicyInherited: boolean;
   client: string;
+  /** The organisation whose owned or adopted generation this client is, when there is one. */
+  organisation?: string | undefined;
   identity: 'oidc' | 'legacy';
   createdAt: string;
   lastRefreshOkAt?: string | undefined;
@@ -55,6 +58,7 @@ export async function inboxList(context: GmailContext): Promise<InboxView[]> {
   const views: InboxView[] = [];
   for (const [alias, inbox] of Object.entries(config.inboxes)) {
     const state = await context.core.states.get(inbox.id);
+    const organisation = organisationForClient(config, inbox.client);
     views.push({
       alias,
       id: inbox.id,
@@ -67,6 +71,7 @@ export async function inboxList(context: GmailContext): Promise<InboxView[]> {
       changePolicy: inbox.changePolicy ?? defaultChangePolicy(config),
       changePolicyInherited: inbox.changePolicy === undefined,
       client: inbox.client,
+      ...(organisation ? { organisation } : {}),
       identity: inbox.identity,
       createdAt: inbox.createdAt,
       lastRefreshOkAt: state.lastRefreshOkAt,

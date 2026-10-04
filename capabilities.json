@@ -696,7 +696,18 @@
       "mcp": "gmail_setup",
       "status": "both",
       "operation": "setupState",
-      "reason": "The report `setup` starts from: the clients and mailboxes there are, the MCP clients the server is registered with, the downloaded client files, and the one step to take next. `setup --json` with no flags and no terminal prints it and changes nothing; gmail_setup never changes anything. The steps `setup` then takes are the three rows that follow."
+      "reason": "The report `setup` starts from: the eligible client for the target mailbox, the clients and mailboxes there are, the MCP clients the server is registered with, the downloaded client files, and the one step to take next. With no --profile it changes nothing. The steps `setup` then takes are the rows that follow."
+    },
+    {
+      "id": "gmail.setup.profile",
+      "package": "gmail",
+      "cli": "setup",
+      "mcp": "gmail_setup",
+      "status": "both",
+      "operation": "setupProfileChange",
+      "argv": ["--profile", "parity.agentcomms.json"],
+      "args": { "profile": "parity.agentcomms.json" },
+      "reason": "`setup --profile <file>` and gmail_setup profile add the organisation through core's orgAddChange first, under the separate --org-approval/orgApproval, then continue Gmail setup (design 2026-10-02 §D6)."
     },
     {
       "id": "gmail.setup.client",

@@ -28,11 +28,12 @@ npm i -g @agentcomms/gmail
 agent-gmail setup
 ```
 
-`setup` is the way in. You need one OAuth client of your own, created once in Google Cloud (type **Desktop app**)
-and published so its tokens do not expire after a week — `setup` walks those five screens with a link to each and
-says what to type in every field, then finds the JSON you downloaded, connects a mailbox, and offers to register
-the MCP server. It skips whatever is already done, so running it again adds another mailbox — and stopped partway,
-it offers to carry on from the last Google Cloud screen you confirmed.
+`setup` is the way in. You need an eligible OAuth client: one of your own, or one an organisation profile provides.
+For your own, create it once in Google Cloud (type **Desktop app**) and publish it so its tokens do not expire after
+a week — `setup` walks those five screens with a link to each and says what to type in every field. With a profile,
+`setup --profile <file>` adds it through its own approval and skips the Cloud walk when the mailbox name selects its
+active client. It then connects the mailbox and offers to register the MCP server. It skips whatever is already done,
+so running it again adds another mailbox — and stopped partway, it offers to carry on from the last screen confirmed.
 
 At a terminal it draws a list you move through with the cursor keys; `--no-tui` asks the same questions one line
 at a time. Where nobody can answer one — `--json`, `--no-input`, CI, a redirected stream — it acts on the flags it
@@ -60,6 +61,10 @@ agent-gmail inbox add acme/gmail --email you@example.com --start   # prints a li
 agent-gmail inbox add --finish fl_… --wait 60
 agent-gmail whoami --inbox acme/gmail
 ```
+
+Adding a profile does not move mailboxes already connected. Read its active client from `agentcomms org show
+<organisation>`, then move one with `agent-gmail inbox reauth <name> --client <organisation>-1 --start`, using the
+generation name that `org show` reports.
 
 `--start` and `--finish` are two commands because consent takes minutes and an agent's shell does not last that
 long. On a terminal, plain `agent-gmail inbox add acme/gmail` waits for the browser itself.
