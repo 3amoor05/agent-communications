@@ -33,7 +33,8 @@ token it replaces is revoked — only when Slack confirms it, or says the token 
 confirmed is kept and retried by `doctor`, even across a restart, until the token's own expiry. `workspace remove`
 finishes what revocations it can first and leaves the rest for `doctor`. A sign-in that does not finish, for example
 because the workspace requires an administrator to approve the app, says so without guessing why, and never says you
-declined (CUE-391).
+declined. One stopped with Ctrl-C just as it saves keeps the account it saved and says so, rather than reporting that
+nothing happened (CUE-391).
 
 What it means for you: a minor release; nothing changes unless you add an organisation profile.
 - Profiles need the version-2 account names (`organisation/platform`); `agentcomms names migrate` moves an older
