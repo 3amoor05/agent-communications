@@ -92,6 +92,8 @@ async function cli(
     appConfig?: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
     tty?: boolean;
     env?: NodeJS.ProcessEnv;
+    /** The shell syntax printed commands use; pinned whenever a test asserts their text. */
+    platform?: NodeJS.Platform;
     /** Typed at the hidden prompt, the way a person would, once it is asked. */
     type?: string;
   } = {},
@@ -125,6 +127,7 @@ async function cli(
     probe: (probeInput, init) => harness.probe(probeInput, init),
     read: unreachable,
     appConfig: options.appConfig ?? options.fake?.fetch ?? unreachable,
+    platform: options.platform,
   });
   return { code, stdout, stderr, json: <T>() => JSON.parse(stdout) as Envelope<T> };
 }
@@ -483,6 +486,7 @@ test('app create validates, creates, and prints the app id, the Client ID and th
   const result = await cli(harness, ['app', 'create', 'zeta', '--mode', 'send', '--port', '51234'], {
     fake,
     env: { SLACK_APP_CONFIG_TOKEN: TOKEN },
+    platform: 'win32',
   });
   assert.equal(result.code, EXIT_CODES.OK, result.stderr);
   assert.deepEqual(
@@ -501,7 +505,7 @@ test('app create validates, creates, and prints the app id, the Client ID and th
   assert.match(result.stdout, /1111111111\.2222222222/);
   assert.match(
     result.stdout,
-    /agent-slack workspace add zeta --client-id 1111111111\.2222222222 --port 51234 --mode send/,
+    /agent-slack workspace add zeta --client-id "1111111111\.2222222222" --port "51234" --mode send/,
   );
   assert.match(result.stdout, /client_secret, signing_secret, verification_token\. None was kept or shown/);
   assert.equal(await configText(harness), before, 'creating an app connects nothing');
@@ -514,6 +518,7 @@ test('app create under --json returns the ids and the names of what it dropped, 
   const result = await cli(harness, ['--json', 'app', 'create', '--port', '51234'], {
     fake,
     env: { SLACK_APP_CONFIG_TOKEN: TOKEN },
+    platform: 'darwin',
   });
   assert.equal(result.code, EXIT_CODES.OK, result.stdout);
   const data = result.json<Record<string, unknown>>().data;
@@ -521,7 +526,7 @@ test('app create under --json returns the ids and the names of what it dropped, 
   assert.equal(data?.clientId, '1111111111.2222222222');
   assert.equal(data?.mode, 'read');
   assert.deepEqual(data?.secretsDiscarded, ['client_secret', 'signing_secret', 'verification_token']);
-  assert.equal(data?.next, 'agent-slack workspace add <name> --client-id 1111111111.2222222222 --port 51234');
+  assert.equal(data?.next, "agent-slack workspace add '<name>' --client-id 1111111111.2222222222 --port 51234");
   assert.deepEqual(Object.keys(data ?? {}).sort(), [
     'appId',
     'clientId',

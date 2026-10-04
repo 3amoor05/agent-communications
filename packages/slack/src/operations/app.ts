@@ -1,4 +1,4 @@
-import { type AccountConfig, CommsError, toCommsError } from '@agentcomms/core';
+import { commandText, type AccountConfig, CommsError, inlineCommand, shellCommand, toCommsError } from '@agentcomms/core';
 import { callSlack, type SlackCall, type SlackProblem, type SlackResponse } from '../api/call.ts';
 import { closedPermit, configureWith, type FetchLike } from '../api/guard.ts';
 import { appManifestUrl, buildManifest, type InstallMode, parseMode, type SlackManifest } from '../manifest.ts';
@@ -45,6 +45,7 @@ export interface AppUpdateInput {
   readonly transport?: AppTransport | undefined;
   readonly audit?: AuditSink | undefined;
   readonly surface?: 'cli' | 'mcp' | undefined;
+  readonly platform?: NodeJS.Platform | undefined;
 }
 
 export interface AppUpdated {
@@ -80,6 +81,7 @@ export interface AppCreateInput {
   readonly transport?: AppTransport | undefined;
   readonly audit?: AuditSink | undefined;
   readonly surface?: 'cli' | 'mcp' | undefined;
+  readonly platform?: NodeJS.Platform | undefined;
 }
 
 export interface AppCreated {
@@ -261,11 +263,22 @@ async function validate(
 }
 
 /** What happens next, for the workspace whose app was just updated. */
-function stepsAfterUpdate(alias: string, account: AccountConfig, mode: InstallMode, port: number): string[] {
+function stepsAfterUpdate(
+  alias: string,
+  account: AccountConfig,
+  mode: InstallMode,
+  port: number,
+  platform: NodeJS.Platform,
+): string[] {
   const workspaceMode = parseMode(account.mode ?? account.tier, `"${alias}"`);
   if (mode === 'send' && workspaceMode === 'read') {
     return [
-      `\`agent-slack workspace mode ${alias} send --app-updated --port ${port}\` (slack_mode_set from a chat): a person approves the change, then approves the sign-in in Slack. That sign-in is what gives "${alias}" a token that can post.`,
+      `${inlineCommand(
+        shellCommand(
+          ['agent-slack', 'workspace', 'mode', alias, 'send', '--app-updated', '--port', String(port)],
+          platform,
+        ),
+      )} (slack_mode_set from a chat): a person approves the change, then approves the sign-in in Slack. That sign-in is what gives "${alias}" a token that can post.`,
     ];
   }
   if (mode === 'read' && workspaceMode === 'send') {
@@ -295,6 +308,7 @@ function stepsAfterUpdate(alias: string, account: AccountConfig, mode: InstallMo
  */
 export async function updateApp(input: AppUpdateInput): Promise<AppUpdated> {
   const { alias, account, mode, port, transport } = input;
+  const platform = input.platform ?? process.platform;
   const appId = account.appId;
   if (!appId) {
     throw new CommsError('CONFIG', `"${alias}" does not record which Slack app it was connected through`, {
@@ -339,7 +353,7 @@ export async function updateApp(input: AppUpdateInput): Promise<AppUpdated> {
     ...(typeof reply.permissions_updated === 'boolean' ? { permissionsUpdated: reply.permissions_updated } : {}),
     tokenChanged: false,
     workspaceMode,
-    next: stepsAfterUpdate(alias, account, mode, port),
+    next: stepsAfterUpdate(alias, account, mode, port, platform),
   };
 }
 
@@ -355,6 +369,7 @@ const PRINTABLE_ID = /^[A-Za-z0-9._-]{1,100}$/;
  */
 export async function createApp(input: AppCreateInput): Promise<AppCreated> {
   const { mode, port, transport } = input;
+  const platform = input.platform ?? process.platform;
   const manifest = buildManifest(mode, redirectUrlFor(port));
   const token = await input.askToken();
   checkConfigurationToken(token);
@@ -396,7 +411,12 @@ export async function createApp(input: AppCreateInput): Promise<AppCreated> {
   await record('ok', { appId });
   if (typeof clientId !== 'string' || !PRINTABLE_ID.test(clientId)) {
     throw new CommsError('PROVIDER_UNAVAILABLE', `Slack created app ${appId} but its reply carried no Client ID`, {
-      hint: `Copy the Client ID from https://api.slack.com/apps/${encodeURIComponent(appId)}/general, then \`agent-slack workspace add <name> --client-id <it> --port ${port}\`. Do not create another app.`,
+      hint: `Copy the Client ID from https://api.slack.com/apps/${encodeURIComponent(appId)}/general, then ${inlineCommand(
+        shellCommand(
+          ['agent-slack', 'workspace', 'add', '<name>', '--client-id', '<it>', '--port', String(port)],
+          platform,
+        ),
+      )}. Do not create another app.`,
     });
   }
   const name = input.alias ?? '<name>';
@@ -408,6 +428,21 @@ export async function createApp(input: AppCreateInput): Promise<AppCreated> {
     redirectUrl: redirectUrlFor(port),
     manifestPage: manifestPageFor(appId),
     secretsDiscarded,
-    next: `agent-slack workspace add ${name} --client-id ${clientId} --port ${port}${mode === 'send' ? ' --mode send' : ''}`,
+    next: commandText(
+      shellCommand(
+        [
+          'agent-slack',
+          'workspace',
+          'add',
+          name,
+          '--client-id',
+          clientId,
+          '--port',
+          String(port),
+          ...(mode === 'send' ? ['--mode', 'send'] : []),
+        ],
+        platform,
+      ),
+    ),
   };
 }

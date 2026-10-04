@@ -1,6 +1,7 @@
 import {
   type AccountConfig,
   type ChangePolicy,
+  commandText,
   CommsError,
   type Config,
   defaultChangePolicy,
@@ -8,6 +9,7 @@ import {
   type GatedChange,
   refuseUnclaimedApproval,
   type SendPolicy,
+  shellCommand,
   withCredentialsLock,
 } from '@agentcomms/core';
 import type { SlackContext } from '../context.ts';
@@ -47,7 +49,7 @@ export interface SignInStarted {
   readonly finish: { readonly tool: 'slack_workspace_finish'; readonly command: string };
 }
 
-export function signInStarted(started: StartedSignIn, reauth: boolean): SignInStarted {
+export function signInStarted(context: SlackContext, started: StartedSignIn, reauth: boolean): SignInStarted {
   return {
     flowId: started.flowId,
     alias: started.alias,
@@ -57,7 +59,18 @@ export function signInStarted(started: StartedSignIn, reauth: boolean): SignInSt
     expiresAt: started.expiresAt,
     finish: {
       tool: 'slack_workspace_finish',
-      command: `agent-slack workspace ${reauth ? `reauth ${started.alias}` : 'add'} --finish ${started.flowId}`,
+      command: commandText(
+        shellCommand(
+          [
+            'agent-slack',
+            'workspace',
+            ...(reauth ? ['reauth', started.alias] : ['add']),
+            '--finish',
+            started.flowId,
+          ],
+          context.platform,
+        ),
+      ),
     },
   };
 }
@@ -363,7 +376,12 @@ async function modeSetPlan(
         steps: wideningSteps(found.alias, port, found.account.appId),
         manifest: await manifestFor(context, { mode: 'send', port, workspace: found.alias }),
         terminalAlternative: found.account.appId
-          ? `agent-slack app update ${found.alias} --mode send --port ${port}`
+          ? commandText(
+              shellCommand(
+                ['agent-slack', 'app', 'update', found.alias, '--mode', 'send', '--port', String(port)],
+                context.platform,
+              ),
+            )
           : null,
       },
     };

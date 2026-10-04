@@ -1,6 +1,15 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { renderPosted, renderWorkspace, renderWorkspaces } from '../src/cli/render.ts';
+import { commandText, shellCommand } from '@agentcomms/core';
+import type { SlackDraft } from '../src/compose/drafts.ts';
+import {
+  renderCreatedDraft,
+  renderManifestHelp,
+  renderPosted,
+  renderSignInStarted,
+  renderWorkspace,
+  renderWorkspaces,
+} from '../src/cli/render.ts';
 import type { WorkspaceView } from '../src/operations/workspaces.ts';
 
 /**
@@ -69,6 +78,38 @@ test('a workspace with no name shows its id rather than an empty gap', () => {
   const printed = renderWorkspaces([view({ workspaceName: undefined })], false);
   assert.match(printed, /T0001/);
   assert.doesNotMatch(printed, / — \n/);
+});
+
+test('renderer commands use the explicitly selected shell platform', () => {
+  const draft = { draftId: 'draft one' } as SlackDraft;
+  assert.match(
+    renderCreatedDraft(draft, 'two words', 'win32'),
+    new RegExp(
+      commandText(
+        shellCommand(
+          ['agent-slack', 'post', 'prepare', '--workspace', 'two words', '--draft', 'draft one'],
+          'win32',
+        ),
+      ).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+    ),
+  );
+  assert.match(
+    renderSignInStarted(
+      {
+        flowId: 'flow one',
+        alias: 'two words',
+        mode: 'read',
+        authUrl: 'https://example.test',
+        redirectUrl: 'http://localhost',
+        expiresAt: '2026-10-04T12:00:00.000Z',
+      },
+      true,
+      false,
+      'win32',
+    ),
+    /agent-slack workspace reauth "two words" --finish "flow one"/,
+  );
+  assert.match(renderManifestHelp('read', 60426, false, undefined, 'win32'), /--port "60426"/);
 });
 
 test('a post reads as it always did, and a note about its record is said after it rather than dropped', () => {

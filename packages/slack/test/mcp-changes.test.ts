@@ -55,7 +55,10 @@ interface Started {
   finish: { tool: string; command: string };
 }
 
-async function connect(harness: Harness, options: { workspace?: string } = {}) {
+async function connect(
+  harness: Harness,
+  options: { workspace?: string; platform?: NodeJS.Platform } = {},
+) {
   const { server } = await createSlackMcpServer({
     core: harness.core,
     env: harness.env,
@@ -63,6 +66,7 @@ async function connect(harness: Harness, options: { workspace?: string } = {}) {
     listenerCommand: LISTENER_COMMAND,
     // Nothing here reads Slack, and anything that tried would be answered by this rather than by slack.com.
     fetch: async () => new Response(JSON.stringify({ ok: false, error: 'unknown_method' })),
+    platform: options.platform,
     ...(options.workspace ? { workspace: options.workspace } : {}),
   });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -147,7 +151,7 @@ async function modeOf(harness: Harness, alias: string): Promise<string | undefin
 
 test('connecting in read starts at once and returns the link; finishing records what Slack granted', async () => {
   const harness = await newHarness();
-  const { call, close } = await connect(harness);
+  const { call, close } = await connect(harness, { platform: 'darwin' });
   try {
     const port = await freePort();
     const started = applied<Started>(
@@ -279,7 +283,7 @@ test('slack_mode_set hands over the app step first, then asks, then signs in; a 
   const harness = await newHarness();
   const port = await freePort();
   await harness.addWorkspace({ alias: 'acme', redirectPort: port });
-  const { call, close } = await connect(harness);
+  const { call, close } = await connect(harness, { platform: 'win32' });
   try {
     // 1. The recorded grant cannot show the app was widened: the manifest and its page, and nothing started.
     const appStep = ok<{
@@ -293,7 +297,7 @@ test('slack_mode_set hands over the app step first, then asks, then signs in; a 
     assert.equal(appStep.appUpdateNeeded, true);
     assert.equal(appStep.manifest.manifestUrl, 'https://api.slack.com/apps/A0001/app-manifest');
     assert.equal(appStep.manifest.port, port);
-    assert.equal(appStep.terminalAlternative, `agent-slack app update acme --mode send --port ${port}`);
+    assert.equal(appStep.terminalAlternative, `agent-slack app update acme --mode send --port "${port}"`);
     assert.deepEqual(await harness.core.approvals.list(), []);
 
     // 2. The person says the app is updated: a change to approve.

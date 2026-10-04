@@ -5,11 +5,14 @@ import {
   type CanonicalChannelMessage,
   type ChannelPreview,
   type ClaimOptions,
+  commandText,
   CommsError,
+  inlineCommand,
   canonicalJson,
   type Expectation,
   messageDigest,
   type SendPolicy,
+  shellCommand,
   sha256Hex,
   stricterPolicy,
   truncateDisplay,
@@ -95,6 +98,7 @@ export interface PrepareDeps {
   readonly accountId: string;
   readonly workspaceId: string;
   readonly workspaceName: string;
+  readonly platform?: NodeJS.Platform | undefined;
   /** The user id this posts as. In the digest: two accounts in one workspace are two different people speaking. */
   readonly postingAs: string;
   readonly policy: SendPolicy;
@@ -332,7 +336,9 @@ export async function viewPost(
  * narrow in between. Slack would refuse it anyway — a `read` token holds no posting scope — but only after the bytes had
  * gone to it, and in words that do not say what to do. A post of text alone never comes here.
  */
-export function requireFileSending(deps: Pick<PrepareDeps, 'mode' | 'grantedScopes' | 'workspaceName'>): void {
+export function requireFileSending(
+  deps: Pick<PrepareDeps, 'mode' | 'grantedScopes' | 'workspaceName' | 'platform'>,
+): void {
   const alias = deps.workspaceName;
   if (deps.mode !== 'send') {
     throw new CommsError('SCOPE_MISSING', `"${alias}" is connected to read, and cannot send files`, {
@@ -341,10 +347,13 @@ export function requireFileSending(deps: Pick<PrepareDeps, 'mode' | 'grantedScop
     });
   }
   if (!(deps.grantedScopes ?? []).includes('files:write')) {
-    const command = `agent-slack workspace reauth ${alias} --mode send`;
+    const command = shellCommand(
+      ['agent-slack', 'workspace', 'reauth', alias, '--mode', 'send'],
+      deps.platform ?? process.platform,
+    );
     throw new CommsError('SCOPE_MISSING', `"${alias}" was not granted files:write, which sending a file needs`, {
-      hint: `Nothing was sent. Sign in again to grant it: \`${command}\`. If the app itself does not offer files:write, update it with \`agent-slack manifest --mode send\` first.`,
-      details: { scope: 'files:write', command },
+      hint: `Nothing was sent. Sign in again to grant it: ${inlineCommand(command)}. If the app itself does not offer files:write, update it with \`agent-slack manifest --mode send\` first.`,
+      details: { scope: 'files:write', command: commandText(command) },
     });
   }
 }

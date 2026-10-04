@@ -1,4 +1,14 @@
-import { describeSize, escapeForDisplay, paint, sizeOf, stripInvisible, truncateDisplay } from '@agentcomms/core';
+import {
+  commandText,
+  describeSize,
+  escapeForDisplay,
+  inlineCommand,
+  paint,
+  shellCommand,
+  sizeOf,
+  stripInvisible,
+  truncateDisplay,
+} from '@agentcomms/core';
 import type { SlackDraft } from '../compose/drafts.ts';
 import { renderManifest } from '../manifest.ts';
 import type { AppCreated, AppUpdated } from '../operations/app.ts';
@@ -184,18 +194,31 @@ export function renderDrafts(drafts: readonly DraftView[], color: boolean): stri
 }
 
 /** What `draft create` wrote, and what to run next: nothing has gone anywhere yet. */
-export function renderCreatedDraft(draft: SlackDraft, workspace: string): string {
+export function renderCreatedDraft(
+  draft: SlackDraft,
+  workspace: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
   const count = draft.files?.length ?? 0;
   const files = count === 0 ? '' : ` with ${count} file${count === 1 ? '' : 's'}`;
-  return `Draft ${draft.draftId}${files}. Nothing has reached Slack.\nPreview it with: agent-slack post prepare --workspace ${workspace} --draft ${draft.draftId}`;
+  const preview = commandText(
+    shellCommand(['agent-slack', 'post', 'prepare', '--workspace', workspace, '--draft', draft.draftId], platform),
+  );
+  return `Draft ${draft.draftId}${files}. Nothing has reached Slack.\nPreview it with: ${preview}`;
 }
 
 /** What `draft update` saved: a new revision, which no approval made before it covers. */
-export function renderUpdatedDraft(draft: SlackDraft, workspace: string): string {
+export function renderUpdatedDraft(
+  draft: SlackDraft,
+  workspace: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
   const count = draft.files?.length ?? 0;
   return [
     `Draft ${draft.draftId} saved${count === 0 ? '' : ` with ${count} file${count === 1 ? '' : 's'}`}, as a new revision: any approval it had no longer holds.`,
-    `Preview it with: agent-slack post prepare --workspace ${workspace} --draft ${draft.draftId}`,
+    `Preview it with: ${commandText(
+      shellCommand(['agent-slack', 'post', 'prepare', '--workspace', workspace, '--draft', draft.draftId], platform),
+    )}`,
   ].join('\n');
 }
 
@@ -267,7 +290,12 @@ export function renderDoctor(result: DoctorResult, color: boolean): string {
  * already waiting and telling somebody to run a second command would send them to a flow this process has
  * claimed.
  */
-export function renderSignInStarted(started: StartedSignIn, reauth: boolean, color: boolean): string {
+export function renderSignInStarted(
+  started: StartedSignIn,
+  reauth: boolean,
+  color: boolean,
+  platform: NodeJS.Platform = process.platform,
+): string {
   const lines = [
     paint(color, 'bold', `${reauth ? 'Re-authorise' : 'Connect'} ${started.alias} (${started.mode})`),
     '',
@@ -281,7 +309,18 @@ export function renderSignInStarted(started: StartedSignIn, reauth: boolean, col
     lines.push(
       '',
       'Then finish it with:',
-      `  agent-slack workspace ${reauth ? `reauth ${started.alias}` : 'add'} --finish ${started.flowId}`,
+      `  ${commandText(
+        shellCommand(
+          [
+            'agent-slack',
+            'workspace',
+            ...(reauth ? ['reauth', started.alias] : ['add']),
+            '--finish',
+            started.flowId,
+          ],
+          platform,
+        ),
+      )}`,
     );
   } else {
     lines.push('', paint(color, 'dim', 'Waiting for the browser…'));
@@ -322,13 +361,23 @@ export function renderSteps(title: string, steps: readonly string[], color: bool
  * The manifest is printed whole, because pasting it is the step; and the reason comes first, because "nothing
  * happened" is otherwise read as a fault rather than as the order Slack requires.
  */
-export function renderAppUpdateNeeded(result: AppUpdateNeeded, color: boolean): string {
+export function renderAppUpdateNeeded(
+  result: AppUpdateNeeded,
+  color: boolean,
+  platform: NodeJS.Platform = process.platform,
+): string {
   const { manifest } = result;
   return [
     paint(color, 'bold', `"${result.alias}" cannot post yet, and its app comes first.`),
     `Its recorded grant has no posting scope, so nothing shows its app now offers one — and a sign-in would be granted read again. Nothing was changed.`,
     '',
-    renderManifestHelp('send', manifest.port, color, { workspace: result.alias, manifestUrl: manifest.manifestUrl }),
+    renderManifestHelp(
+      'send',
+      manifest.port,
+      color,
+      { workspace: result.alias, manifestUrl: manifest.manifestUrl },
+      platform,
+    ),
     '',
     renderManifest('send', manifest.redirectUrl).trimEnd(),
     '',
@@ -343,7 +392,21 @@ export function renderAppUpdateNeeded(result: AppUpdateNeeded, color: boolean): 
           '',
         ]),
     'Once it is saved:',
-    `  agent-slack workspace mode ${result.alias} send --app-updated --port ${manifest.port}`,
+    `  ${commandText(
+      shellCommand(
+        [
+          'agent-slack',
+          'workspace',
+          'mode',
+          result.alias,
+          'send',
+          '--app-updated',
+          '--port',
+          String(manifest.port),
+        ],
+        platform,
+      ),
+    )}`,
   ].join('\n');
 }
 
@@ -367,6 +430,7 @@ export function renderManifestHelp(
   port: number,
   color: boolean,
   target: { workspace: string | null; manifestUrl: string | null } = { workspace: null, manifestUrl: null },
+  platform: NodeJS.Platform = process.platform,
 ): string {
   /*
    * For a workspace already connected, the app to change is the one it signed in through — so the steps are to edit
@@ -386,7 +450,21 @@ export function renderManifestHelp(
           paint(color, 'dim', 'is no client secret to copy: this signs in with PKCE, which replaces one.'),
           '',
           'Then connect it:',
-          `  agent-slack workspace add <name> --client-id <the Client ID> --port ${port}`,
+          `  ${commandText(
+            shellCommand(
+              [
+                'agent-slack',
+                'workspace',
+                'add',
+                '<name>',
+                '--client-id',
+                '<the Client ID>',
+                '--port',
+                String(port),
+              ],
+              platform,
+            ),
+          )}`,
         ]
       : [
           target.manifestUrl === null
@@ -405,12 +483,30 @@ export function renderManifestHelp(
       ? paint(
           color,
           'dim',
-          `This app can read, search and draft, and Slack itself refuses it any post. For one that can post after your approval, print \`agent-slack manifest --mode send --port ${port}\` — and for a workspace already connected, update this same app with it first: a token can only be granted what its app offers.`,
+          `This app can read, search and draft, and Slack itself refuses it any post. For one that can post after your approval, print ${inlineCommand(
+            shellCommand(['agent-slack', 'manifest', '--mode', 'send', '--port', String(port)], platform),
+          )} — and for a workspace already connected, update this same app with it first: a token can only be granted what its app offers.`,
         )
       : paint(
           color,
           'dim',
-          `This app can post, upload and react, each only after your approval. \`agent-slack manifest --mode read --port ${port}\` prints one that cannot post at all. To move an existing workspace from read, update its app with this manifest first, then run \`agent-slack workspace mode ${target.workspace ?? '<name>'} send --app-updated --port ${port}\`.`,
+          `This app can post, upload and react, each only after your approval. ${inlineCommand(
+            shellCommand(['agent-slack', 'manifest', '--mode', 'read', '--port', String(port)], platform),
+          )} prints one that cannot post at all. To move an existing workspace from read, update its app with this manifest first, then run ${inlineCommand(
+            shellCommand(
+              [
+                'agent-slack',
+                'workspace',
+                'mode',
+                target.workspace ?? '<name>',
+                'send',
+                '--app-updated',
+                '--port',
+                String(port),
+              ],
+              platform,
+            ),
+          )}.`,
         ),
   ].join('\n');
 }

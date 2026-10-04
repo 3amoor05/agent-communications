@@ -357,7 +357,7 @@ configuration problem.`,
           result,
           output(),
           (data) =>
-            `${renderManifestHelp(data.mode, data.port, options.color, data)}\n\n${renderManifest(data.mode, data.redirectUrl)}`,
+            `${renderManifestHelp(data.mode, data.port, options.color, data, context.platform)}\n\n${renderManifest(data.mode, data.redirectUrl)}`,
           streams,
         );
       }),
@@ -419,6 +419,7 @@ configuration problem.`,
           transport: { fetch: deps.appConfig, baseUrl: deps.slackBaseUrl },
           audit: context.core.audit,
           surface: 'cli',
+          platform: context.platform,
         });
         writeResult(result, output(), () => renderAppUpdated(result, options.color), streams);
       }),
@@ -462,6 +463,7 @@ configuration problem.`,
           transport: { fetch: deps.appConfig, baseUrl: deps.slackBaseUrl },
           audit: context.core.audit,
           surface: 'cli',
+          platform: context.platform,
         });
         writeResult(result, output(), () => renderAppCreated(result, options.color), streams);
       }),
@@ -571,7 +573,10 @@ configuration problem.`,
           platform,
         ),
       );
-      await presentSignIn(started, false, options, { start: flags.start === true, browser: flags.browser !== false });
+      await presentSignIn(context, started, false, options, {
+        start: flags.start === true,
+        browser: flags.browser !== false,
+      });
     }),
   );
 
@@ -640,7 +645,12 @@ configuration problem.`,
           );
           return;
         case 'app-update-needed':
-          writeResult(planned.result, output(), () => renderAppUpdateNeeded(planned.result, options.color), streams);
+          writeResult(
+            planned.result,
+            output(),
+            () => renderAppUpdateNeeded(planned.result, options.color, context.platform),
+            streams,
+          );
           return;
         case 'change': {
           const started = await changeAt(
@@ -652,7 +662,7 @@ configuration problem.`,
               platform,
             ),
           );
-          await presentSignIn(started, true, options, {
+          await presentSignIn(context, started, true, options, {
             start: flags.start === true,
             browser: flags.browser !== false,
           });
@@ -736,7 +746,10 @@ configuration problem.`,
           platform,
         ),
       );
-      await presentSignIn(started, true, options, { start: flags.start === true, browser: flags.browser !== false });
+      await presentSignIn(context, started, true, options, {
+        start: flags.start === true,
+        browser: flags.browser !== false,
+      });
     }),
   );
 
@@ -1062,7 +1075,12 @@ configuration problem.`,
           broadcast: flags.broadcast,
           files: flags.file as string[] | undefined,
         });
-        writeResult(created, output(), (data) => renderCreatedDraft(data, String(flags.workspace)), streams);
+        writeResult(
+          created,
+          output(),
+          (data) => renderCreatedDraft(data, String(flags.workspace), context.platform),
+          streams,
+        );
       }),
     );
 
@@ -1098,7 +1116,12 @@ configuration problem.`,
           files: noFiles ? [] : (flags.file as string[] | undefined),
           addFiles: flags.addFile as string[] | undefined,
         });
-        writeResult(updated, output(), (data) => renderUpdatedDraft(data, String(flags.workspace)), streams);
+        writeResult(
+          updated,
+          output(),
+          (data) => renderUpdatedDraft(data, String(flags.workspace), context.platform),
+          streams,
+        );
       }),
     );
 
@@ -1485,6 +1508,7 @@ configuration problem.`,
    * this waits for the browser.
    */
   async function presentSignIn(
+    context: SlackContext,
     started: StartedSignIn,
     reauth: boolean,
     options: GlobalOptions,
@@ -1493,14 +1517,14 @@ configuration problem.`,
     if (how.start) {
       if (how.browser) tryOpen(started.authUrl);
       writeResult(
-        signInStarted(started, reauth),
+        signInStarted(context, started, reauth),
         output(),
-        () => renderSignInStarted(started, reauth, options.color),
+        () => renderSignInStarted(started, reauth, options.color, context.platform),
         streams,
       );
       return;
     }
-    streams.stderr.write(`${renderSignInStarted(started, reauth, options.color)}\n\n`);
+    streams.stderr.write(`${renderSignInStarted(started, reauth, options.color, context.platform)}\n\n`);
     if (how.browser) tryOpen(started.authUrl);
     const listener = started.listener;
     if (!listener) throw new CommsError('UNEXPECTED', 'the sign-in listener did not start');

@@ -1146,7 +1146,9 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
       approveCommand: 'agent-slack approve',
     });
     return changeToolResult(
-      outcome.status === 'applied' ? { status: 'applied', result: signInStarted(outcome.result, reauth) } : outcome,
+      outcome.status === 'applied'
+        ? { status: 'applied', result: signInStarted(context, outcome.result, reauth) }
+        : outcome,
     );
   };
 

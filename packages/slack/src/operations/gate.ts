@@ -33,6 +33,7 @@ export async function gateDepsFor(context: SlackContext, alias: string, deps: Se
     accountId: account.id,
     workspaceId: teamId,
     workspaceName: name,
+    platform: context.platform,
     postingAs: account.userId,
     policy: effectiveAccountSendPolicy(config, name),
     // What a post with files is checked against, at prepare and again at send: the mode, the grant, and the folders.
