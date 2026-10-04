@@ -43,7 +43,7 @@ function recorder() {
   return { calls, inner };
 }
 
-function revokeBinding(token = 'xoxp-old-access'): RevokeBinding {
+function revokeBinding(token = 'fake-old-access'): RevokeBinding {
   return {
     ref: 'slack/token/superseded',
     kind: 'access',
@@ -147,7 +147,7 @@ test('auth.revoke has its own class and cannot leave without a dedicated grant',
 });
 
 test('a revocation grant binds one request to its ref, token kind and bearer digest, then is spent', async () => {
-  const token = 'xoxp-old-access';
+  const token = 'fake-old-access';
   const digest = createHash('sha256').update(token).digest('hex');
   const binding = revokeBinding(token);
   const permit = closedPermit();
@@ -177,8 +177,8 @@ test('a revocation grant binds one request to its ref, token kind and bearer dig
 });
 
 test('a revocation grant refuses the wrong bearer without exposing the token or either digest', async () => {
-  const expected = 'xoxp-old-access';
-  const wrong = 'xoxp-another-token';
+  const expected = 'fake-old-access';
+  const wrong = 'fake-another-token';
   const binding = revokeBinding(expected);
   const { calls, inner } = recorder();
   const permit = closedPermit();
