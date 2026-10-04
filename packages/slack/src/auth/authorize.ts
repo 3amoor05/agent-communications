@@ -135,18 +135,35 @@ export interface ExchangedToken {
   readonly tokenType?: string | undefined;
 }
 
-/** Provider diagnostics are display text, never credentials, markup or instructions. */
+/**
+ * Canonical escaped plain text for storage and comparison, bounded without splitting an entity.
+ *
+ * Sanitisation can expose literal markup from an entity (e.g. &lt;b&gt;). Escaping the result makes the
+ * representation stable: a later save sanitises the same literal text instead of interpreting it as a tag.
+ */
 export function safeSlackFailureText(value: unknown): string {
   if (typeof value !== 'string') return '';
   const visible = neutralise(sanitizeHtmlToText(neutralise(value).text).text).text;
-  return visible
+  const redacted = visible
     .replace(
-      /\bBearer\s+\S+|\bxox[a-z]-[\w-]+|\b(?:client_secret|access_token|refresh_token)\s*[=:]\s*\S+/gi,
+      /["']?\b(?:client_secret|access_token|refresh_token)["']?\s*[=:]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}]+)/gi,
       '[redacted]',
     )
+    .replace(/\bBearer\s+\S+|\bxox[a-z]-[\w-]+/gi, '[redacted]')
     .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 512);
+    .trim();
+  let canonical = '';
+  for (const char of redacted) {
+    const escaped = ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' } as Record<string, string>)[char] ?? char;
+    if (canonical.length + escaped.length > 512) break;
+    canonical += escaped;
+  }
+  return canonical;
+}
+
+/** Decode the canonical representation for an untrusted envelope or escaped browser display. */
+export function displaySlackFailureText(value: unknown): string {
+  return neutralise(sanitizeHtmlToText(safeSlackFailureText(value)).text).text;
 }
 
 /** Slack's `oauth.v2.access` shape, as far as this needs it. */
@@ -189,15 +206,19 @@ export function readExchange(body: unknown): ExchangedToken {
      * message — the redirect URL, which Slack matches exactly, and whether the app is allowed to sign in without
      * a client secret at all. Retrying fixes neither, and somebody retrying is somebody not looking at the app.
      */
-    throw new CommsError('AUTH_REQUIRED', `Slack refused the sign-in: ${slackError || 'no reason given'}`, {
-      hint:
-        'Check the app at https://api.slack.com/apps: its redirect URL must match the one this used exactly, ' +
-        'and it must be allowed to sign in without a client secret (PKCE).',
-      details: {
-        ...(slackError ? { slackError } : {}),
-        ...(slackDescription ? { slackDescription } : {}),
+    throw new CommsError(
+      'AUTH_REQUIRED',
+      `Slack refused the sign-in: ${displaySlackFailureText(slackError) || 'no reason given'}`,
+      {
+        hint:
+          'Check the app at https://api.slack.com/apps: its redirect URL must match the one this used exactly, ' +
+          'and it must be allowed to sign in without a client secret (PKCE).',
+        details: {
+          ...(slackError ? { slackError } : {}),
+          ...(slackDescription ? { slackDescription } : {}),
+        },
       },
-    });
+    );
   }
 
   const user = response.authed_user;

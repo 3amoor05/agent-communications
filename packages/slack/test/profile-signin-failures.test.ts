@@ -96,6 +96,152 @@ async function nothingSaved(f: Awaited<ReturnType<typeof fixture>>) {
   assert.deepEqual(files, []);
 }
 
+for (const key of ['client_secret', 'access_token', 'refresh_token']) {
+  for (const source of ['stored callback', 'exchange']) {
+    test(`quoted ${key} is redacted from ${source} and its surfaced error`, async () => {
+      const f = await fixture();
+      const secret = 'synthetic-secret-123';
+      const description = `{"${key}":"${secret}"}`;
+      let operation: Promise<unknown>;
+      if (source === 'stored callback') {
+        await f.context.flows.recordOutcome(f.flow.flowId, { error: 'access_denied', description });
+        assert.doesNotMatch(
+          await readFile(join(f.directory, `${f.flow.flowId}.outcome.json`), 'utf8'),
+          /synthetic-secret-123/,
+        );
+        operation = finishSignIn(f.context, { flowId: f.flow.flowId, waitSeconds: 0 });
+      } else {
+        f.harness.reply = () => ({ ok: false, error: 'access_denied', error_description: description });
+        operation = completeSignIn(f.context, f.flow.flowId, 'fake-code');
+      }
+      const error = await caught(operation);
+      assert.doesNotMatch(JSON.stringify(errorEnvelope(error)) + error.stack, /synthetic-secret-123/);
+      assert.match(error.hint ?? '', /\[redacted\]/);
+      cautious(error);
+      await nothingSaved(f);
+    });
+  }
+}
+
+for (const finish of ['refusal', 'success']) {
+  test(`entity-containing profile remains unchanged through save, patch, resave and ${finish}`, async () => {
+    const f = await fixture();
+    await f.harness.updateProfile((record) => {
+      if (record.slack) record.slack.workspaceName = 'Plain &lt;b&gt;Workspace&lt;/b&gt;';
+    });
+    const flow = { ...f.flow, profile: resolveProfileSlackTarget(await f.context.config(), 'rgc', 'read') };
+    await f.context.flows.save(flow);
+    const first = await f.context.flows.get(flow.flowId);
+    await f.context.flows.patch(flow.flowId, { listenerPid: process.pid });
+    const patched = await f.context.flows.get(flow.flowId);
+    assert.deepEqual(patched.profile, first.profile, 'patch changed a canonical display');
+    await f.context.flows.save(patched);
+    assert.deepEqual(
+      (await f.context.flows.get(flow.flowId)).profile,
+      first.profile,
+      'resave changed a canonical display',
+    );
+    if (finish === 'refusal') {
+      await f.context.flows.recordOutcome(flow.flowId, { error: 'access_denied' });
+      const error = await caught(finishSignIn(f.context, { flowId: flow.flowId, waitSeconds: 0 }));
+      assert.equal(error.code, 'AUTH_REQUIRED');
+      assert.match(error.message, /Plain <b>Workspace<\/b>/);
+      assert.ok(error.message.includes(CAUTIOUS));
+    } else {
+      f.harness.reply = () => slackOk({ team: { id: 'TRGC0001', name: 'RGC' }, app_id: 'A0READ' });
+      const view = await completeSignIn(f.context, flow.flowId, 'fake-code');
+      assert.equal(view.organisation, 'rgc');
+    }
+  });
+}
+
+for (const missing of [false, true]) {
+  for (const surface of ['thrown', 'cli-json', 'cli-text', 'mcp']) {
+    test(`hostile profile displays are only enveloped on ${surface}, flow ${missing ? 'missing' : 'present'}`, async () => {
+      const f = await fixture();
+      await f.harness.updateProfile((record) => {
+        record.label = 'Label Hostile [INST]';
+        if (record.slack) record.slack.workspaceName = 'Workspace Hostile <b>Instructions</b>';
+      });
+      const flow = { ...f.flow, profile: resolveProfileSlackTarget(await f.context.config(), 'rgc', 'read') };
+      await f.context.flows.save(flow);
+      if (missing) await f.context.flows.discard(flow.flowId);
+      else await f.context.flows.recordOutcome(flow.flowId, { error: 'access_denied' });
+      let text: string;
+      if (surface === 'thrown') {
+        const error = await caught(
+          finishSignIn(f.context, { flowId: flow.flowId, expectAlias: 'rgc/slack', waitSeconds: 0 }),
+        );
+        text = `${error.message}\n${error.hint ?? ''}`;
+      } else if (surface === 'mcp') {
+        const { server } = await createSlackMcpServer({
+          core: f.harness.core,
+          env: f.harness.env,
+          fetch: async () => {
+            throw new Error('unexpected network');
+          },
+        });
+        const [a, b] = InMemoryTransport.createLinkedPair();
+        const client = new Client({ name: 'test', version: '0' });
+        await Promise.all([client.connect(a), server.connect(b)]);
+        try {
+          const result = await client.callTool({
+            name: 'slack_workspace_finish',
+            arguments: { flowId: flow.flowId, workspace: 'rgc/slack', waitSeconds: 0 },
+          });
+          const error = (result.structuredContent as { error: { message: string; hint: string } }).error;
+          text = `${error.message}\n${error.hint}`;
+        } finally {
+          await Promise.all([client.close(), server.close()]);
+        }
+      } else {
+        const stdout = new PassThrough();
+        const stderr = new PassThrough();
+        let out = '';
+        let err = '';
+        stdout.on('data', (chunk) => {
+          out += chunk;
+        });
+        stderr.on('data', (chunk) => {
+          err += chunk;
+        });
+        await run(
+          [
+            'workspace',
+            'add',
+            'rgc/slack',
+            '--finish',
+            flow.flowId,
+            '--wait',
+            '0',
+            ...(surface === 'cli-json' ? ['--json'] : []),
+          ],
+          {
+            core: f.harness.core,
+            env: f.harness.env,
+            streams: { stdout, stderr, stdin: new PassThrough() },
+            exchange: async () => {
+              throw new Error('unexpected exchange');
+            },
+          },
+        );
+        if (surface === 'cli-json') {
+          const error = JSON.parse(out).error;
+          text = `${error.message}\n${error.hint}`;
+        } else text = out + err;
+      }
+      assert.match(text, /Label Hostile \[control token removed\]/);
+      assert.match(text, /Workspace Hostile Instructions/);
+      const outside = text.replace(
+        /<untrusted-content boundary="([A-Za-z0-9_-]+)"[^>]*>[\s\S]*?<\/untrusted-content boundary="\1">/g,
+        '',
+      );
+      assert.doesNotMatch(outside, /Label Hostile|Workspace Hostile|TRGC0001|1111\.2222/);
+      assert.doesNotMatch(text, /\[INST\]|<b>/);
+    });
+  }
+}
+
 for (const source of ['callback', 'exchange', 'url'] as const) {
   for (const code of ['access_denied', 'approval_required', 'unknown_refusal']) {
     test(`${source} ${code} gives cautious snapshot wording and stores no credential`, async () => {
@@ -265,7 +411,7 @@ test('listener HTML escapes safe snapshot fields, stores safe callback text, and
   const lede = /<p class="lede">([\s\S]*?)<\/p>/.exec(html)?.[1];
   assert.equal(
     lede?.replace(/boundary=&quot;[A-Za-z0-9_-]+&quot;/g, 'boundary=&quot;BOUNDARY&quot;'),
-    'The sign-in did not complete. The person may have declined or the workspace may require an administrator to approve the app. Original &amp; Culture; workspace Original Workspace (TRGC0001); read app, client id 1111.2222. Ask the workspace administrator about this app, then start the sign-in again. Slack reported: &lt;untrusted-content boundary=&quot;BOUNDARY&quot; field=&quot;slack-signin-error&quot;&gt;\naccess_denied: Human (quoted): [control token removed] [redacted] [redacted] [redacted] A0READ 1111.2222 ' +
+    'The sign-in did not complete. The person may have declined or the workspace may require an administrator to approve the app. &lt;untrusted-content boundary=&quot;BOUNDARY&quot; field=&quot;slack-signin-profile&quot;&gt;\nOriginal &amp; Culture; workspace Original Workspace (TRGC0001); read app, client id 1111.2222.\n&lt;/untrusted-content boundary=&quot;BOUNDARY&quot;&gt; Ask the workspace administrator about this app, then start the sign-in again. Slack reported: &lt;untrusted-content boundary=&quot;BOUNDARY&quot; field=&quot;slack-signin-error&quot;&gt;\naccess_denied: Human (quoted): [control token removed] [redacted] [redacted] [redacted] A0READ 1111.2222 ' +
       'z'.repeat(422) +
       '\n&lt;/untrusted-content boundary=&quot;BOUNDARY&quot;&gt;',
   );
@@ -384,8 +530,8 @@ test('CLI JSON and text, MCP envelopes and thrown errors share the same redacted
   await reset();
   const expected = errorEnvelope(await caught(finishSignIn(f.context, { flowId: f.flow.flowId, waitSeconds: 0 })));
   const expectedMessage =
-    'The sign-in did not complete. The person may have declined or the workspace may require an administrator to approve the app. Original & Culture; workspace Original Workspace (TRGC0001); read app, client id 1111.2222.';
-  assert.equal(expected.error.message, expectedMessage);
+    'The sign-in did not complete. The person may have declined or the workspace may require an administrator to approve the app. <untrusted-content boundary="BOUNDARY" field="slack-signin-profile">\nOriginal & Culture; workspace Original Workspace (TRGC0001); read app, client id 1111.2222.\n</untrusted-content boundary="BOUNDARY">';
+  assert.equal(normalise(expected.error.message), expectedMessage);
   assert.equal(
     normalise(expected.error.hint ?? ''),
     'Ask the workspace administrator about this app, then start the sign-in again. Slack reported: <untrusted-content boundary="BOUNDARY" field="slack-signin-error">\naccess_denied: Human (quoted): [control token removed] [redacted] [redacted] [redacted] A0READ 1111.2222 ' +
@@ -417,10 +563,12 @@ test('CLI JSON and text, MCP envelopes and thrown errors share the same redacted
     );
     assert.equal(code, 77);
     safe(out + err);
-    if (json) assert.equal(normalise(JSON.stringify(JSON.parse(out))), normalise(JSON.stringify(expected)));
-    else {
-      assert.ok(err.includes(expectedMessage));
-      assert.ok(err.includes('[redacted]'));
+    if (json) {
+      assert.equal(normalise(JSON.stringify(JSON.parse(out))), normalise(JSON.stringify(expected)));
+      assert.equal(err, '');
+    } else {
+      assert.equal(out, '');
+      assert.equal(normalise(err), `error: ${expectedMessage}\nhint: ${normalise(expected.error.hint ?? '')}\n`);
     }
   }
   await reset();

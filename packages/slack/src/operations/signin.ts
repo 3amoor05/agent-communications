@@ -22,7 +22,7 @@ import {
   withCredentialsLock,
   wrapUntrusted,
 } from '@agentcomms/core';
-import { buildAuthorizeUrl, readExchange, safeSlackFailureText } from '../auth/authorize.ts';
+import { buildAuthorizeUrl, displaySlackFailureText, readExchange, safeSlackFailureText } from '../auth/authorize.ts';
 import { parseBundle, serialiseBundle } from '../auth/bundle.ts';
 import { FLOW_TTL_MS, newFlowId, type SlackFlow } from '../auth/flow.ts';
 import { startLoopback } from '../auth/listener.ts';
@@ -528,8 +528,9 @@ export async function finishSignIn(context: SlackContext, options: FinishOptions
     const organisation = options.expectAlias.split('/')[0] ?? '';
     const record = config.version === 2 ? config.organisations?.[organisation] : undefined;
     if (!record?.slack) throw error;
+    const identity = `${displaySlackFailureText(record.label)}; workspace ${displaySlackFailureText(record.slack.workspaceName)} (${displaySlackFailureText(record.slack.workspace)})`;
     throw new CommsError(error.code, error.message, {
-      hint: `${error.hint ?? ''} If a sign-in through ${safeSlackFailureText(record.label)}'s organisation app never came back, ${safeSlackFailureText(record.slack.workspaceName)} (${safeSlackFailureText(record.slack.workspace)}) may require an administrator to approve the app.`,
+      hint: `${error.hint ?? ''} If a sign-in through the organisation's app never came back, the workspace may require an administrator to approve the app. ${wrapUntrusted(identity, { field: 'slack-signin-profile' })}`,
     });
   }
   const kind = flow.expect ? 'reauth' : 'add';
@@ -823,8 +824,8 @@ function codeFromUrl(raw: string, flow: SlackFlow): string {
 function slackDenied(error: string, description?: string | undefined): CommsError {
   const slackError = safeSlackFailureText(error);
   const slackDescription = safeSlackFailureText(description);
-  return new CommsError('AUTH_REQUIRED', `Slack did not grant access: ${slackError}`, {
-    hint: slackDescription || 'Approve the app in Slack, leaving every permission ticked.',
+  return new CommsError('AUTH_REQUIRED', `Slack did not grant access: ${displaySlackFailureText(slackError)}`, {
+    hint: displaySlackFailureText(slackDescription) || 'Approve the app in Slack, leaving every permission ticked.',
     details: { slackError, ...(slackDescription ? { slackDescription } : {}) },
   });
 }
@@ -839,12 +840,12 @@ async function profileFailure(
 ): Promise<CommsError> {
   profileTargetFor(flow, await context.config(), context.platform);
   const profile = flow.profile as ProfileSlackTarget;
-  const identity = `${safeSlackFailureText(profile.label)}; workspace ${safeSlackFailureText(profile.workspaceName)} (${profile.workspace}); ${profile.role} app, client id ${profile.clientId}`;
-  const slackError = safeSlackFailureText(error);
-  const slackDescription = safeSlackFailureText(description);
+  const identity = `${displaySlackFailureText(profile.label)}; workspace ${displaySlackFailureText(profile.workspaceName)} (${profile.workspace}); ${profile.role} app, client id ${profile.clientId}.`;
+  const slackError = displaySlackFailureText(error);
+  const slackDescription = displaySlackFailureText(description);
   return new CommsError(
     code,
-    `The sign-in did not complete. The person may have declined or the workspace may require an administrator to approve the app. ${identity}.`,
+    `The sign-in did not complete. The person may have declined or the workspace may require an administrator to approve the app. ${wrapUntrusted(identity, { field: 'slack-signin-profile' })}`,
     {
       hint: `Ask the workspace administrator about this app, then start the sign-in again.${slackError || slackDescription ? ` Slack reported: ${wrapUntrusted([slackError, slackDescription].filter(Boolean).join(': '), { field: 'slack-signin-error' })}` : ''}`,
     },
