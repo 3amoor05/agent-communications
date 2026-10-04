@@ -4,9 +4,10 @@ import type {
   PendingRevocation,
   PendingRevocationStatus,
   PendingRevocationTokenState,
+  SecretStore,
   SecretStoreKind,
 } from '@agentcomms/core';
-import { CommsError, withCredentialsLock } from '@agentcomms/core';
+import { APPROVAL_KEY_REF, CommsError, withCredentialsLock, writeOutcome } from '@agentcomms/core';
 import { callSlack, type SlackResponse } from '../api/call.ts';
 import { closedPermit, revokeWith } from '../api/guard.ts';
 import { parseBundle, type TokenBundle } from '../auth/bundle.ts';
@@ -170,6 +171,33 @@ function requireEntry(config: Config, ref: string): { index: number; entry: Pend
   return found[0] as { index: number; entry: PendingRevocation };
 }
 
+function sameEntry(left: PendingRevocation, right: PendingRevocation): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function refIsUnowned(config: Config, ref: string): boolean {
+  return (
+    ref !== APPROVAL_KEY_REF &&
+    !Object.values(config.clients).some((client) => client.secretRef === ref) &&
+    !Object.values(config.inboxes).some((inbox) => inbox.secretRef === ref) &&
+    !Object.values(config.accounts).some((account) => account.secretRef === ref) &&
+    !(config.pendingRevocations ?? []).some((entry) => entry.ref === ref)
+  );
+}
+
+function requireExclusivePendingRef(config: Config, expected: PendingRevocation): void {
+  const owners = (config.pendingRevocations ?? []).filter((entry) => entry.ref === expected.ref);
+  const onlyThisEntry = owners.length === 1 && owners[0] !== undefined && sameEntry(owners[0], expected);
+  const liveOwner =
+    expected.ref === APPROVAL_KEY_REF ||
+    Object.values(config.clients).some((client) => client.secretRef === expected.ref) ||
+    Object.values(config.inboxes).some((inbox) => inbox.secretRef === expected.ref) ||
+    Object.values(config.accounts).some((account) => account.secretRef === expected.ref);
+  if (!onlyThisEntry || liveOwner) {
+    throw new CommsError('CONFIG', 'the pending credential reference is not exclusive to this revocation entry');
+  }
+}
+
 function tokenState(entry: PendingRevocation, kind: RevocationTokenKind): PendingRevocationTokenState | undefined {
   return kind === 'access' ? entry.tokens.access : entry.tokens.refresh;
 }
@@ -188,7 +216,9 @@ async function prepareToken(
   kind: RevocationTokenKind,
 ): Promise<PreparedToken | null> {
   return withCredentialsLock(context.core.paths.configDir, async () => {
-    const { entry } = requireEntry(await context.config(), ref);
+    const config = await context.config();
+    const { entry } = requireEntry(config, ref);
+    requireExclusivePendingRef(config, entry);
     const state = tokenState(entry, kind);
     if (state === undefined) return null;
     if (state.status !== 'pending' || context.now().getTime() >= Date.parse(state.deadline)) {
@@ -301,6 +331,7 @@ async function persistTokenState(
     let written: PendingRevocation | undefined;
     await context.core.config.update((config) => {
       const { index, entry } = requireEntry(config, expected.entry.ref);
+      requireExclusivePendingRef(config, entry);
       if (sameEntryAndPending(entry, expected) === null) {
         throw new CommsError('TRANSIENT', 'the pending revocation changed while its token was being revoked');
       }
@@ -317,41 +348,69 @@ async function persistTokenState(
   });
 }
 
-function sameEntry(left: PendingRevocation, right: PendingRevocation): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
-}
-
 async function cleanFinished(context: SlackContext, ref: string): Promise<PendingRevocationResult> {
   return withCredentialsLock(context.core.paths.configDir, async () => {
-    const { index, entry } = requireEntry(await context.config(), ref);
+    const config = await context.config();
+    const { index, entry } = requireEntry(config, ref);
+    requireExclusivePendingRef(config, entry);
     if (pendingRevocationTokens(entry).some(({ state }) => state.status === 'pending')) return resultOf(entry, false);
-    let deleted: boolean;
+    let store: SecretStore;
+    let raw: string | null;
     try {
-      deleted = await (await context.core.secrets(entry.store)).delete(entry.ref);
+      store = await context.core.secrets(entry.store);
+      raw = await store.get(entry.ref);
     } catch {
       return resultOf(entry, false, {
         code: 'SECRET_STORE_UNAVAILABLE',
-        message: 'the finished credential bundle could not be deleted from its recorded store',
+        message: 'the finished credential bundle could not be read from its recorded store before cleanup',
       });
     }
-    if (!deleted) {
-      return resultOf(entry, false, {
-        code: 'NOT_FOUND',
-        message: 'the finished credential bundle was not present to delete from its recorded store',
-      });
-    }
-    await context.core.config.update((config) => {
-      const found = requireEntry(config, ref);
-      if (found.index !== index || !sameEntry(found.entry, entry)) {
-        throw new CommsError('TRANSIENT', 'the pending revocation changed before its bundle could be cleaned up');
+    if (raw !== null) {
+      try {
+        await store.delete(entry.ref);
+      } catch {
+        return resultOf(entry, false, {
+          code: 'SECRET_STORE_UNAVAILABLE',
+          message: 'the finished credential bundle could not be deleted from its recorded store',
+        });
       }
-      const pendingRevocations = [...(config.pendingRevocations ?? [])];
-      pendingRevocations.splice(index, 1);
-      return {
-        ...config,
-        pendingRevocations: pendingRevocations.length === 0 ? undefined : pendingRevocations,
-      };
-    });
+    }
+    try {
+      await context.core.config.update((current) => {
+        const found = requireEntry(current, ref);
+        requireExclusivePendingRef(current, found.entry);
+        if (found.index !== index || !sameEntry(found.entry, entry)) {
+          throw new CommsError('TRANSIENT', 'the pending revocation changed before its bundle could be cleaned up');
+        }
+        const pendingRevocations = [...(current.pendingRevocations ?? [])];
+        pendingRevocations.splice(index, 1);
+        return {
+          ...current,
+          pendingRevocations: pendingRevocations.length === 0 ? undefined : pendingRevocations,
+        };
+      });
+    } catch {
+      const landed = await writeOutcome(async () => refIsUnowned(await context.config(), ref));
+      if (landed === 'present') return resultOf(entry, true);
+      if (raw !== null) {
+        try {
+          await store.set(entry.ref, raw);
+          if ((await store.get(entry.ref)) !== raw) throw new Error('the restored bundle did not verify');
+        } catch {
+          return resultOf(entry, false, {
+            code: 'SECRET_STORE_UNAVAILABLE',
+            message: 'the bundle could not be restored after its ledger entry failed to be removed',
+          });
+        }
+      }
+      return resultOf(entry, false, {
+        code: landed === 'absent' ? 'CONFIG_WRITE_FAILED' : 'CONFIG_OUTCOME_UNKNOWN',
+        message:
+          landed === 'absent'
+            ? 'the finished ledger entry could not be removed, so its bundle was kept'
+            : 'whether the finished ledger entry was removed could not be confirmed, so its bundle was kept',
+      });
+    }
     return resultOf(entry, true);
   });
 }
@@ -380,14 +439,30 @@ export async function revokePendingEntry(context: SlackContext, ref: string): Pr
 
 /** Retries each Slack ledger entry independently, in its stored order. */
 export async function retryPendingRevocations(context: SlackContext): Promise<readonly PendingRevocationResult[]> {
-  const refs = [
-    ...new Set(
-      (await context.config()).pendingRevocations
-        ?.filter((entry) => entry.platform === 'slack')
-        .map((entry) => entry.ref) ?? [],
-    ),
-  ];
+  const entries = (await context.config()).pendingRevocations?.filter((entry) => entry.platform === 'slack') ?? [];
+  const refs = [...new Set(entries.map((entry) => entry.ref))];
   const results: PendingRevocationResult[] = [];
-  for (const ref of refs) results.push(await revokePendingEntry(context, ref));
+  for (const ref of refs) {
+    const snapshot = entries.find((entry) => entry.ref === ref) as PendingRevocation;
+    try {
+      results.push(await revokePendingEntry(context, ref));
+    } catch (error) {
+      if (
+        error instanceof CommsError &&
+        error.code === 'NOT_FOUND' &&
+        (await writeOutcome(
+          async () => !(await context.config()).pendingRevocations?.some((entry) => entry.ref === ref),
+        )) === 'present'
+      ) {
+        continue;
+      }
+      results.push(
+        resultOf(snapshot, false, {
+          code: error instanceof CommsError ? error.code : 'UNEXPECTED',
+          message: 'this pending revocation could not be retried; later entries were still attempted',
+        }),
+      );
+    }
+  }
   return Object.freeze(results);
 }
