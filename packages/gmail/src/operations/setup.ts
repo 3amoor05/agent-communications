@@ -344,6 +344,11 @@ export function requireSetupTarget(config: Config, alias: string): void {
   if (!available.ok) throw available.error;
 }
 
+/** Whether an installed profile makes OAuth-client choice depend on the mailbox being added. */
+export function setupClientChoiceNeedsMailbox(config: Config): boolean {
+  return Object.values(organisationsOf(config)).some((organisation) => organisation.gmail !== undefined);
+}
+
 /**
  * Whether a registered MCP server is one of ours.
  *
@@ -391,15 +396,16 @@ export async function setupState(context: GmailContext, options: SetupStateOptio
           platform: context.platform,
         })
       : undefined;
-  // A registered row is not enough to finish this step: profile routing is decided for the mailbox being added.
-  // Without that name there is no §D6 choice to report as done, even when the machine already has clients. An
-  // existing target has already made that choice: report its stored client rather than rerouting it through today's
-  // active generation.
+  // Once a Gmail profile is installed, a registered row is not enough to finish this step: profile routing is
+  // decided for the mailbox being added. Without profiles, preserve setup's original client-first contract — an
+  // ordinary registered client finishes the step before setup asks which mailbox comes next. An existing target
+  // has already made that choice: report its stored client rather than rerouting it through today's active
+  // generation.
   const clientDone = target
     ? config.clients[target.client]?.provider === 'gmail'
     : options.alias
       ? selected !== null
-      : false;
+      : !setupClientChoiceNeedsMailbox(config) && clients.length > 0;
   const inboxDone = target !== undefined;
 
   const done: ('client' | 'inbox' | 'mcp')[] = [];

@@ -58,7 +58,12 @@ import {
   prepareSend,
   revokeApproval,
 } from '../operations/send.ts';
-import { CONSOLE_STEPS, requireSetupTarget, setupState } from '../operations/setup.ts';
+import {
+  CONSOLE_STEPS,
+  requireSetupTarget,
+  setupClientChoiceNeedsMailbox,
+  setupState,
+} from '../operations/setup.ts';
 import {
   FINISH_WAIT_SECONDS,
   finishSignIn,
@@ -1380,12 +1385,14 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
           });
         }
         const setupInbox = pinned ? targetInbox(inbox) : inbox;
-        if (!setupInbox) {
+        const configBeforeProfile = await context.config();
+        const clientChoiceNeedsMailbox = Boolean(profile) || setupClientChoiceNeedsMailbox(configBeforeProfile);
+        if (clientChoiceNeedsMailbox && !setupInbox) {
           throw new CommsError('USAGE', 'name the mailbox with `inbox` before setup can choose its client', {
             hint: 'Call gmail_setup again with inbox set to the mailbox name being added.',
           });
         }
-        requireSetupTarget(await context.config(), setupInbox);
+        if (setupInbox) requireSetupTarget(configBeforeProfile, setupInbox);
         if (profile) {
           const outcome = await gatedChange(
             context.core,
@@ -1416,7 +1423,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
         // A pinned server reports no candidates at all, so there is nothing to scan the downloads for.
         const state = await setupState(context, {
           scanDownloads: !pinned,
-          alias: setupInbox,
+          ...(setupInbox ? { alias: setupInbox } : {}),
           ...(email ? { email } : {}),
           ...(client ? { client } : {}),
         });

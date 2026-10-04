@@ -1176,8 +1176,66 @@ test('setup --profile has its own approval, then adds the profile and continues'
   assertRedacted(JSON.stringify(await harness.core.audit.tail()), 'audit log');
 });
 
-test('headless setup requires the mailbox name before it decides the client', async () => {
+test('headless setup without profiles keeps the pre-profile client-first behaviour', async () => {
   const harness = offlineCliHarness();
+  await harness.core.config.update((config) => ({
+    ...config,
+    clients: {
+      desktop: {
+        provider: 'gmail',
+        clientId: TEST_CLIENT_ID,
+        secretRef: 'gmail:client:desktop',
+        addedAt: '2026-10-04T12:00:00.000Z',
+      },
+    },
+  }));
+  const result = await cli(harness, ['setup', '--json']);
+  assert.equal(result.code, 0, `${result.stdout}${result.stderr}`);
+  const report = result.json<Envelope<{ next: string; done: string[]; blocked: { step: string } | null }>>().data;
+  assert.equal(report?.next, 'inbox');
+  assert.ok(report?.done.includes('client'));
+  assert.equal(report?.blocked?.step, 'inbox');
+});
+
+test('headless setup with a Gmail profile requires the mailbox name before it decides the client', async () => {
+  const harness = offlineCliHarness();
+  await harness.core.config.update((config) => {
+    if (config.version !== 2) throw new Error('the setup fixture starts at version 2');
+    return {
+      ...config,
+      clients: {
+        'acme-1': {
+          provider: 'gmail',
+          clientId: TEST_CLIENT_ID,
+          secretRef: 'gmail:client:acme-1',
+          organisation: 'acme',
+          addedAt: '2026-10-04T12:00:00.000Z',
+        },
+      },
+      organisations: {
+        acme: {
+          label: 'Acme Test Org',
+          source: { kind: 'file' as const, path: '/profiles/acme.json' },
+          sha256: 'a'.repeat(64),
+          readAt: '2026-10-04T12:00:00.000Z',
+          addedAt: '2026-10-04T12:00:00.000Z',
+          forOtherAddresses: false,
+          gmail: {
+            active: 'acme-1',
+            generations: [
+              {
+                name: 'acme-1',
+                clientId: TEST_CLIENT_ID,
+                ownership: 'owned' as const,
+                serves: { domains: ['acme.test'] },
+                addedAt: '2026-10-04T12:00:00.000Z',
+              },
+            ],
+          },
+        },
+      },
+    };
+  });
   const result = await cli(harness, ['setup', '--json']);
   assert.equal(result.code, EXIT_CODES.USAGE);
   const error = result.json<Envelope<never>>().error;

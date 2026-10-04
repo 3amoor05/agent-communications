@@ -82,6 +82,30 @@ async function organisationSetup(options: { active?: boolean; forOtherAddresses?
   return new GmailContext({ core, env });
 }
 
+async function ordinarySetup() {
+  const configDir = tempDir('agent-gmail-setup-ordinary-');
+  const env: NodeJS.ProcessEnv = {
+    AGENT_COMMS_CONFIG_DIR: configDir,
+    HOME: configDir,
+    USERPROFILE: configDir,
+    NO_COLOR: '1',
+    AGENT_COMMS_UPDATE_CHECK: 'off',
+  };
+  const core = openCore({ env });
+  await core.config.update((config) => ({
+    ...config,
+    clients: {
+      desktop: {
+        provider: 'gmail',
+        clientId: TEST_CLIENT_ID,
+        secretRef: clientSecretRef('desktop'),
+        addedAt: '2026-10-02T12:00:00.000Z',
+      },
+    },
+  }));
+  return new GmailContext({ core, env });
+}
+
 test('setup marks the client step done when the target name’s organisation provides it', async () => {
   const context = await organisationSetup();
   const state = await setupState(context, {
@@ -98,7 +122,15 @@ test('setup marks the client step done when the target name’s organisation pro
   });
 });
 
-test('setup without a target mailbox cannot call the client step done', async () => {
+test('setup without profiles keeps an ordinary registered client step done before it knows the mailbox', async () => {
+  const context = await ordinarySetup();
+  const state = await setupState(context, { scanDownloads: false });
+  assert.equal(state.next, 'inbox');
+  assert.ok(state.done.includes('client'));
+  assert.equal(state.clientChoice, null);
+});
+
+test('setup with a Gmail profile cannot call the client step done before it knows the mailbox', async () => {
   const context = await organisationSetup();
   const state = await setupState(context, { scanDownloads: false });
   assert.equal(state.next, 'client');

@@ -1777,7 +1777,9 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
     .option('--no-browser', 'print the links instead of opening them')
     .action(
       act(async (context, globalOptions, options: Options) => {
-        const { requireSetupTarget, setupState, CONSOLE_STEPS } = await import('../operations/setup.ts');
+        const { requireSetupTarget, setupClientChoiceNeedsMailbox, setupState, CONSOLE_STEPS } = await import(
+          '../operations/setup.ts'
+        );
         const out = streams.stderr;
         const bold = (text: string) => paint(globalOptions.color, 'bold', text);
         const dim = (text: string) => paint(globalOptions.color, 'dim', text);
@@ -1821,13 +1823,17 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
           });
         }
 
+        const configBeforeProfile = await context.config();
         /*
-         * The client step is decided for the mailbox this run is adding (design 2026-10-02 §D6). A client merely
-         * existing on the machine cannot answer that question, so every interactive run asks for the name first
-         * and every headless run requires the equivalent flag.
+         * The client step is decided for the mailbox this run is adding only when a Gmail profile participates in
+         * routing (design 2026-10-02 §D6). An incoming --profile will do so after approval; an installed Gmail
+         * profile already does. Without either, setup keeps its pre-profile order: finish the ordinary client step,
+         * then ask for a mailbox in the mailbox step below.
          */
-        if (mode !== 'none' && !options.inbox) {
-          const organisationNames = (await context.config()).version === 2;
+        const clientChoiceNeedsMailbox =
+          Boolean(options.profile) || setupClientChoiceNeedsMailbox(configBeforeProfile);
+        if (clientChoiceNeedsMailbox && mode !== 'none' && !options.inbox) {
+          const organisationNames = Boolean(options.profile) || configBeforeProfile.version === 2;
           options.inbox = await askText(mode, streams, {
             message: organisationNames ? 'A name for it: organisation/gmail' : 'A short name for it',
             placeholder: organisationNames ? 'acme/gmail' : 'work',
@@ -1840,12 +1846,12 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
             if (address) options.email = address;
           }
         }
-        if (!options.inbox) {
+        if (clientChoiceNeedsMailbox && !options.inbox) {
           throw new CommsError('USAGE', 'name the mailbox with --inbox before setup can choose its client', {
             hint: `Run ${inlineCommand(shellCommand(['agent-gmail', 'setup', '--inbox', 'acme/gmail'], platform))}, replacing acme/gmail with the name being added. Nothing was done.`,
           });
         }
-        requireSetupTarget(await context.config(), String(options.inbox));
+        if (options.inbox) requireSetupTarget(configBeforeProfile, String(options.inbox));
 
         if (options.profile) {
           await gatedChangeAtTerminal(

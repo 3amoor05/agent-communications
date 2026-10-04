@@ -226,8 +226,70 @@ test('gmail_setup refuses orgApproval without the profile it approves', async ()
   }
 });
 
-test('an unpinned gmail_setup requires the target mailbox before it decides the client', async () => {
+test('an unpinned gmail_setup without profiles keeps the pre-profile client-first behaviour', async () => {
   const harness = await newHarness();
+  await harness.core.config.update((config) => ({
+    ...config,
+    clients: {
+      desktop: {
+        provider: 'gmail',
+        clientId: '123456789012-desktop.apps.googleusercontent.com',
+        secretRef: 'gmail:client:desktop',
+        addedAt: '2026-10-04T12:00:00.000Z',
+      },
+    },
+  }));
+  const { client, close } = await connect({ core: harness.core, env: harness.env });
+  try {
+    const result = (await client.callTool({ name: 'gmail_setup', arguments: {} })) as ToolResult;
+    assert.equal(result.isError, undefined);
+    assert.equal(result.structuredContent?.next, 'inbox');
+    assert.deepEqual(result.structuredContent?.done, ['client']);
+  } finally {
+    await close();
+  }
+});
+
+test('an unpinned gmail_setup with a Gmail profile requires the target mailbox before it decides the client', async () => {
+  const harness = await newHarness();
+  await migrateNamesForTest(harness);
+  await harness.core.config.update((config) => {
+    if (config.version !== 2) throw new Error('the setup fixture was migrated to version 2');
+    return {
+      ...config,
+      clients: {
+        'acme-1': {
+          provider: 'gmail',
+          clientId: '123456789012-acme.apps.googleusercontent.com',
+          secretRef: 'gmail:client:acme-1',
+          organisation: 'acme',
+          addedAt: '2026-10-04T12:00:00.000Z',
+        },
+      },
+      organisations: {
+        acme: {
+          label: 'Acme Test Org',
+          source: { kind: 'file' as const, path: '/profiles/acme.json' },
+          sha256: 'a'.repeat(64),
+          readAt: '2026-10-04T12:00:00.000Z',
+          addedAt: '2026-10-04T12:00:00.000Z',
+          forOtherAddresses: false,
+          gmail: {
+            active: 'acme-1',
+            generations: [
+              {
+                name: 'acme-1',
+                clientId: '123456789012-acme.apps.googleusercontent.com',
+                ownership: 'owned' as const,
+                serves: { domains: ['acme.test'] },
+                addedAt: '2026-10-04T12:00:00.000Z',
+              },
+            ],
+          },
+        },
+      },
+    };
+  });
   const { client, close } = await connect({ core: harness.core, env: harness.env });
   try {
     const result = (await client.callTool({ name: 'gmail_setup', arguments: {} })) as ToolResult;
