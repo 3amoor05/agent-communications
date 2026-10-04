@@ -24,6 +24,7 @@ import type { GmailContext } from '../context.ts';
 import { chooseClientForNewInbox, type GmailClientChoice } from './client-choice.ts';
 import { type ConsentResult, completeConsent } from './consent.ts';
 import { requireNewInboxName } from './inbox-names.ts';
+import { setupClientChoiceNeedsMailbox } from './setup.ts';
 
 /**
  * How long a detached sign-in waits for its listener to say it is ready. Thirty seconds, not ten: starting a process on
@@ -187,7 +188,11 @@ export async function startSignIn(context: GmailContext, options: StartOptions):
     // Before the browser opens, not only when it comes back: a name the file cannot take would otherwise be refused
     // after the person has already been through Google's consent screens.
     requireNewInboxName(config, options.alias, undefined, context.platform);
-    if (!options.setupWithoutGmailProfile) {
+    // Setup may have observed no active Gmail profile before prompting or applying an incoming profile. Honour that
+    // compatibility mode only if the configuration reloaded here still says the same thing; otherwise a concurrent
+    // `org add`/`org update` could bypass §D6 and leave the flow with no generation for completion to re-check.
+    const ordinarySetupChoice = options.setupWithoutGmailProfile && !setupClientChoiceNeedsMailbox(config);
+    if (!ordinarySetupChoice) {
       choice =
         chooseClientForNewInbox(config, {
           alias: options.alias,

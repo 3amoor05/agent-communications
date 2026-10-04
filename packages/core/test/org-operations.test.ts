@@ -20,7 +20,7 @@ import {
   orgShow,
   orgUpdateChange,
 } from '../src/operations/organisations.ts';
-import { shownPath } from '../src/organisations.ts';
+import { readProfileFile, shownPath } from '../src/organisations.ts';
 import {
   clientAddReplaceAsReleased0121,
   clientRemoveAsReleased0121,
@@ -281,6 +281,40 @@ test('a profile that changed between the preview and the claim is refused in tho
   assert.equal((await config(m)).organisations, undefined);
   assert.equal(await storedSecret(m, 'acme-1'), null);
   assert.equal((await m.core.approvals.get(approvalId))?.state, 'revoked', 'and the approval cannot be used again');
+});
+
+test('an org add bound to setup’s loaded profile cannot apply different bytes swapped into its path', async () => {
+  const m = machine();
+  const path = writeProfile(m, profile());
+  const first = await gatedChange(m.core, orgAddChange(m.core, { file: path }, options(m)), { surface: 'mcp' });
+  assert.equal(first.status, 'approval-required');
+  const { approvalId } = (first as { prepared: PreparedChange }).prepared;
+
+  const slackOnly = profile({ gmail: undefined });
+  writeProfile(m, slackOnly);
+  const loadedProfile = await readProfileFile(path);
+  writeProfile(m, profile());
+
+  await assert.rejects(
+    gatedChange(m.core, orgAddChange(m.core, { file: path, approvalId, loadedProfile }, options(m)), {
+      surface: 'mcp',
+      approvalId,
+    }),
+    is('APPROVAL_VOID', /the profile changed since it was approved/),
+  );
+  assert.equal((await config(m)).organisations, undefined);
+});
+
+test('an org add refuses a loaded setup profile from a different path', async () => {
+  const m = machine();
+  const loadedPath = writeProfile(m, profile());
+  const requestedPath = writeProfile(m, profile({ organisation: 'other' }), 'other.agentcomms.json');
+  const loadedProfile = await readProfileFile(loadedPath);
+
+  assert.throws(
+    () => orgAddChange(m.core, { file: requestedPath, loadedProfile }, options(m)),
+    is('UNEXPECTED', /does not match the file being added/),
+  );
 });
 
 test('an organisation already added is refused by org add: org update reads it again', async () => {

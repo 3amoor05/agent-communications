@@ -515,6 +515,23 @@ test('§D6 row 4: the explicit remedy names the active live generation after A �
   );
 });
 
+test('§D6 row 4: a known out-of-domain address is offered only remedies that can serve it', () => {
+  assert.throws(
+    () =>
+      chooseClientForNewInbox(routingConfig(), {
+        alias: 'personal/gmail',
+        email: 'jo@outside.test',
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof CommsError);
+      assert.match(error.hint ?? '', /setup/);
+      assert.doesNotMatch(error.hint ?? '', /--client/);
+      assert.doesNotMatch(error.hint ?? '', /for-other-addresses/);
+      return true;
+    },
+  );
+});
+
 test('§D6 row 4: setup with only profile clients asks to make a client of one’s own', () => {
   const choice = chooseClientForNewInbox(routingConfig(), { alias: 'personal/gmail', allowOwnClient: true });
   assert.equal(choice, null);
@@ -531,7 +548,7 @@ test('every §D6 refusal prints only shell-built concrete commands for darwin an
 
     const add = inlineCommand(
       shellCommand(
-        ['agent-gmail', 'inbox', 'add', 'personal/gmail', '--client', '7-1', '--email', 'jo@elsewhere.test', '--start'],
+        ['agent-gmail', 'inbox', 'add', 'personal/gmail', '--client', '7-1', '--email', 'jo@acme.test', '--start'],
         platform,
       ),
     );
@@ -539,13 +556,13 @@ test('every §D6 refusal prints only shell-built concrete commands for darwin an
       shellCommand(['agentcomms', 'org', 'update', '7', '--for-other-addresses', 'on'], platform),
     );
     const setup = inlineCommand(
-      shellCommand(['agent-gmail', 'setup', '--inbox', 'personal/gmail', '--email', 'jo@elsewhere.test'], platform),
+      shellCommand(['agent-gmail', 'setup', '--inbox', 'personal/gmail', '--email', 'jo@acme.test'], platform),
     );
     assert.throws(
       () =>
         chooseClientForNewInbox(profileOnly, {
           alias: 'personal/gmail',
-          email: 'jo@elsewhere.test',
+          email: 'jo@acme.test',
           platform,
         }),
       (error: unknown) => {
@@ -645,6 +662,40 @@ test('inbox add records the expected organisation client id and generation in it
     forOtherAddresses: false,
   });
   await context.flows.discard(started.flowId);
+});
+
+test('setup compatibility is re-checked after reload when a Gmail profile became active meanwhile', async () => {
+  const harness = await offlineProfileClient('jo@acme.test');
+  await (await harness.core.secrets('file')).set(clientSecretRef('default'), TEST_CLIENT_SECRET);
+  await harness.core.config.update((config) => ({
+    ...config,
+    clients: {
+      default: {
+        provider: 'gmail',
+        clientId: OTHER_ID,
+        secretRef: clientSecretRef('default'),
+        addedAt: WHEN,
+      },
+      ...config.clients,
+    },
+  }));
+
+  const started = await startSignIn(harness.context, {
+    mode: 'add',
+    alias: 'acme/gmail',
+    email: 'jo@acme.test',
+    setupWithoutGmailProfile: true,
+    listenerCommand: NOOP_LISTENER,
+  });
+  const flow = await harness.context.flows.get(started.flowId);
+  assert.equal(flow.clientName, 'acme-1');
+  assert.deepEqual(flow.expect.generation, {
+    organisation: 'acme',
+    name: 'acme-1',
+    active: true,
+    forOtherAddresses: false,
+  });
+  await harness.context.flows.discard(started.flowId);
 });
 
 test('inbox add refuses when the reloaded row no longer has the client id §D6 chose', async (t) => {

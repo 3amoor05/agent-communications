@@ -1779,7 +1779,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
     .option('--no-browser', 'print the links instead of opening them')
     .action(
       act(async (context, globalOptions, options: Options) => {
-        const { requireSetupTarget, setupClientChoiceNeedsMailbox, setupProfileHasGmail, setupState, CONSOLE_STEPS } =
+        const { loadSetupProfile, requireSetupTarget, setupClientChoiceNeedsMailbox, setupState, CONSOLE_STEPS } =
           await import('../operations/setup.ts');
         const out = streams.stderr;
         const bold = (text: string) => paint(globalOptions.color, 'bold', text);
@@ -1828,7 +1828,8 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
         const profilePath = options.profile
           ? profileSourcePath(String(options.profile), context.env, context.cwd, platform)
           : undefined;
-        const incomingProfileHasGmail = profilePath ? await setupProfileHasGmail(profilePath) : false;
+        const incomingProfile = profilePath ? await loadSetupProfile(profilePath) : undefined;
+        const incomingProfileHasGmail = incomingProfile?.profile.gmail !== undefined;
         /*
          * The client step is decided for the mailbox this run is adding only when a Gmail profile participates in
          * routing (design 2026-10-02 §D6). An incoming --profile will do so after approval; an installed Gmail
@@ -1870,6 +1871,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
               context.core,
               {
                 file: profilePath,
+                loadedProfile: incomingProfile,
                 ...(options.store ? { store: String(options.store) } : {}),
                 ...(typeof options.orgApproval === 'string' ? { approvalId: options.orgApproval } : {}),
               },

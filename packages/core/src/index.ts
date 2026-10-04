@@ -64,6 +64,7 @@ export {
   organisationProfileSchema,
   organisationsOf,
   PROFILE_ORGANISATION_MAX,
+  type ProfileFile,
   parseProfile,
   profileSourcePath,
   readProfileFile,

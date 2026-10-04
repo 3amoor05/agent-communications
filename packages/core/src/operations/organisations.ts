@@ -75,6 +75,11 @@ export interface OrgOptions {
 export interface OrgAddRequest {
   /** The profile file, as typed: absolute, relative to the working directory, or from `~`. */
   file: string;
+  /**
+   * The exact file a delegating channel already classified. Internal to that delegation: it prevents a path or
+   * symlink swap from making the channel validate one profile and this operation plan another.
+   */
+  loadedProfile?: ProfileFile | undefined;
   /** Let the organisation's client serve the member's addresses outside it too (§D6). Off unless asked. */
   forOtherAddresses?: boolean | undefined;
   /** The client row to adopt when this profile's client id is registered here more than once. */
@@ -854,6 +859,8 @@ function profileChange(
     /** The organisation to update; for an add, the profile's own. */
     organisation?: string | undefined;
     path: (config: Config) => string;
+    /** Exact bytes already loaded by a delegating surface; otherwise this operation reads `path` itself. */
+    file?: ProfileFile | undefined;
     sourceGiven: boolean;
     forOtherAddresses: 'on' | 'off' | undefined;
     adopt: string | undefined;
@@ -932,7 +939,7 @@ function profileChange(
         (narrowedEarlier || (await approvalRecordsNarrowing(core, spec.approvalId)));
       narrowedEarlier ||= narrowedNow;
       const narrowed = narrowedNow || narrowedBefore;
-      const file = await readProfileFile(spec.path(config));
+      const file = spec.file ?? (await readProfileFile(spec.path(config)));
       await refuseChangedProfile(core, spec.approvalId, file, options.surface);
       const now = (options.now?.() ?? new Date()).toISOString();
       const profilePlan = await plan(config, file, now);
@@ -1167,9 +1174,13 @@ export function orgAddChange(core: Core, request: OrgAddRequest, options: OrgOpt
   // Checked before anything is read, so a word that is no store is refused before any approval is prepared.
   const store = storeWord(request.store);
   const path = profileSourcePath(request.file, options.env, options.cwd, options.platform);
+  if (request.loadedProfile !== undefined && request.loadedProfile.path !== path) {
+    throw new CommsError('UNEXPECTED', 'the loaded organisation profile does not match the file being added');
+  }
   return profileChange(core, options, {
     mode: 'add',
     path: () => path,
+    ...(request.loadedProfile ? { file: request.loadedProfile } : {}),
     sourceGiven: true,
     forOtherAddresses: request.forOtherAddresses === true ? 'on' : undefined,
     adopt: request.adopt,

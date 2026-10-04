@@ -62,9 +62,9 @@ import {
 } from '../operations/send.ts';
 import {
   CONSOLE_STEPS,
+  loadSetupProfile,
   requireSetupTarget,
   setupClientChoiceNeedsMailbox,
-  setupProfileHasGmail,
   setupState,
 } from '../operations/setup.ts';
 import {
@@ -1395,7 +1395,8 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
         }
         const setupInbox = pinned ? targetInbox(inbox) : inbox;
         const configBeforeProfile = await context.config();
-        const incomingProfileHasGmail = profilePath ? await setupProfileHasGmail(profilePath) : false;
+        const incomingProfile = profilePath ? await loadSetupProfile(profilePath) : undefined;
+        const incomingProfileHasGmail = incomingProfile?.profile.gmail !== undefined;
         const clientChoiceNeedsMailbox = incomingProfileHasGmail || setupClientChoiceNeedsMailbox(configBeforeProfile);
         if (clientChoiceNeedsMailbox && !setupInbox) {
           throw new CommsError('USAGE', 'name the mailbox with `inbox` before setup can choose its client', {
@@ -1410,6 +1411,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
               context.core,
               {
                 file: profilePath,
+                loadedProfile: incomingProfile,
                 store,
                 ...(orgApproval ? { approvalId: orgApproval } : {}),
               },
@@ -1483,7 +1485,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
           clientChoice: state.clientChoice,
           registeredWith: state.registeredWith,
           candidates: pinned ? [] : state.candidates,
-          consoleSteps: CONSOLE_STEPS.map((step) => ({
+          consoleSteps: (state.clientChoice?.organisation ? [] : CONSOLE_STEPS).map((step) => ({
             id: step.id,
             title: step.title,
             url: step.url,

@@ -9,6 +9,7 @@ import {
   lookupName,
   nameAvailable,
   organisationsOf,
+  type ProfileFile,
   readProfileFile,
   shownText,
 } from '@agentcomms/core';
@@ -351,9 +352,9 @@ export function setupClientChoiceNeedsMailbox(config: Config): boolean {
   return Object.values(organisationsOf(config)).some((organisation) => activeGeneration(organisation) !== undefined);
 }
 
-/** Whether a profile being added participates in Gmail routing, before that change is approved and stored. */
-export async function setupProfileHasGmail(path: string): Promise<boolean> {
-  return (await readProfileFile(path)).profile.gmail !== undefined;
+/** The exact profile setup classifies and hands to core, so a path swap cannot change what the approval applies. */
+export async function loadSetupProfile(path: string): Promise<ProfileFile> {
+  return readProfileFile(path);
 }
 
 /**
