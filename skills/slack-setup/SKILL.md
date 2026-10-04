@@ -258,8 +258,8 @@ client secret this package never stores. So own-app narrowing remains the person
 1. Replace the app's manifest with the `read` one.
 2. In Slack: **Workspace settings → Manage apps → the app → Remove app.** This is the step that actually resets
    the scopes.
-3. `agent-slack workspace reauth <name> --mode read --port <port>` — `reauth`, not `add`, so the name and its
-   history are kept.
+3. `agent-slack workspace reauth <name> --mode read --port <port>` — the person grants Slack consent,
+   then finishes the sign-in. Use `reauth`, not `add`, so the name and its history are kept.
 
 For an own-app account, `agent-slack workspace mode <name> read` (`slack_mode_set` with
 `mode: "read"`, or `slack_mode_narrow`) prints exactly this and changes nothing.

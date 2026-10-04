@@ -145,3 +145,80 @@ test('Slack setup documents profile apps and own apps as distinct paths', async 
     assert.match(ownApp, /--client-id\s+\S+.*--port\s+\S+/, `${file}: own-app example needs client id and port`);
   }
 });
+
+test('Slack mode guidance keeps each account path and consent step in its own section', async () => {
+  const setup = await readFile(join(SKILLS, 'slack-setup', 'SKILL.md'), 'utf8');
+  const onboarding = await readFile(join(SKILLS, 'comms-onboarding', 'SKILL.md'), 'utf8');
+
+  function between(text, start, end, label) {
+    const from = text.indexOf(start);
+    assert.notEqual(from, -1, `${label}: start marker missing`);
+    const to = text.indexOf(end, from + start.length);
+    assert.notEqual(to, -1, `${label}: end marker missing`);
+    return text.slice(from + start.length, to);
+  }
+
+  const send = between(setup, '## Moving a workspace to `send`', '## Going back to `read`', 'send mode');
+  const read = between(setup, '## Going back to `read`', '## Removing a workspace', 'read mode');
+  const cases = [
+    {
+      label: 'profile read to send',
+      text: between(send, 'For an account with organisation provenance', "For a person's own app", 'profile send'),
+      required: [
+        /profile's send app/i,
+        /approv/i,
+        /Slack consent/i,
+        /slack_workspace_finish/,
+        /No manifest edit.*app update.*--app-updated/is,
+      ],
+    },
+    {
+      label: 'own-app read to send',
+      text: between(send, "For a person's own app", 'If Slack grants no posting scope', 'own-app send'),
+      required: [
+        /manifest.*`send`/is,
+        /--app-updated/,
+        /change approval/i,
+        /approves that in\s+Slack/i,
+        /slack_workspace_finish/,
+      ],
+    },
+    {
+      label: 'profile send to read',
+      text: between(read, 'For an account with organisation provenance', "For a person's own app", 'profile read'),
+      required: [
+        /starts immediately through the profile's read app/i,
+        /Slack consent/i,
+        /slack_workspace_finish/,
+        /no\s+change approval, manifest replacement, or app removal/i,
+      ],
+    },
+    {
+      label: 'own-app send to read',
+      text: between(read, "For a person's own app", 'For an own-app account', 'own-app read'),
+      required: [
+        /replace the app's manifest with the `read` one/i,
+        /Remove app/i,
+        /workspace reauth.*--mode read/i,
+        /Slack consent/i,
+      ],
+    },
+    {
+      label: 'onboarding direct profile move',
+      text: between(
+        onboarding,
+        '- **Slack, with an organisation profile added:**',
+        '- **Slack, without one:**',
+        'onboarding profile',
+      ),
+      required: [
+        /moves the account\s+directly between the profile's read and send apps through another sign-in/i,
+        /neither app is edited/i,
+      ],
+    },
+  ];
+
+  for (const { label, text, required } of cases) {
+    for (const pattern of required) assert.match(text, pattern, `${label}: missing ${pattern}`);
+  }
+});
