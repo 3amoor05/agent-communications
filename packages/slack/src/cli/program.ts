@@ -724,7 +724,7 @@ configuration problem.`,
         flags,
         shellCommand(['agent-slack', 'workspace', 'remove', alias], platform),
       );
-      writeResult(removed, output(), () => renderRemoved(removed), streams);
+      writeResult(removed, output(), () => renderRemoved(removed, context.platform), streams);
     }),
   );
 

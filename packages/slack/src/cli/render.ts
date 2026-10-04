@@ -118,14 +118,15 @@ export function renderConnected(workspace: WorkspaceView, reauth: boolean, color
  * looking. Uninstalling it for them is not this command's to do: `apps.uninstall` is refused by the transport
  * precisely because an agent quietly removing an app for a whole workspace is not a local change.
  */
-export function renderRemoved(removed: RemovedWorkspace): string {
+export function renderRemoved(removed: RemovedWorkspace, platform: NodeJS.Platform = process.platform): string {
+  const retry = commandText(shellCommand(['agent-slack', 'doctor'], platform));
   const cleanup = removed.cleanup.flatMap((entry) => [
     `Old credential for ${entry.workspace}: ${entry.tokens.map((token) => `${token.kind} ${token.status} (deadline ${token.deadline})`).join('; ')}.`,
     ...(entry.cleaned
       ? ['The old credential bundle was cleaned up.']
       : entry.issue
-        ? [`The pending revocation ledger entry remains for agent-slack doctor to retry: ${entry.issue.message}.`]
-        : ['The old credential bundle remains for agent-slack doctor to retry.']),
+        ? [`The pending revocation ledger entry remains for ${retry} to retry: ${entry.issue.message}.`]
+        : [`The old credential bundle remains for ${retry} to retry.`]),
   ]);
   return [
     `Disconnected "${removed.alias}" from this machine. The stored credential is gone.`,

@@ -148,7 +148,7 @@ export function doctor(input: DoctorInput): DoctorResult {
       id: 'pending-revocation',
       title: `Old Slack credential cleanup for ${result.workspace}`,
       status: result.issue || result.tokens.some((token) => token.status === 'pending') ? 'warn' : 'ok',
-      detail: `${tokens}; ${result.cleaned ? 'old bundle cleaned up' : 'old bundle retained for doctor'}${result.issue ? `; ${result.issue.message}` : ''}. Revoking these tokens does not remove the Slack app installation.`,
+      detail: `${tokens}; ${result.cleaned ? 'old bundle cleaned up' : 'pending revocation ledger entry retained for doctor'}${result.issue ? `; ${result.issue.message}` : ''}. Revoking these tokens does not remove the Slack app installation.`,
       fix: result.cleaned ? null : command('agent-slack', 'doctor'),
       workspace: null,
     });

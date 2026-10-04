@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { commandText, shellCommand } from '@agentcomms/core';
 import {
@@ -6,12 +7,61 @@ import {
   renderDoctor,
   renderManifestHelp,
   renderPosted,
+  renderRemoved,
   renderSignInStarted,
   renderWorkspace,
   renderWorkspaces,
 } from '../src/cli/render.ts';
 import type { SlackDraft } from '../src/compose/drafts.ts';
 import type { WorkspaceView } from '../src/operations/workspaces.ts';
+
+test('removal retry commands are constructed instead of embedded as shell text', () => {
+  const source = readFileSync(new URL('../src/cli/render.ts', import.meta.url), 'utf8');
+  const removal = source.slice(source.indexOf('export function renderRemoved('), source.indexOf('function draftCell('));
+  assert.doesNotMatch(removal, /agent-slack doctor/, 'printed commands must be built with shellCommand');
+  assert.match(removal, /shellCommand\([\s\S]*?, platform\)/, 'the renderer must pass its selected platform');
+});
+
+for (const platform of ['darwin', 'win32'] as const) {
+  test(`removal renders the exact retry command for ${platform}`, () => {
+    for (const issue of [
+      undefined,
+      { code: 'CONFIG', message: 'the old credential bundle is missing from its recorded store' },
+    ]) {
+      const text = renderRemoved(
+        {
+          alias: 'acme',
+          accountId: 'acc_0000000000000000',
+          removed: true,
+          cleanup: [
+            {
+              ref: 'slack/token/old',
+              platform: 'slack',
+              workspace: 'T0001',
+              cleaned: false,
+              tokens: [{ kind: 'access', status: 'pending', deadline: '2026-10-05T12:00:00.000Z' }],
+              ...(issue ? { issue } : {}),
+            },
+          ],
+        },
+        platform,
+      );
+      assert.equal(
+        text,
+        [
+          'Disconnected "acme" from this machine. The stored credential is gone.',
+          'Old credential for T0001: access pending (deadline 2026-10-05T12:00:00.000Z).',
+          issue
+            ? 'The pending revocation ledger entry remains for agent-slack doctor to retry: the old credential bundle is missing from its recorded store.'
+            : 'The old credential bundle remains for agent-slack doctor to retry.',
+          '',
+          'The Slack app is still installed in your workspace. Remove it there through Slack’s own app settings —',
+          'nothing here will do that for you.',
+        ].join('\n'),
+      );
+    }
+  });
+}
 
 /**
  * What reaches a terminal.

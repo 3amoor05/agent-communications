@@ -9,7 +9,7 @@ import { migrateSecrets } from '../../core/src/operations/secrets-migrate.ts';
 import { secretsStoreSwitchAsReleased0121, writeAsReleased0121 } from '../../core/test/fixtures/config-v2-0.12.1.ts';
 import { serialiseBundle, type TokenBundle } from '../src/auth/bundle.ts';
 import { run } from '../src/cli/program.ts';
-import { renderRemoved } from '../src/cli/render.ts';
+import { renderDoctor, renderRemoved } from '../src/cli/render.ts';
 import { removeWorkspaceChange } from '../src/operations/changes.ts';
 import { runDoctor } from '../src/operations/doctor.ts';
 import { createPendingRevocation } from '../src/operations/revocations.ts';
@@ -314,6 +314,11 @@ test('doctor reports missing and corrupt retained bundles without dropping ledge
       assert.equal(result.cleanup?.[0]?.cleaned, false, damaged);
       assert.equal(result.cleanup?.[0]?.tokens[0]?.status, 'pending', damaged);
       assert.ok(result.cleanup?.[0]?.issue, damaged);
+      const text = renderDoctor(result, false);
+      assert.match(text, /pending revocation ledger entry retained/);
+      assert.doesNotMatch(text, /old bundle retained/);
+      assert.ok(text.includes(result.cleanup?.[0]?.issue?.message ?? 'missing issue'), damaged);
+      assert.match(text, damaged === 'missing' ? /missing from its recorded store/ : /could not be read/);
       assert.equal(fake.requests.length, 0, damaged);
       assert.ok(
         (await harness.core.config.load()).pendingRevocations?.some((entry) => entry.ref === ref),
