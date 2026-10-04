@@ -188,10 +188,11 @@ export async function startSignIn(context: GmailContext, options: StartOptions):
     // Before the browser opens, not only when it comes back: a name the file cannot take would otherwise be refused
     // after the person has already been through Google's consent screens.
     requireNewInboxName(config, options.alias, undefined, context.platform);
-    // Setup may have observed no active Gmail profile before prompting or applying an incoming profile. Honour that
-    // compatibility mode only if the configuration reloaded here still says the same thing; otherwise a concurrent
-    // `org add`/`org update` could bypass §D6 and leave the flow with no generation for completion to re-check.
-    const ordinarySetupChoice = options.setupWithoutGmailProfile && !setupClientChoiceNeedsMailbox(config);
+    // Setup's earlier snapshot says only that this is a setup flow. The freshly loaded configuration decides the
+    // route in both directions: a newly active Gmail generation must enter §D6, and a deactivated last generation
+    // must return to main's ordinary first-client rule. Inbox-add callers omit the flag and always use §D6.
+    const ordinarySetupChoice =
+      options.setupWithoutGmailProfile !== undefined && !setupClientChoiceNeedsMailbox(config);
     if (!ordinarySetupChoice) {
       choice =
         chooseClientForNewInbox(config, {

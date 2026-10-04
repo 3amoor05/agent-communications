@@ -698,6 +698,35 @@ test('setup compatibility is re-checked after reload when a Gmail profile became
   await harness.context.flows.discard(started.flowId);
 });
 
+test('setup compatibility follows the reload when an active Gmail profile became inactive meanwhile', async () => {
+  const harness = await offlineProfileClient('jo@acme.test');
+  await harness.core.config.update((config) => {
+    if (config.version !== 2) throw new Error('the fixture is version 2');
+    const organisation = config.organisations?.acme;
+    if (!organisation?.gmail) throw new Error('the fixture has an active Gmail profile');
+    return {
+      ...config,
+      organisations: {
+        ...config.organisations,
+        acme: { ...organisation, gmail: { ...organisation.gmail, active: null } },
+      },
+    };
+  });
+
+  const started = await startSignIn(harness.context, {
+    mode: 'add',
+    alias: 'acme/gmail',
+    email: 'jo@acme.test',
+    setupWithoutGmailProfile: false,
+    listenerCommand: NOOP_LISTENER,
+  });
+  const flow = await harness.context.flows.get(started.flowId);
+  assert.equal(flow.clientName, 'acme-1');
+  assert.equal(flow.expect.clientId, TEST_CLIENT_ID);
+  assert.equal(flow.expect.generation, undefined);
+  await harness.context.flows.discard(started.flowId);
+});
+
 test('inbox add refuses when the reloaded row no longer has the client id §D6 chose', async (t) => {
   const harness = await offlineProfileClient('jo@acme.test');
   const original = harness.context.client.bind(harness.context);
