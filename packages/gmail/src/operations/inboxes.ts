@@ -99,13 +99,13 @@ export async function inboxRename(
   if (RESERVED_ALIASES.has(to)) {
     throw new CommsError('USAGE', `"${to}" is reserved: it means every inbox`, { hint: 'Choose another name.' });
   }
-  requireNewInboxName(await context.config(), to, 'Choose another name.');
+  requireNewInboxName(await context.config(), to, 'Choose another name.', context.platform);
   await context.core.config.update((current) => {
     // By id, and the target checked again, under the lock: a rename is a write like any other, and the file may have
     // moved since it was read. In version 2 `renameEntry` also records the old name, for good.
     const now = findById(current, 'inbox', inbox.id);
     if (!now) throw new CommsError('NOT_FOUND', `no inbox called "${from}"`);
-    requireNewInboxName(current, to, 'Choose another name.');
+    requireNewInboxName(current, to, 'Choose another name.', context.platform);
     return renameEntry(current, 'inbox', now.alias, to);
   });
   context.forgetTransports();

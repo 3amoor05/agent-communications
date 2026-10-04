@@ -18,6 +18,7 @@ import {
   gatedChange,
   gatedChangeAtTerminal,
   homeDirectory,
+  inlineCommand,
   installExitStatus,
   type OutputOptions,
   openCore,
@@ -683,7 +684,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
     if (!alias) {
       const example = (await context.config()).version === 2 ? 'acme/gmail' : 'work';
       throw new CommsError('USAGE', 'name the inbox', {
-        hint: `For example: \`agent-gmail inbox ${mode} ${example} --start\`.`,
+        hint: `For example: ${inlineCommand(shellCommand(['agent-gmail', 'inbox', mode, example, '--start'], context.platform))}.`,
       });
     }
 
@@ -1285,13 +1286,13 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
         const marker = agentMarker(env);
         if (marker) {
           throw new CommsError('APPROVAL_REQUIRED', 'only a person can approve a send or a change, not an agent', {
-            hint: `Ask the user to run \`agent-gmail approve ${approvalId}\` in their own terminal.`,
+            hint: `Ask the user to run ${inlineCommand(shellCommand(['agent-gmail', 'approve', approvalId], context.platform))} in their own terminal.`,
             details: { marker },
           });
         }
         if (!canPrompt(env, streams, { json: globalOptions.json, noInput: globalOptions.noInput })) {
           throw new CommsError('APPROVAL_REQUIRED', 'approving a send or a change needs an interactive terminal', {
-            hint: `Run \`agent-gmail approve ${approvalId}\` directly in a terminal, or send the draft from Gmail.`,
+            hint: `Run ${inlineCommand(shellCommand(['agent-gmail', 'approve', approvalId], context.platform))} directly in a terminal, or send the draft from Gmail.`,
           });
         }
         /*
@@ -2315,7 +2316,11 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
         out.write(`\n${bold('Done.')} ${final.inboxes.length} mailbox(es): ${final.inboxes.join(', ')}\n`);
         // A name to copy, or no line at all. The old fallback printed `--inbox work`, which is not a name a config
         // made today will accept and was never a name this machine had.
-        if (first) out.write(`${dim(`Try: agent-gmail search "newer_than:7d" --inbox ${first}`)}\n`);
+        if (first) {
+          out.write(
+            `${dim(`Try: ${commandText(shellCommand(['agent-gmail', 'search', 'newer_than:7d', '--inbox', first], context.platform))}`)}\n`,
+          );
+        }
         out.write(
           `${dim(`${first ? 'Add another' : 'Add one'} with: agent-gmail inbox add <organisation>/gmail --email <address>`)}\n`,
         );

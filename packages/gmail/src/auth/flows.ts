@@ -1,7 +1,7 @@
 import { randomInt } from 'node:crypto';
 import { open, readdir, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { CommsError, ensurePrivateDir, writeFileAtomic } from '@agentcomms/core';
+import { CommsError, ensurePrivateDir, inlineCommand, shellCommand, writeFileAtomic } from '@agentcomms/core';
 import type { LoopbackAbout } from './loopback.ts';
 
 /**
@@ -88,13 +88,19 @@ export function newFlowId(): string {
  * and to an agent over MCP, sending it to a command it may have no shell for, for a step its own tools take. The
  * flow knows which kind it was and for which mailbox, and the store knows who is asking, so the step is named here.
  */
-function startAgain(flow: Pick<OAuthFlow, 'mode' | 'alias'>, surface: 'cli' | 'mcp'): string {
+function startAgain(
+  flow: Pick<OAuthFlow, 'mode' | 'alias'>,
+  surface: 'cli' | 'mcp',
+  platform: NodeJS.Platform,
+): string {
   if (surface === 'mcp') {
     return flow.mode === 'reauth'
       ? `call gmail_inbox_reauth with inbox "${flow.alias}"`
       : `call gmail_inbox_add with alias "${flow.alias}"`;
   }
-  return `run \`agent-gmail inbox ${flow.mode === 'reauth' ? 'reauth' : 'add'} ${flow.alias} --start\``;
+  return `run ${inlineCommand(
+    shellCommand(['agent-gmail', 'inbox', flow.mode === 'reauth' ? 'reauth' : 'add', flow.alias, '--start'], platform),
+  )}`;
 }
 
 /** Flow files, each usable exactly once. The claim is an `O_EXCL` marker, so two `--finish` calls cannot both win. */
@@ -103,11 +109,18 @@ export class FlowStore {
   readonly #now: () => Date;
   /** Who is asking, so a refusal names the next step as that surface takes it. */
   readonly #surface: 'cli' | 'mcp';
+  readonly #platform: NodeJS.Platform;
 
-  constructor(stateDir: string, now: () => Date = () => new Date(), surface: 'cli' | 'mcp' = 'cli') {
+  constructor(
+    stateDir: string,
+    now: () => Date = () => new Date(),
+    surface: 'cli' | 'mcp' = 'cli',
+    platform: NodeJS.Platform = process.platform,
+  ) {
     this.directory = join(stateDir, 'flows');
     this.#now = now;
     this.#surface = surface;
+    this.#platform = platform;
   }
 
   #path(flowId: string, suffix = '.json'): string {
@@ -192,7 +205,7 @@ export class FlowStore {
     if (Date.parse(flow.expiresAt) <= this.#now().getTime()) {
       await this.discard(flowId);
       throw new CommsError('AUTH_REQUIRED', 'that sign-in took longer than ten minutes and has expired', {
-        hint: `Start again: ${startAgain(flow, this.#surface)}.`,
+        hint: `Start again: ${startAgain(flow, this.#surface, this.#platform)}.`,
       });
     }
     return flow;
@@ -230,7 +243,7 @@ export class FlowStore {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       throw new CommsError('AUTH_REQUIRED', 'that sign-in has already been finished', {
-        hint: `Each sign-in completes once. To start another, ${startAgain(flow, this.#surface)}.`,
+        hint: `Each sign-in completes once. To start another, ${startAgain(flow, this.#surface, this.#platform)}.`,
       });
     }
     return flow;

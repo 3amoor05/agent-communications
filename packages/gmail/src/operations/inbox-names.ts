@@ -1,4 +1,4 @@
-import { CommsError, type Config, lookupName, nameAvailable } from '@agentcomms/core';
+import { CommsError, type Config, inlineCommand, lookupName, nameAvailable, shellCommand } from '@agentcomms/core';
 
 /**
  * Refuses a name a new mailbox cannot take, under whichever version the config is.
@@ -8,12 +8,19 @@ import { CommsError, type Config, lookupName, nameAvailable } from '@agentcomms/
  * `nameAvailable`; only the wording for a name that is already a mailbox is Gmail's own, because the fix for it —
  * re-authorise that mailbox — is something only this package can suggest.
  */
-export function requireNewInboxName(config: Config, alias: string, whenTaken?: string): void {
+export function requireNewInboxName(
+  config: Config,
+  alias: string,
+  whenTaken?: string,
+  platform: NodeJS.Platform = process.platform,
+): void {
   const check = nameAvailable(config, 'inbox', alias, 'gmail');
   if (check.ok) return;
   if (lookupName(config, 'inbox', alias)) {
     throw new CommsError('CONFIG', `an inbox called "${alias}" already exists`, {
-      hint: whenTaken ?? `Re-authorise it with \`agent-gmail inbox reauth ${alias}\`, or choose another name.`,
+      hint:
+        whenTaken ??
+        `Re-authorise it with ${inlineCommand(shellCommand(['agent-gmail', 'inbox', 'reauth', alias], platform))}, or choose another name.`,
     });
   }
   throw check.error;

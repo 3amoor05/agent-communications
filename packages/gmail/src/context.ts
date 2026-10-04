@@ -67,7 +67,7 @@ export class GmailContext {
     this.platform = options.platform ?? process.platform;
     this.surface = options.surface ?? 'cli';
     this.cwd = options.cwd ?? process.cwd();
-    this.flows = new FlowStore(this.core.paths.stateDir, this.now, this.surface);
+    this.flows = new FlowStore(this.core.paths.stateDir, this.now, this.surface, this.platform);
     this.#createTransport = options.createTransport ?? defaultTransport;
   }
 
@@ -143,8 +143,10 @@ function defaultTransport({ resolved, client, context }: TransportRequest): Gmai
       inbox: resolved.inbox,
       client,
       alias: resolved.alias,
+      platform: context.platform,
     }),
     endpoints: context.endpoints,
+    platform: context.platform,
   });
 }
 

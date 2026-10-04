@@ -172,7 +172,7 @@ export async function startSignIn(context: GmailContext, options: StartOptions):
   } else {
     // Before the browser opens, not only when it comes back: a name the file cannot take would otherwise be refused
     // after the person has already been through Google's consent screens.
-    requireNewInboxName(config, options.alias);
+    requireNewInboxName(config, options.alias, undefined, context.platform);
   }
 
   const client = await context.client(clientName);

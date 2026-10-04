@@ -425,7 +425,7 @@ export async function importLegacy(context: GmailContext, options: ImportOptions
         () =>
           context.core.config.update((existing: Config) => {
             // Checked again under the lock: the names were chosen from a snapshot, before any network call.
-            requireNewInboxName(existing, alias, 'Run the import again.');
+            requireNewInboxName(existing, alias, 'Run the import again.', context.platform);
             requireStore(existing, secrets.kind);
             // Re-checked under the lock: another add or import can connect the same account meanwhile, and two rows
             // for one account would share — and overwrite — one grant.

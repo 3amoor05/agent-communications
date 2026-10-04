@@ -8,12 +8,14 @@ import {
   expandHome,
   type GatedChange,
   homeDirectory,
+  inlineCommand,
   keepAndReport,
   type LooseningConsent,
   probeKeychain,
   type StoreKind,
   secretsStoreFor,
   secretsStoreOf,
+  shellCommand,
   withCredentialsLock,
   writeOutcome,
 } from '@agentcomms/core';
@@ -113,14 +115,20 @@ export async function readClientFile(context: GmailContext, given: string): Prom
  * while mailboxes still sign in through it. Checked when the change is planned — so an approval is never asked for a
  * registration that would only be refused — and again under the lock, where it counts.
  */
-function refuseClientConflict(config: Config, name: string, parsed: InstalledClient, replace: boolean): void {
+function refuseClientConflict(
+  config: Config,
+  name: string,
+  parsed: InstalledClient,
+  replace: boolean,
+  platform: NodeJS.Platform,
+): void {
   const existing = config.clients[name];
   if (existing && !replace) {
     throw new CommsError('CONFIG', `an OAuth client called "${name}" is already registered`, {
       hint:
         existing.clientId === parsed.clientId
           ? `To rotate its secret, run the same command with --replace.`
-          : `Choose another name with --name, or remove it first with \`agent-gmail client remove ${name}\`.`,
+          : `Choose another name with --name, or remove it first with ${inlineCommand(shellCommand(['agent-gmail', 'client', 'remove', name], platform))}.`,
     });
   }
   if (existing && replace && existing.clientId !== parsed.clientId) {
@@ -151,7 +159,7 @@ export function clientAddChange(context: GmailContext, request: ClientAddRequest
     plan: async (config) => {
       read = await readClientFile(context, options.path);
       const name = options.name ?? 'default';
-      refuseClientConflict(config, name, read.client, options.replace === true);
+      refuseClientConflict(config, name, read.client, options.replace === true, context.platform);
       const store = await chooseStore(context, options.store);
       const existing = config.clients[name];
       const after = structuredClone(config);
@@ -201,7 +209,7 @@ async function registerClient(
   const { path, client: parsed } = file;
   const config = await context.config();
   const existing = config.clients[name];
-  refuseClientConflict(config, name, parsed, options.replace === true);
+  refuseClientConflict(config, name, parsed, options.replace === true, context.platform);
 
   // One backend per config directory: the first command that stores a secret picks it, and it cannot be mixed later.
   const chosen = await chooseStore(context, options.store);

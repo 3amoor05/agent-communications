@@ -6,10 +6,12 @@ import {
   duplicateInbox,
   findById,
   type InboxConfig,
+  inlineCommand,
   keepAndReport,
   newInboxId,
   PUBLIC_MAILBOX_DOMAINS,
   secretsStoreOf,
+  shellCommand,
   withCredentialsLock,
   withdrawStaged,
   writeOutcome,
@@ -123,10 +125,10 @@ async function addInbox(
   });
   if (duplicate) {
     throw new CommsError('CONFIG', `${identity.email} is already connected as "${duplicate}"`, {
-      hint: `Use it as "${duplicate}", rename it (\`agent-gmail inbox rename ${duplicate} ${flow.alias}\`), or remove it first.`,
+      hint: `Use it as "${duplicate}", rename it (${inlineCommand(shellCommand(['agent-gmail', 'inbox', 'rename', duplicate, flow.alias], context.platform))}), or remove it first.`,
     });
   }
-  requireNewInboxName(config, flow.alias);
+  requireNewInboxName(config, flow.alias, undefined, context.platform);
 
   const id = newInboxId();
   const inbox: InboxConfig = {
@@ -158,7 +160,7 @@ async function addInbox(
        * to the organisation/platform form — in which case a plain name that was fine when the flow started is not
        * one any more, and the flow is refused here rather than writing a name the file no longer allows.
        */
-      requireNewInboxName(current, flow.alias);
+      requireNewInboxName(current, flow.alias, undefined, context.platform);
       requireSameClient(current, flow.clientName, clientId);
       // The backend the token went into must still be the one in force: `secrets migrate` switches backends, and a
       // row written after the switch would name a credential that only exists in the store nothing reads any more.
@@ -240,7 +242,7 @@ async function reauthorise(
     // the token was written — is reported as itself.
     if (!entered && error instanceof CommsError && error.code === 'LOCK_TIMEOUT') {
       throw new CommsError('TRANSIENT', 'another operation on stored credentials is running, so nothing was saved', {
-        hint: `Run \`agent-gmail inbox reauth ${flow.alias}\` again in a moment.`,
+        hint: `Run ${inlineCommand(shellCommand(['agent-gmail', 'inbox', 'reauth', flow.alias], context.platform))} again in a moment.`,
         cause: error,
       });
     }
@@ -424,7 +426,7 @@ async function writeReauth(
         hint:
           `${base.hint ? `${base.hint} ` : ''}Whether the new token reached the secret store could not be confirmed. ` +
           `This mailbox's settings ${settingsUpdated ? 'were updated' : 'were not changed'}. Run ` +
-          `\`agent-gmail inbox reauth ${after?.alias ?? existing.alias}\` again when the store is available; ` +
+          `${inlineCommand(shellCommand(['agent-gmail', 'inbox', 'reauth', after?.alias ?? existing.alias], context.platform))} again when the store is available; ` +
           '`agent-gmail doctor` says whether the mailbox still works.',
         details: {
           tokenStateUnknown: existing.inbox.secretRef,
@@ -509,6 +511,7 @@ export async function checkInbox(context: GmailContext, alias: string): Promise<
     inbox: resolved.inbox,
     client,
     alias,
+    platform: context.platform,
   });
   const token = await source.accessToken();
   const transport = await context.transport(alias);

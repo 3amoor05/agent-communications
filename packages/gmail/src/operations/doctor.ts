@@ -307,7 +307,14 @@ async function inboxChecks(context: GmailContext, alias: string): Promise<Check[
 
   let tokenOk = false;
   try {
-    const source = new TokenSource({ core: context.core, endpoints: context.endpoints, inbox, client, alias });
+    const source = new TokenSource({
+      core: context.core,
+      endpoints: context.endpoints,
+      inbox,
+      client,
+      alias,
+      platform: context.platform,
+    });
     await source.accessToken();
     tokenOk = true;
     checks.push({

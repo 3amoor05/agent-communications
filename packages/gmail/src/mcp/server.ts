@@ -973,7 +973,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
             downloadForms.delete(choiceId);
             if (asked === undefined || asked !== client || !(await isAllowlisted(client))) {
               throw new CommsError('APPROVAL_REQUIRED', 'nothing was saved: that answer was not to a form this asked', {
-                hint: `Ask the person to run \`agent-gmail approve ${choiceId}\` in their own terminal and answer there, then call again with choiceId "${choiceId}" alone.`,
+                hint: `Ask the person to run ${inlineCommand(shellCommand(['agent-gmail', 'approve', choiceId], context.platform))} in their own terminal and answer there, then call again with choiceId "${choiceId}" alone.`,
                 details: { choiceId, client },
               });
             }
@@ -2279,7 +2279,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
               const client = server.server.getClientVersion()?.name ?? '';
               if (!(await isAllowlisted(client))) {
                 throw new CommsError('APPROVAL_REQUIRED', 'this send needs approval outside the chat', {
-                  hint: `Ask the user to run \`agent-gmail approve ${approvalId}\` in a terminal, or to send the draft from Gmail. This client is not on the list of clients whose approval forms are known to reach a person.`,
+                  hint: `Ask the user to run ${inlineCommand(shellCommand(['agent-gmail', 'approve', approvalId], context.platform))} in a terminal, or to send the draft from Gmail. This client is not on the list of clients whose approval forms are known to reach a person.`,
                   details: { approvalId, client },
                 });
               }
