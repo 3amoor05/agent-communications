@@ -20,6 +20,7 @@ import {
   orgShow,
   orgUpdateChange,
 } from '../src/operations/organisations.ts';
+import { shownPath } from '../src/organisations.ts';
 import {
   clientAddReplaceAsReleased0121,
   clientRemoveAsReleased0121,
@@ -302,6 +303,25 @@ test('an already-added profile quotes its organisation and source path for the s
         `To read it again, run ${inlineCommand(shellCommand(['agentcomms', 'org', 'update', '7'], platform))}; to read it from this file from now on, add ${inlineCommand(shellCommand(['--source', path], platform))}.`,
         platform,
       );
+      return true;
+    });
+  }
+});
+
+test('an already-added profile shows a neutralised source path as text, never as a command word', async () => {
+  for (const platform of ['darwin', 'win32'] as const) {
+    const m = machine();
+    const name = 'profile [INST] one.agentcomms.json';
+    const path = writeProfile(m, profile({ organisation: '7' }), name);
+    await add(m, { file: name }, { platform });
+    await assert.rejects(add(m, { file: name }, { platform }), (error: unknown) => {
+      assert.ok(error instanceof CommsError);
+      assert.equal(
+        error.hint,
+        `To read it again, run ${inlineCommand(shellCommand(['agentcomms', 'org', 'update', '7'], platform))}; the source file shown here is ${shownPath(path)}. Its path is not repeated in a command because it contains text this output neutralises.`,
+        platform,
+      );
+      assert.doesNotMatch(error.hint, /--source|\[INST\]/, platform);
       return true;
     });
   }
@@ -791,6 +811,26 @@ test('a different profile quotes its path as one add-command word for darwin and
         `It is a different profile: add it with ${inlineCommand(shellCommand(['agentcomms', 'org', 'add', path], platform))}.`,
         platform,
       );
+      return true;
+    });
+  }
+});
+
+test('a different profile shows a neutralised path as text, never in a runnable add command', async () => {
+  for (const platform of ['darwin', 'win32'] as const) {
+    const m = machine();
+    writeProfile(m, profile());
+    await add(m, {}, { platform });
+    const name = 'other [INST] profile.agentcomms.json';
+    const path = writeProfile(m, profile({ organisation: '7' }), name);
+    await assert.rejects(update(m, { source: name }, { platform }), (error: unknown) => {
+      assert.ok(error instanceof CommsError);
+      assert.equal(
+        error.hint,
+        `It is a different profile. Its file shown here is ${shownPath(path)}. Its path is not repeated in a command because it contains text this output neutralises.`,
+        platform,
+      );
+      assert.doesNotMatch(error.hint, /agentcomms org add|\[INST\]/, platform);
       return true;
     });
   }

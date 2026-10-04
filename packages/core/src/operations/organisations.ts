@@ -372,15 +372,22 @@ async function planProfile(config: Config, input: PlanInput): Promise<ProfilePla
     });
   }
   const organisation = input.organisation;
+  const displayedPath = shownPath(file.path);
+  const commandPath = displayedPath === file.path ? file.path : null;
   const previous =
     input.mode === 'update' ? requireRecord(config, organisation, input.platform) : recordOf(config, organisation);
   if (input.mode === 'add' && previous) {
     throw new CommsError('CONFIG', `the organisation profile "${organisation}" has already been added here`, {
-      hint: `To read it again, run ${inlineCommand(
-        shellCommand(['agentcomms', 'org', 'update', organisation], input.platform),
-      )}; to read it from this file from now on, add ${inlineCommand(
-        shellCommand(['--source', shownPath(file.path)], input.platform),
-      )}.`,
+      hint:
+        commandPath === null
+          ? `To read it again, run ${inlineCommand(
+              shellCommand(['agentcomms', 'org', 'update', organisation], input.platform),
+            )}; the source file shown here is ${displayedPath}. Its path is not repeated in a command because it contains text this output neutralises.`
+          : `To read it again, run ${inlineCommand(
+              shellCommand(['agentcomms', 'org', 'update', organisation], input.platform),
+            )}; to read it from this file from now on, add ${inlineCommand(
+              shellCommand(['--source', commandPath], input.platform),
+            )}.`,
     });
   }
   if (profile.organisation !== organisation) {
@@ -388,9 +395,12 @@ async function planProfile(config: Config, input: PlanInput): Promise<ProfilePla
       'CONFIG',
       `this profile is for the organisation "${profile.organisation}", not "${organisation}"`,
       {
-        hint: `It is a different profile: add it with ${inlineCommand(
-          shellCommand(['agentcomms', 'org', 'add', shownPath(file.path)], input.platform),
-        )}.`,
+        hint:
+          commandPath === null
+            ? `It is a different profile. Its file shown here is ${displayedPath}. Its path is not repeated in a command because it contains text this output neutralises.`
+            : `It is a different profile: add it with ${inlineCommand(
+                shellCommand(['agentcomms', 'org', 'add', commandPath], input.platform),
+              )}.`,
       },
     );
   }
