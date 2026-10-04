@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { readdir } from 'node:fs/promises';
+import fs, { readdir } from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -167,3 +168,63 @@ test('abort after the finisher owns the outcome lets that owner complete once', 
   assert.equal(f.harness.calls.length, 1);
   assert.equal(await f.context.flows.peek(f.flow.flowId), null);
 });
+
+for (const when of ['during mkdir', 'after atomic open'] as const) {
+  test(`abort ${when} respects the claim ownership boundary`, async (t) => {
+    const f = await fixture();
+    t.after(() => stopListeners([f.pid]));
+    const controller = new AbortController();
+    const directory = join(f.harness.core.paths.stateDir, 'slack', 'flows');
+    const marker = join(directory, `${f.flow.flowId}.claim`);
+    await f.context.flows.recordOutcome(f.flow.flowId, { code: 'fake-code' });
+    const saved = await f.context.flows.readOutcome(f.flow.flowId);
+    let intercepted = false;
+    const mkdir = fs.mkdir;
+    const open = fs.open;
+    if (when === 'during mkdir') {
+      t.mock.method(fs, 'mkdir', async (...args: Parameters<typeof mkdir>) => {
+        const result = await mkdir(...args);
+        if (String(args[0]) === directory && !intercepted) {
+          intercepted = true;
+          assert.ok(!(await readdir(directory)).includes(`${f.flow.flowId}.claim`));
+          controller.abort();
+        }
+        return result;
+      });
+    } else {
+      t.mock.method(fs, 'open', async (...args: Parameters<typeof open>) => {
+        const handle = await open(...args);
+        if (String(args[0]) === marker && !intercepted) {
+          intercepted = true;
+          assert.ok((await readdir(directory)).includes(`${f.flow.flowId}.claim`));
+          controller.abort();
+        }
+        return handle;
+      });
+    }
+    syncBuiltinESMExports();
+    t.after(() => {
+      t.mock.restoreAll();
+      syncBuiltinESMExports();
+    });
+    const finishing = finishSignIn(f.context, { flowId: f.flow.flowId, waitSeconds: 0, signal: controller.signal });
+    if (when === 'during mkdir') {
+      await assert.rejects(finishing, (error) => cancelled(error, f.flow.flowId));
+      assert.equal(f.harness.calls.length, 0);
+      assert.deepEqual(await f.context.flows.get(f.flow.flowId), f.flow);
+      assert.deepEqual(await f.context.flows.readOutcome(f.flow.flowId), saved);
+      assert.ok(!(await readdir(directory)).includes(`${f.flow.flowId}.claim`));
+      assert.ok(running(f.pid));
+      // The listener must still answer a callback, not merely have an as-yet-live pid.
+      const back = new URL(f.flow.redirectUrl);
+      back.searchParams.set('state', f.flow.state);
+      back.searchParams.set('code', 'fake-code');
+      assert.equal((await fetchListener(back)).status, 200);
+    } else {
+      assert.equal((await finishing).alias, 'rgc/slack');
+      assert.equal(f.harness.calls.length, 1);
+      assert.equal(await f.context.flows.peek(f.flow.flowId), null);
+    }
+    assert.equal(intercepted, true, 'the test did not reach the real claim boundary');
+  });
+}

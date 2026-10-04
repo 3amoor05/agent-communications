@@ -151,7 +151,14 @@ export async function startSignIn(context: SlackContext, options: StartOptions):
     createdAt: startedAt.toISOString(),
     expiresAt: new Date(startedAt.getTime() + FLOW_TTL_MS).toISOString(),
   };
-  await context.flows.save(flow);
+  const foreground = options.detached === false ? context.foregroundSignIn : undefined;
+  let startupSettled: (() => void) | undefined;
+  if (foreground) {
+    const startup = new Promise<void>((resolve) => {
+      startupSettled = resolve;
+    });
+    foreground.register(flow.flowId, startup);
+  }
 
   /*
    * A flow that never gets a listener is discarded rather than left.
@@ -162,17 +169,27 @@ export async function startSignIn(context: SlackContext, options: StartOptions):
    */
   let listener: StartedSignIn['listener'];
   try {
+    foreground?.signal.throwIfAborted();
+    await context.flows.save(flow);
+    foreground?.signal.throwIfAborted();
     listener =
       options.detached === false
         ? await startInProcess(context, flow, options.listenerTimeoutMs)
         : await startDetached(context, flow, options);
+    if (foreground?.signal.aborted) {
+      await listener?.close();
+      foreground.signal.throwIfAborted();
+    }
   } catch (error) {
     await context.flows.discard(flow.flowId);
+    if (foreground?.signal.aborted) throw error;
     if (error instanceof CommsError) throw error;
     throw new CommsError('UNEXPECTED', `the sign-in could not start: ${(error as Error).message}`, {
       hint: `Port ${options.port} may already be in use.`,
       cause: error,
     });
+  } finally {
+    startupSettled?.();
   }
 
   return {
@@ -609,16 +626,13 @@ export async function finishSignIn(context: SlackContext, options: FinishOptions
   }
 
   try {
-    return await completeSignIn(context, flow.flowId, code);
-  } finally {
-    stopListener(flow, context.now());
-    /*
-     * No `discard` here. Only the caller that won the claim may clean up, and `completeSignIn` does that itself.
-     *
-     * This used to discard unconditionally — including when `completeSignIn` threw because *this* caller lost
-     * the claim. The loser then deleted the winner's marker and record while the winner was mid-exchange, and a
-     * third caller could claim the flow again. Cleanup belongs to ownership, not to whoever reaches a `finally`.
-     */
+    return await completeSignIn(context, flow.flowId, code, options.signal);
+  } catch (error) {
+    // Only the unclaimed boundary throws the signal's reason. Once claimed, completion never checks it again.
+    if (options.signal?.aborted && error === options.signal.reason) {
+      checkFinishCancellation(context, flow, options.signal);
+    }
+    throw error;
   }
 }
 
@@ -1003,10 +1017,15 @@ function renewing(context: SlackContext, config: Config, flow: SlackFlow): { ali
   return found;
 }
 
-export async function completeSignIn(context: SlackContext, flowId: string, code: string): Promise<WorkspaceView> {
+export async function completeSignIn(
+  context: SlackContext,
+  flowId: string,
+  code: string,
+  signal?: AbortSignal,
+): Promise<WorkspaceView> {
   // Claimed first, so two `--finish` calls cannot both spend one code. The claim is a file, so it is cleaned up
   // however this ends — the interactive path has no `--finish` above it to do that.
-  const flow = await context.flows.claim(flowId);
+  const flow = await context.flows.claim(flowId, signal);
   try {
     /*
      * A new workspace that can post, finished without a person's consent — a flow started before this was gated, or
@@ -1317,6 +1336,8 @@ export async function completeSignIn(context: SlackContext, flowId: string, code
 
     return viewOf(writtenAlias, written);
   } finally {
+    // Only the owner may stop the listener or discard the flow; a cancelled or losing finisher does neither.
+    stopListener(flow, context.now());
     await context.flows.discard(flowId);
   }
 }

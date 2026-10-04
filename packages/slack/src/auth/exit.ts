@@ -91,6 +91,8 @@ export function exitAfterRefreshes(
   const on = (signal: ExitSignal) => () => {
     void Promise.resolve()
       .then(options.beforeExit)
+      // Cleanup can fail (for example, a directory became unwritable). Exit still belongs to the signal.
+      .catch(() => undefined)
       .finally(() => settleBeforeExit(stderr, waitMs))
       .finally(() => {
         // With no listener left, the signal sent again meets Node's default, which is to die of it.

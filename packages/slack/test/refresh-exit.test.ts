@@ -5,6 +5,7 @@ import { test } from 'node:test';
 import { EXIT_CODES } from '@agentcomms/core';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport, type Transport } from '@modelcontextprotocol/server';
+import { exitAfterRefreshes } from '../src/auth/exit.ts';
 import { settleRefreshes } from '../src/auth/refresh.ts';
 import { run } from '../src/cli/program.ts';
 import { createSlackMcpServer, serveUntilClosed } from '../src/mcp/server.ts';
@@ -23,6 +24,29 @@ import { expired, fakeProcess, flakyStore, markerLandsLate, QUICK, stored, until
  */
 
 const renewed = () => slackOk({ authed_user: { access_token: 'fake-new-access', refresh_token: 'fake-new-refresh' } });
+
+test('a rejected beforeExit cleanup still redelivers the signal and reaches fallback without an unhandled rejection', async () => {
+  const host = fakeProcess();
+  const exits: number[] = [];
+  const stderr = captured();
+  const release = exitAfterRefreshes({
+    host,
+    stderr: stderr.stream,
+    beforeExit: async () => {
+      throw new Error('synthetic cleanup refusal');
+    },
+    exit: (code) => exits.push(code),
+  });
+  try {
+    host.emit('SIGINT');
+    await until(() => exits.length > 0, 5000);
+    assert.deepEqual(host.raised, [{ pid: host.pid, signal: 'SIGINT', listening: 0 }]);
+    assert.deepEqual(exits, [130]);
+    assert.equal(stderr.text(), '');
+  } finally {
+    release();
+  }
+});
 
 /** Slack's reply to every read: no channels. The commands here only need to get as far as a token. */
 const noChannels = async () =>

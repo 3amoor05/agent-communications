@@ -164,7 +164,7 @@ export interface FlowStore {
    * runs, and both deletes then succeed — so both would exchange the same code. Slack refuses the second, and
    * the first has already written a credential, which reports a failure for a sign-in that worked.
    */
-  claim(flowId: string): Promise<SlackFlow>;
+  claim(flowId: string, signal?: AbortSignal): Promise<SlackFlow>;
   discard(flowId: string): Promise<void>;
   /** Every flow that has not expired, newest first. */
   pending(): Promise<SlackFlow[]>;
@@ -246,7 +246,7 @@ export function openFlowStore(stateDir: string, now: () => Date): FlowStore {
       }
     },
 
-    async claim(flowId) {
+    async claim(flowId, signal) {
       const path = flowPath(stateDir, flowId);
       const marker = flowPath(stateDir, flowId, '.claim');
       /*
@@ -262,6 +262,8 @@ export function openFlowStore(stateDir: string, now: () => Date): FlowStore {
        * absence *is* the tombstone — which is also why `discard` removes the record before the marker.
        */
       await mkdir(flowDir(stateDir), { recursive: true, mode: 0o700 });
+      // The preparation above yields. Until the atomic open below begins, cancellation owns no outcome.
+      signal?.throwIfAborted();
       let handle: Awaited<ReturnType<typeof open>>;
       try {
         handle = await open(marker, 'wx', 0o600);

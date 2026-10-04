@@ -256,7 +256,6 @@ configuration problem.`,
    * second envelope after the first, and `--json` promises exactly one document on stdout.
    */
   let softExit: number | null = null;
-  let interruptSignIn: (() => Promise<void>) | undefined;
 
   /*
    * The daily update check (design 2026-09-28 §3), before any command but the exempt ones: an update that is out
@@ -305,7 +304,19 @@ configuration problem.`,
         exitCode = gated;
         return;
       }
-      const context = new SlackContext({ ...deps, env, surface: 'cli' });
+      const interrupted = new AbortController();
+      let foreground: { flowId: string; startup: Promise<void> } | undefined;
+      const context = new SlackContext({
+        ...deps,
+        env,
+        surface: 'cli',
+        foregroundSignIn: {
+          signal: interrupted.signal,
+          register: (flowId, startup) => {
+            foreground = { flowId, startup };
+          },
+        },
+      });
       /*
        * Any command that reads may refresh a token, and the MCP server's two protections apply here for the same
        * reason: Ctrl-C between Slack's reply and the write would lose the renewed token, and a token kept because
@@ -316,10 +327,29 @@ configuration problem.`,
       const release = exitAfterRefreshes({
         ...deps.signals,
         stderr: streams.stderr,
-        beforeExit: async () => interruptSignIn?.(),
+        beforeExit: async () => {
+          interrupted.abort();
+          if (foreground) {
+            // A flow write may still be in flight. It must settle before its final removal and signal redelivery.
+            await foreground.startup;
+            await context.flows.discard(foreground.flowId);
+          }
+        },
       });
       try {
-        exitCode = await runCommand(output(), () => body(context, globals(), ...args), streams);
+        exitCode = await runCommand(
+          output(),
+          async () => {
+            try {
+              await body(context, globals(), ...args);
+            } catch (error) {
+              if (!interrupted.signal.aborted) throw error;
+              // The signal handler owns exit. Do not render a cancellation error while it settles owned state.
+              await new Promise<void>(() => {});
+            }
+          },
+          streams,
+        );
         await settleBeforeExit(streams.stderr);
       } finally {
         release();
@@ -1536,17 +1566,15 @@ configuration problem.`,
       );
       return;
     }
+    context.foregroundSignIn?.signal.throwIfAborted();
     streams.stderr.write(`${renderSignInStarted(started, reauth, options.color, context.platform)}\n\n`);
     if (how.browser) tryOpen(started.authUrl);
     const listener = started.listener;
     if (!listener) throw new CommsError('UNEXPECTED', 'the sign-in listener did not start');
-    // Only the foreground listener belongs to this command. Detached flows never enter this branch.
-    interruptSignIn = () => context.flows.discard(started.flowId);
     try {
       const view = await listener.result;
       writeResult(view, output(), () => renderConnected(view, reauth, options.color), streams);
     } finally {
-      interruptSignIn = undefined;
       await listener.close();
     }
   }

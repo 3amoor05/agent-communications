@@ -35,6 +35,13 @@ export interface SlackContextOptions {
    * production, so a store that never recovers can be driven through a whole command.
    */
   persist?: PersistPolicy | undefined;
+  /** The CLI owns only in-process sign-ins, registered before their first persistent write. */
+  foregroundSignIn?:
+    | {
+        signal: AbortSignal;
+        register(flowId: string, startup: Promise<void>): void;
+      }
+    | undefined;
 }
 
 /**
@@ -107,11 +114,13 @@ export class SlackContext {
   readonly fetch: FetchLike | undefined;
   readonly slackBaseUrl: string | undefined;
   readonly persist: PersistPolicy | undefined;
+  readonly foregroundSignIn: SlackContextOptions['foregroundSignIn'];
 
   constructor(options: SlackContextOptions = {}) {
     this.env = options.env ?? process.env;
     this.core = options.core ?? openCore({ env: this.env });
     this.now = options.now ?? (() => new Date());
+    this.foregroundSignIn = options.foregroundSignIn;
     this.platform = options.platform ?? process.platform;
     this.surface = options.surface ?? 'cli';
     this.cwd = options.cwd ?? process.cwd();

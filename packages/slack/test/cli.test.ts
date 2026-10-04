@@ -16,14 +16,31 @@ import { type Harness, newHarness, slackOk, TEST_CLIENT_ID, tempDir } from './su
 import { fetchListener, LISTENER_COMMAND, running, stopListeners } from './support/listener.ts';
 
 /** A real child running the CLI action, with IPC only to tell the test its signal handlers are installed. */
-function interruptibleCli(harness: Harness, argv: string[]) {
+function interruptibleCli(harness: Harness, argv: string[], pauseAfterFlowWrite = false) {
   const source = `
+    import fs from 'node:fs/promises';
+    import { syncBuiltinESMExports } from 'node:module';
     import { run } from ${JSON.stringify(new URL('../src/cli/program.ts', import.meta.url).href)};
+    if (${pauseAfterFlowWrite}) {
+      const writeFile = fs.writeFile;
+      fs.writeFile = async (...args) => {
+        const result = await writeFile(...args);
+        if (/[/\\\\]slack[/\\\\]flows[/\\\\]sfl_[A-Za-z0-9]+\\.json$/.test(String(args[0]))) {
+          const hold = setInterval(() => {}, 1000);
+          process.send?.('flow-written');
+          await new Promise((done) => process.once('SIGINT', () => setTimeout(done, 30)));
+          clearInterval(hold);
+          process.send?.('flow-write-released');
+        }
+        return result;
+      };
+      syncBuiltinESMExports();
+    }
     const host = {
       pid: process.pid,
       once(signal, listener) {
         process.once(signal, listener);
-        if (signal === 'SIGINT') setTimeout(() => process.send?.('waiting'), 100);
+        if (signal === 'SIGINT' && !${pauseAfterFlowWrite}) setTimeout(() => process.send?.('waiting'), 100);
       },
       removeListener: process.removeListener.bind(process),
       kill: process.kill.bind(process),
@@ -44,6 +61,10 @@ function interruptibleCli(harness: Harness, argv: string[]) {
   );
   let stdout = '';
   let stderr = '';
+  const messages: unknown[] = [];
+  child.on('message', (message) => {
+    messages.push(message);
+  });
   assert.ok(child.stdout);
   assert.ok(child.stderr);
   child.stdout.on('data', (chunk) => {
@@ -60,11 +81,38 @@ function interruptibleCli(harness: Harness, argv: string[]) {
   const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((done) => {
     child.once('close', (code, signal) => done({ code, signal }));
   });
-  return { child, ready, closed, output: () => ({ stdout, stderr }) };
+  return { child, ready, closed, messages, output: () => ({ stdout, stderr }) };
 }
 
 // Match refresh-exit.test.ts: Windows process.kill cannot deliver a catchable POSIX signal.
 const posixOnly = { skip: process.platform === 'win32' };
+
+test(
+  'foreground interrupt after flow write but before listener startup removes all owned state silently',
+  posixOnly,
+  async (t) => {
+    const harness = await newHarness();
+    const port = await freePort();
+    const child = interruptibleCli(
+      harness,
+      ['workspace', 'add', 'acme', '--client-id', TEST_CLIENT_ID, '--port', String(port), '--no-browser'],
+      true,
+    );
+    t.after(() => child.child.kill('SIGKILL'));
+    await child.ready;
+    assert.equal((await harness.context().flows.pending()).length, 1, 'the flow write was not reached');
+    await assert.rejects(fetchListener(`http://localhost:${port}/slack/callback`));
+    assert.deepEqual(child.output(), { stdout: '', stderr: '' });
+    child.child.kill('SIGINT');
+    assert.deepEqual(await child.closed, { code: null, signal: 'SIGINT' });
+    assert.ok(child.messages.includes('flow-write-released'), 'signal was redelivered before startup settled');
+    assert.deepEqual(child.output(), { stdout: '', stderr: '' }, 'interrupted startup printed a result or error');
+    assert.deepEqual((await harness.core.config.load()).accounts, {});
+    assert.deepEqual(await readdir(join(harness.configDir, 'secrets')).catch(() => []), []);
+    assert.deepEqual(await readdir(join(harness.core.paths.stateDir, 'slack', 'flows')), []);
+    await assert.rejects(fetchListener(`http://localhost:${port}/slack/callback`));
+  },
+);
 
 for (const kind of ['add', 'reauth'] as const) {
   test(
