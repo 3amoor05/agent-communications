@@ -65,8 +65,10 @@ export {
   organisationsOf,
   PROFILE_ORGANISATION_MAX,
   parseProfile,
+  profileSourcePath,
   recordOf,
   requireLiveOrganisationGeneration,
+  shownPath,
   shownText,
 } from './organisations.ts';
 export * from './other-servers.ts';

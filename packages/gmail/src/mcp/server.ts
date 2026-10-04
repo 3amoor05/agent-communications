@@ -13,8 +13,10 @@ import {
   inlineCommand,
   lookupName,
   orgAddChange,
+  profileSourcePath,
   retiredOutHint,
   shellCommand,
+  shownPath,
   stricterPolicy,
   strictToolArguments,
   toCommsError,
@@ -1372,11 +1374,19 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
     },
     async ({ inbox, email, client, profile, orgApproval, store }) => {
       try {
-        if (profile) {
+        const profilePath =
+          profile === undefined
+            ? undefined
+            : profileSourcePath(profile, context.env, context.cwd, context.platform);
+        if (profilePath !== undefined) {
           if (options.readOnly || pinned) {
             const why = options.readOnly ? 'read-only' : `pinned to the "${pinned}" mailbox`;
+            const displayedProfile = shownPath(profilePath);
+            const safeToRepeat = displayedProfile === profilePath;
             throw new CommsError('CONFIG', `this Gmail server is ${why}, so setup cannot add an organisation profile`, {
-              hint: `Add the profile with ${inlineCommand(shellCommand(['agent-gmail', 'setup', '--profile', profile], context.platform))}, or use a Gmail server that is not read-only.`,
+              hint: safeToRepeat
+                ? `Add the profile with ${inlineCommand(shellCommand(['agent-gmail', 'setup', '--profile', profilePath], context.platform))}, or use a Gmail server that is not read-only.`
+                : `Add the profile shown here, ${displayedProfile}, with the Gmail CLI, or use a Gmail server that is not read-only. Its path is not repeated in a command because it contains text this output neutralises.`,
             });
           }
         } else if (orgApproval !== undefined) {
@@ -1386,20 +1396,20 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
         }
         const setupInbox = pinned ? targetInbox(inbox) : inbox;
         const configBeforeProfile = await context.config();
-        const clientChoiceNeedsMailbox = Boolean(profile) || setupClientChoiceNeedsMailbox(configBeforeProfile);
+        const clientChoiceNeedsMailbox = profilePath !== undefined || setupClientChoiceNeedsMailbox(configBeforeProfile);
         if (clientChoiceNeedsMailbox && !setupInbox) {
           throw new CommsError('USAGE', 'name the mailbox with `inbox` before setup can choose its client', {
             hint: 'Call gmail_setup again with inbox set to the mailbox name being added.',
           });
         }
         if (setupInbox) requireSetupTarget(configBeforeProfile, setupInbox);
-        if (profile) {
+        if (profilePath !== undefined) {
           const outcome = await gatedChange(
             context.core,
             orgAddChange(
               context.core,
               {
-                file: profile,
+                file: profilePath,
                 store,
                 ...(orgApproval ? { approvalId: orgApproval } : {}),
               },
