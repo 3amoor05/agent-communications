@@ -647,6 +647,44 @@ test('the status compare-and-set refuses a changed location, deadline or pending
   }
 });
 
+test('a ref claimed after dispatch is refused before the answer can be persisted', async () => {
+  const machine = await revocationMachine({ refreshToken: undefined });
+  const live = await machine.harness.addWorkspace({ alias: 'live' });
+  let received = false;
+  let shared = false;
+  const update = machine.harness.core.config.update.bind(machine.harness.core.config);
+  machine.harness.core.config.update = (async (...args: Parameters<typeof update>) => {
+    if (received && !shared) {
+      shared = true;
+      await update((config) => ({
+        ...config,
+        accounts: {
+          ...config.accounts,
+          live: { ...live, secretRef: machine.ref },
+        },
+      }));
+    }
+    return update(...args);
+  }) as typeof machine.harness.core.config.update;
+  const fake = await startFakeSlack({
+    'auth.revoke': () => {
+      received = true;
+      return { ok: true, revoked: true };
+    },
+  });
+  try {
+    await assert.rejects(
+      revokePendingEntry(machine.harness.context({ fetch: fake.fetch }), machine.ref),
+      /not exclusive/,
+    );
+    assert.equal(fake.requests.length, 1);
+    assert.equal((await ledgerEntry(machine))?.tokens.access.status, 'pending');
+    assert.equal(await (await machine.harness.core.secrets('file')).get(machine.ref), serialiseBundle(machine.bundle));
+  } finally {
+    await fake.close();
+  }
+});
+
 test('one entry never updates another pending bundle in the same workspace', async () => {
   const machine = await revocationMachine({ refreshToken: undefined });
   failBundleDeletion(machine);
@@ -724,6 +762,102 @@ test('cleanup restores a deleted bundle when ledger removal definitely fails', a
     assert.equal(result.issue?.code, 'CONFIG_WRITE_FAILED');
     assert.equal((await ledgerEntry(machine))?.tokens.access.status, 'revoked');
     assert.equal(await (await machine.harness.core.secrets('file')).get(machine.ref), serialiseBundle(machine.bundle));
+  } finally {
+    await fake.close();
+  }
+});
+
+test('cleanup restores the exact bundle when its ref is claimed immediately before deletion', async () => {
+  const machine = await revocationMachine({ refreshToken: undefined });
+  const live = await machine.harness.addWorkspace({ alias: 'live' });
+  const open = machine.harness.core.secrets.bind(machine.harness.core);
+  let shared = false;
+  machine.harness.core.secrets = (async (kind) => {
+    const inner = await open(kind);
+    return wrapStore(inner, {
+      async get(ref) {
+        const entry = await ledgerEntry(machine);
+        if (ref === machine.ref && entry?.tokens.access.status === 'revoked' && !shared) {
+          shared = true;
+          await machine.harness.core.config.update((config) => ({
+            ...config,
+            accounts: {
+              ...config.accounts,
+              live: { ...live, secretRef: machine.ref },
+            },
+          }));
+        }
+        return inner.get(ref);
+      },
+    });
+  }) as typeof machine.harness.core.secrets;
+  const fake = await startFakeSlack({ 'auth.revoke': () => ({ ok: true, revoked: true }) });
+  try {
+    const result = await revokePendingEntry(machine.harness.context({ fetch: fake.fetch }), machine.ref);
+    assert.equal(result.cleaned, false);
+    assert.equal(result.issue?.code, 'CONFIG_WRITE_FAILED');
+    assert.equal((await ledgerEntry(machine))?.tokens.access.status, 'revoked');
+    assert.equal(
+      (await machine.harness.core.config.load()).accounts.live?.secretRef,
+      machine.ref,
+      'the live owner was lost',
+    );
+    assert.equal(await (await open('file')).get(machine.ref), serialiseBundle(machine.bundle));
+  } finally {
+    await fake.close();
+  }
+});
+
+test('an unreadable cleanup-write outcome restores and verifies the exact bundle', async () => {
+  const machine = await revocationMachine({ refreshToken: undefined });
+  const update = machine.harness.core.config.update.bind(machine.harness.core.config);
+  const load = machine.harness.core.config.load.bind(machine.harness.core.config);
+  let writes = 0;
+  let makeReconciliationUnreadable = false;
+  machine.harness.core.config.update = (async (...args: Parameters<typeof update>) => {
+    writes += 1;
+    if (writes === 2) {
+      makeReconciliationUnreadable = true;
+      throw new Error('ledger removal outcome is unknown');
+    }
+    return update(...args);
+  }) as typeof machine.harness.core.config.update;
+  machine.harness.core.config.load = (async () => {
+    if (makeReconciliationUnreadable) {
+      makeReconciliationUnreadable = false;
+      throw new Error('configuration cannot be read during reconciliation');
+    }
+    return load();
+  }) as typeof machine.harness.core.config.load;
+  const open = machine.harness.core.secrets.bind(machine.harness.core);
+  const restoration: string[] = [];
+  let deleted = false;
+  machine.harness.core.secrets = (async (kind) => {
+    const inner = await open(kind);
+    return wrapStore(inner, {
+      async delete(ref) {
+        const answer = await inner.delete(ref);
+        if (ref === machine.ref) deleted = true;
+        return answer;
+      },
+      async set(ref, value) {
+        if (deleted && ref === machine.ref) restoration.push('set');
+        return inner.set(ref, value);
+      },
+      async get(ref) {
+        if (deleted && ref === machine.ref) restoration.push('verify');
+        return inner.get(ref);
+      },
+    });
+  }) as typeof machine.harness.core.secrets;
+  const fake = await startFakeSlack({ 'auth.revoke': () => ({ ok: true, revoked: true }) });
+  try {
+    const result = await revokePendingEntry(machine.harness.context({ fetch: fake.fetch }), machine.ref);
+    assert.equal(result.cleaned, false);
+    assert.equal(result.issue?.code, 'CONFIG_OUTCOME_UNKNOWN');
+    assert.deepEqual(restoration, ['set', 'verify']);
+    assert.equal((await ledgerEntry(machine))?.tokens.access.status, 'revoked');
+    assert.equal(await (await open('file')).get(machine.ref), serialiseBundle(machine.bundle));
   } finally {
     await fake.close();
   }
