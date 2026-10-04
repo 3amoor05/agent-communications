@@ -147,7 +147,7 @@ test('a list applies at once, and the next sync leaves what it hides out of the 
     assert.equal(synced.data().chats, 5, 'the sync did not index it');
     await person(harness, 'clear');
     assert.equal((await on.read(BOB)).code, 66, 'not in the index at all: cleared, it is still not there');
-    const cleared = await harness.cli(['clear', '--account', ACCOUNT]);
+    const cleared = await harness.cli(['clear', '--account', ACCOUNT], { platform: 'darwin' });
     assert.match(cleared.stdout, /agent-whatsapp sync --account acme\/whatsapp/, 'the person is told to sync');
     await harness.cli(['sync', '--account', ACCOUNT]);
     assert.equal((await on.read(BOB)).code, 0, 'the next sync brings it back');
@@ -162,6 +162,13 @@ test('a list applies at once, and the next sync leaves what it hides out of the 
   } finally {
     await close();
   }
+});
+
+test('a list change renders its next sync for the selected Windows shell', async () => {
+  const harness = await newHarness();
+  await harness.ready('7/whatsapp');
+  const result = await clearChats(harness.context({ platform: 'win32' }), { account: '7/whatsapp' });
+  assert.equal(result.next, 'agent-whatsapp sync --account "7/whatsapp"');
 });
 
 test('allow, deny and clear are a person’s: refused to an agent, unchanged by one, and offered by no tool', async () => {

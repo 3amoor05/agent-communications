@@ -1,4 +1,4 @@
-import { isCommsError, shellCommand } from '@agentcomms/core';
+import { commandText, isCommsError, shellCommand } from '@agentcomms/core';
 import { chatRefOf } from '../chat-ref.ts';
 import type { WhatsAppAccount } from '../config.ts';
 import type { WhatsAppContext } from '../context.ts';
@@ -116,7 +116,7 @@ async function change(
     deny: [...after.deny],
     changed: JSON.stringify(before) !== JSON.stringify(after),
     effect: effectOf(after),
-    next: `agent-whatsapp sync --account ${name}`,
+    next: commandText(shellCommand(['agent-whatsapp', 'sync', '--account', name], context.platform)),
     ...(chatId === undefined ? {} : await named(context, name, account, chatId)),
   };
 }

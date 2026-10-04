@@ -1,6 +1,7 @@
 import { rm } from 'node:fs/promises';
 import {
   agentMarker,
+  commandText,
   CommsError,
   inlineCommand,
   lookupName,
@@ -107,7 +108,7 @@ export async function addAccount(
     account: request.name,
     id: account.id,
     store: { path, default: isDefault, id: account.workspace },
-    next: `agent-whatsapp sync --account ${request.name}`,
+    next: commandText(shellCommand(['agent-whatsapp', 'sync', '--account', request.name], context.platform)),
   };
 }
 

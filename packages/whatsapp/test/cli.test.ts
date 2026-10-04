@@ -25,7 +25,7 @@ test('the default store is found from the HOME the environment names, never from
 
 test('add records the account in core’s config.json, as the generic record every channel after Gmail uses', async () => {
   const harness = await newHarness();
-  const added = await harness.cli(['add', ACCOUNT, '--json']);
+  const added = await harness.cli(['add', ACCOUNT, '--json'], { platform: 'darwin' });
   assert.equal(added.code, 0, added.stdout);
   const data = added.data() as { id: string; store: { default: boolean; path: string; id: string }; next: string };
   assert.equal(data.store.default, true);
@@ -65,6 +65,15 @@ test('add records the account in core’s config.json, as the generic record eve
   const wrong = await harness.cli(['add', 'acme/slack', '--json']);
   assert.equal(wrong.code, 64);
   assert.match(String(wrong.json().error?.message), /ends in \/slack, but this is a whatsapp account/);
+});
+
+test('account hand-off commands use the selected Windows shell syntax', async () => {
+  const harness = await newHarness();
+  const account = '7/whatsapp';
+  const added = await harness.cli(['add', account, '--json'], { platform: 'win32' });
+  assert.equal(added.data().next, 'agent-whatsapp sync --account "7/whatsapp"');
+  const status = await harness.cli(['status', '--account', account, '--no-check'], { platform: 'win32' });
+  assert.match(status.stdout, /agent-whatsapp sync --account "7\/whatsapp"/);
 });
 
 test('add and remove are a person’s: refused to an agent, before anything is read or written', async () => {

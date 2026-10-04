@@ -276,7 +276,7 @@ a macOS dialog may be waiting) · 77 permission needed (macOS privacy) · 78 con
           account: flags.account === undefined ? undefined : String(flags.account),
           check: flags.check !== false,
         });
-        writeResult(result, options, () => renderStatus(result, options.color), streams);
+        writeResult(result, options, () => renderStatus(result, options.color, context.platform), streams);
       }),
     );
 
