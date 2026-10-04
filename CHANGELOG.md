@@ -3,6 +3,50 @@
 All notable changes to this project are recorded here, newest first. Every package in this repository is released
 together under one version.
 
+## 0.13.0
+
+**An organisation can now set up its Google and Slack apps once, for every member.** Until now each person connecting
+Gmail made their own Google Cloud project and OAuth client, and each person connecting Slack made their own Slack app.
+An organisation can now describe its shared apps — one Google client, and a Slack app for reading and one for posting —
+in a small file, an *organisation profile*, and every member adds it with one command:
+`agentcomms org add ./<organisation>.agentcomms.json` (or `comms_org_add` from a chat). After that, connecting a
+mailbox or the organisation's Slack needs no Cloud console and no app of your own. Members' other accounts — a
+personal gmail.com, another company's address — keep working on their own clients and apps; the organisation's are
+added beside them, never in place of them (CUE-387, CUE-389).
+- A profile is data, never code, checked by a strict schema; adding, updating and removing one is a change you approve,
+  bound to the file's exact contents, and the client secret is never shown.
+- `agentcomms org list | show | update | remove` (and `comms_orgs_list`, `comms_org_show`, `comms_org_update`,
+  `comms_org_remove`). `org update` re-reads the file and repairs the configuration if an older release or a manual
+  edit drifted from it; `doctor` reports drift with the command that repairs it.
+
+**Gmail uses the organisation's client without asking.** `inbox add`, `setup` and `gmail_inbox_add` choose the Google
+client before the consent link is made: an organisation's mailbox name (`rgc/gmail`) gets that organisation's client;
+`--for-other-addresses` lets it serve your other addresses too, if you asked for that. `setup` skips the Google Cloud
+steps when the organisation provides the client, and `setup --profile <file>` adds the profile first. Every check is
+made again when Google answers, and a sign-in that no longer fits is stopped and its grant revoked. A machine with no
+organisation profile behaves exactly as before (CUE-390).
+
+**Slack through the organisation's apps.** `agent-slack workspace add <organisation>/slack` signs in through the
+profile's read app (or its send app with `--mode send`), checks the sign-in is for the right workspace and app before
+storing anything, and `workspace mode` moves an account between the two apps instead of asking you to edit one. The
+token it replaces is revoked — only when Slack confirms it, or says the token is dead — and anything Slack has not
+confirmed is kept and retried by `doctor`, even across a restart, until the token's own expiry. `workspace remove`
+finishes what revocations it can first and leaves the rest for `doctor`. A sign-in that does not finish, for example
+because the workspace requires an administrator to approve the app, says so without guessing why, and never says you
+declined (CUE-391).
+
+What it means for you: a minor release; nothing changes unless you add an organisation profile.
+- Profiles need the version-2 account names (`organisation/platform`); `agentcomms names migrate` moves an older
+  configuration, and `org add` says so if it is needed.
+- The configuration gains two keys, `organisations` and `pendingRevocations`. Releases before 0.13.0 keep them but do
+  not know their rules: update every machine that shares a configuration.
+- `client add --replace` and `client remove` now refuse a client an organisation's profile owns, and point at
+  `org update` and `org remove`.
+- With an organisation's Gmail client installed, `setup` asks which mailbox it is setting up before it decides which
+  client to use (headless, pass `--inbox`); without one, `setup` asks and answers exactly as before.
+- To get 0.13.0: your servers will say an update is out. Run `agentcomms update` (or say "update my comms"), then
+  restart your client.
+
 ## 0.12.3
 
 **A command printed for you to paste can no longer run something an email's sender chose.** After `agent-gmail send
