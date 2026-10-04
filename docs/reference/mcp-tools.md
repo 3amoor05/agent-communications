@@ -31,7 +31,7 @@ names it `from`. There is no default mailbox.
 | [`gmail_sendas_list`](#gmail_sendas_list) | The addresses this mailbox can send as, which one is the default, and whether each is verified. |
 | [`gmail_draft_list`](#gmail_draft_list) | The drafts waiting in a mailbox: who each is to, its subject, and when it was last saved. |
 | [`gmail_draft_get`](#gmail_draft_get) | Read a draft back, with the same preview the person would approve. |
-| [`gmail_setup`](#gmail_setup) | Where this machine is in connecting Gmail, and the one thing to do next: whether an OAuth client is registered, whether any mailbox is connected, which MCP clients the server is registered with, and the Google Cloud steps with their links. |
+| [`gmail_setup`](#gmail_setup) | Where this machine is in connecting Gmail, and the one thing to do next: the eligible client for a target mailbox, connected mailboxes, registered MCP clients, and any Google Cloud steps still needed. |
 | [`gmail_clients_list`](#gmail_clients_list) | The Google Cloud OAuth clients registered on this machine: the name, the client id, the Cloud project, when each was added, and which mailboxes sign in through it. |
 | [`gmail_inbox_add`](#gmail_inbox_add) | Begin connecting a Gmail account. |
 | [`gmail_inbox_finish`](#gmail_inbox_finish) | Complete a sign-in started by gmail_inbox_add or gmail_inbox_reauth, once Google has returned a grant for it. |
@@ -271,11 +271,18 @@ Read a draft back, with the same preview the person would approve. Show the prev
 
 ### `gmail_setup`
 
-Where this machine is in connecting Gmail, and the one thing to do next: whether an OAuth client is registered, whether any mailbox is connected, which MCP clients the server is registered with, and the Google Cloud steps with their links. Call this when asked to set up Gmail, before anything else. Changes nothing: it is the report `agent-gmail setup` starts from. The steps themselves are gmail_client_add (the client), gmail_inbox_add then gmail_inbox_finish (a mailbox), and the core server’s comms_server_install with channel "gmail" (the agent connection).
+Where this machine is in connecting Gmail, and the one thing to do next: the eligible client for a target mailbox, connected mailboxes, registered MCP clients, and any Google Cloud steps still needed. Call this when asked to set up Gmail, before anything else. With `profile`, it adds that organisation profile through its own `orgApproval`, then continues; without one it changes nothing. The remaining steps are gmail_client_add (a client of one’s own), gmail_inbox_add then gmail_inbox_finish (a mailbox), and the core server’s comms_server_install with channel "gmail" (the agent connection).
 
-*read-only*
+*writes*
 
-Takes no arguments.
+| Argument | Type | Required | What it is |
+|---|---|---|---|
+| `inbox` | string | no | the mailbox name setup is preparing, e.g. acme/gmail |
+| `email` | string | no | the address that mailbox must turn out to be |
+| `client` | string | no | use this OAuth client explicitly |
+| `profile` | string | no | add this organisation profile file before continuing |
+| `orgApproval` | string | no | the approvalId an earlier gmail_setup call returned for adding the organisation profile |
+| `store` | `keychain` \\| `file` | no | where the first secret is kept |
 
 ### `gmail_clients_list`
 
@@ -297,7 +304,7 @@ Begin connecting a Gmail account. Returns a sign-in link and stops — this serv
 | `email` | string | no | the address it must turn out to be; refuses any other |
 | `tier` | string | no | read, draft or organize — how much access to ask for |
 | `contacts` | boolean | no | ask for the address book too; true when left out |
-| `client` | string | no | sign in through this OAuth client, by the name gmail_clients_list gives; the first one when left out |
+| `client` | string | no | sign in through this OAuth client, by the name gmail_clients_list gives; when left out, the mailbox name’s organisation, one opted-in organisation, or an organisation-free client is chosen in that order |
 | `port` | integer | no | the loopback port Google sends the browser back to, for a network where only some ports are free: 1–65535, or 0 or left out for any free one |
 | `hd` | string | no | limit Google’s account chooser to this Google Workspace domain |
 

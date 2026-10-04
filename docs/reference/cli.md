@@ -750,6 +750,9 @@ agent-gmail setup [options]
 | `--client-json <path>` | the OAuth client JSON, if you already have it | — |
 | `--inbox <alias>` | the name to connect the first mailbox under | — |
 | `--email <address>` | the address that mailbox must turn out to be | — |
+| `--client <name>` | sign that mailbox in through this OAuth client | — |
+| `--profile <file>` | add this organisation profile before continuing setup | — |
+| `--org-approval <id>` | add the organisation profile this approval was given for | — |
 | `--mcp-client <client>` | register with this MCP client when the mailbox is connected (choices: "claude-code", "claude-desktop", "codex", "cursor", "gemini", "vscode") | — |
 | `--replace-server` | replace an MCP entry of the same name that is already there | `false` |
 | `--store <store>` | where secrets are kept (first time only) (choices: "keychain", "file") | — |
