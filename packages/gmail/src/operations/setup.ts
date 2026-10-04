@@ -331,6 +331,7 @@ export function setupProfileChange(
     },
     {
       env: context.env,
+      platform: context.platform,
       surface: context.surface,
       cwd: context.cwd,
       now: context.now,
@@ -380,6 +381,7 @@ export async function setupState(context: GmailContext, options: SetupStateOptio
         email: options.email,
         client: options.client,
         allowOwnClient: true,
+        platform: context.platform,
       })
     : undefined;
   const clientDone = options.alias ? selected !== null : clients.length > 0;

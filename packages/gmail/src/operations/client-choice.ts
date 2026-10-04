@@ -3,10 +3,12 @@ import {
   type ClientConfig,
   CommsError,
   type Config,
+  inlineCommand,
   type OrganisationGeneration,
   organisationsOf,
   parseName,
   requireLiveOrganisationGeneration,
+  shellCommand,
 } from '@agentcomms/core';
 
 /** The client decision recorded in a new-inbox consent flow (design 2026-10-02 §D6). */
@@ -26,6 +28,8 @@ export interface GmailClientChoiceOptions {
   client?: string | undefined;
   /** Setup can make a client when no existing one is eligible; inbox add must refuse instead. */
   allowOwnClient?: boolean | undefined;
+  /** The shell syntax used for commands returned in refusal hints. */
+  platform?: NodeJS.Platform | undefined;
 }
 
 function generationNamed(
@@ -68,13 +72,14 @@ function refuseOutsideDomains(
   organisation: string,
   generation: OrganisationGeneration,
   email: string | undefined,
+  platform: NodeJS.Platform,
 ): void {
   if (email === undefined || generationServes(generation, email)) return;
   throw new CommsError(
     'CONFIG',
     `the organisation ${organisation} says its Google client "${generation.name}" does not serve ${email}`,
     {
-      hint: `Run the command again with --client <name> for a client that serves this address.`,
+      hint: `Choose a client that serves this address; ${inlineCommand(shellCommand(['agent-gmail', 'inbox', 'add', '--help'], platform))} describes the --client option.`,
       details: { organisation, client: generation.name },
     },
   );
@@ -87,9 +92,10 @@ function organisationChoice(
   generation: OrganisationGeneration,
   email: string | undefined,
   active: boolean,
+  platform: NodeJS.Platform,
 ): GmailClientChoice {
-  const row = requireLiveOrganisationGeneration(config, organisation, generation);
-  refuseOutsideDomains(organisation, generation, email);
+  const row = requireLiveOrganisationGeneration(config, organisation, generation, platform);
+  refuseOutsideDomains(organisation, generation, email, platform);
   return {
     name: generation.name,
     clientId: row.clientId,
@@ -105,20 +111,29 @@ function organisationChoice(
  * Import never calls this function: an imported refresh token remains bound to the client it arrived with.
  */
 export function chooseClientForNewInbox(config: Config, options: GmailClientChoiceOptions): GmailClientChoice | null {
+  const platform = options.platform ?? process.platform;
   if (options.client !== undefined) {
     const managed = generationNamed(config, options.client);
     if (managed) {
-      return organisationChoice(config, managed.organisation, managed.label, managed.generation, options.email, false);
+      return organisationChoice(
+        config,
+        managed.organisation,
+        managed.label,
+        managed.generation,
+        options.email,
+        false,
+        platform,
+      );
     }
     const row = config.clients[options.client];
     if (!row) {
       throw new CommsError('CONFIG', `no OAuth client called "${options.client}" is registered`, {
-        hint: 'Add one with `agent-gmail client add <client_secret.json>`.',
+        hint: `Register one as described by ${inlineCommand(shellCommand(['agent-gmail', 'client', 'add', '--help'], platform))}.`,
       });
     }
     if (row.provider !== 'gmail') {
       throw new CommsError('CONFIG', `"${options.client}" is not a Google OAuth client`, {
-        hint: 'Choose a client listed by `agent-gmail client list`.',
+        hint: `Choose a client listed by ${inlineCommand(shellCommand(['agent-gmail', 'client', 'list'], platform))}.`,
       });
     }
     return {
@@ -131,7 +146,8 @@ export function chooseClientForNewInbox(config: Config, options: GmailClientChoi
   if (parsed) {
     const record = organisationsOf(config)[parsed.org];
     const active = activeGeneration(record);
-    if (record && active) return organisationChoice(config, parsed.org, record.label, active, options.email, true);
+    if (record && active)
+      return organisationChoice(config, parsed.org, record.label, active, options.email, true, platform);
   }
 
   const optedIn = Object.entries(organisationsOf(config))
@@ -150,7 +166,9 @@ export function chooseClientForNewInbox(config: Config, options: GmailClientChoi
     throw new CommsError(
       'CONFIG',
       `more than one organisation offers its Google client for other addresses: ${optedIn.map((item) => item.organisation).join(', ')}`,
-      { hint: 'Run the command again with --client <name> to choose one.' },
+      {
+        hint: `Choose one explicitly; ${inlineCommand(shellCommand(['agent-gmail', 'inbox', 'add', '--help'], platform))} describes the --client option.`,
+      },
     );
   }
   const offered = optedIn[0];
@@ -162,6 +180,7 @@ export function chooseClientForNewInbox(config: Config, options: GmailClientChoi
       offered.generation,
       options.email,
       true,
+      platform,
     );
   }
 
@@ -177,16 +196,29 @@ export function chooseClientForNewInbox(config: Config, options: GmailClientChoi
   if (organisation) {
     const [name, record] = organisation;
     const generation = record.gmail?.generations.at(-1);
+    const client = generation?.name ?? `${name}-1`;
+    const emailWords = options.email === undefined ? [] : ['--email', options.email];
+    const add = inlineCommand(
+      shellCommand(
+        ['agent-gmail', 'inbox', 'add', options.alias, '--client', client, ...emailWords, '--start'],
+        platform,
+      ),
+    );
+    const offer = inlineCommand(
+      shellCommand(['agentcomms', 'org', 'update', name, '--for-other-addresses', 'on'], platform),
+    );
+    const setup = inlineCommand(
+      shellCommand(['agent-gmail', 'setup', '--inbox', options.alias, ...emailWords], platform),
+    );
     throw new CommsError('CONFIG', 'no Google client is available for this new mailbox', {
-      hint:
-        `Choose this organisation explicitly with --client ${generation?.name ?? `${name}-1`}; ` +
-        'let it serve other addresses with `agentcomms org update ' +
-        name +
-        ' --for-other-addresses on`; ' +
-        'or run `agent-gmail setup` to make a client of your own.',
+      hint: `Choose this organisation explicitly with ${add}; let it serve other addresses with ${offer}; or make a client of your own with ${setup}.`,
     });
   }
+  const emailWords = options.email === undefined ? [] : ['--email', options.email];
+  const setup = inlineCommand(
+    shellCommand(['agent-gmail', 'setup', '--inbox', options.alias, ...emailWords], platform),
+  );
   throw new CommsError('CONFIG', 'no Google client is registered for this new mailbox', {
-    hint: 'Run `agent-gmail setup` to make a client of your own, or add an organisation profile first.',
+    hint: `Run ${setup} to make a client of your own, or add an organisation profile first.`,
   });
 }

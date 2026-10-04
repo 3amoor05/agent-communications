@@ -1834,7 +1834,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
         } else {
           refuseUnclaimedApproval(options.orgApproval, {
             message: '--org-approval goes with --profile: without it this run adds no organisation profile',
-            hint: 'Run it again with --profile <file> as well, as the preview named it. Nothing was done.',
+            hint: `Run ${inlineCommand(shellCommand(['agent-gmail', 'setup', '--help'], platform))} and include the --profile file the preview named. Nothing was done.`,
           });
         }
 

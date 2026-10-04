@@ -53,7 +53,7 @@ export interface ConsentResult {
  */
 export async function completeConsent(context: GmailContext, flow: OAuthFlow, code: string): Promise<ConsentResult> {
   const starting = await context.config();
-  const expectedClientId = requireSameClient(starting, flow);
+  const expectedClientId = requireSameClient(starting, flow, undefined, context.platform);
   const client = await context.client(flow.clientName);
   const tokens = await exchangeCode({
     client: { clientId: client.clientId, clientSecret: await clientSecret(context, client, flow.clientName) },
@@ -88,12 +88,7 @@ export async function completeConsent(context: GmailContext, flow: OAuthFlow, co
         'CONFIG',
         `the organisation ${expectedGeneration.organisation} says its Google client "${flow.clientName}" does not serve ${identity.email}; nothing was saved`,
         {
-          hint:
-            'Run `agent-gmail inbox add ' +
-            flow.alias +
-            ' --client <name> --email ' +
-            identity.email +
-            '` again through a client that serves this address.',
+          hint: `Start the sign-in again through a client that serves this address; ${inlineCommand(shellCommand(['agent-gmail', 'inbox', 'add', '--help'], context.platform))} describes the --client option.`,
           details: {
             alias: flow.alias,
             client: flow.clientName,
@@ -206,7 +201,7 @@ async function addInbox(
        * one any more, and the flow is refused here rather than writing a name the file no longer allows.
        */
       requireNewInboxName(current, flow.alias, undefined, context.platform);
-      requireSameClient(current, flow, clientId);
+      requireSameClient(current, flow, clientId, context.platform);
       // The backend the token went into must still be the one in force: `secrets migrate` switches backends, and a
       // row written after the switch would name a credential that only exists in the store nothing reads any more.
       if (secretsStoreOf(current) !== secrets.kind) {
@@ -418,7 +413,7 @@ async function writeReauth(
       const now = findById(current, 'inbox', inboxId);
       refused = true;
       if (!now) throw inboxGone();
-      requireSameClient(current, flow, clientId);
+      requireSameClient(current, flow, clientId, context.platform);
       /*
        * And no other mailbox on this client is the same account.
        *
@@ -535,7 +530,12 @@ async function restorePrevious(
  * `client add --replace` or a `client remove` landing in between would leave a mailbox pointing at a client that
  * cannot renew its token.
  */
-function requireSameClient(config: Config, flow: OAuthFlow, exchangedClientId?: string): string {
+function requireSameClient(
+  config: Config,
+  flow: OAuthFlow,
+  exchangedClientId?: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
   const name = flow.clientName;
   const held = config.clients[name];
   const expectedClientId = flow.expect.clientId ?? exchangedClientId ?? held?.clientId;
@@ -548,17 +548,17 @@ function requireSameClient(config: Config, flow: OAuthFlow, exchangedClientId?: 
         'CONFIG',
         `the organisation ${expectedGeneration.organisation}'s Google client generation changed while this sign-in was being completed`,
         {
-          hint: `Run \`agentcomms org update ${expectedGeneration.organisation}\`, then start the sign-in again.`,
+          hint: `Run ${inlineCommand(shellCommand(['agentcomms', 'org', 'update', expectedGeneration.organisation], platform))}, then start the sign-in again.`,
         },
       );
     }
-    requireLiveOrganisationGeneration(config, expectedGeneration.organisation, generation);
+    requireLiveOrganisationGeneration(config, expectedGeneration.organisation, generation, platform);
     if (expectedGeneration.active && activeGeneration(record)?.name !== generation.name) {
       throw new CommsError(
         'CONFIG',
         `the organisation ${expectedGeneration.organisation}'s active Google client changed while this sign-in was being completed`,
         {
-          hint: `Run \`agentcomms org update ${expectedGeneration.organisation}\`, then start the sign-in again.`,
+          hint: `Run ${inlineCommand(shellCommand(['agentcomms', 'org', 'update', expectedGeneration.organisation], platform))}, then start the sign-in again.`,
         },
       );
     }

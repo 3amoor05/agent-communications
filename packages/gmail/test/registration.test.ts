@@ -975,7 +975,9 @@ test('a sign-in that carries no registration finishes exactly as it always did',
   });
   assert.equal(finished.code, 0, `${finished.stdout}${finished.stderr}`);
   const data = finished.envelope<Record<string, unknown>>().data ?? {};
-  assert.deepEqual(Object.keys(data).sort(), ['alias', 'inbox', 'missingScopes', 'reauthorised']);
+  // Organisation routing deliberately adds the client to every completed sign-in result (§D6),
+  // including an otherwise unchanged flow that carries no MCP registration handoff.
+  assert.deepEqual(Object.keys(data).sort(), ['alias', 'client', 'inbox', 'missingScopes', 'reauthorised']);
   assert.equal(existsSync(machine.cursor), false);
   assert.deepEqual(await machine.harness.core.approvals.list(), []);
 });

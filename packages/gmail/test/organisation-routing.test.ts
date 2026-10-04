@@ -6,9 +6,11 @@ import {
   type Core,
   clientSecretRef,
   emptyConfig,
+  inlineCommand,
   type OrganisationGeneration,
   type OrganisationRecord,
   openCore,
+  shellCommand,
 } from '@agentcomms/core';
 import { newPkce, newState } from '../src/auth/oauth.ts';
 import { SCOPES } from '../src/auth/scopes.ts';
@@ -374,6 +376,72 @@ test('§D6 row 4: setup with only profile clients asks to make a client of one�
   assert.equal(choice, null);
 });
 
+test('every §D6 refusal prints only shell-built concrete commands for darwin and win32', () => {
+  for (const platform of ['darwin', 'win32'] as const) {
+    const profileOnly = routingConfig({ generations: [generation({ name: '7-1' })] });
+    const acme = profileOnly.organisations?.acme;
+    const row = profileOnly.clients['7-1'];
+    if (!acme || !row) throw new Error('the fixture has an organisation generation');
+    profileOnly.organisations = { '7': acme };
+    profileOnly.clients['7-1'] = { ...row, organisation: '7' };
+
+    const add = inlineCommand(
+      shellCommand(
+        ['agent-gmail', 'inbox', 'add', 'personal/gmail', '--client', '7-1', '--email', 'jo@elsewhere.test', '--start'],
+        platform,
+      ),
+    );
+    const offer = inlineCommand(
+      shellCommand(['agentcomms', 'org', 'update', '7', '--for-other-addresses', 'on'], platform),
+    );
+    const setup = inlineCommand(
+      shellCommand(['agent-gmail', 'setup', '--inbox', 'personal/gmail', '--email', 'jo@elsewhere.test'], platform),
+    );
+    assert.throws(
+      () =>
+        chooseClientForNewInbox(profileOnly, {
+          alias: 'personal/gmail',
+          email: 'jo@elsewhere.test',
+          platform,
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof CommsError);
+        assert.ok(error.hint?.includes(add), platform);
+        assert.ok(error.hint?.includes(offer), platform);
+        assert.ok(error.hint?.includes(setup), platform);
+        assert.doesNotMatch(error.hint ?? '', /<[^>]+>/, platform);
+        return true;
+      },
+      platform,
+    );
+
+    const clientHelp = inlineCommand(shellCommand(['agent-gmail', 'client', 'add', '--help'], platform));
+    assert.throws(
+      () =>
+        chooseClientForNewInbox(routingConfig(), {
+          alias: 'personal/gmail',
+          client: 'missing',
+          platform,
+        }),
+      (error: unknown) => error instanceof CommsError && error.hint?.includes(clientHelp) === true,
+      platform,
+    );
+
+    const inboxHelp = inlineCommand(shellCommand(['agent-gmail', 'inbox', 'add', '--help'], platform));
+    assert.throws(
+      () =>
+        chooseClientForNewInbox(routingConfig(), {
+          alias: 'acme/gmail',
+          email: 'jo@outside.test',
+          platform,
+        }),
+      (error: unknown) =>
+        error instanceof CommsError && error.hint?.includes(inboxHelp) === true && !error.hint.includes('<name>'),
+      platform,
+    );
+  }
+});
+
 test('organisation-name routing refuses a missing or reused active row with org update', () => {
   for (const drift of ['missing', 'reused'] as const) {
     const config = routingConfig();
@@ -551,6 +619,23 @@ test('a post-consent serves mismatch revokes the new grant best effort and saves
       );
       assert.equal(harness.requests.includes('/revoke'), true);
       assert.deepEqual(await inboxList(context), []);
+    });
+  }
+});
+
+test('a post-consent serves mismatch prints a shell-built help command for darwin and win32', async (t) => {
+  for (const platform of ['darwin', 'win32'] as const) {
+    await t.test(platform, async (child) => {
+      const harness = await offlineProfileClient('jo@outside.test');
+      const context = new GmailContext({ core: harness.core, env: harness.context.env, platform });
+      child.mock.method(globalThis, 'fetch', offlineGoogle(harness));
+      const { flow, code } = await routedConsent({ ...harness, context });
+      const help = inlineCommand(shellCommand(['agent-gmail', 'inbox', 'add', '--help'], platform));
+      await assert.rejects(
+        completeConsent(context, flow, code),
+        (error: unknown) =>
+          error instanceof CommsError && error.hint?.includes(help) === true && !error.hint.includes('<name>'),
+      );
     });
   }
 });

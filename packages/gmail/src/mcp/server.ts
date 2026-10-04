@@ -1372,7 +1372,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
               'CONFIG',
               'this Gmail server is read-only, so setup cannot add an organisation profile',
               {
-                hint: 'Add the profile with `agent-gmail setup --profile <file>`, or use a Gmail server that is not read-only.',
+                hint: `Add the profile with ${inlineCommand(shellCommand(['agent-gmail', 'setup', '--profile', profile], context.platform))}, or use a Gmail server that is not read-only.`,
               },
             );
           }
@@ -1383,7 +1383,12 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
               store,
               ...(orgApproval ? { orgApproval } : {}),
             }),
-            { surface: 'mcp', approvalId: orgApproval, approveCommand: 'agent-gmail approve' },
+            {
+              surface: 'mcp',
+              approvalId: orgApproval,
+              approveCommand: 'agent-gmail approve',
+              platform: context.platform,
+            },
           );
           if (outcome.status === 'approval-required') return reply(changeToolResult(outcome));
         } else if (orgApproval !== undefined) {

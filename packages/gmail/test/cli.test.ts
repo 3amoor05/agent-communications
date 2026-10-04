@@ -4,7 +4,7 @@ import { dirname, isAbsolute, join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { commandText, EXIT_CODES, openCore, shellCommand } from '@agentcomms/core';
+import { commandText, EXIT_CODES, inlineCommand, openCore, shellCommand } from '@agentcomms/core';
 import { run } from '../src/cli/program.ts';
 import { renderDoctor, renderSendPreparation } from '../src/cli/render.ts';
 import { GmailContext } from '../src/context.ts';
@@ -1101,10 +1101,16 @@ test('setup --profile has its own approval, then adds the profile and continues'
 });
 
 test('setup refuses --org-approval without --profile', async () => {
-  const harness = offlineCliHarness();
-  const result = await cli(harness, ['setup', '--org-approval', 'ap_not_for_this_run', '--json']);
-  assert.equal(result.code, EXIT_CODES.USAGE);
-  assert.match(result.json<Envelope<never>>().error?.message ?? '', /goes with --profile/);
+  for (const platform of ['darwin', 'win32'] as const) {
+    const harness = offlineCliHarness();
+    const result = await cli(harness, ['setup', '--org-approval', 'ap_not_for_this_run', '--json'], { platform });
+    assert.equal(result.code, EXIT_CODES.USAGE);
+    const error = result.json<Envelope<never>>().error;
+    assert.match(error?.message ?? '', /goes with --profile/);
+    const help = inlineCommand(shellCommand(['agent-gmail', 'setup', '--help'], platform));
+    assert.ok(error?.hint?.includes(help), platform);
+    assert.doesNotMatch(error?.hint ?? '', /<file>/, platform);
+  }
 });
 
 test('setup --inbox is honoured when a mailbox already exists', async () => {

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { type ConfigV2, openCore, renameEntry } from '@agentcomms/core';
+import { type ConfigV2, inlineCommand, openCore, renameEntry, shellCommand } from '@agentcomms/core';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { GmailContext } from '../src/context.ts';
@@ -167,22 +167,56 @@ test('a read-only server does not offer the tools that would write', async () =>
 });
 
 test('read-only gmail_setup refuses its profile-writing arguments', async () => {
-  const configDir = tempDir('agent-gmail-mcp-read-only-setup-');
+  for (const platform of ['darwin', 'win32'] as const) {
+    const configDir = tempDir('agent-gmail-mcp-read-only-setup-');
+    const env: NodeJS.ProcessEnv = {
+      AGENT_COMMS_CONFIG_DIR: configDir,
+      HOME: configDir,
+      USERPROFILE: configDir,
+      AGENT_COMMS_UPDATE_CHECK: 'off',
+    };
+    const core = openCore({ env });
+    const profile = platform === 'win32' ? 'C:\\Profiles\\7 profile.json' : '/profiles/7 profile.json';
+    const { client, close } = await connect({ core, env, readOnly: true, platform });
+    try {
+      const result = (await client.callTool({
+        name: 'gmail_setup',
+        arguments: { profile },
+      })) as ToolResult;
+      assert.equal(result.isError, true);
+      const command = inlineCommand(shellCommand(['agent-gmail', 'setup', '--profile', profile], platform));
+      const error = result.structuredContent?.error as { message: string; hint: string };
+      assert.match(error.message, /read-only/);
+      assert.ok(error.hint.includes(command), platform);
+      assert.doesNotMatch(error.hint, /<file>/, platform);
+      const config = await core.config.load();
+      assert.equal(config.version, 2);
+      if (config.version !== 2) throw new Error('a new config is version 2');
+      assert.deepEqual(config.organisations, undefined);
+    } finally {
+      await close();
+    }
+  }
+});
+
+test('gmail_setup refuses orgApproval without the profile it approves', async () => {
+  const configDir = tempDir('agent-gmail-mcp-unclaimed-org-approval-');
   const env: NodeJS.ProcessEnv = {
     AGENT_COMMS_CONFIG_DIR: configDir,
     HOME: configDir,
-    USERPROFILE: configDir,
     AGENT_COMMS_UPDATE_CHECK: 'off',
   };
   const core = openCore({ env });
-  const { client, close } = await connect({ core, env, readOnly: true });
+  const { client, close } = await connect({ core, env });
   try {
     const result = (await client.callTool({
       name: 'gmail_setup',
-      arguments: { profile: '/profiles/acme.json' },
+      arguments: { orgApproval: 'ap_not_for_this_call' },
     })) as ToolResult;
     assert.equal(result.isError, true);
-    assert.match(result.content?.[0]?.text ?? '', /read-only/);
+    const error = result.structuredContent?.error as { code: string; message: string };
+    assert.equal(error.code, 'USAGE');
+    assert.match(error.message, /goes with profile/);
     const config = await core.config.load();
     assert.equal(config.version, 2);
     if (config.version !== 2) throw new Error('a new config is version 2');

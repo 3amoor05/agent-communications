@@ -176,6 +176,7 @@ export async function startSignIn(context: GmailContext, options: StartOptions):
         alias: options.alias,
         email: expect.email,
         client: clientName,
+        platform: context.platform,
       }) ?? undefined;
   } else {
     // Before the browser opens, not only when it comes back: a name the file cannot take would otherwise be refused
@@ -186,6 +187,7 @@ export async function startSignIn(context: GmailContext, options: StartOptions):
         alias: options.alias,
         email: options.email,
         client: options.client,
+        platform: context.platform,
       }) ?? undefined;
     if (!choice) throw new CommsError('UNEXPECTED', 'inbox add did not choose a Google client');
     clientName = choice.name;

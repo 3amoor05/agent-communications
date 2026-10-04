@@ -476,6 +476,7 @@ export function requireLiveOrganisationGeneration(
   config: Config,
   organisation: string,
   generation: OrganisationGeneration,
+  platform: NodeJS.Platform = process.platform,
 ): ClientConfig {
   const row = own(config.clients, generation.name);
   const commonMatches =
@@ -493,10 +494,7 @@ export function requireLiveOrganisationGeneration(
       'CONFIG',
       `the organisation ${organisation} cannot use its Google client "${generation.name}" because its registered row is missing or no longer matches`,
       {
-        hint:
-          'Run `agentcomms org update ' +
-          organisation +
-          '` (or comms_org_update from a chat) to repair the organisation profile before signing in.',
+        hint: `Run ${inlineCommand(shellCommand(['agentcomms', 'org', 'update', organisation], platform))} (or comms_org_update from a chat) to repair the organisation profile before signing in.`,
       },
     );
   }

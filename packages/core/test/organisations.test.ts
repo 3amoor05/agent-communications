@@ -481,3 +481,21 @@ test('the live-generation validator applies provider, id and canonical-secret ch
     );
   }
 });
+
+test('the live-generation validator quotes its repair command for darwin and win32', () => {
+  for (const platform of ['darwin', 'win32'] as const) {
+    const gen = generation({ name: '7-1' });
+    const config = generationConfig(gen);
+    const acme = config.organisations?.acme;
+    if (!acme) throw new Error('the fixture has an organisation');
+    config.organisations = { '7': acme };
+    delete config.clients[gen.name];
+    const repair = inlineCommand(shellCommand(['agentcomms', 'org', 'update', '7'], platform));
+    assert.throws(
+      () => requireLiveOrganisationGeneration(config, '7', gen, platform),
+      (error: unknown) =>
+        error instanceof CommsError && error.hint?.includes(repair) === true && !error.hint.includes('<organisation>'),
+      platform,
+    );
+  }
+});
