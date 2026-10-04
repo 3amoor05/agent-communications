@@ -256,6 +256,7 @@ configuration problem.`,
    * second envelope after the first, and `--json` promises exactly one document on stdout.
    */
   let softExit: number | null = null;
+  let interruptSignIn: (() => Promise<void>) | undefined;
 
   /*
    * The daily update check (design 2026-09-28 §3), before any command but the exempt ones: an update that is out
@@ -312,7 +313,11 @@ configuration problem.`,
        * runs under the same signal hold, and before it returns, one more attempt is made to write down what it is
        * holding, with a line on stderr naming the workspace if that fails too.
        */
-      const release = exitAfterRefreshes({ ...deps.signals, stderr: streams.stderr });
+      const release = exitAfterRefreshes({
+        ...deps.signals,
+        stderr: streams.stderr,
+        beforeExit: async () => interruptSignIn?.(),
+      });
       try {
         exitCode = await runCommand(output(), () => body(context, globals(), ...args), streams);
         await settleBeforeExit(streams.stderr);
@@ -1535,10 +1540,13 @@ configuration problem.`,
     if (how.browser) tryOpen(started.authUrl);
     const listener = started.listener;
     if (!listener) throw new CommsError('UNEXPECTED', 'the sign-in listener did not start');
+    // Only the foreground listener belongs to this command. Detached flows never enter this branch.
+    interruptSignIn = () => context.flows.discard(started.flowId);
     try {
       const view = await listener.result;
       writeResult(view, output(), () => renderConnected(view, reauth, options.color), streams);
     } finally {
+      interruptSignIn = undefined;
       await listener.close();
     }
   }

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { chmod, readFile, writeFile } from 'node:fs/promises';
+import { chmod, readdir, readFile, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -10,8 +11,156 @@ import { parseBundle } from '../src/auth/bundle.ts';
 import { openFlowStore } from '../src/auth/flow.ts';
 import { run } from '../src/cli/program.ts';
 import { scopesForMode } from '../src/manifest.ts';
+import { finishSignIn, startSignIn } from '../src/operations/signin.ts';
 import { type Harness, newHarness, slackOk, TEST_CLIENT_ID, tempDir } from './support/harness.ts';
-import { fetchListener, LISTENER_COMMAND, stopListeners } from './support/listener.ts';
+import { fetchListener, LISTENER_COMMAND, running, stopListeners } from './support/listener.ts';
+
+/** A real child running the CLI action, with IPC only to tell the test its signal handlers are installed. */
+function interruptibleCli(harness: Harness, argv: string[]) {
+  const source = `
+    import { run } from ${JSON.stringify(new URL('../src/cli/program.ts', import.meta.url).href)};
+    const host = {
+      pid: process.pid,
+      once(signal, listener) {
+        process.once(signal, listener);
+        if (signal === 'SIGINT') setTimeout(() => process.send?.('waiting'), 100);
+      },
+      removeListener: process.removeListener.bind(process),
+      kill: process.kill.bind(process),
+    };
+    process.exitCode = await run(process.argv.slice(1), { signals: { host } });
+  `;
+  const child = spawn(
+    process.execPath,
+    [
+      '--experimental-strip-types',
+      '--disable-warning=ExperimentalWarning',
+      '--input-type=module',
+      '--eval',
+      source,
+      ...argv,
+    ],
+    { env: { ...process.env, ...harness.env }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] },
+  );
+  let stdout = '';
+  let stderr = '';
+  assert.ok(child.stdout);
+  assert.ok(child.stderr);
+  child.stdout.on('data', (chunk) => {
+    stdout += String(chunk);
+  });
+  child.stderr.on('data', (chunk) => {
+    stderr += String(chunk);
+  });
+  const ready = new Promise<void>((done, reject) => {
+    child.once('message', () => done());
+    child.once('error', reject);
+    child.once('exit', () => reject(new Error(`child exited before waiting: ${stderr}`)));
+  });
+  const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((done) => {
+    child.once('close', (code, signal) => done({ code, signal }));
+  });
+  return { child, ready, closed, output: () => ({ stdout, stderr }) };
+}
+
+// Match refresh-exit.test.ts: Windows process.kill cannot deliver a catchable POSIX signal.
+const posixOnly = { skip: process.platform === 'win32' };
+
+for (const kind of ['add', 'reauth'] as const) {
+  test(
+    `interrupting detached ${kind} --finish exits silently and leaves the browser sign-in open`,
+    posixOnly,
+    async (t) => {
+      const harness = await newHarness();
+      const account =
+        kind === 'reauth' ? await harness.addWorkspace({ alias: 'acme', oauthClientId: TEST_CLIENT_ID }) : undefined;
+      const started = await startSignIn(harness.context(), {
+        alias: 'acme',
+        clientId: TEST_CLIENT_ID,
+        mode: 'read',
+        port: await freePort(),
+        listenerCommand: LISTENER_COMMAND,
+        ...(account
+          ? {
+              expect: {
+                accountId: account.id,
+                workspaceId: account.workspace,
+                userId: account.userId,
+                oauthClientId: account.oauthClientId,
+                secretRef: account.secretRef,
+              },
+            }
+          : {}),
+      });
+      const flow = await harness.context().flows.get(started.flowId);
+      assert.ok(flow.listenerPid);
+      const pid = flow.listenerPid;
+      t.after(() => stopListeners([pid]));
+      const before = await harness.core.config.load();
+      const child = interruptibleCli(harness, [
+        'workspace',
+        kind,
+        ...(kind === 'reauth' ? ['acme'] : []),
+        '--finish',
+        started.flowId,
+        '--wait',
+        '60',
+      ]);
+      t.after(() => child.child.kill('SIGKILL'));
+      await child.ready;
+      child.child.kill('SIGINT');
+      const ended = await child.closed;
+      assert.deepEqual(ended, { code: null, signal: 'SIGINT' });
+      assert.deepEqual(child.output(), { stdout: '', stderr: '' }, 'the CLI authored an interruption message');
+      assert.deepEqual(await harness.core.config.load(), before);
+      assert.deepEqual(await harness.context().flows.get(flow.flowId), flow);
+      assert.ok(running(pid));
+      const back = new URL(flow.redirectUrl);
+      back.searchParams.set('state', flow.state);
+      back.searchParams.set('code', 'fake-code');
+      await fetchListener(back);
+      const view = await finishSignIn(harness.context(), { flowId: flow.flowId, waitSeconds: 5, pollMs: 10 });
+      assert.equal(view.alias, 'acme');
+      assert.equal(harness.calls.length, 1);
+    },
+  );
+}
+
+test(
+  'foreground interruption ends its listener and leaves no account, token, flow or timeout state',
+  posixOnly,
+  async (t) => {
+    const harness = await newHarness();
+    const port = await freePort();
+    const child = interruptibleCli(harness, [
+      'workspace',
+      'add',
+      'acme',
+      '--client-id',
+      TEST_CLIENT_ID,
+      '--port',
+      String(port),
+      '--no-browser',
+    ]);
+    t.after(() => child.child.kill('SIGKILL'));
+    await child.ready;
+    const until = Date.now() + 5000;
+    while (!child.output().stderr.includes('https://slack.com/oauth')) {
+      assert.ok(Date.now() < until, child.output().stderr);
+      await new Promise((done) => setTimeout(done, 10));
+    }
+    const before = child.output();
+    assert.equal((await harness.context().flows.pending()).length, 1);
+    child.child.kill('SIGINT');
+    const ended = await child.closed;
+    assert.deepEqual(ended, { code: null, signal: 'SIGINT' });
+    assert.deepEqual(child.output(), before, 'the CLI authored an interruption message');
+    await assert.rejects(fetchListener(`http://localhost:${port}/slack/callback`));
+    assert.deepEqual((await harness.core.config.load()).accounts, {});
+    assert.deepEqual(await readdir(join(harness.configDir, 'secrets')).catch(() => []), []);
+    assert.deepEqual(await readdir(join(harness.core.paths.stateDir, 'slack', 'flows')), []);
+  },
+);
 
 /**
  * The command, end to end.

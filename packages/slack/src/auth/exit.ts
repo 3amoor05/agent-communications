@@ -75,19 +75,29 @@ export async function settleBeforeExit(stderr: WarningSink, waitMs: number = EXI
  * have without the hold.
  */
 export function exitAfterRefreshes(
-  options: { host?: SignalHost; waitMs?: number; exit?: (code: number) => void; stderr?: WarningSink } = {},
+  options: {
+    host?: SignalHost;
+    waitMs?: number;
+    exit?: (code: number) => void;
+    stderr?: WarningSink;
+    /** Release state owned by this command before re-delivering its signal. */
+    beforeExit?: () => Promise<void>;
+  } = {},
 ): () => void {
   const host: SignalHost = options.host ?? process;
   const waitMs = options.waitMs ?? EXIT_WAIT_MS;
   const exit = options.exit ?? ((code: number) => process.exit(code));
   const stderr = options.stderr ?? process.stderr;
   const on = (signal: ExitSignal) => () => {
-    void settleBeforeExit(stderr, waitMs).finally(() => {
-      // With no listener left, the signal sent again meets Node's default, which is to die of it.
-      release();
-      setTimeout(() => exit(signal === 'SIGINT' ? 130 : 143), REDELIVERY_GRACE_MS);
-      host.kill(host.pid, signal);
-    });
+    void Promise.resolve()
+      .then(options.beforeExit)
+      .finally(() => settleBeforeExit(stderr, waitMs))
+      .finally(() => {
+        // With no listener left, the signal sent again meets Node's default, which is to die of it.
+        release();
+        setTimeout(() => exit(signal === 'SIGINT' ? 130 : 143), REDELIVERY_GRACE_MS);
+        host.kill(host.pid, signal);
+      });
   };
   const onTerm = on('SIGTERM');
   const onInt = on('SIGINT');
