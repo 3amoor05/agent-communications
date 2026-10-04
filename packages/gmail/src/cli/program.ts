@@ -1830,8 +1830,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
          * profile already does. Without either, setup keeps its pre-profile order: finish the ordinary client step,
          * then ask for a mailbox in the mailbox step below.
          */
-        const clientChoiceNeedsMailbox =
-          Boolean(options.profile) || setupClientChoiceNeedsMailbox(configBeforeProfile);
+        const clientChoiceNeedsMailbox = Boolean(options.profile) || setupClientChoiceNeedsMailbox(configBeforeProfile);
         if (clientChoiceNeedsMailbox && mode !== 'none' && !options.inbox) {
           const organisationNames = Boolean(options.profile) || configBeforeProfile.version === 2;
           options.inbox = await askText(mode, streams, {

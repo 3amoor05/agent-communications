@@ -60,12 +60,7 @@ import {
   prepareSend,
   revokeApproval,
 } from '../operations/send.ts';
-import {
-  CONSOLE_STEPS,
-  requireSetupTarget,
-  setupClientChoiceNeedsMailbox,
-  setupState,
-} from '../operations/setup.ts';
+import { CONSOLE_STEPS, requireSetupTarget, setupClientChoiceNeedsMailbox, setupState } from '../operations/setup.ts';
 import {
   FINISH_WAIT_SECONDS,
   finishSignIn,
@@ -1375,9 +1370,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
     async ({ inbox, email, client, profile, orgApproval, store }) => {
       try {
         const profilePath =
-          profile === undefined
-            ? undefined
-            : profileSourcePath(profile, context.env, context.cwd, context.platform);
+          profile === undefined ? undefined : profileSourcePath(profile, context.env, context.cwd, context.platform);
         if (profilePath !== undefined) {
           if (options.readOnly || pinned) {
             const why = options.readOnly ? 'read-only' : `pinned to the "${pinned}" mailbox`;
@@ -1396,7 +1389,8 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
         }
         const setupInbox = pinned ? targetInbox(inbox) : inbox;
         const configBeforeProfile = await context.config();
-        const clientChoiceNeedsMailbox = profilePath !== undefined || setupClientChoiceNeedsMailbox(configBeforeProfile);
+        const clientChoiceNeedsMailbox =
+          profilePath !== undefined || setupClientChoiceNeedsMailbox(configBeforeProfile);
         if (clientChoiceNeedsMailbox && !setupInbox) {
           throw new CommsError('USAGE', 'name the mailbox with `inbox` before setup can choose its client', {
             hint: 'Call gmail_setup again with inbox set to the mailbox name being added.',
