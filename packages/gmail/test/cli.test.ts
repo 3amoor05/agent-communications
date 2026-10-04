@@ -1422,15 +1422,11 @@ test('an interactive setup with an explicit flag does not ask what you already s
     // `--launcher local` so this registers the checkout rather than running an `npm install` of a managed
     // runtime — which is what the default does, and what made the first version of this test reach into the
     // machine's real data directory.
-    cli(
-      harness,
-      ['setup', '--inbox', 'work', '--mcp-client', 'codex', '--launcher', 'local', '--no-browser', '--no-tui'],
-      {
-        tty: true,
-        env: { HOME: home, USERPROFILE: home },
-        stdin: 'n\nn\nn\n',
-      },
-    ),
+    cli(harness, ['setup', '--mcp-client', 'codex', '--launcher', 'local', '--no-browser', '--no-tui'], {
+      tty: true,
+      env: { HOME: home, USERPROFILE: home },
+      stdin: 'n\nn\nn\n',
+    }),
     new Promise<never>((_resolve, reject) =>
       setTimeout(
         () => reject(new Error('setup was still running after 30s: it went somewhere that waits for a browser')),
@@ -1487,7 +1483,7 @@ test('setup --launcher reaches the headless agent step, and the entry it writes 
 
   const { first, second: result } = await settingUp(
     harness,
-    ['setup', '--inbox', 'work', '--mcp-client', 'cursor', '--launcher', 'local'],
+    ['setup', '--mcp-client', 'cursor', '--launcher', 'local'],
     { env: { HOME: home, USERPROFILE: home } },
   );
   // The preview names the checkout it will start: the flag had arrived before anybody was asked.
@@ -1530,7 +1526,7 @@ test('setup --replace-server keeps the mailbox pin and --read-only of the entry 
 
   const { first, second: result } = await settingUp(
     harness,
-    ['setup', '--inbox', 'work', '--mcp-client', 'cursor', '--launcher', 'local', '--replace-server'],
+    ['setup', '--mcp-client', 'cursor', '--launcher', 'local', '--replace-server'],
     { env: { HOME: home, USERPROFILE: home } },
   );
   // What the person approved already said so: the replacement, and the narrowing it keeps.

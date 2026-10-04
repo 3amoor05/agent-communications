@@ -1767,13 +1767,13 @@ test('gmail_setup answers with the report `setup --json` makes before it takes a
    * state, plus the fields about steps it took (`did`, `warnings`, `blocked`, `handoff`), which a report has none of.
    */
   const harness = await workAndHome();
-  const printed = await cli(harness, ['setup', '--inbox', 'work', '--json']);
+  const printed = await cli(harness, ['setup', '--json']);
   const report = printed.envelope<Record<string, unknown>>().data ?? {};
   assert.deepEqual(report.did, [], 'setup with no flags took a step');
 
   const { call, close } = await connect({ core: harness.core, env: harness.env });
   try {
-    const answered = wire(await call('gmail_setup', { inbox: 'work' }));
+    const answered = wire(await call('gmail_setup', {}));
     const steps = new Set(['did', 'warnings', 'blocked', 'handoff']);
     for (const [key, value] of Object.entries(report)) {
       if (steps.has(key)) continue;
