@@ -1176,8 +1176,11 @@ function revocationReach(root: ts.SourceFile): string[] {
       if (node.importClause?.phaseModifier === ts.SyntaxKind.TypeKeyword) return;
       const names = node.importClause?.namedBindings;
       if (names && ts.isNamedImports(names)) {
-        if (names.elements.some((name) => !name.isTypeOnly && (name.propertyName ?? name.name).text === 'revokeWith'))
-          found.push('import');
+        for (const name of names.elements) {
+          if (!name.isTypeOnly && (name.propertyName ?? name.name).text === 'revokeWith') {
+            found.push(name.name.text === 'revokeWith' ? 'import' : 'aliased import');
+          }
+        }
       } else if (names && guardModule(node.moduleSpecifier)) found.push('namespace import');
       return;
     }
@@ -1272,6 +1275,14 @@ test('syntax-aware source scans catch ordinary fallback calls, template methods 
       path: 'import-alias.ts',
       text: "import { revokeWith as open } from './guard.ts'; open(permit, method, binding, work);",
     },
+    {
+      path: 'duplicate-import-alias.ts',
+      text: "import { revokeWith, revokeWith as open } from './guard.ts'; revokeWith(permit, method, binding, work); open(permit, method, binding, work);",
+    },
+    {
+      path: 'separate-import-alias.ts',
+      text: "import { revokeWith } from './guard.ts'; import { revokeWith as open } from './guard.ts'; revokeWith(permit, method, binding, work); open(permit, method, binding, work);",
+    },
   ];
   const files = new Map(syntaxTrees(examples).map((file) => [file.path, file.tree]));
   const tree = (path: string): ts.SourceFile => {
@@ -1285,7 +1296,10 @@ test('syntax-aware source scans catch ordinary fallback calls, template methods 
   assert.equal(methodLiteralCount(tree('methods.ts'), 'auth.revoke'), 1);
   assert.equal(methodLiteralCount(tree('methods.ts'), 'apps.uninstall'), 1);
   assert.deepEqual(revocationReach(tree('alias.ts')), ['import', 'reference']);
-  assert.deepEqual(revocationReach(tree('import-alias.ts')), ['import']);
+  assert.deepEqual(revocationReach(tree('import-alias.ts')), ['aliased import']);
+  for (const path of ['duplicate-import-alias.ts', 'separate-import-alias.ts']) {
+    assert.deepEqual(revocationReach(tree(path)), ['import', 'aliased import', 'call'], path);
+  }
   assert.deepEqual(revocationReach(tree('allowed.ts')), ['import', 'call']);
 });
 
