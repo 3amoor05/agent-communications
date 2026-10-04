@@ -1186,7 +1186,11 @@ test('an earlier client whose mark an older release dropped is marked again, and
   writeFileSync(
     path,
     writeAsReleased0121(readFileSync(path, 'utf8'), (raw) =>
-      clientAddReplaceAsReleased0121(raw, 'acme-1', { clientId: CLIENT_A, addedAt: CREATED }),
+      clientAddReplaceAsReleased0121(raw, 'acme-1', {
+        clientId: CLIENT_A,
+        projectId: 'acme-agent-comms',
+        addedAt: CREATED,
+      }),
     ),
   );
   const before = await storedSecret(m, 'acme-1');
@@ -1258,28 +1262,43 @@ test('(d) an earlier generation gone is reported with a concrete mailbox move qu
   }
 });
 
-test('(e) an earlier generation altered loses its mark and is reported as no longer managed', async () => {
-  const m = machine();
-  writeProfile(m, profile());
-  await add(m);
-  writeProfile(m, profile({ gmail: gmail({ clientId: CLIENT_B, clientSecret: SECRET_B }) }));
-  await update(m);
-  await edit(m, (raw) => {
-    const row = raw.clients['acme-1'];
-    if (row) row.projectId = 'acme-someone-else';
-  });
-  const { prepared, result } = await update(m);
-  assert.equal(prepared, null);
-  assert.match(
-    result.applied.join('\n'),
-    /"acme-1", an earlier client of acme, was changed, so it is no longer managed/,
-  );
-  assert.equal((await config(m)).clients['acme-1']?.organisation, undefined);
+test('(e) an earlier generation with a changed or removed project stays ordinary across later updates', async () => {
+  for (const project of ['acme-someone-else', undefined] as const) {
+    const m = machine();
+    writeProfile(m, profile());
+    await add(m);
+    writeProfile(m, profile({ gmail: gmail({ clientId: CLIENT_B, clientSecret: SECRET_B }) }));
+    await update(m);
+    await edit(m, (raw) => {
+      const row = raw.clients['acme-1'];
+      if (!row) return;
+      if (project === undefined) delete row.projectId;
+      else row.projectId = project;
+    });
+    const { prepared, result } = await update(m);
+    assert.equal(prepared, null, String(project));
+    assert.match(
+      result.applied.join('\n'),
+      /"acme-1", an earlier client of acme, was changed, so it is no longer managed/,
+      String(project),
+    );
+    assert.equal((await config(m)).clients['acme-1']?.organisation, undefined, String(project));
 
-  const again = await update(m);
-  assert.equal(again.result.changed, false, 'the next update must not reclaim the released row');
-  assert.match(again.result.reported.join('\n'), /the name "acme-1".*now holds a client that is not acme's/);
-  assert.equal((await config(m)).clients['acme-1']?.organisation, undefined);
+    for (let round = 0; round < 2; round += 1) {
+      const again = await update(m);
+      assert.equal(
+        again.result.changed,
+        false,
+        `${String(project)}, round ${round}: the update reclaimed the released row`,
+      );
+      assert.match(
+        again.result.reported.join('\n'),
+        /the name "acme-1".*now holds a client that is not acme's/,
+        String(project),
+      );
+      assert.equal((await config(m)).clients['acme-1']?.organisation, undefined, String(project));
+    }
+  }
 });
 
 test('a mark nothing explains is cleared by an update, at once', async () => {
@@ -1739,7 +1758,7 @@ test('an update and a remove that race: whichever reaches the lock second finds 
   }
 });
 
-test('an earlier client marked again stays marked: its project id comes back with the mark, so nothing flips', async () => {
+test('an inactive unmarked client with no project stays ordinary because it may be a row D8(e) released', async () => {
   const m = machine();
   writeProfile(m, profile());
   await add(m);
@@ -1753,12 +1772,12 @@ test('an earlier client marked again stays marked: its project id comes back wit
       clientAddReplaceAsReleased0121(raw, 'acme-1', { clientId: CLIENT_A, addedAt: CREATED }),
     ),
   );
-  await update(m);
-  assert.equal((await config(m)).clients['acme-1']?.projectId, 'acme-agent-comms');
-  for (let round = 0; round < 2; round += 1) {
+  for (let round = 0; round < 3; round += 1) {
     const again = await update(m);
     assert.equal(again.result.changed, false, `round ${round}: ${JSON.stringify(again.result.applied)}`);
-    assert.equal((await config(m)).clients['acme-1']?.organisation, 'acme');
+    assert.match(again.result.reported.join('\n'), /the name "acme-1".*now holds a client that is not acme's/);
+    assert.equal((await config(m)).clients['acme-1']?.organisation, undefined);
+    assert.equal((await config(m)).clients['acme-1']?.projectId, undefined);
   }
 });
 
@@ -1886,37 +1905,31 @@ test('a client made active again names its project even when the project does no
   assert.doesNotMatch(preview, /Google Cloud project of "acme-1"/, 'no change line: the project is the same');
 });
 
-test('marking a client again says when its project goes back too, in the result and in doctor', async () => {
-  for (const which of ['active', 'earlier'] as const) {
-    const m = machine();
-    writeProfile(m, profile());
-    await add(m);
-    if (which === 'earlier') {
-      writeProfile(m, profile({ gmail: gmail({ clientId: CLIENT_B, clientSecret: SECRET_B }) }));
-      await update(m);
-    }
-    // 0.12.1's `client add --replace` from a file without `project_id`: no mark, and no project.
-    const path = join(m.configDir, 'config.json');
-    writeFileSync(
-      path,
-      writeAsReleased0121(readFileSync(path, 'utf8'), (raw) =>
-        clientAddReplaceAsReleased0121(raw, 'acme-1', { clientId: CLIENT_A, addedAt: CREATED }),
-      ),
-    );
-    const checks = (await doctor(m.core, m.env, { keyring: null })).checks.filter(
-      (check) => check.name === 'organisation acme',
-    );
-    const drift = checks.find((check) => /lost its mark/.test(check.detail));
-    assert.match(drift?.detail ?? '', /has lost its mark as acme's and its project/, which);
-    assert.match(drift?.fix ?? '', /puts back its Google Cloud project \(acme-agent-comms\)/, which);
-    const { result } = await update(m);
-    assert.match(
-      result.applied.join('\n'),
-      /marks "acme-1".* as acme's again.*, and puts back its Google Cloud project, acme-agent-comms \(the row had none\)/,
-      which,
-    );
-    assert.equal((await config(m)).clients['acme-1']?.projectId, 'acme-agent-comms', which);
-  }
+test('marking the active client again says when its project goes back too, in the result and in doctor', async () => {
+  const m = machine();
+  writeProfile(m, profile());
+  await add(m);
+  // 0.12.1's `client add --replace` from a file without `project_id`: no mark, and no project. The active
+  // generation remains repairable from the profile; an inactive one is deliberately left ordinary above.
+  const path = join(m.configDir, 'config.json');
+  writeFileSync(
+    path,
+    writeAsReleased0121(readFileSync(path, 'utf8'), (raw) =>
+      clientAddReplaceAsReleased0121(raw, 'acme-1', { clientId: CLIENT_A, addedAt: CREATED }),
+    ),
+  );
+  const checks = (await doctor(m.core, m.env, { keyring: null })).checks.filter(
+    (check) => check.name === 'organisation acme',
+  );
+  const drift = checks.find((check) => /lost its mark/.test(check.detail));
+  assert.match(drift?.detail ?? '', /has lost its mark as acme's and its project/);
+  assert.match(drift?.fix ?? '', /puts back its Google Cloud project \(acme-agent-comms\)/);
+  const { result } = await update(m);
+  assert.match(
+    result.applied.join('\n'),
+    /marks "acme-1".* as acme's again.*, and puts back its Google Cloud project, acme-agent-comms \(the row had none\)/,
+  );
+  assert.equal((await config(m)).clients['acme-1']?.projectId, 'acme-agent-comms');
 });
 
 test('values a line takes from the record, not the profile, are shown neutralised: a project and a client id', async () => {
