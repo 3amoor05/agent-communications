@@ -1153,6 +1153,13 @@ export async function completeSignIn(
     let pendingRevocation: PendingRevocation | undefined;
     let configCommitted = false;
     let committedBeforeAbort = false;
+    /*
+     * Whether the person's interrupt came after the sign-in was saved: at the config write itself, or later, while the
+     * old credential was being cleaned up or revoked. Asked when the result is built, so an interrupt during that
+     * cleanup still reports the account as saved rather than as an ordinary success.
+     */
+    const savedBeforeInterrupt = (): boolean =>
+      committedBeforeAbort || (configCommitted && completionSignal?.aborted === true);
     try {
       /*
        * The write is inside the boundary that takes it back, not before it.
@@ -1394,7 +1401,7 @@ export async function completeSignIn(
       }
       return {
         ...viewOf(writtenAlias, written, flow.profile?.label),
-        ...(committedBeforeAbort ? { committedBeforeAbort: true as const } : {}),
+        ...(savedBeforeInterrupt() ? { committedBeforeAbort: true as const } : {}),
         cleanup,
       };
     }
@@ -1403,7 +1410,7 @@ export async function completeSignIn(
     }
 
     const view = viewOf(writtenAlias, written, flow.profile?.label);
-    return committedBeforeAbort ? { ...view, committedBeforeAbort: true } : view;
+    return savedBeforeInterrupt() ? { ...view, committedBeforeAbort: true } : view;
   } finally {
     // Only the owner may stop the listener or discard the flow; a cancelled or losing finisher does neither.
     stopListener(flow, context.now());

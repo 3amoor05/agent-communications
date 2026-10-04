@@ -351,4 +351,10 @@ test('an interrupt during postcommit profile revocation finishes cleanup without
     true,
     'the completed cleanup was not reported before exit',
   );
+  // The interrupt arrived after the switch was saved, during its cleanup: the result says it was saved before.
+  assert.equal(
+    JSON.parse(outputAtExit).data.committedBeforeAbort,
+    true,
+    'a sign-in saved before an interrupt during cleanup was reported as an ordinary success',
+  );
 });
