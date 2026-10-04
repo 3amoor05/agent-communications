@@ -13,6 +13,7 @@ import { stat } from 'node:fs/promises';
 import { basename, delimiter, dirname, join, relative } from 'node:path';
 import { test } from 'node:test';
 import { pathToFileURL } from 'node:url';
+import { CHANNEL_SERVERS } from '../src/channel-servers.ts';
 import { ERROR_REGISTRY, EXIT_CODES } from '../src/errors.ts';
 import { knownClientConfigs } from '../src/mcp-clients.ts';
 import {
@@ -795,6 +796,24 @@ function pinnedProduct(): McpProduct {
     }),
   };
 }
+
+test('install warnings render rival removal commands for the selected shell platform', async () => {
+  const data = tempDir();
+  const home = tempDir();
+  writeFileSync(
+    join(home, '.claude.json'),
+    JSON.stringify({ mcpServers: { '7/gmail': { command: 'npx', args: ['@artymclabin/gmail-mcp'] } } }),
+  );
+  const result = await mcpInstall(
+    { ...context(data, home), platform: 'win32' },
+    { ...CHANNEL_SERVERS.gmail, version: '0.0.1', moduleUrl: import.meta.url },
+    { client: 'claude-code', apply: false, noVerify: true },
+  );
+  assert.ok(
+    result.warnings.some((warning) => /claude mcp remove "7\/gmail"/.test(warning)),
+    result.warnings.join('\n'),
+  );
+});
 
 test('a refusal hint repeats every flag that narrows the server, so following it widens nothing', async () => {
   const data = tempDir();

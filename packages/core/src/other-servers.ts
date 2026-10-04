@@ -106,8 +106,9 @@ export function findRivalPackageServers(
 export function rivalPackageWarnings(
   servers: readonly RegisteredServer[],
   packages: readonly ChannelRivalPackage[],
+  platform: NodeJS.Platform = process.platform,
 ): string[] {
-  return findRivalPackageServers(servers, packages).map(
+  return findRivalPackageServers(servers, packages, platform).map(
     (finding) =>
       `${finding.packageName} is registered with ${finding.client} as "${finding.name}": ${finding.reason}. Remove it: ${finding.removal}`,
   );

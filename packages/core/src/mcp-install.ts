@@ -95,7 +95,7 @@ export interface McpProduct {
    * Gmail warns about third-party servers whose send tools no approval gates; Slack about other Slack servers,
    * which post with their own token and none of this package's approval steps.
    */
-  warnAbout?(servers: readonly RegisteredServer[]): string[];
+  warnAbout?(servers: readonly RegisteredServer[], platform?: NodeJS.Platform | undefined): string[];
 }
 
 export type Launcher = 'managed' | 'npx' | 'local';
@@ -1205,9 +1205,12 @@ export async function mcpInstall(
   const { cliName, binary, own, configPath, writes } = target;
   // The client being installed, only. Every other client's findings were being reported here too, with removal
   // advice that said "the file above" and meant a different file.
-  const warnings = (product.warnAbout?.(existing.filter((server) => server.client === options.client)) ?? []).filter(
-    Boolean,
-  );
+  const warnings = (
+    product.warnAbout?.(
+      existing.filter((server) => server.client === options.client),
+      context.platform,
+    ) ?? []
+  ).filter(Boolean);
 
   // What the entry being replaced narrowed, kept wherever this install left it out, and said.
   if (kept.length > 0) {

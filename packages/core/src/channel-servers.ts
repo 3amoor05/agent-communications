@@ -110,8 +110,8 @@ export function serverFactsOf({ packageName, manifest }: ChannelEntry): ServerFa
    */
   return {
     ...facts,
-    warnAbout: (servers) => [
-      ...(rivals.packages ? rivalPackageWarnings(servers, rivals.packages) : []),
+    warnAbout: (servers, platform) => [
+      ...(rivals.packages ? rivalPackageWarnings(servers, rivals.packages, platform) : []),
       ...(rivals.word !== undefined && rivals.can !== undefined
         ? rivalWordWarnings(servers, rivals.word, rivals.can, facts)
         : []),

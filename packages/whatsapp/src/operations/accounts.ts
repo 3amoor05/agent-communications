@@ -133,7 +133,7 @@ export async function removeAccount(context: WhatsAppContext, request: { name: s
     shellCommand(['agent-whatsapp', 'remove', request.name], context.platform),
     'removes a WhatsApp account',
   );
-  const { account } = requireAccount(await context.config(), request.name);
+  const { account } = requireAccount(await context.config(), request.name, context.platform);
   // The sync's lock: a sync running now finishes first, and its index is deleted with the rest; one that starts
   // after finds the account gone.
   await withFileLock(

@@ -99,7 +99,7 @@ export class WhatsAppContext {
    */
   async checkPin(): Promise<void> {
     if (this.pinned === undefined) return;
-    this.#pinnedId = requireAccount(await this.config(), this.pinned).account.id;
+    this.#pinnedId = requireAccount(await this.config(), this.pinned, this.platform).account.id;
   }
 
   /** The name a call acts on: the one it gave, checked against the pin when there is one. */
@@ -127,7 +127,7 @@ export class WhatsAppContext {
   /** One account, resolved and checked, with the person's lists for it — which every read applies. */
   async account(named: string | undefined): Promise<ResolvedAccount> {
     const config = await this.config();
-    const { name, account } = requireAccount(config, await this.#nameFor(config, named));
+    const { name, account } = requireAccount(config, await this.#nameFor(config, named), this.platform);
     return { name, account, lists: await this.lists.of(account.id) };
   }
 

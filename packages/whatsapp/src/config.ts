@@ -144,7 +144,11 @@ function notFound(config: Config, name: string): () => CommsError {
  * is not a store path this package would read, is refused rather than acted on: nothing here would know what it
  * means, and the vocabulary is closed (design §5).
  */
-export function requireAccount(config: Config, name: string | undefined): { name: string; account: WhatsAppAccount } {
+export function requireAccount(
+  config: Config,
+  name: string | undefined,
+  platform: NodeJS.Platform = process.platform,
+): { name: string; account: WhatsAppAccount } {
   if (name === undefined || name === '') {
     throw new CommsError('USAGE', 'which WhatsApp account? there is no default', {
       hint: 'Pass the account, as `organisation/whatsapp`.',
@@ -156,7 +160,7 @@ export function requireAccount(config: Config, name: string | undefined): { name
   const mode = account.mode ?? account.tier;
   if (mode !== READ_MODE) {
     throw new CommsError('CONFIG', `"${name}" is recorded in mode "${String(mode)}", and WhatsApp accounts only read`, {
-      hint: `Nothing was read. Remove it with ${inlineCommand(shellCommand(['agent-whatsapp', 'remove', name]))} and add it again.`,
+      hint: `Nothing was read. Remove it with ${inlineCommand(shellCommand(['agent-whatsapp', 'remove', name], platform))} and add it again.`,
     });
   }
   const source = (account as WhatsAppAccount).source;

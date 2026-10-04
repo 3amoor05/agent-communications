@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { rmSync } from 'node:fs';
 import { test } from 'node:test';
+import type { CommsError } from '@agentcomms/core';
 import { innerText, type MessageView, type UntrustedField } from '../src/present.ts';
 import { ALICE, BOB, BROADCAST_LIST, CAROL, DAVE, ERIN_STATUS, GROUP, HIDDEN } from './support/fixture.ts';
 import { newHarness } from './support/harness.ts';
@@ -263,6 +264,24 @@ test('a read before any sync renders its repair for the selected shell platform'
   const result = await harness.cli(['chats', '--account', '7/whatsapp', '--json'], { platform: 'win32' });
   assert.equal(result.code, 66);
   assert.match(String(result.json().error?.hint), /agent-whatsapp sync --account "7\/whatsapp"/);
+});
+
+test('an invalid account renders its removal for the selected shell platform', async () => {
+  const harness = await newHarness();
+  await harness.cli(['add', '7/whatsapp']);
+  const context = harness.context({ platform: 'win32' });
+  await context.core.config.update(
+    (config) => {
+      const account = config.accounts['7/whatsapp'];
+      assert.ok(account);
+      return { ...config, accounts: { ...config.accounts, '7/whatsapp': { ...account, mode: 'send' } } };
+    },
+    { consent: { kind: 'loosening-consent', paths: ['accounts.7/whatsapp.mode'] } },
+  );
+  await assert.rejects(context.account('7/whatsapp'), (error: CommsError) => {
+    assert.match(error.hint ?? '', /agent-whatsapp remove "7\/whatsapp"/);
+    return true;
+  });
 });
 
 test('an account is named organisation/whatsapp, by core’s grammar, and there is no default', async () => {
