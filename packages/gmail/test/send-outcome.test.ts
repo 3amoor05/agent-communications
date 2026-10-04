@@ -185,7 +185,13 @@ test('every certain no-send path attempts each bookkeeping step independently', 
     ['release', 'audit'],
     ['approval', 'audit'],
   ];
-  const triggers = ['final draft read', 'changed draft', 'Gmail refusal'] as const;
+  const triggers = [
+    'claimed draft mismatch',
+    'reservation failure',
+    'final draft read',
+    'changed draft',
+    'Gmail refusal',
+  ] as const;
 
   for (const trigger of triggers) {
     for (const failures of failureSets) {
@@ -197,6 +203,19 @@ test('every certain no-send path attempts each bookkeeping step independently', 
           hint: 'Keep the first hint.',
           details: { trigger },
         });
+        const reserve = setup.harness.core.ledger.reserve.bind(setup.harness.core.ledger);
+        if (trigger === 'claimed draft mismatch') {
+          const claimForSend = setup.harness.core.approvals.claimForSend.bind(setup.harness.core.approvals);
+          setup.harness.core.approvals.claimForSend = async (...args) => ({
+            ...(await claimForSend(...args)),
+            draftId: 'dr_another_draft',
+          });
+        } else if (trigger === 'reservation failure') {
+          setup.harness.core.ledger.reserve = async (...args) => {
+            await reserve(...args);
+            throw original;
+          };
+        }
         if (trigger === 'final draft read' || trigger === 'changed draft') {
           const getDraft = transport.getDraft.bind(transport);
           let reads = 0;
@@ -243,7 +262,12 @@ test('every certain no-send path attempts each bookkeeping step independently', 
         );
         assert.ok(error instanceof CommsError, String(error));
         assert.deepEqual(calls, ['release', 'approval', 'audit']);
-        if (trigger === 'changed draft') {
+        if (trigger === 'claimed draft mismatch') {
+          assert.equal(error.code, 'APPROVAL_VOID');
+          assert.equal(error.message, 'nothing was sent: this approval was prepared for a different draft');
+          assert.ok(error.cause instanceof CommsError);
+          assert.equal(error.cause.message, error.message);
+        } else if (trigger === 'changed draft') {
           assert.equal(error.code, 'APPROVAL_VOID');
           assert.equal(error.message, 'nothing was sent: the draft changed while it was being sent');
           assert.ok(error.cause instanceof CommsError);
@@ -261,7 +285,7 @@ test('every certain no-send path attempts each bookkeeping step independently', 
         assert.ok(inbox);
         assert.equal(
           (await setup.harness.core.ledger.status(inbox.id, { perHour: 20, perDay: 100 })).hour,
-          failures.includes('release') ? 1 : 0,
+          failures.includes('release') && trigger !== 'claimed draft mismatch' ? 1 : 0,
         );
       });
     }
@@ -310,6 +334,7 @@ test('a cap refusal takes no slot, completes the claimed approval and remains RA
   );
   assert.ok(error instanceof CommsError, String(error));
   assert.equal(error.code, 'RATE_CAPPED');
+  assert.equal(error.message, 'nothing was sent: the send limit for this inbox is reached');
   assert.equal(error.details?.hour, 1);
   assert.equal(error.cause instanceof CommsError, true);
   assert.equal(await state(), 'failed');

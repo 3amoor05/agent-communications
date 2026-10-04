@@ -588,19 +588,23 @@ export async function executeSend(
         'Ask the user to approve it in the terminal (`agent-gmail approve <id>`) or in a trusted client form, or to send it from Gmail.',
     },
   );
-  if (claimed.draftId !== options.draftId) {
-    await context.core.approvals.revoke(options.approvalId, 'the approval names a different draft');
-    throw new CommsError('APPROVAL_VOID', 'nothing was sent: this approval was prepared for a different draft', {
-      hint: 'Prepare the send again for the draft you mean.',
-    });
-  }
-
   const bookkeeping = {
     alias,
     inboxId: resolved.inbox.id,
     approvalId: options.approvalId,
     draftId: options.draftId,
   };
+  if (claimed.draftId !== options.draftId) {
+    const error = new CommsError(
+      'APPROVAL_VOID',
+      'nothing was sent: this approval was prepared for a different draft',
+      {
+        hint: 'Prepare the send again for the draft you mean.',
+      },
+    );
+    throw await recordNoSend(context, bookkeeping, error);
+  }
+
   const caps = capsFor(config.defaults);
   try {
     await context.core.ledger.reserve(resolved.inbox.id, options.approvalId, caps);
