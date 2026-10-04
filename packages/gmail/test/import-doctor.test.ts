@@ -271,18 +271,19 @@ test('doctor reports what is missing with the command that fixes it, and finds u
   // And another Gmail server on the machine is a failure, because it would be an ungated way to send.
   await writeFile(
     join(harness.configDir, '.claude.json'),
-    JSON.stringify({ mcpServers: { old: { command: 'npx', args: ['@artymclabin/gmail-mcp'] } } }),
+    JSON.stringify({ mcpServers: { '7/gmail': { command: 'npx', args: ['@artymclabin/gmail-mcp'] } } }),
   );
   const scanned = await doctor(
     new GmailContext({
       core: harness.core,
       env: { ...harness.env, HOME: harness.configDir, USERPROFILE: harness.configDir },
+      platform: 'win32',
     }),
   );
   const others = byId(scanned.checks, 'other-gmail-servers');
   assert.equal(others?.status, 'fail');
   assert.match(others?.detail ?? '', /@artymclabin\/gmail-mcp/);
-  assert.match(others?.fix ?? '', /claude mcp remove old/);
+  assert.match(others?.fix ?? '', /claude mcp remove "7\/gmail"/);
 });
 
 test('doctor says when the registered MCP server is an older version than this one', async () => {
@@ -441,6 +442,10 @@ test('doctor’s repair for a stale server preserves what that server was, not t
           command: 'npx',
           args: ['-y', '@agentcomms/gmail-mcp@0.0.1', '--inbox', 'personal', '--read-only'],
         },
+        archive: {
+          command: 'npx',
+          args: ['-y', '@agentcomms/gmail-mcp@0.0.2', '--inbox', 'archive'],
+        },
       },
     }),
   );
@@ -458,6 +463,8 @@ test('doctor’s repair for a stale server preserves what that server was, not t
   for (const flag of ['--name work', '--inbox personal', '--read-only', '--launcher npx', '--force']) {
     assert.ok(fix.includes(flag), `the repair dropped ${flag}: ${fix}`);
   }
+  assert.doesNotMatch(fix, / && /, 'each repair is its own portable command');
+  assert.equal(fix.split('\n').length, 2, fix);
 });
 
 test('a registered entry’s env is read back, because --force has to be able to put it back', async () => {

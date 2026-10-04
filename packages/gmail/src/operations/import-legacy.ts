@@ -458,7 +458,7 @@ export async function importLegacy(context: GmailContext, options: ImportOptions
   }
 
   context.forgetTransports();
-  const ungatedServers = findUngatedGmailServers(await listRegisteredServers(context.env));
+  const ungatedServers = findUngatedGmailServers(await listRegisteredServers(context.env), context.platform);
   return {
     dryRun,
     client: {

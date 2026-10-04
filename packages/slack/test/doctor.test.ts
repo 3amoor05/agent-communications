@@ -344,7 +344,7 @@ test('another Slack server on this machine is reported, because it is a second r
   const result = doctor({
     config: config({ acme: account() }),
     now: NOW,
-    platform: 'darwin',
+    platform: 'win32',
     bundles: new Map([['acme', bundle()]]),
     registeredServers: [
       ours,
@@ -357,7 +357,7 @@ test('another Slack server on this machine is reported, because it is a second r
         packageName: '@modelcontextprotocol/server-slack',
         env: { SLACK_BOT_TOKEN: 'fake-bot-token-2' },
       }),
-      server({ name: 'official', command: '', url: 'https://mcp.slack.com/mcp', type: 'http' }),
+      server({ name: '7/slack', command: '', url: 'https://mcp.slack.com/mcp', type: 'http' }),
     ],
   });
   const check = find(result, 'other-slack-servers');
@@ -367,7 +367,7 @@ test('another Slack server on this machine is reported, because it is a second r
   assert.doesNotMatch(check?.detail ?? '', /"slack"/, 'our own entry is not another server');
   // Named, never shown: an entry's env is where these servers keep their tokens.
   assert.doesNotMatch(JSON.stringify(result), /fake-bot-token-2/);
-  assert.match(check?.fix ?? '', /claude mcp remove official/);
+  assert.match(check?.fix ?? '', /claude mcp remove "7\/slack"/);
 });
 
 test('a registered Slack server older than this release is reported, with a repair that keeps what it was', () => {
@@ -404,6 +404,8 @@ test('a registered Slack server older than this release is reported, with a repa
   for (const flag of ['--name work-slack', '--workspace acme', '--launcher npx', '--force']) {
     assert.ok(fix.includes(flag), `the repair dropped ${flag}: ${fix}`);
   }
+  assert.doesNotMatch(fix, / && /, 'each repair is its own portable command');
+  assert.equal(fix.split('\n').length, 3, fix);
 
   // This release, in the new layout, is current: the Gmail doctor once called every such install stale for ever.
   const current = doctor({

@@ -504,7 +504,7 @@ async function mcpChecks(context: GmailContext, scope: Scope | undefined): Promi
   const servers = await listRegisteredServers(context.env);
   const checks: Check[] = [];
   // Every other product's Gmail server, whatever the scope: an ungated send path undoes this mailbox's safety too.
-  const ungated = findUngatedGmailServers(servers);
+  const ungated = findUngatedGmailServers(servers, context.platform);
   checks.push({
     id: 'other-gmail-servers',
     title: 'Other Gmail MCP servers',
@@ -515,7 +515,7 @@ async function mcpChecks(context: GmailContext, scope: Scope | undefined): Promi
         : ungated
             .map((finding) => `${finding.name} in ${finding.path} (${finding.client}): ${finding.reason}`)
             .join('; '),
-    fix: ungated.length === 0 ? undefined : ungated.map((finding) => finding.removal).join(' && '),
+    fix: ungated.length === 0 ? undefined : ungated.map((finding) => finding.removal).join('\n'),
   });
 
   /*
@@ -580,7 +580,7 @@ async function mcpChecks(context: GmailContext, scope: Scope | undefined): Promi
           fix:
             stale.length === 0
               ? undefined
-              : stale.map((entry) => repairCommand(entry.server, context.platform)).join(' && '),
+              : stale.map((entry) => repairCommand(entry.server, context.platform)).join('\n'),
         },
   );
 

@@ -682,7 +682,10 @@ function registrationChecks(input: DoctorInput): Check[] {
         : // What a config-file scan cannot see, said rather than implied away.
           'none in the MCP clients’ config files (servers added by plugins, claude.ai connectors or bridges are not visible from here)',
     // Called with the server alone: handed to `map` directly, its index would be taken for the shell to quote for.
-    fix: others.length > 0 ? others.map((server) => otherSlackServerRemoval(server)).join(' && ') : null,
+    fix:
+      others.length > 0
+        ? others.map((server) => otherSlackServerRemoval(server, input.platform ?? process.platform)).join('\n')
+        : null,
     workspace: null,
   });
 
@@ -719,7 +722,7 @@ function registrationChecks(input: DoctorInput): Check[] {
           : `this release, ${VERSION}`,
     fix:
       stale.length > 0
-        ? stale.map((entry) => repairCommand(entry.server, input.platform ?? process.platform)).join(' && ')
+        ? stale.map((entry) => repairCommand(entry.server, input.platform ?? process.platform)).join('\n')
         : none
           ? 'agent-slack mcp install --client <client>'
           : null,
