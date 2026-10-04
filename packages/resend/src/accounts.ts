@@ -4,11 +4,13 @@ import {
   CommsError,
   type Config,
   findById,
+  inlineCommand,
   lookupName,
   nameAvailable,
   newAccountId,
   resolveName,
   type SendPolicy,
+  shellCommand,
 } from '@agentcomms/core';
 
 /**
@@ -92,7 +94,7 @@ export function checkedAccount(name: string, account: AccountConfig): ResendAcco
   })();
   if (problem !== null) {
     throw new CommsError('CONFIG', `"${name}" is not a Resend account this release can act on: ${problem}`, {
-      hint: `Remove it with \`agent-resend account remove ${name}\` and add it again, or fix it in the configuration file.`,
+      hint: `Remove it with ${inlineCommand(shellCommand(['agent-resend', 'account', 'remove', name]))} and add it again, or fix it in the configuration file.`,
     });
   }
   return account as ResendAccount;
@@ -146,7 +148,7 @@ export function checkNewName(config: Config, name: string): void {
   if (check.ok) return;
   if (lookupName(config, 'account', name) || lookupName(config, 'inbox', name)) {
     throw new CommsError('USAGE', `there is already an account called "${name}"`, {
-      hint: `Choose another name, or remove that one first with \`agent-resend account remove ${name}\`.`,
+      hint: `Choose another name, or remove that one first with ${inlineCommand(shellCommand(['agent-resend', 'account', 'remove', name]))}.`,
     });
   }
   throw check.error;

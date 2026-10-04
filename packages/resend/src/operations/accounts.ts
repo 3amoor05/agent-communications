@@ -5,9 +5,11 @@ import {
   type Config,
   classifyChange,
   type GatedChange,
+  inlineCommand,
   type SendPolicy,
   secretsStoreFor,
   secretsStoreOf,
+  shellCommand,
   withCredentialsLock,
 } from '@agentcomms/core';
 import {
@@ -330,7 +332,7 @@ export function removeAccountChange(context: ResendContext, name: string): Gated
         const found = requireAccount(await context.config(), name);
         if (found.account.id !== approved.id) {
           throw new CommsError('CONFIG', `"${name}" changed after its removal was approved, so nothing was removed`, {
-            hint: `Look at it with \`agent-resend account show ${name}\`, and remove it again if you still want it gone.`,
+            hint: `Look at it with ${inlineCommand(shellCommand(['agent-resend', 'account', 'show', name], context.platform))}, and remove it again if you still want it gone.`,
           });
         }
         // The key first: an entry whose key is gone is reported by `doctor`; a key nothing names is never found.
@@ -339,7 +341,7 @@ export function removeAccountChange(context: ResendContext, name: string): Gated
         await context.core.config.update((current) => {
           if (secretsStoreOf(current) !== secrets.kind) {
             throw new CommsError('TRANSIENT', `the secret store changed while "${name}" was being removed`, {
-              hint: `Run \`agent-resend account remove ${name}\` again.`,
+              hint: `Run ${inlineCommand(shellCommand(['agent-resend', 'account', 'remove', name], context.platform))} again.`,
             });
           }
           const held = accountById(current, found.account.id);

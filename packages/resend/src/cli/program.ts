@@ -11,6 +11,7 @@ import {
   exemptFromUpdateGate,
   type GatedChange,
   gatedChangeAtTerminal,
+  inlineCommand,
   installExitStatus,
   type OutputOptions,
   openCore,
@@ -611,13 +612,13 @@ is out: update first, or put it off (agentcomms update, agentcomms update --late
         const marker = agentMarker(env);
         if (marker) {
           throw new CommsError('APPROVAL_REQUIRED', 'only a person can approve a send or a change, not an agent', {
-            hint: `Ask the user to run \`agent-resend approve ${approvalId}\` in their own terminal.`,
+            hint: `Ask the user to run ${inlineCommand(shellCommand(['agent-resend', 'approve', approvalId], context.platform))} in their own terminal.`,
             details: { marker },
           });
         }
         if (!canPrompt(env, streams, { json: options.json })) {
           throw new CommsError('APPROVAL_REQUIRED', 'approving needs an interactive terminal', {
-            hint: `Run \`agent-resend approve ${approvalId}\` directly in a terminal.`,
+            hint: `Run ${inlineCommand(shellCommand(['agent-resend', 'approve', approvalId], context.platform))} directly in a terminal.`,
           });
         }
         const pending = await context.core.approvals.get(approvalId);

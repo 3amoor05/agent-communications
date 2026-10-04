@@ -2,10 +2,12 @@ import {
   CommsError,
   type Config,
   type Core,
+  inlineCommand,
   openCore,
   type SecretStore,
   type SendPolicy,
   secretsStoreOf,
+  shellCommand,
 } from '@agentcomms/core';
 import { AccountStore, type NamedAccount } from './accounts.ts';
 import type { ResendTransport } from './api/client.ts';
@@ -101,7 +103,7 @@ export class ResendContext {
     const key = await (await this.secrets()).get(named.account.secretRef);
     if (key === null || key.trim() === '') {
       throw new CommsError('AUTH_REQUIRED', `the key for "${named.name}" is not in the secret store`, {
-        hint: `A person removes the account and adds it again: \`agent-resend account add ${named.name}\`.`,
+        hint: `A person removes the account and adds it again: ${inlineCommand(shellCommand(['agent-resend', 'account', 'add', named.name], this.platform))}.`,
       });
     }
     return { fetch: this.#fetch, key, throttle: this.#throttle, permit };
