@@ -5,10 +5,12 @@ import {
   canonicalAddress,
   domainOf,
   type Expectation,
+  inlineCommand,
   type MessagePreview,
   publicView,
   renderMessagePreview,
   resolveName,
+  shellCommand,
   type SendPolicy,
   stricterPolicy,
 } from '@agentcomms/core';
@@ -392,7 +394,9 @@ export async function prepareSend(context: GmailContext, alias: string, draftId:
   const livePolicy: SendPolicy = resolved.inbox.sendPolicy ?? config.defaults.sendPolicy;
   if (livePolicy === 'never') {
     throw new CommsError('POLICY_NEVER', `sending from ${alias} is turned off (policy: never)`, {
-      hint: `The draft is in Gmail; send it from there, or change the policy with \`agent-gmail inbox policy ${alias} --send confirm\` in a terminal.`,
+      hint: `The draft is in Gmail; send it from there, or change the policy with ${inlineCommand(
+        shellCommand(['agent-gmail', 'inbox', 'policy', alias, '--send', 'confirm'], context.platform),
+      )} in a terminal.`,
     });
   }
 
@@ -444,7 +448,9 @@ export async function prepareSend(context: GmailContext, alias: string, draftId:
     expiresAt: record.expiresAt,
     nextStep:
       effectivePolicy === 'confirm'
-        ? `Show the preview to the user, then have them run \`agent-gmail approve ${record.approvalId}\` in a terminal, or send it from Gmail. You cannot approve this yourself.`
+        ? `Show the preview to the user, then have them run ${inlineCommand(
+            shellCommand(['agent-gmail', 'approve', record.approvalId], context.platform),
+          )} in a terminal, or send it from Gmail. You cannot approve this yourself.`
         : 'Show the preview to the user verbatim and wait for an explicit yes. Then send it with the same approval id and the recipients and subject shown above.',
   };
 }
@@ -544,7 +550,13 @@ export async function finishApproval(
 export async function executeSend(
   context: GmailContext,
   alias: string,
-  options: { draftId: string; approvalId: string; expect: Expectation },
+  options: {
+    draftId: string;
+    approvalId: string;
+    expect: Expectation;
+    /** True only for the CLI marker `--expect-subject none`; MCP subjects remain ordinary strings. */
+    expectSubjectNone?: boolean | undefined;
+  },
 ): Promise<SendResult> {
   const resolved = await context.inbox(alias);
   await context.requireCapability(resolved, 'draft');
@@ -571,6 +583,13 @@ export async function executeSend(
   // the user a fresh approval for no reason.
   const before = await readDraft(context, alias, options.draftId);
   if (before.refusals.length > 0) throw unsendable(before.refusals);
+  const liveSubject = before.analysis.subject;
+  const expect = options.expectSubjectNone
+    ? {
+        ...options.expect,
+        subject: ['', 'none'].includes(liveSubject.trim()) ? liveSubject : 'none',
+      }
+    : options.expect;
 
   const claimed = await context.core.approvals.claimForSend(
     options.approvalId,
@@ -580,7 +599,7 @@ export async function executeSend(
       inboxId: resolved.inbox.id,
       inboxSub: resolved.inbox.sub,
       policy: livePolicy,
-      expect: options.expect,
+      expect,
     },
     {
       // Gmail's own words, given here because the approval store is shared and no longer speaks for any product.

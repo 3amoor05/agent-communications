@@ -11,7 +11,9 @@ import {
   type GatedChange,
   gatedChange,
   lookupName,
+  inlineCommand,
   retiredOutHint,
+  shellCommand,
   stricterPolicy,
   strictToolArguments,
   toCommsError,
@@ -142,19 +144,32 @@ async function pendingRegistrationOf(
   intent: RegistrationIntent,
   alias: string,
   replace: boolean,
+  platform: NodeJS.Platform,
 ) {
   const served = await mailboxServedElsewhere(env, { client: intent.client, inbox: alias });
-  const launcher = intent.launcher ? ` --launcher ${intent.launcher}` : '';
   const second = `gmail-${alias.split('/')[0]}`;
+  const command = shellCommand(
+    [
+      'agent-gmail',
+      'mcp',
+      'install',
+      '--client',
+      intent.client,
+      ...(intent.launcher ? ['--launcher', intent.launcher] : []),
+      ...(!replace && served !== null ? ['--name', second] : []),
+      ...(served === null ? [] : ['--inbox', alias]),
+      ...(replace ? ['--force'] : []),
+    ],
+    platform,
+  );
   const what = replace
     ? `setup was asked to replace the Gmail server's entry in ${intent.client}${served === null ? '' : ` — it served the mailbox ${served}`} — and it has not been replaced yet`
     : served === null
       ? `no Gmail server registered with ${intent.client} serves it yet`
-      : `the Gmail server's entry in ${intent.client} serves the mailbox ${served}, not this one. Replacing it would take ${served}'s server away, so the way to reach both is a second entry under a name of its own, \`${second}\`, which these arguments already name: call comms_server_install with them, or at a terminal \`agent-gmail mcp install --client ${intent.client} --name ${second} --inbox ${alias}${launcher}\``;
+      : `the Gmail server's entry in ${intent.client} serves the mailbox ${served}, not this one. Replacing it would take ${served}'s server away, so the way to reach both is a second entry under a name of its own, \`${second}\`, which these arguments already name: call comms_server_install with them, or at a terminal ${inlineCommand(command)}`;
   // A second entry when ours under the default name serves another mailbox and is not being replaced: the arguments
   // carry its name, so they work as they are given — passed on unchanged, they would ask for the taken name again.
   const separate = !replace && served !== null;
-  const command = `agent-gmail mcp install --client ${intent.client}${launcher}${separate ? ` --name ${second}` : ''}${served === null ? '' : ` --inbox ${alias}`}${replace ? ' --force' : ''}`;
   return {
     client: intent.client,
     tool: 'comms_server_install' as const,
@@ -169,7 +184,7 @@ async function pendingRegistrationOf(
     next:
       !replace && served !== null
         ? `The mailbox is connected; ${what}. Show the person the preview, and call it again with the approvalId once they say yes.`
-        : `The mailbox is connected; ${what}. Call comms_server_install on the core server with these arguments, show the person its preview, and call it again with the approvalId once they say yes. Without the core server, the person runs \`${command}\` at a terminal.`,
+        : `The mailbox is connected; ${what}. Call comms_server_install on the core server with these arguments, show the person its preview, and call it again with the approvalId once they say yes. Without the core server, the person runs ${inlineCommand(command)} at a terminal.`,
   };
 }
 
@@ -1580,7 +1595,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
             const pending =
               intent &&
               (replace || !(await clientServesInbox(context.env, { client: intent.client, inbox: result.alias })))
-                ? await pendingRegistrationOf(context.env, intent, result.alias, replace)
+                ? await pendingRegistrationOf(context.env, intent, result.alias, replace, context.platform)
                 : undefined;
             return reply({
               alias: result.alias,
@@ -2358,7 +2373,9 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
             client,
             probeId: pending.probeId,
             completed: true,
-            nextStep: `Within ten minutes, if the user wants to trust "${client}", call gmail_confirm_client_add with this name and show them the preview it returns; or they run \`agent-gmail confirm-clients add ${client}\` in a terminal.`,
+            nextStep: `Within ten minutes, if the user wants to trust "${client}", call gmail_confirm_client_add with this name and show them the preview it returns; or they run ${inlineCommand(
+              shellCommand(['agent-gmail', 'confirm-clients', 'add', client], context.platform),
+            )} in a terminal.`,
           });
         } catch (error) {
           return fail(error);

@@ -1,4 +1,13 @@
-import { type InstallResult, paint, renderInstall, type ServerInstallResult, sizeOf } from '@agentcomms/core';
+import {
+  commandText,
+  inlineCommand,
+  type InstallResult,
+  paint,
+  renderInstall,
+  type ServerInstallResult,
+  shellCommand,
+  sizeOf,
+} from '@agentcomms/core';
 import type { RegistrationIntent } from '../auth/flows.ts';
 import type { LabelSummary, SendAsSummary } from '../operations/analyse.ts';
 import type { DownloadQuestion, DownloadResult, FindAttachmentsResult } from '../operations/attachments.ts';
@@ -64,8 +73,18 @@ export function renderClientAdd(result: ClientAddResult, color: boolean): string
   return lines.join('\n');
 }
 
-export function renderSignInStarted(started: StartedSignIn, mode: 'add' | 'reauth', color: boolean): string {
-  const finish = `agent-gmail inbox ${mode} --finish ${started.flowId} --wait ${FINISH_WAIT_SECONDS}`;
+export function renderSignInStarted(
+  started: StartedSignIn,
+  mode: 'add' | 'reauth',
+  color: boolean,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const finish = commandText(
+    shellCommand(
+      ['agent-gmail', 'inbox', mode, '--finish', started.flowId, '--wait', String(FINISH_WAIT_SECONDS)],
+      platform,
+    ),
+  );
   return [
     paint(
       color,
@@ -161,6 +180,7 @@ function renderFinishRegistration(registration: FinishRegistration, color: boole
 export function renderSignedIn(
   result: ConsentResult & { registration?: FinishRegistration | undefined },
   color: boolean,
+  platform: NodeJS.Platform = process.platform,
 ): string {
   const lines = [
     paint(
@@ -175,10 +195,13 @@ export function renderSignedIn(
   if (result.missingScopes.length > 0) {
     lines.push(
       paint(color, 'yellow', `  not granted: ${result.missingScopes.join(', ')}`),
-      `  to grant it: \`agent-gmail inbox reauth ${result.alias}\``,
+      `  to grant it: ${inlineCommand(shellCommand(['agent-gmail', 'inbox', 'reauth', result.alias], platform))}`,
     );
   }
-  lines.push('', `Check it: \`agent-gmail whoami --inbox ${result.alias}\``);
+  lines.push(
+    '',
+    `Check it: ${inlineCommand(shellCommand(['agent-gmail', 'whoami', '--inbox', result.alias], platform))}`,
+  );
   if (result.registration) lines.push('', renderFinishRegistration(result.registration, color));
   return lines.join('\n');
 }
@@ -601,7 +624,11 @@ export function renderDrafts(drafts: DraftSummary[], color: boolean): string {
   );
 }
 
-export function renderModify(result: ModifyResult, color: boolean): string {
+export function renderModify(
+  result: ModifyResult,
+  color: boolean,
+  platform: NodeJS.Platform = process.platform,
+): string {
   const what = [
     result.addLabelIds.length > 0 ? `+${result.addLabelIds.join(' +')}` : '',
     result.removeLabelIds.length > 0 ? `-${result.removeLabelIds.join(' -')}` : '',
@@ -621,7 +648,9 @@ export function renderModify(result: ModifyResult, color: boolean): string {
         color,
         'dim',
         `${result.undo.length} message(s) can be put back exactly as they were: ` +
-          `re-run with --json, then pipe its \`undo\` into \`agent-gmail organise-undo --inbox ${result.inbox}\`.`,
+          `re-run with --json, then pipe its \`undo\` into ${inlineCommand(
+            shellCommand(['agent-gmail', 'organise-undo', '--inbox', result.inbox], platform),
+          )}.`,
       ),
     );
   } else {
@@ -647,7 +676,11 @@ export function renderTrash(result: TrashResult, color: boolean): string {
   ].join('\n');
 }
 
-export function renderSendPreparation(result: SendPreparation, color: boolean): string {
+export function renderSendPreparation(
+  result: SendPreparation,
+  color: boolean,
+  platform: NodeJS.Platform = process.platform,
+): string {
   // The preview verbatim, then what has to happen: reformatting the preview would mean the thing shown is not the
   // thing the digest was taken over.
   const lines = [result.preview, ''];
@@ -657,14 +690,31 @@ export function renderSendPreparation(result: SendPreparation, color: boolean): 
   lines.push(
     paint(color, 'dim', `Approval ${result.approvalId}, good until ${result.expiresAt.slice(11, 16)} UTC.`),
     result.nextStep,
-    paint(
-      color,
-      'dim',
-      `Then: agent-gmail send execute ${result.draftId} --inbox ${result.inbox} --approval ${result.approvalId} ` +
-        `--expect-to ${result.expect.to.join(' ') || 'none'} --expect-subject ${JSON.stringify(result.expect.subject || 'none')}`,
-    ),
+    paint(color, 'dim', `Then: ${commandText(sendExecuteCommand(result, platform))}`),
   );
   return lines.join('\n');
+}
+
+function sendExecuteCommand(result: SendPreparation, platform: NodeJS.Platform) {
+  const recipients = (flag: string, values: readonly string[]) => [flag, ...(values.length > 0 ? values : ['none'])];
+  return shellCommand(
+    [
+      'agent-gmail',
+      'send',
+      'execute',
+      result.draftId,
+      '--inbox',
+      result.inbox,
+      '--approval',
+      result.approvalId,
+      ...recipients('--expect-to', result.expect.to),
+      ...recipients('--expect-cc', result.expect.cc),
+      ...recipients('--expect-bcc', result.expect.bcc),
+      '--expect-subject',
+      result.expect.subject || 'none',
+    ],
+    platform,
+  );
 }
 
 export function renderSent(result: SendResult, color: boolean): string {
@@ -755,6 +805,7 @@ export function renderSetupPlan(
   },
   steps: readonly { title: string; url: string; why: string; actions: readonly string[]; avoid: readonly string[] }[],
   color: boolean,
+  platform: NodeJS.Platform = process.platform,
 ): string {
   const lines: string[] = [];
 
@@ -840,7 +891,14 @@ export function renderSetupPlan(
     // `setup`'s own flags, because this is `setup`'s own output. It named `inbox add … --start` — a real command,
     // but a different one, so the text told you to leave the thing you were running while `blocked.needs` beside
     // it correctly said `--inbox <alias>`. Two answers to one question, in the same document.
-    lines.push(`  agent-gmail setup --inbox ${state.nameExample ?? 'work'} --email you@example.com`);
+    lines.push(
+      `  ${commandText(
+        shellCommand(
+          ['agent-gmail', 'setup', '--inbox', state.nameExample ?? 'work', '--email', 'you@example.com'],
+          platform,
+        ),
+      )}`,
+    );
     lines.push('  then run the --finish command it prints, after signing in.');
   }
 

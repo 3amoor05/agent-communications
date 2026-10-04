@@ -672,12 +672,12 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
         writeResult(
           { ...connected, registration },
           output(),
-          (data) => renderSignedIn(data, globalOptions.color),
+          (data) => renderSignedIn(data, globalOptions.color, context.platform),
           streams,
         );
         return;
       }
-      writeResult(result, output(), (data) => renderSignedIn(data, globalOptions.color), streams);
+      writeResult(result, output(), (data) => renderSignedIn(data, globalOptions.color, context.platform), streams);
       return;
     }
     if (!alias) {
@@ -709,13 +709,18 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
         : await startSignIn(context, { ...signInOptions, mode });
 
     if (!interactive || !started.listener) {
-      writeResult(started, output(), (data) => renderSignInStarted(data, mode, globalOptions.color), streams);
+      writeResult(
+        started,
+        output(),
+        (data) => renderSignInStarted(data, mode, globalOptions.color, context.platform),
+        streams,
+      );
       return;
     }
-    streams.stderr.write(`${renderSignInStarted(started, mode, globalOptions.color)}\n`);
+    streams.stderr.write(`${renderSignInStarted(started, mode, globalOptions.color, context.platform)}\n`);
     if (options.browser !== false) openInBrowser(started.authUrl);
     const result = await started.listener.result;
-    writeResult(result, output(), (data) => renderSignedIn(data, globalOptions.color), streams);
+    writeResult(result, output(), (data) => renderSignedIn(data, globalOptions.color, context.platform), streams);
   };
 
   withSignInOptions(inbox.command('add [alias]').description('connect a mailbox (opens Google in a browser)')).action(
@@ -1204,7 +1209,12 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
     .action(
       act(async (context, globalOptions, draftId: string, options: Options) => {
         const result = await prepareSend(context, String(options.inbox), draftId);
-        writeResult(result, output(), (data) => renderSendPreparation(data, globalOptions.color), streams);
+        writeResult(
+          result,
+          output(),
+          (data) => renderSendPreparation(data, globalOptions.color, context.platform),
+          streams,
+        );
       }),
     );
 
@@ -1219,6 +1229,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
     .option('--expect-bcc <address...>', 'who you believe is blind-copied; `none` for nobody', ['none'])
     .action(
       act(async (context, globalOptions, draftId: string, options: Options) => {
+        const expectSubject = String(options.expectSubject);
         const result = await executeSend(context, String(options.inbox), {
           draftId,
           approvalId: String(options.approval),
@@ -1226,8 +1237,9 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
             to: expected(options.expectTo),
             cc: expected(options.expectCc),
             bcc: expected(options.expectBcc),
-            subject: String(options.expectSubject) === 'none' ? '' : String(options.expectSubject),
+            subject: expectSubject,
           },
+          expectSubjectNone: expectSubject === 'none',
         });
         writeResult(result, output(), (data) => renderSent(data, globalOptions.color), streams);
       }),
@@ -1419,7 +1431,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
           unstar: Boolean(options.unstar),
           dryRun: Boolean(options.dryRun),
         });
-        writeResult(result, output(), (data) => renderModify(data, globalOptions.color), streams);
+        writeResult(result, output(), (data) => renderModify(data, globalOptions.color, context.platform), streams);
       }),
     );
 
@@ -1932,7 +1944,20 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
               });
               handoff = {
                 authUrl: started.authUrl,
-                finish: `agent-gmail inbox add --finish ${started.flowId} --wait ${FINISH_WAIT_SECONDS}`,
+                finish: commandText(
+                  shellCommand(
+                    [
+                      'agent-gmail',
+                      'inbox',
+                      'add',
+                      '--finish',
+                      started.flowId,
+                      '--wait',
+                      String(FINISH_WAIT_SECONDS),
+                    ],
+                    context.platform,
+                  ),
+                ),
                 ...(registerWith ? { registerWith } : {}),
               };
               did.push(`started a sign-in for "${alias}"`);
@@ -2006,7 +2031,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
           writeResult(
             report,
             output(),
-            () => renderSetupPlan({ ...report, nameExample }, CONSOLE_STEPS, globalOptions.color),
+            () => renderSetupPlan({ ...report, nameExample }, CONSOLE_STEPS, globalOptions.color, context.platform),
             streams,
           );
           return;
@@ -2234,11 +2259,11 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
             detached: false,
             ...(deps.listenerCommand ? { listenerCommand: deps.listenerCommand } : {}),
           });
-          out.write(`\n${renderSignInStarted(started, 'add', globalOptions.color)}\n`);
+          out.write(`\n${renderSignInStarted(started, 'add', globalOptions.color, context.platform)}\n`);
           if (options.browser !== false) openInBrowser(started.authUrl);
           if (started.listener) {
             const signedIn = await started.listener.result;
-            out.write(`\n${renderSignedIn(signedIn, globalOptions.color)}\n\n`);
+            out.write(`\n${renderSignedIn(signedIn, globalOptions.color, context.platform)}\n\n`);
           }
           state = await setupState(context, { scanDownloads: false });
           if (!(await askYesNo(mode, streams, { message: 'Connect another mailbox?', defaultYes: false }))) break;

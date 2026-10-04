@@ -4,8 +4,12 @@ import { dirname, isAbsolute, join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { EXIT_CODES } from '@agentcomms/core';
+import { commandText, EXIT_CODES, shellCommand } from '@agentcomms/core';
 import { run } from '../src/cli/program.ts';
+import { renderSendPreparation } from '../src/cli/render.ts';
+import { GmailContext } from '../src/context.ts';
+import { createDraft } from '../src/operations/drafts.ts';
+import type { SendPreparation } from '../src/operations/send.ts';
 import { type Harness, newHarness, TEST_CLIENT_ID, TEST_CLIENT_SECRET, tempDir } from './support/harness.ts';
 
 const CLI_ENTRY = fileURLToPath(new URL('../src/cli.ts', import.meta.url));
@@ -27,6 +31,8 @@ async function cli(
     stdin?: string;
     /** Called with everything written to stdout so far, while the command is still running. */
     onStdout?: (soFar: string) => void;
+    /** The shell syntax printed commands use; pinned whenever a test asserts their text. */
+    platform?: NodeJS.Platform;
   } = {},
 ): Promise<Captured> {
   let stdout = '';
@@ -55,6 +61,7 @@ async function cli(
       command: process.execPath,
       args: ['--experimental-strip-types', '--disable-warning=ExperimentalWarning', CLI_ENTRY],
     },
+    platform: options.platform,
   });
   return { code, stdout, stderr, json: <T>() => JSON.parse(stdout) as T };
 }
@@ -632,6 +639,170 @@ test('the CLI sends only what was prepared, and says so at every step', async ()
   assert.equal(sent.code, 0, `${sent.stdout}${sent.stderr}`);
   assert.match(sent.stdout, /Sent to sam@partner\.test/);
   assert.match(sent.stdout, /Read back from the mailbox/);
+});
+
+test('send prepare prints every expectation as shell-safe words for the selected platform', async () => {
+  const prepare = async (subject: string, platform: NodeJS.Platform) => {
+    const harness = await newHarness({
+      accounts: [
+        {
+          sub: 'sub-1',
+          email: 'jo@example.test',
+          sendAs: [{ sendAsEmail: 'jo@example.test', displayName: 'Jo', isDefault: true, isPrimary: true }],
+        },
+      ],
+    });
+    await harness.connectInbox({ alias: 'work', email: 'jo@example.test', sub: 'sub-1' });
+    await harness.core.config.update(
+      (config) => ({ ...config, defaults: { ...config.defaults, riskEscalation: false } }),
+      { consent: { kind: 'loosening-consent', paths: ['defaults.riskEscalation'] } },
+    );
+    const drafted = await createDraft(new GmailContext({ core: harness.core, env: harness.env }), 'work', {
+      to: ['one@example.test', 'two@example.test'],
+      cc: ['copy@example.test'],
+      bcc: ['blind@example.test'],
+      subject,
+      text: 'Safe command rendering.',
+    });
+    const draftId = drafted.draftId;
+    const prepared = await cli(harness, ['send', 'prepare', draftId, '--inbox', 'work'], { platform });
+    assert.equal(prepared.code, 0, prepared.stderr);
+    const approvalId = /\b(ap_[A-Za-z0-9]+)\b/.exec(prepared.stdout)?.[1];
+    assert.ok(approvalId, prepared.stdout);
+    const words = [
+      'agent-gmail',
+      'send',
+      'execute',
+      draftId,
+      '--inbox',
+      'work',
+      '--approval',
+      approvalId,
+      '--expect-to',
+      'one@example.test',
+      'two@example.test',
+      '--expect-cc',
+      'copy@example.test',
+      '--expect-bcc',
+      'none',
+      '--expect-subject',
+      subject,
+    ];
+    assert.ok(prepared.stdout.includes(`Then: ${commandText(shellCommand(words, platform))}`), prepared.stdout);
+  };
+
+  await prepare('$(whoami)', 'darwin');
+  await prepare('%PATH%', 'win32');
+});
+
+test('send execute rendering preserves every subject and every recipient list on POSIX and Windows', () => {
+  const subjects = ['', 'none', '-urgent', '$(whoami)', '`whoami`', '%PATH%', '"', "'", 'line\nbreak'];
+  const expectations = [
+    {
+      to: ['one@example.test', 'two@example.test'],
+      cc: ['copy@example.test', 'other-copy@example.test'],
+      bcc: ['blind@example.test', 'other-blind@example.test'],
+    },
+    { to: [], cc: [], bcc: [] },
+  ];
+  for (const platform of ['darwin', 'win32'] as const) {
+    for (const subject of subjects) {
+      for (const recipients of expectations) {
+        const result: SendPreparation = {
+          approvalId: 'ap_AAAAAAAAAAAAAAAAAAAAAA',
+          inbox: 'work inbox',
+          draftId: 'draft one',
+          preview: 'Preview',
+          policy: 'chat',
+          effectivePolicy: 'chat',
+          riskFlags: [],
+          expect: { ...recipients, subject },
+          digest: 'digest',
+          expiresAt: '2026-10-04T12:00:00.000Z',
+          nextStep: 'Wait for approval.',
+        };
+        const list = (flag: string, values: readonly string[]) => [
+          flag,
+          ...(values.length > 0 ? values : ['none']),
+        ];
+        const words = [
+          'agent-gmail',
+          'send',
+          'execute',
+          result.draftId,
+          '--inbox',
+          result.inbox,
+          '--approval',
+          result.approvalId,
+          ...list('--expect-to', recipients.to),
+          ...list('--expect-cc', recipients.cc),
+          ...list('--expect-bcc', recipients.bcc),
+          '--expect-subject',
+          subject || 'none',
+        ];
+        const command = shellCommand(words, platform);
+        const rendered = renderSendPreparation(result, false, platform);
+        assert.ok(rendered.includes(`Then: ${commandText(command)}`), JSON.stringify({ platform, subject, rendered }));
+        if (platform === 'win32' && ['$(whoami)', '`whoami`', '%PATH%', '"', 'line\nbreak'].includes(subject)) {
+          assert.equal(command.line, null, JSON.stringify({ subject, command }));
+          assert.match(rendered, /Then: \["agent-gmail","send","execute",/);
+        } else {
+          assert.notEqual(command.line, null, JSON.stringify({ subject, command }));
+        }
+      }
+    }
+  }
+});
+
+test('--expect-subject none accepts only an empty, whitespace-only or literal none subject', async () => {
+  for (const [subject, sends] of [
+    ['', true],
+    ['   ', true],
+    ['none', true],
+    ['something else', false],
+  ] as const) {
+    const harness = await newHarness({
+      accounts: [
+        {
+          sub: 'sub-1',
+          email: 'jo@example.test',
+          sendAs: [{ sendAsEmail: 'jo@example.test', displayName: 'Jo', isDefault: true, isPrimary: true }],
+        },
+      ],
+    });
+    await harness.connectInbox({ alias: 'work', email: 'jo@example.test', sub: 'sub-1' });
+    await harness.core.config.update(
+      (config) => ({ ...config, defaults: { ...config.defaults, riskEscalation: false } }),
+      { consent: { kind: 'loosening-consent', paths: ['defaults.riskEscalation'] } },
+    );
+    const drafted = await createDraft(new GmailContext({ core: harness.core, env: harness.env }), 'work', {
+      to: ['sam@partner.test'],
+      subject,
+      text: 'Subject marker.',
+    });
+    const prepared = await cli(harness, ['send', 'prepare', drafted.draftId, '--inbox', 'work', '--json']);
+    const approvalId = dataOf(prepared.json<Envelope<{ approvalId: string }>>()).approvalId;
+    const sent = await cli(harness, [
+      'send',
+      'execute',
+      drafted.draftId,
+      '--inbox',
+      'work',
+      '--approval',
+      approvalId,
+      '--expect-to',
+      'sam@partner.test',
+      '--expect-cc',
+      'none',
+      '--expect-bcc',
+      'none',
+      '--expect-subject',
+      'none',
+      '--json',
+    ]);
+    assert.equal(sent.code, sends ? EXIT_CODES.OK : EXIT_CODES.APPROVAL, JSON.stringify({ subject, output: sent.stdout }));
+    if (!sends) assert.equal(sent.json<Envelope<never>>().error?.code, 'APPROVAL_VOID');
+  }
 });
 
 test('approving a send refuses an agent, and refuses a pipe', async () => {

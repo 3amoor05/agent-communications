@@ -9,8 +9,10 @@ import {
   findById,
   type GatedChange,
   lookupName,
+  inlineCommand,
   readWholeNumber,
   requireInbox,
+  shellCommand,
   wholeNumber,
 } from '@agentcomms/core';
 import type { OAuthFlow, RegistrationIntent } from '../auth/flows.ts';
@@ -542,7 +544,9 @@ export async function finishSignIn(context: GmailContext, options: FinishOptions
       'USAGE',
       `that sign-in is ${flow.mode === 'reauth' ? 're-authorising an existing mailbox' : 'a new mailbox'}, and this can only finish ${wanted}`,
       {
-        hint: `Finish it where it was started: \`agent-gmail inbox ${flow.mode} --finish ${options.flowId}\`.`,
+        hint: `Finish it where it was started: ${inlineCommand(
+          shellCommand(['agent-gmail', 'inbox', flow.mode, '--finish', options.flowId], context.platform),
+        )}.`,
       },
     );
   }
@@ -564,7 +568,9 @@ export async function finishSignIn(context: GmailContext, options: FinishOptions
     if (!same) {
       const current = config && expected ? (findById(config, 'inbox', expected)?.alias ?? flow.alias) : flow.alias;
       throw new CommsError('USAGE', `that sign-in is for "${current}", not "${options.onlyAlias}"`, {
-        hint: `Finish it without a name — \`agent-gmail inbox ${flow.mode} --finish ${options.flowId}\` — or start a sign-in for "${options.onlyAlias}".`,
+        hint: `Finish it without a name — ${inlineCommand(
+          shellCommand(['agent-gmail', 'inbox', flow.mode, '--finish', options.flowId], context.platform),
+        )} — or start a sign-in for "${options.onlyAlias}".`,
       });
     }
   }
@@ -617,7 +623,20 @@ async function waitForOutcome(
         hint:
           context.surface === 'mcp'
             ? `Open the link, choose the account, then call gmail_inbox_finish with flowId ${flow.flowId} again.`
-            : `Open the link, choose the account, then run \`agent-gmail inbox ${flow.mode === 'reauth' ? 'reauth' : 'add'} --finish ${flow.flowId} --wait ${FINISH_WAIT_SECONDS}\` again.`,
+            : `Open the link, choose the account, then run ${inlineCommand(
+                shellCommand(
+                  [
+                    'agent-gmail',
+                    'inbox',
+                    flow.mode === 'reauth' ? 'reauth' : 'add',
+                    '--finish',
+                    flow.flowId,
+                    '--wait',
+                    String(FINISH_WAIT_SECONDS),
+                  ],
+                  context.platform,
+                ),
+              )} again.`,
         details: { flowId: flow.flowId, expiresAt: flow.expiresAt },
       });
     }
