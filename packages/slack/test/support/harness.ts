@@ -120,7 +120,7 @@ export function assertInsideHome(paths: ResolvedPaths, home: string): void {
   }
 }
 
-export async function newHarness(): Promise<Harness> {
+export async function newHarness(options: { version?: 1 | 2 } = {}): Promise<Harness> {
   /*
    * The configuration inside the home rather than the home itself, as `~/.config/agent-communications` is inside a
    * person's. A download may never be saved into this package's own configuration folder, and with the two the same
@@ -160,7 +160,7 @@ export async function newHarness(): Promise<Harness> {
    * here that are not about names call their workspace `acme`, which version 2 does not accept, so the fixture pins
    * version 1; `names.test.ts` migrates it where the names are the point, and covers a fresh version-2 config too.
    */
-  writeFileSync(join(configDir, 'config.json'), `${JSON.stringify({ version: 1 }, null, 2)}\n`);
+  writeFileSync(join(configDir, 'config.json'), `${JSON.stringify({ version: options.version ?? 1 }, null, 2)}\n`);
   const calls: ExchangeCall[] = [];
 
   const harness: Harness = {

@@ -12,6 +12,7 @@ import {
   inlineCommand,
   type LooseningConsent,
   newAccountId,
+  type ProfileSlackTarget,
   readWholeNumber,
   type SecretStore,
   secretsStoreOf,
@@ -59,6 +60,7 @@ export interface StartOptions {
   readonly mode: InstallMode;
   readonly alias: string;
   readonly clientId: string;
+  readonly profile?: ProfileSlackTarget | undefined;
   /** Matching the one in the manifest. Slack compares redirect URLs exactly, so this is not negotiable. */
   readonly port: number;
   /** False keeps the listener in this process: the interactive flow, which waits. */
@@ -130,6 +132,7 @@ export async function startSignIn(context: SlackContext, options: StartOptions):
     ...(options.expect ? { expect: options.expect } : {}),
     ...(options.consent ? { consent: options.consent } : {}),
     clientId: options.clientId,
+    ...(options.profile ? { profile: options.profile } : {}),
     verifier: request.pkce.verifier,
     state: request.state,
     redirectUrl: request.redirectUrl,

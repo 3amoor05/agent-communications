@@ -1,6 +1,7 @@
 import {
   type AccountConfig,
   type ChangePolicy,
+  type ChangeRequest,
   CommsError,
   type Config,
   commandText,
@@ -8,7 +9,11 @@ import {
   findById,
   type GatedChange,
   inlineCommand,
+  neutralise,
+  type ProfileSlackTarget,
+  parseName,
   refuseUnclaimedApproval,
+  resolveProfileSlackTarget,
   type SendPolicy,
   shellCommand,
   withCredentialsLock,
@@ -134,36 +139,63 @@ function arriving(mode: InstallMode): AccountConfig {
 export function connectWorkspace(context: SlackContext, input: ConnectInput): GatedChange<StartedSignIn> {
   // Checked once, before anything is read: a word that is not a mode is the caller's mistake whatever is connected.
   const mode = modeWanted(input.mode) ?? 'read';
-  const checked = (config: Config): { clientId: string; port: number } => {
+  type Selection = { clientId: string; port: number; profile?: ProfileSlackTarget };
+  type ConnectRequest = ChangeRequest & { readonly selection: Selection };
+  const checked = (config: Config): Selection => {
     checkAliasFree(config, input.alias);
-    if (!input.clientId) {
+    if (input.clientId !== undefined) {
+      if (!input.clientId) {
+        throw new CommsError('USAGE', 'the Slack app’s Client ID is needed', {
+          hint: 'Create the app first: `agent-slack manifest --port 51234`. The Client ID is not a secret.',
+        });
+      }
+      return { clientId: input.clientId, port: checkedPort(input.port) };
+    }
+    if (config.version !== 2) {
       throw new CommsError('USAGE', 'the Slack app’s Client ID is needed', {
         hint: 'Create the app first: `agent-slack manifest --port 51234`. The Client ID is not a secret.',
       });
     }
-    return { clientId: input.clientId, port: checkedPort(input.port) };
+    if (input.port !== undefined) {
+      throw new CommsError('USAGE', 'a profile sign-in uses the profile port; --port needs an explicit --client-id', {
+        hint: 'Leave out --port to use the organisation app, or pass --client-id and --port for your own app.',
+      });
+    }
+    const organisation = parseName(input.alias)?.org;
+    if (!organisation) throw new CommsError('USAGE', 'a profile sign-in needs an organisation/slack name');
+    const target = resolveProfileSlackTarget(config, organisation, mode, context.platform);
+    const profile = {
+      ...target,
+      label: neutralise(target.label).text,
+      workspaceName: neutralise(target.workspaceName).text,
+    };
+    return { clientId: target.clientId, port: target.redirectPort, profile };
   };
   return {
     plan: (config) => {
-      const { clientId } = checked(config);
+      const selection = checked(config);
+      const { clientId } = selection;
       const after = structuredClone(config);
       after.accounts = { ...after.accounts, [input.alias]: arriving(mode) };
-      return {
+      const request: ConnectRequest = {
         account: input.alias,
         before: config,
         after,
+        selection,
         summary:
           mode === 'send' ? `Connect ${input.alias} able to post to Slack` : `Connect ${input.alias} to read Slack`,
         effects: mode === 'send' ? [postingSignIn(input.alias, clientId)] : [],
       };
+      return request;
     },
     apply: async (consent, request) => {
-      const { clientId, port } = checked(request.before);
+      const { clientId, port, profile } = (request as ConnectRequest).selection;
       return startSignIn(context, {
         alias: input.alias,
         mode,
         clientId,
         port,
+        ...(profile ? { profile } : {}),
         detached: input.detached,
         ...(consent ? { consent } : {}),
         ...(input.listenerCommand ? { listenerCommand: input.listenerCommand } : {}),
