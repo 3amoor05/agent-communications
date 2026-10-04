@@ -73,7 +73,7 @@ async function connect(harness: Harness, options: { workspace?: string; platform
   const call = async (name: string, args: Record<string, unknown>) =>
     (await client.callTool({ name, arguments: args })) as ToolResult;
   const names = async () => (await client.listTools()).tools.map((tool) => tool.name);
-  return { call, names, close: () => Promise.all([client.close(), server.close()]) };
+  return { client, call, names, close: () => Promise.all([client.close(), server.close()]) };
 }
 
 function ok<T>(result: ToolResult): T {
@@ -146,6 +146,51 @@ async function modeOf(harness: Harness, alias: string): Promise<string | undefin
 }
 
 // ── Connecting ───────────────────────────────────────────────────────────────────────────────────────────────
+
+test('MCP cancellation leaves the detached sign-in for a later finish after browser approval', async () => {
+  const harness = await newHarness();
+  const mcp = await connect(harness);
+  try {
+    const started = applied<Started>(
+      await mcp.call('slack_workspace_add', {
+        workspace: 'acme',
+        clientId: TEST_CLIENT_ID,
+        port: await freePort(),
+      }),
+    );
+    await track(harness, started.flowId);
+    const controller = new AbortController();
+    const waiting = mcp.client.callTool(
+      {
+        name: 'slack_workspace_finish',
+        arguments: {
+          flowId: started.flowId,
+          waitSeconds: 3,
+        },
+      },
+      { signal: controller.signal },
+    );
+    const cancelled = assert.rejects(waiting);
+    await new Promise((done) => setTimeout(done, 100));
+    controller.abort();
+    await cancelled;
+    await approveInSlack(started);
+    // Give an incorrectly uncancelled server call two polling intervals to consume the callback.
+    await new Promise((done) => setTimeout(done, 1100));
+    assert.equal(harness.calls.length, 0, 'the cancelled MCP request consumed the callback');
+    assert.equal((await harness.core.config.load()).accounts.acme, undefined);
+    const view = ok<{ alias: string }>(
+      await mcp.call('slack_workspace_finish', {
+        flowId: started.flowId,
+        waitSeconds: 0,
+      }),
+    );
+    assert.equal(view.alias, 'acme');
+    assert.equal(harness.calls.length, 1);
+  } finally {
+    await mcp.close();
+  }
+});
 
 test('connecting in read starts at once and returns the link; finishing records what Slack granted', async () => {
   const harness = await newHarness();

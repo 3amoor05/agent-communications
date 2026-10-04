@@ -1248,7 +1248,7 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
       },
       annotations: signingIn,
     },
-    async (args) => {
+    async (args, ctx) => {
       try {
         /*
          * Bound to a name when one is given, and on a pinned server always to its own: a flow id is all this takes,
@@ -1261,6 +1261,7 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
             flowId: args.flowId,
             // Checked by the operation, as `--wait` is, so a wait out of range is refused with a code: `checkedWait`.
             waitSeconds: args.waitSeconds,
+            signal: ctx.mcpReq.signal,
             ...(args.url === undefined ? {} : { url: args.url }),
             ...(name === undefined ? {} : { expectAlias: name }),
           }),

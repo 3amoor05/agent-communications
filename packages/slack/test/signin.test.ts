@@ -55,6 +55,51 @@ async function freePort(): Promise<number> {
   return port;
 }
 
+test('an own-app reauth cancelled before a pasted callback keeps its flow and prints the exact finish step', async () => {
+  const harness = await newHarness();
+  const account = await harness.addWorkspace({ alias: 'acme', oauthClientId: TEST_CLIENT_ID });
+  const flow: SlackFlow = {
+    flowId: newFlowId(),
+    alias: 'acme',
+    clientId: TEST_CLIENT_ID,
+    mode: 'read',
+    state: 'fake-state',
+    verifier: 'fake-verifier',
+    port: 60427,
+    redirectUrl: 'http://localhost:60427/slack/callback',
+    createdAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    expect: {
+      accountId: account.id,
+      workspaceId: account.workspace,
+      userId: account.userId,
+      secretRef: account.secretRef,
+    },
+  };
+  const context = harness.context({ platform: 'darwin' });
+  await context.flows.save(flow);
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    finishSignIn(context, {
+      flowId: flow.flowId,
+      url: `${flow.redirectUrl}?state=fake-state&code=fake-code`,
+      signal: controller.signal,
+    }),
+    (error: CommsError) => {
+      assert.equal(error.code, 'APPROVAL_PENDING');
+      assert.equal(
+        error.hint,
+        `Finish signing in in the browser, then run \`agent-slack workspace reauth acme --finish ${flow.flowId}\`.`,
+      );
+      return true;
+    },
+  );
+  assert.deepEqual(await context.flows.get(flow.flowId), flow);
+  assert.equal(harness.calls.length, 0);
+  assert.equal((await context.config()).accounts.acme?.secretRef, account.secretRef);
+});
+
 test('foreground own-app timeout retains its existing special case', async () => {
   const harness = await newHarness();
   const started = await startSignIn(harness.context(), {

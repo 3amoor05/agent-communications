@@ -1,0 +1,169 @@
+import assert from 'node:assert/strict';
+import { readdir } from 'node:fs/promises';
+import { createServer } from 'node:net';
+import { join } from 'node:path';
+import { test } from 'node:test';
+import { CommsError, resolveProfileSlackTarget } from '@agentcomms/core';
+import type { FlowOutcome } from '../src/auth/flow.ts';
+import { SlackContext } from '../src/context.ts';
+import { finishSignIn, startSignIn } from '../src/operations/signin.ts';
+import { slackOk } from './support/harness.ts';
+import { fetchListener, LISTENER_COMMAND, running, stopListeners } from './support/listener.ts';
+import { newOrganisationHarness } from './support/organisation.ts';
+
+async function fixture(platform: NodeJS.Platform = 'darwin') {
+  const server = createServer();
+  await new Promise<void>((done) => server.listen(0, 'localhost', done));
+  const port = (server.address() as { port: number }).port;
+  await new Promise<void>((done) => server.close(() => done()));
+  const harness = await newOrganisationHarness({ port, readAppId: 'A0READ' });
+  const context = new SlackContext({
+    core: harness.core,
+    env: harness.env,
+    platform,
+    exchange: async (params) => {
+      harness.calls.push({ params });
+      return slackOk({ team: { id: 'TRGC0001', name: 'RGC' }, app_id: 'A0READ' });
+    },
+  });
+  const profile = resolveProfileSlackTarget(await context.config(), 'rgc', 'read');
+  const started = await startSignIn(context, {
+    alias: 'rgc/slack',
+    clientId: profile.clientId,
+    mode: 'read',
+    port,
+    profile,
+    listenerCommand: LISTENER_COMMAND,
+  });
+  const flow = await context.flows.get(started.flowId);
+  assert.ok(flow.listenerPid);
+  return { harness, context, flow, pid: flow.listenerPid };
+}
+
+function cancelled(error: unknown, flowId: string) {
+  assert.ok(error instanceof CommsError);
+  assert.equal(error.code, 'APPROVAL_PENDING');
+  assert.match(error.message, /still open/);
+  assert.doesNotMatch(`${error.message} ${error.hint}`, /did not complete|declined|administrator/);
+  // All these words are shell-safe on both pinned platforms, including the generated flow id.
+  const command = `agent-slack workspace add --finish ${flowId}`;
+  assert.equal(error.hint, `Finish signing in in the browser, then run \`${command}\`.`);
+  assert.equal(error.details?.flowId, flowId);
+  return true;
+}
+
+for (const platform of ['darwin', 'win32'] as const) {
+  test(`pre-aborted detached finish leaves listener and flow untouched (${platform})`, async (t) => {
+    const f = await fixture(platform);
+    t.after(() => stopListeners([f.pid]));
+    const controller = new AbortController();
+    controller.abort();
+    let reads = 0;
+    const read = f.context.flows.readOutcome.bind(f.context.flows);
+    f.context.flows.readOutcome = async (id) => {
+      reads++;
+      return read(id);
+    };
+    await assert.rejects(
+      finishSignIn(f.context, { flowId: f.flow.flowId, waitSeconds: 0, signal: controller.signal }),
+      (error) => cancelled(error, f.flow.flowId),
+    );
+    assert.equal(reads, 0, 'an aborted wait polled the outcome');
+    assert.deepEqual(await f.context.flows.get(f.flow.flowId), f.flow);
+    assert.ok(running(f.pid), 'cancellation stopped the detached listener');
+    assert.deepEqual(
+      (await readdir(join(f.harness.core.paths.stateDir, 'slack', 'flows'))).sort(),
+      [`${f.flow.flowId}.json`, `${f.flow.flowId}.log`].sort(),
+    );
+    assert.equal(f.harness.calls.length, 0);
+    assert.equal((await f.context.config()).accounts['rgc/slack'], undefined);
+    assert.deepEqual(await readdir(join(f.harness.configDir, 'secrets')).catch(() => []), []);
+    const back = new URL(f.flow.redirectUrl);
+    back.searchParams.set('state', f.flow.state);
+    back.searchParams.set('code', 'fake-code');
+    assert.equal((await fetchListener(back)).status, 200);
+    const view = await finishSignIn(f.context, { flowId: f.flow.flowId, waitSeconds: 5, pollMs: 10 });
+    assert.equal(view.alias, 'rgc/slack');
+    assert.equal(f.harness.calls.length, 1);
+  });
+}
+
+test('abort during a long polling sleep promptly leaves the detached sign-in open', async (t) => {
+  const f = await fixture();
+  t.after(() => stopListeners([f.pid]));
+  const controller = new AbortController();
+  const read = f.context.flows.readOutcome.bind(f.context.flows);
+  let polled!: () => void;
+  const firstPoll = new Promise<void>((resolve) => {
+    polled = resolve;
+  });
+  f.context.flows.readOutcome = async (id) => {
+    const result = await read(id);
+    polled();
+    return result;
+  };
+  const waiting = finishSignIn(f.context, {
+    flowId: f.flow.flowId,
+    waitSeconds: 1,
+    pollMs: 1000,
+    signal: controller.signal,
+  });
+  const rejected = assert.rejects(waiting, (error) => cancelled(error, f.flow.flowId));
+  await firstPoll;
+  await new Promise((done) => setTimeout(done, 30));
+  controller.abort();
+  await Promise.race([
+    rejected,
+    new Promise((_, reject) => {
+      const timer = setTimeout(() => reject(new Error('cancelled wait did not settle promptly')), 500);
+      void rejected.finally(() => clearTimeout(timer)).catch(() => undefined);
+    }),
+  ]);
+  assert.deepEqual(await f.context.flows.get(f.flow.flowId), f.flow);
+  assert.equal(await f.context.flows.readOutcome(f.flow.flowId), null);
+  assert.ok(running(f.pid));
+});
+
+for (const outcome of [{ code: 'fake-code' }, { error: 'access_denied' }] satisfies FlowOutcome[]) {
+  test(`abort racing an unclaimed ${'code' in outcome ? 'code' : 'refusal'} preserves the outcome`, async (t) => {
+    const f = await fixture();
+    t.after(() => stopListeners([f.pid]));
+    const controller = new AbortController();
+    await f.context.flows.recordOutcome(f.flow.flowId, outcome);
+    const read = f.context.flows.readOutcome.bind(f.context.flows);
+    const saved = await read(f.flow.flowId);
+    f.context.flows.readOutcome = async (id) => {
+      const result = await read(id);
+      controller.abort();
+      return result;
+    };
+    await assert.rejects(
+      finishSignIn(f.context, { flowId: f.flow.flowId, waitSeconds: 0, signal: controller.signal }),
+      (error) => cancelled(error, f.flow.flowId),
+    );
+    assert.deepEqual(await f.context.flows.get(f.flow.flowId), f.flow);
+    assert.deepEqual(await read(f.flow.flowId), saved);
+    assert.equal(f.harness.calls.length, 0);
+    assert.ok(running(f.pid));
+    assert.ok(
+      !(await readdir(join(f.harness.core.paths.stateDir, 'slack', 'flows'))).some((file) => file.endsWith('.claim')),
+    );
+  });
+}
+
+test('abort after the finisher owns the outcome lets that owner complete once', async (t) => {
+  const f = await fixture();
+  t.after(() => stopListeners([f.pid]));
+  const controller = new AbortController();
+  const claim = f.context.flows.claim.bind(f.context.flows);
+  f.context.flows.claim = async (id) => {
+    const flow = await claim(id);
+    controller.abort();
+    return flow;
+  };
+  await f.context.flows.recordOutcome(f.flow.flowId, { code: 'fake-code' });
+  const view = await finishSignIn(f.context, { flowId: f.flow.flowId, waitSeconds: 0, signal: controller.signal });
+  assert.equal(view.alias, 'rgc/slack');
+  assert.equal(f.harness.calls.length, 1);
+  assert.equal(await f.context.flows.peek(f.flow.flowId), null);
+});

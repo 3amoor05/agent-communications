@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { constants } from 'node:fs';
 import { access, mkdir, open } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import {
   type AccountConfig,
@@ -456,6 +457,8 @@ export interface FinishOptions {
    */
   readonly waitSeconds?: unknown;
   readonly pollMs?: number | undefined;
+  /** Cancels only this wait; a detached sign-in remains available to the next finisher. */
+  readonly signal?: AbortSignal | undefined;
 }
 
 /**
@@ -503,6 +506,14 @@ function finishStep(context: SlackContext, flow: SlackFlow): string {
           context.platform,
         ),
       )}`;
+}
+
+function checkFinishCancellation(context: SlackContext, flow: SlackFlow, signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  throw new CommsError('APPROVAL_PENDING', 'the wait was cancelled; the sign-in is still open', {
+    hint: `Finish signing in in the browser, then ${finishStep(context, flow)}.`,
+    details: { flowId: flow.flowId, expiresAt: flow.expiresAt },
+  });
 }
 
 /** How the caller lists what is connected, in the words of the surface it is using. */
@@ -568,6 +579,7 @@ export async function finishSignIn(context: SlackContext, options: FinishOptions
     );
   }
 
+  checkFinishCancellation(context, flow, options.signal);
   let code: string;
   if (options.url) {
     try {
@@ -586,6 +598,7 @@ export async function finishSignIn(context: SlackContext, options: FinishOptions
     }
   } else {
     const outcome = await waitForOutcome(context, flow, { ...options, waitSeconds });
+    checkFinishCancellation(context, flow, options.signal);
     if ('error' in outcome) {
       await context.flows.discard(flow.flowId);
       throw flow.profile
@@ -612,11 +625,12 @@ export async function finishSignIn(context: SlackContext, options: FinishOptions
 async function waitForOutcome(
   context: SlackContext,
   flow: SlackFlow,
-  options: { waitSeconds: number; pollMs?: number | undefined },
+  options: { waitSeconds: number; pollMs?: number | undefined; signal?: AbortSignal | undefined },
 ): Promise<{ code: string } | { error: string; description?: string | undefined }> {
   const deadline = context.now().getTime() + options.waitSeconds * 1000;
   const pollMs = options.pollMs ?? 500;
   for (;;) {
+    checkFinishCancellation(context, flow, options.signal);
     if (flow.profile) {
       try {
         profileTargetFor(flow, await context.config(), context.platform);
@@ -627,6 +641,8 @@ async function waitForOutcome(
       }
     }
     const outcome = await context.flows.readOutcome(flow.flowId);
+    // Reading is not ownership. Cancellation winning this read leaves even an already-arrived outcome alone.
+    checkFinishCancellation(context, flow, options.signal);
     if (outcome) return outcome;
     if (flow.profile && context.now().getTime() >= Date.parse(flow.expiresAt)) {
       await context.flows.discard(flow.flowId);
@@ -656,7 +672,12 @@ async function waitForOutcome(
         details: { flowId: flow.flowId, expiresAt: flow.expiresAt },
       });
     }
-    await new Promise((settle) => setTimeout(settle, pollMs));
+    try {
+      await sleep(pollMs, undefined, { signal: options.signal });
+    } catch (error) {
+      checkFinishCancellation(context, flow, options.signal);
+      throw error;
+    }
   }
 }
 
