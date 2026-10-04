@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { access, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import {
   beginChangeApproval,
+  CommsError,
   type ConfigV2,
   finishChangeApproval,
   gatedChange,
@@ -268,6 +270,81 @@ test('second move appends an independent pending entry and unique new ref', asyn
   assert.equal(new Set([firstRef, secondRef, present(after.accounts[alias]).secretRef]).size, 3);
 });
 
+test('uncertain renewal keeps its staged credential when a later app move owns it in the ledger', async () => {
+  const f = await fixture();
+  const first = await savedMove(f, 'read');
+  // An ordinary same-app renewal can finish while a later profile move starts in another process.
+  await f.context.flows.patch(first.flowId, { transition: undefined });
+  const nextContext = new SlackContext({
+    core: f.h.core,
+    env: f.h.env,
+    exchange: f.context.exchange,
+    fetch: async () => new Response(JSON.stringify({ ok: true, revoked: false })),
+  });
+  const update = f.h.core.config.update.bind(f.h.core.config);
+  let renewedRef = '';
+  let failed = false;
+  f.h.core.config.update = async (...args) => {
+    const written = await update(...args);
+    if (!renewedRef) {
+      renewedRef = present(written.accounts[alias]).secretRef;
+      const second = await savedMove({ ...f, context: nextContext }, 'send');
+      await completeSignIn(nextContext, second.flowId, 'second');
+      failed = true;
+      throw new Error('post-commit lock release failure');
+    }
+    return written;
+  };
+  const config = f.context.config.bind(f.context);
+  let recoveryWasLocked = false;
+  f.context.config = async () => {
+    if (failed) {
+      recoveryWasLocked = await access(join(f.h.configDir, '.credentials.lock')).then(
+        () => true,
+        () => false,
+      );
+    }
+    return config();
+  };
+  const outcome = await Promise.allSettled([completeSignIn(f.context, first.flowId, 'first')]);
+  assert.ok(failed, 'the post-commit failure was not injected');
+  const current = await f.h.core.config.load();
+  assert.notEqual(current.accounts[alias]?.secretRef, renewedRef);
+  assert.ok(current.pendingRevocations?.some((entry) => entry.ref === renewedRef));
+  assert.ok(await (await f.h.core.secrets('file')).get(renewedRef), 'ledger-owned credential was withdrawn');
+  assert.equal(outcome[0]?.status, 'fulfilled');
+  assert.ok(recoveryWasLocked, 'ownership readback must hold the credentials lock');
+});
+
+for (const mode of ['read', 'send'] as const) {
+  test(`profile ${mode} transition with mismatched scopes directs the member to their administrator`, async () => {
+    const f = await fixture(mode === 'read' ? 'send' : 'read');
+    const source = (await f.h.core.config.load()).accounts[alias];
+    const flow = await savedMove(f, mode);
+    f.h.reply = () =>
+      slackOk({
+        team: { id: 'TRGC0001', name: 'RGC' },
+        app_id: mode === 'read' ? 'A0READ' : 'A0SEND',
+        scopes: scopesForMode(mode === 'read' ? 'send' : 'read'),
+      });
+    f.context.secrets = async () => {
+      throw new Error('scope refusal must precede staging');
+    };
+    await assert.rejects(completeSignIn(f.context, flow.flowId, 'scope-mismatch'), (error: unknown) => {
+      assert.ok(error instanceof CommsError);
+      assert.equal(error.code, mode === 'read' ? 'CONFIG' : 'SCOPE_MISSING');
+      assert.match(error.hint ?? '', /organisation administrator/);
+      assert.match(error.hint ?? '', new RegExp(`${mode} app`));
+      assert.doesNotMatch(
+        `${error.message} ${error.hint}`,
+        /manifest|uninstall|remove.{0,20}app|app.{0,20}remove|re-create|app update/i,
+      );
+      return true;
+    });
+    assert.deepEqual((await f.h.core.config.load()).accounts[alias], source);
+  });
+}
+
 const races: Record<string, (c: ConfigV2) => void> = {
   'profile SHA': (c) => {
     present(present(c.organisations).rgc).sha256 = 'b'.repeat(64);
@@ -310,6 +387,7 @@ for (const [name, mutate] of Object.entries(races)) {
     const flow = await savedMove(f, 'send');
     const real = await f.h.core.secrets('file');
     let staged = '';
+    let withdrawalWasLocked = false;
     f.context.secrets = async () =>
       interceptStore(real, {
         async set(ref) {
@@ -322,10 +400,14 @@ for (const [name, mutate] of Object.entries(races)) {
             await real.set(current.secretRef, old);
           }
         },
+        delete() {
+          withdrawalWasLocked = existsSync(join(f.h.configDir, '.credentials.lock'));
+        },
       });
     await assert.rejects(completeSignIn(f.context, flow.flowId, 'stale'), /changed|different/);
     assert.ok(staged, 'must exercise the post-staging validation');
     assert.equal(await real.get(staged), null);
+    assert.ok(withdrawalWasLocked, 'staged withdrawal must hold the credentials lock');
     assert.equal((await f.h.core.config.load()).pendingRevocations, undefined);
   });
 }

@@ -930,8 +930,8 @@ function stopListener(flow: SlackFlow, now: Date): void {
  * something nobody re-examined.
  */
 /**
- * Whether the configuration now names `ref` under `alias` — read fresh, after a write that may or may not have
- * committed. `unknown` when the configuration cannot be read at all, which must never be treated as `absent`.
+ * Whether the account or a later app move's ledger owns `ref`, read under the credentials lock after an uncertain
+ * write. `unknown` when the configuration cannot be read at all, which must never be treated as `absent`.
  */
 async function committed(
   context: SlackContext,
@@ -940,7 +940,11 @@ async function committed(
 ): Promise<'present' | 'absent' | 'unknown'> {
   try {
     // By the new account's id, not by name: a rename in the same write — or since — must not read as absent.
-    return findById(await context.config(), 'account', accountId)?.account.secretRef === ref ? 'present' : 'absent';
+    const config = await context.config();
+    return findById(config, 'account', accountId)?.account.secretRef === ref ||
+      config.pendingRevocations?.some((entry) => entry.ref === ref)
+      ? 'present'
+      : 'absent';
   } catch {
     return 'unknown';
   }
@@ -1286,14 +1290,18 @@ export async function completeSignIn(
        * release throws — a file Windows will not let go of — the call rejects with the write already in. Taking
        * the credential back then deletes the one the configuration now names, and turns a sign-in that worked
        * into a workspace with no token. So the configuration is read again first, and only a credential it does
-       * not name is withdrawn. If it cannot even be read, nothing is deleted: a possible leftover is reported,
+       * not name in either the account or the pending ledger is withdrawn. The read and withdrawal share the
+       * credentials lock, so another app move or migration cannot change ownership between them.
+       * If it cannot even be read, nothing is deleted: a possible leftover is reported,
        * because the alternative risks deleting a live one.
        */
-      const landed = await committed(context, accountId, secretRef);
-      if (landed === 'unknown') throw keepAndReport(error, secretRef);
-      if (landed === 'absent') {
-        throw await withdrawStaged(secrets, secretRef, explainRefusedConsent(error, flow, context.platform));
-      }
+      await withCredentialsLock(context.core.paths.configDir, async () => {
+        const landed = await committed(context, accountId, secretRef);
+        if (landed === 'unknown') throw keepAndReport(error, secretRef);
+        if (landed === 'absent') {
+          throw await withdrawStaged(secrets, secretRef, explainRefusedConsent(error, flow, context.platform));
+        }
+      });
       // 'present': the write is in and only the lock's cleanup failed. The sign-in worked; carry on as it did.
     }
 

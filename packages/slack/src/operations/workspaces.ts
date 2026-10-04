@@ -193,6 +193,19 @@ export function validateExchange(options: {
    * while holding a token that can. D1's guarantee is Slack's, and only if this holds.
    */
   const { missing, extra } = scopeMismatch(mode, token.scopes);
+  if (flow.profile && (missing.length > 0 || extra.length > 0)) {
+    throw new CommsError(
+      missing.length > 0 ? 'SCOPE_MISSING' : 'CONFIG',
+      `Slack granted permissions that do not match the organisation's ${mode} app: ${[
+        ...(missing.length > 0 ? [`missing ${missing.join(', ')}`] : []),
+        ...(extra.length > 0 ? [`unexpected ${extra.join(', ')}`] : []),
+      ].join('; ')}`,
+      {
+        hint: `Nothing was saved${existing ? `, and "${existing.alias}" is as it was` : ''}. Ask your organisation administrator to check the profile's ${mode} app permissions, then sign in again.`,
+        details: { missing, returned: extra },
+      },
+    );
+  }
   if (missing.length > 0) {
     /*
      * Asking for `send` and getting only reading back is not a person unticking boxes. A token can only be granted what

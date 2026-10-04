@@ -13,6 +13,7 @@ import {
 } from '@agentcomms/core';
 import { FLOW_TTL_MS, newFlowId, type SlackFlow } from '../src/auth/flow.ts';
 import { SlackContext } from '../src/context.ts';
+import { type InstallMode, scopesForMode } from '../src/manifest.ts';
 import { connectWorkspace } from '../src/operations/changes.ts';
 import { completeSignIn } from '../src/operations/signin.ts';
 import { listWorkspaces, showWorkspace } from '../src/operations/workspaces.ts';
@@ -41,14 +42,20 @@ function is(code: string, pattern: RegExp) {
 async function savedProfileFlow(
   harness: Awaited<ReturnType<typeof newOrganisationHarness>>,
   alias: string,
-  options: { ownApp?: boolean; clientId?: string; reply?: (params: Record<string, string>) => unknown } = {},
+  options: {
+    ownApp?: boolean;
+    clientId?: string;
+    mode?: InstallMode;
+    reply?: (params: Record<string, string>) => unknown;
+  } = {},
 ) {
   const context = new SlackContext({
     core: harness.core,
     env: harness.env,
     exchange: async (params) => (options.reply ? options.reply(params) : harness.exchange(params)),
   });
-  const target = resolveProfileSlackTarget(await harness.core.config.load(), 'rgc', 'read');
+  const mode = options.mode ?? 'read';
+  const target = resolveProfileSlackTarget(await harness.core.config.load(), 'rgc', mode);
   const profile = {
     ...target,
     label: neutralise(target.label).text,
@@ -57,7 +64,8 @@ async function savedProfileFlow(
   const now = new Date();
   const flow: SlackFlow = {
     flowId: newFlowId(),
-    mode: 'read',
+    mode,
+    ...(mode === 'send' ? { consent: { kind: 'loosening-consent' as const, paths: [`accounts.${alias}.mode`] } } : {}),
     alias,
     clientId: options.clientId ?? profile.clientId,
     ...(options.ownApp ? {} : { profile }),
@@ -70,6 +78,36 @@ async function savedProfileFlow(
   };
   await context.flows.save(flow);
   return { context, flow };
+}
+
+for (const mode of ['read', 'send'] as const) {
+  test(`profile ${mode} add with mismatched scopes directs the member to their administrator`, async () => {
+    const harness = await newOrganisationHarness({ port: await freePort(), readAppId: 'A0READ', sendAppId: 'A0SEND' });
+    const { context, flow } = await savedProfileFlow(harness, 'rgc/slack', {
+      mode,
+      reply: () =>
+        slackOk({
+          team: { id: 'TRGC0001', name: 'RGC' },
+          app_id: mode === 'read' ? 'A0READ' : 'A0SEND',
+          scopes: scopesForMode(mode === 'read' ? 'send' : 'read'),
+        }),
+    });
+    context.secrets = async () => {
+      throw new Error('scope refusal must precede staging');
+    };
+    await assert.rejects(completeSignIn(context, flow.flowId, 'scope-mismatch'), (error: unknown) => {
+      assert.ok(error instanceof CommsError);
+      assert.equal(error.code, mode === 'read' ? 'CONFIG' : 'SCOPE_MISSING');
+      assert.match(error.hint ?? '', /organisation administrator/);
+      assert.match(error.hint ?? '', new RegExp(`${mode} app`));
+      assert.doesNotMatch(
+        `${error.message} ${error.hint}`,
+        /manifest|uninstall|remove.{0,20}app|app.{0,20}remove|re-create|app update/i,
+      );
+      return true;
+    });
+    assert.equal((await harness.core.config.load()).accounts['rgc/slack'], undefined);
+  });
 }
 
 test('a profile exchange rejects the wrong workspace, client, app, or missing or invalid app id before staging', async () => {
