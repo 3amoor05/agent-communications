@@ -5,7 +5,7 @@ import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { afterEach, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { CommsError, classifyChange, parseConfig, type SecretStore } from '@agentcomms/core';
+import { CommsError, classifyChange, parseConfig, type SecretStore, withCredentialsLock } from '@agentcomms/core';
 import { newFlowId, type SlackFlow } from '../src/auth/flow.ts';
 import { SlackContext } from '../src/context.ts';
 import { scopesForMode } from '../src/manifest.ts';
@@ -622,6 +622,79 @@ test('a credential write that reports failure but landed anyway is taken back', 
     'a credential that landed after a reported failure was left behind',
   );
   assert.equal((await harness.core.config.load()).accounts.acme, undefined);
+});
+
+test('a staged credential retained behind a contended recovery lock is named with both failure contexts', async () => {
+  const harness = await newHarness();
+  const context = harness.context();
+  const flowId = newFlowId();
+  await context.flows.save(await pendingFlow(context, flowId));
+  const real = await harness.core.secrets('file');
+  const original = new CommsError('SECRET_STORE_UNAVAILABLE', 'credential write reported failure after staging', {
+    hint: 'Restore secret-store access.',
+  });
+  let staged = '';
+  let deletes = 0;
+  let recoveryReads = 0;
+  const config = context.config.bind(context);
+  context.config = async () => {
+    if (staged) recoveryReads++;
+    return config();
+  };
+  context.secrets = async () => ({
+    kind: real.kind,
+    get: (ref) => real.get(ref),
+    invalidate: (ref) => real.invalidate(ref),
+    async set(ref, value) {
+      await real.set(ref, value);
+      staged = ref;
+      throw original;
+    },
+    async delete(ref) {
+      deletes++;
+      return real.delete(ref);
+    },
+  });
+  let release!: () => void;
+  let acquired!: () => void;
+  const held = new Promise<void>((resolve) => {
+    acquired = resolve;
+  });
+  const untilReleased = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const holding = withCredentialsLock(harness.configDir, async () => {
+    acquired();
+    await untilReleased;
+  });
+  try {
+    await held;
+    const [outcome] = await Promise.allSettled([completeSignIn(context, flowId, 'fake-code')]);
+    assert.ok(staged, 'the credential was never staged');
+    assert.ok(await real.get(staged), 'the retained bundle is missing');
+    const current = await harness.core.config.load();
+    assert.equal(current.accounts.acme, undefined);
+    assert.equal(current.pendingRevocations, undefined);
+    assert.equal(deletes, 0, 'recovery must not delete without its credentials lock');
+    assert.equal(recoveryReads, 0, 'ownership must not be read without its credentials lock');
+    assert.equal(outcome?.status, 'rejected');
+    if (outcome?.status !== 'rejected') return;
+    const error = outcome.reason;
+    assert.ok(error instanceof CommsError);
+    assert.equal(error.details?.possiblyStrandedSecretRef, staged);
+    assert.equal(error.code, original.code);
+    assert.equal(error.message, original.message);
+    assert.equal(error.cause, original);
+    assert.match(error.hint ?? '', /Restore secret-store access/);
+    assert.match(error.hint ?? '', /kept rather than risk deleting a live one/);
+    assert.match(error.hint ?? '', /credentials lock could not be acquired/);
+    const recovery = error.details?.recoveryError as { code: string; message: string };
+    assert.equal(recovery.code, 'LOCK_TIMEOUT');
+    assert.match(recovery.message, /another agent-communications process is holding/);
+  } finally {
+    release();
+    await holding;
+  }
 });
 
 test('a sign-in refuses to finish into a backend a migration has just switched away from', async () => {

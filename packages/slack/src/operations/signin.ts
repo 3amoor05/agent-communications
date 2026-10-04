@@ -951,14 +951,16 @@ async function committed(
 }
 
 /** The original error, with the credential it may have left behind named — and deliberately not deleted. */
-function keepAndReport(original: unknown, ref: string): CommsError {
+function keepAndReport(original: unknown, ref: string, recovery?: { code: string; message: string }): CommsError {
   const base = original instanceof CommsError ? original : new CommsError('UNEXPECTED', String(original));
   return new CommsError(base.code, base.message, {
     hint:
-      `${base.hint ? `${base.hint} ` : ''}Whether the sign-in was saved could not be confirmed, so the credential ` +
+      `${base.hint ? `${base.hint} ` : ''}` +
+      `${recovery ? 'Credential ownership could not be checked because the credentials lock could not be acquired. ' : ''}` +
+      'Whether the sign-in was saved could not be confirmed, so the credential ' +
       `stored for it was kept rather than risk deleting a live one. Run \`agent-slack workspace list\`: if the ` +
       `workspace is not there, delete \`${ref}\` from your secret store.`,
-    details: { possiblyStrandedSecretRef: ref },
+    details: { possiblyStrandedSecretRef: ref, ...(recovery ? { recoveryError: recovery } : {}) },
     cause: original,
   });
 }
@@ -1295,13 +1297,25 @@ export async function completeSignIn(
        * If it cannot even be read, nothing is deleted: a possible leftover is reported,
        * because the alternative risks deleting a live one.
        */
-      await withCredentialsLock(context.core.paths.configDir, async () => {
-        const landed = await committed(context, accountId, secretRef);
-        if (landed === 'unknown') throw keepAndReport(error, secretRef);
-        if (landed === 'absent') {
-          throw await withdrawStaged(secrets, secretRef, explainRefusedConsent(error, flow, context.platform));
+      let recoveryEntered = false;
+      try {
+        await withCredentialsLock(context.core.paths.configDir, async () => {
+          recoveryEntered = true;
+          const landed = await committed(context, accountId, secretRef);
+          if (landed === 'unknown') throw keepAndReport(error, secretRef);
+          if (landed === 'absent') {
+            throw await withdrawStaged(secrets, secretRef, explainRefusedConsent(error, flow, context.platform));
+          }
+        });
+      } catch (recoveryError) {
+        if (!recoveryEntered) {
+          throw keepAndReport(error, secretRef, {
+            code: recoveryError instanceof CommsError ? recoveryError.code : 'UNEXPECTED',
+            message: recoveryError instanceof Error ? recoveryError.message : String(recoveryError),
+          });
         }
-      });
+        throw recoveryError;
+      }
       // 'present': the write is in and only the lock's cleanup failed. The sign-in worked; carry on as it did.
     }
 
