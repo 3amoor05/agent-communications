@@ -251,12 +251,32 @@ test('the migration ref list carries the non-mail accounts too', async () => {
         createdAt: NOW,
       },
     },
+    pendingRevocations: [
+      {
+        ref: 'slack/token/superseded',
+        store: 'file' as const,
+        platform: 'slack',
+        workspace: 'T0001',
+        createdAt: NOW,
+        tokens: { access: { status: 'pending' as const, deadline: '2026-02-01T00:00:00.000Z' } },
+      },
+      {
+        // The same physical bundle is never copied twice merely because two cleanup records name it.
+        ref: 'slack/token/superseded',
+        store: 'file' as const,
+        platform: 'slack',
+        workspace: 'T0001',
+        createdAt: NOW,
+        tokens: { access: { status: 'pending' as const, deadline: '2026-02-01T00:00:00.000Z' } },
+      },
+    ],
   };
 
   const refs = secretRefsOf(config);
   assert.ok(refs.includes('slack/token/acme'), `a workspace token would be stranded: ${JSON.stringify(refs)}`);
   assert.ok(refs.includes('gmail/token/acme'));
   assert.ok(refs.includes('gmail/client/desktop'));
+  assert.ok(refs.includes('slack/token/superseded'), 'the only reference to the old bundle was omitted');
   // Deduplicated: two entries may legitimately share a ref, and moving it twice would report it twice.
   assert.equal(new Set(refs).size, refs.length);
 });
@@ -270,7 +290,7 @@ test('a migration does not switch backends when a credential appeared or vanishe
    * Asserted on the decision rather than by running a migration, for the reason given at the top of this file:
    * the only other backend is the real keychain, and a test must never write to it.
    */
-  const { migrationConflict, secretRefsOf } = await import('../src/operations/secrets-migrate.ts');
+  const { migrationConflict, secretLocationsOf } = await import('../src/operations/secrets-migrate.ts');
   const { parseConfig } = await import('../src/config.ts');
   const base = parseConfig(
     JSON.stringify({
@@ -289,7 +309,7 @@ test('a migration does not switch backends when a credential appeared or vanishe
       },
     }),
   );
-  const copied = secretRefsOf(base);
+  const copied = secretLocationsOf(base);
   assert.equal(migrationConflict(base, 'keychain', copied), null, 'an unchanged config was refused');
 
   const added = structuredClone(base);
@@ -317,21 +337,27 @@ test('a migration does not switch backends when a credential appeared or vanishe
  */
 function memoryStore(
   kind: 'keychain' | 'file',
-  options: { failSet?: string; failDelete?: boolean; deleteDelayMs?: number } = {},
+  options: { failGet?: string; failSet?: string; failDelete?: boolean; deleteDelayMs?: number } = {},
 ) {
   const values = new Map<string, string>();
+  const calls = { get: [] as string[], set: [] as string[], delete: [] as string[] };
   return {
     values,
+    calls,
     store: {
       kind,
       async get(ref: string) {
+        calls.get.push(ref);
+        if (options.failGet === ref) throw new Error('the secret could not be read');
         return values.get(ref) ?? null;
       },
       async set(ref: string, value: string) {
+        calls.set.push(ref);
         values.set(ref, value);
         if (options.failSet === ref) throw new Error('timed out waiting for the keychain');
       },
       async delete(ref: string) {
+        calls.delete.push(ref);
         if (options.deleteDelayMs) await new Promise((settle) => setTimeout(settle, options.deleteDelayMs));
         if (options.failDelete) throw new Error('the keychain said no');
         return values.delete(ref);
@@ -340,6 +366,189 @@ function memoryStore(
     },
   };
 }
+
+const ROOT_REF = 'slack/token/current';
+const SOURCE_PENDING_REF = 'slack/token/source-pending';
+const TARGET_PENDING_REF = 'slack/token/target-pending';
+
+async function coreWithPendingLocations() {
+  const { openCore } = await import('../src/core.ts');
+  const dir = tempDir();
+  const core = openCore({ env: { AGENT_COMMS_CONFIG_DIR: dir, HOME: dir, USERPROFILE: dir } });
+  await core.config.update((config) => ({
+    ...config,
+    secrets: { store: 'file' },
+    accounts: {
+      'acme/slack': {
+        id: 'acc_AAAAAAAAAAAAAAAA',
+        platform: 'slack',
+        workspace: 'T1',
+        userId: 'U1',
+        tier: 'read',
+        grantedScopes: [],
+        secretRef: ROOT_REF,
+        createdAt: NOW,
+      },
+    },
+    pendingRevocations: [
+      {
+        ref: SOURCE_PENDING_REF,
+        store: 'file',
+        platform: 'slack',
+        workspace: 'T1',
+        createdAt: NOW,
+        tokens: { access: { status: 'pending', deadline: '2026-02-01T00:00:00.000Z' } },
+      },
+      {
+        ref: TARGET_PENDING_REF,
+        store: 'keychain',
+        platform: 'slack',
+        workspace: 'T1',
+        createdAt: NOW,
+        tokens: { access: { status: 'pending', deadline: '2026-02-01T00:00:00.000Z' } },
+      },
+    ],
+  }));
+  const source = memoryStore('file');
+  source.values.set(ROOT_REF, 'current-token');
+  source.values.set(SOURCE_PENDING_REF, 'source-pending-token');
+  const target = memoryStore('keychain');
+  target.values.set(TARGET_PENDING_REF, 'target-pending-token');
+  return { core, source, target };
+}
+
+test('a mixed migration copies source bundles, verifies target bundles in place, and switches both locations atomically', async () => {
+  const { migrateSecrets, secretsMigration } = await import('../src/operations/secrets-migrate.ts');
+  const { core, source, target } = await coreWithPendingLocations();
+  const planned = await secretsMigration(core, 'keychain', {
+    stores: { source: source.store, target: target.store },
+    surface: 'cli',
+  }).plan(await core.config.load());
+  assert.deepEqual(planned.effects, [
+    'copies the 2 credentials this configuration names from files on this disk to the system keychain, and then deletes the originals from files on this disk; verifies the 1 pending credential already in the system keychain and keeps it there',
+  ]);
+  assert.deepEqual(
+    planned.after.pendingRevocations?.map((entry) => entry.store),
+    ['keychain', 'keychain'],
+  );
+
+  let updates = 0;
+  const events: string[] = [];
+  const removeSource = source.store.delete.bind(source.store);
+  source.store.delete = async (ref) => {
+    events.push(`delete:${ref}`);
+    return removeSource(ref);
+  };
+  const update = core.config.update.bind(core.config);
+  core.config.update = (async (...args: Parameters<typeof update>) => {
+    updates += 1;
+    const written = await update(...args);
+    events.push('switch');
+    return written;
+  }) as typeof core.config.update;
+  const result = await migrateSecrets(core, 'keychain', { source: source.store, target: target.store });
+
+  assert.equal(result.moved, 2);
+  assert.equal(updates, 1, 'the root switch and ledger rewrite were separate updates');
+  assert.equal(target.values.get(ROOT_REF), 'current-token');
+  assert.equal(target.values.get(SOURCE_PENDING_REF), 'source-pending-token');
+  assert.equal(target.values.get(TARGET_PENDING_REF), 'target-pending-token');
+  assert.deepEqual(target.calls.set.sort(), [ROOT_REF, SOURCE_PENDING_REF].sort(), 'an in-place bundle was rewritten');
+  assert.equal(
+    target.calls.delete.includes(TARGET_PENDING_REF),
+    false,
+    'an in-place bundle was put on rollback cleanup',
+  );
+  assert.equal(source.values.has(ROOT_REF), false);
+  assert.equal(source.values.has(SOURCE_PENDING_REF), false);
+  assert.ok(
+    events
+      .filter((event) => event.startsWith('delete:'))
+      .every((event) => events.indexOf(event) > events.indexOf('switch')),
+    `a true source was deleted before the atomic switch: ${events.join(', ')}`,
+  );
+  const after = await core.config.load();
+  assert.equal(after.secrets?.store, 'keychain');
+  assert.deepEqual(
+    after.pendingRevocations?.map((entry) => entry.store),
+    ['keychain', 'keychain'],
+  );
+});
+
+test('a missing or unreadable in-place pending bundle aborts before any copy or cleanup', async () => {
+  const { migrateSecrets } = await import('../src/operations/secrets-migrate.ts');
+  for (const unreadable of [false, true]) {
+    const { core, source } = await coreWithPendingLocations();
+    const target = memoryStore('keychain', unreadable ? { failGet: TARGET_PENDING_REF } : {});
+    await assert.rejects(
+      migrateSecrets(core, 'keychain', { source: source.store, target: target.store }),
+      /pending|read/,
+    );
+    assert.deepEqual(target.calls.set, [], 'a source copy started before the in-place preflight finished');
+    assert.deepEqual(target.calls.delete, [], 'an in-place verification failure deleted from the target');
+    assert.deepEqual(source.calls.delete, [], 'an in-place verification failure deleted from the source');
+    assert.equal(source.values.get(ROOT_REF), 'current-token');
+    assert.equal((await core.config.load()).secrets?.store, 'file');
+  }
+});
+
+test('a failed mixed switch rolls back only copies and leaves an in-place target bundle alone', async () => {
+  const { migrateSecrets } = await import('../src/operations/secrets-migrate.ts');
+  const { core, source, target } = await coreWithPendingLocations();
+  const update = core.config.update.bind(core.config);
+  core.config.update = (async () => {
+    throw new CommsError('TRANSIENT', 'another writer won');
+  }) as typeof core.config.update;
+
+  await assert.rejects(
+    migrateSecrets(core, 'keychain', { source: source.store, target: target.store }),
+    /another writer/,
+  );
+  core.config.update = update;
+  assert.equal(target.values.has(ROOT_REF), false);
+  assert.equal(target.values.has(SOURCE_PENDING_REF), false);
+  assert.equal(target.values.get(TARGET_PENDING_REF), 'target-pending-token');
+  assert.equal(target.calls.delete.includes(TARGET_PENDING_REF), false);
+  assert.equal(source.values.get(ROOT_REF), 'current-token');
+  assert.equal(source.values.get(SOURCE_PENDING_REF), 'source-pending-token');
+  assert.deepEqual(
+    (await core.config.load()).pendingRevocations?.map((entry) => entry.store),
+    ['file', 'keychain'],
+  );
+});
+
+test('a migration conflict snapshot includes every pending reference location', async () => {
+  const { migrationConflict, secretLocationsOf } = await import('../src/operations/secrets-migrate.ts');
+  const { core } = await coreWithPendingLocations();
+  const before = await core.config.load();
+  const locations = secretLocationsOf(before);
+  assert.equal(migrationConflict(before, 'file', locations), null);
+  const moved = structuredClone(before);
+  const entry = moved.pendingRevocations?.find((item) => item.ref === SOURCE_PENDING_REF);
+  assert.ok(entry);
+  entry.store = 'keychain';
+  assert.match(migrationConflict(moved, 'file', locations) ?? '', /location/);
+});
+
+test('the frozen 0.12.1 migration switches only the root and preserves an unknown pending location', async () => {
+  const { secretsStoreSwitchAsReleased0121, writeAsReleased0121 } = await import('./fixtures/config-v2-0.12.1.ts');
+  const pendingRevocations = [
+    {
+      ref: SOURCE_PENDING_REF,
+      store: 'file',
+      platform: 'slack',
+      workspace: 'T1',
+      createdAt: NOW,
+      tokens: { access: { status: 'pending', deadline: '2026-02-01T00:00:00.000Z' } },
+    },
+  ];
+  const written = writeAsReleased0121(JSON.stringify({ version: 2, clients: {}, pendingRevocations }), (raw) =>
+    secretsStoreSwitchAsReleased0121(raw, 'keychain'),
+  );
+  const parsed = JSON.parse(written);
+  assert.deepEqual(parsed.secrets, { store: 'keychain' });
+  assert.deepEqual(parsed.pendingRevocations, pendingRevocations, 'the older writer rewrote an unknown ledger');
+});
 
 async function coreWithTwoSlackTokens() {
   const { openCore } = await import('../src/core.ts');

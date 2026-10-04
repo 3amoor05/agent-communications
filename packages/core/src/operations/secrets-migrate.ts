@@ -33,9 +33,73 @@ export function secretRefsOf(config: Config): string[] {
       ...Object.values(config.clients).map((client) => client.secretRef),
       ...Object.values(config.inboxes).map((inbox) => inbox.secretRef),
       ...Object.values(config.accounts).map((account) => account.secretRef),
+      ...(config.pendingRevocations ?? []).map((entry) => entry.ref),
       APPROVAL_KEY_REF,
     ]),
   ];
+}
+
+/** The physical backend a named secret occupies before a migration starts. */
+export interface SecretLocation {
+  readonly ref: string;
+  readonly store: SecretStoreKind;
+}
+
+/**
+ * One stable location snapshot for conflict detection.
+ *
+ * Ordinary credentials follow the root store. Pending bundles do not: their ledger entry remains authoritative when
+ * an older release moves only the root. The pair is deduplicated because more than one record may name one bundle.
+ */
+export function secretLocationsOf(config: Config): SecretLocation[] {
+  const root = secretsStoreOf(config);
+  const locations = [
+    ...Object.values(config.clients).map((client) => ({ ref: client.secretRef, store: root })),
+    ...Object.values(config.inboxes).map((inbox) => ({ ref: inbox.secretRef, store: root })),
+    ...Object.values(config.accounts).map((account) => ({ ref: account.secretRef, store: root })),
+    { ref: APPROVAL_KEY_REF, store: root },
+    ...(config.pendingRevocations ?? []).map((entry) => ({ ref: entry.ref, store: entry.store })),
+  ];
+  return [...new Map(locations.map((location) => [`${location.store}\0${location.ref}`, location] as const)).values()];
+}
+
+interface PhysicalMigrationPlan {
+  readonly from: SecretStoreKind;
+  readonly to: SecretStoreKind;
+  readonly snapshot: readonly SecretLocation[];
+  readonly copy: readonly string[];
+  readonly verifyInPlace: readonly string[];
+  readonly requiredSource: ReadonlySet<string>;
+}
+
+/** Partitions physical locations before any store is touched. */
+function physicalMigrationPlan(config: Config, to: SecretStoreKind): PhysicalMigrationPlan {
+  const from = secretsStoreOf(config);
+  const snapshot = secretLocationsOf(config);
+  const byRef = new Map<string, Set<SecretStoreKind>>();
+  for (const location of snapshot) {
+    const stores = byRef.get(location.ref) ?? new Set<SecretStoreKind>();
+    stores.add(location.store);
+    byRef.set(location.ref, stores);
+  }
+  const ambiguous = [...byRef].find(([, stores]) => stores.size > 1);
+  if (ambiguous) {
+    throw new CommsError(
+      'CONFIG',
+      `secret ${ambiguous[0]} is recorded in more than one backend; no migration was started`,
+    );
+  }
+  const requiredSource = new Set(
+    (config.pendingRevocations ?? []).filter((entry) => entry.store === from).map((entry) => entry.ref),
+  );
+  return {
+    from,
+    to,
+    snapshot,
+    copy: [...byRef].filter(([, stores]) => stores.has(from)).map(([ref]) => ref),
+    verifyInPlace: [...byRef].filter(([, stores]) => stores.has(to)).map(([ref]) => ref),
+    requiredSource,
+  };
 }
 
 /** A credential this command put somewhere it did not mean to leave it, and could not take back. */
@@ -77,13 +141,9 @@ export function migrationLeftoversError(result: MigrationResult): CommsError | n
  *
  * A `false` from `delete` means nothing was there, which is the outcome wanted.
  */
-async function takeBack(
-  store: SecretStore,
-  backend: SecretStoreKind,
-  refs: readonly string[],
-): Promise<MigrationLeftover[]> {
+async function takeBack(store: SecretStore, locations: readonly SecretLocation[]): Promise<MigrationLeftover[]> {
   const leftovers: MigrationLeftover[] = [];
-  for (const ref of refs) {
+  for (const { store: backend, ref } of locations) {
     let gone = false;
     for (let attempt = 0; attempt < 2 && !gone; attempt++) {
       gone = await store.delete(ref).then(
@@ -171,6 +231,7 @@ async function migrateUnderLock(
   const config = await core.config.load();
   const from = secretsStoreOf(config);
   if (from === to) return { from, to, moved: 0, leftovers: [] };
+  const plan = physicalMigrationPlan(config, to);
   /*
    * Consent is checked again here, under the lock, before any store is opened.
    *
@@ -202,8 +263,8 @@ async function migrateUnderLock(
       secretsDir: core.paths.secretsDir,
       namespace: keychainNamespace(core.paths.configDir),
     }));
-  const refs = secretRefsOf(config);
-  const attempted: string[] = [];
+  const attemptedTargets: SecretLocation[] = [];
+  const sourceCleanup: SecretLocation[] = [];
   let moved = 0;
   let announced = false;
   // Ties the records of one migration together: two can run one after another, and their lines interleave with
@@ -226,10 +287,28 @@ async function migrateUnderLock(
     return { from, to, moved, leftovers };
   };
   try {
-    for (const ref of refs) {
+    /*
+     * Verify target-resident pending bundles before copying anything.
+     *
+     * There is no safe rollback for these references: they were present before this migration and the ledger
+     * already points at them. A missing or unreadable one therefore stops the operation before a write creates any
+     * duplicate that would then need cleanup.
+     */
+    for (const ref of plan.verifyInPlace) {
+      if ((await target.get(ref)) === null) {
+        throw new CommsError('CONFIG', `pending secret ${ref} is missing from its recorded ${to} store`);
+      }
+    }
+    for (const ref of plan.copy) {
       const value = await source.get(ref);
-      if (value === null) continue;
-      attempted.push(ref);
+      if (value === null) {
+        if (plan.requiredSource.has(ref)) {
+          throw new CommsError('CONFIG', `pending secret ${ref} is missing from its recorded ${from} store`);
+        }
+        continue;
+      }
+      attemptedTargets.push({ store: to, ref });
+      sourceCleanup.push({ store: from, ref });
       await target.set(ref, value);
       if ((await target.get(ref)) !== value)
         throw new CommsError('CONFIG', `could not verify a migrated secret (${ref})`);
@@ -250,9 +329,15 @@ async function migrateUnderLock(
     await core.config.update(
       (current) => {
         // Under the lock, where it holds. See `migrationConflict`.
-        const conflict = migrationConflict(current, from, refs);
+        const conflict = migrationConflict(current, from, plan.snapshot);
         if (conflict) throw new CommsError('TRANSIENT', conflict, { hint: 'Nothing was switched. Run it again.' });
-        return { ...current, secrets: { store: to } };
+        return {
+          ...current,
+          secrets: { store: to },
+          pendingRevocations: current.pendingRevocations?.map((entry) =>
+            entry.store === from ? { ...entry, store: to } : entry,
+          ),
+        };
       },
       consent ? { consent } : {},
     );
@@ -273,7 +358,7 @@ async function migrateUnderLock(
       switched = undefined;
     }
     if (switched === true) {
-      const leftovers = await takeBack(source, from, attempted);
+      const leftovers = await takeBack(source, sourceCleanup);
       return finished(leftovers);
     }
     if (switched === undefined) {
@@ -289,13 +374,16 @@ async function migrateUnderLock(
         hint:
           `${base.hint ? `${base.hint} ` : ''}Whether the backend was switched could not be confirmed, so nothing ` +
           `was deleted from either. Run ${inlineCommand(shellCommand(['agentcomms', 'secrets', 'migrate', '--to', to], platform))} again once the configuration is readable.`,
-        details: { unconfirmed: true, copiedToTarget: attempted.map((ref) => ({ backend: to, ref })) },
+        details: {
+          unconfirmed: true,
+          copiedToTarget: attemptedTargets.map((location) => ({ backend: location.store, ref: location.ref })),
+        },
         cause: error,
       });
     }
     // Not switched, so every copy is a duplicate of a secret still in the source — a live credential in a backend
     // nothing reads from. Take them back, and name any that will not go.
-    const leftovers = await takeBack(target, to, attempted);
+    const leftovers = await takeBack(target, attemptedTargets);
     // A failure the log already heard about — the switch was announced — or one that left copies behind is recorded.
     // One that stopped before either changed nothing, and says nothing.
     if (announced || leftovers.length > 0) {
@@ -315,7 +403,7 @@ async function migrateUnderLock(
   // Switched. The originals are now the duplicates, in the backend nothing reads. Only the references that were
   // actually copied have an original to remove — the rest held nothing, and "could not delete nothing" reported a
   // credential left behind that never existed.
-  const leftovers = await takeBack(source, from, attempted);
+  const leftovers = await takeBack(source, sourceCleanup);
   return finished(leftovers);
 }
 
@@ -333,13 +421,19 @@ async function migrateUnderLock(
 export function migrationConflict(
   current: Config,
   from: SecretStoreKind,
-  copiedRefs: readonly string[],
+  copiedLocations: readonly SecretLocation[],
 ): string | null {
   if (secretsStoreOf(current) !== from) return 'the secret store was changed by something else while migrating';
-  const now = new Set(secretRefsOf(current));
-  const then = new Set(copiedRefs);
-  if (now.size !== then.size || [...now].some((ref) => !then.has(ref))) {
+  const nowLocations = secretLocationsOf(current);
+  const nowRefs = new Set(nowLocations.map((location) => location.ref));
+  const thenRefs = new Set(copiedLocations.map((location) => location.ref));
+  if (nowRefs.size !== thenRefs.size || [...nowRefs].some((ref) => !thenRefs.has(ref))) {
     return 'a credential was added or removed while migrating';
+  }
+  const canonical = (locations: readonly SecretLocation[]) =>
+    locations.map((location) => `${location.store}\0${location.ref}`).sort();
+  if (canonical(nowLocations).join('\n') !== canonical(copiedLocations).join('\n')) {
+    return 'a pending credential location changed while migrating';
   }
   return null;
 }
@@ -371,16 +465,37 @@ export function secretsMigration(
   return {
     plan: (config) => {
       const from = secretsStoreOf(config);
-      const after: Config = from === to ? config : { ...config, secrets: { store: to } };
-      // The approval key is this machine's own, and is re-created if it is lost; what a person is asked about is
-      // their accounts' credentials.
-      const named = secretRefsOf(config).filter((ref) => ref !== APPROVAL_KEY_REF).length;
-      const effects =
-        from === to || named === 0
-          ? []
-          : [
-              `copies the ${named} credential${named === 1 ? '' : 's'} this configuration names from ${STORE_WORDS[from]} to ${STORE_WORDS[to]}, and then deletes the originals from ${STORE_WORDS[from]}`,
-            ];
+      const after: Config =
+        from === to
+          ? config
+          : {
+              ...config,
+              secrets: { store: to },
+              pendingRevocations: config.pendingRevocations?.map((entry) =>
+                entry.store === from ? { ...entry, store: to } : entry,
+              ),
+            };
+      let effects: string[] = [];
+      if (from !== to) {
+        const physical = physicalMigrationPlan(config, to);
+        // The approval key is this machine's own, and is re-created if it is lost; what a person is asked about is
+        // their accounts' credentials. Target-side pending bundles are separate because neither a copy nor a delete
+        // will touch them.
+        const copied = physical.copy.filter((ref) => ref !== APPROVAL_KEY_REF).length;
+        const kept = physical.verifyInPlace.filter((ref) => ref !== APPROVAL_KEY_REF).length;
+        const clauses: string[] = [];
+        if (copied > 0) {
+          clauses.push(
+            `copies the ${copied} credential${copied === 1 ? '' : 's'} this configuration names from ${STORE_WORDS[from]} to ${STORE_WORDS[to]}, and then deletes the originals from ${STORE_WORDS[from]}`,
+          );
+        }
+        if (kept > 0) {
+          clauses.push(
+            `verifies the ${kept} pending credential${kept === 1 ? '' : 's'} already in ${STORE_WORDS[to]} and keeps ${kept === 1 ? 'it' : 'them'} there`,
+          );
+        }
+        if (clauses.length > 0) effects = [clauses.join('; ')];
+      }
       return {
         before: config,
         after,

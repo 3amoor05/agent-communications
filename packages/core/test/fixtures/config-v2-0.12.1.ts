@@ -124,3 +124,8 @@ export function clientAddReplaceAsReleased0121(
 export function clientRemoveAsReleased0121(config: Raw, name: string): void {
   delete config.clients[name];
 }
+
+/** 0.12.1's secret migration knew only the root store, so an unknown ledger survives but is not rewritten. */
+export function secretsStoreSwitchAsReleased0121(config: Raw, store: 'keychain' | 'file'): void {
+  config.secrets = { store };
+}
