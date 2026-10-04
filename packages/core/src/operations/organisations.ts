@@ -864,7 +864,10 @@ function profileChange(
    */
   const storeFor = async (config: Config, profilePlan: ProfilePlan): Promise<StoreKind | null> => {
     if (profilePlan.secret) {
-      const chosen = await chooseSecretStore(config, spec.store, { keyring: options.keyring });
+      const chosen = await chooseSecretStore(config, spec.store, {
+        keyring: options.keyring,
+        platform: options.platform,
+      });
       if (chosen.choosing) profilePlan.needsApproval = true;
       return chosen.store;
     }

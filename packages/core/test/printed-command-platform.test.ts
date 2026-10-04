@@ -70,3 +70,11 @@ test('core passes a selected platform to every printed shell command', () => {
   }
   assert.deepEqual(missing, [], `shellCommand calls without an explicit platform:\n${missing.join('\n')}`);
 });
+
+test('organisation secret-store selection receives the operation platform', () => {
+  const source = readFileSync(join(SOURCE, 'operations', 'organisations.ts'), 'utf8');
+  assert.match(
+    source,
+    /chooseSecretStore\s*\(\s*config,\s*spec\.store,\s*\{\s*keyring:\s*options\.keyring,\s*platform:\s*options\.platform,?\s*\}\s*\)/,
+  );
+});

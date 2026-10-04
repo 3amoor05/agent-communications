@@ -396,6 +396,30 @@ test('--store chooses where the first secret goes and the preview says so; a sec
   );
 });
 
+test('a different --store refusal is rendered with the organisation operation platform', async () => {
+  for (const platform of ['darwin', 'win32'] as const) {
+    const m = machine();
+    writeProfile(m, profile());
+    const migrate = inlineCommand(shellCommand(['agentcomms', 'secrets', 'migrate', '--to', 'keychain'], platform));
+    await assert.rejects(
+      gatedChange(
+        m.core,
+        orgAddChange(m.core, { file: 'acme.agentcomms.json', store: 'keychain' }, options(m, { platform })),
+        { surface: 'mcp' },
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof CommsError);
+        assert.equal(
+          error.hint,
+          `Everything here uses one store, and changing it moves what is already stored. To change it, run ${migrate}, then run this again.`,
+          platform,
+        );
+        return true;
+      },
+    );
+  }
+});
+
 test('a secrets migration that lands between planning and the lock stops the change before anything is written', async () => {
   const m = machine({});
   writeProfile(m, profile());
