@@ -138,11 +138,24 @@ test('empty workspace guidance builds its command for the selected shell', () =>
 });
 
 test('list, show and connected output name the organisation app role', () => {
-  const profile = view({ alias: 'rgc/slack', organisation: 'rgc', profileApp: 'read' });
-  assert.match(renderWorkspaces([profile], false), /Really Good Culture's read app/);
-  assert.match(renderWorkspace(profile, false), /Really Good Culture's read app/);
-  assert.match(renderConnected(profile, false, false), /Really Good Culture's read app/);
-  assert.doesNotMatch(renderWorkspace(profile, false), /your own app/);
+  for (const mode of ['read', 'send'] as const) {
+    const profile = view({
+      alias: 'rgc/slack',
+      organisation: 'rgc',
+      organisationLabel: 'North Culture',
+      profileApp: mode,
+    });
+    for (const rendered of [
+      renderWorkspaces([profile], false),
+      renderWorkspace(profile, false),
+      renderConnected(profile, false, false),
+    ]) {
+      assert.match(rendered, new RegExp(`North Culture's ${mode} app`));
+      assert.doesNotMatch(rendered, /Really Good Culture|your own app/);
+    }
+  }
+  const missingProfile = view({ alias: 'rgc/slack', organisation: 'rgc', profileApp: 'read' });
+  assert.match(renderWorkspace(missingProfile, false), /the rgc organisation's read app/);
   const own = renderWorkspace(view({ oauthClientId: '1111.2222' }), false);
   assert.match(own, /your own app/);
   assert.match(renderWorkspaces([view({ oauthClientId: '1111.2222' })], false), /your own app/);

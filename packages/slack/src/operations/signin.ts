@@ -1350,13 +1350,13 @@ export async function completeSignIn(
           message: 'the app switch was saved; its old credential remains pending cleanup',
         });
       }
-      return { ...viewOf(writtenAlias, written), cleanup };
+      return { ...viewOf(writtenAlias, written, flow.profile?.label), cleanup };
     }
     if (previousRef && previousRef !== secretRef) {
       await secrets.delete(previousRef).catch(() => undefined);
     }
 
-    return viewOf(writtenAlias, written);
+    return viewOf(writtenAlias, written, flow.profile?.label);
   } finally {
     // Only the owner may stop the listener or discard the flow; a cancelled or losing finisher does neither.
     stopListener(flow, context.now());

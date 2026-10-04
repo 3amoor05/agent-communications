@@ -10,10 +10,12 @@ import {
   neutralise,
   newAccountId,
   type ProfileSlackTarget,
+  recordOf,
   resolveName,
   resolveProfileSlackTarget,
   secretsStoreOf,
   shellCommand,
+  shownText,
 } from '@agentcomms/core';
 import { type ExchangedToken, safeSlackFailureText, scopeMismatch } from '../auth/authorize.ts';
 import { BUNDLE_VERSION, serialiseBundle, type TokenBundle } from '../auth/bundle.ts';
@@ -43,6 +45,8 @@ export interface WorkspaceView {
   readonly oauthClientId?: string | undefined;
   readonly appId?: string | undefined;
   readonly organisation?: string | undefined;
+  /** Neutralised and flattened label from the named organisation profile, when it is still available. */
+  readonly organisationLabel?: string | undefined;
   readonly profileApp?: 'read' | 'send' | undefined;
   readonly createdAt: string;
   /** Present after switching profile apps; each old token's cleanup state is reported separately. */
@@ -58,7 +62,7 @@ export interface WorkspaceView {
  * split a control token. Enveloping every name would make `workspace list` unreadable for a risk the neutraliser
  * already covers.
  */
-export function viewOf(alias: string, account: AccountConfig): WorkspaceView {
+export function viewOf(alias: string, account: AccountConfig, profileLabel?: string): WorkspaceView {
   return {
     alias,
     accountId: account.id,
@@ -70,22 +74,29 @@ export function viewOf(alias: string, account: AccountConfig): WorkspaceView {
     ...(account.oauthClientId ? { oauthClientId: account.oauthClientId } : {}),
     ...(account.appId ? { appId: account.appId } : {}),
     ...(account.organisation ? { organisation: account.organisation } : {}),
+    ...(account.organisation && account.profileApp && profileLabel
+      ? { organisationLabel: shownText(profileLabel, 64) }
+      : {}),
     ...(account.profileApp ? { profileApp: account.profileApp } : {}),
     createdAt: account.createdAt,
   };
 }
 
+function profileLabelOf(config: Config, account: AccountConfig): string | undefined {
+  return account.organisation ? recordOf(config, account.organisation)?.label : undefined;
+}
+
 export function listWorkspaces(config: Config): WorkspaceView[] {
   return Object.entries(config.accounts)
     .filter(([, account]) => account.platform === 'slack')
-    .map(([alias, account]) => viewOf(alias, account))
+    .map(([alias, account]) => viewOf(alias, account, profileLabelOf(config, account)))
     .sort((a, b) => a.alias.localeCompare(b.alias));
 }
 
 /** Everything known about one workspace — `workspace show` and `slack_workspace_show`. */
 export function showWorkspace(config: Config, alias: string): WorkspaceView {
   const found = requireWorkspace(config, alias);
-  return viewOf(found.alias, found.account);
+  return viewOf(found.alias, found.account, profileLabelOf(config, found.account));
 }
 
 export function requireWorkspace(config: Config, alias: string): { alias: string; account: AccountConfig } {

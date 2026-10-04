@@ -583,8 +583,15 @@ configuration problem.`,
         return;
       }
       if (!alias) {
+        const profile = inlineCommand(shellCommand(['agent-slack', 'workspace', 'add', 'acme/slack'], platform));
+        const own = inlineCommand(
+          shellCommand(
+            ['agent-slack', 'workspace', 'add', 'acme/slack', '--client-id', '<id>', '--port', '51234'],
+            platform,
+          ),
+        );
         throw new CommsError('USAGE', 'a name for the workspace is needed', {
-          hint: 'e.g. `agent-slack workspace add acme/slack`, or use your own app with `--client-id <id> --port 51234`.',
+          hint: `e.g. ${profile}, or use your own app with ${own}.`,
         });
       }
       const mode = String(flags.mode) as InstallMode;

@@ -6,7 +6,14 @@ import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, test } from 'node:test';
-import { EXIT_CODES, gatedChange, updateLaterChange, withCredentialsLock } from '@agentcomms/core';
+import {
+  EXIT_CODES,
+  gatedChange,
+  inlineCommand,
+  shellCommand,
+  updateLaterChange,
+  withCredentialsLock,
+} from '@agentcomms/core';
 import { parseBundle } from '../src/auth/bundle.ts';
 import { openFlowStore } from '../src/auth/flow.ts';
 import { run } from '../src/cli/program.ts';
@@ -1748,6 +1755,22 @@ test('every name the command suggests is one a config made today would accept', 
   const missing = await cli(harness, ['workspace', 'add', '--json']);
   assert.equal(missing.code, EXIT_CODES.USAGE);
   assert.match(missing.json<Envelope<never>>().error?.hint ?? '', /workspace add acme\/slack/);
+});
+
+test('missing workspace name builds both suggested commands for the selected shell', async () => {
+  const harness = await newHarness();
+  for (const platform of ['darwin', 'win32'] as const) {
+    const result = await cli(harness, ['workspace', 'add', '--json'], { platform });
+    assert.equal(result.code, EXIT_CODES.USAGE);
+    const profile = inlineCommand(shellCommand(['agent-slack', 'workspace', 'add', 'acme/slack'], platform));
+    const own = inlineCommand(
+      shellCommand(
+        ['agent-slack', 'workspace', 'add', 'acme/slack', '--client-id', '<id>', '--port', '51234'],
+        platform,
+      ),
+    );
+    assert.equal(result.json<Envelope<never>>().error?.hint, `e.g. ${profile}, or use your own app with ${own}.`);
+  }
 });
 
 test('react --help says removal only removes your reaction', async () => {

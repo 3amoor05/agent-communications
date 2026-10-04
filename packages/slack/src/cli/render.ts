@@ -103,8 +103,9 @@ export function renderWorkspace(workspace: WorkspaceView, color: boolean): strin
 
 function appRoute(workspace: WorkspaceView): string {
   if (!workspace.organisation || !workspace.profileApp) return 'through your own app';
-  const owner =
-    workspace.organisation === 'rgc' ? 'Really Good Culture' : `the ${cell(workspace.organisation)} organisation`;
+  const owner = workspace.organisationLabel
+    ? cell(workspace.organisationLabel, 64)
+    : `the ${cell(workspace.organisation)} organisation`;
   return `through ${owner}'s ${workspace.profileApp} app`;
 }
 
