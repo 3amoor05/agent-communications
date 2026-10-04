@@ -14,7 +14,7 @@ import {
 } from '@agentcomms/core';
 import { keyPermissionOf, type NamedAccount } from '../accounts.ts';
 import { resendRequest, type WriteOutcome } from '../api/client.ts';
-import { APPROVAL_TAG, closedPermit, spendOn } from '../api/guard.ts';
+import { APPROVAL_TAG, closedPermit, type FetchLike, spendOn } from '../api/guard.ts';
 import {
   type BuiltMessage,
   buildMessage,
@@ -580,9 +580,19 @@ export async function executeSend(
   }
 
   let resendId: string;
+  let requestIssued = false;
+  const innerFetch = transport.fetch ?? (fetch as FetchLike);
+  // Mark the inner fetch, after the throttle and request guard: before this runs, Resend certainly saw nothing.
+  const trackedTransport = {
+    ...transport,
+    fetch: async (...args: Parameters<FetchLike>) => {
+      requestIssued = true;
+      return innerFetch(...args);
+    },
+  };
   try {
     const response = await spendOn(permit, options.approvalId, 'emails.send', () =>
-      resendRequest<{ id?: unknown }>(transport, 'POST', '/emails', {
+      resendRequest<{ id?: unknown }>(trackedTransport, 'POST', '/emails', {
         body: payloadOf(message, options.approvalId, contents),
         idempotencyKey: options.approvalId,
       }),
@@ -594,6 +604,9 @@ export async function executeSend(
     }
     resendId = response.id;
   } catch (error) {
+    if (!requestIssued) {
+      throw await recordNoSend(context, records, bookkeeping, error);
+    }
     const outcome: WriteOutcome =
       error instanceof CommsError && error.details?.outcome === 'not-sent'
         ? 'not-sent'

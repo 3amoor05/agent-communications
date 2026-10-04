@@ -131,19 +131,28 @@ test('every certain no-send path attempts release, approval, local record and au
     ['approval', 'audit'],
     ['record', 'audit'],
   ];
-  const triggers = ['attempt record', 'started audit', 'Resend refusal'] as const;
+  const triggers = [
+    'reservation failure',
+    'attempt record',
+    'started audit',
+    'throttle preflight',
+    'Resend refusal',
+  ] as const;
 
   for (const trigger of triggers) {
     for (const failures of failureSets) {
       await t.test(`${trigger}; ${failures.join(' and ')} fail`, async () => {
-        const { send, state } = await prepared();
+        const { approval, context, send, state } = await prepared();
         const config = await harness.core.config.load();
         const accountId = config.accounts['acme/resend']?.id;
         assert.ok(accountId);
-        const original = new CommsError('LOCK_TIMEOUT', `${trigger} stopped the send`, {
-          hint: 'Keep the first hint.',
-          details: { trigger },
-        });
+        const original: Error =
+          trigger === 'throttle preflight'
+            ? new Error('the throttle state could not be read before the request')
+            : new CommsError('LOCK_TIMEOUT', `${trigger} stopped the send`, {
+                hint: 'Keep the first hint.',
+                details: { trigger },
+              });
         if (trigger === 'Resend refusal') {
           harness.fake.intercept = (request) =>
             request.method === 'POST' && request.path === '/emails'
@@ -152,10 +161,17 @@ test('every certain no-send path attempts release, approval, local record and au
         }
 
         const calls: Step[] = [];
+        const reserve = SendRecords.prototype.reserve;
         const release = SendRecords.prototype.release;
         const record = SendRecords.prototype.record;
         const complete = harness.core.approvals.complete.bind(harness.core.approvals);
         const append = harness.core.audit.append.bind(harness.core.audit);
+        SendRecords.prototype.reserve = async function (...args) {
+          await reserve.apply(this, args);
+          if (trigger === 'reservation failure' && args[1] === approval.approvalId) {
+            throw original;
+          }
+        };
         SendRecords.prototype.release = async function (id, approvalId) {
           calls.push('release');
           if (failures.includes('release')) throw new Error('release disk is read-only');
@@ -183,6 +199,11 @@ test('every certain no-send path attempts release, approval, local record and au
           }
           return append(audit, ...rest);
         };
+        if (trigger === 'throttle preflight') {
+          context.throttle().before = async () => {
+            throw original;
+          };
+        }
 
         try {
           const error = await send().then(
@@ -191,18 +212,26 @@ test('every certain no-send path attempts release, approval, local record and au
           );
           assert.ok(error instanceof CommsError, String(error));
           assert.deepEqual(calls, ['release', 'approval', 'record', 'audit']);
-          assert.ok(error.cause instanceof CommsError || error.cause === original);
-          const cause = error.cause as CommsError;
-          assert.equal(error.code, cause.code);
-          assert.equal(error.message, cause.message);
-          assert.deepEqual(error.details, cause.details);
-          if (trigger !== 'Resend refusal') assert.equal(cause, original);
-          if (cause.hint !== undefined) assert.ok(error.hint?.startsWith(cause.hint));
+          if (original instanceof CommsError) {
+            assert.ok(error.cause instanceof CommsError);
+            const cause = error.cause as CommsError;
+            assert.equal(error.code, cause.code);
+            assert.equal(error.message, cause.message);
+            assert.deepEqual(error.details, cause.details);
+            if (trigger !== 'Resend refusal') assert.equal(cause, original);
+            if (cause.hint !== undefined) assert.ok(error.hint?.startsWith(cause.hint));
+          } else {
+            assert.equal(error.code, 'UNEXPECTED');
+            assert.equal(error.message, original.message);
+            assert.equal(error.details, undefined);
+            assert.equal(error.cause, original);
+          }
           for (const step of failures) {
             const needle = step === 'record' ? 'send record' : step;
             assert.match(error.hint ?? '', new RegExp(`${needle} .*read-only`));
           }
           assert.equal(await state(), failures.includes('approval') ? 'sending' : 'failed');
+          if (trigger === 'throttle preflight') assert.equal(harness.fake.sends().length, 0);
 
           const records = new SendRecords(harness.core.paths.stateDir);
           const probe = await records.reserve(accountId, 'capacity-probe', { perHour: 1, perDay: 1 }).then(
@@ -216,6 +245,7 @@ test('every certain no-send path attempts release, approval, local record and au
           assert.equal(probe, failures.includes('release') ? 'held' : 'free');
           if (probe === 'free') await release.call(records, accountId, 'capacity-probe');
         } finally {
+          SendRecords.prototype.reserve = reserve;
           SendRecords.prototype.release = release;
           SendRecords.prototype.record = record;
           harness.core.approvals.complete = complete;
@@ -271,6 +301,7 @@ test('a Resend cap refusal takes no slot, completes the claimed approval and rem
   );
   assert.ok(error instanceof CommsError, String(error));
   assert.equal(error.code, 'RATE_CAPPED');
+  assert.equal(error.message, 'nothing was sent: the send limit for this account is reached');
   assert.equal(error.cause instanceof CommsError, true);
   assert.equal(await state(), 'failed');
   const local = await records.summary(accountId, approval.approvalId);
