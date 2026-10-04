@@ -1,5 +1,5 @@
 import { CommsError, type Config, type Core, openCore, type SecretStore, secretsStoreOf } from '@agentcomms/core';
-import { closedPermit, guardSlackRequests } from './api/guard.ts';
+import { closedPermit, type FetchLike, guardSlackRequests } from './api/guard.ts';
 import { SLACK_ORIGIN } from './api/methods.ts';
 import { type FlowStore, openFlowStore } from './auth/flow.ts';
 import type { PersistPolicy } from './auth/refresh.ts';
@@ -26,6 +26,10 @@ export interface SlackContextOptions {
   cwd?: string | undefined;
   /** Exchanges an authorisation code. Injected so a test never reaches Slack. */
   exchange?: (params: Record<string, string>) => Promise<unknown>;
+  /** The guarded Web API's inner fetch. Tests point it at loopback; production leaves it as global fetch. */
+  fetch?: FetchLike | undefined;
+  /** The Slack Web API origin. Tests normally keep the real origin and rewrite only after the guard. */
+  slackBaseUrl?: string | undefined;
   /**
    * How patiently a renewed credential's write is retried, on every surface. Tests shorten the minute it takes in
    * production, so a store that never recovers can be driven through a whole command.
@@ -100,6 +104,8 @@ export class SlackContext {
   readonly cwd: string;
   readonly flows: FlowStore;
   readonly exchange: (params: Record<string, string>) => Promise<unknown>;
+  readonly fetch: FetchLike | undefined;
+  readonly slackBaseUrl: string | undefined;
   readonly persist: PersistPolicy | undefined;
 
   constructor(options: SlackContextOptions = {}) {
@@ -111,6 +117,8 @@ export class SlackContext {
     this.cwd = options.cwd ?? process.cwd();
     this.flows = openFlowStore(this.core.paths.stateDir, this.now);
     this.exchange = options.exchange ?? postExchange;
+    this.fetch = options.fetch;
+    this.slackBaseUrl = options.slackBaseUrl;
     this.persist = options.persist;
   }
 

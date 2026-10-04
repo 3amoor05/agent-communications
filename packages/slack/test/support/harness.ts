@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { type AccountConfig, type Core, isInside, newAccountId, openCore, type ResolvedPaths } from '@agentcomms/core';
 import { BUNDLE_VERSION, serialiseBundle, type TokenBundle } from '../../src/auth/bundle.ts';
+import { SlackContext, type SlackContextOptions } from '../../src/context.ts';
 import { type InstallMode, scopesForMode } from '../../src/manifest.ts';
 import { secretRefFor } from '../../src/operations/workspaces.ts';
 
@@ -51,6 +52,8 @@ export interface Harness {
   authTest: () => Response;
   probe: (input: string | URL, init?: RequestInit) => Promise<Response>;
   exchange(params: Record<string, string>): Promise<unknown>;
+  /** Builds an operation context over this harness's core, with only the dependencies a test names replaced. */
+  context(options?: Omit<SlackContextOptions, 'core' | 'env' | 'exchange'>): SlackContext;
   /** Writes a connected workspace straight into the config, for tests that are not about signing in. */
   addWorkspace(options: {
     alias: string;
@@ -177,6 +180,14 @@ export async function newHarness(): Promise<Harness> {
     async exchange(params) {
       calls.push({ params });
       return harness.reply(params);
+    },
+    context(options = {}) {
+      return new SlackContext({
+        core,
+        env,
+        exchange: (params) => harness.exchange(params),
+        ...options,
+      });
     },
     async addWorkspace(options) {
       const id = newAccountId();

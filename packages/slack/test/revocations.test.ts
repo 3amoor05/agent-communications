@@ -1,14 +1,25 @@
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { test } from 'node:test';
-import type { PendingRevocationTokenState } from '@agentcomms/core';
-import type { TokenBundle } from '../src/auth/bundle.ts';
+import {
+  type CommsError,
+  credentialsLockPath,
+  type PendingRevocation,
+  type PendingRevocationTokenState,
+  type SecretStore,
+} from '@agentcomms/core';
+import { parseBundle, serialiseBundle, type TokenBundle } from '../src/auth/bundle.ts';
 import {
   classifyRevocationAnswer,
   createPendingRevocation,
   pendingRevocationTokens,
   type RevocationEvidence,
+  retryPendingRevocations,
   revocationTokenResult,
+  revokePendingEntry,
 } from '../src/operations/revocations.ts';
+import { DROP, type HttpReply, startFakeSlack } from './support/fake-slack.ts';
+import { type Harness, newHarness } from './support/harness.ts';
 
 const CREATED = '2026-10-04T12:00:00.000Z';
 const FALLBACK = '2026-11-03T12:00:00.000Z';
@@ -180,4 +191,472 @@ test('the plain token result names its kind, state and fixed deadline', () => {
     status: 'pending',
     deadline: '2026-11-01T00:00:00.000Z',
   });
+});
+
+interface RevocationMachine {
+  readonly harness: Harness;
+  readonly ref: string;
+  readonly bundle: TokenBundle;
+  readonly entry: PendingRevocation;
+}
+
+async function revocationMachine(over: Partial<TokenBundle> = {}): Promise<RevocationMachine> {
+  const harness = await newHarness();
+  const ref = 'slack/token/superseded';
+  const old = bundle(over);
+  await (await harness.core.secrets('file')).set(ref, serialiseBundle(old));
+  const entry = createPendingRevocation({ ref, store: 'file', workspace: 'T123', createdAt: CREATED, bundle: old });
+  await harness.core.config.update((config) => ({ ...config, pendingRevocations: [entry] }));
+  return { harness, ref, bundle: old, entry };
+}
+
+function wrapStore(inner: SecretStore, over: Partial<SecretStore>): SecretStore {
+  return {
+    kind: inner.kind,
+    get: inner.get.bind(inner),
+    set: inner.set.bind(inner),
+    delete: inner.delete.bind(inner),
+    invalidate: inner.invalidate.bind(inner),
+    ...(inner.settled ? { settled: inner.settled.bind(inner) } : {}),
+    ...over,
+  };
+}
+
+function failBundleDeletion(machine: RevocationMachine): void {
+  const open = machine.harness.core.secrets.bind(machine.harness.core);
+  machine.harness.core.secrets = (async (kind) => {
+    const inner = await open(kind);
+    return wrapStore(inner, {
+      async delete(ref) {
+        if (ref === machine.ref) throw new Error('the secret store refused deletion');
+        return inner.delete(ref);
+      },
+    });
+  }) as typeof machine.harness.core.secrets;
+}
+
+async function ledgerEntry(machine: RevocationMachine): Promise<PendingRevocation | undefined> {
+  return (await machine.harness.core.config.load()).pendingRevocations?.find((entry) => entry.ref === machine.ref);
+}
+
+const ACCESS_ANSWERS: ReadonlyArray<{
+  readonly label: string;
+  readonly answer: unknown | HttpReply | typeof DROP;
+  readonly status: PendingRevocationTokenState['status'];
+}> = [
+  { label: 'ok and revoked', answer: { ok: true, revoked: true }, status: 'revoked' },
+  { label: 'ok and not revoked', answer: { ok: true, revoked: false }, status: 'pending' },
+  { label: 'ok without revoked', answer: { ok: true }, status: 'pending' },
+  { label: 'token_revoked', answer: { ok: false, error: 'token_revoked' }, status: 'revoked' },
+  { label: 'token_expired', answer: { ok: false, error: 'token_expired' }, status: 'revoked' },
+  { label: 'invalid_auth', answer: { ok: false, error: 'invalid_auth' }, status: 'pending' },
+  { label: 'account_inactive', answer: { ok: false, error: 'account_inactive' }, status: 'pending' },
+  { label: 'ratelimited', answer: { ok: false, error: 'ratelimited' }, status: 'pending' },
+  {
+    label: 'http 500 with JSON',
+    answer: { status: 500, body: { ok: false, error: 'token_revoked' } },
+    status: 'pending',
+  },
+  { label: 'dropped connection', answer: DROP, status: 'pending' },
+  { label: 'unreadable empty body', answer: undefined, status: 'pending' },
+  { label: 'unnamed refusal', answer: { ok: false }, status: 'pending' },
+  { label: 'a future error', answer: { ok: false, error: 'future_error' }, status: 'pending' },
+];
+
+test('the executor persists the access token’s own cautious answer through a guarded auth.revoke', async () => {
+  for (const item of ACCESS_ANSWERS) {
+    const machine = await revocationMachine({ refreshToken: undefined, refreshExpiresAt: undefined });
+    failBundleDeletion(machine);
+    const fake = await startFakeSlack({ 'auth.revoke': () => item.answer });
+    try {
+      const result = await revokePendingEntry(
+        machine.harness.context({ fetch: fake.fetch, now: () => new Date('2026-10-04T13:00:00.000Z') }),
+        machine.ref,
+      );
+      assert.equal(result.tokens[0]?.status, item.status, item.label);
+      assert.equal((await ledgerEntry(machine))?.tokens.access.status, item.status, item.label);
+      assert.ok(await (await machine.harness.core.secrets('file')).get(machine.ref), `${item.label}: bundle was lost`);
+      assert.deepEqual(
+        fake.requests.map((request) => request.method),
+        ['auth.revoke'],
+        item.label,
+      );
+      assert.equal(fake.requests[0]?.authorization, `Bearer ${machine.bundle.accessToken}`, item.label);
+      assert.equal(
+        JSON.stringify(result).includes(machine.bundle.accessToken),
+        false,
+        `${item.label}: token in result`,
+      );
+    } finally {
+      await fake.close();
+    }
+  }
+});
+
+const REFRESH_ANSWERS = ACCESS_ANSWERS.filter((item) => item.label !== 'unreadable empty body');
+
+test('the refresh token is always called second and persists its own answer without borrowing access success', async () => {
+  for (const item of REFRESH_ANSWERS) {
+    const machine = await revocationMachine();
+    failBundleDeletion(machine);
+    let call = 0;
+    const fake = await startFakeSlack({
+      'auth.revoke': () => {
+        call += 1;
+        return call === 1 ? { ok: true, revoked: true } : item.answer;
+      },
+    });
+    try {
+      const result = await revokePendingEntry(
+        machine.harness.context({ fetch: fake.fetch, now: () => new Date('2026-10-04T13:00:00.000Z') }),
+        machine.ref,
+      );
+      assert.deepEqual(
+        result.tokens.map(({ kind, status }) => ({ kind, status })),
+        [
+          { kind: 'access', status: 'revoked' },
+          { kind: 'refresh', status: item.status },
+        ],
+        item.label,
+      );
+      const kept = await ledgerEntry(machine);
+      assert.equal(kept?.tokens.access.status, 'revoked', item.label);
+      assert.equal(kept?.tokens.refresh?.status, item.status, item.label);
+      assert.ok(await (await machine.harness.core.secrets('file')).get(machine.ref), `${item.label}: bundle was lost`);
+      assert.deepEqual(
+        fake.requests.map((request) => request.authorization),
+        [`Bearer ${machine.bundle.accessToken}`, `Bearer ${machine.bundle.refreshToken}`],
+        item.label,
+      );
+    } finally {
+      await fake.close();
+    }
+  }
+});
+
+test('two conclusive answers still make two calls, then delete the bundle before the exact ledger entry', async () => {
+  const machine = await revocationMachine();
+  const events: string[] = [];
+  const open = machine.harness.core.secrets.bind(machine.harness.core);
+  machine.harness.core.secrets = (async (kind) => {
+    const inner = await open(kind);
+    return wrapStore(inner, {
+      async delete(ref) {
+        const present = (await machine.harness.core.config.load()).pendingRevocations?.some(
+          (entry) => entry.ref === ref,
+        );
+        events.push(`delete:${String(present)}`);
+        return inner.delete(ref);
+      },
+    });
+  }) as typeof machine.harness.core.secrets;
+  const fake = await startFakeSlack({
+    'auth.revoke': () => {
+      events.push(`network-lock:${String(existsSync(credentialsLockPath(machine.harness.configDir)))}`);
+      return { ok: true, revoked: true };
+    },
+  });
+  try {
+    const result = await revokePendingEntry(
+      machine.harness.context({ fetch: fake.fetch, now: () => new Date('2026-10-04T13:00:00.000Z') }),
+      machine.ref,
+    );
+    assert.deepEqual(
+      result.tokens.map(({ kind, status }) => ({ kind, status })),
+      [
+        { kind: 'access', status: 'revoked' },
+        { kind: 'refresh', status: 'revoked' },
+      ],
+    );
+    assert.deepEqual(
+      fake.requests.map((request) => request.authorization),
+      [`Bearer ${machine.bundle.accessToken}`, `Bearer ${machine.bundle.refreshToken}`],
+    );
+    assert.equal(await (await machine.harness.core.secrets('file')).get(machine.ref), null);
+    assert.equal(await ledgerEntry(machine), undefined);
+    assert.deepEqual(events, ['network-lock:false', 'network-lock:false', 'delete:true']);
+    assert.equal(result.cleaned, true);
+  } finally {
+    await fake.close();
+  }
+});
+
+test('a pending first answer never suppresses an independently conclusive refresh answer', async () => {
+  const machine = await revocationMachine();
+  let call = 0;
+  const fake = await startFakeSlack({
+    'auth.revoke': () => (++call === 1 ? { ok: false, error: 'invalid_auth' } : { ok: true, revoked: true }),
+  });
+  try {
+    const result = await revokePendingEntry(
+      machine.harness.context({ fetch: fake.fetch, now: () => new Date('2026-10-04T13:00:00.000Z') }),
+      machine.ref,
+    );
+    assert.deepEqual(
+      result.tokens.map(({ kind, status }) => ({ kind, status })),
+      [
+        { kind: 'access', status: 'pending' },
+        { kind: 'refresh', status: 'revoked' },
+      ],
+    );
+    assert.equal(fake.requests.length, 2);
+    assert.ok(await ledgerEntry(machine));
+    assert.ok(await (await machine.harness.core.secrets('file')).get(machine.ref));
+  } finally {
+    await fake.close();
+  }
+});
+
+test('wrong refs, caller tokens, final rows and bad stores make no revocation request', async () => {
+  const cases = ['missing', 'corrupt', 'failed-read'] as const;
+  for (const what of cases) {
+    const machine = await revocationMachine({ refreshToken: undefined });
+    const secrets = await machine.harness.core.secrets('file');
+    if (what === 'missing') await secrets.delete(machine.ref);
+    if (what === 'corrupt') await secrets.set(machine.ref, '{not a bundle');
+    if (what === 'failed-read') {
+      const open = machine.harness.core.secrets.bind(machine.harness.core);
+      machine.harness.core.secrets = (async (kind) => {
+        const inner = await open(kind);
+        return wrapStore(inner, {
+          async get(ref) {
+            if (ref === machine.ref) throw new Error('the store could not be read');
+            return inner.get(ref);
+          },
+        });
+      }) as typeof machine.harness.core.secrets;
+    }
+    const fake = await startFakeSlack({ 'auth.revoke': () => ({ ok: true, revoked: true }) });
+    try {
+      const result = await revokePendingEntry(
+        machine.harness.context({ fetch: fake.fetch, now: () => new Date('2026-10-04T13:00:00.000Z') }),
+        machine.ref,
+      );
+      assert.equal(result.tokens[0]?.status, 'pending', what);
+      assert.ok(result.issue, `${what}: no refusal was reported`);
+      assert.equal(fake.requests.length, 0, what);
+    } finally {
+      await fake.close();
+    }
+  }
+
+  const machine = await revocationMachine({ refreshToken: undefined });
+  const fake = await startFakeSlack({ 'auth.revoke': () => ({ ok: true, revoked: true }) });
+  try {
+    const context = machine.harness.context({ fetch: fake.fetch });
+    await assert.rejects(revokePendingEntry(context, 'slack/token/not-this-entry'), (error: CommsError) => {
+      assert.equal(error.code, 'NOT_FOUND');
+      return true;
+    });
+    await assert.rejects(
+      revokePendingEntry(context, { ref: machine.ref, token: machine.bundle.accessToken } as never),
+      /reference must be passed by name; a token is never accepted/,
+    );
+    assert.equal(fake.requests.length, 0);
+  } finally {
+    await fake.close();
+  }
+});
+
+test('the executor reads the bundle from the ledger entry’s recorded store, not the configured default', async () => {
+  const machine = await revocationMachine({ refreshToken: undefined });
+  await machine.harness.core.config.update((config) => ({ ...config, secrets: { store: 'keychain' } }));
+  const opened: Array<string | undefined> = [];
+  const open = machine.harness.core.secrets.bind(machine.harness.core);
+  machine.harness.core.secrets = (async (kind) => {
+    opened.push(kind);
+    if (kind !== 'file') throw new Error('the configured default store must not be opened');
+    return open(kind);
+  }) as typeof machine.harness.core.secrets;
+  const fake = await startFakeSlack({ 'auth.revoke': () => ({ ok: false, error: 'invalid_auth' }) });
+  try {
+    const result = await revokePendingEntry(machine.harness.context({ fetch: fake.fetch }), machine.ref);
+    assert.equal(result.tokens[0]?.status, 'pending');
+    assert.deepEqual(opened, ['file']);
+    assert.equal(fake.requests.length, 1);
+  } finally {
+    await fake.close();
+  }
+});
+
+test('an already-final token is not called and a deadline reached is expired without a request', async () => {
+  const machine = await revocationMachine({ refreshToken: undefined });
+  failBundleDeletion(machine);
+  await machine.harness.core.config.update((config) => ({
+    ...config,
+    pendingRevocations: config.pendingRevocations?.map((entry) => ({
+      ...entry,
+      tokens: { ...entry.tokens, access: { ...entry.tokens.access, status: 'revoked' } },
+    })),
+  }));
+  const fake = await startFakeSlack({ 'auth.revoke': () => ({ ok: true, revoked: true }) });
+  try {
+    const final = await revokePendingEntry(machine.harness.context({ fetch: fake.fetch }), machine.ref);
+    assert.equal(final.tokens[0]?.status, 'revoked');
+    assert.equal(fake.requests.length, 0);
+  } finally {
+    await fake.close();
+  }
+
+  const expired = await revocationMachine({
+    refreshToken: undefined,
+    accessExpiresAt: '2026-10-04T13:00:00.000Z',
+  });
+  failBundleDeletion(expired);
+  const noCall = await startFakeSlack({ 'auth.revoke': () => ({ ok: true, revoked: true }) });
+  try {
+    const result = await revokePendingEntry(
+      expired.harness.context({ fetch: noCall.fetch, now: () => new Date('2026-10-04T13:00:00.000Z') }),
+      expired.ref,
+    );
+    assert.equal(result.tokens[0]?.status, 'expired');
+    assert.equal(noCall.requests.length, 0);
+  } finally {
+    await noCall.close();
+  }
+});
+
+test('the status compare-and-set refuses a changed location, deadline or pending state', async () => {
+  for (const mutation of ['store', 'deadline', 'status'] as const) {
+    const machine = await revocationMachine({ refreshToken: undefined });
+    let received = false;
+    let changed = false;
+    const fake = await startFakeSlack({
+      'auth.revoke': () => {
+        received = true;
+        return { ok: true, revoked: true };
+      },
+    });
+    const update = machine.harness.core.config.update.bind(machine.harness.core.config);
+    machine.harness.core.config.update = (async (...args: Parameters<typeof update>) => {
+      if (received && !changed) {
+        changed = true;
+        await update((config) => ({
+          ...config,
+          pendingRevocations: config.pendingRevocations?.map((entry) => {
+            if (mutation === 'store') return { ...entry, store: 'keychain' };
+            if (mutation === 'deadline')
+              return {
+                ...entry,
+                tokens: { ...entry.tokens, access: { ...entry.tokens.access, deadline: FALLBACK } },
+              };
+            if (mutation === 'status')
+              return {
+                ...entry,
+                tokens: { ...entry.tokens, access: { ...entry.tokens.access, status: 'expired' } },
+              };
+            return entry;
+          }),
+        }));
+      }
+      return update(...args);
+    }) as typeof machine.harness.core.config.update;
+    try {
+      await assert.rejects(
+        revokePendingEntry(
+          machine.harness.context({ fetch: fake.fetch, now: () => new Date('2026-10-04T13:00:00.000Z') }),
+          machine.ref,
+        ),
+        /changed while its token was being revoked/,
+        mutation,
+      );
+      assert.equal(fake.requests.length, 1, mutation);
+    } finally {
+      await fake.close();
+    }
+  }
+});
+
+test('one entry never updates another pending bundle in the same workspace', async () => {
+  const machine = await revocationMachine({ refreshToken: undefined });
+  failBundleDeletion(machine);
+  const otherRef = 'slack/token/other-pending';
+  const otherBundle = bundle({ accessToken: 'fake-other-access', refreshToken: undefined });
+  await (await machine.harness.core.secrets('file')).set(otherRef, serialiseBundle(otherBundle));
+  const other = createPendingRevocation({
+    ref: otherRef,
+    store: 'file',
+    workspace: machine.entry.workspace,
+    createdAt: CREATED,
+    bundle: otherBundle,
+  });
+  await machine.harness.core.config.update((config) => ({
+    ...config,
+    pendingRevocations: [...(config.pendingRevocations ?? []), other],
+  }));
+  const fake = await startFakeSlack({ 'auth.revoke': () => ({ ok: true, revoked: true }) });
+  try {
+    await revokePendingEntry(machine.harness.context({ fetch: fake.fetch }), machine.ref);
+    const entries = (await machine.harness.core.config.load()).pendingRevocations ?? [];
+    assert.equal(entries.find((entry) => entry.ref === machine.ref)?.tokens.access.status, 'revoked');
+    assert.equal(entries.find((entry) => entry.ref === otherRef)?.tokens.access.status, 'pending');
+    assert.equal(fake.requests[0]?.authorization, `Bearer ${machine.bundle.accessToken}`);
+  } finally {
+    await fake.close();
+  }
+});
+
+test('a lost answer leaves pending state, and a fresh context retries instead of inventing success', async () => {
+  const machine = await revocationMachine({ refreshToken: undefined });
+  let received = false;
+  const fake = await startFakeSlack({
+    'auth.revoke': () => {
+      received = true;
+      return { ok: true, revoked: true };
+    },
+  });
+  const update = machine.harness.core.config.update.bind(machine.harness.core.config);
+  machine.harness.core.config.update = (async (...args: Parameters<typeof update>) => {
+    if (received) {
+      received = false;
+      throw new Error('process stopped before the status write');
+    }
+    return update(...args);
+  }) as typeof machine.harness.core.config.update;
+  try {
+    await assert.rejects(
+      revokePendingEntry(machine.harness.context({ fetch: fake.fetch }), machine.ref),
+      /process stopped/,
+    );
+    assert.equal((await ledgerEntry(machine))?.tokens.access.status, 'pending');
+    machine.harness.core.config.update = update;
+    const retried = await revokePendingEntry(machine.harness.context({ fetch: fake.fetch }), machine.ref);
+    assert.equal(retried.tokens[0]?.status, 'revoked');
+    assert.equal(fake.requests.length, 2);
+  } finally {
+    await fake.close();
+  }
+});
+
+test('retrying all entries continues past one bad bundle and returns plain states for each', async () => {
+  const machine = await revocationMachine({ refreshToken: undefined });
+  const badRef = 'slack/token/bad-pending';
+  const bad = createPendingRevocation({
+    ref: badRef,
+    store: 'file',
+    workspace: 'T999',
+    createdAt: CREATED,
+    bundle: bundle({ accessToken: 'fake-bad-access', refreshToken: undefined }),
+  });
+  await (await machine.harness.core.secrets('file')).set(badRef, '{broken');
+  await machine.harness.core.config.update((config) => ({
+    ...config,
+    pendingRevocations: [...(config.pendingRevocations ?? []), bad],
+  }));
+  const fake = await startFakeSlack({ 'auth.revoke': () => ({ ok: false, error: 'invalid_auth' }) });
+  try {
+    const results = await retryPendingRevocations(machine.harness.context({ fetch: fake.fetch }));
+    assert.deepEqual(
+      results.map((result) => ({ ref: result.ref, status: result.tokens[0]?.status, issue: Boolean(result.issue) })),
+      [
+        { ref: machine.ref, status: 'pending', issue: false },
+        { ref: badRef, status: 'pending', issue: true },
+      ],
+    );
+    assert.equal(fake.requests.length, 1);
+    assert.equal(JSON.stringify(results).includes('fake-'), false, 'a plain result carried a token');
+    assert.equal(parseBundle(await (await machine.harness.core.secrets('file')).get(machine.ref))?.state, 'ready');
+  } finally {
+    await fake.close();
+  }
 });

@@ -52,7 +52,13 @@ export interface SlackRequest {
  */
 export const DROP: unique symbol = Symbol('drop the connection instead of answering');
 
-export type Reply = (request: SlackRequest) => unknown;
+/** A Web API answer with a chosen HTTP status and an ordinary JSON body. */
+export interface HttpReply {
+  readonly status: number;
+  readonly body: unknown;
+}
+
+export type Reply = (request: SlackRequest) => unknown | HttpReply | typeof DROP;
 
 /** How the files host answers one file. */
 export interface FileReply {
@@ -348,8 +354,12 @@ export async function startFakeSlack(script: Record<string, Reply> = {}): Promis
         response.socket?.destroy();
         return;
       }
-      response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify(answer));
+      const selected =
+        typeof answer === 'object' && answer !== null && 'status' in answer && 'body' in answer
+          ? (answer as HttpReply)
+          : { status: 200, body: answer };
+      response.writeHead(selected.status, { 'content-type': 'application/json' });
+      response.end(JSON.stringify(selected.body));
     })();
   });
   await new Promise<void>((settle) => server.listen(0, '127.0.0.1', () => settle()));

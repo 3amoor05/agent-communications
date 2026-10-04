@@ -1095,13 +1095,13 @@ test('only the download transport opens a download grant', async () => {
   );
 });
 
-test('the revocation grant has no production caller before the revocation operation lands', async () => {
+test('only the durable revocation operation opens a revocation grant', async () => {
   const files = await sources();
   assert.deepEqual(
     files
       .filter((file) => file.path !== 'api/guard.ts' && reachOf('revokeWith', file.text).length > 0)
       .map((file) => [file.path, reachOf('revokeWith', file.text)]),
-    [],
+    [['operations/revocations.ts', ['names it in an import or export', 'calls it or reads it off an object']]],
   );
 });
 

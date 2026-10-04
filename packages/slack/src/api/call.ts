@@ -440,7 +440,10 @@ async function callOnce(
     });
   }
   if (response.status >= 500) {
-    throw new CommsError('TRANSIENT', `Slack returned ${response.status}`, { hint: 'Try again in a moment.' });
+    throw new CommsError('TRANSIENT', `Slack returned ${response.status}`, {
+      hint: 'Try again in a moment.',
+      details: { httpStatus: response.status },
+    });
   }
 
   let parsed: SlackResponse;

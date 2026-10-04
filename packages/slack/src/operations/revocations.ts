@@ -1,10 +1,16 @@
+import { createHash } from 'node:crypto';
 import type {
+  Config,
   PendingRevocation,
   PendingRevocationStatus,
   PendingRevocationTokenState,
   SecretStoreKind,
 } from '@agentcomms/core';
-import type { TokenBundle } from '../auth/bundle.ts';
+import { CommsError, withCredentialsLock } from '@agentcomms/core';
+import { callSlack, type SlackResponse } from '../api/call.ts';
+import { closedPermit, revokeWith } from '../api/guard.ts';
+import { parseBundle, type TokenBundle } from '../auth/bundle.ts';
+import type { SlackContext } from '../context.ts';
 
 /** The longest a profile-app token can remain usable when its own stored expiry cannot be read. */
 export const REVOCATION_FALLBACK_MS: number = 30 * 24 * 60 * 60_000;
@@ -118,4 +124,270 @@ export function revocationTokenResult(
   state: PendingRevocationTokenState,
 ): RevocationTokenResult {
   return Object.freeze({ kind, status: state.status, deadline: state.deadline });
+}
+
+export interface RevocationIssue {
+  readonly code: string;
+  readonly message: string;
+}
+
+/** A non-secret result for one durable ledger entry. */
+export interface PendingRevocationResult {
+  readonly ref: string;
+  readonly platform: string;
+  readonly workspace: string;
+  readonly tokens: readonly RevocationTokenResult[];
+  /** True only after the old bundle was deleted and this exact ledger entry was removed. */
+  readonly cleaned: boolean;
+  readonly issue?: RevocationIssue | undefined;
+}
+
+function resultOf(entry: PendingRevocation, cleaned: boolean, issue?: RevocationIssue): PendingRevocationResult {
+  return Object.freeze({
+    ref: entry.ref,
+    platform: entry.platform,
+    workspace: entry.workspace,
+    tokens: Object.freeze(pendingRevocationTokens(entry).map(({ kind, state }) => revocationTokenResult(kind, state))),
+    cleaned,
+    ...(issue === undefined ? {} : { issue: Object.freeze(issue) }),
+  });
+}
+
+function entriesNamed(config: Config, ref: string): Array<{ index: number; entry: PendingRevocation }> {
+  const found: Array<{ index: number; entry: PendingRevocation }> = [];
+  for (const [index, entry] of (config.pendingRevocations ?? []).entries()) {
+    if (entry.platform === 'slack' && entry.ref === ref) found.push({ index, entry });
+  }
+  return found;
+}
+
+function requireEntry(config: Config, ref: string): { index: number; entry: PendingRevocation } {
+  const found = entriesNamed(config, ref);
+  if (found.length === 0) throw new CommsError('NOT_FOUND', 'no pending Slack revocation has that reference');
+  if (found.length !== 1) {
+    throw new CommsError('CONFIG', 'more than one pending Slack revocation names the same reference');
+  }
+  return found[0] as { index: number; entry: PendingRevocation };
+}
+
+function tokenState(entry: PendingRevocation, kind: RevocationTokenKind): PendingRevocationTokenState | undefined {
+  return kind === 'access' ? entry.tokens.access : entry.tokens.refresh;
+}
+
+interface PreparedToken {
+  readonly entry: PendingRevocation;
+  readonly kind: RevocationTokenKind;
+  readonly state: PendingRevocationTokenState;
+  readonly token?: string | undefined;
+  readonly issue?: RevocationIssue | undefined;
+}
+
+async function prepareToken(
+  context: SlackContext,
+  ref: string,
+  kind: RevocationTokenKind,
+): Promise<PreparedToken | null> {
+  return withCredentialsLock(context.core.paths.configDir, async () => {
+    const { entry } = requireEntry(await context.config(), ref);
+    const state = tokenState(entry, kind);
+    if (state === undefined) return null;
+    if (state.status !== 'pending' || context.now().getTime() >= Date.parse(state.deadline)) {
+      return { entry, kind, state };
+    }
+    try {
+      const store = await context.core.secrets(entry.store);
+      const raw = await store.get(entry.ref);
+      if (raw === null) {
+        return {
+          entry,
+          kind,
+          state,
+          issue: { code: 'NOT_FOUND', message: 'the pending credential bundle is missing from its recorded store' },
+        };
+      }
+      const bundle = parseBundle(raw);
+      if (bundle === null) {
+        return {
+          entry,
+          kind,
+          state,
+          issue: { code: 'NOT_FOUND', message: 'the pending credential bundle is missing from its recorded store' },
+        };
+      }
+      const token = kind === 'access' ? bundle.accessToken : bundle.refreshToken;
+      if (typeof token !== 'string' || token.length === 0) {
+        return {
+          entry,
+          kind,
+          state,
+          issue: { code: 'BAD_DATA', message: `the pending credential bundle has no ${kind} token` },
+        };
+      }
+      return { entry, kind, state, token };
+    } catch (error) {
+      const code = error instanceof CommsError ? error.code : 'UNEXPECTED';
+      return {
+        entry,
+        kind,
+        state,
+        issue: { code, message: 'the pending credential bundle could not be read from its recorded store' },
+      };
+    }
+  });
+}
+
+function evidenceFromError(error: unknown): RevocationEvidence {
+  if (error instanceof CommsError) {
+    const slackError = error.details?.slackError;
+    if (typeof slackError === 'string') return { kind: 'response', response: { ok: false, error: slackError } };
+    const status = error.details?.httpStatus;
+    if (typeof status === 'number') return { kind: 'http', status };
+    if (error.code === 'PROVIDER_UNAVAILABLE') return { kind: 'unreadable' };
+  }
+  return { kind: 'network' };
+}
+
+async function revokeOne(context: SlackContext, prepared: PreparedToken): Promise<PendingRevocationTokenState> {
+  let evidence: RevocationEvidence = { kind: 'network' };
+  if (prepared.token !== undefined && context.now().getTime() < Date.parse(prepared.state.deadline)) {
+    const permit = closedPermit();
+    const digest = createHash('sha256').update(prepared.token).digest('hex');
+    try {
+      const response: SlackResponse = await revokeWith(
+        permit,
+        'auth.revoke',
+        { ref: prepared.entry.ref, kind: prepared.kind, tokenSha256: digest },
+        () =>
+          callSlack(
+            {
+              token: prepared.token as string,
+              permit,
+              fetch: context.fetch,
+              baseUrl: context.slackBaseUrl,
+              timeoutMs: 30_000,
+            },
+            'auth.revoke',
+          ),
+      );
+      evidence = { kind: 'response', response };
+    } catch (error) {
+      evidence = evidenceFromError(error);
+    }
+  }
+  return classifyRevocationAnswer(prepared.state, evidence, context.now());
+}
+
+function sameEntryAndPending(current: PendingRevocation, expected: PreparedToken): PendingRevocationTokenState | null {
+  if (
+    current.ref !== expected.entry.ref ||
+    current.store !== expected.entry.store ||
+    current.platform !== expected.entry.platform ||
+    current.workspace !== expected.entry.workspace ||
+    current.createdAt !== expected.entry.createdAt
+  ) {
+    return null;
+  }
+  const state = tokenState(current, expected.kind);
+  if (state?.status !== 'pending' || state.deadline !== expected.state.deadline) return null;
+  return state;
+}
+
+async function persistTokenState(
+  context: SlackContext,
+  expected: PreparedToken,
+  nextState: PendingRevocationTokenState,
+): Promise<PendingRevocation> {
+  return withCredentialsLock(context.core.paths.configDir, async () => {
+    let written: PendingRevocation | undefined;
+    await context.core.config.update((config) => {
+      const { index, entry } = requireEntry(config, expected.entry.ref);
+      if (sameEntryAndPending(entry, expected) === null) {
+        throw new CommsError('TRANSIENT', 'the pending revocation changed while its token was being revoked');
+      }
+      written = {
+        ...entry,
+        tokens:
+          expected.kind === 'access' ? { ...entry.tokens, access: nextState } : { ...entry.tokens, refresh: nextState },
+      };
+      const pendingRevocations = [...(config.pendingRevocations ?? [])];
+      pendingRevocations[index] = written;
+      return { ...config, pendingRevocations };
+    });
+    return written as PendingRevocation;
+  });
+}
+
+function sameEntry(left: PendingRevocation, right: PendingRevocation): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+async function cleanFinished(context: SlackContext, ref: string): Promise<PendingRevocationResult> {
+  return withCredentialsLock(context.core.paths.configDir, async () => {
+    const { index, entry } = requireEntry(await context.config(), ref);
+    if (pendingRevocationTokens(entry).some(({ state }) => state.status === 'pending')) return resultOf(entry, false);
+    let deleted: boolean;
+    try {
+      deleted = await (await context.core.secrets(entry.store)).delete(entry.ref);
+    } catch {
+      return resultOf(entry, false, {
+        code: 'SECRET_STORE_UNAVAILABLE',
+        message: 'the finished credential bundle could not be deleted from its recorded store',
+      });
+    }
+    if (!deleted) {
+      return resultOf(entry, false, {
+        code: 'NOT_FOUND',
+        message: 'the finished credential bundle was not present to delete from its recorded store',
+      });
+    }
+    await context.core.config.update((config) => {
+      const found = requireEntry(config, ref);
+      if (found.index !== index || !sameEntry(found.entry, entry)) {
+        throw new CommsError('TRANSIENT', 'the pending revocation changed before its bundle could be cleaned up');
+      }
+      const pendingRevocations = [...(config.pendingRevocations ?? [])];
+      pendingRevocations.splice(index, 1);
+      return {
+        ...config,
+        pendingRevocations: pendingRevocations.length === 0 ? undefined : pendingRevocations,
+      };
+    });
+    return resultOf(entry, true);
+  });
+}
+
+/** Revokes the access and refresh halves of one ledger entry independently, then cleans it up when both are final. */
+export async function revokePendingEntry(context: SlackContext, ref: string): Promise<PendingRevocationResult> {
+  if (typeof ref !== 'string') {
+    throw new CommsError('USAGE', 'a pending reference must be passed by name; a token is never accepted');
+  }
+  let last: PendingRevocation | undefined;
+  for (const kind of ['access', 'refresh'] as const) {
+    const prepared = await prepareToken(context, ref, kind);
+    if (prepared === null) continue;
+    last = prepared.entry;
+    if (prepared.issue !== undefined) return resultOf(prepared.entry, false, prepared.issue);
+    if (prepared.state.status !== 'pending') continue;
+    const next = await revokeOne(context, prepared);
+    last = await persistTokenState(context, prepared, next);
+  }
+  if (last === undefined) {
+    const { entry } = requireEntry(await context.config(), ref);
+    last = entry;
+  }
+  return cleanFinished(context, last.ref);
+}
+
+/** Retries each Slack ledger entry independently, in its stored order. */
+export async function retryPendingRevocations(context: SlackContext): Promise<readonly PendingRevocationResult[]> {
+  const refs = [
+    ...new Set(
+      (await context.config()).pendingRevocations
+        ?.filter((entry) => entry.platform === 'slack')
+        .map((entry) => entry.ref) ?? [],
+    ),
+  ];
+  const results: PendingRevocationResult[] = [];
+  for (const ref of refs) results.push(await revokePendingEntry(context, ref));
+  return Object.freeze(results);
 }
