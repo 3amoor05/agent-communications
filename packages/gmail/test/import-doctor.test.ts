@@ -23,7 +23,10 @@ import { type Harness, newHarness, TEST_CLIENT_ID, TEST_CLIENT_SECRET, tempDir }
 
 const CLIENT = { clientId: TEST_CLIENT_ID, clientSecret: TEST_CLIENT_SECRET };
 
-test('doctor quotes a loose directory repair for the selected shell', async () => {
+test('doctor quotes a loose directory repair for the selected shell', {
+  // It sets POSIX permission bits on a real folder, which a Windows file system does not keep.
+  skip: process.platform === 'win32' && 'Windows keeps no POSIX permission bits to find loose',
+}, async () => {
   const root = tempDir('agent gmail doctor ');
   const configDir = join(root, 'config dir');
   await mkdir(configDir, { recursive: true });

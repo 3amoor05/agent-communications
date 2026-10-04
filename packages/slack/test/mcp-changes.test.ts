@@ -601,6 +601,8 @@ async function cliJson(harness: Harness, argv: string[]) {
     streams: { stdout: out, stderr: quiet, stdin: new PassThrough() },
     openBrowser: () => undefined,
     listenerCommand: LISTENER_COMMAND,
+    // The same platform as `connect`'s server, so both surfaces print a command the same way on any host.
+    platform: 'darwin',
   });
   return { code, envelope: JSON.parse(stdout) as { ok: boolean; data?: unknown; error?: Failure } };
 }
