@@ -28,9 +28,8 @@ for (const account of ['profile', 'own-app'] as const) {
     'after secret',
     'after mutator',
     'after rename',
-    'uncertain rename',
+    'lock release',
     'withdrawal failure',
-    'rollback failure',
   ] as const) {
     test(`foreground ${account} interruption ${boundary} settles the accepted callback before exit`, {
       timeout: 10000,
@@ -51,6 +50,7 @@ for (const account of ['profile', 'own-app'] as const) {
       const events: string[] = [];
       let exchanges = 0;
       let writes = 0;
+      let configWrites = 0;
       let locked = false;
       let armed = false;
       let heldWrite = false;
@@ -60,6 +60,7 @@ for (const account of ['profile', 'own-app'] as const) {
       let diagnostic = '';
       let diagnosticAtExit = '';
       let diagnosticBeforeInterrupt = '';
+      let lockReleaseInterrupted = false;
       const stdout = new PassThrough();
       const stderr = new PassThrough();
       let output = '';
@@ -76,7 +77,7 @@ for (const account of ['profile', 'own-app'] as const) {
         interrupted.resolve();
       };
       const rm = fs.rm;
-      t.mock.method(fs, 'rm', (...args: Parameters<typeof rm>) => {
+      t.mock.method(fs, 'rm', async (...args: Parameters<typeof rm>) => {
         if (
           heldWrite &&
           String(args[0]).startsWith(join(harness.core.paths.stateDir, 'slack', 'flows')) &&
@@ -84,7 +85,16 @@ for (const account of ['profile', 'own-app'] as const) {
         ) {
           earlyDiscard = true;
         }
-        return rm(...args);
+        await rm(...args);
+        if (
+          boundary === 'lock release' &&
+          !lockReleaseInterrupted &&
+          configWrites === 1 &&
+          String(args[0]) === join(harness.configDir, '.config.lock')
+        ) {
+          lockReleaseInterrupted = true;
+          interrupt();
+        }
       });
       const update = harness.core.config.update.bind(harness.core.config);
       t.mock.method(harness.core.config, 'update', (...[mutator, options]: Parameters<typeof update>) =>
@@ -95,20 +105,11 @@ for (const account of ['profile', 'own-app'] as const) {
         }, options),
       );
       const rename = fs.rename;
-      let configWrites = 0;
       t.mock.method(fs, 'rename', async (...args: Parameters<typeof rename>) => {
+        await rename(...args);
         if (String(args[1]) === harness.core.config.path) {
           configWrites++;
-          if (boundary === 'rollback failure' && configWrites === 2) throw new Error('rollback unavailable');
-        }
-        await rename(...args);
-        if (
-          String(args[1]) === harness.core.config.path &&
-          configWrites === 1 &&
-          ['after rename', 'uncertain rename', 'rollback failure'].includes(boundary)
-        ) {
-          interrupt();
-          if (boundary === 'uncertain rename') throw new Error('rename completion unavailable');
+          if (configWrites === 1 && boundary === 'after rename') interrupt();
         }
       });
       syncBuiltinESMExports();
@@ -158,7 +159,7 @@ for (const account of ['profile', 'own-app'] as const) {
       });
       const action = run(
         [
-          ...(boundary === 'withdrawal failure' ? ['--json'] : []),
+          ...(['withdrawal failure', 'lock release'].includes(boundary) ? ['--json'] : []),
           'workspace',
           'add',
           'rgc/slack',
@@ -210,18 +211,18 @@ for (const account of ['profile', 'own-app'] as const) {
         await completion.promise;
       }
       await redelivered.promise;
-      if (boundary !== 'rollback failure') await completion.promise;
+      await completion.promise;
       assert.equal(exchanges, 1, 'the callback must already have reached the exchange');
       assert.equal(writes, boundary === 'before secret' ? 0 : 1, 'interruption allowed a new secret write');
       if (boundary === 'after secret') {
         assert.equal(locked, true, 'the secret was staged outside the credentials lock');
         assert.ok(events.indexOf('withdrawn') < events.indexOf('exit'), 'exit raced staged-secret withdrawal');
       }
-      if (boundary === 'rollback failure') {
+      const committed = boundary === 'after rename' || boundary === 'lock release';
+      if (committed) {
         assert.notDeepEqual(await harness.core.config.load(), before);
-        assert.equal(deletions, 0, 'must not withdraw a credential still owned by an uncertain commit');
-        assert.match(diagnosticAtExit, /could not|cannot/i);
-        assert.ok(diagnosticAtExit.includes(secretRef), 'uncertain ownership was not reported before exit');
+        assert.equal(deletions, 0, 'a committed credential was withdrawn');
+        assert.ok(await secrets.get(secretRef), 'the committed credential was not retained');
       } else {
         assert.deepEqual(await harness.core.config.load(), before, 'interruption wrote account or learned app id');
       }
@@ -230,15 +231,21 @@ for (const account of ['profile', 'own-app'] as const) {
         assert.ok(await secrets.get(secretRef), 'the injected failed withdrawal must leave a credential');
         assert.ok(diagnosticAtExit.includes(secretRef), 'stranded secret reference was not reported before exit');
         assert.match(diagnosticAtExit, /could not be removed/);
-      } else if (boundary !== 'rollback failure') {
+      } else if (!committed) {
         assert.deepEqual(await readdir(join(harness.configDir, 'secrets')).catch(() => []), []);
       }
       assert.doesNotMatch(diagnosticAtExit, /xox[bapr]-|fake-user-token-1|fake-refresh-token-1/);
-      if (boundary !== 'rollback failure' && boundary !== 'withdrawal failure') {
+      if (boundary !== 'withdrawal failure') {
         assert.equal(diagnosticAtExit, diagnosticBeforeInterrupt, 'ordinary cancellation should be silent');
       }
       assert.deepEqual(await readdir(join(harness.core.paths.stateDir, 'slack', 'flows')), []);
-      assert.equal(output, '', 'interrupted sign-in printed a successful result');
+      if (boundary === 'after rename') {
+        assert.match(output, /saved before the interrupt took effect/i);
+      } else if (boundary === 'lock release') {
+        assert.equal(JSON.parse(output).data.committedBeforeAbort, true);
+      } else {
+        assert.equal(output, '', 'an uncommitted sign-in printed a successful result');
+      }
       await assert.rejects(fetchListener(callback));
     });
   }

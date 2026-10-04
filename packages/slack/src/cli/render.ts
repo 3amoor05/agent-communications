@@ -124,6 +124,7 @@ export function renderConnected(workspace: WorkspaceView, reauth: boolean, color
     `${paint(color, 'green', '✓')} ${reauth ? 'Re-authorised' : 'Connected'} "${workspace.alias}" — ${what}, as ${workspace.userId}.`,
     '',
     renderWorkspace(workspace, color),
+    ...(workspace.committedBeforeAbort ? ['', 'The sign-in was saved before the interrupt took effect.'] : []),
     '',
     paint(color, 'dim', `Access is "${workspace.mode}". Check everything with: agent-slack doctor`),
   ].join('\n');

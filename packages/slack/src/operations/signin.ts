@@ -9,6 +9,7 @@ import {
   CommsError,
   type Config,
   childEnvironment,
+  configCommittedBeforeAbort,
   findById,
   inlineCommand,
   type LooseningConsent,
@@ -756,13 +757,17 @@ async function writeWithConsent(
   writtenKey: () => string,
   mutator: (config: Config) => Config,
   signal?: AbortSignal,
-): Promise<void> {
+): Promise<boolean> {
   if (!flow.consent) {
-    await context.core.config.update(mutator, { signal });
-    return;
+    return configCommittedBeforeAbort(await context.core.config.update(mutator, { signal }));
   }
   try {
-    await context.core.config.update(mutator, { consent: consentUnder(flow.consent, flow, snapshotAlias), signal });
+    return configCommittedBeforeAbort(
+      await context.core.config.update(mutator, {
+        consent: consentUnder(flow.consent, flow, snapshotAlias),
+        signal,
+      }),
+    );
   } catch (error) {
     const key = writtenKey();
     if (!(error instanceof CommsError) || error.code !== 'LOOSENING_REFUSED' || key === snapshotAlias) throw error;
@@ -773,7 +778,9 @@ async function writeWithConsent(
      * because the first run wrote nothing — a refused loosening is refused before the write — and the second runs on
      * the same configuration, so it recomputes exactly the same values.
      */
-    await context.core.config.update(mutator, { consent: consentUnder(flow.consent, flow, key), signal });
+    return configCommittedBeforeAbort(
+      await context.core.config.update(mutator, { consent: consentUnder(flow.consent, flow, key), signal }),
+    );
   }
 }
 
@@ -1145,6 +1152,7 @@ export async function completeSignIn(
     let replacedRef: string | undefined;
     let pendingRevocation: PendingRevocation | undefined;
     let configCommitted = false;
+    let committedBeforeAbort = false;
     try {
       /*
        * The write is inside the boundary that takes it back, not before it.
@@ -1197,7 +1205,7 @@ export async function completeSignIn(
             bundle,
           });
         }
-        await writeWithConsent(
+        committedBeforeAbort = await writeWithConsent(
           context,
           flow,
           existing?.alias,
@@ -1309,8 +1317,8 @@ export async function completeSignIn(
           },
           completionSignal,
         );
-        // This transaction's resolution is the interruption boundary. After it, old-token revocation may
-        // already have effects: finish/report that cleanup, never roll the committed transition back.
+        // The rename is the interruption boundary. After it, old-token revocation may already have effects:
+        // finish/report that cleanup, never roll the committed transition back.
         configCommitted = true;
       };
       if (completionSignal || flow.transition === 'profile-app') {
@@ -1384,13 +1392,18 @@ export async function completeSignIn(
           message: 'the app switch was saved; its old credential remains pending cleanup',
         });
       }
-      return { ...viewOf(writtenAlias, written, flow.profile?.label), cleanup };
+      return {
+        ...viewOf(writtenAlias, written, flow.profile?.label),
+        ...(committedBeforeAbort ? { committedBeforeAbort: true as const } : {}),
+        cleanup,
+      };
     }
     if (previousRef && previousRef !== secretRef) {
       await secrets.delete(previousRef).catch(() => undefined);
     }
 
-    return viewOf(writtenAlias, written, flow.profile?.label);
+    const view = viewOf(writtenAlias, written, flow.profile?.label);
+    return committedBeforeAbort ? { ...view, committedBeforeAbort: true } : view;
   } finally {
     // Only the owner may stop the listener or discard the flow; a cancelled or losing finisher does neither.
     stopListener(flow, context.now());

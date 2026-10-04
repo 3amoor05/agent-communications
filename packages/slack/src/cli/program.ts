@@ -335,9 +335,7 @@ configuration problem.`,
             const error = await foreground.settled;
             if (
               error instanceof CommsError &&
-              (error.details?.strandedSecretRef ||
-                error.details?.possiblyStrandedSecretRef ||
-                error.details?.configRollbackFailed)
+              (error.details?.strandedSecretRef || error.details?.possiblyStrandedSecretRef)
             ) {
               // Cancellation itself is silent. A credential we could not safely withdraw is not: the person
               // needs its reference before signal redelivery, even when the command requested JSON output.

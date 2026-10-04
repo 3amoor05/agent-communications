@@ -49,6 +49,8 @@ export interface WorkspaceView {
   readonly organisationLabel?: string | undefined;
   readonly profileApp?: 'read' | 'send' | undefined;
   readonly createdAt: string;
+  /** The interrupt arrived after the atomic config commit, so this result was saved and is authoritative. */
+  readonly committedBeforeAbort?: true | undefined;
   /** Present after switching profile apps; each old token's cleanup state is reported separately. */
   readonly cleanup?: PendingRevocationResult | undefined;
 }
