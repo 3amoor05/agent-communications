@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { inlineCommand, shellCommand } from '../src/cli-runtime.ts';
 import {
@@ -450,12 +450,12 @@ test('a profile is read from a file in version 1: a URL is refused, and nothing 
 test('a relative path is resolved against the working directory, and ~ against the home, to an absolute path', () => {
   const env = { HOME: join('/Profiles', 'jo'), USERPROFILE: join('/Profiles', 'jo') };
   const cwd = join('/Profiles', 'jo', 'src');
-  assert.equal(profileSourcePath(join('.', 'rgc.json'), env, cwd, 'darwin'), join(cwd, 'rgc.json'));
+  assert.equal(profileSourcePath(join('.', 'rgc.json'), env, cwd, 'darwin'), resolve(cwd, 'rgc.json'));
   assert.equal(
     profileSourcePath(join('..', 'rgc', 'rgc.json'), env, cwd, 'darwin'),
-    join('/Profiles', 'jo', 'rgc', 'rgc.json'),
+    resolve('/Profiles', 'jo', 'rgc', 'rgc.json'),
   );
-  assert.equal(profileSourcePath('~/rgc.json', env, cwd, 'darwin'), join('/Profiles', 'jo', 'rgc.json'));
+  assert.equal(profileSourcePath('~/rgc.json', env, cwd, 'darwin'), resolve('/Profiles', 'jo', 'rgc.json'));
   // A Windows drive is a path, not a scheme.
   assert.doesNotThrow(() => profileSourcePath('C:\\profiles\\rgc.json', env, cwd, 'win32'));
 });
