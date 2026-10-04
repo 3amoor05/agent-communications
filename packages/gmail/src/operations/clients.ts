@@ -125,7 +125,7 @@ function refuseClientConflict(
   platform: NodeJS.Platform,
 ): void {
   const existing = config.clients[name];
-  refuseOrganisationRow(config, name, 'replace');
+  refuseOrganisationRow(config, name, 'replace', platform);
   if (existing && !replace) {
     throw new CommsError('CONFIG', `an OAuth client called "${name}" is already registered`, {
       hint:
@@ -153,7 +153,12 @@ function refuseClientConflict(
  * mark naming an organisation with no record here refuses nothing: no `org` command could change that row, and a row
  * no command can change is the one outcome the design rules out.
  */
-function refuseOrganisationRow(config: Config, name: string, act: 'replace' | 'remove'): void {
+function refuseOrganisationRow(
+  config: Config,
+  name: string,
+  act: 'replace' | 'remove',
+  platform: NodeJS.Platform,
+): void {
   const organisation = managingOrganisation(
     config,
     Object.hasOwn(config.clients, name) ? config.clients[name] : undefined,
@@ -165,8 +170,14 @@ function refuseOrganisationRow(config: Config, name: string, act: 'replace' | 'r
     {
       hint:
         act === 'replace'
-          ? `To read the profile again — a new secret, a repaired client — run \`agentcomms org update ${organisation}\`. To register a client of your own, choose another name with --name.`
-          : `To stop using the organisation's apps, run \`agentcomms org remove ${organisation}\`; if the client has drifted from the profile, \`agentcomms org update ${organisation}\` repairs it.`,
+          ? `To read the profile again — a new secret, a repaired client — run ${inlineCommand(
+              shellCommand(['agentcomms', 'org', 'update', organisation], platform),
+            )}. To register a client of your own, choose another name with --name.`
+          : `To stop using the organisation's apps, run ${inlineCommand(
+              shellCommand(['agentcomms', 'org', 'remove', organisation], platform),
+            )}; if the client has drifted from the profile, ${inlineCommand(
+              shellCommand(['agentcomms', 'org', 'update', organisation], platform),
+            )} repairs it.`,
     },
   );
 }
@@ -272,7 +283,7 @@ async function registerClient(
     }
     const held = fresh.clients[name];
     // Re-checked under the lock: an `org add` may have made this name its own since the change was planned.
-    refuseOrganisationRow(fresh, name, 'replace');
+    refuseOrganisationRow(fresh, name, 'replace', context.platform);
     if (held && !options.replace) {
       throw new CommsError('CONFIG', `an OAuth client called "${name}" was registered while this ran`, {
         hint: 'Run the command again to see what is there now.',
@@ -314,7 +325,7 @@ async function registerClient(
                 hint: 'Run the command again.',
               });
             }
-            refuseOrganisationRow(current, name, 'replace');
+            refuseOrganisationRow(current, name, 'replace', context.platform);
             // The users are re-checked here as well as above: a sign-in completing between the two would otherwise
             // attach a mailbox to the client being replaced, and its token would not survive the replacement.
             const held = current.clients[name];
@@ -339,8 +350,10 @@ async function registerClient(
         const held = (await context.config()).clients[name];
         return held !== undefined && JSON.stringify(held) === JSON.stringify(row);
       },
-      howToCheck: 'Run `agent-gmail client list`.',
-      restoreHint: 'register the client again with `agent-gmail client add <its JSON> --replace`.',
+      howToCheck: `Run ${inlineCommand(shellCommand(['agent-gmail', 'client', 'list'], context.platform))}.`,
+      restoreHint: `register the client again; see ${inlineCommand(
+        shellCommand(['agent-gmail', 'client', 'add', '--help'], context.platform),
+      )} and use its JSON with ${inlineCommand(shellCommand(['--name', name, '--replace'], context.platform))}.`,
     });
     return row;
   });
@@ -395,7 +408,7 @@ export function clientRemoveChange(context: GmailContext, name: string): GatedCh
   let planned: string | undefined;
   return {
     plan: (config) => {
-      const client = requireRemovableClient(config, name);
+      const client = requireRemovableClient(config, name, context.platform);
       planned = client.clientId;
       const after = structuredClone(config);
       delete after.clients[name];
@@ -429,7 +442,7 @@ export async function clientRemove(
 }
 
 /** The client registered under `name`, or the refusal: none there, or mailboxes still signing in through it. */
-function requireRemovableClient(config: Config, name: string): ClientConfig {
+function requireRemovableClient(config: Config, name: string, platform: NodeJS.Platform): ClientConfig {
   const client = Object.hasOwn(config.clients, name) ? config.clients[name] : undefined;
   if (!client) {
     throw new CommsError('NOT_FOUND', `no OAuth client called "${name}"`, {
@@ -438,11 +451,13 @@ function requireRemovableClient(config: Config, name: string): ClientConfig {
         : 'None are registered yet.',
     });
   }
-  refuseOrganisationRow(config, name, 'remove');
+  refuseOrganisationRow(config, name, 'remove', platform);
   const users = inboxesOf(config.inboxes, name);
   if (users.length > 0) {
     throw new CommsError('CONFIG', `${users.length} inbox(es) still sign in through "${name}"`, {
-      hint: `Remove them first (${users.join(', ')}), or move them to another client with \`agent-gmail inbox reauth\`.`,
+      hint: `Remove them first (${users.join(', ')}), or move them to another client; see ${inlineCommand(
+        shellCommand(['agent-gmail', 'inbox', 'reauth', '--help'], platform),
+      )}.`,
     });
   }
   return client;
@@ -453,7 +468,7 @@ async function removeClientLocked(
   name: string,
   options: { expectedClientId?: string | undefined },
 ): Promise<{ name: string }> {
-  const client = requireRemovableClient(await context.config(), name);
+  const client = requireRemovableClient(await context.config(), name, context.platform);
   if (options.expectedClientId !== undefined && client.clientId !== options.expectedClientId) {
     throw new CommsError('CONFIG', `"${name}" is no longer the OAuth client this removal was approved for`, {
       hint: 'Nothing was removed. Prepare the removal again, and read the preview before approving it.',
@@ -461,7 +476,7 @@ async function removeClientLocked(
   }
   try {
     await context.core.config.update((current) => {
-      refuseOrganisationRow(current, name, 'remove');
+      refuseOrganisationRow(current, name, 'remove', context.platform);
       // The row this read, not whatever holds the name now.
       if (current.clients[name]?.clientId !== client.clientId) {
         throw new CommsError('CONFIG', `the OAuth client "${name}" changed while it was being removed`, {
@@ -474,7 +489,11 @@ async function removeClientLocked(
         throw new CommsError(
           'CONFIG',
           `${attached.length} inbox(es) began using "${name}" while it was being removed`,
-          { hint: `Remove them first (${attached.join(', ')}), or move them with \`agent-gmail inbox reauth\`.` },
+          {
+            hint: `Remove them first (${attached.join(', ')}), or move them; see ${inlineCommand(
+              shellCommand(['agent-gmail', 'inbox', 'reauth', '--help'], context.platform),
+            )}.`,
+          },
         );
       }
       const clients = { ...current.clients };
@@ -485,7 +504,12 @@ async function removeClientLocked(
     // A rejected write may have committed (see `writeOutcome` in core): only skip the deletion if the row is there.
     const gone = await writeOutcome(async () => (await context.config()).clients[name] === undefined);
     if (gone === 'absent') throw error;
-    if (gone === 'unknown') throw keepAndReport(error, client.secretRef, 'Run `agent-gmail client list`.');
+    if (gone === 'unknown')
+      throw keepAndReport(
+        error,
+        client.secretRef,
+        `Run ${inlineCommand(shellCommand(['agent-gmail', 'client', 'list'], context.platform))}.`,
+      );
   }
   const secrets = await context.core.secrets();
   await secrets.delete(client.secretRef);

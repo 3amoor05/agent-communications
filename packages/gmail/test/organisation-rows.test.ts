@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { CommsError, gatedChange } from '@agentcomms/core';
+import { CommsError, gatedChange, inlineCommand, shellCommand } from '@agentcomms/core';
 import { clientSecretRef } from '../src/auth/session.ts';
 import { GmailContext } from '../src/context.ts';
 import { clientAdd, clientAddChange, clientRemove } from '../src/operations/clients.ts';
@@ -21,17 +21,18 @@ const ORG_SECRET = 'fake-organisation-secret-not-real';
 const CREATED = '2026-09-20T00:00:00.000Z';
 
 /** A version-2 configuration holding the client `acme-1` that the profile `acme` owns — or only its mark. */
-async function withOrganisationRow(options: { record: boolean }) {
+async function withOrganisationRow(options: { record: boolean; organisation?: string; platform?: NodeJS.Platform }) {
   const harness = await newHarness();
+  const organisation = options.organisation ?? 'acme';
   const row = {
     provider: 'gmail',
     clientId: ORG_CLIENT,
     secretRef: clientSecretRef('acme-1'),
     addedAt: CREATED,
-    organisation: 'acme',
+    organisation,
   };
   const organisations = {
-    acme: {
+    [organisation]: {
       label: 'Acme Test Org',
       source: { kind: 'file', path: join(harness.configDir, 'acme.agentcomms.json') },
       sha256: 'a'.repeat(64),
@@ -58,7 +59,15 @@ async function withOrganisationRow(options: { record: boolean }) {
     )}\n`,
   );
   await (await harness.core.secrets('file')).set(clientSecretRef('acme-1'), ORG_SECRET);
-  return { harness, context: new GmailContext({ core: harness.core, env: harness.env }), row };
+  return {
+    harness,
+    context: new GmailContext({
+      core: harness.core,
+      env: harness.env,
+      platform: options.platform ?? 'darwin',
+    }),
+    row,
+  };
 }
 
 async function clientFile(clientId = ORG_CLIENT): Promise<string> {
@@ -89,6 +98,44 @@ test('client remove refuses a client an organisation profile owns, from the comm
   }
   assert.deepEqual((await harness.core.config.load()).clients['acme-1'], row);
   assert.equal(await (await harness.core.secrets('file')).get(clientSecretRef('acme-1')), ORG_SECRET);
+});
+
+test('organisation-owned client refusals quote org update and remove for darwin and win32', async () => {
+  for (const platform of ['darwin', 'win32'] as const) {
+    const update = inlineCommand(shellCommand(['agentcomms', 'org', 'update', '7'], platform));
+    const remove = inlineCommand(shellCommand(['agentcomms', 'org', 'remove', '7'], platform));
+
+    const replacement = await withOrganisationRow({ record: true, organisation: '7', platform });
+    await assert.rejects(
+      clientAdd(replacement.context, {
+        path: await clientFile(),
+        name: 'acme-1',
+        replace: true,
+        store: 'file',
+        noProbe: true,
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof CommsError);
+        assert.equal(
+          error.hint,
+          `To read the profile again — a new secret, a repaired client — run ${update}. To register a client of your own, choose another name with --name.`,
+          platform,
+        );
+        return true;
+      },
+    );
+
+    const removal = await withOrganisationRow({ record: true, organisation: '7', platform });
+    await assert.rejects(clientRemove(removal.context, 'acme-1'), (error: unknown) => {
+      assert.ok(error instanceof CommsError);
+      assert.equal(
+        error.hint,
+        `To stop using the organisation's apps, run ${remove}; if the client has drifted from the profile, ${update} repairs it.`,
+        platform,
+      );
+      return true;
+    });
+  }
 });
 
 test('client add refuses to replace a client an organisation profile owns, with --replace or without', async () => {
