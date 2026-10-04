@@ -421,15 +421,8 @@ test('§D6 row 3: forOtherAddresses without an active generation routes nothing'
   assert.equal(choice?.name, 'personal');
 });
 
-test('§D6 row 4: legacy fallback chooses only an organisation-free client, with or without email', () => {
+test('§D6 row 4: legacy fallback excludes clients managed by an installed profile, with or without email', () => {
   const config = routingConfig({ ordinary: true });
-  config.clients.orphaned = {
-    provider: 'gmail',
-    clientId: '456789012345-orphaned.apps.googleusercontent.com',
-    secretRef: clientSecretRef('orphaned'),
-    organisation: 'removed-org',
-    addedAt: WHEN,
-  };
   config.clients.notGmail = {
     provider: 'slack',
     clientId: '1111.2222',
@@ -438,7 +431,6 @@ test('§D6 row 4: legacy fallback chooses only an organisation-free client, with
   };
   config.clients = {
     notGmail: config.clients.notGmail,
-    orphaned: config.clients.orphaned,
     ...config.clients,
   };
   const choice = chooseClientForNewInbox(config, { alias: 'personal/gmail' });

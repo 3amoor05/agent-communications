@@ -9,7 +9,13 @@ import { GmailContext } from '../src/context.ts';
 import { clientAdd } from '../src/operations/clients.ts';
 import { importLegacy } from '../src/operations/import-legacy.ts';
 import { CONSOLE_STEPS } from '../src/operations/setup.ts';
-import { type Harness, newHarness, TEST_CLIENT_ID, TEST_CLIENT_SECRET } from './support/harness.ts';
+import {
+  type Harness,
+  migrateNamesForTest,
+  newHarness,
+  TEST_CLIENT_ID,
+  TEST_CLIENT_SECRET,
+} from './support/harness.ts';
 
 /**
  * `agent-gmail setup` at a terminal, from the client file's point of view (CUE-298).
@@ -68,6 +74,7 @@ async function setupAtTerminal(
   argv: string[],
   answer: (prompt: string, index: number) => string | Promise<string>,
 ): Promise<Dialog> {
+  const defaultAlias = (await harness.core.config.load()).version === 2 ? 'personal/gmail' : 'work';
   const input = new PassThrough();
   const err = new PassThrough();
   const out = new PassThrough();
@@ -91,9 +98,9 @@ async function setupAtTerminal(
     // In order, and one at a time: an answer may write a file before it types.
     answering = answering.then(async () => {
       if (asked.length > 40) throw new Error(`setup kept asking:\n${asked.slice(-3).join('\n---\n')}`);
-      // Setup now needs the mailbox name before it can decide which client route applies. These tests exercise the
-      // client walk, not naming, so give their version-1 fixture its ordinary target and delegate every later prompt.
-      input.write(`${/A (?:short )?name for it/.test(prompt) ? 'work' : await answer(prompt, index)}\n`);
+      // A profile makes setup need the mailbox name before it can decide which client route applies. These tests
+      // exercise the client walk, not naming, so give each fixture its ordinary target and delegate later prompts.
+      input.write(`${/A (?:short )?name for it/.test(prompt) ? defaultAlias : await answer(prompt, index)}\n`);
     });
   });
   const code = await run(['setup', '--no-tui', '--no-browser', ...argv], {
@@ -125,11 +132,49 @@ const NOWHERE = '/nonexistent/client_secret_nowhere.json';
 
 test('an interactive setup asks for the mailbox name before it decides the client step', async () => {
   const harness = await newHarness();
+  await migrateNamesForTest(harness);
+  await harness.core.config.update((config) => {
+    if (config.version !== 2) throw new Error('the setup fixture was migrated to version 2');
+    return {
+      ...config,
+      clients: {
+        'acme-1': {
+          provider: 'gmail',
+          clientId: TEST_CLIENT_ID,
+          secretRef: 'gmail:client:acme-1',
+          organisation: 'acme',
+          addedAt: '2026-10-04T12:00:00.000Z',
+        },
+      },
+      organisations: {
+        acme: {
+          label: 'Acme Test Org',
+          source: { kind: 'file' as const, path: '/profiles/acme.json' },
+          sha256: 'a'.repeat(64),
+          readAt: '2026-10-04T12:00:00.000Z',
+          addedAt: '2026-10-04T12:00:00.000Z',
+          forOtherAddresses: false,
+          gmail: {
+            active: 'acme-1',
+            generations: [
+              {
+                name: 'acme-1',
+                clientId: TEST_CLIENT_ID,
+                ownership: 'owned' as const,
+                serves: { domains: ['acme.test'] },
+                addedAt: '2026-10-04T12:00:00.000Z',
+              },
+            ],
+          },
+        },
+      },
+    };
+  });
   const dialog = await setupAtTerminal(harness, [], (prompt) => {
     if (/No client file in/.test(prompt)) return NOWHERE;
     return '';
   });
-  assert.match(dialog.asked[0] ?? '', /A short name for it/);
+  assert.match(dialog.asked[0] ?? '', /A (?:short )?name for it/);
 });
 
 test('a client file downloaded during the walk is offered at the client step', async () => {
