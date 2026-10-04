@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { join, relative, sep } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -82,7 +82,8 @@ test('package sources do not assemble a printed command directly', () => {
     const source = join(packages, entry.name, 'src');
     try {
       for (const path of sourceFiles(source)) {
-        const name = relative(ROOT, path);
+        // Always with `/`, so the allowlist and the report read the same on Windows as elsewhere.
+        const name = relative(ROOT, path).split(sep).join('/');
         found.push(...findings(readFileSync(path, 'utf8'), name));
       }
     } catch (error) {
