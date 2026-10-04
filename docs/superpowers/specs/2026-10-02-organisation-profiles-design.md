@@ -2,7 +2,10 @@
 
 Status: proposed 2026-10-02 by the owner; not yet implemented. **Codex design review: READY-TO-IMPLEMENT at round 7**
 (2026-10-03), after revisions for every finding of rounds 1–6 (round 1:
-10 P1, 12 P2; round 2: 6 P1, 2 P2; round 3: 7 P1, 2 P2; round 4: 6 P1, 1 P2; round 5: 3 P1, 2 P2; round 6: 3 P1, 1 P2 — all addressed here). Tracked in Linear, project agent-communications (Cueplusplus). Nothing in it
+10 P1, 12 P2; round 2: 6 P1, 2 P2; round 3: 7 P1, 2 P2; round 4: 6 P1, 1 P2; round 5: 3 P1, 2 P2; round 6: 3 P1, 1 P2 — all addressed here). Tracked in Linear, project agent-communications (Cueplusplus). **Amended
+2026-10-04** (Codex amendment review round 1: NEEDS-REVISION, 4 P1, 2 P2, 1 P3; round 2: 1 P1, 2 P2; round 3: 2 P2; round 4: 2 P2; round 5: 1 P2; round 6: 1 P2; round 7: 2 P2; round 8: 2 P1, 1 P2 — answered by dropping the stored timeout record, see §D7; all addressed): phase 3 no longer
+waits for phase 0. What Slack documents is recorded in §2, and §D7 is made correct
+under every answer phase 0 could give to what the documents leave open (§4). Nothing in it
 changes the [parity design](2026-09-25-cli-mcp-parity-design.md): every capability is a command and a tool running one
 operation.
 
@@ -35,6 +38,11 @@ move his own second computer onto RGC's client.
 | A Slack account is bound to one app: a reauth through another client id, or a token naming another app id, is refused. A safe reauth stages the new secret, switches the config atomically, then deletes the old local credential. | `packages/slack/src/operations/workspaces.ts` (both checks), `signin.ts` |
 | Moving a Slack account `read → send` today means editing that account's own app manifest, then signing in again; `send → read` also asks for the installation to be removed by hand. Wrong for an app a whole organisation shares. | `packages/slack/src/operations/mode.ts` |
 | `auth.revoke` is not in the Slack transport's method allowlist. | `packages/slack/src/api/methods.ts` |
+| Sign-in exchanges the code at `oauth.v2.access`, whose documented answer carries the app id (`app_id`) and workspace id (`team.id`) at the top level and the user token under `authed_user`. | docs.slack.dev/reference/methods/oauth.v2.access (read 2026-10-04); `packages/slack/src/auth/authorize.ts:138-241` |
+| A PKCE client with token rotation on gets a refresh token (with a custom-URI redirect rotation is always on; with a web or localhost redirect it must be enabled, and the manifests this project generates enable both PKCE and rotation); every refresh replaces the refresh token; refresh tokens of PKCE apps expire after 30 days. | docs.slack.dev/authentication/using-pkce, …/using-token-rotation, changelog 2026-03-30 (read 2026-10-04); `packages/slack/src/manifest.ts:135` |
+| With rotation, `auth.revoke` revokes "a single token" — "a refresh token, a bot access token … or a user access token" — "without changing the underlying installation". Its answer carries a `revoked` boolean; `invalid_auth` is also documented for a request from a disallowed IP address. Nothing documents revoking one of a pair as revoking the other. Which error a second revoke of the same token returns is not documented. | api.slack.com/authentication/rotation; docs.slack.dev/reference/methods/auth.revoke (read 2026-10-04) |
+| Where a workspace requires app approval, members "can request installation via a guided interface". Whether the browser then ever returns to the redirect URL, and with which `error`, is not documented; `access_denied` is documented only for a person declining. | docs.slack.dev/app-management/distribution; docs.slack.dev/concepts/security (read 2026-10-04) |
+| The sign-in listener ends a sign-in as `denied` (with Slack's `error` and description) or `timeout` (10 minutes by default). | `packages/slack/src/auth/listener.ts:27-28, 146` |
 | `configV2Schema`'s root is a `looseObject`, and `ConfigStore.update` writes back what it parsed, so a v2-capable release keeps an unknown top-level key through its writes. Releases before v2 refuse a v2 file outright; ordinary writes never change `version`. | `config.ts:379`, `config.ts:711`, `config.ts:720`, `config.ts:646` |
 | The approval system binds safety settings and the plan's `effects` lines; `changedSettings` deliberately ignores clients, ids and other records. | `config.ts:1375`; `packages/core/src/changes.ts:160` |
 | The core package does not depend on the Gmail package; Gmail depends on core. Client parsing, probing and registration live in Gmail. | `packages/core/package.json`, `packages/gmail/package.json`, `clients.ts` |
@@ -289,15 +297,16 @@ documented for this case.
   under the credentials lock: switch the account to the new reference, client id, app id, mode and `profileApp`; and
   add to `pendingRevocations` (below) an entry naming the *old* reference and a status per token — access, and refresh
   where the old bundle has one — each `pending`. The old bundle stays in the secret store, now reachable only through
-  that entry. (3) Call `auth.revoke` for each pending token (added to the transport's allowlist for exactly this) and
-  mark each `revoked` in the config as it succeeds; Slack treats each rotating access or refresh token as a separate
-  token. (4) Only when every token is conclusively revoked, delete the old bundle and the entry. A failure at
-  (3) leaves the record and the bundle; `doctor` retries, after a restart too, and the result says plainly what is
-  revoked and what is still pending. A token Slack reports as already invalid counts as revoked. Revocation does not
+  that entry. (3) Call `auth.revoke` for each pending token — under the one-shot grant below — and mark each token's
+  status in the config by the rules of "What counts as revoked"; Slack treats each rotating access or refresh token as
+  a separate token. (4) Only when every token is conclusively finished (`revoked` or `expired`), delete the old bundle
+  and the entry. A token not yet finished leaves the record and the bundle; `doctor` retries, after a restart too, and
+  the result says plainly what is revoked, expired and still pending. Revocation does not
   remove the app's installation, and nothing says it does. Revoking the account's *own* superseded token is cleanup of
   a change already approved (or of a narrowing), not a separate approval.
 - **One pending store, outside the accounts.** Pending revocations live in a top-level, additive
-  `pendingRevocations` list — `{ ref, store, platform, workspace, tokens: { access, refresh } }` — not on the account, so
+  `pendingRevocations` list — `{ ref, store, platform, workspace, createdAt, tokens: { access, refresh } }`, each token
+  `{ status, deadline }` — not on the account, so
   removing or moving the account again cannot erase the only reference to a live token. `secretRefsOf` and every scan
   of referenced secrets (secrets migration, doctor's orphan checks) include these references, so a migration moves the
   pending bundle with everything else. Each entry also records the **store it was written to**, and revocation reads
@@ -312,6 +321,68 @@ documented for this case.
   refused and its staged token removed. A learned app id is kept only while the workspace, role and client id stay the
   same; it is cleared when the role's client id changes. An `appId` the profile states replaces a learned one, and
   accounts whose recorded app id differs are reported.
+- **The app id comes from the exchange.** `oauth.v2.access` documents `app_id` in its answer (§2), so the first
+  sign-in through a profile app learns it from there. For a *profile* flow, an answer whose `app_id` is missing or
+  does not match the profile grammar (`^A[A-Z0-9]{2,20}$`, §D2) is refused before anything is staged or learned,
+  because without it the app check above could not be made. A sign-in through a person's own app (`--client-id`) keeps
+  accepting an answer without `app_id`, exactly as today.
+- **What counts as revoked.** Slack revokes one token per call and documents no cascade, so each pending token is
+  revoked on its own, the refresh token included. A token is marked:
+  - `revoked` when Slack answers `ok: true` **and** `revoked: true`, or with `token_revoked` or `token_expired`, which
+    each say that this token is dead;
+  - `expired` when the deadline recorded for it in the entry has passed. The deadline is fixed when the entry is
+    created, as an absolute time, from the old bundle (`packages/slack/src/auth/bundle.ts`): its `accessExpiresAt`
+    for the access token and `refreshExpiresAt` for the refresh token when each parses as a time; otherwise — absent,
+    or present but unreadable, as `doctor` already finds (`packages/slack/src/operations/doctor.ts:231`) — 30 days
+    after the entry is created, the documented life of a PKCE app's refresh token (§2), which bounds its access token
+    too, since every bundle these entries hold comes from a profile app whose manifest has rotation on. A token past its
+    deadline cannot be used by anyone, so a revocation that can never be confirmed (a cascade from its pair, or a
+    revoke Slack acted on whose answer was lost, after which a second revoke's answer is undocumented) ends there,
+    and no entry can be retried forever. The result shows each deadline;
+  - otherwise `pending`: `ok: true` with `revoked` false or absent, `invalid_auth` (Slack documents it for a request
+    from a disallowed IP address too, so it does not prove the token dead), `account_inactive` (documented for bot
+    tokens; these are user tokens), `ratelimited`, a 5xx, a dropped connection, and any error not named here.
+  The result names each token's state.
+- **A one-shot grant for each revoke.** `auth.revoke` is not added to the transport's allowlist as an ordinary
+  method. The guard (`packages/slack/src/api/guard.ts`) gains a dedicated grant, as `configure` and `write` have: it
+  is bound to one `pendingRevocations` entry, one token kind (access or refresh) and the SHA-256 of that exact token,
+  allows exactly one `auth.revoke` call carrying that token, and is consumed by it. The operation loads the token from
+  the bundle the entry names, in the store the entry records, never from a caller; after Slack answers, it updates
+  that token's status by compare-and-set on the same entry, kind and `pending` status under the credentials lock, so a
+  wrong reference, another bundle, or an access/refresh swap cannot advance a status or revoke anything else.
+- **A profile sign-in that fails before storing anything.** In a workspace that requires app approval, a member may be
+  shown Slack's request page and never come back; Slack does not document what the sign-in then receives (§2). So
+  every way a profile-app sign-in can end before a token is stored — the listener's timeout, a callback with any
+  `error` (`access_denied` included), and an exchange Slack refuses — reports Slack's own `error` and description where there is one (flattened and neutralised, §D2) and says
+  that the sign-in did not complete, that the person may have declined or the workspace may require an administrator
+  to approve the app, and names the organisation's label, the workspace name and id, and the app's role and client id.
+  It never says the person declined. Those display fields are snapshotted, flattened and neutralised, into the flow
+  when it starts, so the message does not depend on the profile still being there.
+  **No new stored state for a timeout.** The flow store is unchanged: the detached listener still deletes the flow at
+  its timeout, which is the flow's own expiry (`packages/slack/src/operations/signin.ts:215`,
+  `packages/slack/src/auth/flow.ts:23`), and every expiry path discards it as today. The message is given where the
+  sign-in is known to have been a profile one, without remembering anything: a foreground sign-in's own listener
+  timing out, and a finish (`--finish`, `slack_workspace_finish`) already waiting on a profile flow — it has read the
+  flow, display fields included — that sees the flow end at its deadline with no outcome, report it as above. A finish
+  that finds no flow at all keeps today's "not found" answer and, when the account name's organisation word has a
+  profile with a Slack part, adds one cautious line: if a sign-in through the organisation's app never came back, the
+  workspace may require an administrator to approve the app (naming the label and workspace from the profile as it is
+  now). A browser simply abandoned ends as the timeout. Nothing is stored in any of these cases. A profile updated or
+  removed during the wait invalidates the flow, as above, and that is what is reported. (Rounds 4–8 of the amendment
+  review designed a stored timed-out flow instead, with a post-deadline claim, takeover of stale claims and fencing;
+  each round found another race in it, and it bought only a better word than "not found" for a later finish, so it was
+  dropped for this. A completer that crashes after claiming a flow is an existing property of every sign-in, own-app
+  ones included, and is not changed here.)
+- **Cancelling a wait on a detached sign-in ends only the wait.** When an MCP client cancels a waiting
+  `slack_workspace_finish`, the tool honours the request's cancellation signal (passed as the Gmail finish tool already
+  does), stops waiting, and says the sign-in is still open and how to finish it. When the person interrupts a waiting
+  `workspace add … --finish` (or `reauth … --finish`) in a terminal, the command exits as every CLI action does today
+  (`exitAfterRefreshes` settles refreshes and re-delivers the signal, `packages/slack/src/auth/exit.ts:84`), with no
+  message of its own. Either way the flow and its detached listener — a separate process — go on, so a sign-in the
+  person completes in the browser afterwards is collected by the next `--finish`, as today. Cancelling is not a failure and
+  stores nothing by itself. A sign-in run in the foreground (no `--start`), whose listener lives in the command's own
+  process (`packages/slack/src/cli/program.ts:499, 1406`), keeps today's behaviour: interrupting it ends the process
+  and its listener (`packages/slack/src/auth/exit.ts:77`), and nothing is stored.
 - An account connected through a person's own app keeps today's procedure unchanged.
 
 ### D8. Updating, removing, reading
@@ -387,21 +458,25 @@ is the one thing a leaked file can use up.
 
 ## 4. Phases
 
-0. **RGC spike, before any code.** Mateo connects with today's 0.12.1 and RGC's apps by hand (`agent-gmail setup
-   --client-json …`; `agent-slack workspace add rgc/slack --client-id … --port 51234`). It settles: whether a
-   non-admin can authorise an app no admin installed; the app id and workspace id Slack returns; that rotation works
-   for him; and what `auth.revoke` does to a rotating token pair (tried on a throwaway token). Findings recorded in
-   this spec before phase 3.
+0. **RGC acceptance, no longer a gate (amended 2026-10-04).** First written as a spike before any code: Mateo
+   connects with RGC's apps by hand and settles four questions before phase 3. The owner is holding that message, so
+   phase 3 is built without it. Two of the four are answered by Slack's documents (§2): the app id and workspace id
+   come back from the exchange, and a PKCE client's refresh token rotates. The other two are left open by the
+   documents, and §D7 is written to be right under either answer: a revoke that cannot be confirmed stays pending and
+   is retried, and a sign-in that never returns says an admin's approval may be missing. The live checks — a
+   non-admin authorising an app no admin installed (and Slack's exact wording if not), rotation past the first
+   refresh, and what revoking one token of a pair does to the other, on a throwaway token — happen when RGC's members
+   connect in phase 4, and are recorded here with the date then.
 1. **Core: profiles.** Exported organisation parser; schema; the `organisations` record, generations,
    ownership and adoption; the shared client-record module (and Gmail switched to import it); `org add | list | show
    | update | remove` with bound approvals; drift reporting in `doctor`; parity, reference and skills for these.
 2. **Gmail: using it.** Client choice before consent (§D6), the post-consent check and revoke, `setup` skipping the
    walk, `setup --profile` with `--org-approval`, the move-a-mailbox documentation.
 3. **Slack: using it.** Profile-driven `workspace add` with the workspace/app checks; provenance; the mode move with
-   its snapshot, the relaxed checks for exactly that move, and ordered revocation with a pending record;
-   `skills/slack-setup` rewritten.
+   its snapshot, the relaxed checks for exactly that move, and ordered revocation with a pending record; the revoke
+   outcomes and the approval-pending message of §D7; `skills/slack-setup` rewritten.
 4. **RGC.** The RGC repository and its README (how to fill a profile from Google's file); RGC's members moved onto
-   it; release notes.
+   it, with phase 0's live checks recorded as they connect; release notes.
 
 Each phase is one branch, one Codex review, one Blocks loop where the repository uses it, one release.
 
@@ -427,7 +502,22 @@ applying without an approval while a content change asks for one; a `projectId`-
 with control tokens, bidirectional and invisible characters, newlines and over-long values; Gmail choice with and without `--email`, each row of §D6;
 post-consent mismatch revocation; import untouched; Slack add, workspace/app mismatch, the mode move's races and
 snapshot, revocation order, a failed revoke left pending and retried after a restart, an already-invalid token, a
-pending entry surviving `workspace remove`, a second move, a secrets migration by this release, and one by the release
+pending entry surviving `workspace remove`, a second move, each `auth.revoke` answer of §D7 (`ok` with `revoked`
+true, false and absent, `token_revoked`, `token_expired`, `invalid_auth`, `account_inactive`, `ratelimited`, a 5xx, a
+dropped connection, an unnamed error), the refresh token revoked on its own, a cascade (the second token's revoke
+answering each of those) and no cascade, a crash after Slack acted but before the status was written, and expiry ending
+a pending token (access, refresh, and a refresh bundle with no recorded expiry); the one-shot grant refusing a wrong
+reference, another bundle and an access/refresh swap, and being consumed by one call; an exchange without `app_id`,
+or with one outside the grammar, refused before staging on a profile flow and still accepted on an own-app flow; a
+profile-app sign-in ending in the detached listener's real timeout (with a short injected timeout, not `--wait`), in
+a callback `error` (`access_denied`, an approval-like one, an unknown one)
+and in an exchange refusal (the same three), each saying what §D7 says, never that the person declined, and storing
+nothing; a finish already waiting on a profile flow that expires reporting the timeout with the approval line, and a
+finish finding no flow adding that line only when the name's organisation has a Slack profile; a cancelled wait on a
+detached sign-in (MCP cancellation saying it is still open; a CLI interrupt of `--finish` exiting as today) leaving the
+flow open and a later `--finish` collecting a sign-in completed after it, and a foreground sign-in interrupted storing
+nothing as today; a pending entry's deadlines from valid, absent and unreadable expiry fields; the flow store's
+expiry behaviour unchanged for every flow; a profile updated or removed during the wait; a secrets migration by this release, and one by the release
 before it (the bundle read from its recorded store); same-role reauth after an app
 replacement; the app id learned once under two simultaneous first sign-ins, cleared on a new client id; redaction snapshots of every surface; CLI/MCP
 parity; and the repository's full `pnpm verify` (`verify:channels`, `verify:skills`, `verify:reference`,
@@ -446,8 +536,10 @@ a config version 3.
    update, the workspace and app checks (§D7), and Google's and Slack's own consent screens naming the app.
 2. **The 100-account cap** on an External, unverified client: profiles for such clients stay private (§D10);
    `forOtherAddresses` is off unless the member asks for it, so personal addresses use the cap only by choice.
-3. **Slack app approval** in workspaces that require it: phase 0 finds out for RGC; the error must say an admin's
-   approval is what is missing.
+3. **Slack app approval** in workspaces that require it: Slack's documents do not say whether the sign-in ever
+   returns, so a profile-app sign-in that times out, or fails before storing a token, says an admin's approval may be
+   missing (§D7); cancelling a wait is not a failure and leaves the sign-in open;
+   RGC's live behaviour is recorded when its members connect (§4, phase 0).
 4. **Port collisions:** every member signs in on the profile's port; a busy port fails with a message naming it.
 5. **Older releases** editing owned records: made short-lived by the daily update gate where it is on, and in every
    case reported as drift and repaired by `org update` (§D4, §D8).
