@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import type { SecretStore } from '@agentcomms/core';
 import { migrateSecrets } from '../../core/src/operations/secrets-migrate.ts';
+import { secretsStoreSwitchAsReleased0121, writeAsReleased0121 } from '../../core/test/fixtures/config-v2-0.12.1.ts';
 import { serialiseBundle, type TokenBundle } from '../src/auth/bundle.ts';
 import { run } from '../src/cli/program.ts';
 import { renderRemoved } from '../src/cli/render.ts';
@@ -142,9 +143,9 @@ test('workspace remove retries matching old tokens before deleting the current c
   const { ref, old } = await plantPending(harness);
   const other = await plantPending(harness, 'T9999');
   const fake = await startFakeSlack({ 'auth.revoke': () => ({ ok: false, error: 'invalid_auth' }) });
-  let currentPresentAtRevoke = false;
+  const currentPresentAtRevoke: boolean[] = [];
   const fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-    currentPresentAtRevoke ||= (await (await harness.core.secrets('file')).get(account.secretRef)) !== null;
+    currentPresentAtRevoke.push((await (await harness.core.secrets('file')).get(account.secretRef)) !== null);
     return fake.fetch(input, init);
   };
   try {
@@ -156,7 +157,11 @@ test('workspace remove retries matching old tokens before deleting the current c
       } as never,
     );
     assert.equal(removed.removed, true);
-    assert.equal(currentPresentAtRevoke, true);
+    assert.deepEqual(
+      currentPresentAtRevoke,
+      [true, true],
+      'both access and refresh revokes must precede current deletion',
+    );
     assert.deepEqual(
       fake.requests.map((request) => request.authorization),
       [`Bearer ${old.accessToken}`, `Bearer ${old.refreshToken}`],
@@ -320,6 +325,38 @@ test('doctor reports missing and corrupt retained bundles without dropping ledge
   }
 });
 
+test('removal reports a retained ledger entry honestly when its old bundle is missing or corrupt', async () => {
+  for (const damaged of ['missing', 'corrupt'] as const) {
+    const harness = await newHarness();
+    await harness.addWorkspace({ alias: 'acme' });
+    const { ref } = await plantPending(harness);
+    const secrets = await harness.core.secrets('file');
+    if (damaged === 'missing') await secrets.delete(ref);
+    else await secrets.set(ref, '{broken');
+    const fake = await startFakeSlack({ 'auth.revoke': () => ({ ok: true, revoked: true }) });
+    try {
+      const context = harness.context({ fetch: fake.fetch });
+      const removed = await removeWorkspaceChange(context, 'acme').apply(
+        undefined as never,
+        {
+          before: await harness.core.config.load(),
+        } as never,
+      );
+      const issue = removed.cleanup[0]?.issue;
+      assert.ok(issue, damaged);
+      const text = renderRemoved(removed);
+      assert.match(text, /ledger entry remains for agent-slack doctor to retry/);
+      assert.ok(text.includes(issue.message), `${damaged}: the cleanup issue was omitted`);
+      assert.doesNotMatch(text, /old credential bundle remains/);
+      assert.match(text, damaged === 'missing' ? /missing from its recorded store/ : /could not be read/);
+      assert.ok((await harness.core.config.load()).pendingRevocations?.some((entry) => entry.ref === ref));
+      assert.equal(fake.requests.length, 0);
+    } finally {
+      await fake.close();
+    }
+  }
+});
+
 function memoryKeychain(): SecretStore {
   const values = new Map<string, string>();
   return {
@@ -335,8 +372,9 @@ function memoryKeychain(): SecretStore {
 
 test('doctor and remove follow a pending bundle through current and prior-release store switches', async () => {
   for (const modern of [true, false]) {
-    const harness = await newHarness();
-    const account = await harness.addWorkspace({ alias: 'acme' });
+    const harness = await newHarness({ version: 2 });
+    const alias = 'acme/slack';
+    const account = await harness.addWorkspace({ alias });
     const { ref, old } = await plantPending(harness);
     const file = await harness.core.secrets('file');
     const target = memoryKeychain();
@@ -354,7 +392,18 @@ test('doctor and remove follow a pending bundle through current and prior-releas
       assert.ok(current);
       await target.set(account.secretRef, current);
       await file.delete(account.secretRef);
-      await harness.core.config.update((config) => ({ ...config, secrets: { store: 'keychain' } }));
+      const configPath = harness.core.config.path;
+      const before = readFileSync(configPath, 'utf8');
+      const beforeLedger = JSON.parse(before).pendingRevocations;
+      const released = writeAsReleased0121(before, (raw) => secretsStoreSwitchAsReleased0121(raw, 'keychain'));
+      writeFileSync(configPath, released);
+      const persisted = JSON.parse(readFileSync(configPath, 'utf8'));
+      assert.equal(
+        JSON.stringify(persisted.pendingRevocations),
+        JSON.stringify(beforeLedger),
+        'the frozen old writer changed the unknown ledger',
+      );
+      assert.deepEqual(persisted.secrets, { store: 'keychain' });
       assert.equal((await harness.core.config.load()).pendingRevocations?.[0]?.store, 'file');
       assert.ok(await file.get(ref));
       assert.equal(await target.get(ref), null);
@@ -367,7 +416,7 @@ test('doctor and remove follow a pending bundle through current and prior-releas
       const checked = await runDoctor(context, { probe: (input, init) => harness.probe(input, init) });
       assert.equal(checked.cleanup?.[0]?.issue, undefined, String(modern));
       assert.equal(checked.cleanup?.[0]?.tokens[0]?.status, 'pending');
-      const removed = await removeWorkspaceChange(context, 'acme').apply(
+      const removed = await removeWorkspaceChange(context, alias).apply(
         undefined as never,
         {
           before: await harness.core.config.load(),

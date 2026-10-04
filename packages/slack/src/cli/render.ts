@@ -123,7 +123,9 @@ export function renderRemoved(removed: RemovedWorkspace): string {
     `Old credential for ${entry.workspace}: ${entry.tokens.map((token) => `${token.kind} ${token.status} (deadline ${token.deadline})`).join('; ')}.`,
     ...(entry.cleaned
       ? ['The old credential bundle was cleaned up.']
-      : ['The old credential bundle remains for agent-slack doctor to retry.']),
+      : entry.issue
+        ? [`The pending revocation ledger entry remains for agent-slack doctor to retry: ${entry.issue.message}.`]
+        : ['The old credential bundle remains for agent-slack doctor to retry.']),
   ]);
   return [
     `Disconnected "${removed.alias}" from this machine. The stored credential is gone.`,

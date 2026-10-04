@@ -294,7 +294,7 @@ test('the executor persists the access token’s own cautious answer through a g
   }
 });
 
-const REFRESH_ANSWERS = ACCESS_ANSWERS.filter((item) => item.label !== 'unreadable empty body');
+const REFRESH_ANSWERS = ACCESS_ANSWERS;
 
 test('the refresh token is always called second and persists its own answer without borrowing access success', async () => {
   for (const item of REFRESH_ANSWERS) {
