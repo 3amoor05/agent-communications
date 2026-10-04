@@ -711,11 +711,11 @@
       "cli": "setup",
       "mcp": "gmail_setup",
       "status": "both",
-      "operation": "orgAddChange",
-      "via": "setupState",
-      "argv": ["--profile", "setup-parity.agentcomms.json", "--inbox", "parity/gmail"],
-      "args": { "profile": "setup-parity.agentcomms.json", "inbox": "parity/gmail" },
-      "expect": { "request.file": "setup-parity.agentcomms.json" },
+      "operation": "setupState",
+      "via": "orgAddChange",
+      "argv": ["--profile", "setup-parity.agentcomms.json", "--inbox", "profile-parity/gmail"],
+      "args": { "profile": "setup-parity.agentcomms.json", "inbox": "profile-parity/gmail" },
+      "expect": { "options.alias": "profile-parity/gmail" },
       "reason": "`setup --profile <file>` and gmail_setup profile add the organisation through core's orgAddChange first, under the separate --org-approval/orgApproval, then continue Gmail setup (design 2026-10-02 §D6)."
     },
     {

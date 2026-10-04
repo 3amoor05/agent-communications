@@ -531,6 +531,24 @@ function standIn(pkg, name, fn) {
       drive.stopped = id;
       throw new Reached(id);
     }
+    // A profile setup row ends at the setup continuation. Keep that continuation at its client step so the command
+    // does not go on into the separate sign-in capability after the row has proved both orgAddChange and setupState.
+    if (
+      id === 'gmail:setupState' &&
+      drive.wanted.has('gmail:setupState') &&
+      drive.calls.includes('core:orgAddChange')
+    ) {
+      return {
+        next: 'client',
+        done: [],
+        clients: [],
+        inboxes: [],
+        clientOf: {},
+        registeredWith: [],
+        candidates: [],
+        clientChoice: null,
+      };
+    }
     // Setup reaches server registration only after its state says the named mailbox is already connected. The sealed
     // drive replaces setupState like every operation, so give precisely that prerequisite when this drive is proving
     // the setup-registration row; every other setup row retains the ordinary inert answer.
@@ -544,6 +562,16 @@ function standIn(pkg, name, fn) {
         registeredWith: [],
         candidates: [],
         clientChoice: { name: 'parity-client' },
+      };
+    }
+    // `setup --profile` reaches setupState only after core's profile change has applied. The profile operation is a
+    // stand-in in this sealed drive, so give the shared change gate a harmless no-op change to apply; an inert proxy
+    // cannot stand in for GatedChange's plan/apply protocol and used to stop the drive before the continuation this
+    // parity row exists to prove.
+    if (id === 'core:orgAddChange' && drive.wanted.has('gmail:setupState')) {
+      return {
+        plan: async (config) => ({ before: config, after: config, effects: [], summary: 'parity profile addition' }),
+        apply: async () => ({}),
       };
     }
     return inert();

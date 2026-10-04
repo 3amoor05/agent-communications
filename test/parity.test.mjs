@@ -119,6 +119,13 @@ test(`capabilities.json names every command and tool, and only ones that exist${
   assert.deepEqual(problems, [], `capabilities.json and the product disagree:${listed(problems)}`);
 });
 
+test('setup --profile parity follows profile addition into the setup continuation', () => {
+  const row = table.capabilities.find((entry) => entry.id === 'gmail.setup.profile');
+  assert.equal(row?.operation, 'setupState', 'the row must end at the setup continuation');
+  assert.equal(row?.via, 'orgAddChange', 'profile addition is the operation reached before that continuation');
+  assert.deepEqual(row?.expect, { 'options.alias': 'profile-parity/gmail' });
+});
+
 test('`pnpm verify:parity --strict` exits non-zero exactly while a row is pending', async () => {
   // The release reads this exit code, so a script that printed its problems and exited 0 would be a gate that never
   // shut. Checked against the table as it stands: failing while anything is pending, passing once nothing is.
