@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 import { CommsError } from '@agentcomms/core';
 import { secretRefFor } from '../src/accounts.ts';
+import { ResendContext } from '../src/context.ts';
+import { runDoctor } from '../src/operations/doctor.ts';
 import { FULL, type Harness, LOCKED, newHarness, SENDING } from './support/harness.ts';
 
 /**
@@ -252,4 +254,25 @@ test('show and doctor say plainly that read-only is this package’s promise, no
   assert.match(String(result?.readOnly), /Resend has no read-only API key/);
   const sending = result?.accounts.find((account) => account.name === 'acme/resend-send');
   assert.ok(sending?.checks.some((check) => check.ok && /unavailable by design/.test(check.detail)));
+});
+
+test('doctor renders its repair commands for the selected shell platform', async () => {
+  harness = await newHarness();
+  const account = await harness.addAccount({ name: '7/resend', mode: 'read' });
+  await (await harness.core.secrets('file')).delete(account.secretRef);
+  const result = await runDoctor(
+    new ResendContext({
+      core: harness.core,
+      env: harness.env,
+      fetch: harness.fake.fetch,
+      throttle: { intervalMs: 0 },
+      platform: 'win32',
+    }),
+    { offline: true },
+  );
+  const missing = result.accounts[0]?.checks.find((check) => check.name === 'key stored');
+  assert.equal(
+    missing?.fix,
+    'agent-resend account remove "7/resend", then agent-resend account add "7/resend"',
+  );
 });

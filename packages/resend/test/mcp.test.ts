@@ -141,7 +141,7 @@ test('arguments are held to the schema: an unknown key or a wrong type is refuse
 test('under confirm the tool hands over the command a person runs, and sends nothing', async () => {
   harness = await newHarness();
   await harness.addAccount({ name: 'acme/resend', mode: 'send', sendPolicy: 'confirm' });
-  const { call, close } = await harness.mcp();
+  const { call, close } = await harness.mcp({ platform: 'darwin' });
   try {
     const prepared = ok<{ approvalId: string; expect: Record<string, unknown>; effectivePolicy: string }>(
       await call('resend_send_prepare', {

@@ -157,6 +157,36 @@ test('an account in read mode, or under never, sends nothing', async () => {
   assert.equal(harness.fake.sends().length, 0);
 });
 
+test('send hints render commands for the selected shell platform', async () => {
+  harness = await newHarness();
+  await harness.addAccount({ name: '7/resend', mode: 'read' });
+  await harness.addAccount({ name: '8/resend', mode: 'send', sendPolicy: 'never' });
+  await harness.addAccount({ name: '9/resend', mode: 'send', sendPolicy: 'confirm' });
+  const context = harness.context('mcp', 'win32');
+  await assert.rejects(prepareSend(context, '7/resend', message()), (error: unknown) => {
+    assert.ok(error instanceof CommsError);
+    assert.match(String(error.hint), /agent-resend account policy "7\/resend" --mode send/);
+    return true;
+  });
+  await assert.rejects(prepareSend(context, '8/resend', message()), (error: unknown) => {
+    assert.ok(error instanceof CommsError);
+    assert.match(String(error.hint), /agent-resend account policy "8\/resend" --send confirm/);
+    return true;
+  });
+  const prepared = await prepareSend(context, '9/resend', message());
+  assert.match(prepared.preview, new RegExp(`agent-resend approve ${prepared.approvalId}`));
+  assert.match(prepared.nextStep, new RegExp(`agent-resend approve ${prepared.approvalId}`));
+  await assert.rejects(
+    executeSend(context, '9/resend', { approvalId: prepared.approvalId, expect: prepared.expect }),
+    (error: unknown) => {
+      assert.ok(error instanceof CommsError);
+      assert.match(String(error.hint), new RegExp(`agent-resend approve ${prepared.approvalId}`));
+      return true;
+    },
+  );
+  assert.equal(harness.fake.sends().length, 0);
+});
+
 test(`above ${REACH_CONFIRM_THRESHOLD} recipients a person approves at a terminal, whatever the policy says`, async () => {
   harness = await newHarness();
   await sendMode();

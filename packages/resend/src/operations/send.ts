@@ -4,11 +4,13 @@ import {
   approvalKind,
   CommsError,
   canonicalAddress,
+  inlineCommand,
   type Expectation,
   type MessagePreview,
   publicView,
   renderMessagePreview,
   type SendPolicy,
+  shellCommand,
   sha256Hex,
   stricterPolicy,
 } from '@agentcomms/core';
@@ -91,10 +93,12 @@ async function ownRecord(context: ResendContext, named: NamedAccount, approvalId
   return record;
 }
 
-function requireSendMode(named: NamedAccount): void {
+function requireSendMode(named: NamedAccount, platform: NodeJS.Platform): void {
   if (named.account.mode !== 'send') {
     throw new CommsError('SCOPE_MISSING', `"${named.name}" is in read mode, so it sends nothing`, {
-      hint: `A person can allow sending with \`agent-resend account policy ${named.name} --mode send\`, which is a change they approve.`,
+      hint: `A person can allow sending with ${inlineCommand(
+        shellCommand(['agent-resend', 'account', 'policy', named.name, '--mode', 'send'], platform),
+      )}, which is a change they approve.`,
     });
   }
 }
@@ -197,10 +201,17 @@ function expectationOf(message: OutboundMessage): Expectation {
   return { to: [...message.to], cc: [...message.cc], bcc: [...message.bcc], subject: message.subject };
 }
 
-function describePolicy(effective: SendPolicy, approvalId: string, flags: readonly string[]): string {
+function describePolicy(
+  effective: SendPolicy,
+  approvalId: string,
+  flags: readonly string[],
+  platform: NodeJS.Platform,
+): string {
   if (effective === 'confirm') {
     const why = flags.length > 0 ? ` (${flags.join(', ')})` : '';
-    return `Policy: confirm${why} — a person runs \`agent-resend approve ${approvalId}\` at their own terminal before this can go.`;
+    return `Policy: confirm${why} — a person runs ${inlineCommand(
+      shellCommand(['agent-resend', 'approve', approvalId], platform),
+    )} at their own terminal before this can go.`;
   }
   return 'Policy: chat — send only after the user approves this exact preview.';
 }
@@ -213,6 +224,7 @@ function previewOf(options: {
   domainNote: string;
   effective: SendPolicy;
   flags: readonly string[];
+  platform: NodeJS.Platform;
 }): string {
   const { message } = options.built;
   const reach = uniqueRecipients(message);
@@ -256,7 +268,7 @@ function previewOf(options: {
       : undefined,
     links: options.built.links,
     warnings,
-    policy: describePolicy(options.effective, options.approvalId, options.flags),
+    policy: describePolicy(options.effective, options.approvalId, options.flags, options.platform),
   };
   return renderMessagePreview(preview);
 }
@@ -277,12 +289,14 @@ async function attachPolicy(context: ResendContext) {
  */
 export async function prepareSend(context: ResendContext, name: string, input: SendInput): Promise<SendPreparation> {
   const named = await context.accounts.require(name);
-  requireSendMode(named);
+  requireSendMode(named, context.platform);
   const config = await context.config();
   const livePolicy = named.account.sendPolicy ?? config.defaults.sendPolicy;
   if (livePolicy === 'never') {
     throw new CommsError('POLICY_NEVER', `sending from ${name} is turned off (policy: never)`, {
-      hint: `A person can change it with \`agent-resend account policy ${name} --send confirm\`.`,
+      hint: `A person can change it with ${inlineCommand(
+        shellCommand(['agent-resend', 'account', 'policy', name, '--send', 'confirm'], context.platform),
+      )}.`,
     });
   }
   const built = await buildMessage(input, { now: context.now(), attach: await attachPolicy(context) });
@@ -337,6 +351,7 @@ export async function prepareSend(context: ResendContext, name: string, input: S
       domainNote,
       effective,
       flags: study.flags,
+      platform: context.platform,
     }),
     policy: livePolicy,
     effectivePolicy: effective,
@@ -346,7 +361,9 @@ export async function prepareSend(context: ResendContext, name: string, input: S
     expiresAt: record.expiresAt,
     nextStep:
       effective === 'confirm'
-        ? `Show the preview to the user, then have them run \`agent-resend approve ${record.approvalId}\` in their own terminal. You cannot approve this yourself. Then execute it with the same approval id and the recipients and subject shown.`
+        ? `Show the preview to the user, then have them run ${inlineCommand(
+            shellCommand(['agent-resend', 'approve', record.approvalId], context.platform),
+          )} in their own terminal. You cannot approve this yourself. Then execute it with the same approval id and the recipients and subject shown.`
         : 'Show the preview to the user verbatim and wait for an explicit yes. Then execute it with the same approval id and the recipients and subject shown above.',
   };
 }
@@ -502,13 +519,15 @@ export async function executeSend(
   options: { approvalId: string; expect: Expectation },
 ): Promise<SendResult> {
   const named = await context.accounts.require(name);
-  requireSendMode(named);
+  requireSendMode(named, context.platform);
   const known = await ownRecord(context, named, options.approvalId);
   if (known.state !== 'pending' && known.state !== 'approved') {
     throw new CommsError('APPROVAL_VOID', `nothing was sent: ${describeState(known.state)}`, {
       hint:
         known.state === 'unknown'
-          ? `Check what happened with \`agent-resend send status ${options.approvalId} --account ${name}\` before anything else.`
+          ? `Check what happened with ${inlineCommand(
+              shellCommand(['agent-resend', 'send', 'status', options.approvalId, '--account', name], context.platform),
+            )} before anything else.`
           : 'Prepare the send again if it should still go.',
       details: { approvalId: options.approvalId, state: known.state },
     });
@@ -538,7 +557,9 @@ export async function executeSend(
       expect: options.expect,
     },
     {
-      pendingHint: `Ask the user to run \`agent-resend approve ${options.approvalId}\` in their own terminal, then execute it again with the same approval. You cannot approve it yourself.`,
+      pendingHint: `Ask the user to run ${inlineCommand(
+        shellCommand(['agent-resend', 'approve', options.approvalId], context.platform),
+      )} in their own terminal, then execute it again with the same approval. You cannot approve it yourself.`,
     },
   );
 
@@ -646,7 +667,9 @@ export async function executeSend(
     }
     throw new CommsError('TRANSIENT', `whether the email was sent is not known: ${said}`, {
       hint: [
-        `Do not send it again. Check the Resend dashboard or ask the recipient, and check with \`agent-resend send status ${options.approvalId} --account ${name}\`; this approval is not used again.`,
+        `Do not send it again. Check the Resend dashboard or ask the recipient, and check with ${inlineCommand(
+          shellCommand(['agent-resend', 'send', 'status', options.approvalId, '--account', name], context.platform),
+        )}; this approval is not used again.`,
         ...unrecorded,
       ].join(' '),
       details: {
@@ -857,6 +880,7 @@ export async function beginSendApproval(context: ResendContext, approvalId: stri
       domainNote: prepared.warnings[0] ?? '',
       effective,
       flags: record.riskFlags,
+      platform: context.platform,
     }),
     challenge,
   };

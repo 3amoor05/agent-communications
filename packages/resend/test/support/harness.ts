@@ -56,7 +56,7 @@ export interface Harness {
   env: NodeJS.ProcessEnv;
   core: Core;
   fake: FakeResend;
-  context(surface?: 'cli' | 'mcp'): ResendContext;
+  context(surface?: 'cli' | 'mcp', platform?: NodeJS.Platform): ResendContext;
   addAccount(options: {
     name: string;
     key?: string;
@@ -66,8 +66,11 @@ export interface Harness {
     changePolicy?: 'chat' | 'confirm';
     domainLock?: string;
   }): Promise<ResendAccount>;
-  cli(argv: string[], options?: { env?: NodeJS.ProcessEnv; tty?: boolean; input?: string[] }): Promise<Captured>;
-  mcp(options?: { account?: string }): Promise<{
+  cli(
+    argv: string[],
+    options?: { env?: NodeJS.ProcessEnv; tty?: boolean; input?: string[]; platform?: NodeJS.Platform },
+  ): Promise<Captured>;
+  mcp(options?: { account?: string; platform?: NodeJS.Platform }): Promise<{
     client: Client;
     call(name: string, args: Record<string, unknown>): Promise<ToolResult>;
     close(): Promise<void>;
@@ -108,8 +111,8 @@ export async function newHarness(): Promise<Harness> {
     { id: PENDING_DOMAIN_ID, name: 'pending.test', status: 'pending' },
   ];
 
-  const context = (surface: 'cli' | 'mcp' = 'cli') =>
-    new ResendContext({ core, env, fetch: fake.fetch, throttle: { intervalMs: 0 }, surface });
+  const context = (surface: 'cli' | 'mcp' = 'cli', platform?: NodeJS.Platform) =>
+    new ResendContext({ core, env, fetch: fake.fetch, throttle: { intervalMs: 0 }, surface, platform });
 
   const harness: Harness = {
     dir,
@@ -175,6 +178,7 @@ export async function newHarness(): Promise<Harness> {
         env: { ...env, ...options.env },
         fetch: fake.fetch,
         throttle: { intervalMs: 0 },
+        platform: options.platform,
         streams: {
           stdout: Object.assign(out, { isTTY: tty }),
           stderr: Object.assign(err, { isTTY: tty }),
@@ -194,6 +198,7 @@ export async function newHarness(): Promise<Harness> {
         env,
         fetch: fake.fetch,
         throttle: { intervalMs: 0 },
+        platform: options.platform,
         ...(options.account ? { account: options.account } : {}),
       });
       const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
