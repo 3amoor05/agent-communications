@@ -101,14 +101,14 @@ for (const key of ['client_secret', 'access_token', 'refresh_token']) {
   for (const source of ['stored callback', 'exchange']) {
     test(`quoted ${key} is redacted from ${source} and its surfaced error`, async () => {
       const f = await fixture();
-      const secret = 'synthetic-secret-123';
+      const secret = 'test-secret-123';
       const description = `{"${key}":"${secret}"}`;
       let operation: Promise<unknown>;
       if (source === 'stored callback') {
         await f.context.flows.recordOutcome(f.flow.flowId, { error: 'access_denied', description });
         assert.doesNotMatch(
           await readFile(join(f.directory, `${f.flow.flowId}.outcome.json`), 'utf8'),
-          /synthetic-secret-123/,
+          /test-secret-123/,
         );
         operation = finishSignIn(f.context, { flowId: f.flow.flowId, waitSeconds: 0 });
       } else {
@@ -116,7 +116,7 @@ for (const key of ['client_secret', 'access_token', 'refresh_token']) {
         operation = completeSignIn(f.context, f.flow.flowId, 'fake-code');
       }
       const error = await caught(operation);
-      assert.doesNotMatch(JSON.stringify(errorEnvelope(error)) + error.stack, /synthetic-secret-123/);
+      assert.doesNotMatch(JSON.stringify(errorEnvelope(error)) + error.stack, /test-secret-123/);
       assert.match(error.hint ?? '', /\[redacted\]/);
       cautious(error);
       await nothingSaved(f);
