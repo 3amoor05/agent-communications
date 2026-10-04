@@ -104,6 +104,21 @@ test('a good reply is read into the fields the account needs', () => {
   assert.deepEqual(token.scopes, scopesForMode('read'));
 });
 
+test('the exchange keeps a raw app id for the profile validator and accepts an own-app reply without one', () => {
+  assert.equal(readExchange(reply({ app_id: 'not-an-app-id' })).appId, 'not-an-app-id');
+  assert.equal(readExchange(reply({ app_id: undefined })).appId, undefined);
+});
+
+test('an exchange refusal preserves Slack error and description as structured details', () => {
+  assert.throws(
+    () => readExchange({ ok: false, error: 'app_not_approved', error_description: 'Admin approval required' }),
+    (error: CommsError) => {
+      assert.deepEqual(error.details, { slackError: 'app_not_approved', slackDescription: 'Admin approval required' });
+      return true;
+    },
+  );
+});
+
 test('a bot token in the reply is refused, not quietly dropped', () => {
   /*
    * A bot token would live in the same app, outside everything this package guards, and read mode's whole claim

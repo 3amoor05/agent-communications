@@ -2,9 +2,21 @@ import assert from 'node:assert/strict';
 import { readdir } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { test } from 'node:test';
-import { beginChangeApproval, CommsError, claimChange, finishChangeApproval, gatedChange } from '@agentcomms/core';
-import { FLOW_TTL_MS } from '../src/auth/flow.ts';
+import {
+  beginChangeApproval,
+  CommsError,
+  claimChange,
+  finishChangeApproval,
+  gatedChange,
+  neutralise,
+  resolveProfileSlackTarget,
+} from '@agentcomms/core';
+import { FLOW_TTL_MS, newFlowId, type SlackFlow } from '../src/auth/flow.ts';
+import { SlackContext } from '../src/context.ts';
 import { connectWorkspace } from '../src/operations/changes.ts';
+import { completeSignIn } from '../src/operations/signin.ts';
+import { listWorkspaces, showWorkspace } from '../src/operations/workspaces.ts';
+import { slackOk } from './support/harness.ts';
 import { newOrganisationHarness, PROFILE_SHA, READ_CLIENT_ID, SEND_CLIENT_ID } from './support/organisation.ts';
 
 async function freePort(): Promise<number> {
@@ -25,6 +37,203 @@ async function secretFiles(dir: string): Promise<string[]> {
 function is(code: string, pattern: RegExp) {
   return (error: unknown) => error instanceof CommsError && error.code === code && pattern.test(error.message);
 }
+
+async function savedProfileFlow(
+  harness: Awaited<ReturnType<typeof newOrganisationHarness>>,
+  alias: string,
+  options: { ownApp?: boolean; clientId?: string; reply?: (params: Record<string, string>) => unknown } = {},
+) {
+  const context = new SlackContext({
+    core: harness.core,
+    env: harness.env,
+    exchange: async (params) => (options.reply ? options.reply(params) : harness.exchange(params)),
+  });
+  const target = resolveProfileSlackTarget(await harness.core.config.load(), 'rgc', 'read');
+  const profile = {
+    ...target,
+    label: neutralise(target.label).text,
+    workspaceName: neutralise(target.workspaceName).text,
+  };
+  const now = new Date();
+  const flow: SlackFlow = {
+    flowId: newFlowId(),
+    mode: 'read',
+    alias,
+    clientId: options.clientId ?? profile.clientId,
+    ...(options.ownApp ? {} : { profile }),
+    verifier: 'fake-verifier',
+    state: 'fake-state',
+    redirectUrl: `http://localhost:${profile.redirectPort}/slack/callback`,
+    port: profile.redirectPort,
+    createdAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + FLOW_TTL_MS).toISOString(),
+  };
+  await context.flows.save(flow);
+  return { context, flow };
+}
+
+test('a profile exchange rejects the wrong workspace, client, app, or missing or invalid app id before staging', async () => {
+  const cases = [
+    { label: 'workspace', reply: { team: { id: 'TOTHER01', name: 'Other' }, app_id: 'A0READ' }, why: /workspace/i },
+    { label: 'client', reply: { app_id: 'A0READ' }, clientId: '9999.8888', why: /target/i },
+    { label: 'app', reply: { app_id: 'A0OTHER' }, why: /app/i },
+    { label: 'missing app id', reply: { app_id: undefined }, why: /app id/i },
+    { label: 'invalid app id', reply: { app_id: 'a0read' }, why: /app id/i },
+  ];
+  for (const item of cases) {
+    const harness = await newOrganisationHarness({ port: await freePort(), readAppId: 'A0READ' });
+    const { context, flow } = await savedProfileFlow(harness, 'rgc/slack', {
+      ...(item.clientId ? { clientId: item.clientId } : {}),
+      reply: () => slackOk({ team: { id: 'TRGC0001', name: 'RGC' }, ...item.reply }),
+    });
+    const real = await harness.core.secrets('file');
+    let stages = 0;
+    context.secrets = async () => ({
+      ...real,
+      kind: real.kind,
+      get: (ref) => real.get(ref),
+      delete: (ref) => real.delete(ref),
+      invalidate: (ref) => real.invalidate(ref),
+      async set(ref, value) {
+        stages += 1;
+        await real.set(ref, value);
+      },
+    });
+    await assert.rejects(completeSignIn(context, flow.flowId, item.label), is('CONFIG', item.why), item.label);
+    assert.equal(stages, 0, `${item.label}: a credential was staged before validation`);
+    assert.equal((await harness.core.config.load()).accounts['rgc/slack'], undefined, item.label);
+  }
+});
+
+test('a profile add records provenance and app id in one config update; workspace views expose provenance', async () => {
+  const harness = await newOrganisationHarness({ port: await freePort() });
+  const { context, flow } = await savedProfileFlow(harness, 'rgc/slack', {
+    reply: () => slackOk({ team: { id: 'TRGC0001', name: 'RGC' }, app_id: 'A0READ' }),
+  });
+  const originalUpdate = harness.core.config.update.bind(harness.core.config);
+  const writes: { appId: string | undefined; accountAppId: string | undefined; organisation: string | undefined }[] =
+    [];
+  harness.core.config.update = async (...args) => {
+    const config = await originalUpdate(...args);
+    writes.push({
+      appId: config.version === 2 ? config.organisations?.rgc?.slack?.apps.read?.appId : undefined,
+      accountAppId: config.accounts['rgc/slack']?.appId,
+      organisation: config.accounts['rgc/slack']?.organisation,
+    });
+    return config;
+  };
+  const view = await completeSignIn(context, flow.flowId, 'ok');
+  const config = await harness.core.config.load();
+  assert.deepEqual(writes, [{ appId: 'A0READ', accountAppId: 'A0READ', organisation: 'rgc' }]);
+  assert.equal(config.accounts['rgc/slack']?.profileApp, 'read');
+  assert.equal(view.organisation, 'rgc');
+  assert.equal(view.profileApp, 'read');
+  assert.equal(showWorkspace(config, 'rgc/slack').organisation, 'rgc');
+  assert.equal(listWorkspaces(config)[0]?.profileApp, 'read');
+});
+
+test('an explicit client remains unmanaged even when its client and app ids match the profile', async () => {
+  const harness = await newOrganisationHarness({ port: await freePort(), readAppId: 'A0READ' });
+  const { context, flow } = await savedProfileFlow(harness, 'rgc/slack', {
+    ownApp: true,
+    reply: () => slackOk({ team: { id: 'TRGC0001', name: 'RGC' }, app_id: 'A0READ' }),
+  });
+  const view = await completeSignIn(context, flow.flowId, 'own-app');
+  const config = await harness.core.config.load();
+  assert.equal(view.organisation, undefined);
+  assert.equal(view.profileApp, undefined);
+  assert.equal(showWorkspace(config, 'rgc/slack').organisation, undefined);
+  assert.equal(config.accounts['rgc/slack']?.organisation, undefined);
+  assert.equal(config.accounts['rgc/slack']?.profileApp, undefined);
+});
+
+test('an own-app exchange without app_id still connects and does not teach the profile an id', async () => {
+  const harness = await newOrganisationHarness({ port: await freePort() });
+  const { context, flow } = await savedProfileFlow(harness, 'rgc/slack', {
+    ownApp: true,
+    reply: () => slackOk({ team: { id: 'TRGC0001', name: 'RGC' }, app_id: undefined }),
+  });
+  const view = await completeSignIn(context, flow.flowId, 'own-app-without-id');
+  const config = await harness.core.config.load();
+  assert.equal(view.appId, undefined);
+  assert.equal(view.organisation, undefined);
+  assert.equal(config.version, 2);
+  if (config.version === 2) assert.equal(config.organisations?.rgc?.slack?.apps.read?.appId, undefined);
+});
+
+test('a profile changed after exchange and before the config lock cannot accept a staged token', async () => {
+  const harness = await newOrganisationHarness({ port: await freePort(), readAppId: 'A0READ' });
+  const { context, flow } = await savedProfileFlow(harness, 'rgc/slack', {
+    reply: () => slackOk({ team: { id: 'TRGC0001', name: 'RGC' }, app_id: 'A0READ' }),
+  });
+  const real = await harness.core.secrets('file');
+  let staged = '';
+  context.secrets = async () => ({
+    kind: real.kind,
+    get: (ref) => real.get(ref),
+    delete: (ref) => real.delete(ref),
+    invalidate: (ref) => real.invalidate(ref),
+    async set(ref, value) {
+      staged = ref;
+      await real.set(ref, value);
+      await harness.updateProfile((record) => {
+        record.sha256 = 'b'.repeat(64);
+      });
+    },
+  });
+  await assert.rejects(completeSignIn(context, flow.flowId, 'changed'), is('CONFIG', /profile changed/));
+  assert.ok(staged);
+  assert.equal(await real.get(staged), null);
+  assert.equal((await harness.core.config.load()).accounts['rgc/slack'], undefined);
+});
+
+test('two first sign-ins with conflicting app ids commit one winner and remove the losing staged bundle', async () => {
+  const harness = await newOrganisationHarness({ port: await freePort() });
+  const reply = (params: Record<string, string>) =>
+    slackOk({
+      team: { id: 'TRGC0001', name: 'RGC' },
+      app_id: params.code === 'first' ? 'A0FIRST' : 'A0SECOND',
+      authed_user: { id: params.code === 'first' ? 'U0FIRST' : 'U0SECOND' },
+    });
+  const first = await savedProfileFlow(harness, 'rgc/slack', { reply });
+  const second = await savedProfileFlow(harness, 'rgc/slack-other', { reply });
+  const real = await harness.core.secrets('file');
+  const refs: string[] = [];
+  let staged = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((done) => {
+    release = done;
+  });
+  first.context.secrets = async () => ({
+    kind: real.kind,
+    get: (ref) => real.get(ref),
+    delete: (ref) => real.delete(ref),
+    invalidate: (ref) => real.invalidate(ref),
+    async set(ref, value) {
+      refs.push(ref);
+      await real.set(ref, value);
+      staged += 1;
+      if (staged === 2) release();
+      await gate;
+    },
+  });
+  second.context.secrets = first.context.secrets;
+  const results = await Promise.allSettled([
+    completeSignIn(first.context, first.flow.flowId, 'first'),
+    completeSignIn(second.context, second.flow.flowId, 'second'),
+  ]);
+  assert.equal(results.filter((result) => result.status === 'fulfilled').length, 1);
+  assert.equal(results.filter((result) => result.status === 'rejected').length, 1);
+  const config = await harness.core.config.load();
+  const winner = results.find((result) => result.status === 'fulfilled');
+  assert.equal(config.version, 2);
+  if (config.version !== 2 || winner?.status !== 'fulfilled') return;
+  const account = config.accounts[winner.value.alias];
+  assert.equal(config.organisations?.rgc?.slack?.apps.read?.appId, account?.appId);
+  assert.equal(Object.keys(config.accounts).length, 1);
+  assert.equal(refs.length, 2);
+  for (const ref of refs) assert.equal(Boolean(await real.get(ref)), ref === account?.secretRef);
+});
 
 test('profile read add snapshots the selected app and neutralised display, without exchanging or storing a token', async () => {
   const port = await freePort();

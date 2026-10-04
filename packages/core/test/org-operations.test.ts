@@ -1170,6 +1170,7 @@ test('org add leaves an account connected through its own app as it is, and says
     },
   });
   writeProfile(m, profile());
+  const before = structuredClone((await config(m)).accounts['acme/slack']);
   // Early members connected the workspace through an app of their own before profiles existed: adding the profile
   // must not make them disconnect Slack first, and must not take the account over either.
   const { result } = await add(m);
@@ -1178,6 +1179,7 @@ test('org add leaves an account connected through its own app as it is, and says
     /acme\/slack is connected to this workspace through an app of your own, and stays as it is/,
   );
   const after = (await config(m)).accounts['acme/slack'] as AccountConfig & { organisation?: unknown };
+  assert.deepEqual(after, before, 'adding the profile changed an existing own-app account');
   assert.equal(after.workspace, 'TACME0001');
   assert.equal(after.organisation, undefined, 'the account was taken over by the profile');
   assert.deepEqual((await orgShow(m.core, 'acme', 'darwin')).accounts, []);

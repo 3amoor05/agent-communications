@@ -9,7 +9,9 @@ import {
   nameAvailable,
   neutralise,
   newAccountId,
+  type ProfileSlackTarget,
   resolveName,
+  resolveProfileSlackTarget,
   secretsStoreOf,
   shellCommand,
 } from '@agentcomms/core';
@@ -39,6 +41,8 @@ export interface WorkspaceView {
   readonly grantedScopes: readonly string[];
   readonly oauthClientId?: string | undefined;
   readonly appId?: string | undefined;
+  readonly organisation?: string | undefined;
+  readonly profileApp?: 'read' | 'send' | undefined;
   readonly createdAt: string;
 }
 
@@ -62,6 +66,8 @@ export function viewOf(alias: string, account: AccountConfig): WorkspaceView {
     grantedScopes: [...account.grantedScopes].sort(),
     ...(account.oauthClientId ? { oauthClientId: account.oauthClientId } : {}),
     ...(account.appId ? { appId: account.appId } : {}),
+    ...(account.organisation ? { organisation: account.organisation } : {}),
+    ...(account.profileApp ? { profileApp: account.profileApp } : {}),
     createdAt: account.createdAt,
   };
 }
@@ -131,6 +137,35 @@ export function validateExchange(options: {
 }): void {
   const { token, mode, flow, existing } = options;
   const platform = options.platform ?? process.platform;
+
+  if (flow.profile) {
+    const profile = flow.profile;
+    if (!token.appId || !/^A[A-Z0-9]{2,20}$/.test(token.appId)) {
+      throw new CommsError('CONFIG', 'Slack returned a missing or invalid app id for the profile sign-in', {
+        hint: 'Nothing was saved. Check the organisation app and sign in again.',
+      });
+    }
+    if (token.workspaceId !== profile.workspace) {
+      throw new CommsError(
+        'CONFIG',
+        'Slack returned a token for another workspace than the organisation profile names',
+        {
+          hint: 'Nothing was saved. Sign in to the workspace named by the organisation profile.',
+        },
+      );
+    }
+    if (flow.clientId !== profile.clientId || flow.port !== profile.redirectPort || mode !== profile.role) {
+      throw new CommsError('CONFIG', 'the profile sign-in target changed before it could be checked', {
+        hint: 'Nothing was saved. Start the sign-in again from the organisation profile.',
+      });
+    }
+    const live = profileTargetFor(flow, options.config, platform);
+    if ((profile.appId && token.appId !== profile.appId) || (live.appId && token.appId !== live.appId)) {
+      throw new CommsError('CONFIG', 'Slack returned a token for another app than the organisation profile names', {
+        hint: 'Nothing was saved. Check the organisation app and sign in again.',
+      });
+    }
+  }
 
   /*
    * Exact scopes, both directions.
@@ -272,6 +307,46 @@ export function validateExchange(options: {
   }
 }
 
+/** Re-resolve the whole selected profile target, accepting only a concurrent learning of the same app id. */
+export function profileTargetFor(flow: SlackFlow, config: Config, platform: NodeJS.Platform): ProfileSlackTarget {
+  const expected = flow.profile;
+  if (!expected) throw new CommsError('CONFIG', 'this is not a profile sign-in');
+  let live: ProfileSlackTarget;
+  try {
+    live = resolveProfileSlackTarget(config, expected.organisation, expected.role, platform);
+  } catch {
+    throw new CommsError('CONFIG', 'the organisation profile changed during the Slack sign-in', {
+      hint: `Run ${inlineCommand(shellCommand(['agentcomms', 'org', 'update', expected.organisation], platform))}, then start the sign-in again.`,
+    });
+  }
+  const selected = {
+    organisation: live.organisation,
+    role: live.role,
+    label: neutralise(live.label).text,
+    workspace: live.workspace,
+    workspaceName: neutralise(live.workspaceName).text,
+    redirectPort: live.redirectPort,
+    clientId: live.clientId,
+    sha256: live.sha256,
+  };
+  const snapshot = {
+    organisation: expected.organisation,
+    role: expected.role,
+    label: expected.label,
+    workspace: expected.workspace,
+    workspaceName: expected.workspaceName,
+    redirectPort: expected.redirectPort,
+    clientId: expected.clientId,
+    sha256: expected.sha256,
+  };
+  if (JSON.stringify(selected) !== JSON.stringify(snapshot) || (expected.appId && expected.appId !== live.appId)) {
+    throw new CommsError('CONFIG', 'the organisation profile changed during the Slack sign-in', {
+      hint: `Run ${inlineCommand(shellCommand(['agentcomms', 'org', 'update', expected.organisation], platform))}, then start the sign-in again.`,
+    });
+  }
+  return live;
+}
+
 /** The credential, as one value, from what Slack returned. */
 export function bundleFrom(token: ExchangedToken, now: Date): TokenBundle {
   return {
@@ -326,6 +401,7 @@ export function accountFrom(options: {
   now: Date;
   /** Where its credential is stored; a new account's own reference when left out. */
   secretRef?: string | undefined;
+  provenance?: { organisation: string; profileApp: 'read' | 'send' } | undefined;
 }): AccountConfig {
   const { token, mode, flow, accountId, now } = options;
   return {
@@ -340,6 +416,7 @@ export function accountFrom(options: {
     secretRef: options.secretRef ?? secretRefFor(accountId),
     oauthClientId: flow.clientId,
     ...(token.appId ? { appId: token.appId } : {}),
+    ...(options.provenance ?? {}),
     redirectPort: flow.port,
     createdAt: now.toISOString(),
   };

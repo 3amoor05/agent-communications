@@ -11,6 +11,7 @@ import {
   findById,
   inlineCommand,
   type LooseningConsent,
+  learnProfileSlackAppId,
   newAccountId,
   type ProfileSlackTarget,
   readWholeNumber,
@@ -29,6 +30,7 @@ import {
   accountFrom,
   bundleFrom,
   checkAliasFree,
+  profileTargetFor,
   renewedSecretRefFor,
   requireWorkspace,
   secretRefFor,
@@ -939,7 +941,17 @@ export async function completeSignIn(context: SlackContext, flowId: string, code
     const accountId = existing ? existing.account.id : newAccountId();
     const secretRef = existing ? renewedSecretRefFor(accountId) : secretRefFor(accountId);
     const secrets = await context.secrets();
-    const account = accountFrom({ token, mode: flow.mode, flow, accountId, now: at, secretRef });
+    const account = accountFrom({
+      token,
+      mode: flow.mode,
+      flow,
+      accountId,
+      now: at,
+      secretRef,
+      ...(flow.profile
+        ? { provenance: { organisation: flow.profile.organisation, profileApp: flow.profile.role } }
+        : {}),
+    });
     let written: AccountConfig = account;
     let writtenAlias = flow.alias;
     let replacedRef: string | undefined;
@@ -982,6 +994,10 @@ export async function completeSignIn(context: SlackContext, flowId: string, code
               hint: 'Nothing was saved. Sign in again.',
             });
           }
+          // Validate the bound target again under the lock. A concurrent first sign-in may have learned an app id.
+          if (flow.profile) {
+            validateExchange({ token, mode: flow.mode, flow, config: current, platform: context.platform });
+          }
           const held = flow.expect ? findById(current, 'account', flow.expect.accountId)?.account : undefined;
           if (flow.expect) {
             /*
@@ -1023,6 +1039,14 @@ export async function completeSignIn(context: SlackContext, flowId: string, code
            * not speak to, including fields a later version adds that this one has never heard of.
            */
           written = held && flow.expect ? { ...held, ...account } : account;
+          const next = flow.profile
+            ? learnProfileSlackAppId(
+                current,
+                profileTargetFor(flow, current, context.platform),
+                token.appId as string,
+                context.platform,
+              )
+            : current;
           if (held && flow.expect) {
             /*
              * Under the key it has now, by the id it keeps.
@@ -1034,10 +1058,10 @@ export async function completeSignIn(context: SlackContext, flowId: string, code
             const key = renewed?.alias ?? flow.alias;
             writtenAlias = key;
             replacedRef = held.secretRef;
-            return { ...current, accounts: { ...current.accounts, [key]: written } };
+            return { ...next, accounts: { ...next.accounts, [key]: written } };
           }
           writtenAlias = flow.alias;
-          return { ...current, accounts: { ...current.accounts, [flow.alias]: written } };
+          return { ...next, accounts: { ...next.accounts, [flow.alias]: written } };
         },
       );
     } catch (error) {
