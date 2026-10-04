@@ -461,6 +461,11 @@ test('a mixed migration copies source bundles, verifies target bundles in place,
   );
   assert.equal(source.values.has(ROOT_REF), false);
   assert.equal(source.values.has(SOURCE_PENDING_REF), false);
+  assert.deepEqual(
+    source.calls.delete.sort(),
+    [ROOT_REF, SOURCE_PENDING_REF].sort(),
+    'an in-place bundle was put on source cleanup',
+  );
   assert.ok(
     events
       .filter((event) => event.startsWith('delete:'))
