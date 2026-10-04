@@ -29,6 +29,8 @@ export interface GmailContextOptions {
   core?: Core;
   env?: NodeJS.ProcessEnv;
   now?: () => Date;
+  /** The shell syntax used for commands an operation returns or prints. */
+  platform?: NodeJS.Platform | undefined;
   /** Which surface is calling: for the audit log, and for refusals that name the next step as that surface takes it. */
   surface?: 'cli' | 'mcp';
   /**
@@ -51,6 +53,7 @@ export class GmailContext {
   readonly endpoints: GoogleEndpoints;
   readonly flows: FlowStore;
   readonly now: () => Date;
+  readonly platform: NodeJS.Platform;
   readonly surface: 'cli' | 'mcp';
   readonly cwd: string;
   readonly #createTransport: (request: TransportRequest) => GmailTransport;
@@ -61,6 +64,7 @@ export class GmailContext {
     this.core = options.core ?? openCore({ env: this.env });
     this.endpoints = resolveEndpoints(this.env);
     this.now = options.now ?? (() => new Date());
+    this.platform = options.platform ?? process.platform;
     this.surface = options.surface ?? 'cli';
     this.cwd = options.cwd ?? process.cwd();
     this.flows = new FlowStore(this.core.paths.stateDir, this.now, this.surface);

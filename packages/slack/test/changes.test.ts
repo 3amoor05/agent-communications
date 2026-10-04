@@ -17,6 +17,12 @@ function contextFor(harness: Awaited<ReturnType<typeof newHarness>>): SlackConte
   return new SlackContext({ core: harness.core, env: harness.env, exchange: (params) => harness.exchange(params) });
 }
 
+test('the Slack operation context carries an explicitly selected platform', async () => {
+  const harness = await newHarness();
+  const context = new SlackContext({ core: harness.core, env: harness.env, platform: 'win32' });
+  assert.equal(context.platform, 'win32');
+});
+
 test('a workspace being connected is measured from read, never as an account already connected', async () => {
   /*
    * Before the sign-in nobody knows who the new account is, and the approval must not guess. If the account the plan

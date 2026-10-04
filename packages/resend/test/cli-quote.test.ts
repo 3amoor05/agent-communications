@@ -6,12 +6,20 @@ import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { openCore } from '@agentcomms/core';
 import { run } from '../src/cli/program.ts';
+import { ResendContext } from '../src/context.ts';
 
 /** The command printed for a person to add a key has to fit the shell on the platform running this CLI (CUE-398). */
 
 interface ErrorEnvelope {
   error?: { hint?: string };
 }
+
+test('the Resend operation context carries an explicitly selected platform', () => {
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'agent-resend-platform-')));
+  const env = { AGENT_COMMS_CONFIG_DIR: join(root, 'config') };
+  const context = new ResendContext({ core: openCore({ env }), env, platform: 'win32' });
+  assert.equal(context.platform, 'win32');
+});
 
 async function addAccount(domain: string, platform: NodeJS.Platform): Promise<string> {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'agent-resend-quote-')));

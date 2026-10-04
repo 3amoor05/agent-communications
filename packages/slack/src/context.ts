@@ -16,6 +16,8 @@ export interface SlackContextOptions {
   core?: Core;
   env?: NodeJS.ProcessEnv;
   now?: () => Date;
+  /** The shell syntax used for commands an operation returns or prints. */
+  platform?: NodeJS.Platform | undefined;
   surface?: 'cli' | 'mcp';
   /**
    * The folder the process was started in: what a download offers as "the current folder". The process's own when
@@ -93,6 +95,7 @@ export class SlackContext {
   readonly core: Core;
   readonly env: NodeJS.ProcessEnv;
   readonly now: () => Date;
+  readonly platform: NodeJS.Platform;
   readonly surface: 'cli' | 'mcp';
   readonly cwd: string;
   readonly flows: FlowStore;
@@ -103,6 +106,7 @@ export class SlackContext {
     this.env = options.env ?? process.env;
     this.core = options.core ?? openCore({ env: this.env });
     this.now = options.now ?? (() => new Date());
+    this.platform = options.platform ?? process.platform;
     this.surface = options.surface ?? 'cli';
     this.cwd = options.cwd ?? process.cwd();
     this.flows = openFlowStore(this.core.paths.stateDir, this.now);

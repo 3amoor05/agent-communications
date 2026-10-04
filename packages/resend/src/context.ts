@@ -22,6 +22,8 @@ export interface ResendContextOptions {
   core?: Core | undefined;
   env?: NodeJS.ProcessEnv | undefined;
   now?: (() => Date) | undefined;
+  /** The shell syntax used for commands an operation returns or prints. */
+  platform?: NodeJS.Platform | undefined;
   surface?: 'cli' | 'mcp' | undefined;
   /** The inner fetch every request goes through, always inside the guard. Injected so a test never reaches Resend. */
   fetch?: FetchLike | undefined;
@@ -35,6 +37,7 @@ export class ResendContext {
   readonly core: Core;
   readonly env: NodeJS.ProcessEnv;
   readonly now: () => Date;
+  readonly platform: NodeJS.Platform;
   readonly surface: 'cli' | 'mcp';
   readonly accounts: AccountStore;
   readonly #fetch: FetchLike | undefined;
@@ -45,6 +48,7 @@ export class ResendContext {
     this.env = options.env ?? process.env;
     this.core = options.core ?? openCore({ env: this.env });
     this.now = options.now ?? (() => new Date());
+    this.platform = options.platform ?? process.platform;
     this.surface = options.surface ?? 'cli';
     this.accounts = new AccountStore(() => this.core.config.load());
     this.#fetch = options.fetch;

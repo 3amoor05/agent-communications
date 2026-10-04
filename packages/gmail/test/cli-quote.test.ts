@@ -5,6 +5,7 @@ import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { openCore } from '@agentcomms/core';
 import { run } from '../src/cli/program.ts';
+import { GmailContext } from '../src/context.ts';
 import { tempDir } from './support/harness.ts';
 
 /** The command printed for a change has to be pasteable on the platform where this CLI is running (CUE-398). */
@@ -12,6 +13,13 @@ import { tempDir } from './support/harness.ts';
 interface ErrorEnvelope {
   error?: { hint?: string };
 }
+
+test('the Gmail operation context carries an explicitly selected platform', () => {
+  const root = tempDir('agent-gmail-platform-');
+  const env = { AGENT_COMMS_CONFIG_DIR: join(root, 'config') };
+  const context = new GmailContext({ core: openCore({ env }), env, platform: 'win32' });
+  assert.equal(context.platform, 'win32');
+});
 
 function escapedForRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
