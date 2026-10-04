@@ -206,8 +206,8 @@ export interface SetupState {
   registeredWith: string[];
   /** Downloaded client files: Desktop first, then newest first. Empty is ordinary. */
   candidates: ClientCandidate[];
-  /** The existing client selected for the mailbox setup is adding, or null when setup must make one. */
-  clientChoice: {
+  /** The existing client selected for profile-aware mailbox setup, or null when setup must make one. */
+  clientChoice?: {
     name: string;
     organisation?: string | undefined;
     organisationLabel?: string | undefined;
@@ -448,5 +448,8 @@ export async function setupState(context: GmailContext, options: SetupStateOptio
           ...(selected.organisationLabel ? { organisationLabel: selected.organisationLabel } : {}),
         }
       : null;
-  return { next, done, clients, inboxes, clientOf, registeredWith, candidates, clientChoice };
+  const state = { next, done, clients, inboxes, clientOf, registeredWith, candidates };
+  // Compatibility is the complete result contract, not just the values shared with profile-aware setup. Main had
+  // no clientChoice field, so an inactive-only, Slack-only or absent profile must omit it rather than return null.
+  return gmailProfileApplies ? { ...state, clientChoice } : state;
 }

@@ -1350,7 +1350,8 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
               organisation: z.string().optional(),
               organisationLabel: z.string().optional(),
             })
-            .nullable(),
+            .nullable()
+            .optional(),
           registeredWith: z.array(z.string()).describe('the MCP clients this server is registered with'),
           candidates: z
             .array(z.object({ path: z.string(), kind: z.string(), modifiedAt: z.string() }))
@@ -1482,7 +1483,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
           clients: pinned ? (pinnedClient ? [pinnedClient] : []) : state.clients,
           inboxes: pinned ? state.inboxes.filter((alias) => alias === pinned) : state.inboxes,
           clientOf: pinned ? (pinnedClient ? { [pinned]: pinnedClient } : {}) : state.clientOf,
-          clientChoice: state.clientChoice,
+          ...(Object.hasOwn(state, 'clientChoice') ? { clientChoice: state.clientChoice } : {}),
           registeredWith: state.registeredWith,
           candidates: pinned ? [] : state.candidates,
           consoleSteps: (state.clientChoice?.organisation ? [] : CONSOLE_STEPS).map((step) => ({

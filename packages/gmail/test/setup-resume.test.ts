@@ -180,7 +180,7 @@ test('an interactive setup asks for the mailbox name before it decides the clien
   assert.match(dialog.asked[0] ?? '', /A (?:short )?name for it/);
 });
 
-test('without an active Gmail generation every interactive setup starts with main’s prompt', async () => {
+test('without an active Gmail generation interactive setup has main’s complete prompt sequence and final output', async () => {
   for (const fixture of SETUP_MAIN_EQUIVALENCE) {
     const harness = await setupCompatibilityHarness(fixture.name);
     const dialog = await setupAtTerminal(
@@ -195,11 +195,56 @@ test('without an active Gmail generation every interactive setup starts with mai
       // End an inbox step before it starts a listener; this test is about the prompt order, not sign-in.
       { aliasAnswer: 'not a valid mailbox name' },
     );
-    assert.match(
-      dialog.asked[0] ?? '',
-      fixture.name === 'no client' ? /press Enter when that is done/ : /Continue from here, or start over/,
-      fixture.name,
-    );
+    const promptSequence = dialog.asked.map((prompt) => prompt.replaceAll('\r\n', '\n').split('\n').at(-1));
+    const expectedPrompts =
+      fixture.name === 'no client'
+        ? [
+            ...Array.from({ length: CONSOLE_STEPS.length }, () => '      press Enter when that is done — '),
+            'No client file in ~/Downloads yet. Path to it, or Enter to look again (e.g. ~/Downloads/client_secret_….json): ',
+          ]
+        : fixture.expected.inboxes.length === 0
+          ? [
+              '  which one? [1] ',
+              'A name for it: organisation/gmail (e.g. acme/gmail): ',
+              'Which address (blank to choose in the browser): ',
+            ]
+          : ['  which one? [1] ', 'Connect this to an agent? [Y/n] '];
+    // main program.ts walks every console card only with no client; otherwise it resumes, then reaches either the
+    // mailbox name/address pair or the agent question. This checks the whole sequence, not merely its first prompt.
+    assert.deepEqual(promptSequence, expectedPrompts, fixture.name);
+    assert.equal(dialog.stdout, '', `${fixture.name}: main writes its terminal setup transcript to stderr`);
+
+    const terminal = dialog.stderr.replaceAll('\r\n', '\n');
+    const finalMarker = terminal.includes('\nDone.')
+      ? terminal.lastIndexOf('\nDone.')
+      : terminal.lastIndexOf('\nerror:');
+    assert.notEqual(finalMarker, -1, `${fixture.name}: setup produced a final result`);
+    const finalOutput = terminal.slice(finalMarker + 1);
+    if (fixture.name === 'no client') {
+      // main stops at the missing typed client file and exits with its filesystem error.
+      assert.equal(dialog.code, 66);
+      assert.equal(
+        finalOutput,
+        'error: no file at /nonexistent/client_secret_nowhere.json\n' +
+          'hint: Download the client JSON from Google Cloud → Google Auth Platform → Clients, and pass its path.\n',
+      );
+    } else if (fixture.expected.inboxes.length === 0) {
+      // main reaches the inbox step and validates the deliberately invalid name only after asking for its address.
+      assert.equal(dialog.code, 64);
+      assert.equal(
+        finalOutput,
+        'error: "not a valid mailbox name" is not a valid name: it should be the organisation, a slash, then gmail — for example acme/gmail, or acme/gmail-support for a second one\n',
+      );
+    } else {
+      // main can finish without Google when a mailbox already exists and the person declines MCP registration.
+      assert.equal(dialog.code, 0);
+      assert.equal(
+        finalOutput,
+        `Done. ${fixture.expected.inboxes.length} mailbox(es): ${fixture.expected.inboxes.join(', ')}\n` +
+          'Try: agent-gmail search newer_than:7d --inbox acme/gmail\n' +
+          'Add another with: agent-gmail inbox add <organisation>/gmail --email <address>\n',
+      );
+    }
   }
 });
 

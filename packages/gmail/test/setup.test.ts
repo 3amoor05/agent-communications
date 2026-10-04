@@ -128,7 +128,7 @@ test('setup without profiles keeps an ordinary registered client step done befor
   const state = await setupState(context, { scanDownloads: false });
   assert.equal(state.next, 'inbox');
   assert.ok(state.done.includes('client'));
-  assert.equal(state.clientChoice, null);
+  assert.equal(Object.hasOwn(state, 'clientChoice'), false);
 });
 
 test('setup with a Gmail profile cannot call the client step done before it knows the mailbox', async () => {
@@ -145,18 +145,7 @@ test('without an active Gmail generation setupState is exactly main-compatible, 
     const context = new GmailContext({ core: harness.core, env: harness.env });
     for (const alias of [undefined, 'new/gmail', ...fixture.expected.inboxes.slice(0, 1)]) {
       const state = await setupState(context, { scanDownloads: false, ...(alias ? { alias } : {}) });
-      assert.deepEqual(
-        {
-          next: state.next,
-          done: state.done,
-          clients: state.clients,
-          inboxes: state.inboxes,
-          clientOf: state.clientOf,
-        },
-        fixture.expected,
-        `${fixture.name}, ${alias ? 'with inbox' : 'without inbox'}`,
-      );
-      assert.equal(state.clientChoice, null, `${fixture.name}: main had no target-specific client choice`);
+      assert.deepEqual(state, fixture.expected, `${fixture.name}, ${alias ? 'with inbox' : 'without inbox'}`);
     }
   }
 });
@@ -174,7 +163,7 @@ test('inactive forOtherAddresses history is ordinary setup state because no Gmai
   const state = await setupState(context, { alias: 'personal/gmail', scanDownloads: false });
   assert.equal(state.next, 'inbox');
   assert.deepEqual(state.done, ['client']);
-  assert.equal(state.clientChoice, null);
+  assert.equal(Object.hasOwn(state, 'clientChoice'), false);
 });
 
 test('setup reports an existing target through its stored historical client, not the active generation', async () => {
@@ -262,7 +251,7 @@ test('without a Gmail profile setup counts any connected mailbox exactly as main
   const state = await setupState(context, { alias: 'new', scanDownloads: false });
   assert.equal(state.next, 'mcp');
   assert.deepEqual(state.done, ['client', 'inbox']);
-  assert.equal(state.clientChoice, null);
+  assert.equal(Object.hasOwn(state, 'clientChoice'), false);
 });
 
 test('a profile-provided setup says why and omits the Google Cloud walk', () => {

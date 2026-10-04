@@ -17,6 +17,8 @@ export interface MainSetupExpectation {
   clients: string[];
   inboxes: string[];
   clientOf: Record<string, string>;
+  registeredWith: string[];
+  candidates: [];
 }
 
 export const SETUP_MAIN_EQUIVALENCE: ReadonlyArray<{
@@ -26,12 +28,28 @@ export const SETUP_MAIN_EQUIVALENCE: ReadonlyArray<{
   // main setup.ts: no clients makes `next` client and contributes nothing to `done`.
   {
     name: 'no client',
-    expected: { next: 'client', done: [], clients: [], inboxes: [], clientOf: {} },
+    expected: {
+      next: 'client',
+      done: [],
+      clients: [],
+      inboxes: [],
+      clientOf: {},
+      registeredWith: [],
+      candidates: [],
+    },
   },
   // main setup.ts: any client completes client; an empty inbox map makes `next` inbox.
   {
     name: 'one ordinary client and no inbox',
-    expected: { next: 'inbox', done: ['client'], clients: ['desktop'], inboxes: [], clientOf: {} },
+    expected: {
+      next: 'inbox',
+      done: ['client'],
+      clients: ['desktop'],
+      inboxes: [],
+      clientOf: {},
+      registeredWith: [],
+      candidates: [],
+    },
   },
   // main setup.ts: non-empty client and inbox maps complete both steps, so MCP registration is next.
   {
@@ -42,6 +60,8 @@ export const SETUP_MAIN_EQUIVALENCE: ReadonlyArray<{
       clients: ['desktop'],
       inboxes: ['acme/gmail'],
       clientOf: { 'acme/gmail': 'desktop' },
+      registeredWith: [],
+      candidates: [],
     },
   },
   // main setup.ts tests only whether the inbox map is empty; a second mailbox does not change next or done.
@@ -53,17 +73,35 @@ export const SETUP_MAIN_EQUIVALENCE: ReadonlyArray<{
       clients: ['desktop'],
       inboxes: ['acme/gmail', 'personal/gmail'],
       clientOf: { 'acme/gmail': 'desktop', 'personal/gmail': 'desktop' },
+      registeredWith: [],
+      candidates: [],
     },
   },
   // main predates Gmail routing and reads only clients/inboxes: the retained row completes client, with no inbox yet.
   {
     name: 'an inactive-only Gmail profile',
-    expected: { next: 'inbox', done: ['client'], clients: ['acme-1'], inboxes: [], clientOf: {} },
+    expected: {
+      next: 'inbox',
+      done: ['client'],
+      clients: ['acme-1'],
+      inboxes: [],
+      clientOf: {},
+      registeredWith: [],
+      candidates: [],
+    },
   },
   // main ignores organisations entirely: a Slack-only record does not change the ordinary client's result.
   {
     name: 'a Slack-only profile',
-    expected: { next: 'inbox', done: ['client'], clients: ['desktop'], inboxes: [], clientOf: {} },
+    expected: {
+      next: 'inbox',
+      done: ['client'],
+      clients: ['desktop'],
+      inboxes: [],
+      clientOf: {},
+      registeredWith: [],
+      candidates: [],
+    },
   },
 ];
 

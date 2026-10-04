@@ -330,19 +330,11 @@ test('gmail_setup is exactly main-compatible without an active Gmail generation,
       for (const args of [{}, { inbox: 'new/gmail' }]) {
         const result = (await client.callTool({ name: 'gmail_setup', arguments: args })) as ToolResult;
         assert.equal(result.isError, undefined, `${fixture.name}: ${JSON.stringify(result.structuredContent)}`);
-        const body = result.structuredContent ?? {};
         assert.deepEqual(
-          {
-            next: body.next,
-            done: body.done,
-            clients: body.clients,
-            inboxes: body.inboxes,
-            clientOf: body.clientOf,
-          },
-          fixture.expected,
+          result.structuredContent,
+          { ...fixture.expected, consoleSteps },
           `${fixture.name}, ${Object.hasOwn(args, 'inbox') ? 'with inbox' : 'without inbox'}`,
         );
-        assert.deepEqual(body.consoleSteps, consoleSteps, `${fixture.name}: main always returned all console steps`);
       }
     } finally {
       await close();

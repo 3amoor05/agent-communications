@@ -1258,24 +1258,44 @@ test('headless setup is exactly main-compatible without an active Gmail generati
             clients: string[];
             inboxes: string[];
             clientOf: Record<string, string>;
+            registeredWith: string[];
+            candidates: unknown[];
+            did: string[];
+            warnings: string[];
             blocked: { step: string } | null;
-            handoff: { authUrl: string } | null;
+            handoff: { authUrl: string; finish: string } | null;
           }>
         >().data;
+      assert.ok(report, `${fixture.name}: main returned a setup report`);
+      const startsSignIn = withInbox && fixture.expected.clients.length > 0;
+      if (startsSignIn) {
+        assert.deepEqual(Object.keys(report.handoff ?? {}).sort(), ['authUrl', 'finish']);
+        assert.equal(new URL(report.handoff?.authUrl ?? '').pathname, '/o/oauth2/v2/auth');
+        assert.match(report.handoff?.finish ?? '', /^agent-gmail inbox add --finish fl_[A-Za-z0-9_-]+ --wait 60$/);
+      }
+      const blocked =
+        fixture.expected.next === 'client'
+          ? { step: 'client', needs: '--client-json <path>' }
+          : startsSignIn
+            ? {
+                step: 'inbox',
+                needs: 'the link opened and approved in a browser',
+                hint: 'This command does not open browsers or grant consent. Give the user the link, then run the finish command.',
+              }
+            : fixture.expected.next === 'inbox'
+              ? { step: 'inbox', needs: '--inbox <alias> [--email <address>]' }
+              : { step: 'mcp', needs: '--mcp-client <client>' };
       assert.deepEqual(
+        report,
         {
-          next: report?.next,
-          done: report?.done,
-          clients: report?.clients,
-          inboxes: report?.inboxes,
-          clientOf: report?.clientOf,
+          ...fixture.expected,
+          did: startsSignIn ? ['started a sign-in for "new/gmail"'] : [],
+          warnings: [],
+          blocked,
+          handoff: startsSignIn ? report.handoff : null,
         },
-        fixture.expected,
         `${fixture.name}, ${withInbox ? 'with --inbox' : 'without --inbox'}`,
       );
-      const expectedBlock = withInbox && fixture.expected.clients.length > 0 ? 'inbox' : fixture.expected.next;
-      assert.equal(report?.blocked?.step, expectedBlock, `${fixture.name}: main's stopping step`);
-      assert.equal(Boolean(report?.handoff), withInbox && fixture.expected.clients.length > 0, fixture.name);
 
       // A headless setup with --inbox starts a detached production sign-in. Stop its loopback listener rather than
       // leaving it alive for the ten-minute flow lifetime; main did the same start for these cases.
