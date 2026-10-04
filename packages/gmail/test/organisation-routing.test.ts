@@ -237,7 +237,11 @@ test('an active owned generation whose marker disappeared is refused, never borr
   );
   assert.throws(
     () => chooseClientForNewInbox(config, { alias: 'personal/gmail' }),
-    (error: unknown) => error instanceof CommsError && /no Google client is available/.test(error.message),
+    (error: unknown) =>
+      error instanceof CommsError &&
+      /no Google client is available/.test(error.message) &&
+      /no active, live organisation generation/.test(error.hint ?? '') &&
+      !/--client acme-1/.test(error.hint ?? ''),
   );
 });
 
@@ -486,6 +490,26 @@ test('§D6 row 4: inbox add with only profile clients refuses with all three rou
       assert.match(error.hint ?? '', /--client acme-1/);
       assert.match(error.hint ?? '', /org update acme --for-other-addresses on/);
       assert.match(error.hint ?? '', /setup/);
+      return true;
+    },
+  );
+});
+
+test('§D6 row 4: the explicit remedy names the active live generation after A → B → A, never missing B', () => {
+  const active = generation({ name: 'acme-1', clientId: CLIENT_ID });
+  const missing = generation({ name: 'acme-2', clientId: OTHER_ID });
+  const config = routingConfig({ generations: [active, missing] });
+  const organisation = config.organisations?.acme;
+  if (!organisation?.gmail) throw new Error('the fixture has Gmail generations');
+  organisation.gmail.active = active.name;
+  delete config.clients[missing.name];
+
+  assert.throws(
+    () => chooseClientForNewInbox(config, { alias: 'personal/gmail' }),
+    (error: unknown) => {
+      assert.ok(error instanceof CommsError);
+      assert.match(error.hint ?? '', /--client acme-1/);
+      assert.doesNotMatch(error.hint ?? '', /--client acme-2/);
       return true;
     },
   );
