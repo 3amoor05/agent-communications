@@ -1,8 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join, relative, sep } from 'node:path';
+import { join, posix, relative, sep } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { CommsError } from '@agentcomms/core';
@@ -1174,15 +1173,17 @@ test('only the download transport opens a download grant', async () => {
 
 /** Parse with the repository's direct TypeScript dependency, without resolving imports or writing files. */
 function syntaxTrees(files: { path: string; text: string }[]): { path: string; tree: ts.SourceFile }[] {
-  const root = join(tmpdir(), 'agentcomms-slack-source-audit');
-  const config = join(root, 'tsconfig.json');
+  // A virtual tree, never on disk, so it is rooted the way TypeScript names paths on every platform: with forward
+  // slashes. Rooted at the temporary directory, Windows gave it backslashes, which the server never asks for.
+  const root = '/agentcomms-slack-source-audit';
+  const config = posix.join(root, 'tsconfig.json');
   const api = new TypeScriptAPI({
     fs: createVirtualFileSystem({
       [config]: JSON.stringify({
         compilerOptions: { noLib: true, noResolve: true },
         files: files.map((file) => file.path),
       }),
-      ...Object.fromEntries(files.map((file) => [join(root, file.path), file.text])),
+      ...Object.fromEntries(files.map((file) => [posix.join(root, file.path), file.text])),
     }),
   });
   try {
@@ -1192,7 +1193,7 @@ function syntaxTrees(files: { path: string; text: string }[]): { path: string; t
       assert.ok(project);
       assert.deepEqual(project.program.getSyntacticDiagnostics(), [], 'source audit requires valid syntax');
       return files.map((file) => {
-        const tree = project.program.getSourceFile(join(root, file.path));
+        const tree = project.program.getSourceFile(posix.join(root, file.path));
         assert.ok(tree);
         return { path: file.path, tree };
       });

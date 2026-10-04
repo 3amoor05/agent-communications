@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { stripVTControlCharacters } from 'node:util';
@@ -205,7 +205,8 @@ test('without an active Gmail generation interactive setup has main’s complete
       fixture.name === 'no client'
         ? [
             ...Array.from({ length: CONSOLE_STEPS.length }, () => '      press Enter when that is done — '),
-            'No client file in ~/Downloads yet. Path to it, or Enter to look again (e.g. ~/Downloads/client_secret_….json): ',
+            // The folder is named with this platform's separator; the example path is fixed text.
+            `No client file in ${join('~', 'Downloads')} yet. Path to it, or Enter to look again (e.g. ~/Downloads/client_secret_….json): `,
           ]
         : fixture.expected.inboxes.length === 0
           ? [
@@ -230,7 +231,8 @@ test('without an active Gmail generation interactive setup has main’s complete
       assert.equal(dialog.code, 66);
       assert.equal(
         finalOutput,
-        'error: no file at /nonexistent/client_secret_nowhere.json\n' +
+        // The typed path is resolved before it is read, so Windows names it with its drive and backslashes.
+        `error: no file at ${resolve(NOWHERE)}\n` +
           'hint: Download the client JSON from Google Cloud → Google Auth Platform → Clients, and pass its path.\n',
       );
     } else if (fixture.expected.inboxes.length === 0) {
