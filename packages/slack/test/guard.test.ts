@@ -14,6 +14,7 @@ import {
   closedPermit,
   configureWith,
   downloadWith,
+  type FetchLike,
   guardSlackRequests,
   type RevokeBinding,
   revokeWith,
@@ -156,16 +157,44 @@ test('a revocation grant binds one request to its ref, token kind and bearer dig
   const binding = revokeBinding(token);
   const permit = closedPermit();
   const calls: string[] = [];
-  const fetch = guardSlackRequests(async (input) => {
+  const inner: FetchLike = async (input) => {
     calls.push(String(input));
     assert.equal((permit as unknown as { revoking: unknown }).revoking, null, 'the request left before consumption');
     return new Response('{"ok":true,"revoked":true}');
-  }, permit);
+  };
+  const fetch = guardSlackRequests(inner, permit, binding);
 
   await revokeWith(permit, 'auth.revoke', binding, async () => {
     const open = (permit as unknown as { revoking: RevokeBinding | null }).revoking;
     assert.deepEqual(open, binding);
     assert.equal(Object.isFrozen(open), true, 'the ref or token kind could be changed while the grant was open');
+    for (const [identity, bearer, reason] of [
+      [{ ...binding, ref: 'slack/token/another-entry' }, token, 'wrong ref'],
+      [{ ...binding, kind: 'refresh' as const }, token, 'wrong kind'],
+      [binding, 'fake-wrong-bearer', 'wrong digest'],
+      [undefined, token, 'missing identity'],
+    ] as const) {
+      await assert.rejects(
+        guardSlackRequests(
+          inner,
+          permit,
+          identity,
+        )(`${API}/auth.revoke`, {
+          headers: { authorization: `Bearer ${bearer}` },
+        }),
+        (error: CommsError) => {
+          assert.equal(error.code, 'SEND_REFUSED', reason);
+          const rendered = JSON.stringify(error);
+          for (const secret of [token, bearer, digest, createHash('sha256').update(bearer).digest('hex')]) {
+            assert.equal(rendered.includes(secret), false, 'a bearer or digest appeared in the refusal');
+          }
+          return true;
+        },
+        reason,
+      );
+      assert.deepEqual(calls, [], `${reason} reached the inner request`);
+      assert.deepEqual(permit.revoking, binding, `${reason} consumed the grant`);
+    }
     await fetch(`${API}/auth.revoke`, { headers: { authorization: `Bearer ${token}` } });
     await assert.rejects(
       fetch(`${API}/auth.revoke`, { headers: { authorization: `Bearer ${token}` } }),
@@ -180,13 +209,36 @@ test('a revocation grant binds one request to its ref, token kind and bearer dig
   assert.doesNotMatch(rendered, new RegExp(digest));
 });
 
+for (const field of ['ref', 'kind'] as const) {
+  test(`a revocation with the right bearer and wrong ${field} is refused before dispatch`, async () => {
+    const token = 'fake-old-access';
+    const binding = revokeBinding(token);
+    const identity = { ...binding, [field]: field === 'ref' ? 'slack/token/another-entry' : 'refresh' };
+    const { calls, inner } = recorder();
+    const permit = closedPermit();
+    await revokeWith(permit, 'auth.revoke', binding, async () => {
+      await assert.rejects(
+        guardSlackRequests(
+          inner,
+          permit,
+          identity,
+        )(`${API}/auth.revoke`, {
+          headers: { authorization: `Bearer ${token}` },
+        }),
+        (error: CommsError) => error.code === 'SEND_REFUSED',
+      );
+    });
+    assert.deepEqual(calls, []);
+  });
+}
+
 test('a revocation grant refuses the wrong bearer without exposing the token or either digest', async () => {
   const expected = 'fake-old-access';
   const wrong = 'fake-another-token';
   const binding = revokeBinding(expected);
   const { calls, inner } = recorder();
   const permit = closedPermit();
-  const fetch = guardSlackRequests(inner, permit);
+  const fetch = guardSlackRequests(inner, permit, binding);
 
   await revokeWith(permit, 'auth.revoke', binding, async () => {
     await assert.rejects(
@@ -399,12 +451,13 @@ test('there is no way to tell the guard to accept another origin', async () => {
     return new Response('{"ok":true}');
   };
 
-  const fetch = guardSlackRequests(rewritingInner, closedPermit());
+  const fetch = guardSlackRequests(rewritingInner, closedPermit(), { ref: fake, kind: 'access' });
+  await assert.rejects(fetch(`${fake}/api/auth.test`), /this package only calls/);
   await fetch('https://slack.com/api/auth.test');
   assert.deepEqual(seen, [`${fake}/api/auth.test`], 'the inner fetch is where a test redirects, not the guard');
 
-  // And the guard itself takes no second argument that could relax it.
-  assert.equal(guardSlackRequests.length, 2, 'guardSlackRequests grew a parameter that could move the origin');
+  // The third parameter is only the local revocation identity; even a URL there cannot move the origin.
+  assert.equal(guardSlackRequests.length, 3, 'guardSlackRequests grew an unaudited parameter');
 });
 
 test('a query string cannot hide the method from the guard', () => {

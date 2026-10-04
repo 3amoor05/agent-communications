@@ -181,7 +181,11 @@ function checkUpload(url: URL, verb: string, permit: WritePermit): void {
  * the *inner* fetch — after this has approved it — so there is no mode, anywhere, in which the check is off. The
  * files host was added the same way: a second constant beside the first, not a parameter.
  */
-export function guardSlackRequests(inner: FetchLike, permit: WritePermit): FetchLike {
+export function guardSlackRequests(
+  inner: FetchLike,
+  permit: WritePermit,
+  revocation?: Pick<RevokeBinding, 'ref' | 'kind'>,
+): FetchLike {
   return async (input, init) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
 
@@ -298,6 +302,11 @@ export function guardSlackRequests(inner: FetchLike, permit: WritePermit): Fetch
       const grant = permit.revoking;
       if (grant === null) {
         throw new CommsError('SEND_REFUSED', `${method} destroys a token, and no revocation grant is open`, {
+          hint: 'This is a bug — please report it.',
+        });
+      }
+      if (revocation?.ref !== grant.ref || revocation?.kind !== grant.kind) {
+        throw new CommsError('SEND_REFUSED', 'the ledger entry or token kind does not match the revocation grant', {
           hint: 'This is a bug — please report it.',
         });
       }

@@ -298,6 +298,7 @@ async function revokeOne(context: SlackContext, prepared: PreparedToken): Promis
             {
               token: prepared.token as string,
               permit,
+              revocation: { ref: prepared.entry.ref, kind: prepared.kind },
               fetch: context.fetch,
               baseUrl: context.slackBaseUrl,
               timeoutMs: 30_000,

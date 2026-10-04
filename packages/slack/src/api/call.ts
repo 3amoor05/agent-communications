@@ -1,5 +1,5 @@
 import { CommsError } from '@agentcomms/core';
-import { closedPermit, type FetchLike, guardSlackRequests, type WritePermit } from './guard.ts';
+import { closedPermit, type FetchLike, guardSlackRequests, type RevokeBinding, type WritePermit } from './guard.ts';
 import { SLACK_ORIGIN } from './methods.ts';
 
 /**
@@ -23,6 +23,8 @@ export interface SlackCall {
    * than slipping past on a permit nobody opened.
    */
   permit?: WritePermit | undefined;
+  /** Local ledger identity for a revoke; checked against its grant and never sent to Slack. */
+  revocation?: Pick<RevokeBinding, 'ref' | 'kind'> | undefined;
   /** Where Slack is. Tests point this at a local server rather than relaxing the origin check. */
   baseUrl?: string | undefined;
   signal?: AbortSignal | undefined;
@@ -402,7 +404,7 @@ async function callOnce(
   method: string,
   params: Record<string, string | number | boolean | undefined>,
 ): Promise<SlackResponse> {
-  const send = guardSlackRequests(call.fetch ?? (fetch as FetchLike), call.permit ?? closedPermit());
+  const send = guardSlackRequests(call.fetch ?? (fetch as FetchLike), call.permit ?? closedPermit(), call.revocation);
   const url = new URL(`/api/${method}`, call.baseUrl ?? SLACK_ORIGIN);
   const signal = call.signal ?? AbortSignal.timeout(call.timeoutMs ?? 30_000);
 
