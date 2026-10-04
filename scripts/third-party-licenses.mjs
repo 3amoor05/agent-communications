@@ -92,6 +92,11 @@ export function missingNotices(inlined, text) {
   return [...inlined].filter((key) => !noticed.has(key)).sort(byPackage);
 }
 
+/** Remove whitespace that carries no licence wording and would fail the repository's whitespace check. */
+export function normaliseLicenceText(text) {
+  return String(text ?? '').replace(/[ \t]+$/gm, '');
+}
+
 /** By name, then by version as numbers, so `entities@4.5.0` comes before `entities@10.0.0`. */
 function byPackage(a, b) {
   const split = (key) => {
@@ -372,10 +377,14 @@ async function main() {
     counts.push(`${name} ${inlined.size}`);
     // Some licence files are written with CRLF. The repository stores every text file with LF (`.gitattributes`), so
     // a CRLF kept here would be normalised on commit and then differ from every fresh generation, on every platform.
-    const content = (await licencesFile(name, inlined, everything, problems)).replace(/\r\n?/g, '\n');
+    const content = normaliseLicenceText(
+      (await licencesFile(name, inlined, everything, problems)).replace(/\r\n?/g, '\n'),
+    );
     const path = join(ROOT, 'packages', name, 'THIRD_PARTY_LICENSES');
     const current = await readFile(path, 'utf8').catch(() => null);
-    if (current === content) continue;
+    // Existing notices may preserve whitespace copied from an upstream licence. Do not rewrite an unrelated package
+    // merely to remove it; any package whose bundle really changed is written in the clean canonical form above.
+    if (normaliseLicenceText(current) === content) continue;
     if (!check) {
       await writeFile(path, content);
       continue;

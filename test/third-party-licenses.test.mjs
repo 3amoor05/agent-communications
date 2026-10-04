@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { missingNotices, noticedIn, ownerOf } from '../scripts/third-party-licenses.mjs';
+import { missingNotices, normaliseLicenceText, noticedIn, ownerOf } from '../scripts/third-party-licenses.mjs';
 
 /**
  * The licence notices are built from the bundler's module graph (`scripts/third-party-licenses.mjs`): every module
@@ -95,6 +95,13 @@ test('a notice counts only for the package and version it names', () => {
   );
   // A package with no file at all owes every notice.
   assert.deepEqual(missingNotices(['zod@4.6.5'], null), ['zod@4.6.5']);
+});
+
+test('generated licence notices ignore meaningless trailing whitespace from upstream prose', () => {
+  assert.equal(
+    normaliseLicenceText('Copyright holder  \n \nPermission granted\t\n'),
+    'Copyright holder\n\nPermission granted\n',
+  );
 });
 
 test('the packed-tarball check requires THIRD_PARTY_LICENSES in every tarball', async () => {
