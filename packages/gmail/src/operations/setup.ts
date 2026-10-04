@@ -1,11 +1,22 @@
 import { lstat, readdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { type GatedChange, isProductServer, type OrgChangeResult, orgAddChange } from '@agentcomms/core';
+import {
+  CommsError,
+  type Config,
+  type GatedChange,
+  isProductServer,
+  lookupName,
+  nameAvailable,
+  type OrgChangeResult,
+  orgAddChange,
+  organisationsOf,
+  shownText,
+} from '@agentcomms/core';
 import { parseClientJson } from '../auth/oauth.ts';
 import type { GmailContext } from '../context.ts';
 import { clientsRegisteredWith, GMAIL_MCP } from '../mcp/install.ts';
-import { chooseClientForNewInbox } from './client-choice.ts';
+import { chooseClientForNewInbox, organisationForClient } from './client-choice.ts';
 import { readSmallFile } from './small-file.ts';
 
 /**
@@ -340,6 +351,25 @@ export function setupProfileChange(
 }
 
 /**
+ * Refuses a setup target before a profile approval can mutate this machine.
+ *
+ * An exact existing Gmail inbox is a valid target to resume. A new name must pass core's complete versioned name
+ * rules: grammar, Gmail platform, both account maps, and former-name reservations. Keeping this beside `setupState`
+ * gives the CLI and MCP one trust boundary instead of two approximations that can drift.
+ */
+export function requireSetupTarget(config: Config, alias: string): void {
+  const existing = lookupName(config, 'inbox', alias);
+  if (existing) {
+    if (existing.provider !== 'gmail') {
+      throw new CommsError('CONFIG', `"${alias}" is not a Gmail mailbox`, { hint: 'Choose a Gmail mailbox name.' });
+    }
+    return;
+  }
+  const available = nameAvailable(config, 'inbox', alias, 'gmail');
+  if (!available.ok) throw available.error;
+}
+
+/**
  * Whether a registered MCP server is one of ours.
  *
  * This decides whether the last setup step is behind you, and it has now been wrong in both directions.
@@ -375,31 +405,56 @@ export async function setupState(context: GmailContext, options: SetupStateOptio
 
   // Unreadable client configs are not a setup failure; the MCP step simply cannot be skipped automatically.
   const registeredWith = await clientsRegisteredWith(context.env);
-  const selected = options.alias
-    ? chooseClientForNewInbox(config, {
-        alias: options.alias,
-        email: options.email,
-        client: options.client,
-        allowOwnClient: true,
-        platform: context.platform,
-      })
-    : undefined;
-  const clientDone = options.alias ? selected !== null : clients.length > 0;
+  const target = options.alias ? lookupName(config, 'inbox', options.alias) : undefined;
+  const selected =
+    options.alias && !target
+      ? chooseClientForNewInbox(config, {
+          alias: options.alias,
+          email: options.email,
+          client: options.client,
+          allowOwnClient: true,
+          platform: context.platform,
+        })
+      : undefined;
+  // A registered row is not enough to finish this step: profile routing is decided for the mailbox being added.
+  // Without that name there is no §D6 choice to report as done, even when the machine already has clients. An
+  // existing target has already made that choice: report its stored client rather than rerouting it through today's
+  // active generation.
+  const clientDone = target
+    ? config.clients[target.client]?.provider === 'gmail'
+    : options.alias
+      ? selected !== null
+      : false;
+  const inboxDone = target !== undefined;
 
   const done: ('client' | 'inbox' | 'mcp')[] = [];
   if (clientDone) done.push('client');
-  if (inboxes.length > 0) done.push('inbox');
+  if (inboxDone) done.push('inbox');
   if (registeredWith.length > 0) done.push('mcp');
 
-  const next = !clientDone ? 'client' : inboxes.length === 0 ? 'inbox' : registeredWith.length === 0 ? 'mcp' : 'done';
+  const next = !clientDone ? 'client' : !inboxDone ? 'inbox' : registeredWith.length === 0 ? 'mcp' : 'done';
   const candidates = options.scanDownloads === false ? [] : await findClientJson(context.env);
   const clientOf = Object.fromEntries(Object.entries(config.inboxes).map(([alias, inbox]) => [alias, inbox.client]));
-  const clientChoice = selected
+  const targetOrganisation = target ? organisationForClient(config, target.client) : undefined;
+  const clientChoice = target
     ? {
-        name: selected.name,
-        ...(selected.organisation ? { organisation: selected.organisation } : {}),
-        ...(selected.organisationLabel ? { organisationLabel: selected.organisationLabel } : {}),
+        name: target.client,
+        ...(targetOrganisation ? { organisation: targetOrganisation } : {}),
+        ...(targetOrganisation
+          ? {
+              organisationLabel: shownText(
+                organisationsOf(config)[targetOrganisation]?.label ?? targetOrganisation,
+                64,
+              ),
+            }
+          : {}),
       }
-    : null;
+    : selected
+      ? {
+          name: selected.name,
+          ...(selected.organisation ? { organisation: selected.organisation } : {}),
+          ...(selected.organisationLabel ? { organisationLabel: selected.organisationLabel } : {}),
+        }
+      : null;
   return { next, done, clients, inboxes, clientOf, registeredWith, candidates, clientChoice };
 }

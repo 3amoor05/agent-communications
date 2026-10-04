@@ -57,7 +57,7 @@ import {
   prepareSend,
   revokeApproval,
 } from '../operations/send.ts';
-import { CONSOLE_STEPS, setupProfileChange, setupState } from '../operations/setup.ts';
+import { CONSOLE_STEPS, requireSetupTarget, setupProfileChange, setupState } from '../operations/setup.ts';
 import {
   FINISH_WAIT_SECONDS,
   finishSignIn,
@@ -1367,15 +1367,25 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
     async ({ inbox, email, client, profile, orgApproval, store }) => {
       try {
         if (profile) {
-          if (options.readOnly) {
-            throw new CommsError(
-              'CONFIG',
-              'this Gmail server is read-only, so setup cannot add an organisation profile',
-              {
-                hint: `Add the profile with ${inlineCommand(shellCommand(['agent-gmail', 'setup', '--profile', profile], context.platform))}, or use a Gmail server that is not read-only.`,
-              },
-            );
+          if (options.readOnly || pinned) {
+            const why = options.readOnly ? 'read-only' : `pinned to the "${pinned}" mailbox`;
+            throw new CommsError('CONFIG', `this Gmail server is ${why}, so setup cannot add an organisation profile`, {
+              hint: `Add the profile with ${inlineCommand(shellCommand(['agent-gmail', 'setup', '--profile', profile], context.platform))}, or use a Gmail server that is not read-only.`,
+            });
           }
+        } else if (orgApproval !== undefined) {
+          throw new CommsError('USAGE', 'orgApproval goes with profile: this call adds no organisation profile', {
+            hint: 'Call gmail_setup again with profile as well, as the preview named it.',
+          });
+        }
+        const setupInbox = pinned ? targetInbox(inbox) : inbox;
+        if (!setupInbox) {
+          throw new CommsError('USAGE', 'name the mailbox with `inbox` before setup can choose its client', {
+            hint: 'Call gmail_setup again with inbox set to the mailbox name being added.',
+          });
+        }
+        requireSetupTarget(await context.config(), setupInbox);
+        if (profile) {
           const outcome = await gatedChange(
             context.core,
             setupProfileChange(context, {
@@ -1391,15 +1401,11 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
             },
           );
           if (outcome.status === 'approval-required') return reply(changeToolResult(outcome));
-        } else if (orgApproval !== undefined) {
-          throw new CommsError('USAGE', 'orgApproval goes with profile: this call adds no organisation profile', {
-            hint: 'Call gmail_setup again with profile as well, as the preview named it.',
-          });
         }
         // A pinned server reports no candidates at all, so there is nothing to scan the downloads for.
         const state = await setupState(context, {
           scanDownloads: !pinned,
-          ...(inbox ? { alias: inbox } : {}),
+          alias: setupInbox,
           ...(email ? { email } : {}),
           ...(client ? { client } : {}),
         });

@@ -256,7 +256,7 @@ test('printing an entry, or `--client json`, writes nothing and so asks nobody',
 test('`setup --mcp-client` stops for approval without registering, and only `--mcp-approval` carries it', async () => {
   const { harness, home, env } = await machine();
   const cursor = join(home, '.cursor', 'mcp.json');
-  const argv = ['setup', '--mcp-client', 'cursor', '--launcher', 'local', '--json'];
+  const argv = ['setup', '--inbox', 'work', '--mcp-client', 'cursor', '--launcher', 'local', '--json'];
 
   const first = await cli(harness, argv, { env });
   assert.equal(first.code, 10, `a registration nobody approved must not exit 0: ${first.stdout}`);
@@ -269,7 +269,7 @@ test('`setup --mcp-client` stops for approval without registering, and only `--m
   assert.match(
     String(report?.blocked.hint),
     new RegExp(
-      `agent-gmail setup --mcp-client cursor --launcher local --json --mcp-approval ${report?.blocked.approvalId}\``,
+      `agent-gmail setup --inbox work --mcp-client cursor --launcher local --json --mcp-approval ${report?.blocked.approvalId}\``,
     ),
   );
   assert.deepEqual(report?.did, []);
@@ -297,9 +297,13 @@ test('`setup --mcp-client` stops for approval without registering, and only `--m
 
   // Read by a person, the report says what they are agreeing to and what to run once they have.
   const other = await machine();
-  const plain = await cli(other.harness, ['setup', '--mcp-client', 'cursor', '--launcher', 'local'], {
-    env: other.env,
-  });
+  const plain = await cli(
+    other.harness,
+    ['setup', '--inbox', 'work', '--mcp-client', 'cursor', '--launcher', 'local'],
+    {
+      env: other.env,
+    },
+  );
   assert.equal(plain.code, 10, plain.stderr);
   assert.match(plain.stdout, /Stopped at: mcp/);
   assert.match(plain.stdout, /CHANGE PREVIEW[\s\S]*registers the Gmail MCP server with cursor/);
@@ -307,7 +311,17 @@ test('`setup --mcp-client` stops for approval without registering, and only `--m
 });
 
 test('an interactive setup given `--mcp-client` asks as `mcp install` does: nobody has answered anything yet', async () => {
-  const argv = ['setup', '--mcp-client', 'cursor', '--launcher', 'local', '--no-browser', '--no-tui'];
+  const argv = [
+    'setup',
+    '--inbox',
+    'work',
+    '--mcp-client',
+    'cursor',
+    '--launcher',
+    'local',
+    '--no-browser',
+    '--no-tui',
+  ];
 
   // A terminal held by an agent: the preview and the id, the flag to carry it back, and nothing registered.
   const { harness, home, env } = await machine();
@@ -333,8 +347,8 @@ test('an interactive setup given `--mcp-client` asks as `mcp install` does: nobo
 });
 
 test('an interactive setup that asked "Connect this to an agent?" takes the yes under chat, and the code under confirm', async () => {
-  const argv = ['setup', '--launcher', 'local', '--no-browser', '--no-tui'];
-  // Continue where it left off, yes to connecting an agent, then the fourth client in the list: Cursor.
+  const argv = ['setup', '--inbox', 'work', '--launcher', 'local', '--no-browser', '--no-tui'];
+  // The target mailbox is already connected: yes to connecting an agent, then the fourth client in the list, Cursor.
   const answers = [
     [/which one\?/, '1'],
     [/Connect this to an agent\?/, 'y'],
@@ -377,7 +391,7 @@ test('an agent at a terminal that picked the client from the list is told to run
    * and an approval the run then never claimed would have been dropped past the update check's stop. So the command
    * an agent is told to run again carries the client it picked, and that command registers it.
    */
-  const argv = ['setup', '--launcher', 'local', '--no-browser', '--no-tui'];
+  const argv = ['setup', '--inbox', 'work', '--launcher', 'local', '--no-browser', '--no-tui'];
   const { harness, home, env } = await machine();
   const agentEnv = { ...env, CLAUDECODE: '1' };
   const asked = await cli(harness, argv, {

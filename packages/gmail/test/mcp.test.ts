@@ -226,6 +226,21 @@ test('gmail_setup refuses orgApproval without the profile it approves', async ()
   }
 });
 
+test('an unpinned gmail_setup requires the target mailbox before it decides the client', async () => {
+  const harness = await newHarness();
+  const { client, close } = await connect({ core: harness.core, env: harness.env });
+  try {
+    const result = (await client.callTool({ name: 'gmail_setup', arguments: {} })) as ToolResult;
+    assert.equal(result.isError, true);
+    const error = result.structuredContent?.error as { code: string; message: string; hint: string };
+    assert.equal(error.code, 'USAGE');
+    assert.match(error.message, /name the mailbox with `inbox`/i);
+    assert.match(error.hint, /gmail_setup/);
+  } finally {
+    await close();
+  }
+});
+
 test('results arrive as structured content and as text, so every client sees them', async () => {
   const harness = await newHarness({ accounts: [{ sub: 'sub-1', email: 'jo@example.test' }] });
   await harness.addInbox({ alias: 'work', email: 'jo@example.test', sub: 'sub-1', refreshToken: 'rt_x' });
@@ -518,7 +533,7 @@ test('a pinned gmail_setup answers about its own mailbox and nothing else', asyn
 
   const open = await connect({ core: harness.core, env });
   try {
-    const all = (await open.client.callTool({ name: 'gmail_setup', arguments: {} })) as {
+    const all = (await open.client.callTool({ name: 'gmail_setup', arguments: { inbox: 'work' } })) as {
       structuredContent: { inboxes: string[]; clients: string[]; candidates: unknown[] };
     };
     assert.deepEqual(all.structuredContent.inboxes.sort(), ['personal', 'work']);
@@ -530,6 +545,13 @@ test('a pinned gmail_setup answers about its own mailbox and nothing else', asyn
 
   const pinned = await connect({ core: harness.core, env, inbox: 'work' });
   try {
+    const foreign = (await pinned.client.callTool({
+      name: 'gmail_setup',
+      arguments: { inbox: 'personal' },
+    })) as ToolResult;
+    assert.equal(foreign.isError, true);
+    assert.match(String((foreign.structuredContent?.error as { message?: string })?.message), /only serves the "work"/);
+
     const scoped = (await pinned.client.callTool({ name: 'gmail_setup', arguments: {} })) as {
       structuredContent: { inboxes: string[]; clients: string[]; candidates: unknown[] };
     };
@@ -538,6 +560,25 @@ test('a pinned gmail_setup answers about its own mailbox and nothing else', asyn
     assert.deepEqual(scoped.structuredContent.clients, ['default'], 'a pinned server named another client');
   } finally {
     await pinned.close();
+  }
+});
+
+test('a pinned gmail_setup refuses the machine-wide profile change', async () => {
+  const harness = await newHarness({ accounts: [{ sub: 'sub-1', email: 'jo@example.test' }] });
+  await harness.addInbox({ alias: 'work', email: 'jo@example.test', sub: 'sub-1', refreshToken: 'rt_x' });
+  const { client, close } = await connect({ core: harness.core, env: harness.env, inbox: 'work' });
+  try {
+    const result = (await client.callTool({
+      name: 'gmail_setup',
+      arguments: { profile: '/profiles/acme.agentcomms.json' },
+    })) as ToolResult;
+    assert.equal(result.isError, true);
+    const error = result.structuredContent?.error as { code: string; message: string; hint: string };
+    assert.equal(error.code, 'CONFIG');
+    assert.match(error.message, /pinned/);
+    assert.match(error.hint, /agent-gmail setup --profile/);
+  } finally {
+    await close();
   }
 });
 

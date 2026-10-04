@@ -588,10 +588,13 @@ test('--move and move delete the downloaded file only once the change is approve
 test('setup --client-json registers the client the same way client add does: approved first', async () => {
   const harness = await newHarness();
   const path = await clientJson();
-  const asked = await cli(harness, ['setup', '--client-json', path, '--json']);
+  const asked = await cli(harness, ['setup', '--inbox', 'work', '--client-json', path, '--json']);
   pendingApproval(asked);
   assert.deepEqual((await harness.core.config.load()).clients, {}, 'setup registered a client nobody approved');
-  assert.match(asked.envelope().error?.hint ?? '', /agent-gmail setup --client-json \S+ --json --approval/);
+  assert.match(
+    asked.envelope().error?.hint ?? '',
+    /agent-gmail setup --inbox work --client-json \S+ --json --approval/,
+  );
 });
 
 test('removing an OAuth client is approved first, and refused while a mailbox signs in through it', async () => {

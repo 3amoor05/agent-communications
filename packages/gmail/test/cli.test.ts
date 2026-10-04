@@ -1034,7 +1034,16 @@ test('setup can choose the file store, and says which store it used', async () =
   );
 
   // Registering the client is `client add`, approved the same way: a first run that asks, and a second that claims.
-  const result = await approving(harness, ['setup', '--client-json', path, '--store', 'file', '--move']);
+  const result = await approving(harness, [
+    'setup',
+    '--inbox',
+    'work',
+    '--client-json',
+    path,
+    '--store',
+    'file',
+    '--move',
+  ]);
   assert.equal(result.code, 0, result.stdout);
   const { data: report } = result.json<{ data: { did: string[]; clients: string[] } }>();
   assert.deepEqual(report.clients, ['desktop']);
@@ -1055,34 +1064,52 @@ test('setup can choose the file store, and says which store it used', async () =
 
 test('setup --profile has its own approval, then adds the profile and continues', async () => {
   const harness = offlineCliHarness();
-  const path = join(tempDir(), 'acme.agentcomms.json');
-  await writeFile(
-    path,
-    JSON.stringify({
-      agentcomms: 'organisation-profile',
-      version: 1,
-      organisation: 'acme',
-      label: 'Acme Test Org',
-      gmail: {
-        clientId: '123456789012-acme.apps.googleusercontent.com',
-        clientSecret: 'fake-profile-secret-not-real',
-        serves: { domains: ['acme.test'] },
+  await harness.core.config.update((config) => {
+    if (config.version !== 2) throw new Error('the setup fixture starts at version 2');
+    return {
+      ...config,
+      formerNames: {
+        ...config.formerNames,
+        accounts: {
+          ...config.formerNames.accounts,
+          'retired/gmail': { name: 'other/slack', id: 'acc_AAAAAAAAAAAAAAAA' },
+        },
       },
-    }),
-  );
+    };
+  });
+  const path = join(tempDir(), 'acme.agentcomms.json');
+  const secret = 'fake-profile-secret-not-real';
+  const rawProfile = JSON.stringify({
+    agentcomms: 'organisation-profile',
+    version: 1,
+    organisation: 'acme',
+    label: 'Acme Test Org',
+    gmail: {
+      clientId: '123456789012-acme.apps.googleusercontent.com',
+      clientSecret: secret,
+      serves: { domains: ['acme.test'] },
+    },
+  });
+  await writeFile(path, rawProfile);
+  const assertRedacted = (text: string, where: string) => {
+    assert.ok(!text.includes(secret), `${where} contains the client secret`);
+    assert.ok(!text.includes(rawProfile), `${where} contains the raw profile bytes`);
+  };
 
-  const first = await cli(harness, ['setup', '--profile', path, '--store', 'file', '--json']);
+  const first = await cli(harness, ['setup', '--profile', path, '--inbox', 'acme/gmail', '--store', 'file', '--json']);
+  assertRedacted(`${first.stdout}${first.stderr}`, 'CLI preview result');
   assert.equal(first.code, EXIT_CODES.APPROVAL, first.stdout);
   const pending = first.json<Envelope<never>>().error;
   assert.equal(pending?.code, 'APPROVAL_PENDING');
   assert.match(String(pending?.details?.preview), /Acme Test Org/);
+  assertRedacted(String(pending?.details?.preview), 'CLI preview');
   const beforeApproval = await harness.core.config.load();
   assert.equal(beforeApproval.version, 2);
   if (beforeApproval.version !== 2) throw new Error('the fixture was migrated to version 2');
   assert.equal(beforeApproval.organisations?.acme, undefined, 'the profile was added before its own approval');
   const approval = String(pending?.details?.approvalId);
 
-  const second = await cli(harness, [
+  const missingTarget = await cli(harness, [
     'setup',
     '--profile',
     path,
@@ -1092,12 +1119,70 @@ test('setup --profile has its own approval, then adds the profile and continues'
     approval,
     '--json',
   ]);
+  assert.equal(missingTarget.code, EXIT_CODES.USAGE);
+  assert.match(missingTarget.json<Envelope<never>>().error?.message ?? '', /name the mailbox with --inbox/);
+  const stillPending = await harness.core.config.load();
+  assert.equal(stillPending.version, 2);
+  if (stillPending.version !== 2) throw new Error('the fixture remained version 2');
+  assert.equal(stillPending.organisations?.acme, undefined, 'the profile was added before the mailbox was validated');
+
+  for (const invalid of ['   ', 'Acme/gmail', 'acme/slack', 'retired/gmail']) {
+    const refusedTarget = await cli(harness, [
+      'setup',
+      '--profile',
+      path,
+      '--inbox',
+      invalid,
+      '--store',
+      'file',
+      '--org-approval',
+      approval,
+      '--json',
+    ]);
+    assert.notEqual(refusedTarget.code, 0, `accepted setup target ${JSON.stringify(invalid)}`);
+    const unchanged = await harness.core.config.load();
+    assert.equal(unchanged.version, 2);
+    if (unchanged.version !== 2) throw new Error('the fixture remained version 2');
+    assert.equal(
+      unchanged.organisations?.acme,
+      undefined,
+      `the profile was added before rejecting ${JSON.stringify(invalid)}`,
+    );
+  }
+
+  const second = await cli(harness, [
+    'setup',
+    '--profile',
+    path,
+    '--inbox',
+    'acme/gmail',
+    '--store',
+    'file',
+    '--org-approval',
+    approval,
+    '--json',
+  ]);
   assert.equal(second.code, 0, `${second.stdout}${second.stderr}`);
+  assertRedacted(`${second.stdout}${second.stderr}`, 'CLI result');
   const config = await harness.core.config.load();
   assert.equal(config.version, 2);
   if (config.version !== 2) throw new Error('the profile was added to version 2');
   assert.equal(config.organisations?.acme?.label, 'Acme Test Org');
   assert.equal(second.json<Envelope<{ next: string }>>().data?.next, 'inbox');
+
+  const refused = await cli(harness, ['setup', '--profile', path, '--inbox', 'acme/gmail', '--json']);
+  assert.notEqual(refused.code, 0);
+  assertRedacted(`${refused.stdout}${refused.stderr}`, 'CLI error');
+  assertRedacted(JSON.stringify(await harness.core.audit.tail()), 'audit log');
+});
+
+test('headless setup requires the mailbox name before it decides the client', async () => {
+  const harness = offlineCliHarness();
+  const result = await cli(harness, ['setup', '--json']);
+  assert.equal(result.code, EXIT_CODES.USAGE);
+  const error = result.json<Envelope<never>>().error;
+  assert.match(error?.message ?? '', /name the mailbox with --inbox/i);
+  assert.match(error?.hint ?? '', /setup --inbox/);
 });
 
 test('setup refuses --org-approval without --profile', async () => {
@@ -1167,11 +1252,15 @@ test('an interactive setup with an explicit flag does not ask what you already s
     // `--launcher local` so this registers the checkout rather than running an `npm install` of a managed
     // runtime — which is what the default does, and what made the first version of this test reach into the
     // machine's real data directory.
-    cli(harness, ['setup', '--mcp-client', 'codex', '--launcher', 'local', '--no-browser', '--no-tui'], {
-      tty: true,
-      env: { HOME: home, USERPROFILE: home },
-      stdin: 'n\nn\nn\n',
-    }),
+    cli(
+      harness,
+      ['setup', '--inbox', 'work', '--mcp-client', 'codex', '--launcher', 'local', '--no-browser', '--no-tui'],
+      {
+        tty: true,
+        env: { HOME: home, USERPROFILE: home },
+        stdin: 'n\nn\nn\n',
+      },
+    ),
     new Promise<never>((_resolve, reject) =>
       setTimeout(
         () => reject(new Error('setup was still running after 30s: it went somewhere that waits for a browser')),
@@ -1228,7 +1317,7 @@ test('setup --launcher reaches the headless agent step, and the entry it writes 
 
   const { first, second: result } = await settingUp(
     harness,
-    ['setup', '--mcp-client', 'cursor', '--launcher', 'local'],
+    ['setup', '--inbox', 'work', '--mcp-client', 'cursor', '--launcher', 'local'],
     { env: { HOME: home, USERPROFILE: home } },
   );
   // The preview names the checkout it will start: the flag had arrived before anybody was asked.
@@ -1271,7 +1360,7 @@ test('setup --replace-server keeps the mailbox pin and --read-only of the entry 
 
   const { first, second: result } = await settingUp(
     harness,
-    ['setup', '--mcp-client', 'cursor', '--launcher', 'local', '--replace-server'],
+    ['setup', '--inbox', 'work', '--mcp-client', 'cursor', '--launcher', 'local', '--replace-server'],
     { env: { HOME: home, USERPROFILE: home } },
   );
   // What the person approved already said so: the replacement, and the narrowing it keeps.

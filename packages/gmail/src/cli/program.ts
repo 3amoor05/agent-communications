@@ -1776,7 +1776,9 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
     .option('--no-browser', 'print the links instead of opening them')
     .action(
       act(async (context, globalOptions, options: Options) => {
-        const { setupProfileChange, setupState, CONSOLE_STEPS } = await import('../operations/setup.ts');
+        const { requireSetupTarget, setupProfileChange, setupState, CONSOLE_STEPS } = await import(
+          '../operations/setup.ts'
+        );
         const out = streams.stderr;
         const bold = (text: string) => paint(globalOptions.color, 'bold', text);
         const dim = (text: string) => paint(globalOptions.color, 'dim', text);
@@ -1813,6 +1815,39 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
           noTui: options.tui === false,
           canPrompt: canPrompt(env, streams, { json: globalOptions.json, noInput: globalOptions.noInput }),
         });
+        if (!options.profile) {
+          refuseUnclaimedApproval(options.orgApproval, {
+            message: '--org-approval goes with --profile: without it this run adds no organisation profile',
+            hint: `Run ${inlineCommand(shellCommand(['agent-gmail', 'setup', '--help'], platform))} and include the --profile file the preview named. Nothing was done.`,
+          });
+        }
+
+        /*
+         * The client step is decided for the mailbox this run is adding (design 2026-10-02 §D6). A client merely
+         * existing on the machine cannot answer that question, so every interactive run asks for the name first
+         * and every headless run requires the equivalent flag.
+         */
+        if (mode !== 'none' && !options.inbox) {
+          const organisationNames = (await context.config()).version === 2;
+          options.inbox = await askText(mode, streams, {
+            message: organisationNames ? 'A name for it: organisation/gmail' : 'A short name for it',
+            placeholder: organisationNames ? 'acme/gmail' : 'work',
+            ...(organisationNames ? {} : { defaultValue: 'work' }),
+          });
+          if (!options.email) {
+            const address = await askText(mode, streams, {
+              message: 'Which address (blank to choose in the browser)',
+            });
+            if (address) options.email = address;
+          }
+        }
+        if (!options.inbox) {
+          throw new CommsError('USAGE', 'name the mailbox with --inbox before setup can choose its client', {
+            hint: `Run ${inlineCommand(shellCommand(['agent-gmail', 'setup', '--inbox', 'acme/gmail'], platform))}, replacing acme/gmail with the name being added. Nothing was done.`,
+          });
+        }
+        requireSetupTarget(await context.config(), String(options.inbox));
+
         if (options.profile) {
           await gatedChangeAtTerminal(
             context.core,
@@ -1831,36 +1866,6 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
               streams,
             },
           );
-        } else {
-          refuseUnclaimedApproval(options.orgApproval, {
-            message: '--org-approval goes with --profile: without it this run adds no organisation profile',
-            hint: `Run ${inlineCommand(shellCommand(['agent-gmail', 'setup', '--help'], platform))} and include the --profile file the preview named. Nothing was done.`,
-          });
-        }
-
-        /*
-         * A profile makes the mailbox name part of the client step (design 2026-10-02 §D6). Ask it first on a new,
-         * interactive version-2 setup that has profiles, so a personal address does not skip the Cloud walk merely
-         * because an organisation's ineligible client row happens to exist.
-         */
-        const beforeSetup = await context.config();
-        if (
-          mode !== 'none' &&
-          !options.inbox &&
-          Object.keys(beforeSetup.inboxes).length === 0 &&
-          beforeSetup.version === 2 &&
-          Object.keys(beforeSetup.organisations ?? {}).length > 0
-        ) {
-          options.inbox = await askText(mode, streams, {
-            message: 'A name for it: organisation/gmail',
-            placeholder: 'acme/gmail',
-          });
-          if (!options.email) {
-            const address = await askText(mode, streams, {
-              message: 'Which address (blank to choose in the browser)',
-            });
-            if (address) options.email = address;
-          }
         }
 
         const setupStateOptions = (scanDownloads = true) => ({
@@ -1889,6 +1894,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
          */
         const headless = mode === 'none';
         const clientStep = state.next === 'client';
+        const targetAlreadyConnected = options.inbox ? state.inboxes.includes(String(options.inbox)) : false;
         if (!clientStep || (headless && !options.clientJson)) {
           refuseUnclaimedApproval(
             options.approval,
@@ -1907,7 +1913,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
           ? 'it names no client with --mcp-client'
           : !headless
             ? null
-            : options.inbox
+            : options.inbox && !targetAlreadyConnected
               ? 'it signs a mailbox in first, and that waits for a browser'
               : state.inboxes.length === 0
                 ? 'no mailbox is connected yet, and connecting one waits for a browser'
@@ -1983,7 +1989,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
 
           // An explicit `--inbox` is a request, not a step in a sequence: most people have more than one
           // mailbox, and the first one connected must not close the door on the rest.
-          if (!blocked && (state.next === 'inbox' || options.inbox)) {
+          if (!blocked && (state.next === 'inbox' || (options.inbox && !targetAlreadyConnected))) {
             const alias = options.inbox ? String(options.inbox) : '';
             if (alias) {
               /*
@@ -2109,7 +2115,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
          * `setup --inbox personal` on a machine that already has one mailbox never reached them — it went to the
          * agent step, or asked "what would you like to do?" of somebody who had already said.
          */
-        let addAnother = Boolean(options.inbox);
+        let addAnother = Boolean(options.inbox && !targetAlreadyConnected);
         let addMcp = Boolean(options.mcpClient);
         /** Set by `--restart`, or by answering "start over": the walk then begins at 1/5 whatever is recorded. */
         let startOver = options.restart === true;

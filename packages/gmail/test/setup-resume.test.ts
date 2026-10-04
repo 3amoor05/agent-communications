@@ -91,7 +91,9 @@ async function setupAtTerminal(
     // In order, and one at a time: an answer may write a file before it types.
     answering = answering.then(async () => {
       if (asked.length > 40) throw new Error(`setup kept asking:\n${asked.slice(-3).join('\n---\n')}`);
-      input.write(`${await answer(prompt, index)}\n`);
+      // Setup now needs the mailbox name before it can decide which client route applies. These tests exercise the
+      // client walk, not naming, so give their version-1 fixture its ordinary target and delegate every later prompt.
+      input.write(`${/A (?:short )?name for it/.test(prompt) ? 'work' : await answer(prompt, index)}\n`);
     });
   });
   const code = await run(['setup', '--no-tui', '--no-browser', ...argv], {
@@ -120,6 +122,15 @@ const walked = (dialog: Dialog) =>
 
 /** A typed path that does not exist ends a run that went wrong, instead of leaving it asking for ever. */
 const NOWHERE = '/nonexistent/client_secret_nowhere.json';
+
+test('an interactive setup asks for the mailbox name before it decides the client step', async () => {
+  const harness = await newHarness();
+  const dialog = await setupAtTerminal(harness, [], (prompt) => {
+    if (/No client file in/.test(prompt)) return NOWHERE;
+    return '';
+  });
+  assert.match(dialog.asked[0] ?? '', /A short name for it/);
+});
 
 test('a client file downloaded during the walk is offered at the client step', async () => {
   const harness = await newHarness();
@@ -331,12 +342,21 @@ test('--client-json puts the file in hand, so the walk is not shown', async () =
 
 test('the walk record is removed once a client is registered', async () => {
   const harness = await newHarness();
+  // A mailbox whose client row was lost still makes this an exact existing target. Restoring that client lets the
+  // setup run stop after registration, without inventing an invalid mailbox name that the target validator must now
+  // reject before any mutation.
+  await harness.addInbox({
+    alias: 'work',
+    email: 'jo@example.test',
+    refreshToken: 'fake-refresh-token',
+    client: 'desktop',
+  });
+  await harness.core.config.update((config) => ({ ...config, clients: {} }));
   await mkdir(harness.core.paths.stateDir, { recursive: true });
   await writeFile(progressOf(harness), JSON.stringify({ consoleStep: 5, at: new Date().toISOString() }));
   const path = await drop(harness, 'elsewhere.json', ELSEWHERE);
-  // Registered for real this time — the approval answered with its code — and stopped at the mailbox step by a
-  // name that version 1 refuses.
-  await setupAtTerminal(harness, ['--client-json', path, '--inbox', 'not a name'], (prompt) => {
+  // Registered for real this time — the approval answered with its code.
+  await setupAtTerminal(harness, ['--client-json', path, '--inbox', 'work'], (prompt) => {
     const code = /Type (\S+) to (?:apply|approve) this change/.exec(prompt);
     return code ? String(code[1]) : '';
   });
