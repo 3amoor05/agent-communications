@@ -661,8 +661,10 @@ TTL); execution requires that token. Trash always requires a plan token. Every w
    1. Take the record's lock and move it to `sending` by compare-and-swap — from `approved`, or also from `pending`
       when the effective policy is `chat` — then create `<approvalId>.claim` with `O_EXCL`: the file system, not the
       lock, is the single-use guarantee across processes. A record already `sending`, `used`, `failed`, `unknown`,
-      `expired` or `revoked` is refused. Non-consuming refusals (`APPROVAL_PENDING`: not yet approved; `RATE_CAPPED`)
-      leave the record untouched; integrity failures (inbox, account, draft message id, digest, `expect`) void it —
+      `expired` or `revoked` is refused. Non-consuming refusals (`APPROVAL_PENDING`: not yet approved)
+      leave the record untouched; a rate cap is checked in step 2, after this claim, so `RATE_CAPPED` completes the
+      claimed record as `failed` — nothing was sent — and the send is prepared again (corrected 2026-10-04 to match
+      the code; see [0.12.3](2026-10-04-release-0.12.3-design.md), D2); integrity failures (inbox, account, draft message id, digest, `expect`) void it —
       "voided" means moved to `revoked` with a reason. Expiry is derived on every read; a record left in `sending`
       for 5 minutes by a process that died reads as `unknown` and is reported, never retried.
    2. Check, against the **live** config and state: inbox id and `sub` match the record; the live policy is not
