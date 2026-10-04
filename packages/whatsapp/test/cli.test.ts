@@ -14,6 +14,21 @@ import { newHarness } from './support/harness.ts';
 
 const ACCOUNT = 'acme/whatsapp';
 
+test('mcp carries the selected command platform into the stdio server', async () => {
+  const source = readFileSync(new URL('../src/cli/program.ts', import.meta.url), 'utf8');
+  assert.match(source, /startWhatsAppStdioServer\(\{\s*env,\s*platform,/);
+  const harness = await newHarness();
+  let received: NodeJS.Platform | undefined;
+  const result = await harness.cli(['mcp'], {
+    platform: 'win32',
+    startMcp: async (options) => {
+      received = options.platform;
+    },
+  });
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(received, 'win32');
+});
+
 test('the default store is found from the HOME the environment names, never from the real home directory', () => {
   const path = defaultStorePath({ HOME: '/nowhere/home' });
   assert.equal(

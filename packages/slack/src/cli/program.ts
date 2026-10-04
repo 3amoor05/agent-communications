@@ -131,6 +131,10 @@ import {
 export interface CliDeps extends SlackContextOptions {
   streams?: Streams;
   platform?: NodeJS.Platform | undefined;
+  /** Starts the stdio server. Injected so a test can inspect its inputs without opening stdio. */
+  startMcp?:
+    | ((options: { env: NodeJS.ProcessEnv; platform: NodeJS.Platform; workspace?: string }) => Promise<void>)
+    | undefined;
   /** Command used to start the detached sign-in listener; the tests point it at the source entry. */
   listenerCommand?: ListenerEntry;
   /** Opens the browser. Injected so a test does not. */
@@ -1304,6 +1308,7 @@ configuration problem.`,
           const outcome = await answerDownloadAtTerminal(context.core, approvalId, {
             env,
             color: globalOptions.color,
+            platform,
             approveCommand: 'agent-slack approve',
             streams,
           });
@@ -1338,9 +1343,10 @@ configuration problem.`,
     .option('--workspace <name>', 'pin the server to one workspace; every tool then acts on it and no other')
     .action(async (flags: Options) => {
       ran = true;
-      const { startSlackStdioServer } = await import('../mcp/stdio-entry.ts');
+      const startSlackStdioServer = deps.startMcp ?? (await import('../mcp/stdio-entry.ts')).startSlackStdioServer;
       await startSlackStdioServer({
         env,
+        platform,
         ...(flags.workspace ? { workspace: String(flags.workspace) } : {}),
       });
     });

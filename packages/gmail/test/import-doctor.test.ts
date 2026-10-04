@@ -1,13 +1,16 @@
 import assert from 'node:assert/strict';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import {
   CommsError,
+  commandText,
   findUngatedGmailServers,
   listRegisteredServers,
   managedRuntimeEntry,
+  openCore,
   secretsStoreOf,
+  shellCommand,
 } from '@agentcomms/core';
 import { buildAuthUrl, exchangeCode, newPkce } from '../src/auth/oauth.ts';
 import { SCOPES } from '../src/auth/scopes.ts';
@@ -19,6 +22,26 @@ import { VERSION } from '../src/version.ts';
 import { type Harness, newHarness, TEST_CLIENT_ID, TEST_CLIENT_SECRET, tempDir } from './support/harness.ts';
 
 const CLIENT = { clientId: TEST_CLIENT_ID, clientSecret: TEST_CLIENT_SECRET };
+
+test('doctor quotes a loose directory repair for the selected shell', async () => {
+  const root = tempDir('agent gmail doctor ');
+  const configDir = join(root, 'config dir');
+  await mkdir(configDir, { recursive: true });
+  await chmod(configDir, 0o755);
+  await writeFile(join(configDir, 'config.json'), `${JSON.stringify({ version: 2, secrets: { store: 'file' } })}\n`);
+  const env = {
+    AGENT_COMMS_CONFIG_DIR: configDir,
+    HOME: root,
+    USERPROFILE: root,
+    AGENT_COMMS_CLIENT_CLI_DIRS: '',
+    AGENT_COMMS_UPDATE_CHECK: 'off',
+  };
+  const context = new GmailContext({ core: openCore({ env, platform: 'darwin' }), env, platform: 'darwin' });
+
+  const result = await doctor(context);
+  const check = result.checks.find((candidate) => candidate.id === 'config-dir');
+  assert.equal(check?.fix, commandText(shellCommand(['chmod', '700', configDir], 'darwin')));
+});
 
 /** A refresh token the fake Google will renew, as the legacy server's files would hold. */
 async function mintToken(harness: Harness, options: { sub?: string; scopes?: string[] } = {}): Promise<string> {
@@ -361,11 +384,14 @@ test('doctor with nothing registered says so, as something to look at — not as
   const env = { ...harness.env, HOME: harness.configDir, USERPROFILE: harness.configDir };
   const byId = <T extends { id: string }>(checks: readonly T[], id: string) => checks.find((check) => check.id === id);
 
-  const bare = byId((await doctor(new GmailContext({ core: harness.core, env }))).checks, 'registered-server-version');
+  const bare = byId(
+    (await doctor(new GmailContext({ core: harness.core, env, platform: 'darwin' }))).checks,
+    'registered-server-version',
+  );
   assert.equal(bare?.status, 'warn', bare?.detail);
   assert.match(bare?.detail ?? '', /^none registered: /);
   assert.doesNotMatch(bare?.detail ?? '', /this release/);
-  assert.equal(bare?.fix, 'agent-gmail mcp install --client <client>');
+  assert.equal(bare?.fix, 'agent-gmail mcp install --help');
 
   // Scoped to one mailbox, an entry pinned to another is not one that serves it — and is not named.
   await harness.addInbox({ alias: 'work', email: 'jo@example.test', refreshToken: 'rt_work' });

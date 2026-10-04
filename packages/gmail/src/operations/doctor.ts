@@ -70,7 +70,7 @@ export interface Check {
   title: string;
   status: CheckStatus;
   detail: string;
-  /** One command or action that fixes it. */
+  /** One or more newline-separated commands or actions that fix it. */
   fix?: string | undefined;
   inbox?: string | undefined;
 }
@@ -86,8 +86,8 @@ const MINIMUM_NODE = [22, 12, 0];
 const UNUSED_WARNING_DAYS = 150; // Google drops a refresh token unused for six months.
 
 /**
- * A single place that answers "why doesn't it work?". Every check states what it found and the one thing to do about
- * it; nothing here changes anything.
+ * A single place that answers "why doesn't it work?". Every check states what it found and what to do about it;
+ * nothing here changes anything.
  */
 export async function doctor(
   context: GmailContext,
@@ -224,7 +224,7 @@ async function directoryChecks(context: GmailContext): Promise<Check[]> {
       title: `Directory ${path}`,
       status: loose ? 'warn' : 'ok',
       detail: loose ? 'readable by other users on this machine' : 'owner-only',
-      fix: loose ? `chmod 700 ${path}` : undefined,
+      fix: loose ? commandText(shellCommand(['chmod', '700', path], context.platform)) : undefined,
     });
   }
   return checks;
@@ -562,7 +562,7 @@ async function mcpChecks(context: GmailContext, scope: Scope | undefined): Promi
               ? `none registered that serves ${scope.name}: no MCP client's config file starts one that reaches it`
               : "none registered: no MCP client's config file starts this server"
           } (one a plugin or an extension starts is not visible from here)`,
-          fix: 'agent-gmail mcp install --client <client>',
+          fix: commandText(shellCommand(['agent-gmail', 'mcp', 'install', '--help'], context.platform)),
         }
       : {
           id: 'registered-server-version',

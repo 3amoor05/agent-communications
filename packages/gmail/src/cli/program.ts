@@ -1328,6 +1328,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
           const outcome = await answerDownloadAtTerminal(context.core, approvalId, {
             env,
             color: globalOptions.color,
+            platform,
             approveCommand: 'agent-gmail approve',
             streams,
           });

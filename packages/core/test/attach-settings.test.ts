@@ -6,11 +6,12 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
+import { renderAttach } from '../src/cli.ts';
 import { commandText, shellCommand } from '../src/cli-runtime.ts';
 import { type Core, openCore } from '../src/core.ts';
 import { defaultAttachDeny } from '../src/jail.ts';
 import { createCoreMcpServer } from '../src/mcp/server.ts';
-import { checkedPath } from '../src/operations/attach-settings.ts';
+import { attachReport, checkedPath } from '../src/operations/attach-settings.ts';
 import { tempDir } from './helpers/temp.ts';
 
 /*
@@ -357,19 +358,21 @@ test('the report shows a listed folder that names no place apart: it allows noth
 test('an entry is taken out exactly as it is listed: spaces at either end, or nothing at all, from both surfaces', async () => {
   const m = machine({ attachRoots: ['~', ' outgoing ', ''] });
   const shown = cli(m, ['attach']);
-  // Quoted for the shell it is pasted into (`shellCommand`): single quotes for a POSIX one, double quotes on Windows —
-  // where no printing of the empty entry reaches the program from every shell, so the command is shown as its words.
-  const [spaced, empty] =
-    process.platform === 'win32'
-      ? [
-          'agentcomms attach roots remove " outgoing "',
-          commandText(shellCommand(['agentcomms', 'attach', 'roots', 'remove', ''])),
-        ]
-      : ["agentcomms attach roots remove ' outgoing '", "agentcomms attach roots remove ''"];
+  const report = await attachReport(m.core, m.env);
+  // Both forms are asked for by name. The test runner's host must not decide which command the assertion expects.
+  const posix = renderAttach(report, 'darwin');
   assert.ok(
-    shown.stdout.includes(`\n  ${spaced}\n  ${empty}\n`),
-    `the spaces and the empty entry are not visible: ${shown.stdout}`,
+    posix.includes("\n  agentcomms attach roots remove ' outgoing '\n  agentcomms attach roots remove ''\n"),
+    `the spaces and the empty entry are not visible: ${posix}`,
   );
+  const windows = renderAttach(report, 'win32');
+  assert.ok(
+    windows.includes(
+      `\n  agentcomms attach roots remove " outgoing "\n  ${commandText(shellCommand(['agentcomms', 'attach', 'roots', 'remove', ''], 'win32'))}\n`,
+    ),
+    `the Windows command words are not visible: ${windows}`,
+  );
+  assert.match(shown.stdout, /Listed, but allowing nothing/, 'the CLI did not render the report');
   const { ok, error, close } = await connect(m);
   try {
     // Trimmed, it is another entry, and is not listed.

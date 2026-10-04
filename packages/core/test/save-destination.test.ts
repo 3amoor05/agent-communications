@@ -548,6 +548,28 @@ test('a person at a terminal answers 1, 2 or 3 — Enter is 1, 3 asks for the fo
   }
 });
 
+test('a download answer typed at a terminal keeps the command platform selected by the CLI', async () => {
+  const { core, env, home } = machine();
+  const { download } = recorder(core, env, home);
+  const answerDownload = core.approvals.answerDownload.bind(core.approvals);
+  let platform: NodeJS.Platform | undefined;
+  core.approvals.answerDownload = async (...args) => {
+    platform = args[3];
+    return answerDownload(...args);
+  };
+  await downloadAtTerminal({
+    core,
+    download,
+    env,
+    output: { color: false, platform: 'win32' },
+    command: shellCommand(['agent-gmail', 'attachments', 'download', 'm1'], 'win32'),
+    approveCommand: 'agent-gmail approve',
+    render,
+    streams: terminal(['1']).streams,
+  });
+  assert.equal(platform, 'win32');
+});
+
 test('anything else at the terminal cancels, saves nothing, and revokes the question', async () => {
   const { core, env, home } = machine();
   const { calls, download } = recorder(core, env, home);

@@ -196,13 +196,13 @@ const FIXTURES: RegisteredServer[] = [
 
 test('rival warnings: every channel warns about exactly the servers it warned about, in the same words', () => {
   for (const channel of CHANNEL_NAMES) {
-    const derived = CHANNEL_SERVERS[channel].warnAbout?.(FIXTURES);
+    const derived = CHANNEL_SERVERS[channel].warnAbout?.(FIXTURES, 'darwin');
     const expected = golden.GOLDEN_CHANNEL_SERVERS[channel].warnAbout?.(FIXTURES);
     assert.deepEqual(derived, expected, channel);
     // One at a time as well, so an empty list on both sides cannot hide a fixture that matches nothing.
     for (const fixture of FIXTURES) {
       assert.deepEqual(
-        CHANNEL_SERVERS[channel].warnAbout?.([fixture]),
+        CHANNEL_SERVERS[channel].warnAbout?.([fixture], 'darwin'),
         golden.GOLDEN_CHANNEL_SERVERS[channel].warnAbout?.([fixture]),
         `${channel}: ${fixture.name}`,
       );
@@ -232,13 +232,27 @@ test('a command that removes another server gives its name as one word, quoted f
     ['codex', 'codex'],
   ] as const) {
     const helper = entry({ name: 'Slack Helper', client, command: 'node', args: ['/opt/helper.js'] });
-    assert.equal(otherSlackServerRemoval(helper), shellCommand([binary, 'mcp', 'remove', 'Slack Helper']).line);
+    assert.equal(
+      otherSlackServerRemoval(helper, 'darwin'),
+      shellCommand([binary, 'mcp', 'remove', 'Slack Helper'], 'darwin').line,
+    );
     const rival = entry({ name: 'old gmail', client, args: ['-y', '@artymclabin/gmail-mcp'] });
     assert.equal(
-      findUngatedGmailServers([rival])[0]?.removal,
-      shellCommand([binary, 'mcp', 'remove', 'old gmail']).line,
+      findUngatedGmailServers([rival], 'darwin')[0]?.removal,
+      shellCommand([binary, 'mcp', 'remove', 'old gmail'], 'darwin').line,
     );
   }
+});
+
+test('manifest-derived rival warnings render removal commands for the selected Windows shell', () => {
+  const rival = entry({
+    name: '$x&whoami&',
+    client: 'claude-code',
+    args: ['-y', '@artymclabin/gmail-mcp'],
+  });
+  const [warning] = CHANNEL_SERVERS.gmail.warnAbout?.([rival], 'win32') ?? [];
+  assert.match(warning ?? '', /\["claude","mcp","remove","\\u0024x&whoami&"\].*command's words, written as JSON/);
+  assert.doesNotMatch(warning ?? '', /claude mcp remove /);
 });
 
 test('a removal with a name Windows cannot print is shown as its words in JSON, never as a line (CUE-306)', () => {

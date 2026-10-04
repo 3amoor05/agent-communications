@@ -657,7 +657,11 @@ async function claimOrHandOver(
   pendingHint: string,
 ): Promise<void> {
   try {
-    await deps.approvals.claimForSend(approvalId, live, { pendingHint, signal: deps.signal });
+    await deps.approvals.claimForSend(approvalId, live, {
+      pendingHint,
+      signal: deps.signal,
+      platform: deps.platform,
+    });
   } catch (error) {
     if (isCancelledPost(error)) throw cancelledPost(NOT_USED);
     if (!(error instanceof CommsError) || error.code !== 'APPROVAL_PENDING') throw error;

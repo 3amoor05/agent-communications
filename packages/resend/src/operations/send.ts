@@ -560,6 +560,7 @@ export async function executeSend(
       pendingHint: `Ask the user to run ${inlineCommand(
         shellCommand(['agent-resend', 'approve', options.approvalId], context.platform),
       )} in their own terminal, then execute it again with the same approval. You cannot approve it yourself.`,
+      platform: context.platform,
     },
   );
 
@@ -868,7 +869,7 @@ export async function beginSendApproval(context: ResendContext, approvalId: stri
   const study = await studyRecipients(context, named, prepared.message, config.defaults.riskEscalation);
   const live = named.account.sendPolicy ?? config.defaults.sendPolicy;
   const effective = stricterPolicy(live, record.requiredPolicy);
-  const challenge = await context.core.approvals.issueChallenge(approvalId);
+  const challenge = await context.core.approvals.issueChallenge(approvalId, 'send', context.platform);
   return {
     approvalId,
     account: named.name,
@@ -898,6 +899,8 @@ export async function finishSendApproval(
     'terminal',
     { draftMessageId: digest, digest },
     answer,
+    'send',
+    context.platform,
   );
   await context.core.audit.append({
     inboxId: named.account.id,

@@ -165,7 +165,7 @@ export async function beginApproval(
 
   const reaction = reactionOfApproval(record, account.workspace);
   if (reaction) {
-    const challenge = await context.core.approvals.issueChallenge(approvalId);
+    const challenge = await context.core.approvals.issueChallenge(approvalId, 'send', context.platform);
     return { approvalId, kind: 'reaction', preview: renderReaction(name, record, reaction), challenge };
   }
 
@@ -176,7 +176,7 @@ export async function beginApproval(
     context: { ...view.preview.context, approvalId, note: 'nothing has been posted — approving does not post it' },
   });
 
-  const challenge = await context.core.approvals.issueChallenge(approvalId);
+  const challenge = await context.core.approvals.issueChallenge(approvalId, 'send', context.platform);
   return { approvalId, kind: 'post', preview, challenge };
 }
 
@@ -202,6 +202,8 @@ export async function finishApproval(
       'terminal',
       { draftMessageId: record.draftMessageId, digest: record.digest },
       answer,
+      'send',
+      context.platform,
     );
     return;
   }
@@ -211,6 +213,8 @@ export async function finishApproval(
     'terminal',
     { draftMessageId: draft.revision, digest: view.digest },
     answer,
+    'send',
+    context.platform,
   );
 }
 

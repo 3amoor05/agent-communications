@@ -364,8 +364,11 @@ function doctorMachine(): Machine {
   return { ...base, env: { ...base.env, CLAUDE_CONFIG_DIR: base.home } };
 }
 
-async function doctorChecks(m: Machine): Promise<{ report: DoctorReport; checks: DoctorCheck[] }> {
-  const { ok, close } = await connect(m, { keyring: null });
+async function doctorChecks(
+  m: Machine,
+  platform: NodeJS.Platform = 'darwin',
+): Promise<{ report: DoctorReport; checks: DoctorCheck[] }> {
+  const { ok, close } = await connect(m, { keyring: null, platform });
   try {
     const report = (await ok('comms_doctor')) as unknown as DoctorReport;
     return { report, checks: report.checks };
@@ -386,11 +389,11 @@ test('the doctor: a channel with accounts that no client starts is something to 
   assert.equal(gmail?.warn, true, JSON.stringify(checks));
   assert.equal(gmail?.ok, true, 'to look at, not a failure');
   assert.equal(gmail?.detail, 'acme/gmail is set up here, but no MCP client starts the Gmail server');
-  assert.match(gmail?.fix ?? '', /`agent-gmail mcp install --client <client>`/);
+  assert.match(gmail?.fix ?? '', /`agent-gmail mcp install --help`/);
   assert.match(gmail?.fix ?? '', /comms_server_install with channel "gmail"/);
   const slack = checks.find((check) => check.name === 'slack server');
   assert.equal(slack?.warn, true);
-  assert.match(slack?.fix ?? '', /`agent-slack mcp install --client <client>`/);
+  assert.match(slack?.fix ?? '', /`agent-slack mcp install --help`/);
   assert.equal(
     checks.some((check) => check.name === 'core server' || check.name === 'resend server'),
     false,
@@ -485,7 +488,7 @@ test('the doctor gives the name of an entry to register again as one word, quote
   const words = ['agent-slack', 'mcp', 'install', '--client', 'claude-code', '--name', 'slack acme'];
   assert.equal(
     checks.find((check) => check.name === 'slack server')?.fix,
-    `Register it again: \`${shellCommand([...words, '--workspace', 'acme/slack', '--force']).line}\`.`,
+    `Register it again: \`${shellCommand([...words, '--workspace', 'acme/slack', '--force'], 'darwin').line}\`.`,
   );
 });
 
@@ -502,7 +505,7 @@ test('the doctor shows a repair with a name Windows cannot print as its words, n
       mcpServers: { '$x&whoami&': { command: process.execPath, args: [gone, 'mcp', '--workspace', 'acme/slack'] } },
     }),
   );
-  const report = await doctor(m.core, m.env, { keyring: null, platform: 'win32' });
+  const { report } = await doctorChecks(m, 'win32');
   assert.equal(
     report.checks.find((check) => check.name === 'slack server')?.fix,
     `Register it again: \`["agent-slack","mcp","install","--client","claude-code","--name","\\u0024x&whoami&","--workspace","acme/slack","--force"]\` (the command's words, written as JSON: one of them cannot be quoted the same way for cmd.exe and for PowerShell, so type the command yourself, with that word quoted for the shell you use).`,

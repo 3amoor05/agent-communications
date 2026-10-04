@@ -4,7 +4,7 @@ import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from '
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { renderAttach } from '../src/cli.ts';
+import { main, renderAttach } from '../src/cli.ts';
 import { commandAsJson, commandText, inlineCommand, type Streams, shellCommand } from '../src/cli-runtime.ts';
 import { secretsStoreOf } from '../src/config.ts';
 import { CommsError } from '../src/errors.ts';
@@ -50,6 +50,20 @@ function run(args: string[], env: Record<string, string> = {}) {
   const result = spawnSync(process.execPath, [...NODE_FLAGS, CLI, ...args], { encoding: 'utf8', env: full });
   return { ...result, config };
 }
+
+test('mcp carries the selected command platform into the stdio server', async () => {
+  const source = readFileSync(CLI, 'utf8');
+  assert.match(source, /startCoreStdioServer\(\{\s*core,\s*env,\s*platform\s*\}\)/);
+  const { env } = cliEnv();
+  let received: NodeJS.Platform | undefined;
+  const code = await main(['mcp'], env, 'win32', {
+    startMcp: async (options) => {
+      received = options.platform;
+    },
+  });
+  assert.equal(code, 0);
+  assert.equal(received, 'win32');
+});
 
 test('every path a command here resolves is inside the test’s own directories, on macOS, Linux and Windows', () => {
   /*

@@ -566,11 +566,14 @@ test('the command that registers an entry again by hand gives its name as one wo
   // A client's configuration may name an entry anything. Pasted into a command unquoted, this one was three words.
   const m = machine();
   cursor(m, { 'gmail by hand': { command: 'npx', args: ['-y', `${PACKAGES.gmail}@${OLD}`, 'mcp', '--read-only'] } });
-  const { ok, close } = await connect(m, { update: fakes(m) });
+  const { ok, close } = await connect(m, { platform: 'darwin', update: fakes(m) });
   try {
     const [hand] = of((await ok('comms_update', { check: true })).behind, 'registration');
     const words = ['agent-gmail', 'mcp', 'install', '--client', 'cursor', '--name', 'gmail by hand', '--read-only'];
-    assert.ok(String(hand?.reason).includes(`\`${shellCommand([...words, '--force']).line}\``), String(hand?.reason));
+    assert.ok(
+      String(hand?.reason).includes(`\`${shellCommand([...words, '--force'], 'darwin').line}\``),
+      String(hand?.reason),
+    );
     assert.doesNotMatch(String(hand?.reason), /--name gmail by hand/);
   } finally {
     await close();
@@ -589,7 +592,7 @@ test('a command to register again with a name Windows cannot print is shown as i
     join(m.home, '.claude.json'),
     JSON.stringify({ mcpServers: { 'slack 50%': managed(m, PACKAGES.slack, OLD) } }),
   );
-  const { ok, close } = await connect(m, { update: { ...fakes(m), platform: 'win32' } });
+  const { ok, close } = await connect(m, { platform: 'win32', update: fakes(m) });
   try {
     const registrations = of((await ok('comms_update', { check: true })).behind, 'registration');
     const hand = registrations.find((item) => item.client === 'cursor');

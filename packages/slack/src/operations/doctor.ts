@@ -25,7 +25,7 @@ import { openWorkspace } from './session.ts';
 import { listWorkspaces, requireWorkspace } from './workspaces.ts';
 
 /**
- * What has to be true for this to work, and the one command that fixes each thing that is not.
+ * What has to be true for this to work, and the commands or actions that fix each thing that is not.
  *
  * Every check here is answerable from what is already on disk or from one cheap call. That is a constraint
  * rather than an accident — see `rate-limit` below, which is the check that taught it.
@@ -145,7 +145,10 @@ export function doctor(input: DoctorInput): DoctorResult {
       detail: 'none connected yet',
       // The first step, not the last: `workspace add` needs a Client ID that does not exist until an app does,
       // and a fix somebody cannot run is not a fix.
-      fix: 'agent-slack manifest --port 51234, then agent-slack workspace add <name> --client-id <id> --port 51234',
+      fix: [
+        command('agent-slack', 'manifest', '--port', '51234'),
+        command('agent-slack', 'workspace', 'add', '--help'),
+      ].join('\n'),
       workspace: null,
     });
   }
@@ -724,7 +727,7 @@ function registrationChecks(input: DoctorInput): Check[] {
       stale.length > 0
         ? stale.map((entry) => repairCommand(entry.server, input.platform ?? process.platform)).join('\n')
         : none
-          ? 'agent-slack mcp install --client <client>'
+          ? commandText(shellCommand(['agent-slack', 'mcp', 'install', '--help'], input.platform ?? process.platform))
           : null,
     workspace: null,
   });

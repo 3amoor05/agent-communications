@@ -550,12 +550,13 @@ export function committedSecretsStore(config: Config): StoreKind | null {
 export function secretsStoreFor(
   config: Config,
   requested: StoreKind | undefined,
+  platform: NodeJS.Platform = process.platform,
 ): { store: StoreKind; choosing: boolean } {
   const committed = committedSecretsStore(config);
   if (committed === null) return { store: requested ?? 'keychain', choosing: true };
   if (requested !== undefined && requested !== committed) {
     throw new CommsError('CONFIG', `this configuration already keeps its secrets in the ${committed} store`, {
-      hint: `Everything here uses one store, and changing it moves what is already stored. To change it, run ${inlineCommand(shellCommand(['agentcomms', 'secrets', 'migrate', '--to', requested]))}, then run this again.`,
+      hint: `Everything here uses one store, and changing it moves what is already stored. To change it, run ${inlineCommand(shellCommand(['agentcomms', 'secrets', 'migrate', '--to', requested], platform))}, then run this again.`,
     });
   }
   return { store: committed, choosing: false };

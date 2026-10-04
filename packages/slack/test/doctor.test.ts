@@ -60,6 +60,13 @@ function config(accounts: Record<string, AccountConfig>): Config {
 
 const find = (result: ReturnType<typeof doctor>, id: string) => result.checks.find((check) => check.id === id);
 
+test('a missing workspace gives two executable repair steps without argument placeholders', () => {
+  const result = doctor({ config: config({}), now: NOW, platform: 'darwin', bundles: new Map() });
+  const fix = find(result, 'workspaces')?.fix;
+  assert.equal(fix, 'agent-slack manifest --port 51234\nagent-slack workspace add --help');
+  assert.doesNotMatch(fix ?? '', /<name>|<id>/);
+});
+
 test('a healthy install is healthy, and nothing asks to be fixed', () => {
   const result = doctor({
     config: config({ acme: account() }),
@@ -444,7 +451,7 @@ test('a scan that finds none of our servers says so, as something to look at —
     assert.equal(check?.status, 'warn', check?.detail);
     assert.match(check?.detail ?? '', /^none registered: /);
     assert.doesNotMatch(check?.detail ?? '', /this release/);
-    assert.equal(check?.fix, 'agent-slack mcp install --client <client>');
+    assert.equal(check?.fix, 'agent-slack mcp install --help');
   }
 });
 

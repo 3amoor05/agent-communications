@@ -99,6 +99,8 @@ async function takeBack(
 export interface MigrationOptions {
   /** Where the call came from, for the audit trail. */
   surface?: ChangeSurface | undefined;
+  /** The shell syntax used by recovery commands. */
+  platform?: NodeJS.Platform | undefined;
 }
 
 /**
@@ -134,7 +136,7 @@ export async function migrateSecrets(
    * saw before it queued.
    */
   return withCredentialsLock(core.paths.configDir, () =>
-    migrateUnderLock(core, to, stores, consent, options.surface ?? 'cli'),
+    migrateUnderLock(core, to, stores, consent, options.surface ?? 'cli', options.platform ?? process.platform),
   );
 }
 
@@ -164,6 +166,7 @@ async function migrateUnderLock(
   stores: { source?: SecretStore; target?: SecretStore },
   consent: LooseningConsent | undefined,
   surface: ChangeSurface,
+  platform: NodeJS.Platform,
 ): Promise<MigrationResult> {
   const config = await core.config.load();
   const from = secretsStoreOf(config);
@@ -183,7 +186,7 @@ async function migrateUnderLock(
       'LOOSENING_REFUSED',
       'moving credentials out of the system keychain needs a person to approve it',
       {
-        hint: `Run ${inlineCommand(shellCommand(['agentcomms', 'secrets', 'migrate', '--to', to]))}, or call comms_secrets_migrate, and approve the change it shows.`,
+        hint: `Run ${inlineCommand(shellCommand(['agentcomms', 'secrets', 'migrate', '--to', to], platform))}, or call comms_secrets_migrate, and approve the change it shows.`,
       },
     );
   }
@@ -285,7 +288,7 @@ async function migrateUnderLock(
       throw new CommsError(base.code, base.message, {
         hint:
           `${base.hint ? `${base.hint} ` : ''}Whether the backend was switched could not be confirmed, so nothing ` +
-          `was deleted from either. Run ${inlineCommand(shellCommand(['agentcomms', 'secrets', 'migrate', '--to', to]))} again once the configuration is readable.`,
+          `was deleted from either. Run ${inlineCommand(shellCommand(['agentcomms', 'secrets', 'migrate', '--to', to], platform))} again once the configuration is readable.`,
         details: { unconfirmed: true, copiedToTarget: attempted.map((ref) => ({ backend: to, ref })) },
         cause: error,
       });
@@ -359,7 +362,11 @@ const STORE_WORDS: Readonly<Record<SecretStoreKind, string>> = {
 export function secretsMigration(
   core: Core,
   to: SecretStoreKind,
-  options: { stores?: { source?: SecretStore; target?: SecretStore }; surface: ChangeSurface },
+  options: {
+    stores?: { source?: SecretStore; target?: SecretStore };
+    surface: ChangeSurface;
+    platform?: NodeJS.Platform | undefined;
+  },
 ): GatedChange<MigrationResult> {
   return {
     plan: (config) => {
@@ -381,6 +388,10 @@ export function secretsMigration(
         summary: from === to ? `Credentials already use ${STORE_WORDS[to]}` : `Keep credentials in ${STORE_WORDS[to]}`,
       };
     },
-    apply: (consent) => migrateSecrets(core, to, options.stores ?? {}, consent, { surface: options.surface }),
+    apply: (consent) =>
+      migrateSecrets(core, to, options.stores ?? {}, consent, {
+        surface: options.surface,
+        platform: options.platform,
+      }),
   };
 }

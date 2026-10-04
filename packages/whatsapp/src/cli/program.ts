@@ -83,6 +83,10 @@ export interface CliDeps extends WhatsAppContextOptions {
   streams?: Streams | undefined;
   /** Opens a draft's link. Injected so a test does not start WhatsApp. */
   open?: Opener | undefined;
+  /** Starts the stdio server. Injected so a test can inspect its inputs without opening stdio. */
+  startMcp?:
+    | ((options: { env: NodeJS.ProcessEnv; platform: NodeJS.Platform; account?: string }) => Promise<void>)
+    | undefined;
 }
 
 type Options = Record<string, unknown>;
@@ -471,9 +475,11 @@ a macOS dialog may be waiting) · 77 permission needed (macOS privacy) · 78 con
         output(),
         async () => {
           requireSupportedNode();
-          const { startWhatsAppStdioServer } = await import('../mcp/stdio-entry.ts');
+          const startWhatsAppStdioServer =
+            deps.startMcp ?? (await import('../mcp/stdio-entry.ts')).startWhatsAppStdioServer;
           await startWhatsAppStdioServer({
             env,
+            platform,
             ...(flags.account ? { account: String(flags.account) } : {}),
           });
         },

@@ -211,6 +211,16 @@ export async function main(
   argv: string[] = process.argv.slice(2),
   env: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
+  deps: {
+    /** Starts the stdio server. Injected so a test can inspect its inputs without opening stdio. */
+    startMcp?:
+      | ((options: {
+          core: ReturnType<typeof openCore>;
+          env: NodeJS.ProcessEnv;
+          platform: NodeJS.Platform;
+        }) => Promise<void>)
+      | undefined;
+  } = {},
 ): Promise<number> {
   let parsed: ReturnType<typeof parse>;
   try {
@@ -247,8 +257,8 @@ export async function main(
   // The server speaks on stdout, so nothing else may: it is run outside `runCommand`, which prints a result there.
   if (command === 'mcp' && sub === undefined) {
     if (values.json) return writeError(usage('`agentcomms mcp` runs the server; it prints no result'), output);
-    const { startCoreStdioServer } = await import('./mcp/server.ts');
-    await startCoreStdioServer({ core, env });
+    const startCoreStdioServer = deps.startMcp ?? (await import('./mcp/server.ts')).startCoreStdioServer;
+    await startCoreStdioServer({ core, env, platform });
     return EXIT_CODES.OK;
   }
 
@@ -365,7 +375,7 @@ export async function main(
         const [, list, action, path, ...extra] = positionals;
         if (list === undefined) {
           // Reporting takes no --approval: refused with the rest, before the update check's stop.
-          writeResult(await attachReport(core, env), output, renderAttach);
+          writeResult(await attachReport(core, env), output, (report) => renderAttach(report, platform));
           return;
         }
         const kind = ATTACH_KINDS[`${list} ${action ?? ''}`];
@@ -376,7 +386,7 @@ export async function main(
           ...approval,
           command: shellCommand(['agentcomms', 'attach', list, action as string, path], platform),
         });
-        writeResult(result, output, renderAttachChange);
+        writeResult(result, output, (change) => renderAttachChange(change, platform));
         return;
       }
       case 'channels': {
@@ -549,10 +559,14 @@ export async function main(
         if (sub !== 'migrate' || (values.to !== 'keychain' && values.to !== 'file')) {
           throw usage('usage: agentcomms secrets migrate --to keychain|file');
         }
-        const result = await gatedChangeAtTerminal(core, secretsMigration(core, values.to, { surface: 'cli' }), {
-          ...approval,
-          command: shellCommand(['agentcomms', 'secrets', 'migrate', '--to', values.to], platform),
-        });
+        const result = await gatedChangeAtTerminal(
+          core,
+          secretsMigration(core, values.to, { surface: 'cli', platform }),
+          {
+            ...approval,
+            command: shellCommand(['agentcomms', 'secrets', 'migrate', '--to', values.to], platform),
+          },
+        );
         /*
          * One document, whichever way it went.
          *
@@ -645,9 +659,9 @@ export function renderAttach(report: AttachReport, platform: NodeJS.Platform = p
   ].join('\n');
 }
 
-function renderAttachChange(result: AttachChangeResult): string {
+function renderAttachChange(result: AttachChangeResult, platform: NodeJS.Platform): string {
   const done = result.changed ? 'Done.' : 'Nothing was changed.';
-  return [result.note ?? done, '', renderAttach(result)].join('\n');
+  return [result.note ?? done, '', renderAttach(result, platform)].join('\n');
 }
 
 function renderLater(result: UpdateLaterResult): string {

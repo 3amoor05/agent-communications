@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { chmod, readFile, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
@@ -40,6 +41,22 @@ interface PendingChange {
   policy: 'chat' | 'confirm';
   preview: string;
 }
+
+test('mcp carries the selected command platform into the stdio server', async () => {
+  const source = readFileSync(new URL('../src/cli/program.ts', import.meta.url), 'utf8');
+  assert.match(source, /startSlackStdioServer\(\{\s*env,\s*platform,/);
+  let received: NodeJS.Platform | undefined;
+  const code = await run(['mcp'], {
+    env: { AGENT_COMMS_UPDATE_CHECK: 'off' },
+    platform: 'win32',
+    streams: { stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough() },
+    startMcp: async (options) => {
+      received = options.platform;
+    },
+  });
+  assert.equal(code, 0);
+  assert.equal(received, 'win32');
+});
 
 /** The approval a changing command stopped for, read off its refusal. */
 function pendingOf(result: { code: number; json: <T>() => T }): PendingChange {

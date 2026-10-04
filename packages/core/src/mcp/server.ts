@@ -121,6 +121,7 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
   const env = options.env ?? process.env;
   const core = options.core ?? openCore({ env });
   const platform = options.platform ?? process.platform;
+  const updateDeps: UpdateDeps = { ...options.update, platform };
   const server = new McpServer(
     { name: 'agentcomms', version: VERSION },
     { instructions: await buildInstructions(core) },
@@ -179,8 +180,8 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
         comms_names_migrate: CHANGE_CLAIM,
         comms_secrets_migrate: CHANGE_CLAIM,
       },
-      refresh: () => checkForUpdates(core, env, { deps: options.update, now: options.update?.now }),
-      now: options.update?.now,
+      refresh: () => checkForUpdates(core, env, { deps: updateDeps, now: updateDeps.now }),
+      now: updateDeps.now,
     }),
   );
   /** One changing call: the change this tool plans, run through the one flow, returned in its one shape. */
@@ -231,7 +232,13 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
       inputSchema: {},
       annotations: readsLocal,
     },
-    async () => read(() => doctor(core, env, options.keyring !== undefined ? { keyring: options.keyring } : {})),
+    async () =>
+      read(() =>
+        doctor(core, env, {
+          platform,
+          ...(options.keyring !== undefined ? { keyring: options.keyring } : {}),
+        }),
+      ),
   );
 
   server.registerTool(
@@ -528,7 +535,7 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
         );
       }
       if (args.later === true) {
-        return change(() => updateLaterChange(core, { now: options.update?.now }), args.approvalId);
+        return change(() => updateLaterChange(core, { now: updateDeps.now }), args.approvalId);
       }
       if (args.auto !== undefined) {
         return change(() => updateAutoChange(core, args.auto as 'on' | 'off'), args.approvalId);
@@ -540,10 +547,10 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
               hint: 'Leave out `check` to update; the first call returns the preview and the approvalId to call with.',
             });
           }
-          return updateCheck(core, env, options.update);
+          return updateCheck(core, env, updateDeps);
         });
       }
-      return change(() => updateChange(core, env, { noVerify: args.noVerify }, options.update), args.approvalId);
+      return change(() => updateChange(core, env, { noVerify: args.noVerify }, updateDeps), args.approvalId);
     },
   );
 
@@ -594,6 +601,7 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
       try {
         const migration = secretsMigration(core, args.to, {
           surface: 'mcp',
+          platform,
           ...(options.secretStores ? { stores: options.secretStores } : {}),
         });
         const outcome = await gatedChange(core, migration, {

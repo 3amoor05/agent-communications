@@ -493,7 +493,7 @@ export async function beginApproval(context: GmailContext, approvalId: string): 
   const { facts } = config.defaults.riskEscalation
     ? await studyRecipients(context, transport, { alias, inbox }, analysis)
     : { facts: [] };
-  const challenge = await context.core.approvals.issueChallenge(approvalId);
+  const challenge = await context.core.approvals.issueChallenge(approvalId, 'send', context.platform);
   return {
     approvalId,
     preview: previewFor({
@@ -527,6 +527,8 @@ export async function finishApproval(
     via,
     { draftMessageId, digest: analysis.digest },
     answer,
+    'send',
+    context.platform,
   );
   await context.core.audit.append({
     inboxId: record.inboxId,
@@ -605,6 +607,7 @@ export async function executeSend(
       // Gmail's own words, given here because the approval store is shared and no longer speaks for any product.
       pendingHint:
         'Ask the user to approve it in the terminal (`agent-gmail approve <id>`) or in a trusted client form, or to send it from Gmail.',
+      platform: context.platform,
     },
   );
   const bookkeeping = {

@@ -268,7 +268,7 @@ async function registrationChecks(
       ok: true,
       warn: true,
       detail: `${listed(accounts, 'and')} ${accounts.length === 1 ? 'is' : 'are'} set up here, but no MCP client${blind.length > 0 ? ' this could read' : ''} starts the ${channel.label} server${blind.length > 0 ? ` — ${listed(blind, 'and')} could not be read` : ''}`,
-      fix: `Register it with the client you use: \`${channel.binary} mcp install --client <client>\` (${clients}), or comms_server_install with channel "${channel.channel}" from a chat. Used only from a terminal, it needs nothing.`,
+      fix: `Register it with the client you use: ${inlineCommand(shellCommand([channel.binary, 'mcp', 'install', '--help'], platform))} (${clients}), or comms_server_install with channel "${channel.channel}" from a chat. Used only from a terminal, it needs nothing.`,
     });
   }
   return checks;

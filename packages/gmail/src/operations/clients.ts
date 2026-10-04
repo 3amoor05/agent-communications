@@ -373,7 +373,7 @@ async function registerClient(
  * before anybody is asked to approve it (`secretsStoreFor`): switching here would record a store and move nothing.
  */
 async function chooseStore(context: GmailContext, requested: StoreKind | undefined): Promise<StoreKind> {
-  const { store: chosen, choosing } = secretsStoreFor(await context.config(), requested);
+  const { store: chosen, choosing } = secretsStoreFor(await context.config(), requested, context.platform);
   if (!choosing) return chosen;
   if (chosen === 'keychain') {
     const probe = await probeKeychain();

@@ -263,7 +263,7 @@ export function addAccountChange(
     },
     apply: async (consent) => {
       const config = await context.config();
-      const { store, choosing } = secretsStoreFor(config, undefined);
+      const { store, choosing } = secretsStoreFor(config, undefined, context.platform);
       const secrets = await context.core.secrets(store);
       await secrets.set(account.secretRef, request.key.trim());
       let written: Config;

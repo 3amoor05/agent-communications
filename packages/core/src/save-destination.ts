@@ -897,6 +897,7 @@ export async function settleDestination(core: Core, input: SettleInput): Promise
     policy: input.policy,
     pendingHint,
     signal: input.signal,
+    platform,
   });
   // The person's recorded answer wins over a relayed one: it is theirs, given where no agent could give it.
   const chosen = claimed.download.answer ?? answer.answer;
@@ -1080,7 +1081,12 @@ export async function downloadAtTerminal<Q extends DestinationQuestion>(
     throw new CommsError('USAGE', 'cancelled: nothing was saved');
   }
   // Given at this terminal, by the person at it: recorded on the question as such, so it holds under `confirm` too.
-  await options.core.approvals.answerDownload(question.choiceId, 'terminal', recordedAnswer(answer, env));
+  await options.core.approvals.answerDownload(
+    question.choiceId,
+    'terminal',
+    recordedAnswer(answer, env),
+    options.output.platform ?? process.platform,
+  );
   return options.download({ choiceId: question.choiceId });
 }
 
@@ -1181,6 +1187,8 @@ async function askLine(streams: Streams, question: string): Promise<string> {
 export interface AnswerAtTerminalOptions {
   env: NodeJS.ProcessEnv;
   color: boolean;
+  /** The shell syntax used if the stored record is another kind of approval. */
+  platform?: NodeJS.Platform | undefined;
   /** The channel's `approve`, for the words the question is shown with: `agent-gmail approve`. */
   approveCommand: string;
   streams?: Streams | undefined;
@@ -1213,7 +1221,7 @@ export async function answerDownloadAtTerminal(
     return { state: 'revoked' };
   }
   const recorded = recordedAnswer(answer, options.env);
-  await core.approvals.answerDownload(choiceId, 'terminal', recorded);
+  await core.approvals.answerDownload(choiceId, 'terminal', recorded, options.platform ?? process.platform);
   return { state: 'approved', answer: recorded };
 }
 
@@ -1305,6 +1313,7 @@ export async function answerDownloadInForm(
   choiceId: string,
   content: { choice?: unknown; folder?: unknown },
   env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
 ): Promise<RecordedSaveAnswer> {
   const asked = await storedQuestion(core, choiceId, env, false);
   let answer: SaveAnswer;
@@ -1330,6 +1339,6 @@ export async function answerDownloadInForm(
     });
   }
   const recorded = recordedAnswer(answer, env);
-  await core.approvals.answerDownload(choiceId, 'elicitation', recorded);
+  await core.approvals.answerDownload(choiceId, 'elicitation', recorded, platform);
   return recorded;
 }

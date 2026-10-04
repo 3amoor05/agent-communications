@@ -272,6 +272,7 @@ export async function claimChange(
       { change: binding, policy },
       {
         pendingHint: `Ask the user to run ${inlineCommand(changeApprovalCommand(options.approveCommand, approvalId, options.platform))} in their own terminal, then try again with the same approval.`,
+        platform: options.platform,
       },
     );
     const decided = stricterPolicy(policy, record.requiredPolicy) === 'chat' ? 'chat' : 'confirm';
@@ -349,7 +350,7 @@ export async function beginChangeApproval(
   let record: (ApprovalRecord & { change: ChangeBinding }) | undefined;
   try {
     record = await changeRecord(core, approvalId);
-    const challenge = await core.approvals.issueChallenge(approvalId, 'change');
+    const challenge = await core.approvals.issueChallenge(approvalId, 'change', options.platform);
     return { approvalId, preview: renderChangePreview(record), challenge };
   } catch (error) {
     await auditRefusal(core, 'change.approve', error, {
@@ -379,6 +380,7 @@ export async function finishChangeApproval(
       { draftMessageId: digest, digest },
       answer,
       'change',
+      options.platform,
     );
     await auditChange(core, {
       operation: 'change.approve',

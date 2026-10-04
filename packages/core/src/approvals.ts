@@ -348,6 +348,8 @@ export interface LiveDraft {
 
 /** What the product making a claim tells the store about itself. */
 export interface ClaimOptions {
+  /** The shell syntax used by any approval command this refusal prints. */
+  platform?: NodeJS.Platform | undefined;
   /**
    * What the caller is told when the send is waiting for a person: which command approves it, and what to run after.
    *
@@ -598,7 +600,7 @@ export class ApprovalStore {
    * Nothing written, because the caller made a mistake about an approval that may be perfectly good: voiding a post
    * somebody is about to approve, because an agent passed its id to a change, would punish the wrong party.
    */
-  #requireKind(record: ApprovalRecord, kind: ApprovalKind): void {
+  #requireKind(record: ApprovalRecord, kind: ApprovalKind, platform: NodeJS.Platform): void {
     const actual = approvalKind(record);
     if (actual === kind) return;
     const id = record.approvalId;
@@ -625,7 +627,7 @@ export class ApprovalStore {
           'USAGE',
           `approval ${id} is for a configuration change, not a send`,
           record,
-          `A person approves it with ${inlineCommand(shellCommand(['agentcomms', 'approve', id]))} — or ${channelApproveCommands()}, whichever is installed — and it permits only the change it was prepared for.`,
+          `A person approves it with ${inlineCommand(shellCommand(['agentcomms', 'approve', id], platform))} — or ${channelApproveCommands()}, whichever is installed — and it permits only the change it was prepared for.`,
         )
       : refuseChange(
           'USAGE',
@@ -636,10 +638,14 @@ export class ApprovalStore {
   }
 
   /** Issues a new challenge to show a human; only its hash is kept. */
-  async issueChallenge(approvalId: string, kind: ApprovalKind = 'send'): Promise<string> {
+  async issueChallenge(
+    approvalId: string,
+    kind: ApprovalKind = 'send',
+    platform: NodeJS.Platform = process.platform,
+  ): Promise<string> {
     const challenge = newChallenge();
     await this.#transition(approvalId, (current) => {
-      this.#requireKind(current, kind);
+      this.#requireKind(current, kind, platform);
       if (current.state !== 'pending') throw this.#stateError(current);
       return { ...current, challengeHash: hashChallenge(challenge) };
     });
@@ -660,10 +666,11 @@ export class ApprovalStore {
     live: LiveDraft,
     answer: string,
     kind: ApprovalKind = 'send',
+    platform: NodeJS.Platform = process.platform,
   ): Promise<ApprovalRecord> {
     let failure: Failure | null = null;
     const result = await this.#transition(approvalId, (current) => {
-      this.#requireKind(current, kind);
+      this.#requireKind(current, kind, platform);
       if (current.state !== 'pending') throw this.#stateError(current);
       if (!current.challengeHash)
         throw refusalFor(current)('APPROVAL_REQUIRED', 'no challenge was issued for this approval', current);
@@ -705,7 +712,7 @@ export class ApprovalStore {
     const result = await this.#transition(approvalId, (current) => {
       // Before anything else: a change approval names an account in the same field, and a send claimed against it
       // would otherwise be judged — and voided — as a send that went wrong.
-      this.#requireKind(current, 'send');
+      this.#requireKind(current, 'send', options.platform ?? process.platform);
       if (current.state !== 'pending' && current.state !== 'approved') throw this.#stateError(current);
       /*
        * Cancelled while the claim waited for the lock: nothing written, the record as it was. Here, before every branch
@@ -844,7 +851,7 @@ export class ApprovalStore {
     const digest = changeDigest(live.change);
     let failure: Failure | null = null;
     const result = await this.#transition(approvalId, (current) => {
-      this.#requireKind(current, 'change');
+      this.#requireKind(current, 'change', options.platform ?? process.platform);
       if (current.state !== 'pending' && current.state !== 'approved') throw this.#stateError(current);
       // As for a send: a cancellation that landed while this waited for the lock writes nothing.
       if (options.signal?.aborted) throw cancelledClaim(current);
@@ -864,7 +871,7 @@ export class ApprovalStore {
             'this change needs a person to approve it at a terminal first',
             current,
             options.pendingHint ??
-              `Ask the user to run ${inlineCommand(shellCommand(['agentcomms', 'approve', approvalId]))} in their own terminal, then try again with the same approval.`,
+              `Ask the user to run ${inlineCommand(shellCommand(['agentcomms', 'approve', approvalId], options.platform ?? process.platform))} in their own terminal, then try again with the same approval.`,
           );
         }
         // `confirm` means a person at a terminal. An approval given any other way — a form in a client window, which
@@ -951,11 +958,12 @@ export class ApprovalStore {
     approvalId: string,
     via: ApprovalChannel,
     answer: RecordedSaveAnswer,
+    platform: NodeJS.Platform = process.platform,
   ): Promise<ApprovalRecord & { download: DownloadBinding }> {
     const recorded: RecordedSaveAnswer =
       answer.choice === 'other' ? { choice: 'other', folder: answer.folder } : { choice: answer.choice };
     const result = await this.#transition(approvalId, (current) => {
-      this.#requireKind(current, 'download');
+      this.#requireKind(current, 'download', platform);
       if (current.state === 'approved') {
         throw refuseDownload('APPROVAL_VOID', 'the question was answered already, and it is answered once', current);
       }
@@ -1000,12 +1008,13 @@ export class ApprovalStore {
       policy?: ChangePolicy | undefined;
       pendingHint?: string | undefined;
       signal?: AbortSignal | undefined;
+      platform?: NodeJS.Platform | undefined;
     } = {},
   ): Promise<ApprovalRecord & { download: DownloadBinding }> {
     const digest = downloadDigest(live);
     let failure: Failure | null = null;
     const result = await this.#transition(approvalId, (current) => {
-      this.#requireKind(current, 'download');
+      this.#requireKind(current, 'download', options.platform ?? process.platform);
       if (current.state !== 'pending' && current.state !== 'approved') throw this.#stateError(current);
       if (options.signal?.aborted) throw cancelledClaim(current);
       const voidWith = (reason: string): ApprovalRecord => {
