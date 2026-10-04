@@ -8,6 +8,8 @@ const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const PREFIX = '(?:agent-(?:gmail|slack|resend|whatsapp)|agentcomms|npx)';
 const DIRECT = [
   new RegExp(String.raw`(?<!\\)\`${PREFIX} [^\`]*?\$\{`, 'g'),
+  // A command later in a one-line hint is still a command; the escaped backticks are its inline-code markers.
+  new RegExp(String.raw`(?<!\\)\`[^\`\n]*?\\\`${PREFIX} [^\`\n]*?\$\{`, 'g'),
   new RegExp(String.raw`(?<!\\)\`${PREFIX} [^\`]*?\`\s*\+`, 'g'),
   new RegExp(String.raw`(?<!\\)'${PREFIX} [^'\n]*?'\s*\+`, 'g'),
   new RegExp(String.raw`(?<!\\)"${PREFIX} [^"\n]*?"\s*\+`, 'g'),
@@ -58,6 +60,10 @@ function findings(source, path) {
 
 test('the printed-command lint catches direct interpolation and concatenation, but accepts shellCommand', () => {
   assert.equal(findings('const hint = `agent-gmail inbox reauth $' + '{alias}`;', 'fixture.ts').length, 1);
+  assert.equal(
+    findings('const hint = `Try again with \\`agent-slack workspace reauth $' + '{alias}\\`.`;', 'fixture.ts').length,
+    1,
+  );
   assert.equal(findings("const hint = 'agent-slack workspace remove ' + alias;", 'fixture.ts').length, 1);
   assert.equal(
     findings(
