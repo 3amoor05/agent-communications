@@ -80,8 +80,8 @@ Gmail picks the eligible client before consent. Name the mailbox in `gmail_setup
 active generation, one profile opted into `forOtherAddresses` may serve another name, and only then
 does an ordinary client act as the fallback. If no client fits, `gmail_setup` offers the Google Cloud
 walk instead of borrowing a profile client. Existing mailboxes stay on the client that granted their
-token. The profile's Slack apps are recorded, not used by `slack_workspace_add` yet: connect Slack as
-step 3 says for a profile, through the organisation's app, rather than a new app. When the organisation
+token. Slack automatically selects the profile's read app for `rgc/slack`, or its send app when
+`mode: "send"` is requested. No Client ID or port is needed. When the organisation
 changes its file, `comms_org_update` reads it again — a changed profile is approved first, a repair
 applies at once — and `comms_org_remove` stops using it.
 
@@ -92,11 +92,12 @@ applies at once — and `comms_org_remove` stops using it.
   Then `gmail_client_add` with the downloaded client JSON's **path** (never its contents) — a change,
   so preview, yes, `approvalId`. `gmail_inbox_add` with the tier returns a Google link; give it to
   them, and `gmail_inbox_finish` once they are back.
-- **Slack, with an organisation profile added:** do not create an app. Connect through the organisation's
-  read app — or its send app, for `send` — with `slack_workspace_add`, that app's Client ID and the
-  profile's port, both of which `comms_org_show` lists; for `send` it is a change and asks for approval
-  before the sign-in starts. A `slack_workspace_add` that uses the profile by itself comes in a later
-  release.
+- **Slack, with an organisation profile added:** do not create an app. Use `slack_workspace_add` with
+  `workspace: "rgc/slack"` (CLI: `agent-slack workspace add rgc/slack --start`). It selects the
+  profile's read app and port automatically. For send, pass `mode: "send"` (CLI: `--mode send`); it
+  selects the profile's send app and asks for a change approval before sign-in. Give the person the
+  link, then use `slack_workspace_finish` when they return. A later mode change moves the account
+  directly between the profile's read and send apps through another sign-in; neither app is edited.
 - **Slack, without one:** a workspace needs its own Slack app, and creating it is the person's step.
   `slack_manifest` with the mode and a `port` you choose (51234, say; it is required for a new app)
   returns the manifest. Tell them: open https://api.slack.com/apps, **Create New App** → **From a
@@ -114,9 +115,10 @@ applies at once — and `comms_org_remove` stops using it.
   `agent-whatsapp sync --account <organisation>/whatsapp`. `whatsapp_status` shows it; `whatsapp_sync`
   refreshes it later.
 
-A Slack workspace connected on another computer has an app already: reuse it, and do not create a
-second one. On that computer, its Client ID is `oauthClientId` in `slack_workspace_show`, and its port
-is `port` in `slack_manifest` with `workspace` (CLI: `agent-slack manifest --workspace <name> --json`).
+For a person's own app, a Slack workspace connected on another computer has an app already: reuse it,
+and do not create a second one. On that computer, its Client ID is `oauthClientId` in
+`slack_workspace_show`, and its port is `port` in `slack_manifest` with `workspace` (CLI:
+`agent-slack manifest --workspace <name> --json`).
 
 ## 4. Set the policies
 
@@ -149,7 +151,8 @@ Every step has a command, for a person at a terminal or an agent that can run co
 | Register a server | `agent-gmail mcp install --client <client>`, and the same with `agent-slack`, `agent-resend` or `agent-whatsapp` |
 | Gmail, in one command | `agent-gmail setup --inbox <name>` — the Google Cloud screens, the client, a mailbox and the registration. With `--profile <file>` its separate profile preview is claimed with `--org-approval <id>`. With `--json` it acts only on the flags it is given (`--client-json <path>`, `--inbox <name>`, `--email <address>`, `--mcp-client <client>`) and names the one it needs next |
 | Gmail, step by step | `agent-gmail client add <path>`, then `agent-gmail inbox add <name> --tier <tier> --start`, then `agent-gmail inbox add --finish <flowId>` |
-| Slack | `agent-slack manifest --mode <mode> --port <port>`, then `agent-slack workspace add <name> --client-id <id> --port <port> --mode <mode> --start`, then `agent-slack workspace add --finish <flowId>` |
+| Slack, organisation profile | `agent-slack workspace add rgc/slack --start` (or `--mode send --start`), then `agent-slack workspace add --finish <flowId>`; the profile selects its app and port |
+| Slack, own app | `agent-slack manifest --mode <mode> --port <port>`, then `agent-slack workspace add <name> --client-id <id> --port <port> --mode <mode> --start`, then `agent-slack workspace add --finish <flowId>` |
 | Resend | `agent-resend account add <name> --mode <mode>`, the key typed by the person |
 | WhatsApp | `agent-whatsapp add <name>`, then `agent-whatsapp sync --account <name>`, at the Mac's terminal |
 | Policies | `agent-gmail inbox policy <name> --send <policy> --change <policy>`, `agent-slack workspace policy <name> --send <policy> --change <policy>`, `agent-resend account policy <name> --send <policy> --change <policy>`, `agentcomms policy confirm` |
@@ -165,9 +168,9 @@ approves there and then: `yes`, or the code under `confirm`.
 ## Pitfalls
 
 - **Asking per step instead of once.** Ask the choices in step 1 together; then only approvals.
-- **Creating a second Slack app** for a workspace that has one. A new app is a new installation;
+- **Creating a second own Slack app** for a workspace that has one. A new app is a new installation;
   the old one keeps its permissions.
-- **A port that does not match the manifest.** Slack matches the redirect URL exactly; use the port
+- **An own-app port that does not match the manifest.** Slack matches the redirect URL exactly; use the port
   the manifest was made with.
 - **Promising the tools before the restart.** Registered servers start in the next session.
 - **A token in chat.** Never ask for one, never accept one. `agent-slack app update` reads the

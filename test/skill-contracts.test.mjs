@@ -83,3 +83,65 @@ test('the Gmail Cloud walkthrough acknowledges organisation-provided clients', a
   assert.match(guide, /organisation.*provide.*client/is);
   assert.match(guide, /organisation profile/i);
 });
+
+test('Slack setup documents profile apps and own apps as distinct paths', async () => {
+  const cases = [
+    {
+      file: '_shared/contract-comms.md',
+      required: [
+        /organisation profile.*read.*send.*apps/is,
+        /own app.*manifest|own app.*api\.slack\.com/is,
+        /do not ask.*edit or uninstall.*organisation apps/is,
+      ],
+    },
+    {
+      file: '_shared/contract-slack.md',
+      required: [/organisation provenance.*signing.*other app.*profile/is, /own app.*manifest/is, /own app.*remov/is],
+    },
+    {
+      file: 'comms-onboarding/SKILL.md',
+      required: [
+        /Gmail picks the eligible client before consent/,
+        /Slack.*automatically.*profile.*read.*send/is,
+        /slack_workspace_add.*rgc\/slack/is,
+        /agent-slack workspace add rgc\/slack/,
+      ],
+    },
+    {
+      file: 'slack-setup/SKILL.md',
+      required: [
+        /profile.*read app.*send app/is,
+        /read.*send.*profile.*sign.in/is,
+        /send.*read.*profile.*sign.in/is,
+        /own.app.*manifest/is,
+        /own.app.*remov/is,
+        /administrator.*approve.*app/is,
+        /cancel.*finish/is,
+        /pending.*access.*refresh/is,
+        /doctor.*retr/is,
+      ],
+    },
+  ];
+
+  for (const { file, required } of cases) {
+    const prose = await readFile(join(SKILLS, file), 'utf8');
+    for (const pattern of required) assert.match(prose, pattern, `${file}: missing ${pattern}`);
+    assert.doesNotMatch(
+      prose,
+      /not used by `slack_workspace_add` yet|comes in a later release|`workspace add` does not use the profile by itself/i,
+      `${file}: stale release promise`,
+    );
+  }
+
+  for (const file of ['comms-onboarding/SKILL.md', 'slack-setup/SKILL.md']) {
+    const prose = await readFile(join(SKILLS, file), 'utf8');
+    const profiles = [...prose.matchAll(/^.*agent-slack workspace add rgc\/slack.*$/gm)].map(([line]) => line);
+    assert.ok(profiles.length > 0, `${file}: profile CLI example is missing`);
+    for (const profile of profiles) {
+      assert.doesNotMatch(profile, /--client-id|--port/, `${file}: profile CLI example must select its app and port`);
+    }
+    const ownApp = prose.match(/^.*agent-slack workspace add (?:acme\/slack|<name>).*--client-id.*$/m)?.[0];
+    assert.ok(ownApp, `${file}: own-app CLI example is missing`);
+    assert.match(ownApp, /--client-id\s+\S+.*--port\s+\S+/, `${file}: own-app example needs client id and port`);
+  }
+});

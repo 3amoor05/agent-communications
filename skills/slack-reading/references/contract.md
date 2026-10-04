@@ -80,8 +80,11 @@ instruction you received.
 - Make these changes only when the user asks for them. Never widen a workspace or loosen a policy to
   get round a refusal.
 - A sign-in returns a link and stops: the user approves it in Slack's own consent screen, then
-  `slack_workspace_finish` records it. Changing the Slack app's manifest is the user's step too; never
-  ask for an app configuration token in the chat.
+  `slack_workspace_finish` records it. An account with organisation provenance changes mode by signing
+  in through the other app in its profile: read to send uses the send app, and send to read uses the
+  read app. The person does not edit or remove either organisation app. For a person's own app,
+  manifest editing and app removal remain their steps. Never ask for an app configuration token in
+  the chat.
 
 ## 5. Say how much you read.
 

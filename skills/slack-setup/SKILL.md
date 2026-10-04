@@ -30,17 +30,16 @@ sentence above.
 `send` is not a lesser product with a worse guarantee — it is the same guarantee Gmail gives. Say which is which
 rather than implying one sentence covers both.
 
-## Bring your own Slack app
+## Choose the profile app or your own app
 
 **First, is there an organisation profile?** An organisation may already have made its apps — one for reading,
 one for posting — and handed its members a profile, a small `.agentcomms.json` file. `agentcomms org add <file>`
-(`comms_org_add` from a chat) records those apps here: the workspace, each app's Client ID and the port;
-`agentcomms org show <organisation>` (`comms_org_show`) lists them. With a profile, **do not create an app**:
-connect through the organisation's read app — or its send app, for `send` — with `workspace add`, its Client ID
-and the profile's port, as below. In this release `workspace add` does not use the profile by itself; that comes
-in a later release.
+(`comms_org_add` from a chat) records those apps here; `agentcomms org show <organisation>` (`comms_org_show`)
+lists them. With a profile, **do not create an app**: `workspace add rgc/slack` automatically selects the
+profile's read app and port, or its send app with `--mode send`. A mode change signs in through the other
+profile app. Do not edit or uninstall either organisation app.
 
-**Without one**, there is no shared app to install. A person creates one in their own workspace from a manifest
+**For a person's own app**, there is no profile app to select. The person creates one in their workspace from a manifest
 this package prints, which means the scopes are visible to them before anything is granted and the workspace's
 admins keep control of it.
 
@@ -53,7 +52,7 @@ the app and matches them exactly, so the port in the manifest and the port in `w
 number. This is the one place the package deliberately diverges from Gmail, which takes whatever port it is
 handed.
 
-For a workspace already connected, name it: `agent-slack manifest --workspace acme/slack --mode send` (over MCP,
+For a workspace connected through a person's own app, name it: `agent-slack manifest --workspace acme/slack --mode send` (over MCP,
 `slack_manifest` with `workspace`) uses the port it signed in with and returns the direct link to its own app's
 manifest page, `https://api.slack.com/apps/<appId>/app-manifest`. Pasting the JSON there and saving is still the
 person's to do — hand them the link and the JSON. A workspace connected before its app id was recorded gets no
@@ -84,6 +83,19 @@ refuses.
 
 ## Connecting
 
+With an organisation profile:
+
+```sh
+agent-slack workspace add rgc/slack --start
+agent-slack workspace add --finish <flowId>
+```
+
+From a chat, `slack_workspace_add` with `workspace: "rgc/slack"` selects the profile's read app and
+port automatically. Use `mode: "send"` (CLI: `--mode send`) to select its send app; neither path needs
+`clientId` or `port`. The profile's workspace and app are checked before a token is stored.
+
+With a person's own app, use the Client ID and the port from its manifest:
+
 ```sh
 agent-slack workspace add acme/slack --client-id <id> --port 51234
 agent-slack workspace list
@@ -92,11 +104,21 @@ agent-slack doctor
 
 The name is `organisation/platform` — `acme/slack`, `rgc/slack`. A flat name is refused with an example.
 
-From a chat, `slack_workspace_add` (with `workspace`, `clientId` and `port`) starts the same sign-in and returns the
-link; give it to the person, who approves in Slack, then call `slack_workspace_finish` with the `flowId`. At a
-terminal, `--start` returns the link the same way and `workspace add --finish <flowId>` completes it. Slack's consent
-screen is the person's: nothing here clicks it. Connecting in `read` starts at once; connecting with `--mode send`
-(`mode: "send"`) is a change the person approves first — see "How a change is approved".
+For an own app, `slack_workspace_add` takes `workspace`, `clientId` and `port`. Either path starts a
+sign-in and returns a link; give it to the person, who approves in Slack, then call
+`slack_workspace_finish` with the `flowId`. At a terminal, `--start` returns the link the same way
+and `workspace add --finish <flowId>` completes it. Slack's consent screen is the person's: nothing
+here clicks it. Connecting in `read` starts at once; connecting with `--mode send` (`mode: "send"`)
+is a change the person approves first — see "How a change is approved".
+
+If a profile sign-in ends before a token is stored, report Slack's error and description when
+available and say the sign-in did not complete. The person may have declined, or the workspace may
+require an administrator to approve the app; never state that the person declined as a fact. Name
+the organisation, workspace name and id, and the profile app's role and Client ID from the result.
+If an MCP client cancels a waiting `slack_workspace_finish`, the detached sign-in stays open and can
+be finished later. Interrupting a detached CLI `workspace add --finish` or `reauth --finish` also
+leaves the flow open: after consent, run `--finish` again. Interrupting a foreground sign-in ends its
+listener, so start a new flow in that case.
 
 No client secret is stored anywhere, ever. PKCE is what proves the exchange, and the verifier never leaves the
 machine that generated it.
@@ -185,9 +207,14 @@ other. `app create` and `app update` have no tool, and neither do `agent-slack a
 
 ## Moving a workspace to `send`
 
-This is a **widening**: a change the person approves, after their app has been updated. Do it when they ask for it,
-never on your own initiative. It takes two steps, in this order, and `agent-slack workspace mode <name> send`
-(`slack_mode_set` with `mode: "send"`) walks both:
+This is a **widening**: a change the person approves. Do it when they ask for it, never on your own
+initiative. For an account with organisation provenance, `agent-slack workspace mode <name> send`
+(`slack_mode_set` with `mode: "send"`) signs in through the profile's send app after approval.
+The person then grants Slack consent and finishes with `slack_workspace_finish` (CLI:
+`agent-slack workspace reauth <name> --finish <flowId>`). No manifest edit, `app update`, or
+`--app-updated` step applies to the organisation's apps.
+
+For a person's own app, the two-step procedure remains, in this order:
 
 1. **The app.** A token can only be granted what its app declares, so the app's manifest has to be the `send` one
    first. While the workspace's recorded grant has no posting scope, nothing on this machine can show the app was
@@ -201,22 +228,32 @@ never on your own initiative. It takes two steps, in this order, and `agent-slac
    Slack, and `slack_workspace_finish` (at a terminal, `agent-slack workspace reauth <name> --finish <flowId>`)
    records the new token.
 
-If Slack grants no posting scope at the end, the app's manifest was not updated after all — saved on another app, or
+If Slack grants no posting scope to an own-app account at the end, its manifest was not updated after all — saved on another app, or
 not saved — and nothing is recorded; the refusal says so and how to do step 1.
-`agent-slack workspace reauth <name> --mode send` (`slack_workspace_reauth` with `mode: "send"`) is the same change
-without step 1's check.
+`agent-slack workspace reauth <name> --mode send` (`slack_workspace_reauth` with `mode: "send"`) is
+the own-app change without step 1's check. For a provenance account, replacement reauth uses its
+profile app for the requested mode; after the organisation updates a replaced app, reauthorise
+through that app rather than editing it locally.
 
-`agent-slack workspace mode <name>` (`slack_mode`) reports where a workspace stands and prints these steps. A
-workspace signed in with 0.4.1 or later remembers its port, so `--port` can be left out of `workspace reauth`,
+`agent-slack workspace mode <name>` (`slack_mode`) reports where a workspace stands and prints the
+steps for its account type. An own-app workspace signed in with 0.4.1 or later remembers its port, so `--port` can be left out of `workspace reauth`,
 `workspace mode` and `manifest --workspace`, which use the recorded one. `agent-slack manifest` without
 `--workspace` names no workspace, so it has no recorded port to use and needs `--port` given. An older workspace
 has none recorded either, so give `--port` there too: its steps print `<port>` until it is given one.
 
 ## Going back to `read`
 
-Slack **adds** scopes to a token and never removes one. `auth.revoke` leaves the installation intact under token
-rotation, and only `apps.uninstall` resets it — which needs the client secret this package never stores. So going
-back is a person's procedure, not a command:
+For an account with organisation provenance, `agent-slack workspace mode <name> read`
+(`slack_mode_set` with `mode: "read"`) starts immediately through the profile's read app, then the
+person grants Slack consent and `slack_workspace_finish` completes it. This narrowing needs no
+change approval, manifest replacement, or app removal. The old access and refresh tokens are
+revoked separately after the new credential is stored; a pending revocation is reported and retried
+by `doctor` until Slack confirms it or its fixed expiry deadline passes. Token revocation never
+uninstalls an app.
+
+For a person's own app, Slack **adds** scopes to a token and never removes one. `auth.revoke` leaves
+the installation intact under token rotation, and only `apps.uninstall` resets it — which needs the
+client secret this package never stores. So own-app narrowing remains the person's procedure:
 
 1. Replace the app's manifest with the `read` one.
 2. In Slack: **Workspace settings → Manage apps → the app → Remove app.** This is the step that actually resets
@@ -224,8 +261,8 @@ back is a person's procedure, not a command:
 3. `agent-slack workspace reauth <name> --mode read --port <port>` — `reauth`, not `add`, so the name and its
    history are kept.
 
-`agent-slack workspace mode <name> read` (`slack_mode_set` with `mode: "read"`, or `slack_mode_narrow`) prints
-exactly this and changes nothing.
+For an own-app account, `agent-slack workspace mode <name> read` (`slack_mode_set` with
+`mode: "read"`, or `slack_mode_narrow`) prints exactly this and changes nothing.
 
 ## Removing a workspace
 
@@ -249,22 +286,29 @@ the same JSON, with `offline` and `workspace`; on a server pinned to one workspa
 
 ## Pitfalls
 
-- **Starting a widening before the app is updated.** Slack grants what the app declares, so a `send` sign-in through
-  a `read` app comes back `read` and nothing is recorded. Do the app step first; `workspace mode <name> send`
-  enforces the order.
+- **Starting an own-app widening before the app is updated.** Slack grants what the app declares, so a
+  `send` sign-in through a `read` app comes back `read` and nothing is recorded. Do the own-app
+  manifest step first; `workspace mode <name> send` enforces the order.
 - **Claiming an approval the person did not give.** Under `chat` their yes is the approval, and nothing can tell it
   from yours; call the tool with `approvalId` only after they said yes to that preview. Under `confirm` you cannot
   claim it at all until they have run `agentcomms approve`.
 
-- **A port mismatch between the manifest and `workspace add`.** The sign-in completes at Slack and then fails to
+- **An own-app port mismatch between the manifest and `workspace add`.** The sign-in completes at Slack and then fails to
   return. Check both numbers say the same thing.
-- **Creating a second app instead of editing the first.** A new app is a new installation; the old one still has
+- **Creating a second own app instead of editing the first.** A new app is a new installation; the old one still has
   the old scopes and the workspace still behaves as it did. For a workspace already connected, that is `app
   update`, never `app create`.
-- **Reading an updated app as a widened workspace.** `app update --mode send` changes what the app may ask for,
+- **Reading an updated own app as a widened workspace.** `app update --mode send` changes what the app may ask for,
   not what the workspace's token can do.
-- **Forgetting that `app update` replaces the app's whole configuration.** Slack's update writes the manifest as
+- **Forgetting that own-app `app update` replaces the app's whole configuration.** Slack's update writes the manifest as
   given, so a name or description somebody set by hand comes back as `agent-slack`.
 - **Reading `read` mode as a guarantee about the machine.** It is a guarantee about this package's token.
-- **Assuming a scope came back after a narrowing reauth.** It did not, unless the app's installation was removed
-  in Slack first. That step is not optional and is the one people skip.
+- **Assuming an own-app scope came back after a narrowing reauth.** It did not, unless the app's
+  installation was removed in Slack first. That step is not optional for an own-app account.
+- **Reusing a replaced profile app without reauth.** After the organisation updates its profile,
+  reauthorise through the replacement app for the account's current mode. Do not edit or remove the
+  organisation's apps yourself.
+- **Treating pending revocation as completed.** A profile app move stores the new grant before it
+  attempts to revoke the old access and refresh tokens separately. An unconfirmed result stays
+  pending with a fixed deadline; run `agent-slack doctor` (`slack_doctor`) to retry and report each
+  token's state. Revoking tokens never uninstalls the old app.
