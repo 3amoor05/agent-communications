@@ -5,6 +5,7 @@ import {
   type Config,
   generationState,
   inlineCommand,
+  managingOrganisation,
   type OrganisationGeneration,
   organisationsOf,
   parseName,
@@ -67,7 +68,7 @@ export function organisationForClient(config: Config, name: string): string | un
 }
 
 function isAssociated(config: Config, name: string, row: ClientConfig): boolean {
-  if (typeof row.organisation === 'string') return true;
+  if (managingOrganisation(config, row) !== null) return true;
   return generationForLiveRow(config, name, row) !== undefined;
 }
 
@@ -151,12 +152,13 @@ export function chooseClientForNewInbox(config: Config, options: GmailClientChoi
         hint: `Choose a client listed by ${inlineCommand(shellCommand(['agent-gmail', 'client', 'list'], platform))}.`,
       });
     }
-    if (row.organisation) {
+    const markedFor = managingOrganisation(config, row);
+    if (markedFor !== null) {
       throw new CommsError(
         'CONFIG',
-        `the OAuth client "${options.client}" is marked for organisation ${row.organisation}, but no matching live generation claims it`,
+        `the OAuth client "${options.client}" is marked for organisation ${markedFor}, but no matching live generation claims it`,
         {
-          hint: `Run ${inlineCommand(shellCommand(['agentcomms', 'org', 'update', row.organisation], platform))} (or comms_org_update from a chat) before signing in through it.`,
+          hint: `Run ${inlineCommand(shellCommand(['agentcomms', 'org', 'update', markedFor], platform))} (or comms_org_update from a chat) before signing in through it.`,
         },
       );
     }

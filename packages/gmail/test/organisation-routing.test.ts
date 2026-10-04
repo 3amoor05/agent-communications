@@ -450,6 +450,41 @@ test('§D6 row 4: legacy fallback chooses only an organisation-free client, with
   );
 });
 
+test('§D6 row 4: a marker naming no installed profile is an ordinary fallback client', () => {
+  const config = routingConfig();
+  config.clients = {
+    orphaned: {
+      provider: 'gmail',
+      clientId: OTHER_ID,
+      secretRef: clientSecretRef('orphaned'),
+      organisation: 'removed-org',
+      addedAt: WHEN,
+    },
+  };
+
+  assert.deepEqual(chooseClientForNewInbox(config, { alias: 'personal/gmail' }), {
+    name: 'orphaned',
+    clientId: OTHER_ID,
+  });
+});
+
+test('§D6 row 1: an explicit client whose marker names no installed profile is ordinary', () => {
+  const config = routingConfig();
+  config.clients.orphaned = {
+    provider: 'gmail',
+    clientId: OTHER_ID,
+    secretRef: clientSecretRef('orphaned'),
+    organisation: 'removed-org',
+    addedAt: WHEN,
+  };
+
+  assert.deepEqual(
+    chooseClientForNewInbox(config, { alias: 'personal/gmail', client: 'orphaned' }),
+    { name: 'orphaned', clientId: OTHER_ID },
+    'an orphan marker must not produce an impossible org update removed-org refusal',
+  );
+});
+
 test('§D6 row 4: inbox add with only profile clients refuses with all three routes', () => {
   assert.throws(
     () => chooseClientForNewInbox(routingConfig(), { alias: 'personal/gmail' }),
