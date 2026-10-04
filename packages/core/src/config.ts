@@ -318,13 +318,14 @@ export interface ConfigV2 extends ConfigBody {
 
 export type Config = ConfigV1 | ConfigV2;
 
-/** The committed config, with a process-only marker when cancellation arrived after its atomic rename. */
-export type ConfigUpdateResult = Config & { readonly committedBeforeAbort?: true };
+/** The committed config returned by an update; process-only commit metadata is deliberately stored out of band. */
+export type ConfigUpdateResult = Config;
 
-/** Distinguishes the process-only result marker from an unknown root key preserved from an older config. */
+const COMMITTED_BEFORE_ABORT = new WeakSet<object>();
+
+/** True only for the exact update result whose cancellation arrived after its atomic rename. */
 export function configCommittedBeforeAbort(config: ConfigUpdateResult): boolean {
-  const marker = Object.getOwnPropertyDescriptor(config, 'committedBeforeAbort');
-  return marker?.value === true && marker.enumerable === false;
+  return COMMITTED_BEFORE_ABORT.has(config);
 }
 
 const aliasSchema = z.string().regex(ALIAS_PATTERN, ALIAS_MESSAGE);
@@ -882,75 +883,84 @@ export class ConfigStore {
      * this lock immediately before each rename attempt. Before that point it removes its temporary file and the old
      * config remains; after it, the new config is final and must never be replaced with an earlier snapshot.
      */
-    const result = await withFileLock(this.#lockPath, async () => {
-      options.signal?.throwIfAborted();
-      this.#cache = null;
-      const current = structuredClone(await this.load());
-      const next = await mutator(structuredClone(current));
-      // An ordinary write keeps the version it found. Changing it is a migration — it renames every account and
-      // decides which releases can still read the file — and has exactly one door, `migrateNames`.
-      if ((next as { version?: unknown }).version !== current.version) {
-        throw new CommsError(
-          'CONFIG',
-          `refusing to change the config version from ${current.version} to ${String((next as { version?: unknown }).version)}`,
-          { hint: 'Only `agentcomms names migrate` changes the version. This is a bug — please report it.' },
-        );
-      }
-      const parsed = schemaFor(current.version).safeParse(next);
-      if (!parsed.success) {
-        throw new CommsError(
-          'CONFIG',
-          `refusing to write invalid config: ${describeIssues(parsed.error, current.version)}`,
-        );
-      }
-      if (current.version === 2 && parsed.data.version === 2) {
-        const dropped = formerNamesDropped(current, parsed.data);
-        if (dropped !== null) {
-          throw new CommsError('CONFIG', `refusing to write a config that ${dropped}`, {
-            hint: 'Former names are permanent. This is a bug — please report it.',
+    let committed: ConfigUpdateResult | undefined;
+    let result: ConfigUpdateResult;
+    try {
+      result = await withFileLock(this.#lockPath, async () => {
+        options.signal?.throwIfAborted();
+        this.#cache = null;
+        const current = structuredClone(await this.load());
+        const next = await mutator(structuredClone(current));
+        // An ordinary write keeps the version it found. Changing it is a migration — it renames every account and
+        // decides which releases can still read the file — and has exactly one door, `migrateNames`.
+        if ((next as { version?: unknown }).version !== current.version) {
+          throw new CommsError(
+            'CONFIG',
+            `refusing to change the config version from ${current.version} to ${String((next as { version?: unknown }).version)}`,
+            { hint: 'Only `agentcomms names migrate` changes the version. This is a bug — please report it.' },
+          );
+        }
+        const parsed = schemaFor(current.version).safeParse(next);
+        if (!parsed.success) {
+          throw new CommsError(
+            'CONFIG',
+            `refusing to write invalid config: ${describeIssues(parsed.error, current.version)}`,
+          );
+        }
+        if (current.version === 2 && parsed.data.version === 2) {
+          const dropped = formerNamesDropped(current, parsed.data);
+          if (dropped !== null) {
+            throw new CommsError('CONFIG', `refusing to write a config that ${dropped}`, {
+              hint: 'Former names are permanent. This is a bug — please report it.',
+            });
+          }
+        }
+        const { loosened, changes } = classifyChange(current, parsed.data);
+        const allowed = new Set(options.consent?.paths ?? []);
+        const unconsented = loosened.filter((path) => !allowed.has(path));
+        if (unconsented.length > 0) {
+          /*
+           * Both routes, because both are real (design 2026-09-25 §3.2): a hint naming only the terminal sent an agent
+           * to a shell it may not have, for a change it could have asked for in the conversation.
+           */
+          throw new CommsError('LOOSENING_REFUSED', `this change loosens a safety setting: ${unconsented.join(', ')}`, {
+            hint: 'A person approves a loosening, from a chat or at a terminal. From a chat, the tool that makes the change returns a preview and an approval id: the person says yes in the chat (change policy `chat`) or runs `agentcomms approve <id>` at their own terminal (`confirm`), and the tool is called again with the id. At a terminal, run the matching command and approve the change it shows.',
+            details: { paths: unconsented },
           });
         }
-      }
-      const { loosened, changes } = classifyChange(current, parsed.data);
-      const allowed = new Set(options.consent?.paths ?? []);
-      const unconsented = loosened.filter((path) => !allowed.has(path));
-      if (unconsented.length > 0) {
         /*
-         * Both routes, because both are real (design 2026-09-25 §3.2): a hint naming only the terminal sent an agent
-         * to a shell it may not have, for a change it could have asked for in the conversation.
+         * A consent from a change approval says what each path was approved to move between, and the write has to be
+         * that. Checked here, against the configuration read inside the lock, because this is the one place nothing
+         * can change between the check and the write: a claim checks the change the caller described, and the
+         * configuration may have moved since — a path now loosened from a different value, or an account that is not
+         * the one the person was shown.
          */
-        throw new CommsError('LOOSENING_REFUSED', `this change loosens a safety setting: ${unconsented.join(', ')}`, {
-          hint: 'A person approves a loosening, from a chat or at a terminal. From a chat, the tool that makes the change returns a preview and an approval id: the person says yes in the chat (change policy `chat`) or runs `agentcomms approve <id>` at their own terminal (`confirm`), and the tool is called again with the id. At a terminal, run the matching command and approve the change it shows.',
-          details: { paths: unconsented },
-        });
-      }
-      /*
-       * A consent from a change approval says what each path was approved to move between, and the write has to be
-       * that. Checked here, against the configuration read inside the lock, because this is the one place nothing
-       * can change between the check and the write: a claim checks the change the caller described, and the
-       * configuration may have moved since — a path now loosened from a different value, or an account that is not
-       * the one the person was shown.
-       */
-      const approved = options.consent?.changes;
-      if (approved !== undefined) {
-        const drifted = changes.filter((change) => !approved.some((ok) => sameLoosening(ok, change)));
-        if (drifted.length > 0) {
-          const paths = drifted.map((change) => change.path);
-          throw new CommsError('LOOSENING_REFUSED', `this is not the change that was approved: ${paths.join(', ')}`, {
-            hint: 'The configuration changed after the approval was given. Prepare the change again and ask again.',
-            details: { paths },
-          });
+        const approved = options.consent?.changes;
+        if (approved !== undefined) {
+          const drifted = changes.filter((change) => !approved.some((ok) => sameLoosening(ok, change)));
+          if (drifted.length > 0) {
+            const paths = drifted.map((change) => change.path);
+            throw new CommsError('LOOSENING_REFUSED', `this is not the change that was approved: ${paths.join(', ')}`, {
+              hint: 'The configuration changed after the approval was given. Prepare the change again and ask again.',
+              details: { paths },
+            });
+          }
         }
-      }
-      const serialized = `${JSON.stringify(parsed.data, null, 2)}\n`;
-      await writeFileAtomic(this.path, serialized, FILE_MODE, options.signal);
-      this.#cache = null;
-      return parsed.data;
-    });
+        const serialized = `${JSON.stringify(parsed.data, null, 2)}\n`;
+        await writeFileAtomic(this.path, serialized, FILE_MODE, options.signal);
+        committed = parsed.data;
+        this.#cache = null;
+        return parsed.data;
+      });
+    } catch (error) {
+      if (!options.signal?.aborted || !committed) throw error;
+      // The rename committed. Even if lock cleanup could not report success, cancellation cannot turn that durable
+      // write back into a failed transaction: the caller needs the committed result so it keeps the staged secret.
+      result = committed;
+    }
     if (options.signal?.aborted) {
-      // Process metadata, not config data: non-enumerable keeps serialisation, loose-root compatibility and ordinary
-      // callers unchanged while allowing an interrupting foreground operation to report what crossed the boundary.
-      Object.defineProperty(result, 'committedBeforeAbort', { value: true, enumerable: false });
+      // Out-of-band process metadata keeps loose-root compatibility: no unknown config key is read, changed or hidden.
+      COMMITTED_BEFORE_ABORT.add(result);
     }
     return result;
   }

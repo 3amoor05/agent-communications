@@ -29,6 +29,7 @@ for (const account of ['profile', 'own-app'] as const) {
     'after mutator',
     'after rename',
     'lock release',
+    'lock release failure',
     'withdrawal failure',
   ] as const) {
     test(`foreground ${account} interruption ${boundary} settles the accepted callback before exit`, {
@@ -95,6 +96,18 @@ for (const account of ['profile', 'own-app'] as const) {
           lockReleaseInterrupted = true;
           interrupt();
         }
+        if (
+          boundary === 'lock release failure' &&
+          !lockReleaseInterrupted &&
+          configWrites === 1 &&
+          String(args[0]) === join(harness.configDir, '.config.lock')
+        ) {
+          lockReleaseInterrupted = true;
+          interrupt();
+          const error = new Error('lock removal completed but its acknowledgement failed');
+          Object.assign(error, { code: 'EPERM' });
+          throw error;
+        }
       });
       const update = harness.core.config.update.bind(harness.core.config);
       t.mock.method(harness.core.config, 'update', (...[mutator, options]: Parameters<typeof update>) =>
@@ -159,7 +172,7 @@ for (const account of ['profile', 'own-app'] as const) {
       });
       const action = run(
         [
-          ...(['withdrawal failure', 'lock release'].includes(boundary) ? ['--json'] : []),
+          ...(['withdrawal failure', 'lock release', 'lock release failure'].includes(boundary) ? ['--json'] : []),
           'workspace',
           'add',
           'rgc/slack',
@@ -218,7 +231,7 @@ for (const account of ['profile', 'own-app'] as const) {
         assert.equal(locked, true, 'the secret was staged outside the credentials lock');
         assert.ok(events.indexOf('withdrawn') < events.indexOf('exit'), 'exit raced staged-secret withdrawal');
       }
-      const committed = boundary === 'after rename' || boundary === 'lock release';
+      const committed = ['after rename', 'lock release', 'lock release failure'].includes(boundary);
       if (committed) {
         assert.notDeepEqual(await harness.core.config.load(), before);
         assert.equal(deletions, 0, 'a committed credential was withdrawn');
@@ -241,7 +254,7 @@ for (const account of ['profile', 'own-app'] as const) {
       assert.deepEqual(await readdir(join(harness.core.paths.stateDir, 'slack', 'flows')), []);
       if (boundary === 'after rename') {
         assert.match(output, /saved before the interrupt took effect/i);
-      } else if (boundary === 'lock release') {
+      } else if (boundary === 'lock release' || boundary === 'lock release failure') {
         assert.equal(JSON.parse(output).data.committedBeforeAbort, true);
       } else {
         assert.equal(output, '', 'an uncommitted sign-in printed a successful result');

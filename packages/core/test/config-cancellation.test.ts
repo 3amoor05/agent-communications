@@ -5,15 +5,10 @@ import { syncBuiltinESMExports } from 'node:module';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { Config } from '../src/config.ts';
-import { ConfigStore } from '../src/config.ts';
+import { ConfigStore, configCommittedBeforeAbort } from '../src/config.ts';
 import { tempDir } from './helpers/temp.ts';
 
-type CancellableUpdateResult = Config & { readonly committedBeforeAbort?: true };
-
-function wasCommittedBeforeAbort(result: CancellableUpdateResult): boolean {
-  const marker = Object.getOwnPropertyDescriptor(result, 'committedBeforeAbort');
-  return marker?.value === true && marker.enumerable === false;
-}
+type CancellableUpdateResult = Config;
 
 for (const boundary of ['after mutator', 'before rename'] as const) {
   test(`a cancellable config update keeps its original bytes on abort ${boundary}`, async (t) => {
@@ -69,11 +64,13 @@ for (const boundary of ['after mutator', 'before rename'] as const) {
   });
 }
 
-for (const boundary of ['after rename', 'lock release'] as const) {
+for (const boundary of ['after rename', 'lock release', 'lock release failure'] as const) {
   test(`an abort ${boundary} leaves the config committed and marks the result`, async (t) => {
     const directory = tempDir();
     const store = new ConfigStore(directory);
-    await store.update((current) => current);
+    await store.update((current) =>
+      Object.assign({}, current, { committedBeforeAbort: 'preserved unknown config data' }),
+    );
     const controller = new AbortController();
     const rename = fs.rename;
     const rm = fs.rm;
@@ -86,7 +83,14 @@ for (const boundary of ['after rename', 'lock release'] as const) {
     });
     t.mock.method(fs, 'rm', async (...args: Parameters<typeof rm>) => {
       await rm(...args);
-      if (boundary === 'lock release' && String(args[0]) === join(directory, '.config.lock')) controller.abort();
+      if (boundary !== 'after rename' && String(args[0]) === join(directory, '.config.lock')) {
+        controller.abort();
+        if (boundary === 'lock release failure') {
+          const error = new Error('lock removal completed but its acknowledgement failed');
+          Object.assign(error, { code: 'EPERM' });
+          throw error;
+        }
+      }
     });
     syncBuiltinESMExports();
     t.after(() => {
@@ -100,9 +104,17 @@ for (const boundary of ['after rename', 'lock release'] as const) {
       }),
       { signal: controller.signal },
     )) as CancellableUpdateResult;
-    assert.equal(wasCommittedBeforeAbort(result), true);
+    assert.equal(configCommittedBeforeAbort(result), true);
     assert.equal(result.defaults.timezone, 'Europe/London');
-    assert.equal(JSON.stringify(result).includes('committedBeforeAbort'), false, 'the marker changed config data');
+    assert.equal(
+      (result as Config & { committedBeforeAbort: unknown }).committedBeforeAbort,
+      'preserved unknown config data',
+    );
+    assert.equal(
+      JSON.stringify(result).includes('"committedBeforeAbort":"preserved unknown config data"'),
+      true,
+      'the process marker changed unknown config data',
+    );
     assert.equal(writes, 1, 'the committed transaction attempted a rollback write');
     assert.equal((await store.load()).defaults.timezone, 'Europe/London');
     assert.deepEqual(await fs.readdir(directory), ['config.json']);
@@ -120,7 +132,7 @@ test('abort after a config transaction resolves does not mark or roll back the c
     { signal: controller.signal },
   )) as CancellableUpdateResult;
   controller.abort();
-  assert.equal(wasCommittedBeforeAbort(result), false);
+  assert.equal(configCommittedBeforeAbort(result), false);
   assert.equal((await store.load()).defaults.timezone, 'Europe/London');
 });
 
@@ -188,7 +200,7 @@ test('an abort during lock release never touches an intervening writer', async (
     }),
     { signal: controller.signal },
   )) as CancellableUpdateResult;
-  assert.equal(wasCommittedBeforeAbort(result), true);
+  assert.equal(configCommittedBeforeAbort(result), true);
   assert.equal(writes, 2, 'the interrupted transaction wrote after the intervening commit');
   assert.equal((await second.load()).defaults.timezone, 'Asia/Tokyo');
   assert.deepEqual(await fs.readdir(directory), ['config.json']);
@@ -237,7 +249,7 @@ test('a Windows-style rename-over failure proves no config descriptor spans the 
     }),
     { signal: controller.signal },
   )) as CancellableUpdateResult;
-  assert.equal(wasCommittedBeforeAbort(result), true);
+  assert.equal(configCommittedBeforeAbort(result), true);
   assert.equal(writes, 1);
   assert.equal(openDescriptors.size, 0);
   assert.equal((await store.load()).defaults.timezone, 'Europe/London');
