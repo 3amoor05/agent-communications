@@ -3,6 +3,77 @@
 All notable changes to this project are recorded here, newest first. Every package in this repository is released
 together under one version.
 
+## 0.12.3
+
+**A command printed for you to paste can no longer run something an email's sender chose.** After `agent-gmail send
+prepare`, the CLI printed the command to send the draft with its subject in JSON's double quotes. Those are not shell
+quotes: inside them, macOS's and Linux's shells and PowerShell run `$(…)` and backticks, and Windows' cmd.exe expands
+`%NAME%`. A reply's subject comes from the email being answered, so whoever wrote that email chose it, and pasting the
+printed line could have run their command. Every command the Gmail, Slack, Resend and WhatsApp CLIs and servers print
+for you to run is now built as separate words and quoted for the shell it will be pasted into, by the rule
+`agentcomms` commands have used since 0.12.2. Where a word cannot be written safely for every Windows shell, no line
+is printed: the command is shown as its words in JSON for you to type. The printed send command also carries
+`--expect-cc` and `--expect-bcc`, which it had left out, so a draft with Cc or Bcc failed its own check when you ran
+it (CUE-398).
+
+**Blind-copied recipients now receive drafts sent through agent-gmail.** A draft made with `agent-gmail draft create`
+or `gmail_draft_create` (or a reply or update) with `--bcc` lost its Bcc recipients before Gmail ever saw it: the
+library that writes the message strips the Bcc header by default, because a mail server normally takes the blind
+recipients from elsewhere, and Gmail takes them from that header. So those recipients were never sent the email, and
+nothing said so. The header is now kept. Gmail sends to everyone in To, Cc and Bcc and, as it always does, does not
+show the Bcc addresses to anyone else. Drafts written in Gmail itself were never affected. If you have relied on
+`--bcc`, the people you blind-copied may not have received those emails (CUE-402).
+
+**An email or reaction that may have gone out is no longer recorded as failed.** 0.12.2 did this for Slack posts; now
+Gmail, Resend and Slack reactions work the same way. A send is recorded as *failed* only when the provider's answer is
+one it documents as given before it acts: a malformed request, a refused key or permission, something not found, or a
+rate limit. If the connection drops after the request left, a server error comes back, or the answer can't be read,
+the approval now reads *unknown*, and the message says where to look before trying again: Gmail's Sent folder, the
+Resend dashboard, or the message in Slack. Before, these read *failed*, which said nothing had gone out when it might
+have, and invited sending the same email again (CUE-395, CUE-396).
+- On Resend, an idempotency conflict (409) is *unknown*, not *failed*, because the conflicting request may be the very
+  email being sent.
+- A send or reaction the provider accepted is never recorded as failed, even if writing it down afterwards goes
+  wrong. That failure is added to the result as a `note` instead.
+
+**A send that stops before reaching Gmail or Resend always frees its slot and says why.** Between claiming the
+approval and asking the provider to send, several things can fail: reading the draft one last time, the draft having
+changed, writing the attempt down. Each step that tidies up after such a failure — freeing the send-limit slot,
+marking the approval failed, writing the record and the audit entry — is now tried on its own, so one failing no
+longer skips the rest, and the error you see is still the one that stopped the send, with anything that could not be
+tidied up added to its hint. Before, one failed step could leave a slot taken until the hour passed, or an approval
+reading *unknown* when nothing had been sent (CUE-395).
+
+**Reactions that are already how you asked count as done.** Adding a reaction you had already added
+(`already_reacted`), or removing one of yours that isn't there (`no_reaction`), now succeeds with a note saying so,
+instead of failing. Removing a reaction only ever removes *yours*; other people's stay, and the note says that too
+(CUE-396).
+
+**Cancelling a Gmail attachment download stops it.** If you cancel `gmail_attachment_download` in your client, the
+transfer now stops; files already saved in full are kept, and no part-written file is left. Cancelled while it is
+still settling where to save, it leaves your answer unused (CUE-397).
+
+**Also**
+- `doctor`'s repair for a problem that needs more than one command now lists each command on its own line, ready to
+  paste one at a time, instead of joining them with `&&`, which Windows PowerShell 5.1 does not accept.
+- Where `doctor` used to print a repair with a `<client>` placeholder to fill in, it now prints `mcp install --help`,
+  which runs as shown and lists the clients to choose from.
+- `--expect-subject none` on `agent-gmail send execute` now also matches a draft whose subject is literally "none"
+  (or only spaces), not just an empty one. It meant "an empty subject" before, so such a draft could not be sent from
+  the CLI at all.
+- A send stopped by the hourly or daily limit now leaves an audit entry, and its approval records the limit's own
+  message.
+
+What it means for you: a patch release, and the first item is a security fix.
+- Update if you use the Gmail CLI to send, if you send from Gmail or Resend, or if you react in Slack.
+- Nothing changes in how sends are approved, and no command, flag or tool was removed. Results gained an optional
+  `note`. On macOS and Linux most printed commands read as before; WhatsApp's handoff hints now include the source,
+  chat and account arguments they had been missing. On Windows, a word such as a port number is now in double quotes.
+- For code that uses the packages directly: the operation contexts take an optional `platform`, and core's
+  `DownloadAtTerminalOptions.command` also accepts a `ShellCommand`. Existing callers are unchanged.
+- To get 0.12.3: your servers will say an update is out. Run `agentcomms update` (or say "update my comms"), then
+  restart your client.
+
 ## 0.12.2
 
 **Using several Resend accounts on a busy machine no longer gets requests refused.** Every Resend request on a machine
