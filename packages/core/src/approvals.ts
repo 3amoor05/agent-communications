@@ -1,6 +1,7 @@
 import { open, readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { channelApproveCommands } from './channel-words.ts';
+import { inlineCommand, shellCommand } from './cli-runtime.ts';
 import {
   type ChangePolicy,
   canonicalLoosening,
@@ -624,7 +625,7 @@ export class ApprovalStore {
           'USAGE',
           `approval ${id} is for a configuration change, not a send`,
           record,
-          `A person approves it with \`agentcomms approve ${id}\` — or ${channelApproveCommands()}, whichever is installed — and it permits only the change it was prepared for.`,
+          `A person approves it with ${inlineCommand(shellCommand(['agentcomms', 'approve', id]))} — or ${channelApproveCommands()}, whichever is installed — and it permits only the change it was prepared for.`,
         )
       : refuseChange(
           'USAGE',
@@ -863,7 +864,7 @@ export class ApprovalStore {
             'this change needs a person to approve it at a terminal first',
             current,
             options.pendingHint ??
-              `Ask the user to run \`agentcomms approve ${approvalId}\` in their own terminal, then try again with the same approval.`,
+              `Ask the user to run ${inlineCommand(shellCommand(['agentcomms', 'approve', approvalId]))} in their own terminal, then try again with the same approval.`,
           );
         }
         // `confirm` means a person at a terminal. An approval given any other way — a form in a client window, which

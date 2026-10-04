@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import type { GatedChange } from '../change-flow.ts';
 import type { ChangeSurface } from '../changes.ts';
+import { inlineCommand, shellCommand } from '../cli-runtime.ts';
 import { type Config, classifyChange, type LooseningConsent, secretsStoreOf } from '../config.ts';
 import type { Core } from '../core.ts';
 import { CommsError } from '../errors.ts';
@@ -182,7 +183,7 @@ async function migrateUnderLock(
       'LOOSENING_REFUSED',
       'moving credentials out of the system keychain needs a person to approve it',
       {
-        hint: `Run \`agentcomms secrets migrate --to ${to}\`, or call comms_secrets_migrate, and approve the change it shows.`,
+        hint: `Run ${inlineCommand(shellCommand(['agentcomms', 'secrets', 'migrate', '--to', to]))}, or call comms_secrets_migrate, and approve the change it shows.`,
       },
     );
   }
@@ -284,7 +285,7 @@ async function migrateUnderLock(
       throw new CommsError(base.code, base.message, {
         hint:
           `${base.hint ? `${base.hint} ` : ''}Whether the backend was switched could not be confirmed, so nothing ` +
-          `was deleted from either. Run \`agentcomms secrets migrate --to ${to}\` again once the configuration is readable.`,
+          `was deleted from either. Run ${inlineCommand(shellCommand(['agentcomms', 'secrets', 'migrate', '--to', to]))} again once the configuration is readable.`,
         details: { unconfirmed: true, copiedToTarget: attempted.map((ref) => ({ backend: to, ref })) },
         cause: error,
       });

@@ -4,6 +4,7 @@ import { homedir, platform } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { z } from 'zod';
 import { CHANNEL_SNAPSHOT } from './channels.generated.ts';
+import { inlineCommand, shellCommand } from './cli-runtime.ts';
 import { type ConfigVersion, NEW_CONFIG_VERSION } from './config-version.ts';
 import { CommsError } from './errors.ts';
 import { FILE_MODE, writeFileAtomic } from './fs.ts';
@@ -554,7 +555,7 @@ export function secretsStoreFor(
   if (committed === null) return { store: requested ?? 'keychain', choosing: true };
   if (requested !== undefined && requested !== committed) {
     throw new CommsError('CONFIG', `this configuration already keeps its secrets in the ${committed} store`, {
-      hint: `Everything here uses one store, and changing it moves what is already stored. To change it, run \`agentcomms secrets migrate --to ${requested}\`, then run this again.`,
+      hint: `Everything here uses one store, and changing it moves what is already stored. To change it, run ${inlineCommand(shellCommand(['agentcomms', 'secrets', 'migrate', '--to', requested]))}, then run this again.`,
     });
   }
   return { store: committed, choosing: false };
