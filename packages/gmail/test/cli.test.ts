@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
@@ -11,6 +11,7 @@ import { GmailContext } from '../src/context.ts';
 import { createDraft } from '../src/operations/drafts.ts';
 import type { SendPreparation } from '../src/operations/send.ts';
 import { type Harness, newHarness, TEST_CLIENT_ID, TEST_CLIENT_SECRET, tempDir } from './support/harness.ts';
+import { SETUP_MAIN_EQUIVALENCE, setupCompatibilityHarness } from './support/setup-compatibility.ts';
 
 const CLI_ENTRY = fileURLToPath(new URL('../src/cli.ts', import.meta.url));
 
@@ -1241,6 +1242,117 @@ test('headless setup with a Gmail profile requires the mailbox name before it de
   const error = result.json<Envelope<never>>().error;
   assert.match(error?.message ?? '', /name the mailbox with --inbox/i);
   assert.match(error?.hint ?? '', /setup --inbox/);
+});
+
+test('headless setup is exactly main-compatible without an active Gmail generation, with or without --inbox', async () => {
+  for (const fixture of SETUP_MAIN_EQUIVALENCE) {
+    for (const withInbox of [false, true]) {
+      const harness = await setupCompatibilityHarness(fixture.name);
+      const result = await cli(harness, ['setup', ...(withInbox ? ['--inbox', 'new/gmail'] : []), '--json']);
+      assert.equal(result.code, 0, `${fixture.name}: ${result.stdout}${result.stderr}`);
+      const report =
+        result.json<
+          Envelope<{
+            next: string;
+            done: string[];
+            clients: string[];
+            inboxes: string[];
+            clientOf: Record<string, string>;
+            blocked: { step: string } | null;
+            handoff: { authUrl: string } | null;
+          }>
+        >().data;
+      assert.deepEqual(
+        {
+          next: report?.next,
+          done: report?.done,
+          clients: report?.clients,
+          inboxes: report?.inboxes,
+          clientOf: report?.clientOf,
+        },
+        fixture.expected,
+        `${fixture.name}, ${withInbox ? 'with --inbox' : 'without --inbox'}`,
+      );
+      const expectedBlock = withInbox && fixture.expected.clients.length > 0 ? 'inbox' : fixture.expected.next;
+      assert.equal(report?.blocked?.step, expectedBlock, `${fixture.name}: main's stopping step`);
+      assert.equal(Boolean(report?.handoff), withInbox && fixture.expected.clients.length > 0, fixture.name);
+
+      // A headless setup with --inbox starts a detached production sign-in. Stop its loopback listener rather than
+      // leaving it alive for the ten-minute flow lifetime; main did the same start for these cases.
+      const context = new GmailContext({ core: harness.core, env: harness.env });
+      for (const file of await readdir(join(harness.core.paths.stateDir, 'flows')).catch(() => [])) {
+        if (!file.endsWith('.json')) continue;
+        const flowId = file.slice(0, -'.json'.length);
+        try {
+          const flow = await context.flows.get(flowId);
+          if (flow.listenerPid) process.kill(flow.listenerPid, 'SIGTERM');
+          await context.flows.discard(flowId);
+        } catch {
+          // It finished or disappeared before cleanup.
+        }
+      }
+    }
+  }
+});
+
+test('without an active Gmail profile setup defers an invalid --inbox until main reaches the inbox step', async () => {
+  const harness = await setupCompatibilityHarness('no client');
+  const result = await cli(harness, ['setup', '--inbox', 'not a mailbox name', '--json']);
+
+  assert.equal(result.code, 0, `${result.stdout}${result.stderr}`);
+  const report = result.json<Envelope<{ next: string; done: string[]; blocked: { step: string } | null }>>().data;
+  // main checks the client step first. With no client it reports that step and never validates a future inbox name.
+  assert.deepEqual(
+    { next: report?.next, done: report?.done, blocked: report?.blocked?.step },
+    { next: 'client', done: [], blocked: 'client' },
+  );
+});
+
+test('without an active Gmail profile setup treats --inbox for an existing mailbox as a new request, like main', async () => {
+  const harness = await setupCompatibilityHarness('one client and one connected inbox');
+  const result = await cli(harness, ['setup', '--inbox', 'acme/gmail', '--json']);
+
+  // main always enters the explicit --inbox branch, whose add operation refuses a name that is already connected.
+  assert.equal(result.code, EXIT_CODES.CONFIG, `${result.stdout}${result.stderr}`);
+  assert.match(result.json<Envelope<never>>().error?.message ?? '', /already exists|already connected/i);
+});
+
+test('an incoming Slack-only profile needs no unrelated mailbox name and resumes main setup after approval', async () => {
+  const harness = offlineCliHarness();
+  const path = join(tempDir(), 'slack-only.agentcomms.json');
+  await writeFile(
+    path,
+    JSON.stringify({
+      agentcomms: 'organisation-profile',
+      version: 1,
+      organisation: 'acme',
+      label: 'Acme Test Org',
+      slack: {
+        workspace: 'TACME0001',
+        workspaceName: 'Acme Test Org',
+        redirectPort: 51234,
+        apps: { read: { clientId: '1111.2222' } },
+      },
+    }),
+  );
+
+  const first = await cli(harness, ['setup', '--profile', path, '--json']);
+  assert.equal(first.code, EXIT_CODES.APPROVAL, first.stdout);
+  const approval = String(first.json<Envelope<never>>().error?.details?.approvalId);
+  const second = await cli(harness, ['setup', '--profile', path, '--org-approval', approval, '--json']);
+  assert.equal(second.code, 0, `${second.stdout}${second.stderr}`);
+  const report = second.json<Envelope<{ next: string; done: string[]; blocked: { step: string } | null }>>().data;
+  assert.deepEqual(
+    { next: report?.next, done: report?.done, blocked: report?.blocked?.step },
+    {
+      next: 'client',
+      done: [],
+      blocked: 'client',
+    },
+  );
+  const config = await harness.core.config.load();
+  assert.equal(config.version, 2);
+  assert.equal(config.version === 2 ? config.organisations?.acme?.gmail : undefined, undefined);
 });
 
 test('setup refuses --org-approval without --profile', async () => {

@@ -60,7 +60,13 @@ import {
   prepareSend,
   revokeApproval,
 } from '../operations/send.ts';
-import { CONSOLE_STEPS, requireSetupTarget, setupClientChoiceNeedsMailbox, setupState } from '../operations/setup.ts';
+import {
+  CONSOLE_STEPS,
+  requireSetupTarget,
+  setupClientChoiceNeedsMailbox,
+  setupProfileHasGmail,
+  setupState,
+} from '../operations/setup.ts';
 import {
   FINISH_WAIT_SECONDS,
   finishSignIn,
@@ -1389,14 +1395,14 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
         }
         const setupInbox = pinned ? targetInbox(inbox) : inbox;
         const configBeforeProfile = await context.config();
-        const clientChoiceNeedsMailbox =
-          profilePath !== undefined || setupClientChoiceNeedsMailbox(configBeforeProfile);
+        const incomingProfileHasGmail = profilePath ? await setupProfileHasGmail(profilePath) : false;
+        const clientChoiceNeedsMailbox = incomingProfileHasGmail || setupClientChoiceNeedsMailbox(configBeforeProfile);
         if (clientChoiceNeedsMailbox && !setupInbox) {
           throw new CommsError('USAGE', 'name the mailbox with `inbox` before setup can choose its client', {
             hint: 'Call gmail_setup again with inbox set to the mailbox name being added.',
           });
         }
-        if (setupInbox) requireSetupTarget(configBeforeProfile, setupInbox);
+        if (clientChoiceNeedsMailbox && setupInbox) requireSetupTarget(configBeforeProfile, setupInbox);
         if (profilePath !== undefined) {
           const outcome = await gatedChange(
             context.core,
@@ -1477,7 +1483,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
           clientChoice: state.clientChoice,
           registeredWith: state.registeredWith,
           candidates: pinned ? [] : state.candidates,
-          consoleSteps: (state.next === 'client' ? CONSOLE_STEPS : []).map((step) => ({
+          consoleSteps: CONSOLE_STEPS.map((step) => ({
             id: step.id,
             title: step.title,
             url: step.url,

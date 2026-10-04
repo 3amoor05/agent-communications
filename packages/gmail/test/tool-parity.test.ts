@@ -9,6 +9,7 @@ import { searchContacts } from '../src/operations/contacts.ts';
 import { createDraft, getDraft } from '../src/operations/drafts.ts';
 import { inboxPolicy, orphanedSecretsPath } from '../src/operations/inboxes.ts';
 import { prepareSend } from '../src/operations/send.ts';
+import { CONSOLE_STEPS } from '../src/operations/setup.ts';
 import {
   type Harness,
   migrateNamesForTest,
@@ -1931,7 +1932,17 @@ test('gmail_setup adds --profile through its own orgApproval, then reports the r
       organisation: 'acme',
       organisationLabel: 'Acme Test Org',
     });
-    assert.deepEqual(answer.consoleSteps, []);
+    assert.deepEqual(
+      answer.consoleSteps,
+      CONSOLE_STEPS.map((step) => ({
+        id: step.id,
+        title: step.title,
+        url: step.url,
+        why: step.why,
+        actions: [...step.actions],
+        avoid: [...step.avoid],
+      })),
+    );
     const refused = await call('gmail_setup', { profile, inbox: 'acme/gmail', email: 'jo@acme.test' });
     assert.equal(refused.isError, true);
     assertRedacted(refused, 'MCP error');

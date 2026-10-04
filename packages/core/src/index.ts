@@ -66,6 +66,7 @@ export {
   PROFILE_ORGANISATION_MAX,
   parseProfile,
   profileSourcePath,
+  readProfileFile,
   recordOf,
   requireLiveOrganisationGeneration,
   shownPath,

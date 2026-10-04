@@ -16,6 +16,7 @@ import {
   TEST_CLIENT_ID,
   TEST_CLIENT_SECRET,
 } from './support/harness.ts';
+import { SETUP_MAIN_EQUIVALENCE, setupCompatibilityHarness } from './support/setup-compatibility.ts';
 
 /**
  * `agent-gmail setup` at a terminal, from the client file's point of view (CUE-298).
@@ -73,8 +74,10 @@ async function setupAtTerminal(
   harness: Harness,
   argv: string[],
   answer: (prompt: string, index: number) => string | Promise<string>,
+  options: { aliasAnswer?: string } = {},
 ): Promise<Dialog> {
-  const defaultAlias = (await harness.core.config.load()).version === 2 ? 'personal/gmail' : 'work';
+  const defaultAlias =
+    options.aliasAnswer ?? ((await harness.core.config.load()).version === 2 ? 'personal/gmail' : 'work');
   const input = new PassThrough();
   const err = new PassThrough();
   const out = new PassThrough();
@@ -175,6 +178,29 @@ test('an interactive setup asks for the mailbox name before it decides the clien
     return '';
   });
   assert.match(dialog.asked[0] ?? '', /A (?:short )?name for it/);
+});
+
+test('without an active Gmail generation every interactive setup starts with main’s prompt', async () => {
+  for (const fixture of SETUP_MAIN_EQUIVALENCE) {
+    const harness = await setupCompatibilityHarness(fixture.name);
+    const dialog = await setupAtTerminal(
+      harness,
+      [],
+      (prompt) => {
+        if (/Continue from here/.test(prompt)) return pick(prompt, 'Continue');
+        if (/Connect this to an agent/.test(prompt)) return 'n';
+        if (/No client file in/.test(prompt)) return NOWHERE;
+        return '';
+      },
+      // End an inbox step before it starts a listener; this test is about the prompt order, not sign-in.
+      { aliasAnswer: 'not a valid mailbox name' },
+    );
+    assert.match(
+      dialog.asked[0] ?? '',
+      fixture.name === 'no client' ? /press Enter when that is done/ : /Continue from here, or start over/,
+      fixture.name,
+    );
+  }
 });
 
 test('a client file downloaded during the walk is offered at the client step', async () => {

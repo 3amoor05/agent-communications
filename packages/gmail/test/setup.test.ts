@@ -12,6 +12,7 @@ import { clientAdd } from '../src/operations/clients.ts';
 import { CONSOLE_STEPS, findClientJson, requireSetupTarget, setupState } from '../src/operations/setup.ts';
 import { readBoundedStream } from '../src/operations/small-file.ts';
 import { newHarness, TEST_CLIENT_ID, TEST_CLIENT_SECRET, tempDir } from './support/harness.ts';
+import { SETUP_MAIN_EQUIVALENCE, setupCompatibilityHarness } from './support/setup-compatibility.ts';
 
 /** A well-formed Desktop client, for the cases that are about something other than its contents. */
 const DESKTOP = { installed: { client_id: TEST_CLIENT_ID, client_secret: TEST_CLIENT_SECRET, project_id: 'proj' } };
@@ -138,6 +139,28 @@ test('setup with a Gmail profile cannot call the client step done before it know
   assert.equal(state.clientChoice, null);
 });
 
+test('without an active Gmail generation setupState is exactly main-compatible, with or without a target', async () => {
+  for (const fixture of SETUP_MAIN_EQUIVALENCE) {
+    const harness = await setupCompatibilityHarness(fixture.name);
+    const context = new GmailContext({ core: harness.core, env: harness.env });
+    for (const alias of [undefined, 'new/gmail', ...fixture.expected.inboxes.slice(0, 1)]) {
+      const state = await setupState(context, { scanDownloads: false, ...(alias ? { alias } : {}) });
+      assert.deepEqual(
+        {
+          next: state.next,
+          done: state.done,
+          clients: state.clients,
+          inboxes: state.inboxes,
+          clientOf: state.clientOf,
+        },
+        fixture.expected,
+        `${fixture.name}, ${alias ? 'with inbox' : 'without inbox'}`,
+      );
+      assert.equal(state.clientChoice, null, `${fixture.name}: main had no target-specific client choice`);
+    }
+  }
+});
+
 test('setup walks the client step when its only registered client belongs to an ineligible profile', async () => {
   const context = await organisationSetup();
   const state = await setupState(context, { alias: 'personal/gmail', scanDownloads: false });
@@ -146,10 +169,11 @@ test('setup walks the client step when its only registered client belongs to an 
   assert.equal(state.clientChoice, null);
 });
 
-test('setup ignores forOtherAddresses when the profile has no active generation', async () => {
+test('inactive forOtherAddresses history is ordinary setup state because no Gmail profile applies', async () => {
   const context = await organisationSetup({ active: false, forOtherAddresses: true });
   const state = await setupState(context, { alias: 'personal/gmail', scanDownloads: false });
-  assert.equal(state.next, 'client');
+  assert.equal(state.next, 'inbox');
+  assert.deepEqual(state.done, ['client']);
   assert.equal(state.clientChoice, null);
 });
 
@@ -230,15 +254,15 @@ test('setup reports an existing target through its stored historical client, not
   });
 });
 
-test('setup does not count another mailbox as the new target being connected', async () => {
+test('without a Gmail profile setup counts any connected mailbox exactly as main does', async () => {
   const harness = await newHarness({ accounts: [{ sub: 'sub-1', email: 'jo@example.test' }] });
   await harness.addInbox({ alias: 'existing', email: 'jo@example.test', sub: 'sub-1', refreshToken: 'rt' });
   const context = new GmailContext({ core: harness.core, env: harness.env });
 
   const state = await setupState(context, { alias: 'new', scanDownloads: false });
-  assert.equal(state.next, 'inbox');
-  assert.deepEqual(state.done, ['client']);
-  assert.deepEqual(state.clientChoice, { name: 'default' });
+  assert.equal(state.next, 'mcp');
+  assert.deepEqual(state.done, ['client', 'inbox']);
+  assert.equal(state.clientChoice, null);
 });
 
 test('a profile-provided setup says why and omits the Google Cloud walk', () => {

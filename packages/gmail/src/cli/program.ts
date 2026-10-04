@@ -24,6 +24,7 @@ import {
   openCore,
   orgAddChange,
   paint,
+  profileSourcePath,
   refuseRetiredOut,
   refuseUnclaimedApproval,
   runCommand,
@@ -95,6 +96,7 @@ import {
   finishSignIn,
   inboxReauthChange,
   MAX_WAIT_SECONDS,
+  type StartOptions,
   startSignIn,
 } from '../operations/signin.ts';
 import { VERSION } from '../version.ts';
@@ -1777,9 +1779,8 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
     .option('--no-browser', 'print the links instead of opening them')
     .action(
       act(async (context, globalOptions, options: Options) => {
-        const { requireSetupTarget, setupClientChoiceNeedsMailbox, setupState, CONSOLE_STEPS } = await import(
-          '../operations/setup.ts'
-        );
+        const { requireSetupTarget, setupClientChoiceNeedsMailbox, setupProfileHasGmail, setupState, CONSOLE_STEPS } =
+          await import('../operations/setup.ts');
         const out = streams.stderr;
         const bold = (text: string) => paint(globalOptions.color, 'bold', text);
         const dim = (text: string) => paint(globalOptions.color, 'dim', text);
@@ -1824,15 +1825,25 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
         }
 
         const configBeforeProfile = await context.config();
+        const profilePath = options.profile
+          ? profileSourcePath(String(options.profile), context.env, context.cwd, platform)
+          : undefined;
+        const incomingProfileHasGmail = profilePath ? await setupProfileHasGmail(profilePath) : false;
         /*
          * The client step is decided for the mailbox this run is adding only when a Gmail profile participates in
          * routing (design 2026-10-02 §D6). An incoming --profile will do so after approval; an installed Gmail
          * profile already does. Without either, setup keeps its pre-profile order: finish the ordinary client step,
          * then ask for a mailbox in the mailbox step below.
          */
-        const clientChoiceNeedsMailbox = Boolean(options.profile) || setupClientChoiceNeedsMailbox(configBeforeProfile);
+        const clientChoiceNeedsMailbox = incomingProfileHasGmail || setupClientChoiceNeedsMailbox(configBeforeProfile);
+        const startSetupSignIn = (signIn: Omit<StartOptions, 'mode' | 'setupWithoutGmailProfile'>) =>
+          startSignIn(context, {
+            ...signIn,
+            mode: 'add',
+            setupWithoutGmailProfile: !clientChoiceNeedsMailbox,
+          });
         if (clientChoiceNeedsMailbox && mode !== 'none' && !options.inbox) {
-          const organisationNames = Boolean(options.profile) || configBeforeProfile.version === 2;
+          const organisationNames = incomingProfileHasGmail || configBeforeProfile.version === 2;
           options.inbox = await askText(mode, streams, {
             message: organisationNames ? 'A name for it: organisation/gmail' : 'A short name for it',
             placeholder: organisationNames ? 'acme/gmail' : 'work',
@@ -1850,15 +1861,15 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
             hint: `Run ${inlineCommand(shellCommand(['agent-gmail', 'setup', '--inbox', 'acme/gmail'], platform))}, replacing acme/gmail with the name being added. Nothing was done.`,
           });
         }
-        if (options.inbox) requireSetupTarget(configBeforeProfile, String(options.inbox));
+        if (clientChoiceNeedsMailbox && options.inbox) requireSetupTarget(configBeforeProfile, String(options.inbox));
 
-        if (options.profile) {
+        if (profilePath) {
           await gatedChangeAtTerminal(
             context.core,
             orgAddChange(
               context.core,
               {
-                file: String(options.profile),
+                file: profilePath,
                 ...(options.store ? { store: String(options.store) } : {}),
                 ...(typeof options.orgApproval === 'string' ? { approvalId: options.orgApproval } : {}),
               },
@@ -1909,7 +1920,9 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
         const headless = mode === 'none';
         const clientStep = state.next === 'client';
         const targetAlreadyConnected =
-          options.inbox && Array.isArray(state.inboxes) ? state.inboxes.includes(String(options.inbox)) : false;
+          clientChoiceNeedsMailbox && options.inbox && Array.isArray(state.inboxes)
+            ? state.inboxes.includes(String(options.inbox))
+            : false;
         if (!clientStep || (headless && !options.clientJson)) {
           refuseUnclaimedApproval(
             options.approval,
@@ -2021,9 +2034,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
                     ...(options.replaceServer === true ? { replace: true } : {}),
                   }
                 : undefined;
-              const { startSignIn } = await import('../operations/signin.ts');
-              const started = await startSignIn(context, {
-                mode: 'add',
+              const started = await startSetupSignIn({
                 alias,
                 ...(options.email ? { email: String(options.email) } : {}),
                 ...(options.client ? { client: String(options.client) } : {}),
@@ -2333,9 +2344,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
             takeFlag('email') ||
             (await askText(mode, streams, { message: 'Which address (blank to choose in the browser)' }));
 
-          const { startSignIn } = await import('../operations/signin.ts');
-          const started = await startSignIn(context, {
-            mode: 'add',
+          const started = await startSetupSignIn({
             alias,
             ...(email ? { email } : {}),
             ...(options.client ? { client: String(options.client) } : {}),

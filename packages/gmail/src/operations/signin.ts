@@ -52,6 +52,11 @@ export interface StartOptions {
   detached?: boolean | undefined;
   /** Recorded in the flow for the finish to take up: see `OAuthFlow.registerWith`. Only `setup` passes it. */
   registerWith?: RegistrationIntent | undefined;
+  /**
+   * Preserve setup's pre-profile client rule when no active Gmail profile participates: an explicit client, or the
+   * first registered client. Other callers always use the §D6 chooser.
+   */
+  setupWithoutGmailProfile?: boolean | undefined;
 }
 
 export interface StartedSignIn {
@@ -182,15 +187,17 @@ export async function startSignIn(context: GmailContext, options: StartOptions):
     // Before the browser opens, not only when it comes back: a name the file cannot take would otherwise be refused
     // after the person has already been through Google's consent screens.
     requireNewInboxName(config, options.alias, undefined, context.platform);
-    choice =
-      chooseClientForNewInbox(config, {
-        alias: options.alias,
-        email: options.email,
-        client: options.client,
-        platform: context.platform,
-      }) ?? undefined;
-    if (!choice) throw new CommsError('UNEXPECTED', 'inbox add did not choose a Google client');
-    clientName = choice.name;
+    if (!options.setupWithoutGmailProfile) {
+      choice =
+        chooseClientForNewInbox(config, {
+          alias: options.alias,
+          email: options.email,
+          client: options.client,
+          platform: context.platform,
+        }) ?? undefined;
+      if (!choice) throw new CommsError('UNEXPECTED', 'inbox add did not choose a Google client');
+      clientName = choice.name;
+    }
   }
 
   const client = await context.client(clientName);

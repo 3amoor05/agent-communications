@@ -16,7 +16,9 @@ import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { GmailContext } from '../src/context.ts';
 import { mcpBoolean, mcpInboxes, mcpInteger, mcpStringArray } from '../src/mcp/schemas.ts';
 import { assertRegistrationShape, buildInstructions, createGmailMcpServer } from '../src/mcp/server.ts';
+import { CONSOLE_STEPS } from '../src/operations/setup.ts';
 import { migrateNamesForTest, newHarness, tempDir } from './support/harness.ts';
+import { SETUP_MAIN_EQUIVALENCE, setupCompatibilityHarness } from './support/setup-compatibility.ts';
 
 interface ToolResult {
   isError?: boolean;
@@ -307,6 +309,103 @@ test('an unpinned gmail_setup with a Gmail profile requires the target mailbox b
     assert.equal(error.code, 'USAGE');
     assert.match(error.message, /name the mailbox with `inbox`/i);
     assert.match(error.hint, /gmail_setup/);
+  } finally {
+    await close();
+  }
+});
+
+test('gmail_setup is exactly main-compatible without an active Gmail generation, including every console step', async () => {
+  const consoleSteps = CONSOLE_STEPS.map((step) => ({
+    id: step.id,
+    title: step.title,
+    url: step.url,
+    why: step.why,
+    actions: [...step.actions],
+    avoid: [...step.avoid],
+  }));
+  for (const fixture of SETUP_MAIN_EQUIVALENCE) {
+    const harness = await setupCompatibilityHarness(fixture.name);
+    const { client, close } = await connect({ core: harness.core, env: harness.env });
+    try {
+      for (const args of [{}, { inbox: 'new/gmail' }]) {
+        const result = (await client.callTool({ name: 'gmail_setup', arguments: args })) as ToolResult;
+        assert.equal(result.isError, undefined, `${fixture.name}: ${JSON.stringify(result.structuredContent)}`);
+        const body = result.structuredContent ?? {};
+        assert.deepEqual(
+          {
+            next: body.next,
+            done: body.done,
+            clients: body.clients,
+            inboxes: body.inboxes,
+            clientOf: body.clientOf,
+          },
+          fixture.expected,
+          `${fixture.name}, ${Object.hasOwn(args, 'inbox') ? 'with inbox' : 'without inbox'}`,
+        );
+        assert.deepEqual(body.consoleSteps, consoleSteps, `${fixture.name}: main always returned all console steps`);
+      }
+    } finally {
+      await close();
+    }
+  }
+});
+
+test('without an active Gmail profile gmail_setup defers an invalid inbox until main reaches that step', async () => {
+  const harness = await setupCompatibilityHarness('no client');
+  const { client, close } = await connect({ core: harness.core, env: harness.env });
+  try {
+    const result = (await client.callTool({
+      name: 'gmail_setup',
+      arguments: { inbox: 'not a mailbox name' },
+    })) as ToolResult;
+    assert.equal(result.isError, undefined, JSON.stringify(result.structuredContent));
+    assert.deepEqual(
+      { next: result.structuredContent?.next, done: result.structuredContent?.done },
+      { next: 'client', done: [] },
+    );
+  } finally {
+    await close();
+  }
+});
+
+test('an incoming Slack-only profile needs no unrelated MCP inbox and resumes main setup after approval', async () => {
+  const harness = await newHarness();
+  await migrateNamesForTest(harness);
+  const path = join(tempDir(), 'slack-only.agentcomms.json');
+  await writeFile(
+    path,
+    JSON.stringify({
+      agentcomms: 'organisation-profile',
+      version: 1,
+      organisation: 'acme',
+      label: 'Acme Test Org',
+      slack: {
+        workspace: 'TACME0001',
+        workspaceName: 'Acme Test Org',
+        redirectPort: 51234,
+        apps: { read: { clientId: '1111.2222' } },
+      },
+    }),
+  );
+  const { client, close } = await connect({ core: harness.core, env: harness.env });
+  try {
+    const first = (await client.callTool({ name: 'gmail_setup', arguments: { profile: path } })) as ToolResult;
+    assert.equal(first.isError, undefined, JSON.stringify(first.structuredContent));
+    assert.equal(first.structuredContent?.approvalRequired, true);
+    const approval = String(first.structuredContent?.approvalId);
+    const second = (await client.callTool({
+      name: 'gmail_setup',
+      arguments: { profile: path, orgApproval: approval },
+    })) as ToolResult;
+    assert.equal(second.isError, undefined, JSON.stringify(second.structuredContent));
+    assert.deepEqual(
+      { next: second.structuredContent?.next, done: second.structuredContent?.done },
+      { next: 'client', done: [] },
+    );
+    assert.equal((second.structuredContent?.consoleSteps as unknown[])?.length, CONSOLE_STEPS.length);
+    const config = await harness.core.config.load();
+    assert.equal(config.version, 2);
+    assert.equal(config.version === 2 ? config.organisations?.acme?.gmail : undefined, undefined);
   } finally {
     await close();
   }

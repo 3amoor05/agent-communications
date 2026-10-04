@@ -2,12 +2,14 @@ import { lstat, readdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
+  activeGeneration,
   CommsError,
   type Config,
   isProductServer,
   lookupName,
   nameAvailable,
   organisationsOf,
+  readProfileFile,
   shownText,
 } from '@agentcomms/core';
 import { parseClientJson } from '../auth/oauth.ts';
@@ -346,7 +348,12 @@ export function requireSetupTarget(config: Config, alias: string): void {
 
 /** Whether an installed profile makes OAuth-client choice depend on the mailbox being added. */
 export function setupClientChoiceNeedsMailbox(config: Config): boolean {
-  return Object.values(organisationsOf(config)).some((organisation) => organisation.gmail !== undefined);
+  return Object.values(organisationsOf(config)).some((organisation) => activeGeneration(organisation) !== undefined);
+}
+
+/** Whether a profile being added participates in Gmail routing, before that change is approved and stored. */
+export async function setupProfileHasGmail(path: string): Promise<boolean> {
+  return (await readProfileFile(path)).profile.gmail !== undefined;
 }
 
 /**
@@ -382,12 +389,13 @@ export async function setupState(context: GmailContext, options: SetupStateOptio
   const config = await context.core.config.load();
   const clients = Object.keys(config.clients);
   const inboxes = Object.keys(config.inboxes);
+  const gmailProfileApplies = setupClientChoiceNeedsMailbox(config);
 
   // Unreadable client configs are not a setup failure; the MCP step simply cannot be skipped automatically.
   const registeredWith = await clientsRegisteredWith(context.env);
-  const target = options.alias ? lookupName(config, 'inbox', options.alias) : undefined;
+  const target = gmailProfileApplies && options.alias ? lookupName(config, 'inbox', options.alias) : undefined;
   const selected =
-    options.alias && !target
+    gmailProfileApplies && options.alias && !target
       ? chooseClientForNewInbox(config, {
           alias: options.alias,
           email: options.email,
@@ -401,12 +409,14 @@ export async function setupState(context: GmailContext, options: SetupStateOptio
   // ordinary registered client finishes the step before setup asks which mailbox comes next. An existing target
   // has already made that choice: report its stored client rather than rerouting it through today's active
   // generation.
-  const clientDone = target
-    ? config.clients[target.client]?.provider === 'gmail'
-    : options.alias
-      ? selected !== null
-      : !setupClientChoiceNeedsMailbox(config) && clients.length > 0;
-  const inboxDone = target !== undefined;
+  const clientDone = !gmailProfileApplies
+    ? clients.length > 0
+    : target
+      ? config.clients[target.client]?.provider === 'gmail'
+      : options.alias
+        ? selected !== null
+        : false;
+  const inboxDone = gmailProfileApplies ? target !== undefined : inboxes.length > 0;
 
   const done: ('client' | 'inbox' | 'mcp')[] = [];
   if (clientDone) done.push('client');
