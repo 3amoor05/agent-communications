@@ -2,7 +2,15 @@ import { randomBytes } from 'node:crypto';
 import { chmod, rename, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
-import { CommsError, DIR_MODE, ensurePrivateDir, FILE_MODE, isGroupOrWorldAccessible } from '@agentcomms/core';
+import {
+  CommsError,
+  DIR_MODE,
+  ensurePrivateDir,
+  FILE_MODE,
+  inlineCommand,
+  isGroupOrWorldAccessible,
+  shellCommand,
+} from '@agentcomms/core';
 import { CHAT_ID } from './chat-ref.ts';
 import { readChats, readMessages, readPushNames } from './source/read-source.ts';
 import type { SchemaReport } from './source/schema.ts';
@@ -294,7 +302,7 @@ export class WhatsAppIndex {
       await stat(path);
     } catch {
       throw new CommsError('NOT_FOUND', `"${accountName}" has not been synced yet, so there is nothing to read`, {
-        hint: `Run \`agent-whatsapp sync --account ${accountName}\` (or the whatsapp_sync tool) first.`,
+        hint: `Run ${inlineCommand(shellCommand(['agent-whatsapp', 'sync', '--account', accountName]))} (or the whatsapp_sync tool) first.`,
         details: { reason: 'NOT_SYNCED' },
       });
     }
@@ -306,7 +314,7 @@ export class WhatsAppIndex {
     if (format !== String(INDEX_FORMAT)) {
       db.close();
       throw new CommsError('CONFIG', `the index for "${accountName}" was written by another version of this package`, {
-        hint: `Run \`agent-whatsapp sync --account ${accountName}\` to rebuild it.`,
+        hint: `Run ${inlineCommand(shellCommand(['agent-whatsapp', 'sync', '--account', accountName]))} to rebuild it.`,
       });
     }
     // The lists, as SQL can ask them: every query below filters with these, so none can forget to.

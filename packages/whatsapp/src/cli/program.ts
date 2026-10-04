@@ -13,6 +13,7 @@ import {
   exemptFromUpdateGate,
   type GatedChange,
   gatedChangeAtTerminal,
+  inlineCommand,
   installExitStatus,
   type OutputOptions,
   openCore,
@@ -406,13 +407,13 @@ a macOS dialog may be waiting) · 77 permission needed (macOS privacy) · 78 con
         const marker = agentMarker(env);
         if (marker) {
           throw new CommsError('APPROVAL_REQUIRED', 'only a person can approve a change, not an agent', {
-            hint: `Ask the person to run \`agent-whatsapp approve ${approvalId}\` in their own terminal.`,
+            hint: `Ask the person to run ${inlineCommand(shellCommand(['agent-whatsapp', 'approve', approvalId], context.platform))} in their own terminal.`,
             details: { marker },
           });
         }
         if (!canPrompt(env, streams, { json: options.json })) {
           throw new CommsError('APPROVAL_REQUIRED', 'approving a change needs an interactive terminal', {
-            hint: `Run \`agent-whatsapp approve ${approvalId}\` directly in a terminal.`,
+            hint: `Run ${inlineCommand(shellCommand(['agent-whatsapp', 'approve', approvalId], context.platform))} directly in a terminal.`,
           });
         }
         const pending = await context.core.approvals.get(approvalId);

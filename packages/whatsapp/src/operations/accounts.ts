@@ -82,7 +82,7 @@ export async function addAccount(
     if (!free.ok) {
       throw lookupName(config, 'account', request.name)?.platform === PLATFORM
         ? new CommsError('USAGE', `"${request.name}" is already added`, {
-            hint: `Remove it first with \`agent-whatsapp remove ${request.name}\` to point it at another store.`,
+            hint: `Remove it first with ${inlineCommand(shellCommand(['agent-whatsapp', 'remove', request.name], context.platform))} to point it at another store.`,
           })
         : free.error;
     }

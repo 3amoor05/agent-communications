@@ -1,6 +1,14 @@
 import { createHash } from 'node:crypto';
 import { basename, dirname } from 'node:path';
-import { type AccountConfig, CommsError, type Config, newAccountId, resolveName } from '@agentcomms/core';
+import {
+  type AccountConfig,
+  CommsError,
+  type Config,
+  inlineCommand,
+  newAccountId,
+  resolveName,
+  shellCommand,
+} from '@agentcomms/core';
 import { STORE_FILE, WHATSAPP_BUSINESS_CONTAINER, WHATSAPP_GROUP_CONTAINER } from './source/location.ts';
 
 /**
@@ -148,7 +156,7 @@ export function requireAccount(config: Config, name: string | undefined): { name
   const mode = account.mode ?? account.tier;
   if (mode !== READ_MODE) {
     throw new CommsError('CONFIG', `"${name}" is recorded in mode "${String(mode)}", and WhatsApp accounts only read`, {
-      hint: `Nothing was read. Remove it with \`agent-whatsapp remove ${name}\` and add it again.`,
+      hint: `Nothing was read. Remove it with ${inlineCommand(shellCommand(['agent-whatsapp', 'remove', name]))} and add it again.`,
     });
   }
   const source = (account as WhatsAppAccount).source;
