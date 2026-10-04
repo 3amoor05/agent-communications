@@ -444,8 +444,14 @@ export async function revokePendingEntry(context: SlackContext, ref: string): Pr
 }
 
 /** Retries each Slack ledger entry independently, in its stored order. */
-export async function retryPendingRevocations(context: SlackContext): Promise<readonly PendingRevocationResult[]> {
-  const entries = (await context.config()).pendingRevocations?.filter((entry) => entry.platform === 'slack') ?? [];
+export async function retryPendingRevocations(
+  context: SlackContext,
+  workspace?: string,
+): Promise<readonly PendingRevocationResult[]> {
+  const entries =
+    (await context.config()).pendingRevocations?.filter(
+      (entry) => entry.platform === 'slack' && (workspace === undefined || entry.workspace === workspace),
+    ) ?? [];
   const refs = [...new Set(entries.map((entry) => entry.ref))];
   const results: PendingRevocationResult[] = [];
   for (const ref of refs) {

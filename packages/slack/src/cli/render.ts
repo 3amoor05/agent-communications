@@ -28,7 +28,7 @@ import type {
 } from '../operations/read.ts';
 import type { PostedFiles, PostedMessage } from '../operations/send.ts';
 import type { StartedSignIn } from '../operations/signin.ts';
-import type { WorkspaceView } from '../operations/workspaces.ts';
+import type { RemovedWorkspace, WorkspaceView } from '../operations/workspaces.ts';
 
 /**
  * Turning results into something to read at a terminal.
@@ -118,9 +118,16 @@ export function renderConnected(workspace: WorkspaceView, reauth: boolean, color
  * looking. Uninstalling it for them is not this command's to do: `apps.uninstall` is refused by the transport
  * precisely because an agent quietly removing an app for a whole workspace is not a local change.
  */
-export function renderRemoved(alias: string): string {
+export function renderRemoved(removed: RemovedWorkspace): string {
+  const cleanup = removed.cleanup.flatMap((entry) => [
+    `Old credential for ${entry.workspace}: ${entry.tokens.map((token) => `${token.kind} ${token.status} (deadline ${token.deadline})`).join('; ')}.`,
+    ...(entry.cleaned
+      ? ['The old credential bundle was cleaned up.']
+      : ['The old credential bundle remains for agent-slack doctor to retry.']),
+  ]);
   return [
-    `Disconnected "${alias}" from this machine. The stored credential is gone.`,
+    `Disconnected "${removed.alias}" from this machine. The stored credential is gone.`,
+    ...cleanup,
     '',
     'The Slack app is still installed in your workspace. Remove it there through Slack’s own app settings —',
     'nothing here will do that for you.',

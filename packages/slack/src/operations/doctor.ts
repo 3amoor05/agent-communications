@@ -21,6 +21,7 @@ import type { InstallMode } from '../manifest.ts';
 import { SLACK_MCP } from '../mcp/install.ts';
 import { VERSION } from '../version.ts';
 import { type ProbeFetch, probeIdentity } from './identity.ts';
+import { type PendingRevocationResult, pendingRevocationResult, retryPendingRevocations } from './revocations.ts';
 import { openWorkspace } from './session.ts';
 import { listWorkspaces, requireWorkspace } from './workspaces.ts';
 
@@ -51,6 +52,7 @@ export interface DoctorResult {
   readonly healthy: boolean;
   readonly summary: { ok: number; unknown: number; warn: number; fail: number };
   readonly checks: readonly Check[];
+  readonly cleanup?: readonly PendingRevocationResult[];
 }
 
 /** The secret store would not answer, and why, in its own words. Says nothing about the credential inside it. */
@@ -104,7 +106,7 @@ export interface DoctorInput {
    * What Slack says about each stored credential, when it was asked.
    *
    * Absent for an alias means nothing asked — offline, or no usable token — and that is reported as unknown
-   * rather than as health. This is the one network call `doctor` makes, and it is the whole difference between
+   * rather than as health. This identity call is one part of online `doctor`, and it is the whole difference between
    * "a credential is stored" and "the credential works, and belongs to who this says it does".
    */
   readonly identities?: ReadonlyMap<string, IdentityProbe> | undefined;
@@ -113,6 +115,7 @@ export interface DoctorInput {
    * are reported either way, as Gmail's doctor reports them for one mailbox.
    */
   readonly workspace?: string | undefined;
+  readonly cleanup?: readonly PendingRevocationResult[] | undefined;
 }
 
 /**
@@ -136,6 +139,20 @@ export function doctor(input: DoctorInput): DoctorResult {
   const workspaces = listWorkspaces(input.config).filter(
     (view) => input.workspace === undefined || view.alias === input.workspace,
   );
+
+  for (const result of input.cleanup ?? []) {
+    const tokens = result.tokens
+      .map((token) => `${token.kind} ${token.status} (deadline ${token.deadline})`)
+      .join('; ');
+    checks.push({
+      id: 'pending-revocation',
+      title: `Old Slack credential cleanup for ${result.workspace}`,
+      status: result.issue || result.tokens.some((token) => token.status === 'pending') ? 'warn' : 'ok',
+      detail: `${tokens}; ${result.cleaned ? 'old bundle cleaned up' : 'old bundle retained for doctor'}${result.issue ? `; ${result.issue.message}` : ''}. Revoking these tokens does not remove the Slack app installation.`,
+      fix: result.cleaned ? null : command('agent-slack', 'doctor'),
+      workspace: null,
+    });
+  }
 
   if (workspaces.length === 0) {
     checks.push({
@@ -478,7 +495,7 @@ export function doctor(input: DoctorInput): DoctorResult {
     warn: checks.filter((check) => check.status === 'warn').length,
     fail: checks.filter((check) => check.status === 'fail').length,
   };
-  return { healthy: summary.fail === 0, summary, checks };
+  return { healthy: summary.fail === 0, summary, checks, ...(input.cleanup ? { cleanup: input.cleanup } : {}) };
 }
 
 export interface DoctorRun {
@@ -498,9 +515,21 @@ export interface DoctorRun {
  * a locked keychain or a token that is due; so the command and the tool both call this, and get one answer.
  */
 export async function runDoctor(context: SlackContext, options: DoctorRun = {}): Promise<DoctorResult> {
-  const config = await context.config();
+  let config = await context.config();
   // Resolved first, so a name that is not connected is an error and not an empty, healthy report.
   const only = options.workspace === undefined ? undefined : requireWorkspace(config, options.workspace).alias;
+  const workspaceId = only === undefined ? undefined : requireWorkspace(config, only).account.workspace;
+  const cleanup =
+    options.offline === true
+      ? Object.freeze(
+          (config.pendingRevocations ?? [])
+            .filter(
+              (entry) => entry.platform === 'slack' && (workspaceId === undefined || entry.workspace === workspaceId),
+            )
+            .map((entry) => pendingRevocationResult(entry, false)),
+        )
+      : await retryPendingRevocations(context, workspaceId);
+  if (options.offline !== true) config = await context.config();
   const bundles = new Map<string, TokenBundle | null | 'unreadable' | StoreUnavailable>();
   /*
    * A store that will not open is one finding per workspace, not a crash: a keychain module missing, or a keychain
@@ -551,8 +580,8 @@ export async function runDoctor(context: SlackContext, options: DoctorRun = {}):
   /*
    * One call per workspace, and only for a credential that could possibly work.
    *
-   * `offline` exists because this is the only thing here that needs a network, and somebody diagnosing a machine
-   * with no network still deserves everything the files can tell them. Without it a failure to reach Slack is
+   * `offline` leaves identity and pending revocation requests unsent, while still reporting what the files know.
+   * Somebody diagnosing a machine with no network deserves those local findings. A failure to reach Slack is
    * reported as not having asked, never as a problem with the install.
    */
   const identities = new Map<string, IdentityProbe>();
@@ -615,6 +644,7 @@ export async function runDoctor(context: SlackContext, options: DoctorRun = {}):
     identities,
     registeredServers,
     missingFiles,
+    cleanup,
     ...(only === undefined ? {} : { workspace: only }),
   });
 }

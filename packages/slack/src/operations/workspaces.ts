@@ -446,6 +446,8 @@ export interface RemovedWorkspace {
   readonly alias: string;
   readonly accountId: string;
   readonly removed: true;
+  /** The attempted old-token cleanup; unfinished entries remain available to doctor after removal. */
+  readonly cleanup: readonly PendingRevocationResult[];
 }
 
 /** What `workspace remove` needs, named explicitly so the order below can be tested with a store that fails. */
@@ -470,7 +472,7 @@ export interface RemovalDeps {
 export async function removeWorkspace(
   deps: RemovalDeps,
   alias: string,
-  options: { expectId?: string | undefined } = {},
+  options: { expectId?: string | undefined; cleanup?: readonly PendingRevocationResult[] | undefined } = {},
 ): Promise<RemovedWorkspace> {
   const found = requireWorkspace(deps.config, alias);
   /*
@@ -519,5 +521,5 @@ export async function removeWorkspace(
     const { [held.alias]: _removed, ...rest } = config.accounts;
     return { ...config, accounts: rest };
   });
-  return { alias, accountId: found.account.id, removed: true };
+  return { alias, accountId: found.account.id, removed: true, cleanup: options.cleanup ?? [] };
 }

@@ -689,7 +689,7 @@ configuration problem.`,
         flags,
         shellCommand(['agent-slack', 'workspace', 'remove', alias], platform),
       );
-      writeResult(removed, output(), () => renderRemoved(alias), streams);
+      writeResult(removed, output(), () => renderRemoved(removed), streams);
     }),
   );
 

@@ -22,6 +22,7 @@ import type { SlackContext } from '../context.ts';
 import { type InstallMode, parseMode } from '../manifest.ts';
 import { checkedPort, type ManifestResult, manifestFor, modeWanted } from './manifest.ts';
 import { type ModeReport, modeReport, narrowingSteps, profileMoveSteps, wideningSteps } from './mode.ts';
+import { retryPendingRevocations } from './revocations.ts';
 import { type ListenerEntry, type StartedSignIn, startSignIn } from './signin.ts';
 import { checkAliasFree, type RemovedWorkspace, removeWorkspace, requireWorkspace } from './workspaces.ts';
 
@@ -535,6 +536,13 @@ export function removeWorkspaceChange(context: SlackContext, alias: string): Gat
     },
     apply: async (_consent, request) => {
       const expectId = requireWorkspace(request.before, alias).account.id;
+      const current = requireWorkspace(await context.config(), alias);
+      if (current.account.id !== expectId) {
+        throw new CommsError('CONFIG', `"${alias}" changed after its removal was approved, so nothing was removed`);
+      }
+      // The retry engine takes the credentials lock for each status write. Finish it before the
+      // current-secret-first removal takes that same lock around its whole transaction.
+      const cleanup = await retryPendingRevocations(context, current.account.workspace);
       /*
        * Under the credentials lock, from reading the configuration to the last write.
        *
@@ -557,7 +565,7 @@ export function removeWorkspaceChange(context: SlackContext, alias: string): Gat
             platform: context.platform,
           },
           alias,
-          { expectId },
+          { expectId, cleanup },
         ),
       );
     },
