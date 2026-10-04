@@ -1998,7 +1998,7 @@ test('an organisation profile change carries its approval past the stop, from th
       },
     }),
   );
-  const orgOptions = { env: m.env, surface: 'mcp' as const, keyring: null };
+  const orgOptions = { env: m.env, platform: 'darwin' as const, surface: 'mcp' as const, keyring: null };
   const { 'a send': send } = await spentApprovals(m);
   const adding = await preparedFor(m, orgAddChange(m.core, { file }, orgOptions));
   await seed(m, { latest: LATEST, behind: true });

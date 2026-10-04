@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
 import { approveChangeAtTerminal, gatedChangeAtTerminal, refuseUnclaimedApproval } from './change-flow.ts';
+import { changeApprovalCommand, type PreparedChange } from './changes.ts';
 import {
   colorEnabled,
   commandText,
   defaultStreams,
+  inlineCommand,
   type OutputOptions,
   runCommand,
   shellCommand,
@@ -268,6 +270,7 @@ function refuseApprovalNotTaken(command: string | undefined, sub: string | undef
 function refuseOrgOptionsElsewhere(
   command: string | undefined,
   values: { 'for-other-addresses'?: boolean; adopt?: string; store?: string; source?: string },
+  platform: NodeJS.Platform,
 ): void {
   if (command === 'org') return;
   const given = [
@@ -279,9 +282,13 @@ function refuseOrgOptionsElsewhere(
   if (given.length === 0) return;
   throw new CommsError(
     'USAGE',
-    `${given.join(', ')} ${given.length === 1 ? 'is an option' : 'are options'} of \`agentcomms org\` only`,
+    `${given.join(', ')} ${given.length === 1 ? 'is an option' : 'are options'} of ${inlineCommand(
+      shellCommand(['agentcomms', 'org'], platform),
+    )} only`,
     {
-      hint: 'Run `agentcomms --help` for what each command takes. Nothing was run.',
+      hint: `Run ${inlineCommand(
+        shellCommand(['agentcomms', '--help'], platform),
+      )} for what each command takes. Nothing was run.`,
     },
   );
 }
@@ -325,7 +332,7 @@ export async function main(
   const [command, sub, arg] = positionals;
   try {
     refuseApprovalNotTaken(command, sub, values.approval);
-    refuseOrgOptionsElsewhere(command, values);
+    refuseOrgOptionsElsewhere(command, values, platform);
   } catch (error) {
     return writeError(error as CommsError, output);
   }
@@ -382,7 +389,7 @@ export async function main(
         );
         return;
       case 'doctor': {
-        const report = await doctor(core, env);
+        const report = await doctor(core, env, { platform });
         writeResult(report, output, renderDoctor);
         if (!report.ok)
           throw new CommsError('CONFIG', 'doctor found problems', { hint: 'Apply the fixes listed above.' });
@@ -472,7 +479,7 @@ export async function main(
       case 'org': {
         const { positionals: words, word } = forOtherAddressesWord(parsed);
         const [, , target, ...extra] = words;
-        const orgOptions = { env, surface: 'cli' as const };
+        const orgOptions = { env, platform, surface: 'cli' as const };
         const flagsOf = (taken: readonly string[]) => {
           const given = (
             [
@@ -485,18 +492,23 @@ export async function main(
             .filter(([, on]) => on)
             .map(([flag]) => flag);
           const wrong = given.filter((flag) => !taken.includes(flag));
-          if (wrong.length > 0) throw usage(`\`agentcomms org ${sub}\` takes no --${wrong.join(', --')}`);
+          if (wrong.length > 0)
+            throw usage(
+              `${inlineCommand(
+                shellCommand(['agentcomms', 'org', ...(sub === undefined ? [] : [sub])], platform),
+              )} takes no --${wrong.join(', --')}`,
+            );
         };
         if (sub === 'list') {
           if (target !== undefined) throw usage('usage: agentcomms org list');
           flagsOf([]);
-          writeResult(await orgList(core), output, renderOrgList);
+          writeResult(await orgList(core, platform), output, (views) => renderOrgList(views, platform));
           return;
         }
         if (sub === 'show') {
           if (target === undefined || extra.length > 0) throw usage('usage: agentcomms org show <organisation>');
           flagsOf([]);
-          writeResult(await orgShow(core, target), output, renderOrg);
+          writeResult(await orgShow(core, target, platform), output, renderOrg);
           return;
         }
         if (sub === 'add') {
@@ -507,7 +519,10 @@ export async function main(
           }
           flagsOf(['for-other-addresses', 'adopt', 'store']);
           // The file as it will be read, absolute: the command run again from another directory reads the same file.
-          const command = ['agentcomms', 'org', 'add', rerunPath(profileSourcePath(target, env))];
+          const path = profileSourcePath(target, env, undefined, platform);
+          const repeated = rerunPath(path);
+          const command =
+            repeated === null ? ['agentcomms', 'org', 'add', '--help'] : ['agentcomms', 'org', 'add', repeated];
           if (values['for-other-addresses']) command.push('--for-other-addresses');
           if (values.adopt !== undefined) command.push('--adopt', values.adopt);
           if (values.store !== undefined) command.push('--store', values.store);
@@ -524,7 +539,13 @@ export async function main(
               },
               orgOptions,
             ),
-            { ...approval, command: shellCommand(command) },
+            {
+              ...approval,
+              command: shellCommand(command, platform),
+              ...(repeated === null
+                ? { pendingHint: (prepared: PreparedChange) => hiddenPathApprovalHint(prepared, platform) }
+                : {}),
+            },
           );
           writeResult(result, output, renderOrgChange);
           return;
@@ -537,8 +558,13 @@ export async function main(
           }
           flagsOf(['for-other-addresses', 'adopt', 'store', 'source']);
           const command = ['agentcomms', 'org', 'update', target];
+          let repeatedSource = true;
           // The source as it will be read, absolute: the command run again from another directory reads the same file.
-          if (values.source !== undefined) command.push('--source', rerunPath(profileSourcePath(values.source, env)));
+          if (values.source !== undefined) {
+            const source = rerunPath(profileSourcePath(values.source, env, undefined, platform));
+            repeatedSource = source !== null;
+            if (source !== null) command.push('--source', source);
+          }
           if (word !== undefined) command.push('--for-other-addresses', word);
           if (values.adopt !== undefined) command.push('--adopt', values.adopt);
           if (values.store !== undefined) command.push('--store', values.store);
@@ -556,7 +582,13 @@ export async function main(
               },
               orgOptions,
             ),
-            { ...approval, command: shellCommand(command) },
+            {
+              ...approval,
+              command: shellCommand(repeatedSource ? command : ['agentcomms', 'org', 'update', '--help'], platform),
+              ...(!repeatedSource
+                ? { pendingHint: (prepared: PreparedChange) => hiddenPathApprovalHint(prepared, platform) }
+                : {}),
+            },
           );
           writeResult(result, output, renderOrgChange);
           return;
@@ -569,7 +601,7 @@ export async function main(
             orgRemoveChange(core, { organisation: target }, orgOptions),
             {
               ...approval,
-              command: shellCommand(['agentcomms', 'org', 'remove', target]),
+              command: shellCommand(['agentcomms', 'org', 'remove', target], platform),
             },
           );
           writeResult(result, output, renderOrgRemove);
@@ -853,12 +885,22 @@ function renderAttachChange(result: AttachChangeResult, platform: NodeJS.Platfor
 }
 
 /**
- * A profile's path in the command an agent is told to run again: as it is, or — when it cannot be shown as it is,
- * because its name holds text that looks like a chat-template token — a description of it. The hint is printed for an
- * agent to read, and a file name is not allowed to write into it; the agent has the path it was given.
+ * A profile's path in the command an agent is told to run again: as it is, or absent when showing it would change it
+ * because its name holds text that looks like a chat-template token. The hint then names only the approval option and
+ * says why the path is not repeated; a made-up path or placeholder must never be presented as a command word.
  */
-function rerunPath(path: string): string {
-  return shownPath(path) === path ? path : '<the same file>';
+function rerunPath(path: string): string | null {
+  return shownPath(path) === path ? path : null;
+}
+
+function hiddenPathApprovalHint(prepared: PreparedChange, platform: NodeJS.Platform): string {
+  const carrying = inlineCommand(shellCommand(['--approval', prepared.approvalId], platform));
+  const hidden = ' Its file path is not repeated here because it contains text this output neutralises.';
+  return prepared.policy === 'confirm'
+    ? `Show the person the preview. They run ${inlineCommand(
+        changeApprovalCommand(undefined, prepared.approvalId, platform),
+      )}; then run the same command again with ${carrying}.${hidden}`
+    : `Show the person the preview. Once they say yes, run the same command again with ${carrying}.${hidden}`;
 }
 
 /** One profile at a terminal. Every string in a view that came from a profile is already neutralised and on one line. */
@@ -901,9 +943,11 @@ function renderOrg(view: OrganisationView): string {
   return lines.join('\n');
 }
 
-function renderOrgList(views: readonly OrganisationView[]): string {
+function renderOrgList(views: readonly OrganisationView[], platform: NodeJS.Platform): string {
   if (views.length === 0)
-    return 'No organisation profiles have been added here. Add one with `agentcomms org add <file>`.';
+    return `No organisation profiles have been added here. Add one with ${inlineCommand(
+      shellCommand(['agentcomms', 'org', 'add', '--help'], platform),
+    )}.`;
   return views.map(renderOrg).join('\n\n');
 }
 

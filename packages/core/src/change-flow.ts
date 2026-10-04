@@ -176,6 +176,8 @@ export async function gatedChangeAtTerminal<T>(
      * that one it has no line for is shown as its words, to be typed, or a fixed string with nobody's words in it.
      */
     command: string | ShellCommand;
+    /** A safe replacement when the command cannot be repeated, for example because showing its path changes it. */
+    pendingHint?: ((prepared: PreparedChange) => string) | undefined;
     /**
      * The option that carries the approval on this command, when it is not `--approval`: `setup` registers a server
      * with `--mcp-approval`, because its `--approval` is already the OAuth client's, a different change.
@@ -215,12 +217,14 @@ export async function gatedChangeAtTerminal<T>(
     const carrying = [options.approvalFlag ?? '--approval', prepared.approvalId];
     const { command } = options;
     throw new CommsError('APPROVAL_PENDING', `this change needs approval first: ${prepared.summary}`, {
-      hint: approvalHint(
-        prepared,
-        typeof command === 'string' ? `${command} ${carrying.join(' ')}` : withWords(command, ...carrying),
-        approveCommand,
-        options.output.platform,
-      ),
+      hint:
+        options.pendingHint?.(prepared) ??
+        approvalHint(
+          prepared,
+          typeof command === 'string' ? `${command} ${carrying.join(' ')}` : withWords(command, ...carrying),
+          approveCommand,
+          options.output.platform,
+        ),
       details: {
         approvalId: prepared.approvalId,
         policy: prepared.policy,

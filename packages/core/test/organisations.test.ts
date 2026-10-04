@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { inlineCommand, shellCommand } from '../src/cli-runtime.ts';
 import { CommsError } from '../src/errors.ts';
 import {
   isValidName,
@@ -249,7 +250,7 @@ test('a profile is read from a file in version 1: a URL is refused, and nothing 
     'ftp://example.test/x',
   ]) {
     assert.throws(
-      () => profileSourcePath(url, env, '/work'),
+      () => profileSourcePath(url, env, '/work', 'darwin'),
       (error: unknown) =>
         error instanceof CommsError &&
         error.code === 'USAGE' &&
@@ -260,17 +261,29 @@ test('a profile is read from a file in version 1: a URL is refused, and nothing 
       url,
     );
   }
-  assert.throws(() => profileSourcePath('', env, '/work'), /name the profile file/);
+  for (const platform of ['darwin', 'win32'] as const) {
+    assert.throws(
+      () => profileSourcePath('', env, '/work', platform),
+      (error: unknown) =>
+        error instanceof CommsError &&
+        error.hint ===
+          `For example: ${inlineCommand(shellCommand(['agentcomms', 'org', 'add', './rgc.agentcomms.json'], platform))}.`,
+      platform,
+    );
+  }
 });
 
 test('a relative path is resolved against the working directory, and ~ against the home, to an absolute path', () => {
   const env = { HOME: join('/Profiles', 'jo'), USERPROFILE: join('/Profiles', 'jo') };
   const cwd = join('/Profiles', 'jo', 'src');
-  assert.equal(profileSourcePath(join('.', 'rgc.json'), env, cwd), join(cwd, 'rgc.json'));
-  assert.equal(profileSourcePath(join('..', 'rgc', 'rgc.json'), env, cwd), join('/Profiles', 'jo', 'rgc', 'rgc.json'));
-  assert.equal(profileSourcePath('~/rgc.json', env, cwd), join('/Profiles', 'jo', 'rgc.json'));
+  assert.equal(profileSourcePath(join('.', 'rgc.json'), env, cwd, 'darwin'), join(cwd, 'rgc.json'));
+  assert.equal(
+    profileSourcePath(join('..', 'rgc', 'rgc.json'), env, cwd, 'darwin'),
+    join('/Profiles', 'jo', 'rgc', 'rgc.json'),
+  );
+  assert.equal(profileSourcePath('~/rgc.json', env, cwd, 'darwin'), join('/Profiles', 'jo', 'rgc.json'));
   // A Windows drive is a path, not a scheme.
-  assert.doesNotThrow(() => profileSourcePath('C:\\profiles\\rgc.json', env, cwd));
+  assert.doesNotThrow(() => profileSourcePath('C:\\profiles\\rgc.json', env, cwd, 'win32'));
 });
 
 test('reading a profile: the SHA-256 of the exact bytes, a 64 KiB bound, and no directory or missing file read', async () => {
@@ -330,7 +343,7 @@ test('a read error names the path as it is shown, never as it is spelt', async (
     return true;
   });
   assert.throws(
-    () => profileSourcePath('acme‮nosj.json', { HOME: '/Profiles/jo' }, '/Profiles/jo'),
+    () => profileSourcePath('acme‮nosj.json', { HOME: '/Profiles/jo' }, '/Profiles/jo', 'darwin'),
     (error: unknown) => error instanceof CommsError && !error.message.includes('‮') && /<U\+202E>/.test(error.message),
   );
 });

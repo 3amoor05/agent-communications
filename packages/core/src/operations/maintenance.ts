@@ -145,7 +145,7 @@ export async function doctor(core: Core, env: NodeJS.ProcessEnv, options: Doctor
       : {}),
   });
 
-  if (readable) checks.push(...organisationChecks(config));
+  if (readable) checks.push(...organisationChecks(config, platform));
 
   const keyring = options.keyring !== undefined ? options.keyring : await loadKeyringModule();
   // `probeKeychain` loads the real module when handed none, so a machine without it is answered here instead.
@@ -184,10 +184,10 @@ export async function doctor(core: Core, env: NodeJS.ProcessEnv, options: Doctor
  *
  * Nothing at all is said on a machine with no profile, so every other doctor reads as it always did.
  */
-function organisationChecks(config: Config): DoctorCheck[] {
+function organisationChecks(config: Config, platform: NodeJS.Platform): DoctorCheck[] {
   const checks: DoctorCheck[] = [];
   for (const organisation of Object.keys(organisationsOf(config)).sort()) {
-    const drift = organisationDrift(config, organisation);
+    const drift = organisationDrift(config, organisation, platform);
     const record = organisationsOf(config)[organisation];
     const active = record?.gmail?.active ?? null;
     if (drift.length === 0) {
@@ -214,7 +214,11 @@ function organisationChecks(config: Config): DoctorCheck[] {
       ok: true,
       warn: true,
       detail: `the OAuth client "${client}" is marked as belonging to "${shownText(organisation, 40)}", which has no profile here`,
-      fix: `It is treated as a client of your own: \`agent-gmail client\` commands can change or remove it. To give it back to the organisation, add its profile with \`agentcomms org add <file>\`.`,
+      fix: `It is treated as a client of your own: ${inlineCommand(
+        shellCommand(['agent-gmail', 'client', '--help'], platform),
+      )} shows commands that can change or remove it. To give it back to the organisation, add its profile with ${inlineCommand(
+        shellCommand(['agentcomms', 'org', 'add', '--help'], platform),
+      )}.`,
     });
   }
   return checks;

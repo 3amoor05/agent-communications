@@ -1,6 +1,7 @@
 import { approvalKind } from '../approvals.ts';
 import type { GatedChange } from '../change-flow.ts';
 import { type ChangeRequest, type ChangeSurface, revokeChange } from '../changes.ts';
+import { inlineCommand, shellCommand } from '../cli-runtime.ts';
 import {
   type ClientConfig,
   type Config,
@@ -61,6 +62,8 @@ import type { KeyringModule, SecretStore } from '../secrets.ts';
 
 export interface OrgOptions {
   env: NodeJS.ProcessEnv;
+  /** The shell every command in a result or refusal is quoted for. */
+  platform: NodeJS.Platform;
   surface: ChangeSurface;
   /** Where a relative path is resolved from: the working directory of the command, by default. */
   cwd?: string | undefined;
@@ -186,12 +189,15 @@ function organisationArgument(value: unknown): string {
   return word;
 }
 
-function requireRecord(config: Config, organisation: string): OrganisationRecord {
+function requireRecord(config: Config, organisation: string, platform: NodeJS.Platform): OrganisationRecord {
   const record = recordOf(config, organisation);
   if (!record) {
     const known = Object.keys(organisationsOf(config));
     throw new CommsError('NOT_FOUND', `no organisation profile called "${organisation}" has been added here`, {
-      hint: known.length > 0 ? `Added here: ${known.join(', ')}.` : 'Add one with `agentcomms org add <file>`.',
+      hint:
+        known.length > 0
+          ? `Added here: ${known.join(', ')}.`
+          : `Add one with ${inlineCommand(shellCommand(['agentcomms', 'org', 'add', '--help'], platform))}.`,
     });
   }
   return record;
@@ -294,6 +300,7 @@ interface PlanInput {
   forOtherAddresses: 'on' | 'off' | undefined;
   adopt: string | undefined;
   now: string;
+  platform: NodeJS.Platform;
   /** The secret held under a reference now, in the store the configuration uses; null when none is stored. */
   readSecret: (ref: string) => Promise<string | null>;
 }
@@ -359,21 +366,32 @@ async function planProfile(config: Config, input: PlanInput): Promise<ProfilePla
   const { profile } = file;
   if (config.version !== 2) {
     throw new CommsError('CONFIG', 'an organisation profile needs the configuration’s organisation/platform names', {
-      hint: 'Run `agentcomms names migrate` (comms_names_migrate from a chat) first, then add the profile again.',
+      hint: `Run ${inlineCommand(
+        shellCommand(['agentcomms', 'names', 'migrate'], input.platform),
+      )} (comms_names_migrate from a chat) first, then add the profile again.`,
     });
   }
   const organisation = input.organisation;
-  const previous = input.mode === 'update' ? requireRecord(config, organisation) : recordOf(config, organisation);
+  const previous =
+    input.mode === 'update' ? requireRecord(config, organisation, input.platform) : recordOf(config, organisation);
   if (input.mode === 'add' && previous) {
     throw new CommsError('CONFIG', `the organisation profile "${organisation}" has already been added here`, {
-      hint: `To read it again, run \`agentcomms org update ${organisation}\`; to read it from this file from now on, add \`--source ${shownPath(file.path)}\`.`,
+      hint: `To read it again, run ${inlineCommand(
+        shellCommand(['agentcomms', 'org', 'update', organisation], input.platform),
+      )}; to read it from this file from now on, add ${inlineCommand(
+        shellCommand(['--source', shownPath(file.path)], input.platform),
+      )}.`,
     });
   }
   if (profile.organisation !== organisation) {
     throw new CommsError(
       'CONFIG',
       `this profile is for the organisation "${profile.organisation}", not "${organisation}"`,
-      { hint: `It is a different profile: add it with \`agentcomms org add ${shownPath(file.path)}\`.` },
+      {
+        hint: `It is a different profile: add it with ${inlineCommand(
+          shellCommand(['agentcomms', 'org', 'add', shownPath(file.path)], input.platform),
+        )}.`,
+      },
     );
   }
 
@@ -542,7 +560,11 @@ async function planProfile(config: Config, input: PlanInput): Promise<ProfilePla
        */
       const row = own(config.clients, target.name);
       const stored = row ? await input.readSecret(row.secretRef) : null;
-      const fix = `to use the profile's, run \`agent-gmail client add <its client file> --name ${target.name} --replace\``;
+      const fix = `to use the profile's, see ${inlineCommand(
+        shellCommand(['agent-gmail', 'client', 'add', '--help'], input.platform),
+      )}; use its client file with ${inlineCommand(
+        shellCommand(['--name', target.name, '--replace'], input.platform),
+      )}`;
       if (stored === null) {
         reports.push(`"${target.name}", which you registered yourself, has no secret stored on this machine; ${fix}`);
       } else if (stored !== pg.clientSecret) {
@@ -590,7 +612,13 @@ async function planProfile(config: Config, input: PlanInput): Promise<ProfilePla
       const users = mailboxesOn(config, generation.name);
       const move =
         active !== null && users.length > 0
-          ? `; move ${users.join(', ')} onto "${active}" with \`agent-gmail inbox reauth <mailbox> --client ${active}\``
+          ? `; move ${users.join(', ')} onto "${active}" with ${users
+              .map((mailbox) =>
+                inlineCommand(
+                  shellCommand(['agent-gmail', 'inbox', 'reauth', mailbox, '--client', active], input.platform),
+                ),
+              )
+              .join(' and ')}`
           : '';
       reports.push(
         generation.ownership === 'adopted'
@@ -632,7 +660,11 @@ async function planProfile(config: Config, input: PlanInput): Promise<ProfilePla
       throw new CommsError(
         'CONFIG',
         `the profile moves to another Slack workspace, and ${provenance.join(', ')} ${provenance.length === 1 ? 'is' : 'are'} connected through its apps`,
-        { hint: 'Remove them with `agent-slack workspace remove <name>` first, then run the update again.' },
+        {
+          hint: `Remove them with ${provenance
+            .map((name) => inlineCommand(shellCommand(['agent-slack', 'workspace', 'remove', name], input.platform)))
+            .join(' and ')} first, then run the update again.`,
+        },
       );
     }
     slack = { ...(rs ?? {}), ...slackRecordFrom(ps, rs) };
@@ -666,10 +698,19 @@ async function planProfile(config: Config, input: PlanInput): Promise<ProfilePla
           (name) => (own(config.accounts, name) as { profileApp?: unknown } | undefined)?.profileApp === role,
         );
         if (on.length > 0 && was && (!now || now.clientId !== was.clientId)) {
+          const reauth = on
+            .map((name) => inlineCommand(shellCommand(['agent-slack', 'workspace', 'reauth', name], input.platform)))
+            .join(' and ');
+          const mode = on
+            .map((name) => inlineCommand(shellCommand(['agent-slack', 'workspace', 'mode', name], input.platform)))
+            .join(' and ');
+          const remove = on
+            .map((name) => inlineCommand(shellCommand(['agent-slack', 'workspace', 'remove', name], input.platform)))
+            .join(' and ');
           reports.push(
             now
-              ? `${on.join(', ')} ${on.length === 1 ? 'is' : 'are'} on the old ${role} app: \`agent-slack workspace reauth <name>\` signs in through the new one`
-              : `${on.join(', ')} ${on.length === 1 ? 'is' : 'are'} on the ${role} app the profile no longer lists: move with \`agent-slack workspace mode\` to the other app, or remove with \`agent-slack workspace remove\``,
+              ? `${on.join(', ')} ${on.length === 1 ? 'is' : 'are'} on the old ${role} app: ${reauth} ${on.length === 1 ? 'signs' : 'sign'} in through the new one`
+              : `${on.join(', ')} ${on.length === 1 ? 'is' : 'are'} on the ${role} app the profile no longer lists: move with ${mode} to the other app, or remove with ${remove}`,
           );
         }
       }
@@ -845,6 +886,7 @@ function profileChange(
       forOtherAddresses: spec.forOtherAddresses,
       adopt: spec.adopt,
       now,
+      platform: options.platform,
       readSecret: async (ref) => (committed === null ? null : (await core.secrets(committed)).get(ref)),
     });
   };
@@ -1027,7 +1069,7 @@ async function applyProfile(
       reported: plan.reports,
       gmail: plan.gmail,
       store: plan.secret ? store : null,
-      profile: viewOf(await core.config.load(), organisation),
+      profile: viewOf(await core.config.load(), organisation, options.platform),
     };
   };
   if (mode === 'update' && writesNothing(plan)) return done(false);
@@ -1080,8 +1122,12 @@ async function applyProfile(
         secret: profileSecret,
         commit: write,
         landed,
-        howToCheck: `Run \`agentcomms org show ${organisation}\`.`,
-        restoreHint: `run \`agentcomms org update ${organisation}\` once the store can be written to.`,
+        howToCheck: `Run ${inlineCommand(
+          shellCommand(['agentcomms', 'org', 'show', organisation], options.platform),
+        )}.`,
+        restoreHint: `run ${inlineCommand(
+          shellCommand(['agentcomms', 'org', 'update', organisation], options.platform),
+        )} once the store can be written to.`,
       });
     } else {
       try {
@@ -1107,7 +1153,7 @@ async function applyProfile(
 export function orgAddChange(core: Core, request: OrgAddRequest, options: OrgOptions): GatedChange<OrgChangeResult> {
   // Checked before anything is read, so a word that is no store is refused before any approval is prepared.
   const store = storeWord(request.store);
-  const path = profileSourcePath(request.file, options.env, options.cwd);
+  const path = profileSourcePath(request.file, options.env, options.cwd, options.platform);
   return profileChange(core, options, {
     mode: 'add',
     path: () => path,
@@ -1132,13 +1178,16 @@ export function orgUpdateChange(
   const organisation = organisationArgument(request.organisation);
   const store = storeWord(request.store);
   const forOtherAddresses = onOff(request.forOtherAddresses);
-  const given = request.source === undefined ? undefined : profileSourcePath(request.source, options.env, options.cwd);
+  const given =
+    request.source === undefined
+      ? undefined
+      : profileSourcePath(request.source, options.env, options.cwd, options.platform);
   return profileChange(core, options, {
     mode: 'update',
     organisation,
     path: (config) => {
       if (given !== undefined) return given;
-      const record = requireRecord(config, organisation);
+      const record = requireRecord(config, organisation, options.platform);
       if (record.source.kind !== 'file') {
         throw new CommsError('CONFIG', `"${organisation}" was added from a source this release cannot read`, {
           hint: 'Update agent-communications, or give the profile’s file with --source <file>.',
@@ -1166,8 +1215,8 @@ interface RemovalPlan {
  * with its secret. Refused while anything uses one of its clients or its apps, and while a row still carries its mark
  * without matching its generation: left without a record, such a row would be one no command could change.
  */
-function planRemoval(config: Config, organisation: string): RemovalPlan {
-  const record = requireRecord(config, organisation);
+function planRemoval(config: Config, organisation: string, platform: NodeJS.Platform): RemovalPlan {
+  const record = requireRecord(config, organisation, platform);
   const generations = record.gmail?.generations ?? [];
   const states = generations.map((generation) => ({
     generation,
@@ -1180,13 +1229,17 @@ function planRemoval(config: Config, organisation: string): RemovalPlan {
     );
   if (used.length > 0) {
     throw new CommsError('CONFIG', `mailboxes still sign in through ${organisation}'s clients: ${used.join(', ')}`, {
-      hint: 'Move each onto another client with `agent-gmail inbox reauth <mailbox> --client <client>`, or remove it, then remove the profile.',
+      hint: `Move each onto another client; see ${inlineCommand(
+        shellCommand(['agent-gmail', 'inbox', 'reauth', '--help'], platform),
+      )}, or remove it, then remove the profile.`,
     });
   }
   const accounts = accountsOfOrganisation(config, organisation);
   if (accounts.length > 0) {
     throw new CommsError('CONFIG', `accounts are connected through ${organisation}'s apps: ${accounts.join(', ')}`, {
-      hint: 'Remove them with `agent-slack workspace remove <name>` first, then remove the profile.',
+      hint: `Remove them with ${accounts
+        .map((name) => inlineCommand(shellCommand(['agent-slack', 'workspace', 'remove', name], platform)))
+        .join(' and ')} first, then remove the profile.`,
     });
   }
   const mismatched = [
@@ -1202,7 +1255,9 @@ function planRemoval(config: Config, organisation: string): RemovalPlan {
       'CONFIG',
       `${mismatched.map((name) => `"${name}"`).join(', ')} ${mismatched.length === 1 ? 'is' : 'are'} still marked as ${organisation}'s but no longer match ${mismatched.length === 1 ? 'its' : 'their'} client`,
       {
-        hint: `Nothing was removed. Run \`agentcomms org update ${organisation}\` first: it repairs the client or clears the mark, and then the profile can be removed.`,
+        hint: `Nothing was removed. Run ${inlineCommand(
+          shellCommand(['agentcomms', 'org', 'update', organisation], platform),
+        )} first: it repairs the client or clears the mark, and then the profile can be removed.`,
       },
     );
   }
@@ -1242,7 +1297,7 @@ export function orgRemoveChange(
   let planned: { removal: RemovalPlan; inputs: string } | null = null;
   return {
     plan: (config) => {
-      const removal = planRemoval(config, organisation);
+      const removal = planRemoval(config, organisation, options.platform);
       planned = { removal, inputs: inputsOf(config) };
       const { record } = removal;
       return {
@@ -1286,7 +1341,9 @@ export function orgRemoveChange(
               {
                 hint:
                   base.hint ??
-                  'Run `agentcomms doctor` to see what is wrong with the secret store, then run this again.',
+                  `Run ${inlineCommand(
+                    shellCommand(['agentcomms', 'doctor'], options.platform),
+                  )} to see what is wrong with the secret store, then run this again.`,
                 cause: error,
               },
             );
@@ -1329,24 +1386,24 @@ export function orgRemoveChange(
 }
 
 /** Every profile added here, as `org show` shows each. Reads only. */
-export async function orgList(core: Core): Promise<OrganisationView[]> {
+export async function orgList(core: Core, platform: NodeJS.Platform): Promise<OrganisationView[]> {
   const config = await core.config.load();
   return Object.keys(organisationsOf(config))
     .sort()
-    .map((organisation) => viewOf(config, organisation));
+    .map((organisation) => viewOf(config, organisation, platform));
 }
 
 /** One profile: its record, its generations and their mailboxes, its Slack apps, and any drift. Reads only. */
-export async function orgShow(core: Core, organisation: string): Promise<OrganisationView> {
+export async function orgShow(core: Core, organisation: string, platform: NodeJS.Platform): Promise<OrganisationView> {
   const word = organisationArgument(organisation);
   const config = await core.config.load();
-  requireRecord(config, word);
-  return viewOf(config, word);
+  requireRecord(config, word, platform);
+  return viewOf(config, word, platform);
 }
 
 /** A record as it is shown: every string that came from a profile neutralised and on one line. */
-export function viewOf(config: Config, organisation: string): OrganisationView {
-  const record = requireRecord(config, organisation);
+export function viewOf(config: Config, organisation: string, platform: NodeJS.Platform): OrganisationView {
+  const record = requireRecord(config, organisation, platform);
   const active = activeGeneration(record);
   const app = (role: 'read' | 'send'): SlackAppView | null => {
     const value = record.slack?.apps[role];
@@ -1392,7 +1449,7 @@ export function viewOf(config: Config, organisation: string): OrganisationView {
         }
       : null,
     accounts: accountsOfOrganisation(config, organisation),
-    drift: organisationDrift(config, organisation),
+    drift: organisationDrift(config, organisation, platform),
     notes,
   };
 }

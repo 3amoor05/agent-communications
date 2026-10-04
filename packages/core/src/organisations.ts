@@ -4,6 +4,7 @@ import { type FileHandle, open } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { z } from 'zod';
 import { isDangerous } from './chars.ts';
+import { inlineCommand, shellCommand } from './cli-runtime.ts';
 import type {
   AccountConfig,
   ClientConfig,
@@ -227,11 +228,18 @@ const URL_LIKE = /^[A-Za-z][A-Za-z0-9+.-]+:/;
  * kept or shown would leak it, and fetching one is an outbound request the core does not make. The refusal names the
  * scheme and nothing else of it, for the same reason.
  */
-export function profileSourcePath(given: unknown, env: NodeJS.ProcessEnv, cwd: string = process.cwd()): string {
+export function profileSourcePath(
+  given: unknown,
+  env: NodeJS.ProcessEnv,
+  cwd: string | undefined,
+  platform: NodeJS.Platform,
+): string {
   const value = typeof given === 'string' ? given : '';
   if (value.trim() === '') {
     throw new CommsError('USAGE', 'name the profile file', {
-      hint: 'For example: `agentcomms org add ./rgc.agentcomms.json`.',
+      hint: `For example: ${inlineCommand(
+        shellCommand(['agentcomms', 'org', 'add', './rgc.agentcomms.json'], platform),
+      )}.`,
     });
   }
   /*
@@ -267,7 +275,7 @@ export function profileSourcePath(given: unknown, env: NodeJS.ProcessEnv, cwd: s
       },
     );
   }
-  return resolve(cwd, expandHome(value, homeDirectory(env)));
+  return resolve(cwd ?? process.cwd(), expandHome(value, homeDirectory(env)));
 }
 
 /**
@@ -633,11 +641,17 @@ export interface OrganisationDrift {
 }
 
 /** Every drift of one organisation's record from the configuration, in a stable order. */
-export function organisationDrift(config: Config, organisation: string): OrganisationDrift[] {
+export function organisationDrift(
+  config: Config,
+  organisation: string,
+  platform: NodeJS.Platform,
+): OrganisationDrift[] {
   const record = recordOf(config, organisation);
   if (!record) return [];
   const drift: OrganisationDrift[] = [];
-  const update = `Run \`agentcomms org update ${organisation}\` (comms_org_update from a chat).`;
+  const update = `Run ${inlineCommand(
+    shellCommand(['agentcomms', 'org', 'update', organisation], platform),
+  )} (comms_org_update from a chat).`;
   const active = activeGeneration(record);
   for (const generation of record.gmail?.generations ?? []) {
     const state = generationState(config, organisation, generation);
@@ -645,9 +659,18 @@ export function organisationDrift(config: Config, organisation: string): Organis
     const isActive = generation === active;
     const { name } = generation;
     const users = mailboxesOn(config, name);
+    const moves = active
+      ? users.map((mailbox) =>
+          inlineCommand(shellCommand(['agent-gmail', 'inbox', 'reauth', mailbox, '--client', active.name], platform)),
+        )
+      : [];
     const move =
       active && !isActive
-        ? ` Move ${users.length > 0 ? users.join(', ') : 'any mailbox on it'} onto "${active.name}" with \`agent-gmail inbox reauth <mailbox> --client ${active.name}\`.`
+        ? ` Move ${users.length > 0 ? users.join(', ') : 'any mailbox on it'} onto "${active.name}" with ${
+            moves.length > 0
+              ? moves.join(' and ')
+              : inlineCommand(shellCommand(['agent-gmail', 'inbox', 'reauth', '--help'], platform))
+          }.`
         : '';
     if (generation.ownership === 'adopted') {
       drift.push({

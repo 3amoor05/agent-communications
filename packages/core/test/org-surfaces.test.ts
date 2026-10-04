@@ -3,9 +3,10 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
+import { inlineCommand, shellCommand } from '../src/cli-runtime.ts';
 import { type Core, openCore } from '../src/core.ts';
 import { createCoreMcpServer } from '../src/mcp/server.ts';
 import { tempDir } from './helpers/temp.ts';
@@ -70,14 +71,33 @@ function cli(m: Machine, args: string[], cwd?: string) {
   return { ...result, json };
 }
 
+/** Runs the source CLI through its exported entry so this host can assert another platform's command rendering. */
+function cliForPlatform(m: Machine, args: string[], platform: NodeJS.Platform, cwd?: string) {
+  const source = pathToFileURL(CLI).href;
+  const script = `const { main } = await import(${JSON.stringify(source)}); process.exitCode = await main(${JSON.stringify(args)}, process.env, ${JSON.stringify(platform)});`;
+  const result = spawnSync(process.execPath, [...NODE_FLAGS, '--input-type=module', '--eval', script], {
+    encoding: 'utf8',
+    env: m.env,
+    cwd,
+  });
+  assert.ok(!`${result.stdout}${result.stderr}`.includes(SECRET), `the secret was printed by ${args.join(' ')}`);
+  const json = () => JSON.parse(result.stdout.trim().split('\n')[0] ?? '');
+  return { ...result, json };
+}
+
 interface ToolResult {
   isError?: boolean;
   structuredContent?: Record<string, unknown>;
   content?: { text?: string }[];
 }
 
-async function connect(m: Machine) {
-  const { server } = await createCoreMcpServer({ core: m.core, env: m.env, keyring: null });
+async function connect(m: Machine, platform?: NodeJS.Platform) {
+  const { server } = await createCoreMcpServer({
+    core: m.core,
+    env: m.env,
+    keyring: null,
+    ...(platform === undefined ? {} : { platform }),
+  });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: 'test', version: '0' });
   await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
@@ -211,6 +231,50 @@ test('at a terminal: the same change, the same view, and --for-other-addresses r
   assert.match(plain.stdout, /acme — Acme Test Org/);
 });
 
+test('the org CLI quotes approval reruns for darwin and win32, with a space and $ in the profile path', () => {
+  for (const platform of ['darwin', 'win32'] as const) {
+    const m = machine();
+    const path = join(m.home, 'profile $ one.agentcomms.json');
+    writeFileSync(path, readFileSync(m.profile, 'utf8'));
+    const asked = cliForPlatform(m, ['org', 'add', path, '--json'], platform);
+    assert.equal(asked.status, 10, `${platform}: ${asked.stdout}${asked.stderr}`);
+    const error = asked.json().error;
+    const expected = inlineCommand(
+      shellCommand(['agentcomms', 'org', 'add', path, '--approval', error.details.approvalId], platform),
+    );
+    assert.match(error.hint, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), platform);
+
+    const wrong = cliForPlatform(m, ['org', 'list', '--source', path, '--json'], platform);
+    assert.equal(wrong.status, 64, `${platform}: ${wrong.stdout}${wrong.stderr}`);
+    assert.equal(
+      wrong.json().error.message,
+      `${inlineCommand(shellCommand(['agentcomms', 'org', 'list'], platform))} takes no --source`,
+      platform,
+    );
+  }
+});
+
+test('the org MCP surface threads its selected platform into operation hints', async () => {
+  for (const platform of ['darwin', 'win32'] as const) {
+    const m = machine();
+    const document = JSON.parse(readFileSync(m.profile, 'utf8'));
+    document.organisation = '7';
+    writeFileSync(m.profile, JSON.stringify(document));
+    const { ok, call, close } = await connect(m, platform);
+    try {
+      const first = await ok('comms_org_add', { file: m.profile });
+      await ok('comms_org_add', { file: m.profile, approvalId: first.approvalId });
+      const refused = await call('comms_org_add', { file: m.profile });
+      assert.equal(refused.isError, true, platform);
+      const error = (refused.structuredContent as { error: { hint: string } }).error;
+      const update = inlineCommand(shellCommand(['agentcomms', 'org', 'update', '7'], platform));
+      assert.match(error.hint, new RegExp(update.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), platform);
+    } finally {
+      await close();
+    }
+  }
+});
+
 test('nothing on the machine holds the secret but the secret store: config, approvals, audit, state', async () => {
   const m = machine();
   const asked = cli(m, ['org', 'add', m.profile, '--json']);
@@ -311,7 +375,9 @@ test('the command to run again names a plain path as it is, and a path that cann
   assert.match(plain.json().error.hint, /acme\.agentcomms\.json --approval ap_/);
   const masked = cli(m, ['org', 'add', odd, '--json']);
   assertNothingRaw(`${masked.stdout}${masked.stderr}`, 'org add');
-  assert.match(masked.json().error.hint, /agentcomms org add '<the same file>' --approval ap_/);
+  assert.doesNotMatch(masked.json().error.hint, /<the same file>|agentcomms org add/);
+  assert.match(masked.json().error.hint, /run the same command again with `--approval ap_/);
+  assert.match(masked.json().error.hint, /file path is not repeated here/);
 });
 
 test('a project id a client file wrote is shown neutralised when a repair names it, from both surfaces', async () => {

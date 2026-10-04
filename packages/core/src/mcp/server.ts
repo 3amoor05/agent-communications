@@ -396,6 +396,7 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
    */
   const orgOptions = {
     env,
+    platform,
     surface: 'mcp' as const,
     ...(options.keyring !== undefined ? { keyring: options.keyring } : {}),
   };
@@ -419,7 +420,7 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
       inputSchema: {},
       annotations: readsLocal,
     },
-    async () => read(async () => ({ organisations: await orgList(core) })),
+    async () => read(async () => ({ organisations: await orgList(core, platform) })),
   );
 
   server.registerTool(
@@ -433,7 +434,7 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
       },
       annotations: readsLocal,
     },
-    async (args) => read(() => orgShow(core, args.organisation)),
+    async (args) => read(() => orgShow(core, args.organisation, platform)),
   );
 
   server.registerTool(
