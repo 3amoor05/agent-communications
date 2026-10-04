@@ -12,6 +12,7 @@ import { run } from '../src/cli/program.ts';
 import { SlackContext } from '../src/context.ts';
 import { createSlackMcpServer } from '../src/mcp/server.ts';
 import { completeSignIn, finishSignIn, runSignInListener, startSignIn } from '../src/operations/signin.ts';
+import { profileTargetFor } from '../src/operations/workspaces.ts';
 import { slackOk } from './support/harness.ts';
 import { fetchListener, LISTENER_COMMAND, stopListeners } from './support/listener.ts';
 import { newOrganisationHarness } from './support/organisation.ts';
@@ -154,6 +155,33 @@ for (const finish of ['refusal', 'success']) {
     }
   });
 }
+
+test('bounded control-token display remains canonical through patch, resave and live-profile finish', async () => {
+  const f = await fixture();
+  const workspaceName = `xxxxx${'<s>'.repeat(22)} tail`;
+  await f.harness.updateProfile((record) => {
+    if (record.slack) record.slack.workspaceName = workspaceName;
+  });
+  const flow = { ...f.flow, profile: resolveProfileSlackTarget(await f.context.config(), 'rgc', 'read') };
+  await f.context.flows.save(flow);
+  const first = await f.context.flows.get(flow.flowId);
+  assert.ok(first.profile);
+  assert.ok(first.profile.workspaceName.length <= 512);
+  assert.doesNotMatch(first.profile.workspaceName, /<s>|&(?:amp|lt|gt)?$/);
+  const live = await f.context.config();
+  assert.doesNotThrow(() => profileTargetFor(first, live, f.context.platform), 'an unchanged profile was invalidated');
+  await f.context.flows.patch(flow.flowId, { listenerPid: process.pid });
+  const patched = await f.context.flows.get(flow.flowId);
+  assert.deepEqual(patched.profile, first.profile, 'patch changed the bounded display');
+  await f.context.flows.save(patched);
+  const saved = await f.context.flows.get(flow.flowId);
+  assert.deepEqual(saved.profile, first.profile, 'resave changed the bounded display');
+  assert.equal(profileTargetFor(saved, await f.context.config(), f.context.platform).workspaceName, workspaceName);
+  f.harness.reply = () => slackOk({ team: { id: 'TRGC0001', name: 'RGC' }, app_id: 'A0READ' });
+  await f.context.flows.recordOutcome(flow.flowId, { code: 'fake-code' });
+  const view = await finishSignIn(f.context, { flowId: flow.flowId, waitSeconds: 0 });
+  assert.equal(view.organisation, 'rgc');
+});
 
 for (const missing of [false, true]) {
   for (const surface of ['thrown', 'cli-json', 'cli-text', 'mcp']) {

@@ -158,7 +158,8 @@ export function safeSlackFailureText(value: unknown): string {
     if (canonical.length + escaped.length > 512) break;
     canonical += escaped;
   }
-  return canonical;
+  // Bounding can end on whitespace that the next normalisation would otherwise remove.
+  return canonical.trimEnd();
 }
 
 /** Decode the canonical representation for an untrusted envelope or escaped browser display. */
