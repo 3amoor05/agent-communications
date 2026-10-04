@@ -465,18 +465,29 @@ test('reauth: a write that did not happen is reported, not mistaken for one that
   assert.equal(await secrets.get(`gmail:refresh:${id}`), before);
 });
 
-test('reauth: when the credentials lock cannot be had, it says nothing was saved — and nothing was', async () => {
-  const harness = await newHarness({ accounts: [{ sub: 'sub-1', email: 'jo@example.test' }] });
-  const context = await withClient(harness);
-  const id = await connectBySignIn(harness, context, 'work', 'read');
-  const reauth = await startSignIn(context, { mode: 'reauth', alias: 'work', tier: 'organize', detached: false });
-  const seen = recordSecrets(await harness.core.secrets('file'));
-  await withFileLock(credentialsLockPath(harness.configDir), async () => {
-    await fetch(harness.google.consent(reauth.authUrl, { sub: 'sub-1' }));
-    await assert.rejects(reauth.listener?.result ?? Promise.resolve(), is('TRANSIENT', /nothing was saved/));
-  });
-  assert.deepEqual(seen.set, [], `no token written for ${id}`);
-  assert.equal((await inboxList(context))[0]?.tier, 'read');
+test('reauth: a credentials-lock timeout revokes the unstored grant best effort', async (t) => {
+  for (const revokeFails of [false, true]) {
+    await t.test(revokeFails ? 'a revoke failure does not hide the timeout' : 'the grant is revoked', async () => {
+      const harness = await newHarness({ accounts: [{ sub: 'sub-1', email: 'jo@example.test' }] });
+      const context = await withClient(harness);
+      const id = await connectBySignIn(harness, context, 'work', 'read');
+      const reauth = await startSignIn(context, { mode: 'reauth', alias: 'work', tier: 'organize', detached: false });
+      const seen = recordSecrets(await harness.core.secrets('file'));
+      if (revokeFails) harness.google.failNext('/revoke', 1, 503);
+      const revokesBefore = harness.google.requests.filter((request) => request.path === '/revoke').length;
+      await withFileLock(credentialsLockPath(harness.configDir), async () => {
+        await fetch(harness.google.consent(reauth.authUrl, { sub: 'sub-1' }));
+        await assert.rejects(reauth.listener?.result ?? Promise.resolve(), is('TRANSIENT', /nothing was saved/));
+      });
+      assert.deepEqual(seen.set, [], `no token written for ${id}`);
+      assert.equal((await inboxList(context))[0]?.tier, 'read');
+      assert.equal(
+        harness.google.requests.filter((request) => request.path === '/revoke').length,
+        revokesBefore + 1,
+        'the unstored reauth grant was not revoked',
+      );
+    });
+  }
 });
 
 test('add: a secret store switched away while it finished is caught, and the token taken back', async () => {

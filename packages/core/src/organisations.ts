@@ -424,12 +424,17 @@ export function generationState(
   if (!row) return 'missing';
   if (generation.ownership === 'owned') {
     // Only the mark missing: the provider and the canonical secret reference are what `client add --replace` writes,
-    // and a row without them is not one marking again would make the generation's.
+    // and a row without them is not one marking again would make the generation's. A replacement from an older
+    // release may omit the project id, so absence still counts as that repairable shape. An active generation is
+    // repairable from the profile too, so its project can be restored. A *different* project id on an inactive row
+    // does not count: D8(e) deliberately releases that row, and the next update must not claim it again.
+    const active = organisationsOf(config)[organisation]?.gmail?.active === generation.name;
     if (
       row.organisation === undefined &&
       row.clientId === generation.clientId &&
       row.provider === 'gmail' &&
-      row.secretRef === clientSecretRef(generation.name)
+      row.secretRef === clientSecretRef(generation.name) &&
+      (active || row.projectId === undefined || row.projectId === generation.projectId)
     ) {
       return 'unmarked';
     }

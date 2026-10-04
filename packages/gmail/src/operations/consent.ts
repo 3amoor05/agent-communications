@@ -188,32 +188,53 @@ async function addInbox(
 
   // The token first: a registry row pointing at a secret that is not there would look connected and fail on use.
   const secrets = await context.core.secrets();
+  let refused = false;
+  let entered = false;
   try {
-    // Inside the boundary that takes it back: a keychain write can finish after it reported a timeout.
-    await secrets.set(inbox.secretRef, tokens.refreshToken);
-    await context.core.config.update((current) => {
-      /*
-       * Checked again under the lock, against the file as it is now.
-       *
-       * Up to ten minutes pass between starting a sign-in and finishing it, and the checks above ran on a snapshot.
-       * In between, the name can be taken, the same account connected under another name, or every name migrated
-       * to the organisation/platform form — in which case a plain name that was fine when the flow started is not
-       * one any more, and the flow is refused here rather than writing a name the file no longer allows.
-       */
-      requireNewInboxName(current, flow.alias, undefined, context.platform);
-      requireSameClient(current, flow, clientId, context.platform);
-      // The backend the token went into must still be the one in force: `secrets migrate` switches backends, and a
-      // row written after the switch would name a credential that only exists in the store nothing reads any more.
-      if (secretsStoreOf(current) !== secrets.kind) {
-        throw new CommsError('TRANSIENT', 'the secret store was changed while this sign-in was completing', {
-          hint: 'Nothing was saved. Sign in again.',
-        });
-      }
-      const raced = duplicateInbox(current, { client: flow.clientName, sub: identity.sub, email: identity.email });
-      if (raced) throw new CommsError('CONFIG', `${identity.email} was connected as "${raced}" while this finished`);
-      return { ...current, inboxes: { ...current.inboxes, [flow.alias]: inbox } };
+    await withCredentialsLock(context.core.paths.configDir, async () => {
+      entered = true;
+      // Inside the boundary that takes it back: a keychain write can finish after it reported a timeout.
+      await secrets.set(inbox.secretRef, tokens.refreshToken);
+      await context.core.config.update((current) => {
+        /*
+         * Checked again under the credentials and config locks, against the file as it is now.
+         *
+         * Up to ten minutes pass between starting a sign-in and finishing it, and the checks above ran on a snapshot.
+         * In between, the name can be taken, the same account connected under another name, or an organisation route
+         * can change. A deliberate refusal is marked so the staged grant can be withdrawn and revoked below.
+         */
+        refused = true;
+        requireNewInboxName(current, flow.alias, undefined, context.platform);
+        requireSameClient(current, flow, clientId, context.platform, identity.email);
+        // The backend the token went into must still be the one in force: `secrets migrate` switches backends, and a
+        // row written after the switch would name a credential that only exists in the store nothing reads any more.
+        if (secretsStoreOf(current) !== secrets.kind) {
+          throw new CommsError('TRANSIENT', 'the secret store was changed while this sign-in was completing', {
+            hint: 'Nothing was saved. Sign in again.',
+          });
+        }
+        const raced = duplicateInbox(current, { client: flow.clientName, sub: identity.sub, email: identity.email });
+        if (raced) throw new CommsError('CONFIG', `${identity.email} was connected as "${raced}" while this finished`);
+        refused = false;
+        return { ...current, inboxes: { ...current.inboxes, [flow.alias]: inbox } };
+      });
     });
   } catch (error) {
+    if (!entered && error instanceof CommsError && error.code === 'LOCK_TIMEOUT') {
+      // Consent has already issued a live grant, but the credentials lock stopped us before anything could name it.
+      // Revoke it just as we do for a routing mismatch; cleanup is deliberately best effort so the lock failure is
+      // still the error the caller can act on.
+      await revokeGrantBestEffort(context, tokens.refreshToken);
+      throw new CommsError('TRANSIENT', 'another operation on stored credentials is running, so nothing was saved', {
+        hint: 'Start the sign-in again in a moment.',
+        cause: error,
+      });
+    }
+    if (refused) {
+      const withdrawn = await withdrawStaged(secrets, inbox.secretRef, error);
+      await revokeGrantBestEffort(context, tokens.refreshToken);
+      throw withdrawn;
+    }
     /*
      * Look before undoing: a rejected write may have committed (see `writeOutcome`). This used to delete the token on
      * any error, which turned a sign-in whose lock release failed into a connected mailbox with no credential — and
@@ -223,7 +244,11 @@ async function addInbox(
       async () => findById(await context.config(), 'inbox', id)?.inbox.secretRef === inbox.secretRef,
     );
     if (landed === 'unknown') throw keepAndReport(error, inbox.secretRef, 'Run `agent-gmail inbox list`.');
-    if (landed === 'absent') throw await withdrawStaged(secrets, inbox.secretRef, error);
+    if (landed === 'absent') {
+      const withdrawn = await withdrawStaged(secrets, inbox.secretRef, error);
+      await revokeGrantBestEffort(context, tokens.refreshToken);
+      throw withdrawn;
+    }
     // 'present': the write is in and only the lock's cleanup failed. The mailbox is connected.
   }
   await context.core.states.update(id, {
@@ -288,6 +313,7 @@ async function reauthorise(
     // Only a lock that could not be taken means nothing was saved. A timeout from inside — the config lock, after
     // the token was written — is reported as itself.
     if (!entered && error instanceof CommsError && error.code === 'LOCK_TIMEOUT') {
+      await revokeGrantBestEffort(context, tokens.refreshToken);
       throw new CommsError('TRANSIENT', 'another operation on stored credentials is running, so nothing was saved', {
         hint: `Run ${inlineCommand(shellCommand(['agent-gmail', 'inbox', 'reauth', flow.alias], context.platform))} again in a moment.`,
         cause: error,
@@ -413,7 +439,7 @@ async function writeReauth(
       const now = findById(current, 'inbox', inboxId);
       refused = true;
       if (!now) throw inboxGone();
-      requireSameClient(current, flow, clientId, context.platform);
+      requireSameClient(current, flow, clientId, context.platform, identity.email);
       /*
        * And no other mailbox on this client is the same account.
        *
@@ -439,7 +465,11 @@ async function writeReauth(
     });
   } catch (error) {
     // A check inside the write refused it: nothing was written, whatever the row and the store now look like.
-    if (refused) throw await restorePrevious(secrets, existing.inbox.secretRef, previous, error);
+    if (refused) {
+      const restored = await restorePrevious(secrets, existing.inbox.secretRef, previous, error);
+      await revokeGrantBestEffort(context, tokens.refreshToken);
+      throw restored;
+    }
     /*
      * The row existed, under this lock, when the token was written — and nothing that holds the lock can have removed
      * it since. So normally the token stays referenced whatever the write did. The exception is a release that does
@@ -535,6 +565,7 @@ function requireSameClient(
   flow: OAuthFlow,
   exchangedClientId?: string,
   platform: NodeJS.Platform = process.platform,
+  actualEmail?: string,
 ): string {
   const name = flow.clientName;
   const held = config.clients[name];
@@ -562,6 +593,30 @@ function requireSameClient(
         },
       );
     }
+    if (expectedGeneration.forOtherAddresses && record?.forOtherAddresses !== true) {
+      throw new CommsError(
+        'CONFIG',
+        `the organisation ${expectedGeneration.organisation} no longer offers its Google client for other addresses; nothing was saved`,
+        {
+          hint: `Choose another client, or run ${inlineCommand(shellCommand(['agentcomms', 'org', 'update', expectedGeneration.organisation, '--for-other-addresses', 'on'], platform))} and start the sign-in again.`,
+        },
+      );
+    }
+    if (actualEmail !== undefined && !generationServes(generation, actualEmail)) {
+      throw new CommsError(
+        'CONFIG',
+        `the organisation ${expectedGeneration.organisation} says its Google client "${flow.clientName}" does not serve ${actualEmail}; nothing was saved`,
+        {
+          hint: `Start the sign-in again through a client that serves this address; ${inlineCommand(shellCommand(['agent-gmail', 'inbox', 'add', '--help'], platform))} describes the --client option.`,
+          details: {
+            alias: flow.alias,
+            client: flow.clientName,
+            organisation: expectedGeneration.organisation,
+            actual: actualEmail,
+          },
+        },
+      );
+    }
   }
   if (
     held &&
@@ -575,6 +630,14 @@ function requireSameClient(
       ? `Run \`agent-gmail inbox reauth\` for this mailbox again, through the client it should use.`
       : `Register it again with \`agent-gmail client add\`, then run the sign-in again.`,
   });
+}
+
+async function revokeGrantBestEffort(context: GmailContext, refreshToken: string): Promise<void> {
+  try {
+    await revokeToken(context.endpoints, refreshToken);
+  } catch {
+    // Best effort by design: a revoke failure must never turn a refused route into a stored mailbox (§D6).
+  }
 }
 
 /** Whether two rows are the same, field for field, whatever order their keys were written in. */

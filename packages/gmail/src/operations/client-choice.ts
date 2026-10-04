@@ -3,12 +3,14 @@ import {
   type ClientConfig,
   CommsError,
   type Config,
+  generationState,
   inlineCommand,
   type OrganisationGeneration,
   organisationsOf,
   parseName,
   requireLiveOrganisationGeneration,
   shellCommand,
+  shownText,
 } from '@agentcomms/core';
 
 /** The client decision recorded in a new-inbox consent flow (design 2026-10-02 §D6). */
@@ -20,6 +22,8 @@ export interface GmailClientChoice {
   generation?: OrganisationGeneration | undefined;
   /** Whether this route depended on the generation still being the organisation's active one. */
   activeGeneration?: boolean | undefined;
+  /** Whether this route depended on the organisation still offering its client for other addresses. */
+  forOtherAddresses?: boolean | undefined;
 }
 
 export interface GmailClientChoiceOptions {
@@ -32,31 +36,39 @@ export interface GmailClientChoiceOptions {
   platform?: NodeJS.Platform | undefined;
 }
 
-function generationNamed(
+function generationForLiveRow(
   config: Config,
   name: string,
+  row: ClientConfig | undefined = config.clients[name],
 ): { organisation: string; label: string; generation: OrganisationGeneration } | undefined {
+  if (!row) return undefined;
   for (const [organisation, record] of Object.entries(organisationsOf(config)).sort(([left], [right]) =>
     left.localeCompare(right),
   )) {
     const generation = record.gmail?.generations.find((candidate) => candidate.name === name);
-    if (generation) return { organisation, label: record.label, generation };
+    if (!generation || generation.clientId !== row.clientId) continue;
+    // A canonical owned row whose marker disappeared is unreconciled drift, whether the generation is active or
+    // retained. Keep it associated long enough for the live-generation validator to refuse it with `org update`;
+    // otherwise it silently becomes an ordinary client and bypasses `serves` and `forOtherAddresses`. Rows D8(c)/(e)
+    // deliberately unmarked during reconciliation are `name-reused`/`altered`, not `unmarked`, and remain ordinary.
+    const ownedWithoutMarker =
+      generation.ownership === 'owned' && generationState(config, organisation, generation) === 'unmarked';
+    if (generation.ownership === 'owned' && row.organisation !== organisation && !ownedWithoutMarker) continue;
+    if (generation.ownership === 'adopted' && row.organisation && row.organisation !== organisation) continue;
+    return { organisation, label: record.label, generation };
   }
   return undefined;
 }
 
 /** The organisation whose owned or adopted generation names this live client row, if there is one. */
 export function organisationForClient(config: Config, name: string): string | undefined {
-  const found = generationNamed(config, name);
   const row = config.clients[name];
-  return found && row?.clientId === found.generation.clientId ? found.organisation : undefined;
+  return generationForLiveRow(config, name, row)?.organisation;
 }
 
 function isAssociated(config: Config, name: string, row: ClientConfig): boolean {
   if (typeof row.organisation === 'string') return true;
-  return Object.values(organisationsOf(config)).some((record) =>
-    record.gmail?.generations.some((generation) => generation.name === name),
-  );
+  return generationForLiveRow(config, name, row) !== undefined;
 }
 
 /** Whether an address is one this generation says its Google client serves. */
@@ -92,6 +104,7 @@ function organisationChoice(
   generation: OrganisationGeneration,
   email: string | undefined,
   active: boolean,
+  forOtherAddresses: boolean,
   platform: NodeJS.Platform,
 ): GmailClientChoice {
   const row = requireLiveOrganisationGeneration(config, organisation, generation, platform);
@@ -100,9 +113,10 @@ function organisationChoice(
     name: generation.name,
     clientId: row.clientId,
     organisation,
-    organisationLabel: label,
+    organisationLabel: shownText(label, 64),
     generation,
     activeGeneration: active,
+    forOtherAddresses,
   };
 }
 
@@ -113,7 +127,8 @@ function organisationChoice(
 export function chooseClientForNewInbox(config: Config, options: GmailClientChoiceOptions): GmailClientChoice | null {
   const platform = options.platform ?? process.platform;
   if (options.client !== undefined) {
-    const managed = generationNamed(config, options.client);
+    const row = config.clients[options.client];
+    const managed = generationForLiveRow(config, options.client, row);
     if (managed) {
       return organisationChoice(
         config,
@@ -122,10 +137,10 @@ export function chooseClientForNewInbox(config: Config, options: GmailClientChoi
         managed.generation,
         options.email,
         false,
+        false,
         platform,
       );
     }
-    const row = config.clients[options.client];
     if (!row) {
       throw new CommsError('CONFIG', `no OAuth client called "${options.client}" is registered`, {
         hint: `Register one as described by ${inlineCommand(shellCommand(['agent-gmail', 'client', 'add', '--help'], platform))}.`,
@@ -135,6 +150,15 @@ export function chooseClientForNewInbox(config: Config, options: GmailClientChoi
       throw new CommsError('CONFIG', `"${options.client}" is not a Google OAuth client`, {
         hint: `Choose a client listed by ${inlineCommand(shellCommand(['agent-gmail', 'client', 'list'], platform))}.`,
       });
+    }
+    if (row.organisation) {
+      throw new CommsError(
+        'CONFIG',
+        `the OAuth client "${options.client}" is marked for organisation ${row.organisation}, but no matching live generation claims it`,
+        {
+          hint: `Run ${inlineCommand(shellCommand(['agentcomms', 'org', 'update', row.organisation], platform))} (or comms_org_update from a chat) before signing in through it.`,
+        },
+      );
     }
     return {
       name: options.client,
@@ -147,7 +171,7 @@ export function chooseClientForNewInbox(config: Config, options: GmailClientChoi
     const record = organisationsOf(config)[parsed.org];
     const active = activeGeneration(record);
     if (record && active)
-      return organisationChoice(config, parsed.org, record.label, active, options.email, true, platform);
+      return organisationChoice(config, parsed.org, record.label, active, options.email, true, false, platform);
   }
 
   const optedIn = Object.entries(organisationsOf(config))
@@ -179,6 +203,7 @@ export function chooseClientForNewInbox(config: Config, options: GmailClientChoi
       offered.record.label,
       offered.generation,
       options.email,
+      true,
       true,
       platform,
     );

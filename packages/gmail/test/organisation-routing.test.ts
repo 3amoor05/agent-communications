@@ -11,8 +11,8 @@ import {
   type OrganisationRecord,
   openCore,
   shellCommand,
+  withCredentialsLock,
 } from '@agentcomms/core';
-import { newPkce, newState } from '../src/auth/oauth.ts';
 import { SCOPES } from '../src/auth/scopes.ts';
 import { GmailContext } from '../src/context.ts';
 import { chooseClientForNewInbox } from '../src/operations/client-choice.ts';
@@ -24,7 +24,6 @@ import { TEST_CLIENT_ID, TEST_CLIENT_SECRET, tempDir } from './support/harness.t
 const CLIENT_ID = '123456789012-acme.apps.googleusercontent.com';
 const OTHER_ID = '234567890123-personal.apps.googleusercontent.com';
 const WHEN = '2026-10-02T12:00:00.000Z';
-const REDIRECT_URI = 'http://127.0.0.1:51234/';
 const NOOP_LISTENER = {
   command: process.execPath,
   args: ['-e', 'process.send?.({type:"ready"}); setTimeout(() => {}, 1000)'],
@@ -70,6 +69,7 @@ function routingConfig(
             provider: 'gmail',
             clientId: item.clientId,
             secretRef: clientSecretRef(item.name),
+            ...(item.projectId ? { projectId: item.projectId } : {}),
             addedAt: item.addedAt,
             ...(item.ownership === 'owned' ? { organisation: 'acme' } : {}),
           },
@@ -143,39 +143,16 @@ async function offlineProfileClient(
 
 async function routedConsent(harness: OfflineHarness, options: { email?: string; alias?: string } = {}) {
   const { context } = harness;
-  const config = await context.config();
   const alias = options.alias ?? 'acme/gmail';
-  const choice = chooseClientForNewInbox(config, { alias, email: options.email });
-  if (!choice) throw new Error('the fixture has a routed client');
-  const pkce = newPkce();
-  const state = newState();
-  const scopes = [SCOPES.openid, SCOPES.email, SCOPES.gmailModify];
-  const flow = await context.flows.create({
+  const started = await startSignIn(context, {
     mode: 'add',
     alias,
-    clientName: choice.name,
-    tier: 'organize',
+    email: options.email,
     contacts: false,
-    scopes,
-    state,
-    codeVerifier: pkce.verifier,
-    redirectUri: REDIRECT_URI,
-    port: 51234,
-    expect: {
-      email: options.email,
-      clientId: choice.clientId,
-      ...(choice.organisation && choice.generation
-        ? {
-            generation: {
-              organisation: choice.organisation,
-              name: choice.generation.name,
-              active: choice.activeGeneration === true,
-            },
-          }
-        : {}),
-    },
+    listenerCommand: NOOP_LISTENER,
   });
-  return { choice, code: 'offline-code', flow };
+  const flow = await context.flows.get(started.flowId);
+  return { code: 'offline-code', flow };
 }
 
 function offlineGoogle(harness: OfflineHarness): typeof fetch {
@@ -230,6 +207,122 @@ test('§D6 row 1: an explicit client must be a Gmail client', () => {
     () => chooseClientForNewInbox(config, { alias: 'personal/gmail', client: 'slack' }),
     (error: unknown) => error instanceof CommsError && error.code === 'CONFIG' && /Google/.test(error.message),
   );
+});
+
+test('an explicit client marked for an organisation must still be one of its live generations', () => {
+  const config = routingConfig({ ordinary: true });
+  config.clients.stray = {
+    provider: 'gmail',
+    clientId: '345678901234-stray.apps.googleusercontent.com',
+    secretRef: clientSecretRef('stray'),
+    organisation: 'acme',
+    addedAt: WHEN,
+  };
+  assert.throws(
+    () => chooseClientForNewInbox(config, { alias: 'personal/gmail', client: 'stray' }),
+    (error: unknown) =>
+      error instanceof CommsError && error.code === 'CONFIG' && /org update acme/.test(error.hint ?? ''),
+  );
+});
+
+test('an active owned generation whose marker disappeared is refused, never borrowed as an ordinary client', () => {
+  const config = routingConfig();
+  const row = config.clients['acme-1'];
+  if (!row) throw new Error('the fixture has an acme-1 client');
+  config.clients['acme-1'] = { ...row, organisation: undefined };
+
+  assert.throws(
+    () => chooseClientForNewInbox(config, { alias: 'personal/gmail', client: 'acme-1' }),
+    (error: unknown) => error instanceof CommsError && /org update acme/.test(error.hint ?? ''),
+  );
+  assert.throws(
+    () => chooseClientForNewInbox(config, { alias: 'personal/gmail' }),
+    (error: unknown) => error instanceof CommsError && /no Google client is available/.test(error.message),
+  );
+});
+
+test('an inactive canonical owned generation whose marker disappeared is refused until reconciliation', () => {
+  const retained = generation();
+  const active = generation({ name: 'acme-2', clientId: OTHER_ID });
+  const config = routingConfig({ generations: [retained, active] });
+  const row = config.clients['acme-1'];
+  if (!row) throw new Error('the fixture has an acme-1 client');
+  config.clients['acme-1'] = { ...row, organisation: undefined };
+
+  assert.throws(
+    () => chooseClientForNewInbox(config, { alias: 'personal/gmail', client: 'acme-1' }),
+    (error: unknown) => error instanceof CommsError && /org update acme/.test(error.hint ?? ''),
+  );
+  assert.throws(
+    () => chooseClientForNewInbox(config, { alias: 'personal/gmail' }),
+    (error: unknown) => error instanceof CommsError && /no Google client is available/.test(error.message),
+  );
+});
+
+test('a reconciled historical name with another id and no marker is an ordinary client again', () => {
+  const retained = generation();
+  const active = generation({ name: 'acme-2', clientId: OTHER_ID });
+  const config = routingConfig({ generations: [retained, active] });
+  const row = config.clients['acme-1'];
+  if (!row) throw new Error('the fixture has an acme-1 client');
+  config.clients['acme-1'] = { ...row, clientId: OTHER_ID, organisation: undefined };
+
+  const explicit = chooseClientForNewInbox(config, { alias: 'personal/gmail', client: 'acme-1' });
+  assert.deepEqual(explicit, { name: 'acme-1', clientId: OTHER_ID });
+  const fallback = chooseClientForNewInbox(config, { alias: 'personal/gmail' });
+  assert.deepEqual(fallback, { name: 'acme-1', clientId: OTHER_ID });
+});
+
+test('an unmarked altered owned row with the historical id is an ordinary client again', () => {
+  const retained = generation();
+  const active = generation({ name: 'acme-2', clientId: OTHER_ID });
+  const config = routingConfig({ generations: [retained, active] });
+  const row = config.clients['acme-1'];
+  if (!row) throw new Error('the fixture has an acme-1 client');
+  config.clients['acme-1'] = { ...row, secretRef: 'oauth-client/personal', organisation: undefined };
+
+  assert.deepEqual(chooseClientForNewInbox(config, { alias: 'personal/gmail', client: 'acme-1' }), {
+    name: 'acme-1',
+    clientId: CLIENT_ID,
+  });
+  assert.deepEqual(chooseClientForNewInbox(config, { alias: 'personal/gmail' }), {
+    name: 'acme-1',
+    clientId: CLIENT_ID,
+  });
+});
+
+test('an unmarked historical row with another project id stays an ordinary client after D8(e)', () => {
+  const retained = generation({ projectId: 'acme-agent-comms' });
+  const active = generation({ name: 'acme-2', clientId: OTHER_ID });
+  const config = routingConfig({ generations: [retained, active] });
+  const row = config.clients['acme-1'];
+  if (!row) throw new Error('the fixture has an acme-1 client');
+  config.clients['acme-1'] = { ...row, projectId: 'personal-agent-comms', organisation: undefined };
+
+  assert.deepEqual(chooseClientForNewInbox(config, { alias: 'personal/gmail', client: 'acme-1' }), {
+    name: 'acme-1',
+    clientId: CLIENT_ID,
+  });
+  assert.deepEqual(chooseClientForNewInbox(config, { alias: 'personal/gmail' }), {
+    name: 'acme-1',
+    clientId: CLIENT_ID,
+  });
+});
+
+test('an adopted historical name follows the live row client id before it stays associated', () => {
+  const config = routingConfig({ generations: [generation({ ownership: 'adopted' })] });
+  const row = config.clients['acme-1'];
+  if (!row) throw new Error('the fixture has an acme-1 client');
+  config.clients['acme-1'] = { ...row, clientId: OTHER_ID };
+
+  assert.deepEqual(chooseClientForNewInbox(config, { alias: 'personal/gmail', client: 'acme-1' }), {
+    name: 'acme-1',
+    clientId: OTHER_ID,
+  });
+  assert.deepEqual(chooseClientForNewInbox(config, { alias: 'personal/gmail' }), {
+    name: 'acme-1',
+    clientId: OTHER_ID,
+  });
 });
 
 test('§D6 row 1: an explicit retained generation uses that generation’s serves, not the active one’s', () => {
@@ -494,8 +587,36 @@ test('inbox add records the expected organisation client id and generation in it
   const flow = await context.flows.get(started.flowId);
   assert.equal(flow.clientName, 'acme-1');
   assert.equal(flow.expect.clientId, TEST_CLIENT_ID);
-  assert.deepEqual(flow.expect.generation, { organisation: 'acme', name: 'acme-1', active: true });
+  assert.deepEqual(flow.expect.generation, {
+    organisation: 'acme',
+    name: 'acme-1',
+    active: true,
+    forOtherAddresses: false,
+  });
   await context.flows.discard(started.flowId);
+});
+
+test('inbox add refuses when the reloaded row no longer has the client id §D6 chose', async (t) => {
+  const harness = await offlineProfileClient('jo@acme.test');
+  const original = harness.context.client.bind(harness.context);
+  t.mock.method(harness.context, 'client', async (name: string) => {
+    await harness.core.config.update((config) => {
+      const row = config.clients[name];
+      if (!row) throw new Error('the fixture has the chosen client');
+      return { ...config, clients: { ...config.clients, [name]: { ...row, clientId: OTHER_ID } } };
+    });
+    return original(name);
+  });
+
+  await assert.rejects(
+    startSignIn(harness.context, {
+      mode: 'add',
+      alias: 'acme/gmail',
+      email: 'jo@acme.test',
+      listenerCommand: NOOP_LISTENER,
+    }),
+    (error: unknown) => error instanceof CommsError && /changed/.test(error.message),
+  );
 });
 
 test('completion rechecks the expected organisation client id before exchanging or saving', async (t) => {
@@ -574,34 +695,139 @@ test('completion rechecks that the expected generation is still present, live an
   }
 });
 
-test('completion rechecks the organisation generation under the write lock and withdraws the staged token', async (t) => {
-  const harness = await offlineProfileClient('jo@acme.test');
-  t.mock.method(globalThis, 'fetch', offlineGoogle(harness));
-  const { flow, code } = await routedConsent(harness);
-  const secrets = await harness.core.secrets('file');
-  const set = secrets.set.bind(secrets);
-  let stagedRef: string | undefined;
-  secrets.set = async (ref, value) => {
-    await set(ref, value);
-    if (!ref.startsWith('gmail:refresh:') || stagedRef !== undefined) return;
-    stagedRef = ref;
-    await harness.core.config.update((config) => {
-      const row = config.clients['acme-1'];
-      if (!row) throw new Error('the fixture has an acme-1 client');
-      return {
-        ...config,
-        clients: { ...config.clients, 'acme-1': { ...row, secretRef: 'oauth-client/other' } },
+test('completion rechecks every organisation route predicate under the credentials lock', async (t) => {
+  for (const drift of ['client-id', 'serves', 'for-other-addresses'] as const) {
+    await t.test(drift, async (child) => {
+      const forOtherAddresses = drift === 'for-other-addresses';
+      const harness = await offlineProfileClient('jo@acme.test', { forOtherAddresses });
+      child.mock.method(globalThis, 'fetch', offlineGoogle(harness));
+      const { flow, code } = await routedConsent(harness, {
+        alias: forOtherAddresses ? 'personal/gmail' : 'acme/gmail',
+      });
+      assert.equal(flow.expect.generation?.forOtherAddresses, forOtherAddresses);
+      const secrets = await harness.core.secrets('file');
+      const set = secrets.set.bind(secrets);
+      let stagedRef: string | undefined;
+      secrets.set = async (ref, value) => {
+        await set(ref, value);
+        if (!ref.startsWith('gmail:refresh:') || stagedRef !== undefined) return;
+        stagedRef = ref;
+        await harness.core.config.update((config) => {
+          if (config.version !== 2) throw new Error('the fixture is version 2');
+          const row = config.clients['acme-1'];
+          const organisation = config.organisations?.acme;
+          const first = organisation?.gmail?.generations[0];
+          if (!row || !organisation?.gmail || !first) throw new Error('the fixture has an acme generation');
+          if (drift === 'client-id') {
+            return { ...config, clients: { ...config.clients, 'acme-1': { ...row, clientId: OTHER_ID } } };
+          }
+          if (drift === 'serves') {
+            return {
+              ...config,
+              organisations: {
+                ...config.organisations,
+                acme: {
+                  ...organisation,
+                  gmail: {
+                    ...organisation.gmail,
+                    generations: [{ ...first, serves: { domains: ['narrowed.test'] } }],
+                  },
+                },
+              },
+            };
+          }
+          return {
+            ...config,
+            organisations: { ...config.organisations, acme: { ...organisation, forOtherAddresses: false } },
+          };
+        });
       };
-    });
-  };
 
-  await assert.rejects(
-    completeConsent(harness.context, flow, code),
-    (error: unknown) => error instanceof CommsError && /org update acme/.test(error.hint ?? ''),
-  );
-  assert.ok(stagedRef, 'the refresh token reached the staging boundary');
-  assert.equal(await secrets.get(stagedRef), null, 'the refused token was not withdrawn');
-  assert.deepEqual(await inboxList(harness.context), []);
+      await assert.rejects(
+        completeConsent(harness.context, flow, code),
+        (error: unknown) =>
+          error instanceof CommsError && /nothing was saved|org update acme/.test(error.message + error.hint),
+      );
+      assert.ok(stagedRef, 'the refresh token reached the staging boundary');
+      assert.equal(await secrets.get(stagedRef), null, 'the refused token was not withdrawn');
+      assert.equal(harness.requests.includes('/revoke'), true, 'the new grant was not revoked');
+      assert.deepEqual(await inboxList(harness.context), []);
+    });
+  }
+});
+
+test('completion takes the credentials lock before it stores a routed grant', async (t) => {
+  const harness = await offlineProfileClient('jo@acme.test');
+  let sawProfile: (() => void) | undefined;
+  const profileRead = new Promise<void>((resolve) => {
+    sawProfile = resolve;
+  });
+  const google = offlineGoogle(harness);
+  t.mock.method(globalThis, 'fetch', (async (input: string | URL | Request) => {
+    const response = await google(input);
+    const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
+    if (url.pathname === '/gmail/v1/users/me/profile') sawProfile?.();
+    return response;
+  }) as typeof fetch);
+  const { flow, code } = await routedConsent(harness);
+  let release: (() => void) | undefined;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let locked: (() => void) | undefined;
+  const lockTaken = new Promise<void>((resolve) => {
+    locked = resolve;
+  });
+  const holder = withCredentialsLock(harness.core.paths.configDir, async () => {
+    locked?.();
+    await held;
+  });
+  await lockTaken;
+
+  const completing = completeConsent(harness.context, flow, code);
+  await profileRead;
+  const whileLocked = await Promise.race([
+    completing.then(() => 'completed' as const),
+    new Promise<'waiting'>((resolve) => setTimeout(() => resolve('waiting'), 50)),
+  ]);
+  release?.();
+  await holder;
+  await completing;
+  assert.equal(whileLocked, 'waiting', 'the grant was stored without taking the credentials lock');
+});
+
+test('a credentials-lock timeout revokes the unstored grant best effort', async (t) => {
+  for (const revokeFails of [false, true]) {
+    await t.test(revokeFails ? 'a revoke failure does not hide the timeout' : 'the grant is revoked', async (child) => {
+      const harness = await offlineProfileClient('jo@acme.test');
+      harness.revokeFails = revokeFails;
+      child.mock.method(globalThis, 'fetch', offlineGoogle(harness));
+      const { flow, code } = await routedConsent(harness);
+      let release: (() => void) | undefined;
+      let locked: (() => void) | undefined;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const lockTaken = new Promise<void>((resolve) => {
+        locked = resolve;
+      });
+      const holder = withCredentialsLock(harness.core.paths.configDir, async () => {
+        locked?.();
+        await held;
+      });
+      await lockTaken;
+
+      await assert.rejects(
+        completeConsent(harness.context, flow, code),
+        (error: unknown) =>
+          error instanceof CommsError && error.code === 'TRANSIENT' && /nothing was saved/.test(error.message),
+      );
+      release?.();
+      await holder;
+      assert.equal(harness.requests.includes('/revoke'), true, 'the unstored grant was not revoked');
+      assert.deepEqual(await inboxList(harness.context), []);
+    });
+  }
 });
 
 test('a post-consent serves mismatch revokes the new grant best effort and saves nothing', async (t) => {

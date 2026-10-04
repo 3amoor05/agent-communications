@@ -33,8 +33,15 @@ export interface OAuthFlow {
     inboxId?: string | undefined;
     /** The row the consent link was built for; absent only on a flow written by an earlier release. */
     clientId?: string | undefined;
-    /** The organisation generation selected before consent, and whether the route required it to stay active. */
-    generation?: { organisation: string; name: string; active: boolean } | undefined;
+    /** The organisation generation selected before consent, and which live routing predicates it depended on. */
+    generation?:
+      | {
+          organisation: string;
+          name: string;
+          active: boolean;
+          forOtherAddresses: boolean;
+        }
+      | undefined;
   };
   /** Set when a detached listener is waiting for the browser redirect. */
   listenerPid?: number | undefined;

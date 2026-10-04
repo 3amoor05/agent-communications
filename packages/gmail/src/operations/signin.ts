@@ -194,15 +194,23 @@ export async function startSignIn(context: GmailContext, options: StartOptions):
   }
 
   const client = await context.client(clientName);
+  if (choice && client.clientId !== choice.clientId) {
+    throw new CommsError('CONFIG', `the OAuth client "${clientName}" changed after it was selected for this sign-in`, {
+      hint: choice.organisation
+        ? `Run ${inlineCommand(shellCommand(['agentcomms', 'org', 'update', choice.organisation], context.platform))}, then start the sign-in again.`
+        : 'Choose the client again, then start the sign-in again.',
+    });
+  }
   expect = {
     ...expect,
-    clientId: client.clientId,
+    clientId: choice?.clientId ?? client.clientId,
     ...(choice?.organisation && choice.generation
       ? {
           generation: {
             organisation: choice.organisation,
             name: choice.generation.name,
             active: choice.activeGeneration === true,
+            forOtherAddresses: choice.forOtherAddresses === true,
           },
         }
       : {}),

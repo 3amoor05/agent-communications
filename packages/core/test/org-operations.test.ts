@@ -1275,6 +1275,11 @@ test('(e) an earlier generation altered loses its mark and is reported as no lon
     /"acme-1", an earlier client of acme, was changed, so it is no longer managed/,
   );
   assert.equal((await config(m)).clients['acme-1']?.organisation, undefined);
+
+  const again = await update(m);
+  assert.equal(again.result.changed, false, 'the next update must not reclaim the released row');
+  assert.match(again.result.reported.join('\n'), /the name "acme-1".*now holds a client that is not acme's/);
+  assert.equal((await config(m)).clients['acme-1']?.organisation, undefined);
 });
 
 test('a mark nothing explains is cleared by an update, at once', async () => {
