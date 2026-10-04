@@ -35,6 +35,7 @@ import {
   UPDATE_CHECK_CHILD_COMMAND,
   updateGateAtTerminal,
   wholeNumber,
+  writeError,
   writeResult,
 } from '@agentcomms/core';
 import { Command, CommanderError, Option } from 'commander';
@@ -305,7 +306,7 @@ configuration problem.`,
         return;
       }
       const interrupted = new AbortController();
-      let foreground: { flowId: string; settled: Promise<void> } | undefined;
+      let foreground: { flowId: string; settled: Promise<unknown> } | undefined;
       const context = new SlackContext({
         ...deps,
         env,
@@ -331,7 +332,17 @@ configuration problem.`,
           interrupted.abort();
           if (foreground) {
             // Startup and any accepted callback must finish, including staged-secret withdrawal, before exit.
-            await foreground.settled;
+            const error = await foreground.settled;
+            if (
+              error instanceof CommsError &&
+              (error.details?.strandedSecretRef ||
+                error.details?.possiblyStrandedSecretRef ||
+                error.details?.configRollbackFailed)
+            ) {
+              // Cancellation itself is silent. A credential we could not safely withdraw is not: the person
+              // needs its reference before signal redelivery, even when the command requested JSON output.
+              writeError(error, { json: false, color: false }, streams);
+            }
             await context.flows.discard(foreground.flowId);
           }
         },

@@ -22,9 +22,10 @@ export async function writeFileAtomic(
   path: string,
   data: string | Uint8Array,
   mode: number = FILE_MODE,
+  signal?: AbortSignal,
 ): Promise<void> {
   await ensurePrivateDir(dirname(path));
-  await replaceAtomically(path, data, mode);
+  await replaceAtomically(path, data, mode, signal);
 }
 
 /**
@@ -63,7 +64,12 @@ export async function replaceFileInPlace(path: string, data: string | Uint8Array
 }
 
 /** A temporary file beside `path`, flushed, given its mode and renamed over it. */
-async function replaceAtomically(path: string, data: string | Uint8Array, mode: number): Promise<void> {
+async function replaceAtomically(
+  path: string,
+  data: string | Uint8Array,
+  mode: number,
+  signal?: AbortSignal,
+): Promise<void> {
   const directory = dirname(path);
   const temp = join(directory, `.${randomBytes(6).toString('hex')}.tmp`);
   const handle = await open(temp, 'wx', mode);
@@ -75,7 +81,7 @@ async function replaceAtomically(path: string, data: string | Uint8Array, mode: 
   }
   try {
     if (process.platform !== 'win32') await chmod(temp, mode);
-    await renameWithRetry(temp, path);
+    await renameWithRetry(temp, path, signal);
   } catch (error) {
     await rm(temp, { force: true });
     throw error;
@@ -83,9 +89,11 @@ async function replaceAtomically(path: string, data: string | Uint8Array, mode: 
 }
 
 /** On Windows a rename onto a file another process has open (or a scanner is reading) fails briefly; retry ~1 s. */
-async function renameWithRetry(from: string, to: string): Promise<void> {
+async function renameWithRetry(from: string, to: string, signal?: AbortSignal): Promise<void> {
   for (let attempt = 0; ; attempt += 1) {
     try {
+      // This is the atomic commit boundary, including each retry after an asynchronous backoff.
+      signal?.throwIfAborted();
       await rename(from, to);
       return;
     } catch (error) {

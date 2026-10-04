@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { chmod, open, readFile, stat } from 'node:fs/promises';
+import { chmod, open, readFile, rm, stat } from 'node:fs/promises';
 import { homedir, platform } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { z } from 'zod';
@@ -866,71 +866,128 @@ export class ConfigStore {
    */
   async update(
     mutator: (config: Config) => Config | Promise<Config>,
-    options: { consent?: LooseningConsent } = {},
+    options: { consent?: LooseningConsent; signal?: AbortSignal | undefined } = {},
   ): Promise<Config> {
-    return withFileLock(this.#lockPath, async () => {
-      this.#cache = null;
-      const current = structuredClone(await this.load());
-      const next = await mutator(structuredClone(current));
-      // An ordinary write keeps the version it found. Changing it is a migration — it renames every account and
-      // decides which releases can still read the file — and has exactly one door, `migrateNames`.
-      if ((next as { version?: unknown }).version !== current.version) {
-        throw new CommsError(
-          'CONFIG',
-          `refusing to change the config version from ${current.version} to ${String((next as { version?: unknown }).version)}`,
-          { hint: 'Only `agentcomms names migrate` changes the version. This is a bug — please report it.' },
-        );
-      }
-      const parsed = schemaFor(current.version).safeParse(next);
-      if (!parsed.success) {
-        throw new CommsError(
-          'CONFIG',
-          `refusing to write invalid config: ${describeIssues(parsed.error, current.version)}`,
-        );
-      }
-      if (current.version === 2 && parsed.data.version === 2) {
-        const dropped = formerNamesDropped(current, parsed.data);
-        if (dropped !== null) {
-          throw new CommsError('CONFIG', `refusing to write a config that ${dropped}`, {
-            hint: 'Former names are permanent. This is a bug — please report it.',
-          });
+    // Cancellation is opt-in. Its linearization point is this transaction's resolution, not its mutator or
+    // rename: abort during a write/lock release restores the exact preimage, while later aborts do nothing.
+    let staged: { before: string | null; after: string } | undefined;
+    let restored = false;
+    let rollbackFailed = false;
+    const restore = async () => {
+      if (!staged || restored) return;
+      try {
+        const live = await readFileIfExists(this.path);
+        if (live !== staged.before) {
+          // A writer can run during lock release. Never overwrite its config with our old snapshot.
+          if (live !== staged.after) throw new Error('the config is no longer owned by this update');
+          if (staged.before === null) await rm(this.path, { force: true });
+          else await writeFileAtomic(this.path, staged.before);
         }
-      }
-      const { loosened, changes } = classifyChange(current, parsed.data);
-      const allowed = new Set(options.consent?.paths ?? []);
-      const unconsented = loosened.filter((path) => !allowed.has(path));
-      if (unconsented.length > 0) {
-        /*
-         * Both routes, because both are real (design 2026-09-25 §3.2): a hint naming only the terminal sent an agent
-         * to a shell it may not have, for a change it could have asked for in the conversation.
-         */
-        throw new CommsError('LOOSENING_REFUSED', `this change loosens a safety setting: ${unconsented.join(', ')}`, {
-          hint: 'A person approves a loosening, from a chat or at a terminal. From a chat, the tool that makes the change returns a preview and an approval id: the person says yes in the chat (change policy `chat`) or runs `agentcomms approve <id>` at their own terminal (`confirm`), and the tool is called again with the id. At a terminal, run the matching command and approve the change it shows.',
-          details: { paths: unconsented },
+        restored = true;
+      } catch (error) {
+        rollbackFailed = true;
+        throw new CommsError('TRANSIENT', 'the interrupted config update could not be safely restored', {
+          details: { configRollbackFailed: true },
+          cause: error,
         });
+      } finally {
+        this.#cache = null;
       }
-      /*
-       * A consent from a change approval says what each path was approved to move between, and the write has to be
-       * that. Checked here, against the configuration read inside the lock, because this is the one place nothing
-       * can change between the check and the write: a claim checks the change the caller described, and the
-       * configuration may have moved since — a path now loosened from a different value, or an account that is not
-       * the one the person was shown.
-       */
-      const approved = options.consent?.changes;
-      if (approved !== undefined) {
-        const drifted = changes.filter((change) => !approved.some((ok) => sameLoosening(ok, change)));
-        if (drifted.length > 0) {
-          const paths = drifted.map((change) => change.path);
-          throw new CommsError('LOOSENING_REFUSED', `this is not the change that was approved: ${paths.join(', ')}`, {
-            hint: 'The configuration changed after the approval was given. Prepare the change again and ask again.',
-            details: { paths },
+    };
+    try {
+      const result = await withFileLock(this.#lockPath, async () => {
+        options.signal?.throwIfAborted();
+        this.#cache = null;
+        const current = structuredClone(await this.load());
+        const next = await mutator(structuredClone(current));
+        // An ordinary write keeps the version it found. Changing it is a migration — it renames every account and
+        // decides which releases can still read the file — and has exactly one door, `migrateNames`.
+        if ((next as { version?: unknown }).version !== current.version) {
+          throw new CommsError(
+            'CONFIG',
+            `refusing to change the config version from ${current.version} to ${String((next as { version?: unknown }).version)}`,
+            { hint: 'Only `agentcomms names migrate` changes the version. This is a bug — please report it.' },
+          );
+        }
+        const parsed = schemaFor(current.version).safeParse(next);
+        if (!parsed.success) {
+          throw new CommsError(
+            'CONFIG',
+            `refusing to write invalid config: ${describeIssues(parsed.error, current.version)}`,
+          );
+        }
+        if (current.version === 2 && parsed.data.version === 2) {
+          const dropped = formerNamesDropped(current, parsed.data);
+          if (dropped !== null) {
+            throw new CommsError('CONFIG', `refusing to write a config that ${dropped}`, {
+              hint: 'Former names are permanent. This is a bug — please report it.',
+            });
+          }
+        }
+        const { loosened, changes } = classifyChange(current, parsed.data);
+        const allowed = new Set(options.consent?.paths ?? []);
+        const unconsented = loosened.filter((path) => !allowed.has(path));
+        if (unconsented.length > 0) {
+          /*
+           * Both routes, because both are real (design 2026-09-25 §3.2): a hint naming only the terminal sent an agent
+           * to a shell it may not have, for a change it could have asked for in the conversation.
+           */
+          throw new CommsError('LOOSENING_REFUSED', `this change loosens a safety setting: ${unconsented.join(', ')}`, {
+            hint: 'A person approves a loosening, from a chat or at a terminal. From a chat, the tool that makes the change returns a preview and an approval id: the person says yes in the chat (change policy `chat`) or runs `agentcomms approve <id>` at their own terminal (`confirm`), and the tool is called again with the id. At a terminal, run the matching command and approve the change it shows.',
+            details: { paths: unconsented },
           });
         }
+        /*
+         * A consent from a change approval says what each path was approved to move between, and the write has to be
+         * that. Checked here, against the configuration read inside the lock, because this is the one place nothing
+         * can change between the check and the write: a claim checks the change the caller described, and the
+         * configuration may have moved since — a path now loosened from a different value, or an account that is not
+         * the one the person was shown.
+         */
+        const approved = options.consent?.changes;
+        if (approved !== undefined) {
+          const drifted = changes.filter((change) => !approved.some((ok) => sameLoosening(ok, change)));
+          if (drifted.length > 0) {
+            const paths = drifted.map((change) => change.path);
+            throw new CommsError('LOOSENING_REFUSED', `this is not the change that was approved: ${paths.join(', ')}`, {
+              hint: 'The configuration changed after the approval was given. Prepare the change again and ask again.',
+              details: { paths },
+            });
+          }
+        }
+        const serialized = `${JSON.stringify(parsed.data, null, 2)}\n`;
+        if (options.signal) staged = { before: await readFileIfExists(this.path), after: serialized };
+        try {
+          await writeFileAtomic(this.path, serialized, FILE_MODE, options.signal);
+          options.signal?.throwIfAborted();
+        } catch (error) {
+          if (options.signal?.aborted) {
+            await restore();
+            throw options.signal.reason;
+          }
+          throw error;
+        }
+        this.#cache = null;
+        return parsed.data;
+      });
+      options.signal?.throwIfAborted();
+      return result;
+    } catch (error) {
+      if (options.signal?.aborted && staged && !restored && !rollbackFailed) {
+        // Abort can arrive while withFileLock releases its lock after the callback has completed.
+        try {
+          await withFileLock(this.#lockPath, restore);
+        } catch (recoveryError) {
+          if (rollbackFailed) throw recoveryError;
+          throw new CommsError('TRANSIENT', 'the interrupted config update could not be safely restored', {
+            details: { configRollbackFailed: true },
+            cause: recoveryError,
+          });
+        }
+        throw options.signal.reason;
       }
-      await writeFileAtomic(this.path, `${JSON.stringify(parsed.data, null, 2)}\n`);
-      this.#cache = null;
-      return parsed.data;
-    });
+      throw error;
+    }
   }
 
   /**

@@ -39,7 +39,8 @@ export interface SlackContextOptions {
   foregroundSignIn?:
     | {
         signal: AbortSignal;
-        register(flowId: string, settled: Promise<void>): void;
+        /** Resolves to the completion error, if any; ownership errors must survive cancellation. */
+        register(flowId: string, settled: Promise<unknown>): void;
       }
     | undefined;
 }

@@ -152,9 +152,9 @@ export async function startSignIn(context: SlackContext, options: StartOptions):
     expiresAt: new Date(startedAt.getTime() + FLOW_TTL_MS).toISOString(),
   };
   const foreground = options.detached === false ? context.foregroundSignIn : undefined;
-  let foregroundSettled: (() => void) | undefined;
+  let foregroundSettled: ((error?: unknown) => void) | undefined;
   if (foreground) {
-    const settled = new Promise<void>((resolve) => {
+    const settled = new Promise<unknown>((resolve) => {
       foregroundSettled = resolve;
     });
     foreground.register(flow.flowId, settled);
@@ -189,7 +189,7 @@ export async function startSignIn(context: SlackContext, options: StartOptions):
       cause: error,
     });
   } finally {
-    if (listener && foregroundSettled) void listener.result.then(foregroundSettled, foregroundSettled);
+    if (listener && foregroundSettled) void listener.result.then(() => foregroundSettled?.(), foregroundSettled);
     else foregroundSettled?.();
   }
 
@@ -247,6 +247,9 @@ async function startInProcess(
     if (cancel) signal?.removeEventListener('abort', cancel);
     await loopback.close();
   });
+  // Abort can already be observable when listen resolves. Own rejection now, before startup can await cleanup;
+  // callers still receive the original result (and its error), never a flattened success promise.
+  void result.catch(() => undefined);
   return { result, close: () => loopback.close() };
 }
 
@@ -752,13 +755,14 @@ async function writeWithConsent(
   snapshotAlias: string | undefined,
   writtenKey: () => string,
   mutator: (config: Config) => Config,
+  signal?: AbortSignal,
 ): Promise<void> {
   if (!flow.consent) {
-    await context.core.config.update(mutator);
+    await context.core.config.update(mutator, { signal });
     return;
   }
   try {
-    await context.core.config.update(mutator, { consent: consentUnder(flow.consent, flow, snapshotAlias) });
+    await context.core.config.update(mutator, { consent: consentUnder(flow.consent, flow, snapshotAlias), signal });
   } catch (error) {
     const key = writtenKey();
     if (!(error instanceof CommsError) || error.code !== 'LOOSENING_REFUSED' || key === snapshotAlias) throw error;
@@ -769,7 +773,7 @@ async function writeWithConsent(
      * because the first run wrote nothing — a refused loosening is refused before the write — and the second runs on
      * the same configuration, so it recomputes exactly the same values.
      */
-    await context.core.config.update(mutator, { consent: consentUnder(flow.consent, flow, key) });
+    await context.core.config.update(mutator, { consent: consentUnder(flow.consent, flow, key), signal });
   }
 }
 
@@ -1140,6 +1144,7 @@ export async function completeSignIn(
     let writtenAlias = flow.alias;
     let replacedRef: string | undefined;
     let pendingRevocation: PendingRevocation | undefined;
+    let configCommitted = false;
     try {
       /*
        * The write is inside the boundary that takes it back, not before it.
@@ -1302,7 +1307,11 @@ export async function completeSignIn(
             writtenAlias = flow.alias;
             return { ...next, accounts: { ...next.accounts, [flow.alias]: written } };
           },
+          completionSignal,
         );
+        // This transaction's resolution is the interruption boundary. After it, old-token revocation may
+        // already have effects: finish/report that cleanup, never roll the committed transition back.
+        configCommitted = true;
       };
       if (completionSignal || flow.transition === 'profile-app') {
         await withCredentialsLock(context.core.paths.configDir, switchAccount);
@@ -1325,7 +1334,9 @@ export async function completeSignIn(
         await withCredentialsLock(context.core.paths.configDir, async () => {
           recoveryEntered = true;
           const landed = await committed(context, accountId, secretRef);
-          if (landed === 'unknown') throw keepAndReport(error, secretRef);
+          if (landed === 'unknown' || (landed === 'present' && completionSignal?.aborted && !configCommitted)) {
+            throw keepAndReport(error, secretRef);
+          }
           if (landed === 'absent') {
             throw await withdrawStaged(secrets, secretRef, explainRefusedConsent(error, flow, context.platform));
           }
