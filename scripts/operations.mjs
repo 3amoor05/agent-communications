@@ -531,6 +531,21 @@ function standIn(pkg, name, fn) {
       drive.stopped = id;
       throw new Reached(id);
     }
+    // Setup reaches server registration only after its state says the named mailbox is already connected. The sealed
+    // drive replaces setupState like every operation, so give precisely that prerequisite when this drive is proving
+    // the setup-registration row; every other setup row retains the ordinary inert answer.
+    if (id === 'gmail:setupState' && drive.wanted.has('core:serverInstallChange')) {
+      return {
+        next: 'mcp',
+        done: ['client', 'inbox'],
+        clients: ['parity-client'],
+        inboxes: ['parity/gmail'],
+        clientOf: { 'parity/gmail': 'parity-client' },
+        registeredWith: [],
+        candidates: [],
+        clientChoice: { name: 'parity-client' },
+      };
+    }
     return inert();
   };
   return new Proxy(fn, { apply: (_target, _this, args) => call(args), construct: (_target, args) => call(args) });

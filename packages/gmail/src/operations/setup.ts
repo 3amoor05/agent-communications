@@ -4,12 +4,9 @@ import { join } from 'node:path';
 import {
   CommsError,
   type Config,
-  type GatedChange,
   isProductServer,
   lookupName,
   nameAvailable,
-  type OrgChangeResult,
-  orgAddChange,
   organisationsOf,
   shownText,
 } from '@agentcomms/core';
@@ -326,28 +323,6 @@ export interface SetupStateOptions {
   alias?: string | undefined;
   email?: string | undefined;
   client?: string | undefined;
-}
-
-/** The organisation-profile step both setup surfaces run before measuring the Gmail steps (§D6). */
-export function setupProfileChange(
-  context: GmailContext,
-  request: { profile: string; store?: string | undefined; orgApproval?: string | undefined },
-): GatedChange<OrgChangeResult> {
-  return orgAddChange(
-    context.core,
-    {
-      file: request.profile,
-      store: request.store,
-      ...(request.orgApproval ? { approvalId: request.orgApproval } : {}),
-    },
-    {
-      env: context.env,
-      platform: context.platform,
-      surface: context.surface,
-      cwd: context.cwd,
-      now: context.now,
-    },
-  );
 }
 
 /**

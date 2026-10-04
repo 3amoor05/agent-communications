@@ -75,16 +75,19 @@ client secret is never shown. Pass `forOtherAddresses: true` only if they ask fo
 other addresses too. It is added beside what they have; nothing of theirs is replaced, and
 `comms_orgs_list` lists every profile added on this machine.
 
-In this release the profile's client is not picked by itself yet: connect each mailbox with
-`gmail_inbox_add` and `client` set to the active client `comms_org_show` names. Its Slack apps are
-recorded, not used by `slack_workspace_add` yet: connect Slack as step 3 says for a profile, through the
-organisation's app, rather than a new app. When the organisation changes its
-file, `comms_org_update` reads it again — a changed profile is approved first, a repair applies at once
-— and `comms_org_remove` stops using it.
+Gmail picks the eligible client before consent. Name the mailbox in `gmail_setup` and
+`gmail_inbox_add`: an explicit `client` wins; otherwise `<organisation>/gmail` uses that profile's
+active generation, one profile opted into `forOtherAddresses` may serve another name, and only then
+does an ordinary client act as the fallback. If no client fits, `gmail_setup` offers the Google Cloud
+walk instead of borrowing a profile client. Existing mailboxes stay on the client that granted their
+token. The profile's Slack apps are recorded, not used by `slack_workspace_add` yet: connect Slack as
+step 3 says for a profile, through the organisation's app, rather than a new app. When the organisation
+changes its file, `comms_org_update` reads it again — a changed profile is approved first, a repair
+applies at once — and `comms_org_remove` stops using it.
 
 ## 3. Connect each account
 
-- **Gmail:** `gmail_setup` says what is missing. With no OAuth client registered, making one in
+- **Gmail:** `gmail_setup` with the mailbox's `inbox` says what is missing. With no eligible OAuth client, making one in
   Google Cloud is the person's step: `consoleSteps` has each screen, its link and what to type there.
   Then `gmail_client_add` with the downloaded client JSON's **path** (never its contents) — a change,
   so preview, yes, `approvalId`. `gmail_inbox_add` with the tier returns a Google link; give it to
@@ -144,7 +147,7 @@ Every step has a command, for a person at a terminal or an agent that can run co
 | What is there | `agentcomms channels` |
 | An organisation's profile | `agentcomms org add <file>`, then `agentcomms org show <organisation>` for its client's name; later `agentcomms org update <organisation>` or `agentcomms org remove <organisation>` |
 | Register a server | `agent-gmail mcp install --client <client>`, and the same with `agent-slack`, `agent-resend` or `agent-whatsapp` |
-| Gmail, in one command | `agent-gmail setup` — the Google Cloud screens, the client, a mailbox and the registration. With `--json` it acts only on the flags it is given (`--client-json <path>`, `--inbox <name>`, `--email <address>`, `--mcp-client <client>`) and names the one it needs next |
+| Gmail, in one command | `agent-gmail setup --inbox <name>` — the Google Cloud screens, the client, a mailbox and the registration. With `--profile <file>` its separate profile preview is claimed with `--org-approval <id>`. With `--json` it acts only on the flags it is given (`--client-json <path>`, `--inbox <name>`, `--email <address>`, `--mcp-client <client>`) and names the one it needs next |
 | Gmail, step by step | `agent-gmail client add <path>`, then `agent-gmail inbox add <name> --tier <tier> --start`, then `agent-gmail inbox add --finish <flowId>` |
 | Slack | `agent-slack manifest --mode <mode> --port <port>`, then `agent-slack workspace add <name> --client-id <id> --port <port> --mode <mode> --start`, then `agent-slack workspace add --finish <flowId>` |
 | Resend | `agent-resend account add <name> --mode <mode>`, the key typed by the person |

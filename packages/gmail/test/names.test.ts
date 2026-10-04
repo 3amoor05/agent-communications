@@ -9,7 +9,6 @@ import {
   credentialsLockPath,
   formerNamesOf,
   inboxProfileFile,
-  readComposeProfile,
   type SecretStore,
   withFileLock,
 } from '@agentcomms/core';
@@ -259,30 +258,42 @@ test('a sign-in started before the migration and finished after it is refused, w
   assert.deepEqual(await inboxList(context), []);
 });
 
-test('a migration landing between the last check and the write is caught under the lock, and the token taken back', async () => {
+test('a migration started while a token is staged waits, refuses its stale plan, and succeeds when retried', async () => {
   const harness = await newHarness({ accounts: [{ sub: 'sub-1', email: 'jo@example.test' }] });
   const context = await withClient(harness);
   const secrets = await harness.core.secrets('file');
   const seen = recordSecrets(secrets);
-  // The migration runs while the token is being stored: after every check made on a snapshot, before the write.
+  // The credentials lock now covers both the staged token and the routing/name re-check. A migration that starts
+  // here must wait outside that boundary, refuse the plan made before the mailbox landed, and leave the fully
+  // connected mailbox intact for a fresh migration rather than deadlocking or withdrawing its valid grant.
   const store = secrets.set.bind(secrets);
+  let migration: Promise<void> | undefined;
   secrets.set = async (ref, value) => {
     await store(ref, value);
-    if (ref.startsWith('gmail:refresh:')) await migrate(harness);
+    if (ref.startsWith('gmail:refresh:')) {
+      // Attach the expected-rejection handler now: under the full suite the lock can release and reject this plan
+      // before the consent listener has resolved far enough for the assertion below to await it.
+      migration = assert.rejects(migrate(harness), is('TRANSIENT', /configuration changed/));
+    }
   };
 
   const started = await startSignIn(context, { mode: 'add', alias: 'home', detached: false });
   await fetch(harness.google.consent(started.authUrl, { sub: 'sub-1' }));
-  await assert.rejects(started.listener?.result ?? Promise.resolve(), is('USAGE', /not a valid name/));
+  await started.listener?.result;
+  assert.ok(migration, 'the migration started while the token was staged');
+  await migration;
+  await migrate(harness);
 
   const tokens = seen.set.filter((ref) => ref.startsWith('gmail:refresh:'));
   assert.equal(tokens.length, 1);
   assert.deepEqual(
     seen.deleted.filter((ref) => ref.startsWith('gmail:refresh:')),
-    tokens,
-    'taken back',
+    [],
   );
-  assert.deepEqual(await inboxList(context), []);
+  assert.deepEqual(
+    (await inboxList(context)).map((row) => row.alias),
+    ['home/gmail'],
+  );
 });
 
 test('a sign-in that finishes on a migrated config under a valid name connects', async () => {

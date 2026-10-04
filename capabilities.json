@@ -162,6 +162,7 @@
       "operation": "orgAddChange",
       "argv": ["parity.agentcomms.json"],
       "args": { "file": "parity.agentcomms.json" },
+      "expect": { "request.file": "parity.agentcomms.json" },
       "reason": "Adding an organisation's profile — its Google client and Slack apps, beside what is here — is a change the person approves, bound to the profile's SHA-256 (design 2026-10-02 §D5)."
     },
     {
@@ -696,6 +697,12 @@
       "mcp": "gmail_setup",
       "status": "both",
       "operation": "setupState",
+      "argv": ["--inbox", "parity/gmail"],
+      "args": { "inbox": "parity/gmail" },
+      "expect": { "options.alias": "parity/gmail" },
+      "after": {
+        "startSignIn": "When the named mailbox is not connected yet, setup continues from its state report into the same sign-in that inbox add starts."
+      },
       "reason": "The report `setup` starts from: the eligible client for the target mailbox, the clients and mailboxes there are, the MCP clients the server is registered with, the downloaded client files, and the one step to take next. With no --profile it changes nothing. The steps `setup` then takes are the rows that follow."
     },
     {
@@ -704,9 +711,11 @@
       "cli": "setup",
       "mcp": "gmail_setup",
       "status": "both",
-      "operation": "setupProfileChange",
-      "argv": ["--profile", "parity.agentcomms.json"],
-      "args": { "profile": "parity.agentcomms.json" },
+      "operation": "orgAddChange",
+      "via": "setupState",
+      "argv": ["--profile", "setup-parity.agentcomms.json", "--inbox", "parity/gmail"],
+      "args": { "profile": "setup-parity.agentcomms.json", "inbox": "parity/gmail" },
+      "expect": { "request.file": "setup-parity.agentcomms.json" },
       "reason": "`setup --profile <file>` and gmail_setup profile add the organisation through core's orgAddChange first, under the separate --org-approval/orgApproval, then continue Gmail setup (design 2026-10-02 §D6)."
     },
     {
@@ -737,7 +746,7 @@
       "status": "both",
       "operation": "serverInstallChange",
       "via": "setupState",
-      "argv": ["--mcp-client", "claude-code"],
+      "argv": ["--inbox", "parity/gmail", "--mcp-client", "claude-code"],
       "args": { "channel": "gmail", "client": "claude-code" },
       "expect": { "request.channel": "gmail" },
       "reason": "`setup --mcp-client <client>` registers the server as `mcp install` does; from chat that step is the core server's comms_server_install with `channel: \"gmail\"` (design §5)."

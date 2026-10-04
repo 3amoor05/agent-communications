@@ -12,6 +12,7 @@ import {
   gatedChange,
   inlineCommand,
   lookupName,
+  orgAddChange,
   retiredOutHint,
   shellCommand,
   stricterPolicy,
@@ -57,7 +58,7 @@ import {
   prepareSend,
   revokeApproval,
 } from '../operations/send.ts';
-import { CONSOLE_STEPS, requireSetupTarget, setupProfileChange, setupState } from '../operations/setup.ts';
+import { CONSOLE_STEPS, requireSetupTarget, setupState } from '../operations/setup.ts';
 import {
   FINISH_WAIT_SECONDS,
   finishSignIn,
@@ -1388,11 +1389,21 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
         if (profile) {
           const outcome = await gatedChange(
             context.core,
-            setupProfileChange(context, {
-              profile,
-              store,
-              ...(orgApproval ? { orgApproval } : {}),
-            }),
+            orgAddChange(
+              context.core,
+              {
+                file: profile,
+                store,
+                ...(orgApproval ? { approvalId: orgApproval } : {}),
+              },
+              {
+                env: context.env,
+                platform: context.platform,
+                surface: context.surface,
+                cwd: context.cwd,
+                now: context.now,
+              },
+            ),
             {
               surface: 'mcp',
               approvalId: orgApproval,

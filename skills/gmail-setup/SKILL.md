@@ -90,7 +90,7 @@ claimed by the command, and the other way round:
 
 | The job | MCP tool | CLI command | Needs the user's approval |
 |---|---|---|---|
-| What setup still needs | `gmail_setup` | `agent-gmail setup --json` | no |
+| What setup still needs | `gmail_setup` with `inbox` | `agent-gmail setup --inbox <name> --json` | no |
 | Register the OAuth client | `gmail_client_add` (a `path`) | `client add <path>` | yes |
 | Remove an OAuth client | `gmail_client_remove` | `client remove <name>` | yes |
 | The OAuth clients, never their secrets | `gmail_clients_list` | `client list` | no |
@@ -151,7 +151,7 @@ send policy?" either: `gmail_inboxes_list` answers that in one call.
    approve) registers its client here, and no Cloud project is needed. Do not guess the client's name:
    it is often `<organisation>-1`, but another number when that name is taken, or a name of the
    person's own when they had registered the same client already. `setup --profile <file>` adds the
-   profile through its own change approval and then chooses its active client for a mailbox whose name
+   profile through its own change approval (`--org-approval <id>` on the rerun) and then chooses its active client for a mailbox whose name
    starts with that organisation. `inbox add` and `gmail_inbox_add` make the same choice before consent;
    pass `--client <name>` / `client` only to override it.
    **Complete when:** the user has named the project, agreed to create one, or added their organisation's
@@ -176,9 +176,8 @@ send policy?" either: `gmail_inboxes_list` answers that in one call.
 
 ## Procedure
 
-1. **Start with `setup --json`, not `doctor`.** Run `agent-gmail setup --json`. It costs nothing, changes
-   nothing without a flag, and answers the only question worth asking first — what is next. `doctor` is a
-   diagnostic: it tells you what is *broken* about an install that used to work, which is the wrong
+1. **Start with setup for the mailbox, not `doctor`.** Run `agent-gmail setup --inbox <name> --json`. It costs nothing,
+   changes nothing without a flag, and answers what is next. `doctor` tells you what is *broken* about an install,
    question for a machine that has nothing yet. Use it later, for a setup that stops behaving.
 
    Four fields drive everything you do after this:
@@ -192,8 +191,7 @@ send policy?" either: `gmail_inboxes_list` answers that in one call.
 
    **Complete when:** you can say what `next` is and, if `blocked` is set, which flag it asked for.
 
-1a. **Over MCP, the same three steps are tools.** `gmail_setup` answers what is next and returns the
-   Google Cloud steps with their links, so you can walk somebody through the console without a shell.
+1a. **Over MCP, the same three steps are tools.** `gmail_setup` with `inbox` answers what is next and returns the Google Cloud steps.
    `gmail_inbox_add` starts a sign-in and returns `authUrl` — it connects nothing on its own. Show the
    person that link, warn them about the unverified-app screen *before* they meet it, then
    `gmail_inbox_finish` with the `flowId`. `APPROVAL_PENDING` means they have not finished yet and the
@@ -208,6 +206,8 @@ send policy?" either: `gmail_inboxes_list` answers that in one call.
    store, and no result carries it. The first call returns the change approval; show the preview (it
    names the client id and project, both public) and claim it after their yes. `gmail_clients_list` shows
    what is registered already, so you can tell "no client yet" from "a client nobody signs in through".
+   For an organisation profile, call `gmail_setup` with `profile`, `inbox` and optional `store`. Show its profile
+   change preview; after their yes, repeat it with that id as `orgApproval`, not OAuth-client `approval`.
    **Complete when:** you have used `gmail_setup` to say what is next, or established you have a shell
    and are using the CLI instead.
 
@@ -215,11 +215,10 @@ send policy?" either: `gmail_inboxes_list` answers that in one call.
    answer and stops when you do not:
 
    ```
-   agent-gmail setup --client-json <path> --json      # prepares the client's registration: exit 10
-   agent-gmail setup --client-json <path> --json --approval <id>   # after the user's yes
+   agent-gmail setup --profile <file> --inbox <name> --json [--org-approval <id>]
+   agent-gmail setup --inbox <name> --client-json <path> --json [--approval <id>]
    agent-gmail setup --inbox <name> --email <addr> --json
-   agent-gmail setup --mcp-client claude-code --json   # stops at the registration: exit 10, `blocked`
-   agent-gmail setup --mcp-client claude-code --json --mcp-approval <id>   # after the user's yes
+   agent-gmail setup --inbox <connected-name> --mcp-client claude-code --json [--mcp-approval <id>]
    ```
 
    Registering the client is `client add` underneath, approved the same way: the first run exits `10`

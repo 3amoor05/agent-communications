@@ -22,6 +22,7 @@ import {
   installExitStatus,
   type OutputOptions,
   openCore,
+  orgAddChange,
   paint,
   refuseRetiredOut,
   refuseUnclaimedApproval,
@@ -1776,9 +1777,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
     .option('--no-browser', 'print the links instead of opening them')
     .action(
       act(async (context, globalOptions, options: Options) => {
-        const { requireSetupTarget, setupProfileChange, setupState, CONSOLE_STEPS } = await import(
-          '../operations/setup.ts'
-        );
+        const { requireSetupTarget, setupState, CONSOLE_STEPS } = await import('../operations/setup.ts');
         const out = streams.stderr;
         const bold = (text: string) => paint(globalOptions.color, 'bold', text);
         const dim = (text: string) => paint(globalOptions.color, 'dim', text);
@@ -1851,11 +1850,21 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
         if (options.profile) {
           await gatedChangeAtTerminal(
             context.core,
-            setupProfileChange(context, {
-              profile: String(options.profile),
-              ...(options.store ? { store: String(options.store) } : {}),
-              ...(typeof options.orgApproval === 'string' ? { orgApproval: options.orgApproval } : {}),
-            }),
+            orgAddChange(
+              context.core,
+              {
+                file: String(options.profile),
+                ...(options.store ? { store: String(options.store) } : {}),
+                ...(typeof options.orgApproval === 'string' ? { approvalId: options.orgApproval } : {}),
+              },
+              {
+                env: context.env,
+                platform: context.platform,
+                surface: context.surface,
+                cwd: context.cwd,
+                now: context.now,
+              },
+            ),
             {
               approvalId: typeof options.orgApproval === 'string' ? options.orgApproval : undefined,
               env,
@@ -1894,7 +1903,8 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
          */
         const headless = mode === 'none';
         const clientStep = state.next === 'client';
-        const targetAlreadyConnected = options.inbox ? state.inboxes.includes(String(options.inbox)) : false;
+        const targetAlreadyConnected =
+          options.inbox && Array.isArray(state.inboxes) ? state.inboxes.includes(String(options.inbox)) : false;
         if (!clientStep || (headless && !options.clientJson)) {
           refuseUnclaimedApproval(
             options.approval,

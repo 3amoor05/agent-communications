@@ -120,9 +120,12 @@ test('agent-gmail: an approval the stop let through is refused by a finish, and 
       /--finish collects a sign-in/,
     ],
     // A client is registered already: no step of this run registers one.
-    [['setup', '--approval', later], /already registered, so this run registers none and takes no --approval/],
+    [
+      ['setup', '--inbox', 'work', '--approval', later],
+      /already registered, so this run registers none and takes no --approval/,
+    ],
     // No client named: nothing claims the registration's approval, whatever the run reaches.
-    [['setup', '--mcp-approval', later], /names no client with --mcp-client/],
+    [['setup', '--inbox', 'work', '--mcp-approval', later], /names no client with --mcp-client/],
     // A mailbox to sign in first: the run stops at its browser, before the registration.
     [
       ['setup', '--mcp-client', 'cursor', '--inbox', 'home', '--mcp-approval', later],
