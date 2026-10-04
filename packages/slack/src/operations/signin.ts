@@ -9,11 +9,13 @@ import {
   type Config,
   childEnvironment,
   findById,
+  inlineCommand,
   type LooseningConsent,
   newAccountId,
   readWholeNumber,
   type SecretStore,
   secretsStoreOf,
+  shellCommand,
 } from '@agentcomms/core';
 import { buildAuthorizeUrl, readExchange } from '../auth/authorize.ts';
 import { serialiseBundle } from '../auth/bundle.ts';
@@ -103,7 +105,7 @@ export async function startSignIn(context: SlackContext, options: StartOptions):
         'LOOSENING_REFUSED',
         `connecting "${options.alias}" able to post needs a person to confirm it`,
         {
-          hint: `Connect it with \`agent-slack workspace add ${options.alias} --mode send\`, or slack_workspace_add from a chat: both ask the person to approve it first. Or connect it in read mode.`,
+          hint: `Connect it with ${inlineCommand(shellCommand(['agent-slack', 'workspace', 'add', options.alias, '--mode', 'send'], context.platform))}, or slack_workspace_add from a chat: both ask the person to approve it first. Or connect it in read mode.`,
         },
       );
     }
@@ -463,7 +465,12 @@ export function checkedWait(raw: unknown, surface: 'cli' | 'mcp'): number {
 function finishStep(context: SlackContext, flow: SlackFlow): string {
   return context.surface === 'mcp'
     ? `call \`slack_workspace_finish\` with flowId ${flow.flowId}`
-    : `run \`agent-slack workspace ${flow.expect ? `reauth ${flow.alias}` : 'add'} --finish ${flow.flowId}\``;
+    : `run ${inlineCommand(
+        shellCommand(
+          ['agent-slack', 'workspace', ...(flow.expect ? ['reauth', flow.alias] : ['add']), '--finish', flow.flowId],
+          context.platform,
+        ),
+      )}`;
 }
 
 /** How the caller lists what is connected, in the words of the surface it is using. */
@@ -492,9 +499,18 @@ export async function finishSignIn(context: SlackContext, options: FinishOptions
       hint:
         context.surface === 'mcp'
           ? `Finish it with \`slack_workspace_finish\`, flowId ${options.flowId}, on a server that serves "${flow.alias}".`
-          : `Finish it as \`agent-slack workspace ${kind === 'reauth' ? `reauth ${flow.alias}` : 'add'} --finish ${
-              options.flowId
-            }\`.`,
+          : `Finish it as ${inlineCommand(
+              shellCommand(
+                [
+                  'agent-slack',
+                  'workspace',
+                  ...(kind === 'reauth' ? ['reauth', flow.alias] : ['add']),
+                  '--finish',
+                  options.flowId,
+                ],
+                context.platform,
+              ),
+            )}.`,
     });
   }
   if (options.only && kind !== options.only) {
@@ -550,9 +566,20 @@ async function waitForOutcome(
         hint:
           context.surface === 'mcp'
             ? `Open the link, approve it in Slack, then ${finishStep(context, flow)} again. The link is good until ${flow.expiresAt}.`
-            : `Open the link, approve it in Slack, then run \`agent-slack workspace ${
-                flow.expect ? `reauth ${flow.alias}` : 'add'
-              } --finish ${flow.flowId} --wait 60\` again.`,
+            : `Open the link, approve it in Slack, then run ${inlineCommand(
+                shellCommand(
+                  [
+                    'agent-slack',
+                    'workspace',
+                    ...(flow.expect ? ['reauth', flow.alias] : ['add']),
+                    '--finish',
+                    flow.flowId,
+                    '--wait',
+                    '60',
+                  ],
+                  context.platform,
+                ),
+              )} again.`,
         details: { flowId: flow.flowId, expiresAt: flow.expiresAt },
       });
     }
@@ -668,7 +695,7 @@ function consentUnder(consent: LooseningConsent, flow: SlackFlow, current: strin
  * what to do: ask for the change again. Whether the token could be taken back is the caller's to add, since only it
  * knows.
  */
-function explainRefusedConsent(error: unknown, flow: SlackFlow): unknown {
+function explainRefusedConsent(error: unknown, flow: SlackFlow, platform: NodeJS.Platform): unknown {
   if (!(error instanceof CommsError) || error.code !== 'LOOSENING_REFUSED' || flow.consent?.changes === undefined) {
     return error;
   }
@@ -676,7 +703,18 @@ function explainRefusedConsent(error: unknown, flow: SlackFlow): unknown {
     'LOOSENING_REFUSED',
     `"${flow.alias}" changed after this was approved, so the sign-in was not saved`,
     {
-      hint: `Nothing was saved for it. Ask for the change again — \`agent-slack workspace ${flow.expect ? `reauth ${flow.alias}` : `add ${flow.alias}`} --mode ${flow.mode}\`, or the same tool from a chat — and approve what it shows now.`,
+      hint: `Nothing was saved for it. Ask for the change again — ${inlineCommand(
+        shellCommand(
+          [
+            'agent-slack',
+            'workspace',
+            ...(flow.expect ? ['reauth', flow.alias] : ['add', flow.alias]),
+            '--mode',
+            flow.mode,
+          ],
+          platform,
+        ),
+      )}, or the same tool from a chat — and approve what it shows now.`,
       details: { ...(error.details ?? {}), refused: error.message },
       cause: error,
     },
@@ -845,7 +883,7 @@ export async function completeSignIn(context: SlackContext, flowId: string, code
         'LOOSENING_REFUSED',
         `connecting "${flow.alias}" able to post needs a person to confirm it`,
         {
-          hint: `Start again with \`agent-slack workspace add ${flow.alias} --mode send\`, or slack_workspace_add from a chat: both ask the person to approve it first.`,
+          hint: `Start again with ${inlineCommand(shellCommand(['agent-slack', 'workspace', 'add', flow.alias, '--mode', 'send'], context.platform))}, or slack_workspace_add from a chat: both ask the person to approve it first.`,
         },
       );
     }
@@ -877,7 +915,7 @@ export async function completeSignIn(context: SlackContext, flowId: string, code
      */
     const existing = flow.expect ? renewing(context, config, flow) : undefined;
     if (!existing) checkAliasFree(config, flow.alias);
-    validateExchange({ token, mode: flow.mode, flow, config, existing });
+    validateExchange({ token, mode: flow.mode, flow, config, existing, platform: context.platform });
 
     const at = context.now();
     /*
@@ -970,7 +1008,7 @@ export async function completeSignIn(context: SlackContext, flowId: string, code
              * under a second name — both of which a concurrent command can make true in the gap.
              */
             checkAliasFree(current, flow.alias);
-            validateExchange({ token, mode: flow.mode, flow, config: current });
+            validateExchange({ token, mode: flow.mode, flow, config: current, platform: context.platform });
           }
           /*
            * The grant owns what it sets; everything else carries over.
@@ -1013,7 +1051,7 @@ export async function completeSignIn(context: SlackContext, flowId: string, code
       const landed = await committed(context, accountId, secretRef);
       if (landed === 'unknown') throw keepAndReport(error, secretRef);
       if (landed === 'absent') {
-        throw await withdrawStaged(secrets, secretRef, explainRefusedConsent(error, flow));
+        throw await withdrawStaged(secrets, secretRef, explainRefusedConsent(error, flow, context.platform));
       }
       // 'present': the write is in and only the lock's cleanup failed. The sign-in worked; carry on as it did.
     }

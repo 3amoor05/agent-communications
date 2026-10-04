@@ -326,7 +326,7 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
   const slackDeps = { fetch: options.fetch, baseUrl: options.slackBaseUrl };
   const probe: ProbeFetch | undefined = options.probe ?? options.fetch;
   const session = (name: string) => openWorkspace(context, name, slackDeps);
-  const drafts = () => openDraftStore(context.core.paths.stateDir, context.now);
+  const drafts = () => openDraftStore(context.core.paths.stateDir, context.now, context.platform);
 
   /*
    * Annotations, as the Gmail server declares them: a client that asks before a write needs to know which these

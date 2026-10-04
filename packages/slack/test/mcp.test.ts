@@ -340,7 +340,7 @@ test('the mode steps name the port the workspace signed in with, and never guess
     // The report names no port it does not have: its steps say `<port>`, as the command's do.
     const report = (await client.callTool({ name: 'slack_mode', arguments: { workspace: 'unknown' } })) as ToolResult;
     const toSend = (report.structuredContent as { toSend: string[] }).toSend.join('\n');
-    assert.match(toSend, /--port <port>/);
+    assert.match(toSend, /--port '<port>'/);
     assert.doesNotMatch(toSend, /51234/);
   } finally {
     await close();

@@ -291,13 +291,13 @@ function stepsAfterUpdate(
   if (mode === 'read' && workspaceMode === 'send') {
     // The first of the narrowing steps is the one just done — putting the `read` manifest on the app — so only
     // what follows it is left. Taken from `narrowingSteps` rather than rewritten, so both say the same thing.
-    return narrowingSteps(alias, port, { knowsItsApp: account.oauthClientId !== undefined }).slice(1);
+    return narrowingSteps(alias, port, { knowsItsApp: account.oauthClientId !== undefined }, platform).slice(1);
   }
   if (account.redirectPort !== port) {
     const was =
       account.redirectPort === undefined ? 'a port this record does not keep' : `port ${account.redirectPort}`;
     return [
-      `The app now redirects to port ${port}, and "${alias}" last signed in on ${was}: its next sign-in must use \`--port ${port}\`, e.g. \`agent-slack workspace reauth ${alias} --port ${port}\`.`,
+      `The app now redirects to port ${port}, and "${alias}" last signed in on ${was}: its next sign-in must use \`--port ${port}\`, e.g. ${inlineCommand(shellCommand(['agent-slack', 'workspace', 'reauth', alias, '--port', String(port)], platform))}.`,
     ];
   }
   return [];
@@ -319,7 +319,7 @@ export async function updateApp(input: AppUpdateInput): Promise<AppUpdated> {
   const appId = account.appId;
   if (!appId) {
     throw new CommsError('CONFIG', `"${alias}" does not record which Slack app it was connected through`, {
-      hint: `Re-authorising records it: \`agent-slack workspace reauth ${alias}\`. Or paste \`agent-slack manifest --mode ${mode} --port ${port}\` on the app's page at https://api.slack.com/apps.`,
+      hint: `Re-authorising records it: ${inlineCommand(shellCommand(['agent-slack', 'workspace', 'reauth', alias], platform))}. Or paste ${inlineCommand(shellCommand(['agent-slack', 'manifest', '--mode', mode, '--port', String(port)], platform))} on the app's page at https://api.slack.com/apps.`,
     });
   }
   const workspaceMode = parseMode(account.mode ?? account.tier, `"${alias}"`);

@@ -92,7 +92,7 @@ async function currentPost(
   deps: SessionDeps,
 ): Promise<{ draft: SlackDraft; view: PostView }> {
   const approvalId = record.approvalId;
-  const drafts = openDraftStore(context.core.paths.stateDir, context.now);
+  const drafts = openDraftStore(context.core.paths.stateDir, context.now, context.platform);
   const draft = await drafts.get(record.draftId);
   const gate = await gateDepsFor(context, workspace, deps);
   const view = await viewPost(gate, draft, new NameBook());

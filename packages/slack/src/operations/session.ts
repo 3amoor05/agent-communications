@@ -1,4 +1,4 @@
-import { CommsError } from '@agentcomms/core';
+import { CommsError, inlineCommand, shellCommand } from '@agentcomms/core';
 import type { SlackCall } from '../api/call.ts';
 import type { FetchLike } from '../api/guard.ts';
 import { accessTokenFor, type PersistPolicy, type RefreshDeps, renewRejectedToken } from '../auth/refresh.ts';
@@ -141,7 +141,7 @@ export async function openWorkspace(
   const { alias: name, account } = requireWorkspace(config, alias);
   if (!account.oauthClientId) {
     throw new CommsError('CONFIG', `"${name}" has no Slack client id recorded`, {
-      hint: `Re-authorise it with \`agent-slack workspace reauth ${name}\` so the id is stored.`,
+      hint: `Re-authorise it with ${inlineCommand(shellCommand(['agent-slack', 'workspace', 'reauth', name], context.platform))} so the id is stored.`,
     });
   }
   const secrets = await context.secrets();
@@ -154,6 +154,7 @@ export async function openWorkspace(
     now: context.now,
     exchange: refreshExchange(context, account.oauthClientId),
     alias: name,
+    platform: context.platform,
     ...(persist ? { persist } : {}),
   };
   const { token } = await accessTokenFor(refresh, account.id, account.secretRef);

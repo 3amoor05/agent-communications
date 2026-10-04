@@ -14,6 +14,7 @@ import {
   exemptFromUpdateGate,
   type GatedChange,
   gatedChangeAtTerminal,
+  inlineCommand,
   installExitStatus,
   type OutputOptions,
   openCore,
@@ -1150,7 +1151,7 @@ configuration problem.`,
     .action(
       act(async (context, _options, draftId: string, flags: Options) => {
         const { account } = requireWorkspace(await context.config(), String(flags.workspace));
-        const store = openDraftStore(context.core.paths.stateDir, context.now);
+        const store = openDraftStore(context.core.paths.stateDir, context.now, context.platform);
         const deleted = await deleteOwnDraft(store, account.id, draftId);
         writeResult(deleted, output(), renderDeletedDraft, streams);
       }),
@@ -1259,7 +1260,7 @@ configuration problem.`,
             'APPROVAL_REQUIRED',
             'only a person can approve a post, a reaction or a change, not an agent',
             {
-              hint: `Ask the user to run \`agent-slack approve ${approvalId}\` in their own terminal.`,
+              hint: `Ask the user to run ${inlineCommand(shellCommand(['agent-slack', 'approve', approvalId], context.platform))} in their own terminal.`,
               details: { marker },
             },
           );
@@ -1269,7 +1270,7 @@ configuration problem.`,
             'APPROVAL_REQUIRED',
             'approving a post, a reaction or a change needs an interactive terminal',
             {
-              hint: `Run \`agent-slack approve ${approvalId}\` directly in a terminal.`,
+              hint: `Run ${inlineCommand(shellCommand(['agent-slack', 'approve', approvalId], context.platform))} directly in a terminal.`,
             },
           );
         }

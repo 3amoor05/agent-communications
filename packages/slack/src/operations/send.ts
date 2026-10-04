@@ -280,7 +280,7 @@ export async function viewPost(
   // Before Slack is asked anything: a draft that is not what its text composes to is shown to nobody.
   const payload = postedPayload(draft, deps.platform);
   // A draft stored before 0.12.0, or written by hand, may name a user: refused here too, before Slack is asked.
-  requireConversation(payload.channel, deps.workspaceName);
+  requireConversation(payload.channel, deps.workspaceName, deps.platform);
   const { channel, members, why } = await roomOf(deps.call, payload.channel);
   // Here, so preparing, the approval screen and posting all refuse it — and posting before the approval is claimed.
   if (channel) requireMember(channel, payload.channel);
@@ -344,7 +344,7 @@ export function requireFileSending(
   const alias = deps.workspaceName;
   if (deps.mode !== 'send') {
     throw new CommsError('SCOPE_MISSING', `"${alias}" is connected to read, and cannot send files`, {
-      hint: `Nothing was sent. Moving it to send takes a person: \`agent-slack workspace mode ${alias}\` shows the steps, as slack_mode does from a chat.`,
+      hint: `Nothing was sent. Moving it to send takes a person: ${inlineCommand(shellCommand(['agent-slack', 'workspace', 'mode', alias], deps.platform))} shows the steps, as slack_mode does from a chat.`,
       details: { mode: deps.mode ?? null },
     });
   }

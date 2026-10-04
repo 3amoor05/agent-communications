@@ -1,7 +1,7 @@
 import { randomInt } from 'node:crypto';
 import { readdir, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { CommsError, writeFileAtomic } from '@agentcomms/core';
+import { CommsError, inlineCommand, shellCommand, writeFileAtomic } from '@agentcomms/core';
 import type { ComposedPayload } from './blocks.ts';
 import { MAX_FILES, type SlackDraftFile } from './files.ts';
 
@@ -163,7 +163,11 @@ export function isUnreadableDraft(error: unknown): boolean {
   return error instanceof CommsError && error.code === 'BAD_DATA' && error.details?.reason === 'unreadable';
 }
 
-export function openDraftStore(stateDir: string, now: () => Date): DraftStore {
+export function openDraftStore(
+  stateDir: string,
+  now: () => Date,
+  platform: NodeJS.Platform = process.platform,
+): DraftStore {
   const read = async (draftId: string): Promise<SlackDraft> => {
     /*
      * Outside the try, deliberately.
@@ -199,7 +203,7 @@ export function openDraftStore(stateDir: string, now: () => Date): DraftStore {
      */
     if (!isDraftShaped(parsed)) {
       throw new CommsError('BAD_DATA', `draft "${draftId}" could not be read`, {
-        hint: `Delete it with \`agent-slack draft delete ${draftId} --workspace <name>\` and compose it again.`,
+        hint: `Delete it with ${inlineCommand(shellCommand(['agent-slack', 'draft', 'delete', draftId, '--workspace', '<name>'], platform))} and compose it again.`,
         details: { reason: 'unreadable' },
       });
     }

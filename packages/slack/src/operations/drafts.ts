@@ -86,13 +86,18 @@ function nothingToPost(): CommsError {
  */
 export async function createDraft(context: SlackContext, alias: string, input: DraftInput): Promise<SlackDraft> {
   const { account } = requireWorkspace(await context.config(), alias);
-  requireConversation(input.channel, alias);
+  requireConversation(input.channel, alias, context.platform);
   const paths = input.files ?? [];
   if (input.text === undefined && paths.length === 0) throw nothingToPost();
   const payload = draftPayload(input);
   checkFileCount(paths.length);
   const files = paths.length === 0 ? [] : await recordFiles(paths, await attachPolicyOf(context));
-  return openDraftStore(context.core.paths.stateDir, context.now).create(account.id, payload, input.text ?? '', files);
+  return openDraftStore(context.core.paths.stateDir, context.now, context.platform).create(
+    account.id,
+    payload,
+    input.text ?? '',
+    files,
+  );
 }
 
 /**
@@ -159,7 +164,7 @@ export async function updateDraft(
   change: DraftChange,
 ): Promise<SlackDraft> {
   const { account } = requireWorkspace(await context.config(), alias);
-  const store = openDraftStore(context.core.paths.stateDir, context.now);
+  const store = openDraftStore(context.core.paths.stateDir, context.now, context.platform);
   const draft = await ownDraft(store, account.id, draftId);
   // As the gate would post it, or its refusal: a draft changed outside agent-slack is composed again, not edited.
   const posted = postedPayload(draft, context.platform);
@@ -171,7 +176,7 @@ export async function updateDraft(
     mentionUsers: change.mentionUsers ?? kept.users,
     broadcast: change.broadcast ?? kept.broadcast,
   };
-  requireConversation(next.channel, alias);
+  requireConversation(next.channel, alias, context.platform);
   const payload = draftPayload(next);
 
   const staying = change.files === undefined ? (draft.files ?? []) : [];
@@ -365,7 +370,11 @@ export function viewDraft(draft: SlackDraft, platform: NodeJS.Platform = process
 export async function showDraft(context: SlackContext, alias: string, draftId: string): Promise<DraftView> {
   const { account } = requireWorkspace(await context.config(), alias);
   // Whose it is before what it says: another workspace's draft is absent here, refused or not.
-  const draft = await ownDraft(openDraftStore(context.core.paths.stateDir, context.now), account.id, draftId);
+  const draft = await ownDraft(
+    openDraftStore(context.core.paths.stateDir, context.now, context.platform),
+    account.id,
+    draftId,
+  );
   return viewDraft(draft, context.platform);
 }
 
@@ -378,7 +387,7 @@ export async function showDraft(context: SlackContext, alias: string, draftId: s
  */
 export async function listDrafts(context: SlackContext, alias: string): Promise<DraftView[]> {
   const { account } = requireWorkspace(await context.config(), alias);
-  const drafts = await openDraftStore(context.core.paths.stateDir, context.now).list(account.id);
+  const drafts = await openDraftStore(context.core.paths.stateDir, context.now, context.platform).list(account.id);
   return drafts.map((draft) => {
     try {
       return viewDraft(draft, context.platform);

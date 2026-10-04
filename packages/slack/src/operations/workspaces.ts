@@ -4,12 +4,14 @@ import {
   CommsError,
   type Config,
   findById,
+  inlineCommand,
   lookupName,
   nameAvailable,
   neutralise,
   newAccountId,
   resolveName,
   secretsStoreOf,
+  shellCommand,
 } from '@agentcomms/core';
 import { type ExchangedToken, scopeMismatch } from '../auth/authorize.ts';
 import { BUNDLE_VERSION, serialiseBundle, type TokenBundle } from '../auth/bundle.ts';
@@ -125,8 +127,10 @@ export function validateExchange(options: {
   config: Config;
   /** The account being replaced, on a reauth. */
   existing?: { alias: string; account: AccountConfig } | undefined;
+  platform?: NodeJS.Platform | undefined;
 }): void {
   const { token, mode, flow, existing } = options;
+  const platform = options.platform ?? process.platform;
 
   /*
    * Exact scopes, both directions.
@@ -151,8 +155,8 @@ export function validateExchange(options: {
         `Slack granted no posting scope, so the app's manifest was not updated to send: it did not grant ${missing.join(', ')}`,
         {
           hint: existing
-            ? `Nothing was saved, and "${alias}" is as it was. Update the app it signed in through: \`agent-slack manifest --workspace ${alias} --mode send\` (slack_manifest from a chat) prints the manifest and the link to its page, or \`agent-slack app update ${alias} --mode send --port ${flow.port}\` does it at a terminal with an app configuration token. Then sign in again.`
-            : `Nothing was saved. Update the app first: paste \`agent-slack manifest --mode send --port ${flow.port}\` on its App Manifest page at https://api.slack.com/apps, and save. Then connect it again.`,
+            ? `Nothing was saved, and "${alias}" is as it was. Update the app it signed in through: ${inlineCommand(shellCommand(['agent-slack', 'manifest', '--workspace', alias, '--mode', 'send'], platform))} (slack_manifest from a chat) prints the manifest and the link to its page, or ${inlineCommand(shellCommand(['agent-slack', 'app', 'update', alias, '--mode', 'send', '--port', String(flow.port)], platform))} does it at a terminal with an app configuration token. Then sign in again.`
+            : `Nothing was saved. Update the app first: paste ${inlineCommand(shellCommand(['agent-slack', 'manifest', '--mode', 'send', '--port', String(flow.port)], platform))} on its App Manifest page at https://api.slack.com/apps, and save. Then connect it again.`,
           details: { missing },
         },
       );
@@ -171,13 +175,13 @@ export function validateExchange(options: {
     if (mode === 'read' && extra.every((scope) => OUTWARD_SCOPES.includes(scope))) {
       throw new CommsError('CONFIG', `Slack returned posting scopes it granted this app before: ${extra.join(', ')}`, {
         hint: existing
-          ? `Slack never takes a scope back from a token. \`agent-slack workspace mode ${existing.alias} read --port ${flow.port}\` says how to remove the app's installation first.`
+          ? `Slack never takes a scope back from a token. ${inlineCommand(shellCommand(['agent-slack', 'workspace', 'mode', existing.alias, 'read', '--port', String(flow.port)], platform))} says how to remove the app's installation first.`
           : 'Slack never takes a scope back from a token. Remove the app from the workspace in Slack (Workspace settings → Manage apps → the app → Remove app), then connect it again.',
         details: { returned: extra },
       });
     }
     throw new CommsError('CONFIG', `Slack granted more than "${mode}" asks for: ${extra.join(', ')}`, {
-      hint: `The app requests more than this mode allows. Re-create it from \`agent-slack manifest --mode ${mode}\`.`,
+      hint: `The app requests more than this mode allows. Re-create it from ${inlineCommand(shellCommand(['agent-slack', 'manifest', '--mode', mode], platform))}.`,
     });
   }
 
@@ -263,7 +267,7 @@ export function validateExchange(options: {
   );
   if (duplicate) {
     throw new CommsError('CONFIG', `that account is already connected as "${duplicate[0]}"`, {
-      hint: `To renew it, use \`agent-slack workspace reauth ${duplicate[0]}\`.`,
+      hint: `To renew it, use ${inlineCommand(shellCommand(['agent-slack', 'workspace', 'reauth', duplicate[0]], platform))}.`,
     });
   }
 }
@@ -355,6 +359,7 @@ export interface RemovalDeps {
   /** `kind` so the removal can tell whether the backend it deleted from is still the one in force. */
   readonly secrets: { readonly kind?: string; delete(ref: string): Promise<boolean> };
   readonly update: (mutator: (config: Config) => Config) => Promise<Config>;
+  readonly platform?: NodeJS.Platform | undefined;
 }
 
 /**
@@ -384,7 +389,7 @@ export async function removeWorkspace(
    */
   if (options.expectId !== undefined && found.account.id !== options.expectId) {
     throw new CommsError('CONFIG', `"${alias}" changed after its removal was approved, so nothing was removed`, {
-      hint: `Look at it with \`agent-slack workspace show ${alias}\`, and remove it again if you still want it gone.`,
+      hint: `Look at it with ${inlineCommand(shellCommand(['agent-slack', 'workspace', 'show', alias], deps.platform))}, and remove it again if you still want it gone.`,
     });
   }
   await deps.secrets.delete(found.account.secretRef);
@@ -406,14 +411,14 @@ export async function removeWorkspace(
      */
     if (deps.secrets.kind && secretsStoreOf(config) !== deps.secrets.kind) {
       throw new CommsError('TRANSIENT', `the secret store changed while "${alias}" was being removed`, {
-        hint: `Run \`agent-slack workspace remove ${alias}\` again.`,
+        hint: `Run ${inlineCommand(shellCommand(['agent-slack', 'workspace', 'remove', alias], deps.platform))} again.`,
       });
     }
     // By id, under whatever key it holds now: nothing may depend on the name staying put between the read and here.
     const held = findById(config, 'account', found.account.id);
     if (!held || held.account.secretRef !== found.account.secretRef) {
       throw new CommsError('CONFIG', `"${alias}" was renewed while it was being removed`, {
-        hint: `It is connected again. Run \`agent-slack workspace remove ${alias}\` once more if you still want it gone.`,
+        hint: `It is connected again. Run ${inlineCommand(shellCommand(['agent-slack', 'workspace', 'remove', alias], deps.platform))} once more if you still want it gone.`,
       });
     }
     const { [held.alias]: _removed, ...rest } = config.accounts;

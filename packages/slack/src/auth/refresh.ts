@@ -1,6 +1,14 @@
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
-import { CommsError, type ErrorCode, type SecretStore, withCredentialsLock, withFileLock } from '@agentcomms/core';
+import {
+  CommsError,
+  type ErrorCode,
+  inlineCommand,
+  type SecretStore,
+  shellCommand,
+  withCredentialsLock,
+  withFileLock,
+} from '@agentcomms/core';
 import {
   ATTEMPT_ABANDONED_MS,
   attemptAbandoned,
@@ -73,6 +81,7 @@ export interface RefreshDeps {
   exchange(refreshToken: string): Promise<Omit<TokenBundle, 'v' | 'state' | 'attempt'>>;
   /** The workspace's name, so a hint can say which one to re-authorise instead of `<name>`. */
   alias?: string | undefined;
+  platform?: NodeJS.Platform | undefined;
   /** How long, and how patiently, the write after Slack answered is retried. Tests shorten it. */
   persist?: PersistPolicy | undefined;
 }
@@ -149,8 +158,8 @@ function lockPathFor(stateDir: string, accountId: string): string {
   return join(stateDir, 'slack', `${accountId}.refresh.lock`);
 }
 
-function reauthHint(alias: string | undefined): string {
-  return `Run \`agent-slack workspace reauth ${alias ?? '<name>'}\`.`;
+function reauthHint(alias: string | undefined, platform: NodeJS.Platform = process.platform): string {
+  return `Run ${inlineCommand(shellCommand(['agent-slack', 'workspace', 'reauth', alias ?? '<name>'], platform))}.`;
 }
 
 /**
@@ -470,7 +479,7 @@ async function refreshNow(
     if (storeError !== null) {
       pendingWrites.set(accountId, { secretRef, attemptId: attempt.id, bundle: settled, renewed: false, deps });
     }
-    throw failureError(failure, error, deps.alias);
+    throw failureError(failure, error, deps.alias, deps.platform);
   }
 
   const replacement: TokenBundle = { v: BUNDLE_VERSION, state: 'ready', ...fresh, attempt: undefined };
@@ -885,7 +894,12 @@ function failureDetails(failure: RefreshFailure): Record<string, unknown> {
   };
 }
 
-function failureError(failure: RefreshFailure, error: unknown, alias: string | undefined): CommsError {
+function failureError(
+  failure: RefreshFailure,
+  error: unknown,
+  alias: string | undefined,
+  platform: NodeJS.Platform = process.platform,
+): CommsError {
   const details = failureDetails(failure);
   switch (failure.kind) {
     case 'not-sent':
@@ -914,11 +928,11 @@ function failureError(failure: RefreshFailure, error: unknown, alias: string | u
         failure.stage === 'parse'
           ? 'Slack renewed the token, but its reply held no credential this could use'
           : `Slack says this workspace’s refresh token is no longer valid (${failure.slackError})`,
-        { hint: reauthHint(alias), details, cause: error },
+        { hint: reauthHint(alias, platform), details, cause: error },
       );
     default:
       return new CommsError('AUTH_REQUIRED', 'the token refresh did not complete, and cannot be retried safely', {
-        hint: `Slack refresh tokens are single-use, and this one may have been used. ${reauthHint(alias)}`,
+        hint: `Slack refresh tokens are single-use, and this one may have been used. ${reauthHint(alias, platform)}`,
         details,
         cause: error,
       });

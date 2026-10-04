@@ -1,4 +1,4 @@
-import type { AccountConfig } from '@agentcomms/core';
+import { type AccountConfig, inlineCommand, shellCommand } from '@agentcomms/core';
 import { appManifestUrl, type InstallMode, parseMode, scopesForMode } from '../manifest.ts';
 
 /**
@@ -32,7 +32,12 @@ export interface ModeReport {
   readonly toRead: readonly string[];
 }
 
-export function modeReport(alias: string, account: AccountConfig, requested?: number): ModeReport {
+export function modeReport(
+  alias: string,
+  account: AccountConfig,
+  requested?: number,
+  platform: NodeJS.Platform = process.platform,
+): ModeReport {
   // The port asked for, else the one the workspace was signed in with; neither, and the steps say `<port>`.
   const port = requested ?? account.redirectPort;
   const mode = parseMode(account.mode ?? account.tier, `"${alias}"`);
@@ -43,11 +48,11 @@ export function modeReport(alias: string, account: AccountConfig, requested?: nu
     mode,
     outwardScopes,
     canActOutward: outwardScopes.length > 0,
-    toSend: mode === 'send' ? [] : wideningSteps(alias, port, account.appId),
+    toSend: mode === 'send' ? [] : wideningSteps(alias, port, account.appId, platform),
     toRead:
       mode === 'read' && outwardScopes.length === 0
         ? []
-        : narrowingSteps(alias, port, { knowsItsApp: account.oauthClientId !== undefined }),
+        : narrowingSteps(alias, port, { knowsItsApp: account.oauthClientId !== undefined }, platform),
   };
 }
 
@@ -65,13 +70,25 @@ const portText = (port: number | undefined): string => (port === undefined ? '<p
  * of a `read` workspace cannot show that the app was widened, and without the person's word that it was, the command
  * hands back this first step instead of starting a sign-in that Slack would answer with `read` again.
  */
-export function wideningSteps(alias: string, port?: number, appId?: string | undefined): string[] {
+export function wideningSteps(
+  alias: string,
+  port?: number,
+  appId?: string | undefined,
+  platform: NodeJS.Platform = process.platform,
+): string[] {
   const p = portText(port);
+  const manifest = inlineCommand(shellCommand(['agent-slack', 'manifest', '--mode', 'send', '--port', p], platform));
+  const appUpdate = inlineCommand(
+    shellCommand(['agent-slack', 'app', 'update', alias, '--mode', 'send', '--port', p], platform),
+  );
+  const move = inlineCommand(
+    shellCommand(['agent-slack', 'workspace', 'mode', alias, 'send', '--app-updated', '--port', p], platform),
+  );
   return [
     appId
-      ? `Open ${appManifestUrl(appId)} — the manifest of the app "${alias}" signed in through — replace it with \`agent-slack manifest --mode send --port ${p}\`, and save: the same app, not a new one. With an app configuration token, \`agent-slack app update ${alias} --mode send --port ${p}\` does this at a terminal instead.`
-      : `Open the workspace's existing app at https://api.slack.com/apps → App Manifest, and replace it with \`agent-slack manifest --mode send --port ${p}\` — the same app, not a new one.`,
-    `Then move it: \`agent-slack workspace mode ${alias} send --app-updated --port ${p}\` at a terminal, or slack_mode_set with appUpdated from a chat. Either asks for the change to be approved first, then for the sign-in to be approved in Slack.`,
+      ? `Open ${appManifestUrl(appId)} — the manifest of the app "${alias}" signed in through — replace it with ${manifest}, and save: the same app, not a new one. With an app configuration token, ${appUpdate} does this at a terminal instead.`
+      : `Open the workspace's existing app at https://api.slack.com/apps → App Manifest, and replace it with ${manifest} — the same app, not a new one.`,
+    `Then move it: ${move} at a terminal, or slack_mode_set with appUpdated from a chat. Either asks for the change to be approved first, then for the sign-in to be approved in Slack.`,
   ];
 }
 
@@ -83,13 +100,29 @@ export function wideningSteps(alias: string, port?: number, appId?: string | und
  * client secret this package deliberately never stores. So the installation is removed in Slack's own settings, and
  * the workspace signs in again asking for less — as a reauth, which keeps its name, its app and its former names.
  */
-export function narrowingSteps(alias: string, port?: number, options: { knowsItsApp?: boolean } = {}): string[] {
+export function narrowingSteps(
+  alias: string,
+  port?: number,
+  options: { knowsItsApp?: boolean } = {},
+  platform: NodeJS.Platform = process.platform,
+): string[] {
   const p = portText(port);
+  const manifest = inlineCommand(shellCommand(['agent-slack', 'manifest', '--mode', 'read', '--port', p], platform));
+  const remove = inlineCommand(shellCommand(['agent-slack', 'workspace', 'remove', alias], platform));
+  const add = inlineCommand(
+    shellCommand(
+      ['agent-slack', 'workspace', 'add', alias, '--client-id', "<the app's Client ID>", '--port', p],
+      platform,
+    ),
+  );
+  const reauth = inlineCommand(
+    shellCommand(['agent-slack', 'workspace', 'reauth', alias, '--mode', 'read', '--port', p], platform),
+  );
   return [
-    `(Recommended) Open the workspace's existing app at https://api.slack.com/apps → App Manifest, and replace it with \`agent-slack manifest --mode read --port ${p}\`, so the app itself can no longer offer posting.`,
+    `(Recommended) Open the workspace's existing app at https://api.slack.com/apps → App Manifest, and replace it with ${manifest}, so the app itself can no longer offer posting.`,
     'In Slack, remove the app from the workspace: Workspace settings → Manage apps → the app → Remove app. That revokes every token it holds, which is the only way Slack takes a scope back.',
     options.knowsItsApp === false
-      ? `Then \`agent-slack workspace remove ${alias}\`, and \`agent-slack workspace add ${alias} --client-id <the app's Client ID> --port ${p}\`. This record predates the one that remembers its app, so it cannot be re-authorised in place.`
-      : `Then: \`agent-slack workspace reauth ${alias} --mode read --port ${p}\` — a reauth, which keeps the name, the app and every former name.`,
+      ? `Then ${remove}, and ${add}. This record predates the one that remembers its app, so it cannot be re-authorised in place.`
+      : `Then: ${reauth} — a reauth, which keeps the name, the app and every former name.`,
   ];
 }
