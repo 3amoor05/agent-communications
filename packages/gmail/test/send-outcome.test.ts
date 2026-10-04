@@ -135,6 +135,229 @@ test('only Gmail responses documented as pre-action refusals mark the approval f
   });
 });
 
+test('a final draft read failure is a certain no-send whose slot, approval and audit are settled', async () => {
+  const setup = await world();
+  const { approval, send, state } = await prepared(setup);
+  const transport = await setup.context.transport('work');
+  const getDraft = transport.getDraft.bind(transport);
+  const original = new CommsError('LOCK_TIMEOUT', 'the final draft read could not finish', {
+    hint: 'This is the first failure.',
+    details: { phase: 'final-read' },
+  });
+  let reads = 0;
+  transport.getDraft = async (draftId) => {
+    reads += 1;
+    if (reads === 2) throw original;
+    return getDraft(draftId);
+  };
+
+  const error = await send().then(
+    () => assert.fail('a send whose final draft read failed was reported as sent'),
+    (thrown: unknown) => thrown,
+  );
+  assert.ok(error instanceof CommsError, String(error));
+  assert.equal(error.code, original.code);
+  assert.equal(error.message, original.message);
+  assert.equal(error.hint, original.hint);
+  assert.deepEqual(error.details, original.details);
+  assert.equal(error.cause, original);
+  assert.equal(await state(), 'failed');
+  const inbox = (await setup.harness.core.config.load()).inboxes.work;
+  assert.ok(inbox);
+  assert.deepEqual(await setup.harness.core.ledger.status(inbox.id, { perHour: 20, perDay: 100 }), {
+    hour: 0,
+    day: 0,
+  });
+  assert.equal(setup.harness.google.requests.filter((request) => request.path.endsWith('/send')).length, 0);
+  const audit = await setup.harness.core.audit.tail({ inbox: 'work' });
+  const outcome = audit.findLast((entry) => entry.operation === 'send.execute');
+  assert.equal(outcome?.outcome, 'failed');
+  assert.equal(outcome?.reason, original.message);
+  assert.equal((outcome?.ids?.approvalIds as string[] | undefined)?.[0], approval.approvalId);
+});
+
+test('every certain no-send path attempts each bookkeeping step independently', async (t) => {
+  const failureSets: ReadonlyArray<ReadonlyArray<'release' | 'approval' | 'audit'>> = [
+    ['release'],
+    ['approval'],
+    ['audit'],
+    ['release', 'approval'],
+    ['release', 'audit'],
+    ['approval', 'audit'],
+  ];
+  const triggers = ['final draft read', 'changed draft', 'Gmail refusal'] as const;
+
+  for (const trigger of triggers) {
+    for (const failures of failureSets) {
+      await t.test(`${trigger}; ${failures.join(' and ')} fail`, async () => {
+        const setup = await world();
+        const { send, state } = await prepared(setup);
+        const transport = await setup.context.transport('work');
+        const original = new CommsError('SEND_REFUSED', `${trigger} stopped the send`, {
+          hint: 'Keep the first hint.',
+          details: { trigger },
+        });
+        if (trigger === 'final draft read' || trigger === 'changed draft') {
+          const getDraft = transport.getDraft.bind(transport);
+          let reads = 0;
+          transport.getDraft = async (draftId) => {
+            reads += 1;
+            const draft = await getDraft(draftId);
+            if (reads !== 2) return draft;
+            if (trigger === 'final draft read') throw original;
+            return {
+              ...draft,
+              message: draft.message ? { ...draft.message, id: `${draft.message.id ?? 'message'}-changed` } : undefined,
+            };
+          };
+        } else {
+          transport.sendDraft = async () => {
+            throw original;
+          };
+        }
+
+        const calls: string[] = [];
+        const release = setup.harness.core.ledger.release.bind(setup.harness.core.ledger);
+        setup.harness.core.ledger.release = async (inboxId, approvalId) => {
+          calls.push('release');
+          if (failures.includes('release')) throw new Error('release disk is read-only');
+          return release(inboxId, approvalId);
+        };
+        const complete = setup.harness.core.approvals.complete.bind(setup.harness.core.approvals);
+        setup.harness.core.approvals.complete = async (approvalId, outcome) => {
+          calls.push('approval');
+          if (failures.includes('approval')) throw new Error('approval disk is read-only');
+          return complete(approvalId, outcome);
+        };
+        const append = setup.harness.core.audit.append.bind(setup.harness.core.audit);
+        setup.harness.core.audit.append = async (record, ...rest) => {
+          if (record.operation !== 'send.execute') return append(record, ...rest);
+          calls.push('audit');
+          if (failures.includes('audit')) throw new Error('audit disk is read-only');
+          return append(record, ...rest);
+        };
+
+        const error = await send().then(
+          () => assert.fail(`${trigger} was reported as a send`),
+          (thrown: unknown) => thrown,
+        );
+        assert.ok(error instanceof CommsError, String(error));
+        assert.deepEqual(calls, ['release', 'approval', 'audit']);
+        if (trigger === 'changed draft') {
+          assert.equal(error.code, 'APPROVAL_VOID');
+          assert.equal(error.message, 'nothing was sent: the draft changed while it was being sent');
+          assert.ok(error.cause instanceof CommsError);
+          assert.equal(error.cause.message, error.message);
+        } else {
+          assert.equal(error.code, original.code);
+          assert.equal(error.message, original.message);
+          assert.deepEqual(error.details, original.details);
+          assert.equal(error.cause, original);
+        }
+        assert.match(error.hint ?? '', /^Keep the first hint\.|^Prepare the send again/);
+        for (const step of failures) assert.match(error.hint ?? '', new RegExp(`${step} .*read-only`));
+        assert.equal(await state(), failures.includes('approval') ? 'sending' : 'failed');
+        const inbox = (await setup.harness.core.config.load()).inboxes.work;
+        assert.ok(inbox);
+        assert.equal(
+          (await setup.harness.core.ledger.status(inbox.id, { perHour: 20, perDay: 100 })).hour,
+          failures.includes('release') ? 1 : 0,
+        );
+      });
+    }
+  }
+});
+
+test('a reservation append failure releases a possibly committed slot and keeps the first error', async () => {
+  const setup = await world();
+  const { send, state } = await prepared(setup);
+  const reserve = setup.harness.core.ledger.reserve.bind(setup.harness.core.ledger);
+  const original = new Error('the reservation append reached disk but its close failed');
+  setup.harness.core.ledger.reserve = async (...args) => {
+    await reserve(...args);
+    throw original;
+  };
+
+  const error = await send().then(
+    () => assert.fail('a failed reservation was reported as a send'),
+    (thrown: unknown) => thrown,
+  );
+  assert.ok(error instanceof CommsError, String(error));
+  assert.equal(error.code, 'UNEXPECTED');
+  assert.equal(error.message, original.message);
+  assert.equal(error.hint, undefined);
+  assert.equal(error.cause, original);
+  assert.equal(await state(), 'failed');
+  const inbox = (await setup.harness.core.config.load()).inboxes.work;
+  assert.ok(inbox);
+  assert.equal((await setup.harness.core.ledger.status(inbox.id, { perHour: 20, perDay: 100 })).hour, 0);
+});
+
+test('a cap refusal takes no slot, completes the claimed approval and remains RATE_CAPPED', async () => {
+  const setup = await world();
+  const { approval, send, state } = await prepared(setup);
+  const inbox = (await setup.harness.core.config.load()).inboxes.work;
+  assert.ok(inbox);
+  await setup.harness.core.config.update((config) => ({
+    ...config,
+    defaults: { ...config.defaults, sendCaps: { perHour: 1, perDay: 10 } },
+  }));
+  await setup.harness.core.ledger.reserve(inbox.id, 'earlier-send', { perHour: 1, perDay: 10 });
+
+  const error = await send().then(
+    () => assert.fail('an over-cap send was reported as sent'),
+    (thrown: unknown) => thrown,
+  );
+  assert.ok(error instanceof CommsError, String(error));
+  assert.equal(error.code, 'RATE_CAPPED');
+  assert.equal(error.details?.hour, 1);
+  assert.equal(error.cause instanceof CommsError, true);
+  assert.equal(await state(), 'failed');
+  assert.equal((await setup.harness.core.ledger.status(inbox.id, { perHour: 1, perDay: 10 })).hour, 1);
+  const audit = await setup.harness.core.audit.tail({ inbox: 'work' });
+  const outcome = audit.findLast((entry) => entry.operation === 'send.execute');
+  assert.equal(outcome?.outcome, 'failed');
+  assert.equal((outcome?.ids?.approvalIds as string[] | undefined)?.[0], approval.approvalId);
+});
+
+test('an unknown Gmail outcome keeps its slot and approval when its audit also fails', async () => {
+  const setup = await world();
+  const { approval, send, state } = await prepared(setup);
+  const transport = await setup.context.transport('work');
+  const original = new CommsError('PROVIDER_UNAVAILABLE', 'the connection ended after the request left', {
+    hint: 'The provider answer was lost.',
+    details: { providerRequest: 'gmail-send-1' },
+  });
+  transport.sendDraft = async () => {
+    throw original;
+  };
+  const append = setup.harness.core.audit.append.bind(setup.harness.core.audit);
+  setup.harness.core.audit.append = async (record, ...rest) => {
+    if (record.operation === 'send.execute') throw new Error('audit disk is read-only');
+    return append(record, ...rest);
+  };
+
+  const error = await send().then(
+    () => assert.fail('an unknown outcome was reported as sent'),
+    (thrown: unknown) => thrown,
+  );
+  assert.ok(error instanceof CommsError, String(error));
+  assert.equal(error.code, original.code);
+  assert.match(error.message, /^whether the email was sent is not known:/);
+  assert.match(error.hint ?? '', /^Check the Sent folder/);
+  assert.match(error.hint ?? '', /audit log could not record this either \(audit disk is read-only\)/);
+  assert.deepEqual(error.details, {
+    providerRequest: 'gmail-send-1',
+    approvalId: approval.approvalId,
+    outcome: 'unknown',
+  });
+  assert.equal(error.cause, original);
+  assert.equal(await state(), 'sending');
+  const inbox = (await setup.harness.core.config.load()).inboxes.work;
+  assert.ok(inbox);
+  assert.equal((await setup.harness.core.ledger.status(inbox.id, { perHour: 20, perDay: 100 })).hour, 1);
+});
+
 test('Gmail success is never rewritten when its approval or audit bookkeeping fails', async (t) => {
   await t.test('approval record', async () => {
     const setup = await world();

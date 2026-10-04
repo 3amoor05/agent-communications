@@ -462,6 +462,8 @@ test('a channel, a private channel and a DM are all somewhere a post can go', as
 // ── Reactions ──────────────────────────────────────────────────────────────────────────────────────────────────
 
 const REACTION = { workspace: 'acme', channel: 'C1', ts: '1.1', emoji: 'tada' };
+const NO_REACTION_NOTE =
+  'Slack says this account had no such reaction on the message, so there was nothing of yours to remove; reactions other people added are not affected.';
 
 test('under `chat`, slack_react adds the reaction the person said yes to, once', async () => {
   const harness = await newHarness();
@@ -476,6 +478,31 @@ test('under `chat`, slack_react adds the reaction the person said yes to, once',
 
     const record = await harness.core.approvals.get((made.structuredContent as { approvalId: string }).approvalId);
     assert.equal(record?.state, 'used', 'through a real approval, spent by the reaction it permitted');
+  } finally {
+    await close();
+  }
+});
+
+test('no_reaction removal is success with the ownership note through CLI JSON and MCP', async () => {
+  const harness = await newHarness();
+  await harness.addWorkspace({ alias: 'acme', mode: 'send', sendPolicy: 'chat' });
+  const fake = slack();
+  fake.script['reactions.remove'] = { ok: false, error: 'no_reaction' };
+
+  const terminal = await cli(
+    harness,
+    ['--json', 'react', '--workspace', 'acme', '--channel', 'C1', '--ts', '1.1', '--emoji', 'tada', '--remove'],
+    { read: fake.read },
+  );
+  assert.equal(terminal.code, EXIT_CODES.OK, terminal.stdout + terminal.stderr);
+  assert.equal(terminal.json<Envelope<{ note: string }>>().data?.note, NO_REACTION_NOTE);
+
+  const { call, close } = await connect(harness, fake.read);
+  try {
+    const result = await call('slack_react', { ...REACTION, remove: true });
+    assert.notEqual(result.isError, true, JSON.stringify(result.structuredContent));
+    assert.equal((result.structuredContent as { note?: string }).note, NO_REACTION_NOTE);
+    assert.equal(fake.count('reactions.remove'), 2);
   } finally {
     await close();
   }

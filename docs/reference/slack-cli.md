@@ -47,7 +47,7 @@ Scripts should read these rather than parse output.
 | [`people`](#agent-slack-people) | the members of this workspace |
 | [`draft`](#agent-slack-draft) | compose and keep messages locally; nothing reaches Slack |
 | [`post`](#agent-slack-post) | take a draft through the approval gate |
-| [`react`](#agent-slack-react) | add or remove a reaction. Behind the same gate, at lower ceremony |
+| [`react`](#agent-slack-react) | add a reaction or remove your reaction. Behind the same gate, at lower ceremony |
 | [`approve`](#agent-slack-approve) | approve a post, a reaction or a change at this terminal: read it, then type the code back — or answer where a download is saved |
 | [`mcp`](#agent-slack-mcp) | run the MCP server on stdio, for a coding agent to connect to |
 
@@ -442,7 +442,7 @@ agent-slack post send [options]
 
 ### `agent-slack react`
 
-add or remove a reaction. Behind the same gate, at lower ceremony
+add a reaction or remove your reaction. Behind the same gate, at lower ceremony
 
 ```
 agent-slack react [options]
@@ -454,7 +454,7 @@ agent-slack react [options]
 | `--channel <id>` | the channel | — |
 | `--ts <ts>` | the message timestamp | — |
 | `--emoji <name>` | the emoji name, without colons | — |
-| `--remove` | take one off instead | `false` |
+| `--remove` | remove your reaction instead | `false` |
 | `--approval <approvalId>` | the approval a person gave with `agent-slack approve`, under `confirm` | — |
 
 ### `agent-slack approve`

@@ -1174,11 +1174,11 @@ configuration problem.`,
     );
 
   workspaceOption(program.command('react'))
-    .description('add or remove a reaction. Behind the same gate, at lower ceremony')
+    .description('add a reaction or remove your reaction. Behind the same gate, at lower ceremony')
     .requiredOption('--channel <id>', 'the channel')
     .requiredOption('--ts <ts>', 'the message timestamp')
     .requiredOption('--emoji <name>', 'the emoji name, without colons')
-    .option('--remove', 'take one off instead', false)
+    .option('--remove', 'remove your reaction instead', false)
     .option('--approval <approvalId>', 'the approval a person gave with `agent-slack approve`, under `confirm`')
     .action(
       act(async (context, options, flags: Options) => {

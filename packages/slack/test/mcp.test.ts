@@ -87,6 +87,16 @@ test('the tools that reach people say what approval they need, and the one that 
       assert.match(String(tool.description), /agent-slack approve/, `${outward} names the command a person runs`);
       assert.match(String(tool.description), /cannot approve/i, `${outward} says the agent cannot approve`);
     }
+    for (const reacting of ['slack_react', 'slack_react_send']) {
+      const tool = tools.find((candidate) => candidate.name === reacting);
+      assert.match(String(tool?.description), /remove your reaction/i, `${reacting} says whose reaction it removes`);
+      const remove = tool?.inputSchema.properties?.remove as { description?: string } | undefined;
+      assert.match(
+        String(remove?.description),
+        /remove your reaction/i,
+        `${reacting} says whose reaction remove means`,
+      );
+    }
     const prepare = tools.find((tool) => tool.name === 'slack_post_prepare');
     assert.match(String(prepare?.description), /Nothing is posted/i);
   } finally {

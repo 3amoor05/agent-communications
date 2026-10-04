@@ -330,7 +330,6 @@ const REFUSED_BEFORE_ACTING: Readonly<Record<PostingMethod, ReadonlySet<string>>
     'file_not_found',
     'file_comment_not_found',
     'no_access',
-    'no_reaction',
     'thread_locked',
     'ekm_access_denied',
     // The reaction and the arguments.

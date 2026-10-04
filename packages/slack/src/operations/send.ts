@@ -1420,6 +1420,18 @@ export async function reactPrepared(
     if (method === 'reactions.add' && error instanceof CommsError && error.details?.slackError === 'already_reacted') {
       return recordReactionChanged(deps, approvalId, options, 'Slack says this account had already added the reaction');
     }
+    /*
+     * `no_reaction` means this account already has the state the removal asked for. Other people's reactions remain,
+     * which the result says explicitly so success cannot be mistaken for removing the emoji from the message.
+     */
+    if (method === 'reactions.remove' && error instanceof CommsError && error.details?.slackError === 'no_reaction') {
+      return recordReactionChanged(
+        deps,
+        approvalId,
+        options,
+        'Slack says this account had no such reaction on the message, so there was nothing of yours to remove; reactions other people added are not affected.',
+      );
+    }
     if (error instanceof CommsError && certainlyRefused(error, method)) {
       throw await recordReactionRefused(deps, approvalId, options, error);
     }

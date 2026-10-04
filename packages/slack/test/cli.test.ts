@@ -1480,6 +1480,13 @@ test('every name the command suggests is one a config made today would accept', 
   assert.match(missing.json<Envelope<never>>().error?.hint ?? '', /workspace add acme\/slack/);
 });
 
+test('react --help says removal only removes your reaction', async () => {
+  const harness = await newHarness();
+  const help = (await cli(harness, ['react', '--help'])).stdout;
+  assert.match(help, /add a reaction or remove your reaction/i);
+  assert.match(help, /--remove\s+remove your reaction instead/i);
+});
+
 test('an agent cannot turn a read workspace into one that can post by removing it and adding it back, unapproved', async () => {
   /*
    * The route the mode-switching design closed: remove a `read` workspace, add it back as `send`. Both halves are now

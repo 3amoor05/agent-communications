@@ -17,6 +17,8 @@ import { type Harness, newHarness } from './support/harness.ts';
  */
 
 const WANTED = { channel: 'C1', ts: '1700000000.000100', name: 'tada' };
+const NO_REACTION_NOTE =
+  'Slack says this account had no such reaction on the message, so there was nothing of yours to remove; reactions other people added are not affected.';
 
 interface ReactionResult {
   readonly approvalId: string;
@@ -56,8 +58,8 @@ async function world(remove = false) {
   return { harness, fake, method, change, state, approvalId: prepared.approvalId, changed };
 }
 
-async function audited(harness: Harness): Promise<AuditRecord[]> {
-  return (await harness.core.audit.tail({ limit: 20 })).filter((record) => record.operation === 'slack.reaction.add');
+async function audited(harness: Harness, operation = 'slack.reaction.add'): Promise<AuditRecord[]> {
+  return (await harness.core.audit.tail({ limit: 20 })).filter((record) => record.operation === operation);
 }
 
 /** Every outcome the store was asked to record, so a test can prove an unknown or success was never made failed. */
@@ -143,7 +145,6 @@ test('the documented pre-action reaction refusals are certain, and Slack state o
     'no_access',
     'no_item_specified',
     'no_permission',
-    'no_reaction',
     'not_allowed_token_type',
     'not_authed',
     'ratelimited',
@@ -183,6 +184,11 @@ test('the documented pre-action reaction refusals are certain, and Slack state o
     certainlyRefused(refused('already_reacted'), 'reactions.add'),
     false,
     'already_reacted is the desired state, not a failure',
+  );
+  assert.equal(
+    certainlyRefused(refused('no_reaction'), 'reactions.remove'),
+    false,
+    'no_reaction is the desired removal state, not a failure',
   );
 });
 
@@ -299,6 +305,72 @@ test('already_reacted from a removal does not claim that the reaction was remove
   assert.match(error.message, /^whether the reaction was removed is not known: /);
   assert.deepEqual(outcomes, []);
   assert.equal(await state(), 'sending');
+});
+
+test('no_reaction is recorded as used because this account has nothing to remove, and the result says whose reactions remain', async () => {
+  const { harness, fake, change, state, changed } = await world(true);
+  fake.script['reactions.remove'] = () => ({ ok: false, error: 'no_reaction' });
+  const outcomes = recordedOutcomes(harness);
+
+  const result = await change();
+  assert.equal(result.note, NO_REACTION_NOTE);
+  assert.equal(changed(), 1);
+  assert.deepEqual(outcomes, ['used'], 'the state already reached was recorded as a failure');
+  assert.equal(await state(), 'used');
+  const [record] = await audited(harness, 'slack.reaction.remove');
+  assert.equal(record?.outcome, 'ok');
+  assert.equal(record?.reason, NO_REACTION_NOTE);
+});
+
+test('no_reaction from an addition remains unknown rather than claiming that the reaction is present', async () => {
+  const { harness, fake, change, state } = await world();
+  fake.script['reactions.add'] = () => ({ ok: false, error: 'no_reaction' });
+  const outcomes = recordedOutcomes(harness);
+
+  const error = await change().then(
+    () => assert.fail('an addition Slack did not confirm was reported as added'),
+    (thrown: unknown) => thrown,
+  );
+  assert.ok(error instanceof CommsError, String(error));
+  assert.match(error.message, /^whether the reaction was added is not known: /);
+  assert.deepEqual(outcomes, []);
+  assert.equal(await state(), 'sending');
+});
+
+test('no_reaction remains success when recording that result is incomplete', async (t) => {
+  await t.test('the approval failure is noted', async () => {
+    const { harness, fake, change, state } = await world(true);
+    fake.script['reactions.remove'] = () => ({ ok: false, error: 'no_reaction' });
+    const store = harness.core.approvals;
+    const complete = store.complete.bind(store);
+    store.complete = async (approvalId, outcome) => {
+      if ('sentMessageId' in outcome) throw new Error('approval ledger is read-only');
+      return complete(approvalId, outcome);
+    };
+
+    const result = await change();
+    assert.match(result.note ?? '', new RegExp(`^${NO_REACTION_NOTE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+    assert.match(result.note ?? '', /approval could not be marked used \(approval ledger is read-only\)/);
+    assert.equal(await state(), 'sending');
+    const [record] = await audited(harness, 'slack.reaction.remove');
+    assert.equal(record?.outcome, 'ok');
+  });
+
+  await t.test('the audit failure is noted', async () => {
+    const { harness, fake, change, state } = await world(true);
+    fake.script['reactions.remove'] = () => ({ ok: false, error: 'no_reaction' });
+    const audit = harness.core.audit;
+    const append = audit.append.bind(audit);
+    audit.append = async (record, ...rest) => {
+      if (record.operation === 'slack.reaction.remove') throw new Error('audit ledger is read-only');
+      return append(record, ...rest);
+    };
+
+    const result = await change();
+    assert.match(result.note ?? '', new RegExp(`^${NO_REACTION_NOTE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+    assert.match(result.note ?? '', /audit log could not record it \(audit ledger is read-only\)/);
+    assert.equal(await state(), 'used');
+  });
 });
 
 test('a reaction Slack accepted whose approval cannot be marked used is never failed, and the result says so', async () => {

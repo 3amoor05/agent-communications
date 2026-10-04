@@ -105,6 +105,56 @@ function describeState(state: ApprovalRecord['state']): string {
   }
 }
 
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** Keeps the failure that stopped the send visible, adding only what could not be settled afterwards. */
+function noSendError(error: unknown, unrecorded: readonly string[]): CommsError {
+  const original =
+    error instanceof CommsError ? error : new CommsError('UNEXPECTED', messageOf(error), { cause: error });
+  const hint = [original.hint, ...unrecorded].filter((part) => part !== undefined);
+  return new CommsError(original.code, original.message, {
+    ...(hint.length === 0 ? {} : { hint: hint.join(' ') }),
+    ...(original.details === undefined ? {} : { details: original.details }),
+    cause: error,
+  });
+}
+
+/** Settles a failure known to have happened before Gmail sent anything, without one failed write skipping another. */
+async function recordNoSend(
+  context: GmailContext,
+  options: { alias: string; inboxId: string; approvalId: string; draftId: string },
+  error: unknown,
+): Promise<CommsError> {
+  const unrecorded: string[] = [];
+  const said = messageOf(error);
+  try {
+    await context.core.ledger.release(options.inboxId, options.approvalId);
+  } catch (failure) {
+    unrecorded.push(`the capacity slot could not be released (${messageOf(failure)})`);
+  }
+  try {
+    await context.core.approvals.complete(options.approvalId, { error: said });
+  } catch (failure) {
+    unrecorded.push(`the approval could not be marked failed (${messageOf(failure)})`);
+  }
+  try {
+    await context.core.audit.append({
+      inboxId: options.inboxId,
+      alias: options.alias,
+      operation: 'send.execute',
+      outcome: 'failed',
+      surface: context.surface,
+      ids: { approvalIds: [options.approvalId], draftIds: [options.draftId] },
+      reason: [said, ...unrecorded].join('; '),
+    });
+  } catch (failure) {
+    unrecorded.push(`the audit log could not record the failure (${messageOf(failure)})`);
+  }
+  return noSendError(error, unrecorded);
+}
+
 function capsFor(defaults: { sendCaps: { perHour: number; perDay: number } }): Caps {
   return { perHour: defaults.sendCaps.perHour, perDay: defaults.sendCaps.perDay };
 }
@@ -545,23 +595,32 @@ export async function executeSend(
     });
   }
 
+  const bookkeeping = {
+    alias,
+    inboxId: resolved.inbox.id,
+    approvalId: options.approvalId,
+    draftId: options.draftId,
+  };
   const caps = capsFor(config.defaults);
   try {
     await context.core.ledger.reserve(resolved.inbox.id, options.approvalId, caps);
   } catch (error) {
-    await context.core.approvals.complete(options.approvalId, { error: 'rate capped' });
-    throw error;
+    throw await recordNoSend(context, bookkeeping, error);
   }
 
   // The last look. Between the claim and here, nothing of ours can have changed the draft — `draft update` and
   // `draft delete` refuse while an approval is sending — but a person in Gmail web still can.
-  const now = await readDraft(context, alias, options.draftId);
+  let now: Awaited<ReturnType<typeof readDraft>>;
+  try {
+    now = await readDraft(context, alias, options.draftId);
+  } catch (error) {
+    throw await recordNoSend(context, bookkeeping, error);
+  }
   if (now.draftMessageId !== claimed.draftMessageId || now.analysis.digest !== claimed.digest) {
-    await context.core.ledger.release(resolved.inbox.id, options.approvalId);
-    await context.core.approvals.complete(options.approvalId, { error: 'the draft changed' });
-    throw new CommsError('APPROVAL_VOID', 'nothing was sent: the draft changed while it was being sent', {
+    const error = new CommsError('APPROVAL_VOID', 'nothing was sent: the draft changed while it was being sent', {
       hint: 'Prepare the send again to see what it says now.',
     });
+    throw await recordNoSend(context, bookkeeping, error);
   }
 
   let sent: { id: string; threadId: string | undefined };
@@ -571,18 +630,7 @@ export async function executeSend(
     const said = error instanceof Error ? error.message : String(error);
     const ids = { approvalIds: [options.approvalId], draftIds: [options.draftId] };
     if (sendCertainlyRefused(error)) {
-      await context.core.ledger.release(resolved.inbox.id, options.approvalId);
-      await context.core.approvals.complete(options.approvalId, { error: said });
-      await context.core.audit.append({
-        inboxId: resolved.inbox.id,
-        alias,
-        operation: 'send.execute',
-        outcome: 'failed',
-        surface: context.surface,
-        ids,
-        reason: said,
-      });
-      throw error;
+      throw await recordNoSend(context, bookkeeping, error);
     }
 
     let unaudited = '';
@@ -609,6 +657,7 @@ export async function executeSend(
           approvalId: options.approvalId,
           outcome: 'unknown',
         },
+        cause: error,
       },
     );
   }

@@ -37,8 +37,8 @@ Tightening applies at once. No tool approves.
 | [`slack_draft_list`](#slack_draft_list) | The drafts held on this machine for this workspace, newest first, each as slack_draft_get shows it. |
 | [`slack_draft_get`](#slack_draft_get) | One draft, exactly as it would be posted: `text` is what the channel would read and `payload` what would be sent, and `source` the words it was typed as. |
 | [`slack_draft_delete`](#slack_draft_delete) | Throw a draft away. |
-| [`slack_react`](#slack_react) | Add or remove one reaction. |
-| [`slack_react_send`](#slack_react_send) | Add or remove the reaction a person approved at their own terminal with `agent-slack approve <approvalId>`, once — you cannot approve it yourself. |
+| [`slack_react`](#slack_react) | Add a reaction or remove your reaction. |
+| [`slack_react_send`](#slack_react_send) | Add the reaction or remove your reaction as a person approved at their own terminal with `agent-slack approve <approvalId>`, once — you cannot approve it yourself. |
 | [`slack_mode`](#slack_mode) | Reports whether this workspace can post, upload or react, what its recorded grant allows, and the steps each way (`toSend`, `toRead`). |
 | [`slack_mode_request_send`](#slack_mode_request_send) | The steps that let this workspace post, and changes nothing — `agent-slack workspace mode <name> send`, stopped before any change is asked for. |
 | [`slack_mode_narrow`](#slack_mode_narrow) | The path back to read-only, as `agent-slack workspace mode <name> read` returns it, and changes nothing. |
@@ -283,7 +283,7 @@ Throw a draft away. One too damaged to read is removed too, unless it names anot
 
 ### `slack_react`
 
-Add or remove one reaction. Say which emoji on which message first, and wait for a yes. Under the workspace’s `chat` policy this does it at once, through a single-use approval. Under `confirm` it adds nothing: it returns APPROVAL_PENDING with an approval id and the command the person runs at their own terminal (`agent-slack approve <approvalId>`) — you cannot approve it yourself. Once they have, call slack_react_send with that approval id. Under `never` it refuses.
+Add a reaction or remove your reaction. Say which emoji on which message first, and wait for a yes. Under the workspace’s `chat` policy this does it at once, through a single-use approval. Under `confirm` it adds nothing: it returns APPROVAL_PENDING with an approval id and the command the person runs at their own terminal (`agent-slack approve <approvalId>`) — you cannot approve it yourself. Once they have, call slack_react_send with that approval id. Under `never` it refuses.
 
 *writes · destructive*
 
@@ -293,11 +293,11 @@ Add or remove one reaction. Say which emoji on which message first, and wait for
 | `channel` | string | **yes** | the channel id |
 | `ts` | string | **yes** | the message timestamp |
 | `emoji` | string | **yes** | the emoji name, without colons |
-| `remove` | boolean | no | take the reaction off instead of adding it |
+| `remove` | boolean | no | remove your reaction instead of adding one |
 
 ### `slack_react_send`
 
-Add or remove the reaction a person approved at their own terminal with `agent-slack approve <approvalId>`, once — you cannot approve it yourself. The approval is bound to the channel, the message, the emoji and whether it adds or removes: pass exactly what slack_react was given, or nothing happens. APPROVAL_PENDING means they have not approved it yet; do not call slack_react again, which would make a new approval nobody has seen.
+Add the reaction or remove your reaction as a person approved at their own terminal with `agent-slack approve <approvalId>`, once — you cannot approve it yourself. The approval is bound to the channel, the message, the emoji and whether it adds or removes: pass exactly what slack_react was given, or nothing happens. APPROVAL_PENDING means they have not approved it yet; do not call slack_react again, which would make a new approval nobody has seen.
 
 *writes · destructive*
 
@@ -307,7 +307,7 @@ Add or remove the reaction a person approved at their own terminal with `agent-s
 | `channel` | string | **yes** | the channel id |
 | `ts` | string | **yes** | the message timestamp |
 | `emoji` | string | **yes** | the emoji name, without colons |
-| `remove` | boolean | no | take the reaction off instead of adding it |
+| `remove` | boolean | no | remove your reaction instead of adding one |
 | `approvalId` | string | **yes** | from slack_react |
 
 ### `slack_mode`

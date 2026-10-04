@@ -138,7 +138,7 @@ test('a fraction, a word for a flag or a missing argument is USAGE naming it, fr
       await call('slack_react', { workspace: 'acme', channel: 'C1', ts: '1.1', emoji: 'eyes', remove: 'yes' }),
     );
     assert.match(remove.message, /`remove` takes true or false/);
-    assert.match(remove.hint ?? '', /`remove`: take the reaction off/);
+    assert.match(remove.hint ?? '', /`remove`: remove your reaction/);
 
     const missing = usage(await call('slack_read', { workspace: 'acme' }));
     assert.match(missing.message, /`channel` is required, and takes a string/);

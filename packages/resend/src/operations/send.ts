@@ -430,6 +430,66 @@ function describeState(state: ApprovalRecord['state']): string {
   }
 }
 
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** Keeps the failure that stopped the send visible, adding only what could not be settled afterwards. */
+function noSendError(error: unknown, unrecorded: readonly string[]): CommsError {
+  const original =
+    error instanceof CommsError ? error : new CommsError('UNEXPECTED', messageOf(error), { cause: error });
+  const hint = [original.hint, ...unrecorded].filter((part) => part !== undefined);
+  return new CommsError(original.code, original.message, {
+    ...(hint.length === 0 ? {} : { hint: hint.join(' ') }),
+    ...(original.details === undefined ? {} : { details: original.details }),
+    cause: error,
+  });
+}
+
+/** Settles a failure known to have happened before Resend sent anything, without one failed write skipping another. */
+async function recordNoSend(
+  context: ResendContext,
+  records: SendRecords,
+  options: { name: string; accountId: string; approvalId: string },
+  error: unknown,
+): Promise<CommsError> {
+  const unrecorded: string[] = [];
+  const said = messageOf(error);
+  try {
+    await records.release(options.accountId, options.approvalId);
+  } catch (failure) {
+    unrecorded.push(`the capacity slot could not be released (${messageOf(failure)})`);
+  }
+  try {
+    await context.core.approvals.complete(options.approvalId, { error: said });
+  } catch (failure) {
+    unrecorded.push(`the approval could not be marked failed (${messageOf(failure)})`);
+  }
+  try {
+    await records.record(options.accountId, {
+      approvalId: options.approvalId,
+      event: 'failed',
+      error: said.slice(0, 300),
+    });
+  } catch (failure) {
+    unrecorded.push(`the send record could not record the failure (${messageOf(failure)})`);
+  }
+  try {
+    await context.core.audit.append({
+      inboxId: options.accountId,
+      alias: options.name,
+      operation: 'resend.send.execute',
+      outcome: 'failed',
+      surface: context.surface,
+      approvalId: options.approvalId,
+      reason: [said.slice(0, 200), ...unrecorded].join('; '),
+    });
+  } catch (failure) {
+    unrecorded.push(`the audit log could not record the failure (${messageOf(failure)})`);
+  }
+  return noSendError(error, unrecorded);
+}
+
 /**
  * Step three, and the only place mail leaves.
  *
@@ -485,31 +545,39 @@ export async function executeSend(
   const records = new SendRecords(context.core.paths.stateDir, context.now);
   const message = prepared.message;
   const recipients = uniqueRecipients(message);
+  const bookkeeping = {
+    name,
+    accountId: named.account.id,
+    approvalId: options.approvalId,
+  };
   try {
     await records.reserve(named.account.id, options.approvalId, config.defaults.sendCaps);
   } catch (error) {
-    await context.core.approvals.complete(options.approvalId, { error: 'rate capped' });
-    throw error;
+    throw await recordNoSend(context, records, bookkeeping, error);
   }
-  await records.record(named.account.id, {
-    approvalId: options.approvalId,
-    event: 'attempt',
-    recipients,
-    subject: message.subject,
-    scheduledAt: message.scheduledAt,
-  });
-  await context.core.audit.append(
-    {
-      inboxId: named.account.id,
-      alias: name,
-      operation: 'resend.send.execute',
-      outcome: 'started',
-      surface: context.surface,
+  try {
+    await records.record(named.account.id, {
       approvalId: options.approvalId,
-      recipients: recipients.map(canonicalAddress),
-    },
-    { durable: true },
-  );
+      event: 'attempt',
+      recipients,
+      subject: message.subject,
+      scheduledAt: message.scheduledAt,
+    });
+    await context.core.audit.append(
+      {
+        inboxId: named.account.id,
+        alias: name,
+        operation: 'resend.send.execute',
+        outcome: 'started',
+        surface: context.surface,
+        approvalId: options.approvalId,
+        recipients: recipients.map(canonicalAddress),
+      },
+      { durable: true },
+    );
+  } catch (error) {
+    throw await recordNoSend(context, records, bookkeeping, error);
+  }
 
   let resendId: string;
   try {
@@ -534,14 +602,13 @@ export async function executeSend(
           : 'unknown';
     const said = error instanceof Error ? error.message : String(error);
     if (outcome === 'not-sent') {
-      await context.core.approvals.complete(options.approvalId, { error: said });
-      await records.release(named.account.id, options.approvalId);
+      throw await recordNoSend(context, records, bookkeeping, error);
     }
     const unrecorded: string[] = [];
     try {
       await records.record(named.account.id, {
         approvalId: options.approvalId,
-        event: outcome === 'unknown' ? 'unknown' : 'failed',
+        event: 'unknown',
         error: said.slice(0, 300),
       });
     } catch (failure) {
@@ -557,23 +624,25 @@ export async function executeSend(
         outcome: 'failed',
         surface: context.surface,
         approvalId: options.approvalId,
-        reason: outcome === 'unknown' ? `outcome unknown: ${said.slice(0, 200)}` : said.slice(0, 200),
+        reason: `outcome unknown: ${said.slice(0, 200)}`,
       });
     } catch (failure) {
       unrecorded.push(
         `the audit log could not record this (${failure instanceof Error ? failure.message : String(failure)})`,
       );
     }
-    if (outcome === 'unknown') {
-      throw new CommsError('TRANSIENT', `whether the email was sent is not known: ${said}`, {
-        hint: [
-          `Do not send it again. Check the Resend dashboard or ask the recipient, and check with \`agent-resend send status ${options.approvalId} --account ${name}\`; this approval is not used again.`,
-          ...unrecorded,
-        ].join(' '),
-        details: { approvalId: options.approvalId, outcome: 'unknown' },
-      });
-    }
-    throw error;
+    throw new CommsError('TRANSIENT', `whether the email was sent is not known: ${said}`, {
+      hint: [
+        `Do not send it again. Check the Resend dashboard or ask the recipient, and check with \`agent-resend send status ${options.approvalId} --account ${name}\`; this approval is not used again.`,
+        ...unrecorded,
+      ].join(' '),
+      details: {
+        ...(error instanceof CommsError ? error.details : {}),
+        approvalId: options.approvalId,
+        outcome: 'unknown',
+      },
+      cause: error,
+    });
   }
 
   const unrecorded: string[] = [];

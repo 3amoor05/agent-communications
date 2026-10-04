@@ -944,7 +944,7 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
     channel: z.string().describe('the channel id'),
     ts: z.string().describe('the message timestamp'),
     emoji: z.string().describe('the emoji name, without colons'),
-    remove: z.boolean().optional().describe('take the reaction off instead of adding it'),
+    remove: z.boolean().optional().describe('remove your reaction instead of adding one'),
   };
   const reactionOf = (args: { channel: string; ts: string; emoji: string; remove?: boolean | undefined }) => ({
     channel: args.channel,
@@ -958,7 +958,7 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
     {
       title: 'React to a message',
       description:
-        'Add or remove one reaction. Say which emoji on which message first, and wait for a yes. Under the workspace’s `chat` policy this does it at once, through a single-use approval. Under `confirm` it adds nothing: it returns APPROVAL_PENDING with an approval id and the command the person runs at their own terminal (`agent-slack approve <approvalId>`) — you cannot approve it yourself. Once they have, call slack_react_send with that approval id. Under `never` it refuses.',
+        'Add a reaction or remove your reaction. Say which emoji on which message first, and wait for a yes. Under the workspace’s `chat` policy this does it at once, through a single-use approval. Under `confirm` it adds nothing: it returns APPROVAL_PENDING with an approval id and the command the person runs at their own terminal (`agent-slack approve <approvalId>`) — you cannot approve it yourself. Once they have, call slack_react_send with that approval id. Under `never` it refuses.',
       inputSchema: { ...workspaceArg, ...reactionArgs },
       annotations: outward,
     },
@@ -976,7 +976,7 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
     {
       title: 'Use a reaction’s approval',
       description:
-        'Add or remove the reaction a person approved at their own terminal with `agent-slack approve <approvalId>`, once — you cannot approve it yourself. The approval is bound to the channel, the message, the emoji and whether it adds or removes: pass exactly what slack_react was given, or nothing happens. APPROVAL_PENDING means they have not approved it yet; do not call slack_react again, which would make a new approval nobody has seen.',
+        'Add the reaction or remove your reaction as a person approved at their own terminal with `agent-slack approve <approvalId>`, once — you cannot approve it yourself. The approval is bound to the channel, the message, the emoji and whether it adds or removes: pass exactly what slack_react was given, or nothing happens. APPROVAL_PENDING means they have not approved it yet; do not call slack_react again, which would make a new approval nobody has seen.',
       inputSchema: { ...workspaceArg, ...reactionArgs, approvalId: z.string().describe('from slack_react') },
       annotations: outward,
     },
