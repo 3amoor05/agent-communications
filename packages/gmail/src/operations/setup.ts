@@ -448,7 +448,7 @@ export async function setupState(context: GmailContext, options: SetupStateOptio
           ...(selected.organisationLabel ? { organisationLabel: selected.organisationLabel } : {}),
         }
       : null;
-  const state = { next, done, clients, inboxes, clientOf, registeredWith, candidates };
+  const state: SetupState = { next, done, clients, inboxes, clientOf, registeredWith, candidates };
   // Compatibility is the complete result contract, not just the values shared with profile-aware setup. Main had
   // no clientChoice field, so an inactive-only, Slack-only or absent profile must omit it rather than return null.
   return gmailProfileApplies ? { ...state, clientChoice } : state;
