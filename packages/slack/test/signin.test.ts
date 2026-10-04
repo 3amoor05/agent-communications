@@ -10,6 +10,7 @@ import { newFlowId, type SlackFlow } from '../src/auth/flow.ts';
 import { SlackContext } from '../src/context.ts';
 import { scopesForMode } from '../src/manifest.ts';
 import {
+  completeSignIn,
   finishSignIn,
   releaseChannel,
   resolveListenerEntry,
@@ -436,6 +437,31 @@ async function pendingFlow(context: SlackContext, flowId: string): Promise<Slack
     expiresAt: new Date(at.getTime() + 10 * 60_000).toISOString(),
   };
 }
+
+test('reauthorising a workspace retains its original creation time', async () => {
+  const harness = await newHarness();
+  const context = harness.context();
+  const original = await harness.addWorkspace({ alias: 'acme', mode: 'read', sendPolicy: 'never' });
+  const flowId = newFlowId();
+  await context.flows.save({
+    ...(await pendingFlow(context, flowId)),
+    expect: {
+      accountId: original.id,
+      workspaceId: original.workspace,
+      userId: original.userId,
+      oauthClientId: original.oauthClientId,
+      appId: original.appId,
+      secretRef: original.secretRef,
+    },
+  });
+
+  await completeSignIn(context, flowId, 'fake-authorisation-code');
+  const renewed = (await harness.core.config.load()).accounts.acme;
+  assert.equal(renewed?.createdAt, original.createdAt);
+  assert.equal(renewed?.sendPolicy, 'never');
+  assert.equal(renewed?.id, original.id);
+  assert.notEqual(renewed?.secretRef, original.secretRef);
+});
 
 test('a credential that cannot be taken back after a failed attempt is named, not silently left', async () => {
   /*

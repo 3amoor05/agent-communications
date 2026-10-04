@@ -1038,7 +1038,7 @@ export async function completeSignIn(context: SlackContext, flowId: string, code
            * a brand-new account and asked nobody. Spreading the held record first keeps any field the grant does
            * not speak to, including fields a later version adds that this one has never heard of.
            */
-          written = held && flow.expect ? { ...held, ...account } : account;
+          written = held && flow.expect ? { ...held, ...account, createdAt: held.createdAt } : account;
           const next = flow.profile
             ? learnProfileSlackAppId(
                 current,
