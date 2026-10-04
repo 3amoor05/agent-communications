@@ -4,6 +4,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
+import { stripVTControlCharacters } from 'node:util';
 import { run } from '../src/cli/program.ts';
 import { GmailContext } from '../src/context.ts';
 import { clientAdd } from '../src/operations/clients.ts';
@@ -195,7 +196,11 @@ test('without an active Gmail generation interactive setup has main’s complete
       // End an inbox step before it starts a listener; this test is about the prompt order, not sign-in.
       { aliasAnswer: 'not a valid mailbox name' },
     );
-    const promptSequence = dialog.asked.map((prompt) => prompt.replaceAll('\r\n', '\n').split('\n').at(-1));
+    // The prompt's words, without the cursor and erase codes readline adds on some terminals but not others: the
+    // order and text of the prompts are what main fixes, not how a given terminal redraws them.
+    const promptSequence = dialog.asked.map((prompt) =>
+      stripVTControlCharacters(prompt).replaceAll('\r\n', '\n').split('\n').at(-1),
+    );
     const expectedPrompts =
       fixture.name === 'no client'
         ? [
