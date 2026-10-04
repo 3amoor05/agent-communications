@@ -263,6 +263,26 @@ test('a revocation grant does not nest with any existing grant', async () => {
   });
 });
 
+test('a revocation grant refuses an upload still open after its publishing permit was consumed', async () => {
+  const permit = closedPermit();
+  const { calls, inner } = recorder();
+  const fetch = guardSlackRequests(inner, permit);
+  await spendOn(permit, 'ap_1', 'files.completeUploadExternal', () =>
+    uploadWith(permit, `${SLACK_FILES_ORIGIN}/upload/one`, async () => {
+      await fetch(`${API}/files.completeUploadExternal`, { method: 'POST' });
+      assert.equal(permit.approvalId, null);
+      assert.notEqual(permit.uploading, null);
+      await assert.rejects(
+        revokeWith(permit, 'auth.revoke', revokeBinding(), async () => {
+          assert.fail('revocation entered while an upload grant remained open');
+        }),
+        /already open/,
+      );
+    }),
+  );
+  assert.deepEqual(calls, [`${API}/files.completeUploadExternal`]);
+});
+
 test('a revocation grant closes in finally even when no request was made', async () => {
   const permit = closedPermit();
   await assert.rejects(
@@ -1103,6 +1123,54 @@ test('only the durable revocation operation opens a revocation grant', async () 
       .map((file) => [file.path, reachOf('revokeWith', file.text)]),
     [['operations/revocations.ts', ['names it in an import or export', 'calls it or reads it off an object']]],
   );
+  const operation = files.find((file) => file.path === 'operations/revocations.ts');
+  assert.ok(operation);
+  assert.equal(
+    [...operation.text.matchAll(/\brevokeWith\s*\(/g)].length,
+    1,
+    'a second production grant caller appeared',
+  );
+});
+
+test('revoke and uninstall method literals stay at their audited boundaries', async () => {
+  const files = await sources();
+  const usesOf = (method: string) =>
+    files
+      .map((file) => ({
+        path: file.path,
+        count: [...file.text.matchAll(new RegExp(`['"]${method.replace('.', '\\.')}['"]`, 'g'))].length,
+      }))
+      .filter((file) => file.count > 0)
+      .sort((left, right) => left.path.localeCompare(right.path));
+  assert.deepEqual(usesOf('auth.revoke'), [
+    { path: 'api/methods.ts', count: 1 },
+    { path: 'operations/revocations.ts', count: 2 },
+  ]);
+  assert.deepEqual(usesOf('apps.uninstall'), [{ path: 'api/methods.ts', count: 1 }]);
+  const operation = files.find((file) => file.path === 'operations/revocations.ts');
+  assert.ok(operation);
+  assert.match(operation.text, /revokePendingEntry\(context: SlackContext, ref: string\)/);
+});
+
+test('only guarded transports send requests to Slack', async () => {
+  const files = await sources();
+  // These scans cover ordinary source calls, not computed names or arbitrary run-time indirection.
+  assert.deepEqual(
+    files.filter((file) => /\bfetch\s*\(/.test(file.text)).map((file) => file.path),
+    [],
+    'a direct fetch bypassed the guarded transport',
+  );
+  const sending = files.filter((file) => /\bsend\s*\(/.test(file.text));
+  assert.deepEqual(sending.map((file) => file.path).sort(), [
+    'api/call.ts',
+    'api/download.ts',
+    'api/upload.ts',
+    'context.ts',
+    'operations/identity.ts',
+  ]);
+  for (const file of sending) {
+    assert.match(file.text, /const send = guardSlackRequests\(/, `${file.path} sends without the guard`);
+  }
 });
 
 // ── Uploads: one POST, to the URL Slack gave, inside the post it belongs to ─────────────────────────────────────
