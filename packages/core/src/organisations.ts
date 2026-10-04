@@ -6,7 +6,6 @@ import { z } from 'zod';
 import { isDangerous } from './chars.ts';
 import { inlineCommand, shellCommand } from './cli-runtime.ts';
 import type {
-  AccountConfig,
   ClientConfig,
   Config,
   OrganisationGeneration,
@@ -79,11 +78,15 @@ function oneLine(max: number, what: string): z.ZodType<string, unknown> {
 /** A host name as an Internal client's administrator lists it: lower case, letters, digits, hyphens and dots. */
 const DOMAIN_PATTERN = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
 
+export const SLACK_WORKSPACE_ID_PATTERN: RegExp = /^T[A-Z0-9]{2,20}$/;
+export const SLACK_CLIENT_ID_PATTERN: RegExp = /^[0-9]{1,20}\.[0-9]{1,20}$/;
+export const SLACK_APP_ID_PATTERN: RegExp = /^A[A-Z0-9]{2,20}$/;
+
 const slackAppSchema: z.ZodType<ProfileSlackApp, unknown> = z.strictObject({
-  clientId: z.string().regex(/^[0-9]{1,20}\.[0-9]{1,20}$/, 'a Slack client id is two runs of digits around a dot'),
+  clientId: z.string().regex(SLACK_CLIENT_ID_PATTERN, 'a Slack client id is two runs of digits around a dot'),
   appId: z
     .string()
-    .regex(/^A[A-Z0-9]{2,20}$/, 'a Slack app id is A followed by 2–20 capital letters or digits')
+    .regex(SLACK_APP_ID_PATTERN, 'a Slack app id is A followed by 2–20 capital letters or digits')
     .optional(),
 });
 
@@ -126,7 +129,7 @@ const profileSchema = z.strictObject({
     .strictObject({
       workspace: z
         .string()
-        .regex(/^T[A-Z0-9]{2,20}$/, 'a Slack workspace id is T followed by capital letters or digits'),
+        .regex(SLACK_WORKSPACE_ID_PATTERN, 'a Slack workspace id is T followed by capital letters or digits'),
       workspaceName: oneLine(80, 'the workspace name'),
       redirectPort: z.number().int().min(1024).max(65535),
       apps: z.strictObject({ read: slackAppSchema.optional(), send: slackAppSchema.optional() }),
@@ -639,7 +642,7 @@ export function mailboxesOn(config: Config, client: string): string[] {
  */
 export function accountsOfOrganisation(config: Config, organisation: string): string[] {
   return Object.entries(config.accounts)
-    .filter(([, account]) => (account as AccountConfig & { organisation?: unknown }).organisation === organisation)
+    .filter(([, account]) => account.organisation === organisation)
     .map(([name]) => name)
     .sort();
 }
@@ -833,6 +836,174 @@ export function slackRecordFrom(
   };
 }
 
+export interface ProfileSlackTarget {
+  organisation: string;
+  role: 'read' | 'send';
+  label: string;
+  workspace: string;
+  workspaceName: string;
+  redirectPort: number;
+  clientId: string;
+  appId?: string | undefined;
+  sha256: string;
+}
+
+const profileSlackTargetSchema: z.ZodType<ProfileSlackTarget, unknown> = z.strictObject({
+  organisation: z.string().refine((word) => parseOrganisation(word) !== null, 'an organisation is a name’s first half'),
+  role: z.enum(['read', 'send']),
+  label: oneLine(64, 'the label'),
+  workspace: z
+    .string()
+    .regex(SLACK_WORKSPACE_ID_PATTERN, 'a Slack workspace id is T followed by capital letters or digits'),
+  workspaceName: oneLine(80, 'the workspace name'),
+  redirectPort: z.number().int().min(1024).max(65535),
+  clientId: z.string().regex(SLACK_CLIENT_ID_PATTERN, 'a Slack client id is two runs of digits around a dot'),
+  appId: z
+    .string()
+    .regex(SLACK_APP_ID_PATTERN, 'a Slack app id is A followed by 2–20 capital letters or digits')
+    .optional(),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/, 'a SHA-256 is 64 lowercase hex digits'),
+});
+
+function slackTargetProblem(organisation: string, message: string, platform: NodeJS.Platform): CommsError {
+  return new CommsError('CONFIG', message, {
+    hint: `Run ${inlineCommand(shellCommand(['agentcomms', 'org', 'update', organisation], platform))} to reconcile the profile, then start the sign-in again.`,
+  });
+}
+
+/** Resolve one profile app to the exact, validated values a Slack sign-in snapshots. */
+export function resolveProfileSlackTarget(
+  config: Config,
+  organisation: string,
+  role: 'read' | 'send',
+  platform: NodeJS.Platform = process.platform,
+): ProfileSlackTarget {
+  const record = recordOf(config, organisation);
+  if (!record) {
+    throw slackTargetProblem(
+      organisation,
+      `there is no organisation profile for ${shownText(organisation, 40)}`,
+      platform,
+    );
+  }
+  if (!record.slack) {
+    throw slackTargetProblem(
+      organisation,
+      `the organisation profile for ${organisation} does not list Slack`,
+      platform,
+    );
+  }
+  const app = record.slack.apps[role];
+  if (!app) {
+    throw slackTargetProblem(
+      organisation,
+      `the organisation profile for ${organisation} does not list a ${role} app`,
+      platform,
+    );
+  }
+  const parsed = profileSlackTargetSchema.safeParse({
+    organisation,
+    role,
+    label: record.label,
+    workspace: record.slack.workspace,
+    workspaceName: record.slack.workspaceName,
+    redirectPort: record.slack.redirectPort,
+    clientId: app.clientId,
+    ...(app.appId === undefined ? {} : { appId: app.appId }),
+    sha256: record.sha256,
+  });
+  if (!parsed.success) {
+    throw slackTargetProblem(
+      organisation,
+      `the organisation profile for ${organisation} has an invalid stored Slack target`,
+      platform,
+    );
+  }
+  return parsed.data;
+}
+
+/**
+ * Learn the app id Slack returned only while the whole target still names the sign-in that produced it.
+ *
+ * The function is pure so the caller can put this change in the same locked config update as the account. A target
+ * which already carries an id is never overwritten: whether the id came from the profile or an earlier sign-in, it
+ * is the one this flow was required to reach.
+ */
+export function learnProfileSlackAppId(
+  config: Config,
+  expected: ProfileSlackTarget,
+  appId: string,
+  platform: NodeJS.Platform = process.platform,
+): Config {
+  if (!SLACK_APP_ID_PATTERN.test(appId)) {
+    throw slackTargetProblem(
+      expected.organisation,
+      'Slack returned an invalid app id for the profile sign-in',
+      platform,
+    );
+  }
+  let live: ProfileSlackTarget;
+  try {
+    live = resolveProfileSlackTarget(config, expected.organisation, expected.role, platform);
+  } catch {
+    throw slackTargetProblem(
+      expected.organisation,
+      `the organisation profile changed during the Slack sign-in`,
+      platform,
+    );
+  }
+  const stable = (target: ProfileSlackTarget) => ({
+    organisation: target.organisation,
+    role: target.role,
+    label: target.label,
+    workspace: target.workspace,
+    workspaceName: target.workspaceName,
+    redirectPort: target.redirectPort,
+    clientId: target.clientId,
+    sha256: target.sha256,
+  });
+  if (JSON.stringify(stable(live)) !== JSON.stringify(stable(expected))) {
+    throw slackTargetProblem(
+      expected.organisation,
+      `the organisation profile changed during the Slack sign-in`,
+      platform,
+    );
+  }
+  if (expected.appId !== undefined && live.appId !== expected.appId) {
+    throw slackTargetProblem(
+      expected.organisation,
+      `the organisation profile changed during the Slack sign-in`,
+      platform,
+    );
+  }
+  if (live.appId !== undefined) {
+    if (live.appId === appId) return config;
+    throw slackTargetProblem(
+      expected.organisation,
+      `the ${expected.role} profile app already has another app id`,
+      platform,
+    );
+  }
+  if (config.version !== 2) {
+    throw slackTargetProblem(
+      expected.organisation,
+      'organisation profiles require a version-2 configuration',
+      platform,
+    );
+  }
+  const next = structuredClone(config);
+  const app = next.organisations?.[expected.organisation]?.slack?.apps[expected.role];
+  if (!app) {
+    throw slackTargetProblem(
+      expected.organisation,
+      `the organisation profile changed during the Slack sign-in`,
+      platform,
+    );
+  }
+  app.appId = appId;
+  return next;
+}
+
 /**
  * Accounts named after this organisation that are connected to its Slack workspace through an app of their own — not
  * the profile's. `org add` reports each and goes on (§D5, as decided in implementation): early members connected that
@@ -847,7 +1018,7 @@ export function unmanagedSlackAccounts(config: Config, organisation: string, wor
         parsed?.org === organisation &&
         account.platform === 'slack' &&
         account.workspace === workspace &&
-        (account as AccountConfig & { organisation?: unknown }).organisation === undefined
+        account.organisation === undefined
       );
     })
     .map(([name]) => name)

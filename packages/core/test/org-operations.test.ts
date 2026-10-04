@@ -1003,6 +1003,53 @@ test('Slack: the workspace, its name, the port and each app follow the profile; 
   assert.equal((await record(m))?.slack, undefined);
 });
 
+test('a stated Slack app id replaces a learned id and reports only provenance accounts still on the old app', async () => {
+  const m = machine();
+  writeProfile(m, profile());
+  await add(m);
+  await edit(m, (raw) => {
+    const read = raw.organisations?.acme?.slack?.apps.read;
+    if (read) read.appId = 'A0LEARNED';
+    const account = (name: string, appId: string, provenance: boolean): AccountConfig => ({
+      id: `acc_${name.padEnd(16, 'A').slice(0, 16).toUpperCase()}`,
+      platform: 'slack',
+      workspace: 'TACME0001',
+      userId: 'U1',
+      tier: 'read',
+      mode: 'read',
+      grantedScopes: [],
+      secretRef: `slack:token:${name}`,
+      createdAt: CREATED,
+      oauthClientId: '1111.2222',
+      appId,
+      ...(provenance ? { organisation: 'acme', profileApp: 'read' as const } : {}),
+    });
+    raw.accounts = {
+      'acme/slack': account('old', 'A0LEARNED', true),
+      'acme/slack-matching': account('matching', 'A0STATED', true),
+      'acme/slack-own': account('own', 'A0LEARNED', false),
+    };
+  });
+  writeProfile(
+    m,
+    profile({
+      slack: {
+        workspace: 'TACME0001',
+        workspaceName: 'Acme Test Org',
+        redirectPort: 51234,
+        apps: { read: { clientId: '1111.2222', appId: 'A0STATED' }, send: { clientId: '1111.3333' } },
+      },
+    }),
+  );
+
+  const changed = await update(m);
+  assert.equal((await record(m))?.slack?.apps.read?.appId, 'A0STATED');
+  const report = changed.result.reported.join('\n');
+  assert.match(report, /acme\/slack is on the old read app/);
+  assert.doesNotMatch(report, /acme\/slack-matching/);
+  assert.doesNotMatch(report, /acme\/slack-own/);
+});
+
 test('the Slack workspace cannot change while an account carries this organisation’s provenance', async () => {
   const m = machine();
   writeProfile(m, profile());

@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import {
   ConfigStore,
+  committedSecretsStore,
   duplicateInbox,
   effectiveSendPolicy,
   emptyConfig,
@@ -85,6 +86,98 @@ test('parseConfig refuses bad JSON, unknown versions and invalid aliases with CO
     () => parseConfig(JSON.stringify({ version: 1, inboxes: { 'Bad Alias': inbox() } })),
     /lowercase letters, digits or hyphens/,
   );
+});
+
+const pendingRevocation = {
+  ref: 'slack:token:old',
+  store: 'file',
+  platform: 'slack',
+  workspace: 'TACME0001',
+  createdAt: '2026-10-04T10:00:00.000Z',
+  tokens: {
+    access: { status: 'pending', deadline: '2026-10-04T11:00:00.000Z' },
+    refresh: { status: 'revoked', deadline: '2026-11-03T10:00:00.000Z' },
+  },
+};
+
+function slackAccount(provenance: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: 'acc_AAAAAAAAAAAAAAAA',
+    platform: 'slack',
+    workspace: 'TACME0001',
+    userId: 'U1',
+    tier: 'read',
+    grantedScopes: [],
+    secretRef: 'slack:token:current',
+    createdAt: '2026-10-04T10:00:00.000Z',
+    ...provenance,
+  };
+}
+
+function configWithSlackState(version: 1 | 2, account: Record<string, unknown>, ledger: unknown = pendingRevocation) {
+  return {
+    version,
+    accounts: { [version === 1 ? 'work' : 'acme/slack']: account },
+    pendingRevocations: [ledger],
+  };
+}
+
+test('both config versions type Slack profile provenance and the pending-revocation ledger', () => {
+  for (const version of [1, 2] as const) {
+    const parsed = parseConfig(
+      JSON.stringify(configWithSlackState(version, slackAccount({ organisation: 'acme', profileApp: 'read' }))),
+    );
+    const account = Object.values(parsed.accounts)[0];
+    assert.equal(account?.organisation, 'acme');
+    assert.equal(account?.profileApp, 'read');
+    assert.deepEqual(parsed.pendingRevocations, [pendingRevocation]);
+  }
+});
+
+test('profile provenance is validated instead of surviving as an unknown account field', () => {
+  for (const version of [1, 2] as const) {
+    assert.throws(
+      () => parseConfig(JSON.stringify(configWithSlackState(version, slackAccount({ organisation: 7 })))),
+      /accounts.*organisation/s,
+      `version ${version}: organisation`,
+    );
+    assert.throws(
+      () => parseConfig(JSON.stringify(configWithSlackState(version, slackAccount({ profileApp: 'admin' })))),
+      /accounts.*profileApp/s,
+      `version ${version}: profile app`,
+    );
+  }
+});
+
+test('the pending-revocation ledger requires its recorded store, access state, status and absolute deadlines', () => {
+  const invalid = [
+    { ...pendingRevocation, store: 'elsewhere' },
+    { ...pendingRevocation, tokens: {} },
+    {
+      ...pendingRevocation,
+      tokens: { ...pendingRevocation.tokens, access: { ...pendingRevocation.tokens.access, status: 'done' } },
+    },
+    {
+      ...pendingRevocation,
+      tokens: { ...pendingRevocation.tokens, access: { ...pendingRevocation.tokens.access, deadline: 'tomorrow' } },
+    },
+  ];
+  for (const [index, ledger] of invalid.entries()) {
+    for (const version of [1, 2] as const) {
+      assert.throws(
+        () => parseConfig(JSON.stringify(configWithSlackState(version, slackAccount(), ledger))),
+        /pendingRevocations/,
+        `case ${index}, version ${version}`,
+      );
+    }
+  }
+});
+
+test('a pending-only configuration has committed to the store recorded by its ledger', () => {
+  for (const version of [1, 2] as const) {
+    const parsed = parseConfig(JSON.stringify({ version, pendingRevocations: [pendingRevocation] }));
+    assert.equal(committedSecretsStore(parsed), 'keychain', `version ${version}`);
+  }
 });
 
 test('effectiveSendPolicy prefers the inbox policy over the default', () => {

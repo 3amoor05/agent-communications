@@ -709,23 +709,30 @@ async function planProfile(config: Config, input: PlanInput): Promise<ProfilePla
         }
         if (was && now && was.clientId === now.clientId && now.appId === undefined) continue;
         changes.push(`Slack ${role} app: ${appText(was)} → ${appText(now)}`);
-        const on = provenance.filter(
-          (name) => (own(config.accounts, name) as { profileApp?: unknown } | undefined)?.profileApp === role,
-        );
-        if (on.length > 0 && was && (!now || now.clientId !== was.clientId)) {
-          const reauth = on
+        const on = provenance.filter((name) => own(config.accounts, name)?.profileApp === role);
+        const affected = on.filter((name) => {
+          const account = own(config.accounts, name);
+          if (!account || !now) return true;
+          return account.oauthClientId !== now.clientId || (now.appId !== undefined && account.appId !== now.appId);
+        });
+        if (
+          affected.length > 0 &&
+          was &&
+          (!now || now.clientId !== was.clientId || (now.appId !== undefined && now.appId !== was.appId))
+        ) {
+          const reauth = affected
             .map((name) => inlineCommand(shellCommand(['agent-slack', 'workspace', 'reauth', name], input.platform)))
             .join(' and ');
-          const mode = on
+          const mode = affected
             .map((name) => inlineCommand(shellCommand(['agent-slack', 'workspace', 'mode', name], input.platform)))
             .join(' and ');
-          const remove = on
+          const remove = affected
             .map((name) => inlineCommand(shellCommand(['agent-slack', 'workspace', 'remove', name], input.platform)))
             .join(' and ');
           reports.push(
             now
-              ? `${on.join(', ')} ${on.length === 1 ? 'is' : 'are'} on the old ${role} app: ${reauth} ${on.length === 1 ? 'signs' : 'sign'} in through the new one`
-              : `${on.join(', ')} ${on.length === 1 ? 'is' : 'are'} on the ${role} app the profile no longer lists: move with ${mode} to the other app, or remove with ${remove}`,
+              ? `${affected.join(', ')} ${affected.length === 1 ? 'is' : 'are'} on the old ${role} app: ${reauth} ${affected.length === 1 ? 'signs' : 'sign'} in through the new one`
+              : `${affected.join(', ')} ${affected.length === 1 ? 'is' : 'are'} on the ${role} app the profile no longer lists: move with ${mode} to the other app, or remove with ${remove}`,
           );
         }
       }

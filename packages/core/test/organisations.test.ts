@@ -27,12 +27,16 @@ import {
   isGoogleClientId,
 } from '../src/oauth-client-records.ts';
 import {
+  accountsOfOrganisation,
+  learnProfileSlackAppId,
   PROFILE_MAX_BYTES,
   PROFILE_ORGANISATION_MAX,
+  type ProfileSlackTarget,
   parseProfile,
   profileSourcePath,
   readProfileFile,
   requireLiveOrganisationGeneration,
+  resolveProfileSlackTarget,
   shownText,
 } from '../src/organisations.ts';
 import { tempDir } from './helpers/temp.ts';
@@ -127,6 +131,114 @@ function withSlack(over: Record<string, unknown>): Record<string, unknown> {
 function accepted(document: Record<string, unknown>): void {
   parseProfile(JSON.stringify(document));
 }
+
+function configWithSlackRecord(): ConfigV2 {
+  const config = emptyConfig() as ConfigV2;
+  config.organisations = {
+    acme: {
+      label: 'Acme Test Org',
+      source: { kind: 'file', path: '/profiles/acme.agentcomms.json' },
+      sha256: 'a'.repeat(64),
+      readAt: '2026-10-04T10:00:00.000Z',
+      addedAt: '2026-10-04T10:00:00.000Z',
+      forOtherAddresses: false,
+      slack: {
+        workspace: 'TACME0001',
+        workspaceName: 'Acme Workspace',
+        redirectPort: 51234,
+        apps: { read: { clientId: '1111.2222' }, send: { clientId: '1111.3333', appId: 'A0SEND' } },
+      },
+    },
+  };
+  return config;
+}
+
+test('only explicit provenance makes a Slack account one of an organisation’s', () => {
+  const config = configWithSlackRecord();
+  const account = (id: string, organisation?: string) => ({
+    id,
+    platform: 'slack',
+    workspace: 'TACME0001',
+    userId: 'U1',
+    tier: 'read',
+    mode: 'read',
+    grantedScopes: [],
+    secretRef: `slack:token:${id}`,
+    createdAt: '2026-10-04T10:00:00.000Z',
+    ...(organisation ? { organisation, profileApp: 'read' as const } : {}),
+  });
+  config.accounts = {
+    'acme/slack': account('acc_AAAAAAAAAAAAAAAA', 'acme'),
+    'acme/slack-own': account('acc_BBBBBBBBBBBBBBBB'),
+    'other/slack': account('acc_CCCCCCCCCCCCCCCC', 'other'),
+  };
+  assert.deepEqual(accountsOfOrganisation(config, 'acme'), ['acme/slack']);
+});
+
+test('a profile Slack role resolves to one complete, validated target', () => {
+  const target = resolveProfileSlackTarget(configWithSlackRecord(), 'acme', 'send');
+  assert.deepEqual(target, {
+    organisation: 'acme',
+    role: 'send',
+    label: 'Acme Test Org',
+    workspace: 'TACME0001',
+    workspaceName: 'Acme Workspace',
+    redirectPort: 51234,
+    clientId: '1111.3333',
+    appId: 'A0SEND',
+    sha256: 'a'.repeat(64),
+  });
+
+  const missingOrganisation = configWithSlackRecord();
+  assert.throws(() => resolveProfileSlackTarget(missingOrganisation, 'other', 'read'), /organisation.*other/i);
+  const missingSlack = configWithSlackRecord();
+  delete missingSlack.organisations?.acme?.slack;
+  assert.throws(() => resolveProfileSlackTarget(missingSlack, 'acme', 'read'), /Slack/i);
+  const missingRole = configWithSlackRecord();
+  delete missingRole.organisations?.acme?.slack?.apps.send;
+  assert.throws(() => resolveProfileSlackTarget(missingRole, 'acme', 'send'), /send app/i);
+  const invalid = configWithSlackRecord();
+  if (invalid.organisations?.acme?.slack) invalid.organisations.acme.slack.workspace = 'wrong';
+  assert.throws(
+    () => resolveProfileSlackTarget(invalid, 'acme', 'read'),
+    (error: unknown) => error instanceof CommsError && /agentcomms org update acme/i.test(error.hint ?? ''),
+  );
+});
+
+test('learning a profile Slack app id is a compare-and-set over the exact target', () => {
+  const original = configWithSlackRecord();
+  const target = resolveProfileSlackTarget(original, 'acme', 'read');
+  const learned = learnProfileSlackAppId(original, target, 'A0READ') as ConfigV2;
+  assert.equal(original.organisations?.acme?.slack?.apps.read?.appId, undefined, 'the input is unchanged');
+  assert.equal(learned.organisations?.acme?.slack?.apps.read?.appId, 'A0READ');
+  assert.deepEqual(learnProfileSlackAppId(learned, target, 'A0READ'), learned, 'the same id is idempotent');
+  assert.throws(() => learnProfileSlackAppId(learned, target, 'A0OTHER'), /another app id/i);
+
+  for (const mutate of [
+    (config: ConfigV2) => {
+      if (config.organisations?.acme) config.organisations.acme.sha256 = 'b'.repeat(64);
+    },
+    (config: ConfigV2) => {
+      if (config.organisations?.acme?.slack) config.organisations.acme.slack.workspace = 'TOTHER001';
+    },
+    (config: ConfigV2) => {
+      if (config.organisations?.acme?.slack?.apps.read)
+        config.organisations.acme.slack.apps.read.clientId = '9999.8888';
+    },
+    (config: ConfigV2) => {
+      delete config.organisations?.acme?.slack?.apps.read;
+    },
+  ]) {
+    const changed = structuredClone(original);
+    mutate(changed);
+    assert.throws(() => learnProfileSlackAppId(changed, target, 'A0READ'), /changed.*sign-in|org update acme/i);
+  }
+
+  const stated = configWithSlackRecord();
+  const statedTarget: ProfileSlackTarget = resolveProfileSlackTarget(stated, 'acme', 'send');
+  assert.deepEqual(learnProfileSlackAppId(stated, statedTarget, 'A0SEND'), stated, 'a stated id is already learned');
+  assert.throws(() => learnProfileSlackAppId(stated, statedTarget, 'A0OTHER'), /another app id/i);
+});
 
 function refused(document: Record<string, unknown>, pattern: RegExp): CommsError {
   let caught: unknown;

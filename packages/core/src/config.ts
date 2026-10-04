@@ -10,7 +10,7 @@ import { CommsError } from './errors.ts';
 import { FILE_MODE, writeFileAtomic } from './fs.ts';
 import { namesItsPlace } from './jail.ts';
 import { withCredentialsLock, withFileLock } from './lock.ts';
-import { NAME_MESSAGE, NAME_PATTERN, ORGANISATION_PATTERN, parseName } from './name-grammar.ts';
+import { NAME_MESSAGE, NAME_PATTERN, ORGANISATION_PATTERN, parseName, parseOrganisation } from './name-grammar.ts';
 import { expandHome } from './paths.ts';
 import { namesMigrationEnabled } from './release-gate.ts';
 
@@ -185,6 +185,37 @@ export interface AccountConfig {
    * had chosen another port followed them to a sign-in that failed on the way back.
    */
   redirectPort?: number | undefined;
+  /** The organisation profile whose Slack app created this account. Absent for a person's own app. */
+  organisation?: string | undefined;
+  /** Which app in that profile issued the account's current credential. */
+  profileApp?: 'read' | 'send' | undefined;
+}
+
+export type PendingRevocationStatus = 'pending' | 'revoked' | 'expired';
+
+/** One bearer token in a superseded rotating bundle, tracked independently from its pair. */
+export interface PendingRevocationTokenState {
+  status: PendingRevocationStatus;
+  /** The fixed absolute time after which the old token is known to be unusable. */
+  deadline: string;
+}
+
+/**
+ * A superseded credential kept until each token in it is conclusively revoked or expired.
+ *
+ * `store` belongs to the entry rather than being inferred from `secrets.store`: an older release can move the root
+ * store without knowing to move this bundle, and cleanup must still find the only copy that exists.
+ */
+export interface PendingRevocation {
+  ref: string;
+  store: StoreKind;
+  platform: string;
+  workspace: string;
+  createdAt: string;
+  tokens: {
+    access: PendingRevocationTokenState;
+    refresh?: PendingRevocationTokenState | undefined;
+  };
 }
 
 interface ConfigBody {
@@ -197,6 +228,8 @@ interface ConfigBody {
   inboxes: Record<string, InboxConfig>;
   /** Non-mail accounts. Absent in every config written before this key existed, hence the default. */
   accounts: Record<string, AccountConfig>;
+  /** Superseded rotating credentials which still need conclusive per-token cleanup. */
+  pendingRevocations?: PendingRevocation[] | undefined;
   defaults: Defaults;
 }
 
@@ -358,6 +391,25 @@ const accountSchema = z.looseObject({
   appId: z.string().min(1).optional(),
   mode: z.string().min(1).optional(),
   redirectPort: z.number().int().min(1).max(65535).optional(),
+  organisation: z
+    .string()
+    .refine((word) => parseOrganisation(word) !== null, 'an organisation is a name’s first half')
+    .optional(),
+  profileApp: z.enum(['read', 'send']).optional(),
+});
+
+const absoluteTimeSchema = z.iso.datetime({ offset: true });
+const pendingRevocationTokenSchema = z.looseObject({
+  status: z.enum(['pending', 'revoked', 'expired']),
+  deadline: absoluteTimeSchema,
+});
+const pendingRevocationSchema = z.looseObject({
+  ref: z.string().min(1),
+  store: storeKindSchema,
+  platform: z.string().min(1),
+  workspace: z.string().min(1),
+  createdAt: absoluteTimeSchema,
+  tokens: z.looseObject({ access: pendingRevocationTokenSchema, refresh: pendingRevocationTokenSchema.optional() }),
 });
 
 // Loose at every level, nested objects included. `sendCaps` and `confirm` were plain objects, which strip what they do
@@ -418,6 +470,7 @@ export const configV1Schema: z.ZodType<ConfigV1, unknown> = z
     clients: z.record(aliasSchema, clientSchema).default({}),
     inboxes: z.record(aliasSchema, inboxSchema).default({}),
     accounts: z.record(aliasSchema, accountSchema).default({}),
+    pendingRevocations: z.array(pendingRevocationSchema).optional(),
     defaults: defaultsSchema.default(defaultsSchema.parse({})),
   })
   .superRefine((config, ctx) => {
@@ -488,6 +541,7 @@ export const configV2Schema: z.ZodType<ConfigV2, unknown> = z
     clients: z.record(aliasSchema, clientSchema).default({}),
     inboxes: z.record(nameSchema, inboxSchema).default({}),
     accounts: z.record(nameSchema, accountSchema).default({}),
+    pendingRevocations: z.array(pendingRevocationSchema).optional(),
     defaults: defaultsSchema.default(defaultsSchema.parse({})),
     formerNames: z
       .looseObject({
@@ -1206,7 +1260,8 @@ function holdsSecrets(config: Config): boolean {
     Object.values(config.inboxes).some((inbox) => Boolean(inbox.secretRef)) ||
     // Accounts hold secret references too. Left out, a configuration whose only secrets were Slack tokens counted
     // as holding none, and the silent move off the keychain that this check exists to catch was not a downgrade.
-    Object.values(config.accounts).some((account) => Boolean(account.secretRef))
+    Object.values(config.accounts).some((account) => Boolean(account.secretRef)) ||
+    (config.pendingRevocations?.some((entry) => Boolean(entry.ref)) ?? false)
   );
 }
 
