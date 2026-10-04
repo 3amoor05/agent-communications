@@ -76,3 +76,10 @@ test('no skill names another platform’s tools, commands or package', async () 
   }
   assert.deepEqual(offenders, [], `a skill that borrows another platform's words:\n${offenders.join('\n')}`);
 });
+
+test('the Gmail Cloud walkthrough acknowledges organisation-provided clients', async () => {
+  const guide = await readFile(join(SKILLS, 'gmail-setup', 'references', 'google-cloud-setup.md'), 'utf8');
+  assert.doesNotMatch(guide, /There is no shared client to borrow\./);
+  assert.match(guide, /organisation.*provide.*client/is);
+  assert.match(guide, /organisation profile/i);
+});

@@ -12,10 +12,11 @@ published, and whether the JSON was downloaded while the dialog was open.
 
 ## Before you start
 
-- **A Google account, and a Cloud project the user may edit.** There is no shared client to borrow.
-  One External, published Desktop client serves every mailbox the user connects, on any domain — but
-  a Cloud project has a lifetime cap of 100 users for an unverified app, which makes a single client
-  unsuitable for a whole company and fine for one person's mailboxes.
+- **A Google account.** A Cloud project is needed only when no organisation profile provides an eligible client.
+  An organisation can create one client for its members and share it through a profile; setup then skips this walk.
+  Otherwise, one External, published Desktop client serves every mailbox the user connects, on any domain — but a
+  Cloud project has a lifetime cap of 100 users for an unverified app, which makes a single client unsuitable for a
+  whole company and fine for one person's mailboxes.
 - **A browser the user controls.** Consent happens there. No flag makes it headless; `--url` only
   lets somebody paste the address bar back from a machine that has no browser of its own.
 - **Node 22.12 or newer**, or the package will not run at all.
