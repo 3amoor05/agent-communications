@@ -106,6 +106,27 @@ test('workspace add schema offers profile apps without own-app arguments and mod
   }
 });
 
+test('workspace reauth description distinguishes own-app and organisation-profile account paths', async () => {
+  const { client, close } = await connect(await newHarness());
+  try {
+    const tool = (await client.listTools()).tools.find((tool) => tool.name === 'slack_workspace_reauth');
+    const description = tool?.description ?? '';
+    const ownApp = description.match(/An own-app account[^.]+\./)?.[0] ?? '';
+    assert.match(ownApp, /through its own app/);
+    assert.match(ownApp, /same app must come back/);
+    assert.match(ownApp, /existing manifest procedure/);
+    assert.match(ownApp, /slack_mode_set.*manifest before widening/);
+    const profile = description.match(/An organisation-profile account[^.]+\./)?.[0] ?? '';
+    assert.match(profile, /role’s current app/);
+    assert.match(profile, /including a replacement/);
+    assert.match(profile, /no manifest step/);
+    assert.match(description, /same person and workspace must come back in both paths/);
+    assert.match(description, /slack_workspace_finish/);
+  } finally {
+    await close();
+  }
+});
+
 test('the tools that reach people say what approval they need, and the one that prepares says it posts nothing', async () => {
   /*
    * Posting and reacting are tools since the owner's rule of 2026-09-25, through the gate the CLI uses. The

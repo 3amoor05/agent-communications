@@ -45,7 +45,7 @@ Tightening applies at once. No tool approves.
 | [`slack_workspace_add`](#slack_workspace_add) | Start connecting a Slack workspace. |
 | [`slack_workspace_remove`](#slack_workspace_remove) | Disconnect a workspace from this machine and delete its token. |
 | [`slack_workspace_finish`](#slack_workspace_finish) | Complete a sign-in slack_workspace_add, slack_workspace_reauth or slack_mode_set started, once the person has approved it in Slack. |
-| [`slack_workspace_reauth`](#slack_workspace_reauth) | Start signing a workspace in again, through the app it was connected with: to renew its grant, or with `mode` to change its access. |
+| [`slack_workspace_reauth`](#slack_workspace_reauth) | Start signing a workspace in again to renew its grant, or with `mode` to change its access. |
 | [`slack_mode_set`](#slack_mode_set) | Move a profile account between the organisation’s send and read apps: `send` needs a person’s approval before sign-in, and `read` starts at once; both finish after Slack consent through slack_workspace_finish. |
 | [`slack_workspace_policy`](#slack_workspace_policy) | Report or set how this workspace’s posts and reactions are approved (`sendPolicy`: `chat`, `confirm` or `never`) and how changes to it are approved (`changePolicy`: `chat` or `confirm`). |
 
@@ -383,7 +383,7 @@ Complete a sign-in slack_workspace_add, slack_workspace_reauth or slack_mode_set
 
 ### `slack_workspace_reauth`
 
-Start signing a workspace in again, through the app it was connected with: to renew its grant, or with `mode` to change its access. The same person, workspace and app must come back, or nothing is recorded. Renewing, and `read`, start at once. `read` → `send` is a change a person approves first — this returns `approvalRequired` with a preview; show it, ask, and call again with `approvalId` once they say yes (under `confirm`, once they have run `agent-slack approve <id>`). The app’s manifest must already be `send` — slack_mode_set checks that first. Returns a sign-in link: the person approves it in Slack, then call slack_workspace_finish. The same as `agent-slack workspace reauth`.
+Start signing a workspace in again to renew its grant, or with `mode` to change its access. An own-app account signs in through its own app; the same app must come back, and changing access keeps the existing manifest procedure (slack_mode_set checks that app’s manifest before widening). An organisation-profile account signs in through the requested role’s current app, including a replacement, with no manifest step. The same person and workspace must come back in both paths, or nothing is recorded. Renewing, and `read`, start at once. `read` → `send` is a change a person approves first — this returns `approvalRequired` with a preview; show it, ask, and call again with `approvalId` once they say yes (under `confirm`, once they have run `agent-slack approve <id>`). Returns a sign-in link: the person approves it in Slack, then call slack_workspace_finish. The same as `agent-slack workspace reauth`.
 
 *writes*
 
