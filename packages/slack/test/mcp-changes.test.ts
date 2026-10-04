@@ -13,6 +13,7 @@ import { createSlackMcpServer } from '../src/mcp/server.ts';
 import { createDraft } from '../src/operations/drafts.ts';
 import { type Harness, newHarness, slackOk, TEST_CLIENT_ID } from './support/harness.ts';
 import { fetchListener, LISTENER_COMMAND, stopListeners } from './support/listener.ts';
+import { newOrganisationHarness, READ_CLIENT_ID } from './support/organisation.ts';
 
 /**
  * Changing a workspace from a chat: connecting, signing in again, moving the mode, setting its policies, removing it.
@@ -125,6 +126,25 @@ async function track(harness: Harness, flowId: string): Promise<void> {
 }
 
 const pendingFlows = (harness: Harness) => openFlowStore(harness.core.paths.stateDir, () => new Date()).pending();
+
+test('slack_workspace_add selects the profile app with omitted arguments and keeps explicit own-app port validation', async () => {
+  const port = await freePort();
+  const harness = await newOrganisationHarness({ port, readAppId: 'A0READ', sendAppId: 'A0SEND' });
+  const mcp = await connect(harness);
+  try {
+    const started = applied<Started>(await mcp.call('slack_workspace_add', { workspace: 'rgc/slack' }));
+    await track(harness, started.flowId);
+    const flow = await harness.context().flows.peek(started.flowId);
+    assert.equal(flow?.clientId, READ_CLIENT_ID);
+    assert.equal(flow?.port, port);
+    assert.equal(flow?.profile?.role, 'read');
+    const own = failed(await mcp.call('slack_workspace_add', { workspace: 'other/slack', clientId: TEST_CLIENT_ID }));
+    assert.equal(own.code, 'USAGE');
+    assert.match(own.message, /port/i);
+  } finally {
+    await mcp.close();
+  }
+});
 
 /** Plays the browser: back to the loopback with a code, as Slack would redirect after the person approved. */
 async function approveInSlack(started: Started): Promise<void> {

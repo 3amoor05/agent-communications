@@ -126,6 +126,21 @@ test('setup --profile parity follows profile addition into the setup continuatio
   assert.deepEqual(row?.expect, { 'options.alias': 'profile-parity/gmail' });
 });
 
+test('Slack profile capability rows keep their shared operations and reject a description field', () => {
+  const row = (id) => table.capabilities.find((entry) => entry.id === id);
+  assert.equal(row('slack.workspace.add')?.operation, 'connectWorkspace');
+  for (const id of ['slack.mode.request-send', 'slack.mode.narrow', 'slack.mode.set']) {
+    assert.equal(row(id)?.operation, 'planModeSet');
+  }
+  assert.deepEqual(row('slack.workspace.add')?.argv, ['parity/slack']);
+  assert.deepEqual(row('slack.mode.request-send')?.expect, { wanted: 'send' });
+  assert.deepEqual(row('slack.mode.narrow')?.expect, { wanted: 'read' });
+  assert.deepEqual(row('slack.mode.set')?.args, { mode: 'send' });
+  const changed = structuredClone(table);
+  changed.capabilities.find((entry) => entry.id === 'slack.workspace.add').description = 'wrong field';
+  assert.match(checkParity(changed, registries).join('\n'), /unknown field "description"/);
+});
+
 test('`pnpm verify:parity --strict` exits non-zero exactly while a row is pending', async () => {
   // The release reads this exit code, so a script that printed its problems and exited 0 would be a gate that never
   // shut. Checked against the table as it stands: failing while anything is pending, passing once nothing is.

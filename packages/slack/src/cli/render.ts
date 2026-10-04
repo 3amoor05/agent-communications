@@ -54,13 +54,22 @@ function cell(value: string, width = 40): string {
   return flat.length > width ? `${flat.slice(0, width - 1)}…` : flat;
 }
 
-export function renderWorkspaces(workspaces: readonly WorkspaceView[], color: boolean): string {
+export function renderWorkspaces(
+  workspaces: readonly WorkspaceView[],
+  color: boolean,
+  platform: NodeJS.Platform = process.platform,
+): string {
   if (workspaces.length === 0) {
+    const profile = commandText(shellCommand(['agent-slack', 'workspace', 'add', '<organisation>/slack'], platform));
+    const manifest = commandText(shellCommand(['agent-slack', 'manifest', '--port', '51234'], platform));
+    const own = commandText(
+      shellCommand(['agent-slack', 'workspace', 'add', '<name>', '--client-id', '<id>', '--port', '51234'], platform),
+    );
     return [
       'No workspace connected yet.',
       '',
-      'Create the Slack app:   agent-slack manifest --port 51234',
-      'Then connect it:        agent-slack workspace add <name> --client-id <id> --port 51234',
+      `With an organisation profile: ${profile}`,
+      `With your own app: create it with ${manifest}, then connect with ${own}.`,
     ].join('\n');
   }
   return workspaces
@@ -68,7 +77,7 @@ export function renderWorkspaces(workspaces: readonly WorkspaceView[], color: bo
       const name = workspace.workspaceName ? ` — ${cell(workspace.workspaceName)}` : '';
       return `${paint(color, 'bold', workspace.alias)}${name}\n  ${workspace.mode} · ${workspace.workspaceId} · ${
         workspace.grantedScopes.length
-      } scopes`;
+      } scopes · ${appRoute(workspace)}`;
     })
     .join('\n');
 }
@@ -78,6 +87,7 @@ export function renderWorkspace(workspace: WorkspaceView, color: boolean): strin
     ['workspace', `${workspace.workspaceId}${workspace.workspaceName ? ` (${cell(workspace.workspaceName)})` : ''}`],
     ['acting as', workspace.userId],
     ['access', workspace.mode],
+    ['via', appRoute(workspace)],
     ['scopes', workspace.grantedScopes.join(', ')],
     ['connected', workspace.createdAt],
   ];
@@ -89,6 +99,13 @@ export function renderWorkspace(workspace: WorkspaceView, color: boolean): strin
     paint(color, 'bold', workspace.alias),
     ...rows.map(([label, value]) => `  ${label.padEnd(width)}  ${value}`),
   ].join('\n');
+}
+
+function appRoute(workspace: WorkspaceView): string {
+  if (!workspace.organisation || !workspace.profileApp) return 'through your own app';
+  const owner =
+    workspace.organisation === 'rgc' ? 'Really Good Culture' : `the ${cell(workspace.organisation)} organisation`;
+  return `through ${owner}'s ${workspace.profileApp} app`;
 }
 
 /**

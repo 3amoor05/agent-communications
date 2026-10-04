@@ -79,6 +79,33 @@ test('doctor tells MCP clients that a repair may contain one or more commands', 
   }
 });
 
+test('workspace add schema offers profile apps without own-app arguments and mode descriptions explain both paths', async () => {
+  const harness = await newHarness();
+  const { client, close } = await connect(harness);
+  try {
+    const tools = (await client.listTools()).tools;
+    const add = tools.find((tool) => tool.name === 'slack_workspace_add');
+    assert.ok(add);
+    assert.ok(!add.inputSchema.required?.includes('clientId'));
+    assert.ok(!add.inputSchema.required?.includes('port'));
+    assert.match(add.description ?? '', /organisation.*read app/);
+    assert.match(add.description ?? '', /clientId.*port.*own app/);
+    for (const name of ['slack_mode', 'slack_mode_request_send', 'slack_mode_narrow', 'slack_mode_set']) {
+      const description = tools.find((tool) => tool.name === name)?.description ?? '';
+      assert.match(description, /profile.*app/i, name);
+      assert.match(description, /own.app/i, name);
+    }
+    for (const name of ['slack_mode_request_send', 'slack_mode_narrow']) {
+      assert.match(tools.find((tool) => tool.name === name)?.description ?? '', /starts nothing/i, name);
+    }
+    const set = tools.find((tool) => tool.name === 'slack_mode_set');
+    const setPort = set?.inputSchema.properties?.port as { description?: string } | undefined;
+    assert.match(setPort?.description ?? '', /own app/i);
+  } finally {
+    await close();
+  }
+});
+
 test('the tools that reach people say what approval they need, and the one that prepares says it posts nothing', async () => {
   /*
    * Posting and reacting are tools since the owner's rule of 2026-09-25, through the gate the CLI uses. The

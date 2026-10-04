@@ -40,13 +40,13 @@ Tightening applies at once. No tool approves.
 | [`slack_react`](#slack_react) | Add a reaction or remove your reaction. |
 | [`slack_react_send`](#slack_react_send) | Add the reaction or remove your reaction as a person approved at their own terminal with `agent-slack approve <approvalId>`, once — you cannot approve it yourself. |
 | [`slack_mode`](#slack_mode) | Reports whether this workspace can post, upload or react, what its recorded grant allows, and the steps each way (`toSend`, `toRead`). |
-| [`slack_mode_request_send`](#slack_mode_request_send) | The steps that let this workspace post, and changes nothing — `agent-slack workspace mode <name> send`, stopped before any change is asked for. |
-| [`slack_mode_narrow`](#slack_mode_narrow) | The path back to read-only, as `agent-slack workspace mode <name> read` returns it, and changes nothing. |
-| [`slack_workspace_add`](#slack_workspace_add) | Start connecting a Slack workspace through the person’s own app, in `read` (the default: its token cannot post, and Slack enforces that) or `send`. |
+| [`slack_mode_request_send`](#slack_mode_request_send) | Returns the steps to let this workspace post; changes nothing and starts nothing. |
+| [`slack_mode_narrow`](#slack_mode_narrow) | Returns the steps back to read-only; changes nothing and starts nothing. |
+| [`slack_workspace_add`](#slack_workspace_add) | Start connecting a Slack workspace. |
 | [`slack_workspace_remove`](#slack_workspace_remove) | Disconnect a workspace from this machine and delete its token. |
 | [`slack_workspace_finish`](#slack_workspace_finish) | Complete a sign-in slack_workspace_add, slack_workspace_reauth or slack_mode_set started, once the person has approved it in Slack. |
 | [`slack_workspace_reauth`](#slack_workspace_reauth) | Start signing a workspace in again, through the app it was connected with: to renew its grant, or with `mode` to change its access. |
-| [`slack_mode_set`](#slack_mode_set) | Move a workspace to `send` (its token can post, upload and react, each still only with a person’s approval) or back to `read`. |
+| [`slack_mode_set`](#slack_mode_set) | Move a profile account between the organisation’s send and read apps: `send` needs a person’s approval before sign-in, and `read` starts at once; both finish after Slack consent through slack_workspace_finish. |
 | [`slack_workspace_policy`](#slack_workspace_policy) | Report or set how this workspace’s posts and reactions are approved (`sendPolicy`: `chat`, `confirm` or `never`) and how changes to it are approved (`changePolicy`: `chat` or `confirm`). |
 
 ### `slack_workspaces_list`
@@ -312,7 +312,7 @@ Add the reaction or remove your reaction as a person approved at their own termi
 
 ### `slack_mode`
 
-Reports whether this workspace can post, upload or react, what its recorded grant allows, and the steps each way (`toSend`, `toRead`). Changes nothing. The same as `agent-slack workspace mode <name>`.
+Reports whether this workspace can post, upload or react, what its recorded grant allows, and the steps each way (`toSend`, `toRead`). A profile account moves between organisation apps; an own-app account keeps the manifest/update or removal procedure. Changes nothing. The same as `agent-slack workspace mode <name>`.
 
 *read-only*
 
@@ -323,7 +323,7 @@ Reports whether this workspace can post, upload or react, what its recorded gran
 
 ### `slack_mode_request_send`
 
-The steps that let this workspace post, and changes nothing — `agent-slack workspace mode <name> send`, stopped before any change is asked for. While its recorded grant cannot show its app offers posting: `appUpdateNeeded`, with the steps, the manifest and the link to that app’s manifest page, exactly as slack_mode_set returns them. Once it can: the `steps`. Already `send`: the report, as slack_mode. To make the move from here, call slack_mode_set with mode `send` — it asks the person to approve the change.
+Returns the steps to let this workspace post; changes nothing and starts nothing. For a profile account, the steps move sign-in to the organisation’s send app through slack_mode_set after approval and Slack consent. For an own-app account, the steps retain the manifest/app-update procedure; while its grant cannot show posting, `appUpdateNeeded` includes the manifest and app page. Already `send`: the report, as slack_mode. The same steps as `agent-slack workspace mode <name> send`.
 
 *read-only*
 
@@ -334,7 +334,7 @@ The steps that let this workspace post, and changes nothing — `agent-slack wor
 
 ### `slack_mode_narrow`
 
-The path back to read-only, as `agent-slack workspace mode <name> read` returns it, and changes nothing. Tightening needs nobody’s consent, but Slack never removes a scope from a token — only removing the app’s installation resets it — so this returns the `steps` rather than pretending to do it. A workspace already `read` gets the report, as slack_mode. The steps name `port`, else the port it last signed in with; with neither it is refused, as the command refuses it.
+Returns the steps back to read-only; changes nothing and starts nothing. For a profile account, slack_mode_set starts a sign-in through the organisation’s read app at once, followed by Slack consent. For an own-app account, Slack cannot remove a scope from an existing token: the steps retain its manifest/removal/reauth procedure. Already `read`: the report, as slack_mode. The same steps as `agent-slack workspace mode <name> read`.
 
 *read-only*
 
@@ -345,15 +345,15 @@ The path back to read-only, as `agent-slack workspace mode <name> read` returns 
 
 ### `slack_workspace_add`
 
-Start connecting a Slack workspace through the person’s own app, in `read` (the default: its token cannot post, and Slack enforces that) or `send`. `read` starts at once. `send` is a change a person approves first: this returns `approvalRequired` with a preview — show it in full and ask; call again with `approvalId` once they say yes (under the `confirm` change policy, once they have run `agent-slack approve <id>` at their terminal; you cannot approve it yourself). Once started it returns a sign-in link and stops: give the person the link to approve in Slack, then call slack_workspace_finish. The same as `agent-slack workspace add`.
+Start connecting a Slack workspace. With no clientId or port, use the named organisation profile’s read app, or its send app for mode `send`. An explicit clientId and port select the person’s own app; clientId requires port. `read` starts at once. `send` is a change a person approves first: this returns `approvalRequired` with a preview — show it in full and ask; call again with `approvalId` once they say yes (under the `confirm` change policy, once they have run `agent-slack approve <id>` at their terminal; you cannot approve it yourself). Once started it returns a sign-in link and stops: give the person the link to approve in Slack, then call slack_workspace_finish. The same as `agent-slack workspace add`.
 
 *writes*
 
 | Argument | Type | Required | What it is |
 |---|---|---|---|
 | `workspace` | string | **yes** | the name to connect it under, as `organisation/slack` |
-| `clientId` | string | **yes** | the app’s Client ID, from its Basic Information page; not a secret |
-| `port` | integer | no | the loopback port in the app’s manifest |
+| `clientId` | string | no | your own app’s Client ID; requires port when given; omit both for the organisation profile |
+| `port` | integer | no | your own app’s loopback port; omit with clientId for the organisation profile |
 | `mode` | `read` \\| `send` | no | `read` when left out |
 | `approvalId` | string | no | the approval id an earlier call returned, once the person has agreed to that change |
 
@@ -396,7 +396,7 @@ Start signing a workspace in again, through the app it was connected with: to re
 
 ### `slack_mode_set`
 
-Move a workspace to `send` (its token can post, upload and react, each still only with a person’s approval) or back to `read`. `send`, while the recorded grant cannot show its app offers posting: returns `appUpdateNeeded` with the manifest and the link to that app’s manifest page, and starts nothing — the person pastes it there and saves (or runs the `terminalAlternative` themselves; never ask for an app configuration token in chat); call again with `appUpdated: true` once they say they have. Then it is a change a person approves: `approvalRequired` and a preview — show it, ask, call again with `approvalId` (and `appUpdated`) once they say yes (under `confirm`, once they have run `agent-slack approve <id>`). Then a sign-in link: they approve it in Slack, then call slack_workspace_finish. `read` returns the procedure and changes nothing: Slack never removes a scope from a token. The same as `agent-slack workspace mode <name> send|read`.
+Move a profile account between the organisation’s send and read apps: `send` needs a person’s approval before sign-in, and `read` starts at once; both finish after Slack consent through slack_workspace_finish. For an own-app account, `send` can first return `appUpdateNeeded` with its manifest and app page; the person updates it, then calls again with `appUpdated: true`, approves the change, and signs in. Own-app `read` returns the manifest/removal/reauth procedure because Slack cannot remove a scope from an existing token. Never ask for an app configuration token in chat. The same as `agent-slack workspace mode <name> send|read`.
 
 *writes*
 
@@ -404,8 +404,8 @@ Move a workspace to `send` (its token can post, upload and react, each still onl
 |---|---|---|---|
 | `workspace` | string | no | which workspace, as `organisation/slack` |
 | `mode` | `read` \\| `send` | **yes** | the mode to move it to |
-| `port` | integer | no | the loopback port; the one it last signed in with when left out |
-| `appUpdated` | boolean | no | the person says the app’s manifest now asks for the send scopes |
+| `port` | integer | no | for your own app, the loopback port; a profile uses its recorded port |
+| `appUpdated` | boolean | no | for your own app, the person says its manifest now asks for the send scopes |
 | `approvalId` | string | no | the approval id an earlier call returned, once the person has agreed to that change |
 
 ### `slack_workspace_policy`

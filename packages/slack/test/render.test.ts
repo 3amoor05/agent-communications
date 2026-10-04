@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { commandText, shellCommand } from '@agentcomms/core';
 import {
+  renderConnected,
   renderCreatedDraft,
   renderDoctor,
   renderManifestHelp,
@@ -129,6 +130,22 @@ test('a workspace with no name shows its id rather than an empty gap', () => {
   const printed = renderWorkspaces([view({ workspaceName: undefined })], false);
   assert.match(printed, /T0001/);
   assert.doesNotMatch(printed, / — \n/);
+});
+
+test('empty workspace guidance builds its command for the selected shell', () => {
+  const expected = commandText(shellCommand(['agent-slack', 'workspace', 'add', '<organisation>/slack'], 'win32'));
+  assert.match(renderWorkspaces([], false, 'win32'), new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+});
+
+test('list, show and connected output name the organisation app role', () => {
+  const profile = view({ alias: 'rgc/slack', organisation: 'rgc', profileApp: 'read' });
+  assert.match(renderWorkspaces([profile], false), /Really Good Culture's read app/);
+  assert.match(renderWorkspace(profile, false), /Really Good Culture's read app/);
+  assert.match(renderConnected(profile, false, false), /Really Good Culture's read app/);
+  assert.doesNotMatch(renderWorkspace(profile, false), /your own app/);
+  const own = renderWorkspace(view({ oauthClientId: '1111.2222' }), false);
+  assert.match(own, /your own app/);
+  assert.match(renderWorkspaces([view({ oauthClientId: '1111.2222' })], false), /your own app/);
 });
 
 test('renderer commands use the explicitly selected shell platform', () => {

@@ -14,6 +14,7 @@ import { scopesForMode } from '../src/manifest.ts';
 import { finishSignIn, startSignIn } from '../src/operations/signin.ts';
 import { type Harness, newHarness, slackOk, TEST_CLIENT_ID, tempDir } from './support/harness.ts';
 import { fetchListener, LISTENER_COMMAND, running, stopListeners } from './support/listener.ts';
+import { newOrganisationHarness, READ_CLIENT_ID } from './support/organisation.ts';
 
 /** A real child running the CLI action, with IPC only to tell the test its signal handlers are installed. */
 function interruptibleCli(harness: Harness, argv: string[], pauseAfterFlowWrite = false) {
@@ -370,6 +371,57 @@ async function startDetached(harness: Harness, argv: string[]): Promise<{ flowId
   if (flow?.listenerPid) strays.push(flow.listenerPid);
   return data;
 }
+
+test('workspace add uses the profile read app without client-id or port, while an explicit client-id needs port', async () => {
+  const port = await freePort();
+  const harness = await newOrganisationHarness({ port, readAppId: 'A0READ', sendAppId: 'A0SEND' });
+  const started = await startDetached(harness, ['workspace', 'add', 'rgc/slack']);
+  const flow = await openFlowStore(harness.core.paths.stateDir, () => new Date()).peek(started.flowId);
+  assert.equal(flow?.clientId, READ_CLIENT_ID);
+  assert.equal(flow?.port, port);
+  assert.equal(flow?.profile?.role, 'read');
+  const own = await cli(harness, [
+    '--json',
+    'workspace',
+    'add',
+    'other/slack',
+    '--client-id',
+    TEST_CLIENT_ID,
+    '--start',
+  ]);
+  assert.equal(own.code, EXIT_CODES.USAGE);
+  assert.match(own.json<Envelope<never>>().error?.message ?? '', /port/i);
+});
+
+test('workspace add approval replay omits absent own-app flags and help explains profile mode', async () => {
+  const harness = await newOrganisationHarness({ port: await freePort(), readAppId: 'A0READ', sendAppId: 'A0SEND' });
+  const asked = await cli(harness, ['--json', 'workspace', 'add', 'rgc/slack', '--mode', 'send', '--start']);
+  assert.equal(asked.code, EXIT_CODES.APPROVAL);
+  assert.doesNotMatch(asked.json<Envelope<never>>().error?.hint ?? '', /--client-id|undefined/);
+  const addHelp = await cli(harness, ['workspace', 'add', '--help']);
+  assert.match(addHelp.stdout, /organisation.*read app/i);
+  const modeHelp = await cli(harness, ['workspace', 'mode', '--help']);
+  assert.match(modeHelp.stdout, /profile.*app/i);
+  assert.match(modeHelp.stdout, /own.app/i);
+  assert.match(modeHelp.stdout, /--port <port>\s+.*own app/i);
+});
+
+test('profile mode approval replay omits own-app update flags', async () => {
+  const harness = await newOrganisationHarness({ port: await freePort(), readAppId: 'A0READ', sendAppId: 'A0SEND' });
+  await harness.addWorkspace({
+    alias: 'rgc/slack',
+    workspaceId: 'TRGC0001',
+    mode: 'read',
+    oauthClientId: READ_CLIENT_ID,
+    appId: 'A0READ',
+  });
+  await harness.updateConfig((config) => {
+    Object.assign(config.accounts['rgc/slack'] as object, { organisation: 'rgc', profileApp: 'read' });
+  });
+  const asked = await cli(harness, ['--json', 'workspace', 'mode', 'rgc/slack', 'send', '--start']);
+  assert.equal(asked.code, EXIT_CODES.APPROVAL);
+  assert.doesNotMatch(asked.json<Envelope<never>>().error?.hint ?? '', /--app-updated|--port|undefined/);
+});
 
 /** Follows the authorisation URL the way a browser would: straight back to the loopback with a code. */
 async function redirect(authUrl: string, over: Record<string, string> = {}): Promise<void> {

@@ -973,7 +973,7 @@
       "status": "both",
       "operation": "connectWorkspace",
       "argv": ["parity/slack"],
-      "reason": "Connecting in `send` is a change approval, given before the sign-in starts; in `read` it starts at once."
+      "reason": "`workspace add <name>` with no client id chooses the organisation profile's read app, or its send app for `mode: \"send\"`; an explicit client id and port keep the own-app path. Send is approved before sign-in; read starts at once."
     },
     {
       "id": "slack.workspace.finish",
@@ -1019,7 +1019,7 @@
       "operation": "planModeSet",
       "argv": ["parity/slack", "send"],
       "expect": { "wanted": "send" },
-      "reason": "The steps as text: `workspace mode <name> send` returns the same steps, with the manifest, while the app has not been updated."
+      "reason": "Changes nothing and starts nothing: returns the steps for a move to send. For a profile account those steps are the move to the profile's send app, which `slack_mode_set` (`workspace mode <name> send`) performs after approval and Slack consent; for an own-app account they are the existing manifest/app-update steps."
     },
     {
       "id": "slack.mode.narrow",
@@ -1030,7 +1030,7 @@
       "operation": "planModeSet",
       "argv": ["parity/slack", "read"],
       "expect": { "wanted": "read" },
-      "reason": "`workspace mode <name> read` returns the same steps back to read-only."
+      "reason": "Changes nothing and starts nothing: returns the steps for a move to read. For a profile account those steps are the move to the profile's read app, which `slack_mode_set` (`workspace mode <name> read`) performs at once, followed by Slack consent; for an own-app account they are the existing manifest/removal/reauth procedure."
     },
     {
       "id": "slack.mode.set",
@@ -1042,7 +1042,7 @@
       "argv": ["parity/slack", "send"],
       "args": { "mode": "send" },
       "expect": { "wanted": "send" },
-      "reason": "The move itself, `workspace mode <name> send|read`: the app step first while nothing shows the app was widened, then a change approval before the sign-in starts; `read` returns the procedure (design §6.2)."
+      "reason": "`workspace mode <name> send|read` moves a profile account between the organisation's apps (`send` needs approval; `read` starts at once); an own-app account keeps the existing app-update/removal instructions."
     },
     {
       "id": "slack.workspace.remove",

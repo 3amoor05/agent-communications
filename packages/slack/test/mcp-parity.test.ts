@@ -11,11 +11,13 @@ import { run } from '../src/cli/program.ts';
 import { payloadOf } from '../src/compose/blocks.ts';
 import { openDraftStore } from '../src/compose/drafts.ts';
 import { SlackContext } from '../src/context.ts';
+import { scopesForMode } from '../src/manifest.ts';
 import { createSlackMcpServer } from '../src/mcp/server.ts';
 import { createDraft } from '../src/operations/drafts.ts';
 import { checkedWait } from '../src/operations/signin.ts';
 import { type Harness, newHarness, TEST_CLIENT_ID } from './support/harness.ts';
 import { LISTENER_COMMAND, stopListeners } from './support/listener.ts';
+import { newOrganisationHarness, READ_CLIENT_ID, SEND_CLIENT_ID } from './support/organisation.ts';
 
 /**
  * The command and the tool that the capability table pairs, given the same input, give the same answer.
@@ -548,6 +550,71 @@ test('a mention the preview cannot count — a user group, an unknown special �
 });
 
 // ── The mode tools, as `workspace mode` (P2-5) ───────────────────────────────────────────────────────────────────
+
+test('profile views and mode step tools agree across CLI and MCP without starting a move', async () => {
+  const harness = await newOrganisationHarness({ port: await freePort(), readAppId: 'A0READ', sendAppId: 'A0SEND' });
+  await harness.addWorkspace({
+    alias: 'rgc/slack',
+    workspaceId: 'TRGC0001',
+    mode: 'read',
+    oauthClientId: READ_CLIENT_ID,
+    appId: 'A0READ',
+  });
+  await harness.updateConfig((config) => {
+    Object.assign(config.accounts['rgc/slack'] as object, { organisation: 'rgc', profileApp: 'read' });
+  });
+  const mcp = await connect(harness);
+  try {
+    assert.deepEqual(ok(await mcp.call('slack_workspaces_list', {})), {
+      workspaces: await cliData(harness, ['workspace', 'list']),
+    });
+    assert.deepEqual(
+      ok(await mcp.call('slack_workspace_show', { workspace: 'rgc/slack' })),
+      await cliData(harness, ['workspace', 'show', 'rgc/slack']),
+    );
+    const report = ok<{ toSend: string[] }>(await mcp.call('slack_mode', { workspace: 'rgc/slack' }));
+    assert.deepEqual(report, await cliData(harness, ['workspace', 'mode', 'rgc/slack']));
+    assert.match(report.toSend.join(' '), /organisation's send app/);
+    const send = ok<{ changed: boolean; steps: string[] }>(
+      await mcp.call('slack_mode_request_send', { workspace: 'rgc/slack' }),
+    );
+    assert.equal(send.changed, false);
+    assert.match(send.steps.join(' '), /organisation's send app/);
+    assert.equal('appUpdateNeeded' in send, false);
+    assert.deepEqual(await harness.core.approvals.list(), []);
+    assert.deepEqual(await harness.context().flows.pending(), []);
+  } finally {
+    await mcp.close();
+  }
+  const sendHarness = await newOrganisationHarness({
+    port: await freePort(),
+    readAppId: 'A0READ',
+    sendAppId: 'A0SEND',
+  });
+  await sendHarness.addWorkspace({
+    alias: 'rgc/slack',
+    workspaceId: 'TRGC0001',
+    mode: 'send',
+    oauthClientId: SEND_CLIENT_ID,
+    appId: 'A0SEND',
+    grantedScopes: scopesForMode('send'),
+  });
+  await sendHarness.updateConfig((config) => {
+    Object.assign(config.accounts['rgc/slack'] as object, { organisation: 'rgc', profileApp: 'send' });
+  });
+  const sendMcp = await connect(sendHarness);
+  try {
+    const read = ok<{ changed: boolean; steps: string[] }>(
+      await sendMcp.call('slack_mode_narrow', { workspace: 'rgc/slack' }),
+    );
+    assert.equal(read.changed, false);
+    assert.match(read.steps.join(' '), /organisation's read app/);
+    assert.deepEqual(await sendHarness.core.approvals.list(), []);
+    assert.deepEqual(await sendHarness.context().flows.pending(), []);
+  } finally {
+    await sendMcp.close();
+  }
+});
 
 test('the mode tools answer as `workspace mode` does: the same reading, the same port check, the same result', async () => {
   const harness = await newHarness();

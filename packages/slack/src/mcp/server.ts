@@ -1017,7 +1017,7 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
     {
       title: 'What a workspace may do',
       description:
-        'Reports whether this workspace can post, upload or react, what its recorded grant allows, and the steps each way (`toSend`, `toRead`). Changes nothing. The same as `agent-slack workspace mode <name>`.',
+        'Reports whether this workspace can post, upload or react, what its recorded grant allows, and the steps each way (`toSend`, `toRead`). A profile account moves between organisation apps; an own-app account keeps the manifest/update or removal procedure. Changes nothing. The same as `agent-slack workspace mode <name>`.',
       inputSchema: { ...workspaceArg, ...modePort },
       annotations: readsLocal,
     },
@@ -1040,7 +1040,7 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
     {
       title: 'The steps to let a workspace post',
       description:
-        'The steps that let this workspace post, and changes nothing — `agent-slack workspace mode <name> send`, stopped before any change is asked for. While its recorded grant cannot show its app offers posting: `appUpdateNeeded`, with the steps, the manifest and the link to that app’s manifest page, exactly as slack_mode_set returns them. Once it can: the `steps`. Already `send`: the report, as slack_mode. To make the move from here, call slack_mode_set with mode `send` — it asks the person to approve the change.',
+        'Returns the steps to let this workspace post; changes nothing and starts nothing. For a profile account, the steps move sign-in to the organisation’s send app through slack_mode_set after approval and Slack consent. For an own-app account, the steps retain the manifest/app-update procedure; while its grant cannot show posting, `appUpdateNeeded` includes the manifest and app page. Already `send`: the report, as slack_mode. The same steps as `agent-slack workspace mode <name> send`.',
       inputSchema: { ...workspaceArg, ...modePort },
       annotations: readsLocal,
     },
@@ -1071,7 +1071,7 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
     {
       title: 'Give up posting access',
       description:
-        'The path back to read-only, as `agent-slack workspace mode <name> read` returns it, and changes nothing. Tightening needs nobody’s consent, but Slack never removes a scope from a token — only removing the app’s installation resets it — so this returns the `steps` rather than pretending to do it. A workspace already `read` gets the report, as slack_mode. The steps name `port`, else the port it last signed in with; with neither it is refused, as the command refuses it.',
+        'Returns the steps back to read-only; changes nothing and starts nothing. For a profile account, slack_mode_set starts a sign-in through the organisation’s read app at once, followed by Slack consent. For an own-app account, Slack cannot remove a scope from an existing token: the steps retain its manifest/removal/reauth procedure. Already `read`: the report, as slack_mode. The same steps as `agent-slack workspace mode <name> read`.',
       inputSchema: { ...workspaceArg, ...modePort },
       annotations: readsLocal,
     },
@@ -1171,11 +1171,18 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
       {
         title: 'Connect a workspace',
         description:
-          'Start connecting a Slack workspace through the person’s own app, in `read` (the default: its token cannot post, and Slack enforces that) or `send`. `read` starts at once. `send` is a change a person approves first: this returns `approvalRequired` with a preview — show it in full and ask; call again with `approvalId` once they say yes (under the `confirm` change policy, once they have run `agent-slack approve <id>` at their terminal; you cannot approve it yourself). Once started it returns a sign-in link and stops: give the person the link to approve in Slack, then call slack_workspace_finish. The same as `agent-slack workspace add`.',
+          'Start connecting a Slack workspace. With no clientId or port, use the named organisation profile’s read app, or its send app for mode `send`. An explicit clientId and port select the person’s own app; clientId requires port. `read` starts at once. `send` is a change a person approves first: this returns `approvalRequired` with a preview — show it in full and ask; call again with `approvalId` once they say yes (under the `confirm` change policy, once they have run `agent-slack approve <id>` at their terminal; you cannot approve it yourself). Once started it returns a sign-in link and stops: give the person the link to approve in Slack, then call slack_workspace_finish. The same as `agent-slack workspace add`.',
         inputSchema: {
           workspace: z.string().describe('the name to connect it under, as `organisation/slack`'),
-          clientId: z.string().describe('the app’s Client ID, from its Basic Information page; not a secret'),
-          port: z.number().int().optional().describe('the loopback port in the app’s manifest'),
+          clientId: z
+            .string()
+            .optional()
+            .describe('your own app’s Client ID; requires port when given; omit both for the organisation profile'),
+          port: z
+            .number()
+            .int()
+            .optional()
+            .describe('your own app’s loopback port; omit with clientId for the organisation profile'),
           mode: oneOfWords(INSTALL_MODES).optional().describe('`read` when left out'),
           ...approvalArg,
         },
@@ -1308,12 +1315,19 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
     {
       title: 'Move a workspace between read and send',
       description:
-        'Move a workspace to `send` (its token can post, upload and react, each still only with a person’s approval) or back to `read`. `send`, while the recorded grant cannot show its app offers posting: returns `appUpdateNeeded` with the manifest and the link to that app’s manifest page, and starts nothing — the person pastes it there and saves (or runs the `terminalAlternative` themselves; never ask for an app configuration token in chat); call again with `appUpdated: true` once they say they have. Then it is a change a person approves: `approvalRequired` and a preview — show it, ask, call again with `approvalId` (and `appUpdated`) once they say yes (under `confirm`, once they have run `agent-slack approve <id>`). Then a sign-in link: they approve it in Slack, then call slack_workspace_finish. `read` returns the procedure and changes nothing: Slack never removes a scope from a token. The same as `agent-slack workspace mode <name> send|read`.',
+        'Move a profile account between the organisation’s send and read apps: `send` needs a person’s approval before sign-in, and `read` starts at once; both finish after Slack consent through slack_workspace_finish. For an own-app account, `send` can first return `appUpdateNeeded` with its manifest and app page; the person updates it, then calls again with `appUpdated: true`, approves the change, and signs in. Own-app `read` returns the manifest/removal/reauth procedure because Slack cannot remove a scope from an existing token. Never ask for an app configuration token in chat. The same as `agent-slack workspace mode <name> send|read`.',
       inputSchema: {
         ...workspaceArg,
         mode: oneOfWords(INSTALL_MODES).describe('the mode to move it to'),
-        port: z.number().int().optional().describe('the loopback port; the one it last signed in with when left out'),
-        appUpdated: z.boolean().optional().describe('the person says the app’s manifest now asks for the send scopes'),
+        port: z
+          .number()
+          .int()
+          .optional()
+          .describe('for your own app, the loopback port; a profile uses its recorded port'),
+        appUpdated: z
+          .boolean()
+          .optional()
+          .describe('for your own app, the person says its manifest now asks for the send scopes'),
         ...approvalArg,
       },
       annotations: signingIn,

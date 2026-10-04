@@ -516,7 +516,7 @@ configuration problem.`,
   const signInOptions = (command: Command, mode: Option = modeOption()): Command =>
     command
       .addOption(mode)
-      .option('--port <port>', 'the loopback port, matching the one in the manifest')
+      .option('--port <port>', 'for your own app, the loopback port in its manifest; a profile uses its recorded port')
       .option('--start', 'print the link and return, instead of waiting', false)
       .option('--finish <flowId>', 'complete a sign-in started with --start')
       .option('--wait <seconds>', 'with --finish, how long to wait for the browser', '60')
@@ -562,8 +562,10 @@ configuration problem.`,
 
   approvalOption(
     signInOptions(workspace.command('add [alias]'))
-      .description('connect a workspace (opens Slack in a browser); in send mode, once a person approves it')
-      .option('--client-id <id>', 'the app’s Client ID, from its Basic Information page'),
+      .description(
+        'connect through the named organisation profile’s read app, or send app with --mode send; an own app uses --client-id and --port',
+      )
+      .option('--client-id <id>', 'use your own app’s Client ID; also requires --port'),
   ).action(
     act(async (context, options, alias: string | undefined, flags: Options) => {
       if (flags.finish) {
@@ -582,7 +584,7 @@ configuration problem.`,
       }
       if (!alias) {
         throw new CommsError('USAGE', 'a name for the workspace is needed', {
-          hint: 'e.g. `agent-slack workspace add acme/slack --client-id <id> --port 51234`.',
+          hint: 'e.g. `agent-slack workspace add acme/slack`, or use your own app with `--client-id <id> --port 51234`.',
         });
       }
       const mode = String(flags.mode) as InstallMode;
@@ -606,8 +608,7 @@ configuration problem.`,
             alias,
             '--mode',
             mode,
-            '--client-id',
-            String(flags.clientId),
+            ...(flags.clientId === undefined ? [] : ['--client-id', String(flags.clientId)]),
             ...given(flags, ['port', 'start']),
           ],
           platform,
@@ -626,7 +627,7 @@ configuration problem.`,
     .action(
       act(async (context, options) => {
         const workspaces = listWorkspaces(await context.config());
-        writeResult(workspaces, output(), () => renderWorkspaces(workspaces, options.color), streams);
+        writeResult(workspaces, output(), () => renderWorkspaces(workspaces, options.color, context.platform), streams);
       }),
     );
 
@@ -651,9 +652,11 @@ configuration problem.`,
   approvalOption(
     workspace
       .command('mode <alias> [mode]')
-      .description('what a workspace can do, and how to change it: `mode <name> send`, or `mode <name> read`')
-      .option('--port <port>', 'the loopback port in the app’s manifest')
-      .option('--app-updated', 'with send: the app’s manifest already asks for the send scopes', false)
+      .description(
+        'report access or move a profile account between organisation apps; own-app accounts use the manifest/update or removal procedure',
+      )
+      .option('--port <port>', 'for your own app, the loopback port in its manifest; a profile uses its recorded port')
+      .option('--app-updated', 'for your own app with send: its manifest already asks for the send scopes', false)
       .option('--start', 'print the sign-in link and return, instead of waiting', false)
       .option('--no-browser', 'print the link instead of opening it'),
   ).action(
@@ -698,7 +701,15 @@ configuration problem.`,
             planned.change,
             flags,
             shellCommand(
-              ['agent-slack', 'workspace', 'mode', alias, 'send', '--app-updated', ...given(flags, ['port', 'start'])],
+              [
+                'agent-slack',
+                'workspace',
+                'mode',
+                alias,
+                'send',
+                ...(flags.appUpdated === true ? ['--app-updated'] : []),
+                ...given(flags, ['port', 'start']),
+              ],
               platform,
             ),
           );

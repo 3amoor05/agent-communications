@@ -116,7 +116,8 @@ test('slack_workspace_add with a key it does not take is refused before any sign
   try {
     const error = usage(await call('slack_workspace_add', { workspace: 'acme', client_id: '123.456', mode: 'send' }));
     assert.match(error.message, /slack_workspace_add does not take `client_id`/);
-    assert.match(error.hint ?? '', /`clientId` \(required\)/);
+    assert.match(error.hint ?? '', /`clientId`/);
+    assert.doesNotMatch(error.hint ?? '', /`clientId` \(required\)/);
   } finally {
     await close();
   }

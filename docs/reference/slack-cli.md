@@ -109,7 +109,7 @@ agent-slack workspace [options] [command]
 
 ### `agent-slack workspace add`
 
-connect a workspace (opens Slack in a browser); in send mode, once a person approves it
+connect through the named organisation profile’s read app, or send app with --mode send; an own app uses --client-id and --port
 
 ```
 agent-slack workspace add [options] [alias]
@@ -118,13 +118,13 @@ agent-slack workspace add [options] [alias]
 | Option | What it does | Default |
 |---|---|---|
 | `--mode <mode>` | how much access to ask Slack for (choices: "read", "send", default: "read") | — |
-| `--port <port>` | the loopback port, matching the one in the manifest | — |
+| `--port <port>` | for your own app, the loopback port in its manifest; a profile uses its recorded port | — |
 | `--start` | print the link and return, instead of waiting | `false` |
 | `--finish <flowId>` | complete a sign-in started with --start | — |
 | `--wait <seconds>` | with --finish, how long to wait for the browser | `"60"` |
 | `--url <url>` | with --finish, the address-bar URL, pasted back by hand | — |
 | `--no-browser` | print the link instead of opening it | — |
-| `--client-id <id>` | the app’s Client ID, from its Basic Information page | — |
+| `--client-id <id>` | use your own app’s Client ID; also requires --port | — |
 | `--approval <approvalId>` | apply a change a person approved: said yes to in chat, or approved with `agent-slack approve` | — |
 
 ### `agent-slack workspace list`
@@ -145,7 +145,7 @@ agent-slack workspace show [options] <alias>
 
 ### `agent-slack workspace mode`
 
-what a workspace can do, and how to change it: `mode <name> send`, or `mode <name> read`
+report access or move a profile account between organisation apps; own-app accounts use the manifest/update or removal procedure
 
 ```
 agent-slack workspace mode [options] <alias> [mode]
@@ -153,8 +153,8 @@ agent-slack workspace mode [options] <alias> [mode]
 
 | Option | What it does | Default |
 |---|---|---|
-| `--port <port>` | the loopback port in the app’s manifest | — |
-| `--app-updated` | with send: the app’s manifest already asks for the send scopes | `false` |
+| `--port <port>` | for your own app, the loopback port in its manifest; a profile uses its recorded port | — |
+| `--app-updated` | for your own app with send: its manifest already asks for the send scopes | `false` |
 | `--start` | print the sign-in link and return, instead of waiting | `false` |
 | `--no-browser` | print the link instead of opening it | — |
 | `--approval <approvalId>` | apply a change a person approved: said yes to in chat, or approved with `agent-slack approve` | — |
@@ -182,7 +182,7 @@ agent-slack workspace reauth [options] <alias>
 | Option | What it does | Default |
 |---|---|---|
 | `--mode <mode>` | how much access to ask Slack for; its own mode when left out (choices: "read", "send") | — |
-| `--port <port>` | the loopback port, matching the one in the manifest | — |
+| `--port <port>` | for your own app, the loopback port in its manifest; a profile uses its recorded port | — |
 | `--start` | print the link and return, instead of waiting | `false` |
 | `--finish <flowId>` | complete a sign-in started with --start | — |
 | `--wait <seconds>` | with --finish, how long to wait for the browser | `"60"` |
