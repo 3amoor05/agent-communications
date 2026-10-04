@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readdir } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { test } from 'node:test';
-import { beginChangeApproval, CommsError, finishChangeApproval, gatedChange } from '@agentcomms/core';
+import { beginChangeApproval, CommsError, claimChange, finishChangeApproval, gatedChange } from '@agentcomms/core';
 import { FLOW_TTL_MS } from '../src/auth/flow.ts';
 import { connectWorkspace } from '../src/operations/changes.ts';
 import { newOrganisationHarness, PROFILE_SHA, READ_CLIENT_ID, SEND_CLIENT_ID } from './support/organisation.ts';
@@ -100,6 +100,59 @@ test('profile send add still needs widening approval and snapshots the send app'
   } finally {
     await started.result.listener?.close();
     await context.flows.discard(started.result.flowId);
+  }
+});
+
+test('a send approval is void when the same-client profile target changes before claim', async () => {
+  const cases = [
+    [
+      'workspace',
+      (h: Awaited<ReturnType<typeof newOrganisationHarness>>) =>
+        h.updateProfile((r) => {
+          if (r.slack) r.slack.workspace = 'TCHANGED01';
+        }),
+    ],
+    [
+      'app id',
+      (h: Awaited<ReturnType<typeof newOrganisationHarness>>) =>
+        h.updateProfile((r) => {
+          if (r.slack?.apps.send) r.slack.apps.send.appId = 'A0OTHER';
+        }),
+    ],
+    [
+      'port',
+      (h: Awaited<ReturnType<typeof newOrganisationHarness>>) =>
+        h.updateProfile((r) => {
+          if (r.slack) r.slack.redirectPort = r.slack.redirectPort === 65535 ? 65534 : r.slack.redirectPort + 1;
+        }),
+    ],
+    [
+      'SHA',
+      (h: Awaited<ReturnType<typeof newOrganisationHarness>>) =>
+        h.updateProfile((r) => {
+          r.sha256 = 'b'.repeat(64);
+        }),
+    ],
+  ] as const;
+  for (const [field, mutate] of cases) {
+    const harness = await newOrganisationHarness({ port: await freePort(), sendAppId: 'A0SEND' });
+    const context = harness.context();
+    const change = connectWorkspace(context, { alias: 'rgc/slack', mode: 'send', detached: false });
+    const prepared = await gatedChange(harness.core, change, { surface: 'cli' });
+    assert.equal(prepared.status, 'approval-required');
+    if (prepared.status !== 'approval-required') continue;
+    const prompt = await beginChangeApproval(harness.core, prepared.prepared.approvalId, { surface: 'cli' });
+    await finishChangeApproval(harness.core, prepared.prepared.approvalId, prompt.challenge, { surface: 'cli' });
+    await mutate(harness);
+    const claimRequest = await change.plan(await harness.core.config.load());
+    assert.equal((claimRequest as { selection?: { clientId?: string } }).selection?.clientId, SEND_CLIENT_ID, field);
+    await assert.rejects(
+      claimChange(harness.core, prepared.prepared.approvalId, claimRequest, { surface: 'cli' }),
+      is('APPROVAL_VOID', /what it does outside the configuration is not what was approved/),
+      field,
+    );
+    assert.deepEqual(await context.flows.pending(), [], field);
+    assert.deepEqual(harness.calls, [], field);
   }
 });
 

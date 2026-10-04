@@ -93,6 +93,15 @@ function postingSignIn(alias: string, clientId?: string): string {
     : `signs in to Slack through the app with Client ID ${clientId} and stores a token for ${alias} that can post, upload and react`;
 }
 
+/** Preview the selected profile app and bind every stable part of it to the widening approval. */
+function profileSignInEffects(profile: ProfileSlackTarget): string[] {
+  const appId = profile.appId ?? 'not recorded yet';
+  return [
+    `uses ${profile.label}'s ${profile.role} Slack app for ${profile.workspaceName} (${profile.workspace})`,
+    `binds the sign-in to organisation ${profile.organisation}, role ${profile.role}, workspace ${profile.workspace}, Client ID ${profile.clientId}, App ID ${appId}, port ${profile.redirectPort}, profile SHA-256 ${profile.sha256}`,
+  ];
+}
+
 // ── Connecting ───────────────────────────────────────────────────────────────────────────────────────────────
 
 export interface ConnectInput extends SignInSurface {
@@ -184,7 +193,13 @@ export function connectWorkspace(context: SlackContext, input: ConnectInput): Ga
         selection,
         summary:
           mode === 'send' ? `Connect ${input.alias} able to post to Slack` : `Connect ${input.alias} to read Slack`,
-        effects: mode === 'send' ? [postingSignIn(input.alias, clientId)] : [],
+        effects:
+          mode === 'send'
+            ? [
+                postingSignIn(input.alias, clientId),
+                ...(selection.profile ? profileSignInEffects(selection.profile) : []),
+              ]
+            : [],
       };
       return request;
     },
