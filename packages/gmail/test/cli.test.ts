@@ -33,6 +33,8 @@ async function cli(
     onStdout?: (soFar: string) => void;
     /** The shell syntax printed commands use; pinned whenever a test asserts their text. */
     platform?: NodeJS.Platform;
+    /** Captures the real command parser's send request without asking Gmail to send. */
+    onExecute?: (inbox: string, request: Record<string, unknown>) => void;
   } = {},
 ): Promise<Captured> {
   let stdout = '';
@@ -63,6 +65,25 @@ async function cli(
     },
     // Tests that need Windows override this. Every other printed-command assertion is intentionally POSIX-pinned.
     platform: options.platform ?? 'darwin',
+    ...(options.onExecute
+      ? {
+          executeSend: async (_context, inbox, request) => {
+            options.onExecute?.(inbox, request as unknown as Record<string, unknown>);
+            return {
+              inbox,
+              approvalId: request.approvalId,
+              draftId: request.draftId,
+              sentMessageId: 'm_parser',
+              threadId: undefined,
+              to: request.expect.to,
+              cc: request.expect.cc,
+              bcc: request.expect.bcc,
+              subject: request.expect.subject,
+              verified: null,
+            };
+          },
+        }
+      : {}),
   });
   return { code, stdout, stderr, json: <T>() => JSON.parse(stdout) as T };
 }
@@ -685,7 +706,7 @@ test('send prepare prints every expectation as shell-safe words for the selected
       '--expect-cc',
       'copy@example.test',
       '--expect-bcc',
-      'none',
+      'blind@example.test',
       '--expect-subject',
       subject,
     ];
@@ -696,7 +717,7 @@ test('send prepare prints every expectation as shell-safe words for the selected
   await prepare('%PATH%', 'win32');
 });
 
-test('send execute rendering preserves every subject and every recipient list on POSIX and Windows', () => {
+test('send execute rendering preserves every subject and every recipient list on POSIX and Windows', async () => {
   const subjects = ['', 'none', '-urgent', '$(whoami)', '`whoami`', '%PATH%', '"', "'", 'line\nbreak'];
   const expectations = [
     {
@@ -706,6 +727,7 @@ test('send execute rendering preserves every subject and every recipient list on
     },
     { to: [], cc: [], bcc: [] },
   ];
+  const harness = await newHarness();
   for (const platform of ['darwin', 'win32'] as const) {
     for (const subject of subjects) {
       for (const recipients of expectations) {
@@ -746,6 +768,30 @@ test('send execute rendering preserves every subject and every recipient list on
           assert.match(rendered, /Then: \["agent-gmail","send","execute",/);
         } else {
           assert.notEqual(command.line, null, JSON.stringify({ subject, command }));
+        }
+        if (platform === 'darwin') {
+          let parsed: { inbox: string; request: Record<string, unknown> } | undefined;
+          const run = await cli(harness, [...command.words.slice(1), '--json'], {
+            platform,
+            onExecute: (inbox, request) => {
+              parsed = { inbox, request };
+            },
+          });
+          assert.equal(run.code, 0, run.stdout + run.stderr);
+          assert.deepEqual(parsed, {
+            inbox: result.inbox,
+            request: {
+              draftId: result.draftId,
+              approvalId: result.approvalId,
+              expect: {
+                to: recipients.to,
+                cc: recipients.cc,
+                bcc: recipients.bcc,
+                subject: subject || 'none',
+              },
+              expectSubjectNone: subject === '' || subject === 'none',
+            },
+          });
         }
       }
     }

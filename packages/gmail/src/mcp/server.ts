@@ -393,7 +393,12 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
     await checkApprovalPin(approvalId);
     return reply(
       changeToolResult(
-        await gatedChange(context.core, change, { surface: 'mcp', approvalId, approveCommand: 'agent-gmail approve' }),
+        await gatedChange(context.core, change, {
+          surface: 'mcp',
+          approvalId,
+          approveCommand: 'agent-gmail approve',
+          platform: context.platform,
+        }),
       ),
     );
   };
@@ -1701,6 +1706,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
               surface: 'mcp',
               approvalId,
               approveCommand: 'agent-gmail approve',
+              platform: context.platform,
             });
             if (outcome.status !== 'applied') return reply(changeToolResult(outcome));
             return reply(changeToolResult({ status: 'applied', result: linkOf(outcome.result) }));

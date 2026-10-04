@@ -219,7 +219,10 @@ export async function composeMessage(input: ComposeInput): Promise<ComposedMessa
     textEncoding: 'quoted-printable' as const,
   });
 
-  const raw = await composer.compile().build();
+  const message = composer.compile();
+  // Gmail stores this MIME directly, so no Nodemailer transport gets a chance to retain Bcc for the later preview.
+  message.keepBcc = true;
+  const raw = await message.build();
   if (raw.byteLength > MAX_MESSAGE_BYTES) {
     throw new CommsError(
       'BAD_DATA',

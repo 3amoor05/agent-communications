@@ -135,6 +135,8 @@ import {
 export interface CliDeps extends GmailContextOptions {
   streams?: Streams;
   platform?: NodeJS.Platform | undefined;
+  /** The send operation; tests replace it so parser round trips cannot send mail. */
+  executeSend?: typeof executeSend | undefined;
   /** Command used to start the detached sign-in listener; the tests point it at the source entry. */
   listenerCommand?: { command: string; args: string[] };
 }
@@ -188,7 +190,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
       noInput: options.input === false,
     };
   };
-  const output = (): OutputOptions => ({ json: globals().json, color: globals().color });
+  const output = (): OutputOptions => ({ json: globals().json, color: globals().color, platform });
 
   /** Wraps a command body so every failure becomes the documented envelope and exit code. */
   /**
@@ -403,7 +405,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
       env,
       // `--no-input` means nobody is asked anything. The flow's one way to hear that is `json`, which it reads only
       // to decide whether a person could answer a question — so both say the same thing to it.
-      output: { json: globalOptions.json || globalOptions.noInput, color: globalOptions.color },
+      output: { json: globalOptions.json || globalOptions.noInput, color: globalOptions.color, platform },
       command: again(),
       approveCommand: 'agent-gmail approve',
       streams,
@@ -511,7 +513,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
         );
         result = await gatedChangeAtTerminal(context.core, change, {
           env,
-          output: { json: globalOptions.json || globalOptions.noInput, color: globalOptions.color },
+          output: { json: globalOptions.json || globalOptions.noInput, color: globalOptions.color, platform },
           command: install,
           approveCommand: 'agent-gmail approve',
           streams,
@@ -520,6 +522,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
         const outcome = await gatedChange(context.core, change, {
           surface: 'cli',
           approveCommand: 'agent-gmail approve',
+          platform,
         });
         if (outcome.status === 'approval-required') {
           const { prepared } = outcome;
@@ -1231,7 +1234,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
     .action(
       act(async (context, globalOptions, draftId: string, options: Options) => {
         const expectSubject = String(options.expectSubject);
-        const result = await executeSend(context, String(options.inbox), {
+        const result = await (deps.executeSend ?? executeSend)(context, String(options.inbox), {
           draftId,
           approvalId: String(options.approval),
           expect: {
@@ -1981,6 +1984,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
                 surface: 'cli',
                 approvalId: mcpApproval,
                 approveCommand: 'agent-gmail approve',
+                platform,
               });
               if (outcome.status === 'approval-required') {
                 const { prepared } = outcome;
