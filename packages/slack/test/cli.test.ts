@@ -65,6 +65,8 @@ async function cli(
      * change policy, and the code it shows under `confirm` or for a post.
      */
     answerChallenge?: boolean;
+    /** The shell syntax printed commands use; pinned whenever a test asserts their text. */
+    platform?: NodeJS.Platform;
   } = {},
 ): Promise<Captured> {
   let stdout = '';
@@ -100,6 +102,7 @@ async function cli(
     },
     openBrowser: () => undefined,
     probe: (input, init) => harness.probe(input, init),
+    platform: options.platform,
     ...(options.read ? { read: options.read } : {}),
     listenerCommand: LISTENER_COMMAND,
   });
@@ -1619,7 +1622,9 @@ test('the command a widening waiting for approval names is one that works as pri
   await harness.addWorkspace({ alias: 'acme' });
   harness.reply = () => slackOk({ scopes: scopesForMode('send') });
   const port = String(await freePort());
-  const refused = await cli(harness, ['--json', 'workspace', 'reauth', 'acme', '--mode', 'send', '--port', port]);
+  const refused = await cli(harness, ['--json', 'workspace', 'reauth', 'acme', '--mode', 'send', '--port', port], {
+    platform: 'darwin',
+  });
   const { approvalId } = pendingOf(refused);
   const hint = refused.json<Envelope<never>>().error?.hint ?? '';
   const printed = /`agent-slack (workspace reauth [^`]+)`/.exec(hint)?.[1];
@@ -1629,6 +1634,23 @@ test('the command a widening waiting for approval names is one that works as pri
   const followed = await cli(harness, (printed as string).split(' '), { ...browserOn(), env: { CLAUDECODE: '1' } });
   assert.equal(followed.code, EXIT_CODES.OK, followed.stderr);
   assert.equal((await harness.core.config.load()).accounts.acme?.mode, 'send');
+});
+
+test('the widening command uses the explicitly selected Windows quoting', async () => {
+  const harness = await newHarness();
+  await harness.addWorkspace({ alias: 'acme' });
+  const port = String(await freePort());
+  const refused = await cli(
+    harness,
+    ['--json', 'workspace', 'reauth', 'acme', '--mode', 'send', '--port', port],
+    { platform: 'win32' },
+  );
+  const { approvalId } = pendingOf(refused);
+  const hint = refused.json<Envelope<never>>().error?.hint ?? '';
+  assert.match(
+    hint,
+    new RegExp(`agent-slack workspace reauth acme --mode send --port "${port}" --approval ${approvalId}`),
+  );
 });
 
 // ── Reading, through the command a person actually runs ────────────────────────────────────────────────────────

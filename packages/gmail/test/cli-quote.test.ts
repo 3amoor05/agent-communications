@@ -13,13 +13,22 @@ interface ErrorEnvelope {
   error?: { hint?: string };
 }
 
-async function addClient(filename: string, name: string, platform: NodeJS.Platform): Promise<string> {
+function escapedForRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+async function addClient(
+  filename: string,
+  name: string,
+  platform: NodeJS.Platform,
+): Promise<{ hint: string; clientPath: string }> {
   const root = tempDir('agent-gmail-quote-');
   const configDir = join(root, 'config');
   mkdirSync(configDir);
   writeFileSync(join(configDir, 'config.json'), `${JSON.stringify({ version: 1, secrets: { store: 'file' } })}\n`);
+  const clientPath = join(root, filename);
   writeFileSync(
-    join(root, filename),
+    clientPath,
     JSON.stringify({
       installed: {
         client_id: `${name}.apps.googleusercontent.com`,
@@ -49,15 +58,20 @@ async function addClient(filename: string, name: string, platform: NodeJS.Platfo
     streams: { stdout: out, stderr: new PassThrough(), stdin: new PassThrough() },
   });
   assert.equal(code, 10, stdout);
-  return String((JSON.parse(stdout) as ErrorEnvelope).error?.hint);
+  return { hint: String((JSON.parse(stdout) as ErrorEnvelope).error?.hint), clientPath };
 }
 
 test('commands to run again quote a spaced word on POSIX and print words instead of an unsafe Windows line', async () => {
   const posix = await addClient('client secret.json', 'posix-client', 'darwin');
-  assert.match(posix, /agent-gmail client add '\/.*\/client secret\.json' --name posix-client --json --approval/);
+  assert.match(
+    posix.hint,
+    new RegExp(
+      `agent-gmail client add '${escapedForRegExp(posix.clientPath)}' --name posix-client --json --approval`,
+    ),
+  );
 
   const windows = await addClient('client 100%.json', 'windows-client', 'win32');
-  assert.match(windows, /\["agent-gmail","client","add",/);
-  assert.match(windows, /client 100\\u0025\.json/);
-  assert.match(windows, /cannot be quoted the same way for cmd\.exe and for PowerShell/);
+  assert.match(windows.hint, /\["agent-gmail","client","add",/);
+  assert.match(windows.hint, /client 100\\u0025\.json/);
+  assert.match(windows.hint, /cannot be quoted the same way for cmd\.exe and for PowerShell/);
 });
