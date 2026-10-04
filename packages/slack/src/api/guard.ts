@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { CommsError } from '@agentcomms/core';
 import {
   type FileOfPath,
@@ -45,6 +46,8 @@ export interface WritePermit {
    * inside a configuration grant is refused exactly as it always was.
    */
   configuring: string | null;
+  /** The one superseded bearer which may be revoked next, or null outside `revokeWith`. */
+  revoking: RevokeBinding | null;
   /**
    * The one file whose bytes may be fetched next, or null — which is always, except inside `downloadWith`.
    *
@@ -65,7 +68,14 @@ export interface WritePermit {
 }
 
 export function closedPermit(): WritePermit {
-  return { approvalId: null, method: null, configuring: null, downloading: null, uploading: null };
+  return { approvalId: null, method: null, configuring: null, revoking: null, downloading: null, uploading: null };
+}
+
+/** The durable identity a revocation request is bound to, without retaining its bearer token. */
+export interface RevokeBinding {
+  readonly ref: string;
+  readonly kind: 'access' | 'refresh';
+  readonly tokenSha256: string;
 }
 
 /**
@@ -278,6 +288,38 @@ export function guardSlackRequests(inner: FetchLike, permit: WritePermit): Fetch
     }
 
     /*
+     * One superseded bearer, named by the durable ledger row which owns it.
+     *
+     * The token itself is compared only here, at the request boundary. The open grant retains its digest, never the
+     * bearer, and is consumed before the inner fetch can observe the request — a response or thrown transport can
+     * never leave the same grant available for an accidental retry.
+     */
+    if (rule.kind === 'revoke') {
+      const grant = permit.revoking;
+      if (grant === null) {
+        throw new CommsError('SEND_REFUSED', `${method} destroys a token, and no revocation grant is open`, {
+          hint: 'This is a bug — please report it.',
+        });
+      }
+      const requestHeaders =
+        init?.headers !== undefined
+          ? new Headers(init.headers)
+          : input instanceof Request
+            ? new Headers(input.headers)
+            : new Headers();
+      const authorization = requestHeaders.get('authorization');
+      const token = authorization?.match(/^Bearer ([^\s]+)$/)?.[1];
+      const actual = token === undefined ? null : createHash('sha256').update(token).digest();
+      const expected = Buffer.from(grant.tokenSha256, 'hex');
+      if (actual === null || expected.length !== actual.length || !timingSafeEqual(actual, expected)) {
+        throw new CommsError('SEND_REFUSED', 'the bearer does not belong to the open revocation grant', {
+          hint: 'This is a bug — please report it.',
+        });
+      }
+      permit.revoking = null;
+    }
+
+    /*
      * `prepare` is not a write and must not spend the permit.
      *
      * `files.getUploadURLExternal` asks Slack where to put bytes and publishes nothing. Classifying it `write`
@@ -325,7 +367,12 @@ export async function spendOn<T>(
   method: string,
   body: () => Promise<T>,
 ): Promise<T> {
-  if (permit.approvalId !== null || permit.downloading !== null || permit.uploading !== null) {
+  if (
+    permit.approvalId !== null ||
+    permit.revoking !== null ||
+    permit.downloading !== null ||
+    permit.uploading !== null
+  ) {
     throw new CommsError('SEND_REFUSED', 'a permit is already open; they do not nest', {
       hint: 'This is a bug — please report it.',
     });
@@ -337,6 +384,55 @@ export async function spendOn<T>(
   } finally {
     permit.approvalId = null;
     permit.method = null;
+  }
+}
+
+/**
+ * Opens a grant for one `auth.revoke` request bound to one pending bundle and token.
+ *
+ * The ref and kind make the transport grant part of the durable cleanup identity; the digest proves that the bearer
+ * attached at request time is the one the operation loaded from that bundle. Empty or mutable identities are refused,
+ * and this opens none of the posting, configuration, download, or upload doors beside it.
+ *
+ * Internal to this package. Task 5's revocation operation is the sole production caller; the package root deliberately
+ * exports neither this helper nor the permit which carries it.
+ */
+export async function revokeWith<T>(
+  permit: WritePermit,
+  method: string,
+  binding: RevokeBinding,
+  body: () => Promise<T>,
+): Promise<T> {
+  if (methodRule(method)?.kind !== 'revoke') {
+    throw new CommsError('SEND_REFUSED', `${method} is not a token revocation method`, {
+      hint: 'This is a bug — please report it.',
+    });
+  }
+  if (
+    binding.ref.length === 0 ||
+    (binding.kind !== 'access' && binding.kind !== 'refresh') ||
+    !/^[a-f0-9]{64}$/.test(binding.tokenSha256)
+  ) {
+    throw new CommsError('SEND_REFUSED', 'a revocation grant names one pending ref, token kind and bearer digest', {
+      hint: 'This is a bug — please report it.',
+    });
+  }
+  if (
+    permit.approvalId !== null ||
+    permit.configuring !== null ||
+    permit.revoking !== null ||
+    permit.downloading !== null ||
+    permit.uploading !== null
+  ) {
+    throw new CommsError('SEND_REFUSED', 'a permit is already open; they do not nest', {
+      hint: 'This is a bug — please report it.',
+    });
+  }
+  permit.revoking = Object.freeze({ ...binding });
+  try {
+    return await body();
+  } finally {
+    permit.revoking = null;
   }
 }
 
@@ -358,6 +454,7 @@ export async function configureWith<T>(permit: WritePermit, method: string, body
   if (
     permit.approvalId !== null ||
     permit.configuring !== null ||
+    permit.revoking !== null ||
     permit.downloading !== null ||
     permit.uploading !== null
   ) {
@@ -391,6 +488,7 @@ export async function downloadWith<T>(permit: WritePermit, file: FileOfPath, bod
   if (
     permit.approvalId !== null ||
     permit.configuring !== null ||
+    permit.revoking !== null ||
     permit.downloading !== null ||
     permit.uploading !== null
   ) {
@@ -441,7 +539,12 @@ export async function uploadWith<T>(permit: WritePermit, url: string, body: () =
   if (permit.approvalId === null || permit.method !== UPLOAD_PUBLISHES) {
     throw refuseUpload(`a file is uploaded only inside an approved post, with the permit for ${UPLOAD_PUBLISHES} open`);
   }
-  if (permit.configuring !== null || permit.downloading !== null || permit.uploading !== null) {
+  if (
+    permit.configuring !== null ||
+    permit.revoking !== null ||
+    permit.downloading !== null ||
+    permit.uploading !== null
+  ) {
     throw new CommsError('SEND_REFUSED', 'a permit is already open; they do not nest', {
       hint: 'This is a bug — please report it.',
     });

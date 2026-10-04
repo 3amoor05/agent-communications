@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import { join, relative, sep } from 'node:path';
 import { test } from 'node:test';
@@ -10,6 +11,8 @@ import {
   configureWith,
   downloadWith,
   guardSlackRequests,
+  type RevokeBinding,
+  revokeWith,
   spendOn,
   uploadWith,
 } from '../src/api/guard.ts';
@@ -38,6 +41,14 @@ function recorder() {
     return new Response('{"ok":true}');
   };
   return { calls, inner };
+}
+
+function revokeBinding(token = 'xoxp-old-access'): RevokeBinding {
+  return {
+    ref: 'slack/token/superseded',
+    kind: 'access',
+    tokenSha256: createHash('sha256').update(token).digest('hex'),
+  };
 }
 
 test('a read goes out; a write without a permit does not', async () => {
@@ -125,6 +136,142 @@ test('an unclassified method is refused, so the registry cannot fall behind the 
   await assert.rejects(fetch(`${API}/chat.postSomethingNew`), /not a method this package is allowed to call/);
   await assert.rejects(fetch(`${API}/conversations.invite`), /not a method this package is allowed to call/);
   assert.equal(calls.length, 0);
+});
+
+test('auth.revoke has its own class and cannot leave without a dedicated grant', async () => {
+  const { calls, inner } = recorder();
+  const fetch = guardSlackRequests(inner, closedPermit());
+  assert.equal(methodRule('auth.revoke')?.kind, 'revoke');
+  await assert.rejects(fetch(`${API}/auth.revoke`), /no revocation grant is open/);
+  assert.deepEqual(calls, []);
+});
+
+test('a revocation grant binds one request to its ref, token kind and bearer digest, then is spent', async () => {
+  const token = 'xoxp-old-access';
+  const digest = createHash('sha256').update(token).digest('hex');
+  const binding = revokeBinding(token);
+  const permit = closedPermit();
+  const calls: string[] = [];
+  const fetch = guardSlackRequests(async (input) => {
+    calls.push(String(input));
+    assert.equal((permit as unknown as { revoking: unknown }).revoking, null, 'the request left before consumption');
+    return new Response('{"ok":true,"revoked":true}');
+  }, permit);
+
+  await revokeWith(permit, 'auth.revoke', binding, async () => {
+    const open = (permit as unknown as { revoking: RevokeBinding | null }).revoking;
+    assert.deepEqual(open, binding);
+    assert.equal(Object.isFrozen(open), true, 'the ref or token kind could be changed while the grant was open');
+    await fetch(`${API}/auth.revoke`, { headers: { authorization: `Bearer ${token}` } });
+    await assert.rejects(
+      fetch(`${API}/auth.revoke`, { headers: { authorization: `Bearer ${token}` } }),
+      /no revocation grant is open/,
+    );
+  });
+
+  assert.deepEqual(calls, [`${API}/auth.revoke`]);
+  assert.equal((permit as unknown as { revoking: unknown }).revoking, null);
+  const rendered = JSON.stringify(permit);
+  assert.doesNotMatch(rendered, new RegExp(token));
+  assert.doesNotMatch(rendered, new RegExp(digest));
+});
+
+test('a revocation grant refuses the wrong bearer without exposing the token or either digest', async () => {
+  const expected = 'xoxp-old-access';
+  const wrong = 'xoxp-another-token';
+  const binding = revokeBinding(expected);
+  const { calls, inner } = recorder();
+  const permit = closedPermit();
+  const fetch = guardSlackRequests(inner, permit);
+
+  await revokeWith(permit, 'auth.revoke', binding, async () => {
+    await assert.rejects(
+      fetch(`${API}/auth.revoke`, { headers: { authorization: `Bearer ${wrong}` } }),
+      (error: CommsError) => {
+        const rendered = JSON.stringify(error);
+        for (const secret of [expected, wrong, binding.tokenSha256, createHash('sha256').update(wrong).digest('hex')]) {
+          assert.equal(rendered.includes(secret), false, 'a bearer or its digest appeared in the refusal');
+        }
+        return true;
+      },
+    );
+  });
+  assert.deepEqual(calls, []);
+});
+
+test('a revocation grant refuses a wrong method and every empty identity before running its body', async () => {
+  const permit = closedPermit();
+  let ran = false;
+  await assert.rejects(
+    revokeWith(permit, 'auth.test', revokeBinding(), async () => {
+      ran = true;
+    }),
+    /not a token revocation method/,
+  );
+  for (const binding of [
+    { ...revokeBinding(), ref: '' },
+    { ...revokeBinding(), kind: '' as 'access' },
+    { ...revokeBinding(), tokenSha256: '' },
+  ]) {
+    await assert.rejects(
+      revokeWith(permit, 'auth.revoke', binding, async () => {
+        ran = true;
+      }),
+      /names one pending ref, token kind and bearer digest/,
+    );
+  }
+  assert.equal(ran, false);
+});
+
+test('a revocation grant does not nest with any existing grant', async () => {
+  const binding = revokeBinding();
+  const nested = async (permit: ReturnType<typeof closedPermit>) =>
+    assert.rejects(
+      revokeWith(permit, 'auth.revoke', binding, async () => undefined),
+      /already open/,
+    );
+
+  const posting = closedPermit();
+  await spendOn(posting, 'ap_1', 'chat.postMessage', () => nested(posting));
+  const configuring = closedPermit();
+  await configureWith(configuring, 'apps.manifest.update', () => nested(configuring));
+  const downloading = closedPermit();
+  await downloadWith(downloading, { teamId: 'T0AAA1', fileId: 'F0BBB2' }, () => nested(downloading));
+  const uploading = closedPermit();
+  await spendOn(uploading, 'ap_2', 'files.completeUploadExternal', () =>
+    uploadWith(uploading, `${SLACK_FILES_ORIGIN}/upload/one`, () => nested(uploading)),
+  );
+  const revoking = closedPermit();
+  await revokeWith(revoking, 'auth.revoke', binding, async () => {
+    await nested(revoking);
+    await assert.rejects(
+      spendOn(revoking, 'ap_3', 'chat.postMessage', async () => undefined),
+      /already open/,
+    );
+    await assert.rejects(
+      configureWith(revoking, 'apps.manifest.update', async () => undefined),
+      /already open/,
+    );
+    await assert.rejects(
+      downloadWith(revoking, { teamId: 'T0AAA1', fileId: 'F0BBB2' }, async () => undefined),
+      /already open/,
+    );
+    await assert.rejects(
+      uploadWith(revoking, `${SLACK_FILES_ORIGIN}/upload/two`, async () => undefined),
+      /approved post/,
+    );
+  });
+});
+
+test('a revocation grant closes in finally even when no request was made', async () => {
+  const permit = closedPermit();
+  await assert.rejects(
+    revokeWith(permit, 'auth.revoke', revokeBinding(), async () => {
+      throw new Error('stopped before dispatch');
+    }),
+    /stopped before dispatch/,
+  );
+  assert.equal((permit as unknown as { revoking: unknown }).revoking, null);
 });
 
 test('a method refused by design says why, and the reason travels with the error', async () => {
@@ -261,7 +408,7 @@ test('every classified method is read, write or refused, and every write is name
     const rule = methodRule(method);
     assert.ok(rule, method);
     assert.ok(
-      ['read', 'write', 'auth', 'prepare', 'configure', 'refused'].includes(rule.kind),
+      ['read', 'write', 'auth', 'prepare', 'configure', 'revoke', 'refused'].includes(rule.kind),
       `${method} is ${rule.kind}`,
     );
     if (rule.kind === 'refused') assert.ok(rule.note, `${method} is refused without saying why`);
@@ -405,6 +552,7 @@ test('the package root does not hand out the key to its own door', async () => {
     'closedPermit',
     'spendOn',
     'configureWith',
+    'revokeWith',
     'downloadWith',
     'uploadWith',
     'WritePermit',
@@ -944,6 +1092,16 @@ test('only the download transport opens a download grant', async () => {
       .filter((file) => file.path !== 'api/guard.ts' && grantReach(file.text).length > 0)
       .map((file) => [file.path, grantReach(file.text)]),
     [['api/download.ts', ['names it in an import or export', 'calls it or reads it off an object']]],
+  );
+});
+
+test('the revocation grant has no production caller before the revocation operation lands', async () => {
+  const files = await sources();
+  assert.deepEqual(
+    files
+      .filter((file) => file.path !== 'api/guard.ts' && reachOf('revokeWith', file.text).length > 0)
+      .map((file) => [file.path, reachOf('revokeWith', file.text)]),
+    [],
   );
 });
 

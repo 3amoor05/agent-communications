@@ -71,6 +71,14 @@ export type MethodClass =
    */
   | 'configure'
   /**
+   * Revokes one superseded token, only while a grant binds the request to its ledger ref, token kind and digest.
+   *
+   * This is not ordinary authentication: OAuth exchanges create a credential and carry none, while `auth.revoke`
+   * destroys an existing bearer. It therefore has a door of its own (`revokeWith` in `guard.ts`) rather than being
+   * reachable as `auth`, `read`, or a posting approval.
+   */
+  | 'revoke'
+  /**
    * A file's bytes, from {@link SLACK_FILES_ORIGIN} rather than the Web API.
    *
    * Not a method at all, which is why no row of the table below has this kind and why it has a rule of its own,
@@ -117,6 +125,7 @@ const RULES: Readonly<Record<string, MethodRule>> = {
   // Getting a token and renewing one. No permit, and no account token attached — these produce the credential.
   'oauth.v2.user.access': { kind: 'auth' },
   'oauth.v2.access': { kind: 'auth' },
+  'auth.revoke': { kind: 'revoke' },
 
   'apps.uninstall': {
     kind: 'refused',
