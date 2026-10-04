@@ -1,4 +1,4 @@
-import { CommsError, neutralise } from '@agentcomms/core';
+import { CommsError, neutralise, sanitizeHtmlToText } from '@agentcomms/core';
 import { SLACK_ORIGIN } from '../api/methods.ts';
 import type { InstallMode } from '../manifest.ts';
 import { scopesForMode } from '../manifest.ts';
@@ -135,6 +135,20 @@ export interface ExchangedToken {
   readonly tokenType?: string | undefined;
 }
 
+/** Provider diagnostics are display text, never credentials, markup or instructions. */
+export function safeSlackFailureText(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  const visible = neutralise(sanitizeHtmlToText(neutralise(value).text).text).text;
+  return visible
+    .replace(
+      /\bBearer\s+\S+|\bxox[a-z]-[\w-]+|\b(?:client_secret|access_token|refresh_token)\s*[=:]\s*\S+/gi,
+      '[redacted]',
+    )
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 512);
+}
+
 /** Slack's `oauth.v2.access` shape, as far as this needs it. */
 interface OAuthResponse {
   ok?: boolean;
@@ -164,8 +178,7 @@ interface OAuthResponse {
 export function readExchange(body: unknown): ExchangedToken {
   const response = body as OAuthResponse;
   if (response?.ok !== true) {
-    const shown = (value: unknown): string | undefined =>
-      typeof value === 'string' ? neutralise(value).text.replace(/\s+/g, ' ').trim() : undefined;
+    const shown = safeSlackFailureText;
     const slackError = shown(response?.error);
     const slackDescription = shown(response?.error_description);
     /*
@@ -176,7 +189,7 @@ export function readExchange(body: unknown): ExchangedToken {
      * message — the redirect URL, which Slack matches exactly, and whether the app is allowed to sign in without
      * a client secret at all. Retrying fixes neither, and somebody retrying is somebody not looking at the app.
      */
-    throw new CommsError('AUTH_REQUIRED', `Slack refused the sign-in: ${slackError ?? 'no reason given'}`, {
+    throw new CommsError('AUTH_REQUIRED', `Slack refused the sign-in: ${slackError || 'no reason given'}`, {
       hint:
         'Check the app at https://api.slack.com/apps: its redirect URL must match the one this used exactly, ' +
         'and it must be allowed to sign in without a client secret (PKCE).',

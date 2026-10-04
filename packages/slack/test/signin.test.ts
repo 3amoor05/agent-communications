@@ -55,6 +55,25 @@ async function freePort(): Promise<number> {
   return port;
 }
 
+test('foreground own-app timeout retains its existing special case', async () => {
+  const harness = await newHarness();
+  const started = await startSignIn(harness.context(), {
+    alias: 'acme',
+    clientId: TEST_CLIENT_ID,
+    mode: 'read',
+    port: await freePort(),
+    detached: false,
+    listenerTimeoutMs: 10,
+  });
+  assert.ok(started.listener);
+  await assert.rejects(started.listener.result, (error: CommsError) => {
+    assert.equal(error.code, 'TRANSIENT');
+    assert.equal(error.message, 'nobody finished signing in within ten minutes');
+    assert.equal(error.hint, 'Start again when you are ready.');
+    return true;
+  });
+});
+
 test('the listener is resolved from this package, not from whatever binary is running', async () => {
   const root = tempDir();
   // The packed shape: this module compiled into `dist/` beside the `agent-slack` bin, reached as a dependency

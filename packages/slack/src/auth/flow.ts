@@ -3,6 +3,7 @@ import { mkdir, open, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path';
 import { CommsError, type LooseningConsent, type ProfileSlackTarget } from '@agentcomms/core';
 import type { InstallMode } from '../manifest.ts';
+import { safeSlackFailureText } from './authorize.ts';
 
 /**
  * A sign-in that outlives the command that started it.
@@ -173,7 +174,17 @@ export function openFlowStore(stateDir: string, now: () => Date): FlowStore {
   return {
     async save(flow) {
       await mkdir(flowDir(stateDir), { recursive: true, mode: 0o700 });
-      await writeFile(flowPath(stateDir, flow.flowId), JSON.stringify(flow), { mode: 0o600 });
+      const safe = flow.profile
+        ? {
+            ...flow,
+            profile: {
+              ...flow.profile,
+              label: safeSlackFailureText(flow.profile.label),
+              workspaceName: safeSlackFailureText(flow.profile.workspaceName),
+            },
+          }
+        : flow;
+      await writeFile(flowPath(stateDir, flow.flowId), JSON.stringify(safe), { mode: 0o600 });
     },
 
     async peek(flowId) {
@@ -211,10 +222,18 @@ export function openFlowStore(stateDir: string, now: () => Date): FlowStore {
     },
 
     async recordOutcome(flowId, outcome) {
+      const safe =
+        'error' in outcome
+          ? {
+              ...outcome,
+              error: safeSlackFailureText(outcome.error),
+              ...(outcome.description ? { description: safeSlackFailureText(outcome.description) } : {}),
+            }
+          : outcome;
       await mkdir(flowDir(stateDir), { recursive: true, mode: 0o700 });
       await writeFile(
         flowPath(stateDir, flowId, '.outcome.json'),
-        JSON.stringify({ ...outcome, at: now().toISOString() }),
+        JSON.stringify({ ...safe, at: now().toISOString() }),
         { mode: 0o600 },
       );
     },

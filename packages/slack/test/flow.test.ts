@@ -28,6 +28,23 @@ const NOW = new Date('2026-09-22T12:00:00.000Z');
  */
 const posix = process.platform !== 'win32';
 
+for (const access of ['peek', 'get', 'claim', 'pending'] as const) {
+  test(`expiry through ${access} removes record, claim, outcome and log without replacement state`, async () => {
+    let at = NOW;
+    const { dir, flows } = await store(() => at);
+    const saved = flow();
+    await flows.save(saved);
+    await flows.recordOutcome(saved.flowId, { error: 'access_denied' });
+    await writeFile(join(dir, 'slack', 'flows', `${saved.flowId}.log`), 'safe log');
+    at = new Date(saved.expiresAt);
+    if (access === 'get' || access === 'claim') await assert.rejects(flows[access](saved.flowId));
+    else if (access === 'peek') assert.equal(await flows.peek(saved.flowId), null);
+    else assert.deepEqual(await flows.pending(), []);
+    assert.equal(await flows.readOutcome(saved.flowId), null);
+    assert.deepEqual(await readdir(join(dir, 'slack', 'flows')), []);
+  });
+}
+
 async function store(now: () => Date = () => NOW): Promise<{ dir: string; flows: FlowStore }> {
   const dir = await mkdtemp(join(tmpdir(), 'slack-flow-'));
   return { dir, flows: openFlowStore(dir, now) };

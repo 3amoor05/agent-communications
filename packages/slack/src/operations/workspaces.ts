@@ -15,7 +15,7 @@ import {
   secretsStoreOf,
   shellCommand,
 } from '@agentcomms/core';
-import { type ExchangedToken, scopeMismatch } from '../auth/authorize.ts';
+import { type ExchangedToken, safeSlackFailureText, scopeMismatch } from '../auth/authorize.ts';
 import { BUNDLE_VERSION, serialiseBundle, type TokenBundle } from '../auth/bundle.ts';
 import type { SlackFlow } from '../auth/flow.ts';
 import type { InstallMode } from '../manifest.ts';
@@ -340,9 +340,9 @@ export function profileTargetFor(flow: SlackFlow, config: Config, platform: Node
   const selected = {
     organisation: live.organisation,
     role: live.role,
-    label: neutralise(live.label).text,
+    label: safeSlackFailureText(live.label),
     workspace: live.workspace,
-    workspaceName: neutralise(live.workspaceName).text,
+    workspaceName: safeSlackFailureText(live.workspaceName),
     redirectPort: live.redirectPort,
     clientId: live.clientId,
     sha256: live.sha256,
@@ -350,9 +350,9 @@ export function profileTargetFor(flow: SlackFlow, config: Config, platform: Node
   const snapshot = {
     organisation: expected.organisation,
     role: expected.role,
-    label: expected.label,
+    label: safeSlackFailureText(expected.label),
     workspace: expected.workspace,
-    workspaceName: expected.workspaceName,
+    workspaceName: safeSlackFailureText(expected.workspaceName),
     redirectPort: expected.redirectPort,
     clientId: expected.clientId,
     sha256: expected.sha256,

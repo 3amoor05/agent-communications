@@ -20,8 +20,9 @@ import {
   secretsStoreOf,
   shellCommand,
   withCredentialsLock,
+  wrapUntrusted,
 } from '@agentcomms/core';
-import { buildAuthorizeUrl, readExchange } from '../auth/authorize.ts';
+import { buildAuthorizeUrl, readExchange, safeSlackFailureText } from '../auth/authorize.ts';
 import { parseBundle, serialiseBundle } from '../auth/bundle.ts';
 import { FLOW_TTL_MS, newFlowId, type SlackFlow } from '../auth/flow.ts';
 import { startLoopback } from '../auth/listener.ts';
@@ -80,6 +81,8 @@ export interface StartOptions {
   readonly consent?: LooseningConsent | undefined;
   /** Command that can run the hidden listener; tests point it at the source entry. */
   readonly listenerCommand?: ListenerEntry | undefined;
+  /** Injectable listener lifetime for embedded callers and loopback tests; never changes stored expiry. */
+  readonly listenerTimeoutMs?: number | undefined;
 }
 
 export interface StartedSignIn {
@@ -159,7 +162,9 @@ export async function startSignIn(context: SlackContext, options: StartOptions):
   let listener: StartedSignIn['listener'];
   try {
     listener =
-      options.detached === false ? await startInProcess(context, flow) : await startDetached(context, flow, options);
+      options.detached === false
+        ? await startInProcess(context, flow, options.listenerTimeoutMs)
+        : await startDetached(context, flow, options);
   } catch (error) {
     await context.flows.discard(flow.flowId);
     if (error instanceof CommsError) throw error;
@@ -180,25 +185,35 @@ export async function startSignIn(context: SlackContext, options: StartOptions):
   };
 }
 
-async function startInProcess(context: SlackContext, flow: SlackFlow): Promise<StartedSignIn['listener']> {
+async function startInProcess(
+  context: SlackContext,
+  flow: SlackFlow,
+  timeoutMs?: number,
+): Promise<StartedSignIn['listener']> {
   const loopback = await startLoopback({
     state: flow.state,
     port: flow.port,
-    timeoutMs: Math.max(1000, Date.parse(flow.expiresAt) - context.now().getTime()),
+    timeoutMs: timeoutMs ?? Math.max(1000, Date.parse(flow.expiresAt) - context.now().getTime()),
     about: { alias: flow.alias, mode: flow.mode, reauth: Boolean(flow.expect) },
+    failureMessage: flow.profile
+      ? (error, description) => listenerFailure(context, flow, error, description)
+      : undefined,
   });
   const result = (async (): Promise<WorkspaceView> => {
     const outcome = await loopback.result;
     await loopback.close();
     if (outcome.kind === 'timeout') {
       await context.flows.discard(flow.flowId);
+      if (flow.profile) throw await profileFailure(context, flow, 'TRANSIENT');
       throw new CommsError('TRANSIENT', 'nobody finished signing in within ten minutes', {
         hint: 'Start again when you are ready.',
       });
     }
     if (outcome.kind === 'denied') {
       await context.flows.discard(flow.flowId);
-      throw slackDenied(outcome.error, outcome.description);
+      throw flow.profile
+        ? await profileFailure(context, flow, 'AUTH_REQUIRED', outcome.error, outcome.description)
+        : slackDenied(outcome.error, outcome.description);
     }
     return completeSignIn(context, flow.flowId, outcome.code);
   })();
@@ -210,13 +225,20 @@ async function startInProcess(context: SlackContext, flow: SlackFlow): Promise<S
  *
  * It is started by `startSignIn` and is not meant to be run by hand, so the command that runs it is hidden.
  */
-export async function runSignInListener(context: SlackContext, flowId: string): Promise<void> {
+export async function runSignInListener(
+  context: SlackContext,
+  flowId: string,
+  options: { timeoutMs?: number } = {},
+): Promise<void> {
   const flow = await context.flows.get(flowId);
   const loopback = await startLoopback({
     state: flow.state,
     port: flow.port,
-    timeoutMs: Math.max(1000, Date.parse(flow.expiresAt) - context.now().getTime()),
+    timeoutMs: options.timeoutMs ?? Math.max(1000, Date.parse(flow.expiresAt) - context.now().getTime()),
     about: { alias: flow.alias, mode: flow.mode, reauth: Boolean(flow.expect) },
+    failureMessage: flow.profile
+      ? (error, description) => listenerFailure(context, flow, error, description)
+      : undefined,
   });
   await context.flows.patch(flowId, { listenerPid: process.pid });
 
@@ -497,7 +519,19 @@ function listStep(context: SlackContext): string {
 export async function finishSignIn(context: SlackContext, options: FinishOptions): Promise<WorkspaceView> {
   // Checked before anything is read, as the command always did: a wait that is not one is refused whatever the flow.
   const waitSeconds = checkedWait(options.waitSeconds, context.surface);
-  const flow = await context.flows.get(options.flowId);
+  let flow: SlackFlow;
+  try {
+    flow = await context.flows.get(options.flowId);
+  } catch (error) {
+    if (!(error instanceof CommsError) || error.code !== 'NOT_FOUND' || !options.expectAlias) throw error;
+    const config = await context.config();
+    const organisation = options.expectAlias.split('/')[0] ?? '';
+    const record = config.version === 2 ? config.organisations?.[organisation] : undefined;
+    if (!record?.slack) throw error;
+    throw new CommsError(error.code, error.message, {
+      hint: `${error.hint ?? ''} If a sign-in through ${safeSlackFailureText(record.label)}'s organisation app never came back, ${safeSlackFailureText(record.slack.workspaceName)} (${safeSlackFailureText(record.slack.workspace)}) may require an administrator to approve the app.`,
+    });
+  }
   const kind = flow.expect ? 'reauth' : 'add';
   /*
    * The refusals name the caller's next step on the caller's surface. A tool told to run `agent-slack … --finish` is
@@ -535,12 +569,27 @@ export async function finishSignIn(context: SlackContext, options: FinishOptions
 
   let code: string;
   if (options.url) {
-    code = codeFromUrl(options.url, flow);
+    try {
+      code = codeFromUrl(options.url, flow);
+    } catch (error) {
+      if (!flow.profile || !(error instanceof CommsError) || error.code !== 'AUTH_REQUIRED') throw error;
+      await context.flows.discard(flow.flowId);
+      stopListener(flow, context.now());
+      throw await profileFailure(
+        context,
+        flow,
+        'AUTH_REQUIRED',
+        error.details?.slackError,
+        error.details?.slackDescription,
+      );
+    }
   } else {
     const outcome = await waitForOutcome(context, flow, { ...options, waitSeconds });
     if ('error' in outcome) {
       await context.flows.discard(flow.flowId);
-      throw slackDenied(outcome.error, outcome.description);
+      throw flow.profile
+        ? await profileFailure(context, flow, 'AUTH_REQUIRED', outcome.error, outcome.description)
+        : slackDenied(outcome.error, outcome.description);
     }
     code = outcome.code;
   }
@@ -567,8 +616,21 @@ async function waitForOutcome(
   const deadline = context.now().getTime() + options.waitSeconds * 1000;
   const pollMs = options.pollMs ?? 500;
   for (;;) {
+    if (flow.profile) {
+      try {
+        profileTargetFor(flow, await context.config(), context.platform);
+      } catch (error) {
+        await context.flows.discard(flow.flowId);
+        stopListener(flow, context.now());
+        throw error;
+      }
+    }
     const outcome = await context.flows.readOutcome(flow.flowId);
     if (outcome) return outcome;
+    if (flow.profile && context.now().getTime() >= Date.parse(flow.expiresAt)) {
+      await context.flows.discard(flow.flowId);
+      throw await profileFailure(context, flow, 'TRANSIENT');
+    }
     if (context.now().getTime() >= deadline) {
       // Not a failure: the person is still reading the consent screen. The flow is left alone so the same
       // `--finish` works when they are done.
@@ -759,9 +821,50 @@ function codeFromUrl(raw: string, flow: SlackFlow): string {
 }
 
 function slackDenied(error: string, description?: string | undefined): CommsError {
-  return new CommsError('AUTH_REQUIRED', `Slack did not grant access: ${error}`, {
-    hint: description ?? 'Approve the app in Slack, leaving every permission ticked.',
+  const slackError = safeSlackFailureText(error);
+  const slackDescription = safeSlackFailureText(description);
+  return new CommsError('AUTH_REQUIRED', `Slack did not grant access: ${slackError}`, {
+    hint: slackDescription || 'Approve the app in Slack, leaving every permission ticked.',
+    details: { slackError, ...(slackDescription ? { slackDescription } : {}) },
   });
+}
+
+/** Every profile refusal uses the original display snapshot; only validity comes from the live profile. */
+async function profileFailure(
+  context: SlackContext,
+  flow: SlackFlow,
+  code: 'AUTH_REQUIRED' | 'TRANSIENT',
+  error?: unknown,
+  description?: unknown,
+): Promise<CommsError> {
+  profileTargetFor(flow, await context.config(), context.platform);
+  const profile = flow.profile as ProfileSlackTarget;
+  const identity = `${safeSlackFailureText(profile.label)}; workspace ${safeSlackFailureText(profile.workspaceName)} (${profile.workspace}); ${profile.role} app, client id ${profile.clientId}`;
+  const slackError = safeSlackFailureText(error);
+  const slackDescription = safeSlackFailureText(description);
+  return new CommsError(
+    code,
+    `The sign-in did not complete. The person may have declined or the workspace may require an administrator to approve the app. ${identity}.`,
+    {
+      hint: `Ask the workspace administrator about this app, then start the sign-in again.${slackError || slackDescription ? ` Slack reported: ${wrapUntrusted([slackError, slackDescription].filter(Boolean).join(': '), { field: 'slack-signin-error' })}` : ''}`,
+    },
+  );
+}
+
+async function listenerFailure(
+  context: SlackContext,
+  flow: SlackFlow,
+  error: string,
+  description?: string,
+): Promise<string> {
+  // A delayed callback cannot prove that this still is a profile sign-in after expiry or invalidation.
+  if (!(await context.flows.peek(flow.flowId))?.profile) return 'The sign-in did not complete.';
+  try {
+    const failure = await profileFailure(context, flow, 'AUTH_REQUIRED', error, description);
+    return `${failure.message} ${failure.hint ?? ''}`;
+  } catch (failure) {
+    return failure instanceof CommsError ? failure.message : 'The sign-in did not complete.';
+  }
 }
 
 /**
@@ -897,14 +1000,29 @@ export async function completeSignIn(context: SlackContext, flowId: string, code
         },
       );
     }
-    const token = readExchange(
-      await context.exchange({
-        client_id: flow.clientId,
-        code,
-        redirect_uri: flow.redirectUrl,
-        code_verifier: flow.verifier,
-      }),
-    );
+    if (flow.profile) profileTargetFor(flow, await context.config(), context.platform);
+    const exchanged = await context.exchange({
+      client_id: flow.clientId,
+      code,
+      redirect_uri: flow.redirectUrl,
+      code_verifier: flow.verifier,
+    });
+    if (flow.profile) profileTargetFor(flow, await context.config(), context.platform);
+    let token: ReturnType<typeof readExchange>;
+    try {
+      token = readExchange(exchanged);
+    } catch (error) {
+      if (flow.profile && error instanceof CommsError && error.details) {
+        throw await profileFailure(
+          context,
+          flow,
+          'AUTH_REQUIRED',
+          error.details.slackError,
+          error.details.slackDescription,
+        );
+      }
+      throw error;
+    }
 
     const config = await context.config();
     /*

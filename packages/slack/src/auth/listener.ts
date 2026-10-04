@@ -80,12 +80,12 @@ a different one is refused. Close this tab — the terminal or the agent that st
 the workspace.</p></main>`;
 }
 
-function pageError(): string {
+function pageError(message?: string): string {
   return `<!doctype html><meta charset="utf-8"><title>Not signed in — agent-slack</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">${STYLE}
 <body><main><p class="brand">agent-slack</p>
 <h1>Not signed in</h1>
-<p class="lede">The sign-in did not complete.</p>
+<p class="lede">${escapeHtml(message ?? 'The sign-in did not complete.')}</p>
 <p class="note">Nothing was changed. Go back to your terminal or your agent: it will say what happened and how to
 start again.</p></main>`;
 }
@@ -97,6 +97,8 @@ export interface LoopbackOptions {
   readonly timeoutMs?: number | undefined;
   /** What the page may say. Absent keeps the plain wording. */
   readonly about?: PageAbout | undefined;
+  /** Operation-level wording, evaluated only for a callback carrying this flow's state. */
+  readonly failureMessage?: ((error: string, description?: string) => Promise<string>) | undefined;
 }
 
 export async function startLoopback(options: LoopbackOptions): Promise<Loopback> {
@@ -105,7 +107,7 @@ export async function startLoopback(options: LoopbackOptions): Promise<Loopback>
     settle = resolve;
   });
 
-  const server: Server = createServer((request, response) => {
+  const server: Server = createServer(async (request, response) => {
     const url = new URL(request.url ?? '/', 'http://localhost');
     if (url.pathname === '/favicon.ico') {
       response.writeHead(404).end();
@@ -128,7 +130,11 @@ export async function startLoopback(options: LoopbackOptions): Promise<Loopback>
       return;
     }
 
-    const body = outcome.kind === 'code' ? pageOk(options.about) : pageError();
+    const message =
+      outcome.kind === 'denied' && options.failureMessage
+        ? await options.failureMessage(outcome.error, outcome.description).catch(() => 'The sign-in did not complete.')
+        : undefined;
+    const body = outcome.kind === 'code' ? pageOk(options.about) : pageError(message);
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }).end(body);
     settle(outcome);
   });
