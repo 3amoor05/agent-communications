@@ -144,8 +144,8 @@ A re-consent keeps the mailbox's existing access tier. It does not widen anythin
 npx -y @agentcomms/gmail doctor
 ```
 
-`doctor` states what is wrong and the one command that fixes each thing. It exits `0` when nothing is broken and
-`78` when something is, so a script can gate on it.
+`doctor` states what is wrong and the commands or actions that fix each thing, one command per line when several are
+needed. It exits `0` when nothing is broken and `78` when something is, so a script can gate on it.
 
 ## 5. Read something
 

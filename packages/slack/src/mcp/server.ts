@@ -403,7 +403,7 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
     {
       title: 'Diagnose',
       description:
-        'Check everything that has to work — each workspace’s stored credential and sign-in, what Slack says the token is and may do, and other Slack servers registered on this machine — and return each problem with the one command that fixes it. `offline` asks Slack nothing. Run this when a call fails and the reason is not obvious.',
+        'Check everything that has to work — each workspace’s stored credential and sign-in, what Slack says the token is and may do, and other Slack servers registered on this machine — and return each problem with one or more commands or actions that fix it. Multiple commands in `fix` are newline-separated. `offline` asks Slack nothing. Run this when a call fails and the reason is not obvious.',
       inputSchema: {
         workspace: z
           .string()

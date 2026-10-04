@@ -616,7 +616,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
     {
       title: 'Diagnose',
       description:
-        'Check everything that has to work — sign-in, permissions, the secret store, other Gmail servers registered on this machine — and return each problem with the one command that fixes it. Run this when a call fails and the reason is not obvious.',
+        'Check everything that has to work — sign-in, permissions, the secret store, other Gmail servers registered on this machine — and return each problem with one or more commands or actions that fix it. Multiple commands in `fix` are newline-separated. Run this when a call fails and the reason is not obvious.',
       inputSchema: z.object({ inbox: z.string().min(1).optional().describe('check only this mailbox') }),
       outputSchema: z.object({
         healthy: z.boolean(),
@@ -627,7 +627,10 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
             title: z.string(),
             status: z.string(),
             detail: z.string(),
-            fix: z.string().nullable(),
+            fix: z
+              .string()
+              .nullable()
+              .describe('one or more newline-separated commands or actions that fix this check; null when none'),
             inbox: z.string().nullable(),
           }),
         ),
@@ -997,7 +1000,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
               SAVE_KEY,
               z.object({ choice: z.string(), folder: z.string().optional() }),
             );
-            await answerDownloadInForm(context.core, choiceId, content ?? {}, context.env);
+            await answerDownloadInForm(context.core, choiceId, content ?? {}, context.env, context.platform);
             // The person's answer is the one on the question now: an answer in the arguments is left out.
             return reply(await download({ maxFiles, choiceId }));
           }

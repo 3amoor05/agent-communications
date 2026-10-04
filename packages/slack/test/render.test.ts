@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { commandText, shellCommand } from '@agentcomms/core';
 import {
   renderCreatedDraft,
+  renderDoctor,
   renderManifestHelp,
   renderPosted,
   renderSignInStarted,
@@ -107,6 +108,30 @@ test('renderer commands use the explicitly selected shell platform', () => {
     /agent-slack workspace reauth "two words" --finish "flow one"/,
   );
   assert.match(renderManifestHelp('read', 60426, false, undefined, 'win32'), /--port "60426"/);
+});
+
+test('doctor prefixes every command in a multi-line repair', () => {
+  const rendered = renderDoctor(
+    {
+      healthy: false,
+      summary: { ok: 0, unknown: 0, warn: 0, fail: 1 },
+      checks: [
+        {
+          id: 'rivals',
+          title: 'Other servers',
+          status: 'fail',
+          detail: 'two unsafe entries are registered',
+          fix: 'claude mcp remove first\ncodex mcp remove second',
+          workspace: null,
+        },
+      ],
+    },
+    false,
+  );
+  assert.match(
+    rendered,
+    /fail {2}Other servers: two unsafe entries are registered\n {6}fix: claude mcp remove first\n {6}fix: codex mcp remove second/,
+  );
 });
 
 test('a post reads as it always did, and a note about its record is said after it rather than dropped', () => {

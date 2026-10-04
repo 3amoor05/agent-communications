@@ -21,7 +21,7 @@ Tightening applies at once. No tool approves.
 |---|---|
 | [`slack_workspaces_list`](#slack_workspaces_list) | The connected Slack workspaces, what each may do (`read` cannot post at all — Slack enforces that), and whether its credential looks healthy. |
 | [`slack_workspace_show`](#slack_workspace_show) | Everything recorded about one workspace: its ids, its mode, the scopes it was granted, the app it signed in through and when it was connected. |
-| [`slack_doctor`](#slack_doctor) | Check everything that has to work — each workspace’s stored credential and sign-in, what Slack says the token is and may do, and other Slack servers registered on this machine — and return each problem with the one command that fixes it. |
+| [`slack_doctor`](#slack_doctor) | Check everything that has to work — each workspace’s stored credential and sign-in, what Slack says the token is and may do, and other Slack servers registered on this machine — and return each problem with one or more commands or actions that fix it. |
 | [`slack_manifest`](#slack_manifest) | The manifest for a Slack app in `read` or `send` mode, for a loopback port. |
 | [`slack_channels`](#slack_channels) | Channels and conversations this account can see. |
 | [`slack_read`](#slack_read) | Recent messages, newest first. |
@@ -69,7 +69,7 @@ Everything recorded about one workspace: its ids, its mode, the scopes it was gr
 
 ### `slack_doctor`
 
-Check everything that has to work — each workspace’s stored credential and sign-in, what Slack says the token is and may do, and other Slack servers registered on this machine — and return each problem with the one command that fixes it. `offline` asks Slack nothing. Run this when a call fails and the reason is not obvious.
+Check everything that has to work — each workspace’s stored credential and sign-in, what Slack says the token is and may do, and other Slack servers registered on this machine — and return each problem with one or more commands or actions that fix it. Multiple commands in `fix` are newline-separated. `offline` asks Slack nothing. Run this when a call fails and the reason is not obvious.
 
 *read-only*
 

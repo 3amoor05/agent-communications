@@ -271,7 +271,12 @@ const MARKS: Record<string, { text: string; colour: Parameters<typeof paint>[1] 
 export function renderDoctor(result: DoctorResult, color: boolean): string {
   const lines = result.checks.map((check) => {
     const mark = MARKS[check.status] ?? FAILED;
-    const fix = check.fix ? `\n      ${paint(color, 'dim', `fix: ${check.fix}`)}` : '';
+    const fix = check.fix
+      ? `\n${check.fix
+          .split('\n')
+          .map((line) => `      ${paint(color, 'dim', `fix: ${line}`)}`)
+          .join('\n')}`
+      : '';
     return `${paint(color, mark.colour, mark.text)}  ${check.title}: ${check.detail}${fix}`;
   });
   const { ok, unknown, warn, fail } = result.summary;

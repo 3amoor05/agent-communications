@@ -274,7 +274,13 @@ export function renderDoctor(result: DoctorResult, color: boolean): string {
   };
   const lines = result.checks.map((check) => {
     const head = `${paint(color, tint[check.status] ?? 'dim', mark[check.status] ?? '?')}  ${check.title}: ${check.detail}`;
-    return check.fix ? `${head}\n      ${paint(color, 'dim', `fix: ${check.fix}`)}` : head;
+    const fix = check.fix
+      ? `\n${check.fix
+          .split('\n')
+          .map((line) => `      ${paint(color, 'dim', `fix: ${line}`)}`)
+          .join('\n')}`
+      : '';
+    return `${head}${fix}`;
   });
   lines.push('', `${result.summary.ok} ok · ${result.summary.warn} to look at · ${result.summary.fail} broken`);
   return lines.join('\n');

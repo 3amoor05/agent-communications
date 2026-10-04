@@ -17,7 +17,7 @@ names it `from`. There is no default mailbox.
 | [`gmail_inboxes_list`](#gmail_inboxes_list) | The mailboxes this server can use: the name to pass as `inbox`, the address, what each one may do, and how sending from it must be approved. |
 | [`gmail_whoami`](#gmail_whoami) | Ask Google which account a mailbox is, and report what it may do and how sending from it must be approved. |
 | [`gmail_inbox_show`](#gmail_inbox_show) | Everything known about one mailbox: its address, tier and what it may do, how sending from it and loosening its settings must be approved and whether each comes from the defaults, the OAuth client it signs in through, the scopes Google granted, its internal domains, and when it last refreshed. |
-| [`gmail_doctor`](#gmail_doctor) | Check everything that has to work — sign-in, permissions, the secret store, other Gmail servers registered on this machine — and return each problem with the one command that fixes it. |
+| [`gmail_doctor`](#gmail_doctor) | Check everything that has to work — sign-in, permissions, the secret store, other Gmail servers registered on this machine — and return each problem with one or more commands or actions that fix it. |
 | [`gmail_search`](#gmail_search) | Search one or more mailboxes with Gmail search syntax (from:, subject:, has:attachment, after:2026-09-17, …) and get the newest matches first, merged across mailboxes. |
 | [`gmail_message_get`](#gmail_message_get) | Read one message: its headers, who it really came from (Google’s own authentication result), its attachments with risk flags, and its body as a person would see it. |
 | [`gmail_thread_get`](#gmail_thread_get) | Read a whole thread in one call, oldest first, with quoted history collapsed so the same text is not repeated for every reply. |
@@ -89,7 +89,7 @@ Everything known about one mailbox: its address, tier and what it may do, how se
 
 ### `gmail_doctor`
 
-Check everything that has to work — sign-in, permissions, the secret store, other Gmail servers registered on this machine — and return each problem with the one command that fixes it. Run this when a call fails and the reason is not obvious.
+Check everything that has to work — sign-in, permissions, the secret store, other Gmail servers registered on this machine — and return each problem with one or more commands or actions that fix it. Multiple commands in `fix` are newline-separated. Run this when a call fails and the reason is not obvious.
 
 *read-only*
 

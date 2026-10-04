@@ -1,7 +1,7 @@
 # Troubleshooting
 
-Run this first. It checks everything that has to work and prints the one command that fixes each thing that does
-not. Slack has its own — see [Slack](#slack) at the end.
+Run this first. It checks everything that has to work and prints the commands or actions that fix each thing that
+does not, one command per line when several are needed. Slack has its own — see [Slack](#slack) at the end.
 
 ```bash
 agent-gmail doctor

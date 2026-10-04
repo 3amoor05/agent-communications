@@ -286,8 +286,9 @@ Reuses the OAuth client and refresh tokens you already have. No browser, no re-c
 approve: at a terminal you type `yes` to what it lists; run by an agent, it exits `10` with the preview and an
 approval id, and runs again with `--approval <id>` after your yes.
 
-`agent-gmail doctor` checks everything that has to work and prints the one command that fixes each thing that does
-not. It exits `78` when something is broken, so CI can gate on it.
+`agent-gmail doctor` checks everything that has to work and prints the commands or actions that fix each thing that
+does not. When a repair needs several commands, it prints them one per line. It exits `78` when something is broken,
+so CI can gate on it.
 
 ### Upgrading
 

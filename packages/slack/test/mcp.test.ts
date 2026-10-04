@@ -68,6 +68,17 @@ test('the tool list is the same whatever is connected, so a workspace added late
   assert.ok(before.includes('slack_read'));
 });
 
+test('doctor tells MCP clients that a repair may contain one or more commands', async () => {
+  const harness = await newHarness();
+  const { client, close } = await connect(harness);
+  try {
+    const doctor = (await client.listTools()).tools.find((tool) => tool.name === 'slack_doctor');
+    assert.match(doctor?.description ?? '', /one or more commands/);
+  } finally {
+    await close();
+  }
+});
+
 test('the tools that reach people say what approval they need, and the one that prepares says it posts nothing', async () => {
   /*
    * Posting and reacting are tools since the owner's rule of 2026-09-25, through the gate the CLI uses. The

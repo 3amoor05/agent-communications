@@ -283,6 +283,18 @@ test('doctor reports the checks and their fixes through the tool', async () => {
   }
 });
 
+test('doctor tells MCP clients that a repair may contain newline-separated commands', async () => {
+  const harness = await newHarness();
+  const { client, close } = await connect({ core: harness.core, env: harness.env });
+  try {
+    const doctor = (await client.listTools()).tools.find((tool) => tool.name === 'gmail_doctor');
+    assert.match(doctor?.description ?? '', /one or more commands/);
+    assert.match(JSON.stringify(doctor?.outputSchema), /newline-separated commands/);
+  } finally {
+    await close();
+  }
+});
+
 test('the instructions tell the model the three things it must know, and stay under 2 KB', async () => {
   const harness = await newHarness({
     accounts: [
