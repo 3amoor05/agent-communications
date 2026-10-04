@@ -1205,7 +1205,11 @@ configuration problem.`,
           done,
           output(),
           () =>
-            `:${wanted.name}: on ${wanted.ts}.${done.note === undefined ? '' : ` ${done.note.charAt(0).toUpperCase()}${done.note.slice(1)}.`}`,
+            `:${wanted.name}: on ${wanted.ts}.${
+              done.note === undefined
+                ? ''
+                : ` ${done.note.charAt(0).toUpperCase()}${done.note.slice(1)}${/[.!?]$/.test(done.note) ? '' : '.'}`
+            }`,
           streams,
         );
       }),

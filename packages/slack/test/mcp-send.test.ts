@@ -508,6 +508,22 @@ test('no_reaction removal is success with the ownership note through CLI JSON an
   }
 });
 
+test('no_reaction removal has one full stop in the CLI human result', async () => {
+  const harness = await newHarness();
+  await harness.addWorkspace({ alias: 'acme', mode: 'send', sendPolicy: 'chat' });
+  const fake = slack();
+  fake.script['reactions.remove'] = { ok: false, error: 'no_reaction' };
+
+  const terminal = await cli(
+    harness,
+    ['react', '--workspace', 'acme', '--channel', 'C1', '--ts', '1.1', '--emoji', 'tada', '--remove'],
+    { read: fake.read },
+  );
+  assert.equal(terminal.code, EXIT_CODES.OK, terminal.stdout + terminal.stderr);
+  assert.equal(terminal.stdout, `:tada: on 1.1. ${NO_REACTION_NOTE}\n`);
+  assert.equal(fake.count('reactions.remove'), 1);
+});
+
 test('under `confirm`, slack_react adds nothing and hands over the command; slack_react_send uses the person’s approval once', async () => {
   const harness = await newHarness();
   await harness.addWorkspace({ alias: 'acme', mode: 'send', sendPolicy: 'confirm' });
