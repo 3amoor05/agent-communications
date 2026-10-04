@@ -34,13 +34,13 @@
 
 1. Write schema round-trip tests for additive account `organisation` and `profileApp: "read" | "send"` provenance and a top-level optional `pendingRevocations` list. Pin the ledger shape to `ref`, recorded `store`, `platform`, `workspace`, `createdAt`, required access state, optional refresh state, and per-token `status: pending | revoked | expired` plus absolute `deadline`. Watch the current parser return untyped/unknown fields and the current secret-store detection ignore a pending-only config.
 2. Write pure organisation tests for resolving an exact Slack target by organisation and role, including label, workspace id/name, port, client id, optional app id, and record SHA-256. Cover absent organisation/Slack/role and a hand-edited invalid record. Watch the current core expose no single validated target.
-3. Write compare-and-set tests for learning an app id: unchanged SHA/workspace/role/client with no id learns once; the same id is idempotent; a different already-learned id, changed SHA, workspace, role, or client refuses; a profile-stated id wins. Extend the §D8 tests so typed provenance still refuses a workspace change, reports a replaced/removed role, preserves a learned id only for the same workspace/role/client, and clears it on a new client id.
+3. Write compare-and-set tests for learning an app id: unchanged SHA/workspace/role/client with no id learns once; the same id is idempotent; a different already-learned id, changed SHA, workspace, role, or client refuses; a profile-stated id wins. Add one focused `org update` case in which the old record carries a learned app id, the new profile states a different app id for the same workspace/role/client, and two provenance accounts use that role: one records the old app id and must be listed as affected, while one already records the stated id and must not be listed. Assert the stored record takes the stated id. Watch the current update preserve the profile's stated value but omit the differing account from its report. Extend the remaining §D8 tests so typed provenance still refuses a workspace change, reports a replaced client/removed role, preserves a learned id only for the same workspace/role/client, and clears it on a new client id.
 4. Add exported `PendingRevocation`, token-state, and typed provenance fields to the schemas used by both config versions without introducing version 3. Include the ledger in `ConfigBody`, in config serialisation, and in `holdsSecrets`.
-5. Add and export one profile Slack target resolver and one pure app-id learner that returns the next config only after all expected values still match. Replace phase 1's provenance casts with the typed fields; keep `slackRecordFrom` as the only profile-update rule for retaining or clearing learned ids.
+5. Add and export one profile Slack target resolver and one pure app-id learner that returns the next config only after all expected values still match. Replace phase 1's provenance casts with the typed fields; keep `slackRecordFrom` as the only profile-update rule for retaining, clearing, or replacing learned ids. In `packages/core/src/operations/organisations.ts`, extend the Slack account-impact report so a provenance account is reported when the profile now states an app id different from the account's `appId`, even when its role and client id did not change; matching accounts and unmanaged own-app accounts remain unreported.
 6. Run:
    - `pnpm --filter @agentcomms/core exec node --experimental-strip-types --test test/config-secrets.test.ts test/organisations.test.ts test/org-operations.test.ts`
    - `pnpm --filter @agentcomms/core test`
-7. Guard mutations, one at a time: remove each provenance field from `accountSchema`; omit `pendingRevocations` from either version schema and from `holdsSecrets`; resolve the wrong role; ignore the record SHA; let learning overwrite a different app id; keep a learned id after a workspace/client change. Each mutation must fail the focused tests before it is restored.
+7. Guard mutations, one at a time: remove each provenance field from `accountSchema`; omit `pendingRevocations` from either version schema and from `holdsSecrets`; resolve the wrong role; ignore the record SHA; let learning overwrite a different app id; keep a learned id after a workspace/client change; retain a learned id instead of a newly stated id; suppress the differing-account report or report the already-matching/unmanaged account. Each mutation must fail the focused tests before it is restored.
 8. Commit this task as a standalone core-schema prerequisite.
 
 ### Task 2: Teach secret discovery and migration about recorded pending stores
@@ -51,13 +51,16 @@
 - Modify: `packages/core/test/fixtures/config-v2-0.12.1.ts`
 
 1. Add tests showing `secretRefsOf` includes and deduplicates ledger refs beside clients, inboxes, accounts, and the approval key. Watch the current list omit the only reference to a superseded Slack bundle.
-2. Add a current-release migration matrix: a pending bundle is read from the `store` on its entry, copied and verified in the target, the root `secrets.store` and every moved entry's `store` change in the same config update, and the source is deleted only after that switch. Include a pending bundle whose recorded store differs from the root store, rollback after a failed switch, and conflict after a concurrent ledger mutation.
+2. Add a current-release migration matrix which distinguishes physical locations before doing any write or cleanup:
+   - `entry.store === from`: read the pending bundle from that recorded source, copy and verify it in `to`, change the entry's `store` to `to` in the same config update as the root `secrets.store` switch, and delete that source copy only after the switch;
+   - `entry.store === to`: this is the only possible differing store in the two-store model, so read and verify the bundle **in place**, retain/canonicalise the ledger's store as `to` in the atomic switch if needed, never call `target.set(ref, value)` against itself, never put that physical target reference on a source-cleanup list, and never delete it. A missing or unverifiable in-place bundle aborts before the root switch and deletes nothing.
+   Include both branches, a mixed migration, rollback after a failed switch, and conflict after a concurrent ledger/store mutation. In the same tests, inspect the approval preview: it must separately state how many credentials will be copied from `from` and have those originals deleted, and how many pending credentials are already in `to` and will only be verified and kept there. It must never claim that an in-place target credential will be copied from or deleted out of the root source.
 3. Extend the frozen 0.12.1 fixture with the minimum helper needed to model the older release switching the root store while preserving an unknown `pendingRevocations` key and not copying its bundle. Do not import current schemas into the fixture. The later Slack test in Task 9 will prove that the bundle is still read from the entry's old store.
-4. Refactor migration's source lookup to select the root store for ordinary refs and the entry's recorded store for pending refs. Keep one target copy per deduplicated ref, include the entry/store mapping in `migrationConflict`, and rewrite ledger stores together with the root switch under the credentials lock.
+4. Refactor migration planning to retain a per-reference physical source/store map instead of treating `secretRefsOf(config)` as one undifferentiated root-store list. Select the root store for ordinary refs and each entry's recorded store for pending refs; partition source copies from already-target verifications before opening the copy loop. Track attempted copies and cleanup as `(backend, ref)` pairs, excluding every in-place target ref. Keep one target copy per deduplicated source ref, include the entry/store mapping in `migrationConflict`, rewrite source-side ledger stores together with the root switch under the credentials lock, and render `secretsMigration`'s effect from the same partition so the approval describes the actual copy/verify/delete plan.
 5. Run:
    - `pnpm --filter @agentcomms/core exec node --experimental-strip-types --test test/cli.test.ts`
    - `pnpm --filter @agentcomms/core test`
-6. Guard mutations: omit pending refs from `secretRefsOf`; read them from the root store; switch the root without rewriting the entry; rewrite the entry in a second update; exclude its location from the conflict snapshot; delete the old bundle before the atomic switch. Restore every mutation after its focused case fails.
+6. Guard mutations: omit pending refs from `secretRefsOf`; read them from the root store; treat `entry.store === to` as an ordinary copy; add an in-place target ref to attempted-source cleanup; claim in the approval preview that an in-place ref is copied/deleted; switch the root without rewriting a source-side entry; rewrite the entry in a second update; exclude its location from the conflict snapshot; delete a true source bundle before the atomic switch. Restore every mutation after its focused case fails.
 7. Commit this task before any Slack code can create ledger entries.
 
 ### Task 3: Add a dedicated one-shot transport grant for `auth.revoke`
@@ -66,12 +69,11 @@
 - Modify: `packages/slack/src/api/methods.ts`
 - Modify: `packages/slack/src/api/guard.ts`
 - Modify: `packages/slack/test/guard.test.ts`
-- Modify: `packages/slack/test/consumer-check.mjs`
 
 1. Add guard tests that first show unclassified `auth.revoke` is refused. Specify a new `revoke` method class which is still refused unless a dedicated grant names the pending ref, token kind, and SHA-256 of the bearer token.
 2. Add a matrix proving the transport refuses no grant, a wrong method, a bearer token whose digest is not the grant's, nesting with every existing grant, and a second call after consumption. Assert refusals happen before the fake sees a request and that the raw token/digest never appears in an error. Pin `ref` and token kind as immutable grant fields here; Task 5 proves that the operation which creates the grant refuses a wrong ref, another bundle, and an access/refresh swap.
 3. Add the `revoke` rule and a `revoking` slot to `WritePermit`. Implement an internal `revokeWith` helper which validates the class, opens no posting/configuration/download/upload permission, compares the exact bearer token digest at request time, consumes the grant before the request leaves, and closes it in `finally`.
-4. Keep `revokeWith` out of the package root. Extend the static caller/export tests to allow no caller yet and, once Task 5 lands, only `operations/revocations.ts`; external consumers cannot construct the grant.
+4. Keep `revokeWith` out of the package root. Extend the existing package-root export check and static import/caller scan in `packages/slack/test/guard.test.ts` to allow no caller yet and, once Task 5 lands, only `operations/revocations.ts`; external consumers cannot construct the grant. Do not change `packages/slack/test/consumer-check.mjs`: it is a packed-consumer smoke test, not where these static boundaries are enforced.
 5. Run:
    - `pnpm --filter @agentcomms/slack exec node --experimental-strip-types --test --test-timeout=600000 test/guard.test.ts`
    - `pnpm --filter @agentcomms/slack test`
@@ -100,20 +102,36 @@
 - Modify: `packages/slack/src/api/call.ts` only to preserve structured evidence needed by the classifier
 - Modify: `packages/slack/test/revocations.test.ts`
 - Modify: `packages/slack/test/guard.test.ts`
-- Modify: `packages/slack/test/consumer-check.mjs`
 - Modify: `packages/slack/test/support/fake-slack.ts`
 - Modify: `packages/slack/test/support/harness.ts`
 
-1. Extend the fake so tests can script ordinary JSON, a 5xx, a dropped connection, and a hook after Slack has received the request. It must still only be reachable through the production guard.
-2. Write executor tests for every answer from Task 4 through a real guarded `auth.revoke` call. Assert the refresh token is called with its own bearer token even when access already answered `token_revoked`, `token_expired`, `invalid_auth`, or any other cascade-like answer, and assert the no-cascade case calls both exactly once.
+1. Extend only the Web API reply shape in `packages/slack/test/support/fake-slack.ts` so a scripted API method can choose an HTTP status such as 500 while still returning its JSON body. Reuse the fake's existing ordinary-JSON replies, `DROP` connection sentinel, pre-response `requests.push(recorded)`, and script callback (which already provides the after-receipt crash hook). Keep it reachable only through the production guard; do not add duplicate JSON, drop, request-recording, or hook mechanisms.
+2. Write executor tests for every answer from Task 4 through a real guarded `auth.revoke` call. First vary the access token's answer across the complete table and assert its own persisted state. Then add the required **second-token** table below: on every row the access call first returns `{ ok: true, revoked: true }`, the refresh call is still made with the refresh bearer token, its deadline is not yet reached, and cleanup deletion is deliberately failed so the entry remains available for an assertion of both independently persisted states (`access: revoked`, refresh as shown).
+
+   | Refresh token's own second answer | Persisted refresh state |
+   |---|---|
+   | `{ ok: true, revoked: true }` | `revoked` |
+   | `{ ok: true, revoked: false }` | `pending` |
+   | `{ ok: true }` (`revoked` absent) | `pending` |
+   | `{ ok: false, error: "token_revoked" }` | `revoked` |
+   | `{ ok: false, error: "token_expired" }` | `revoked` |
+   | `{ ok: false, error: "invalid_auth" }` | `pending` |
+   | `{ ok: false, error: "account_inactive" }` | `pending` |
+   | `{ ok: false, error: "ratelimited" }` | `pending` |
+   | HTTP 5xx with a JSON error body | `pending` |
+   | `DROP` after the fake records the request | `pending` |
+   | `{ ok: false }` (unnamed error) | `pending` |
+   | `{ ok: false, error: "future_error" }` (any other error) | `pending` |
+
+   Add a separate no-cascade success path with access and refresh each returning `{ ok: true, revoked: true }`: assert two calls in access-then-refresh order, each with its own token, followed by bundle deletion and exact ledger-entry removal. This proves that a conclusive first response never substitutes for making or classifying the second call.
 3. Add cases for a wrong entry ref, another bundle, access/refresh swap, already-final status, missing/corrupt bundle, failed secret-store read, and a caller trying to supply a token. Watch each refuse before a request or leave the correct state pending.
-4. Add a crash hook after the fake records Slack's action but before the status update. After a fresh `SlackContext`, prove the token is still pending and retried; the lost answer never becomes an invented success.
+4. Use the fake's existing request recording plus script callback to throw after Slack has received the action but before the status update. After a fresh `SlackContext`, prove the token is still pending and retried; the lost answer never becomes an invented success.
 5. Implement `revokePendingEntry`/`retryPendingRevocations` in three fenced phases per token: under the credentials lock re-read the exact entry, open `core.secrets(entry.store)`, and load the token from the named bundle; release the lock and make one bounded guarded call; reacquire the lock and compare-and-set the same `ref`/store/kind/deadline with status still `pending`. The network call must not hold the machine-wide lock. Continue to the other kind whatever the first answered.
 6. When every token is `revoked` or `expired`, delete the bundle first and remove the exact entry only after deletion succeeds. Leave both entry and bundle for every unfinished state or cleanup failure. Return plain per-entry/per-token states and deadlines; never claim an uninstall.
 7. Run:
    - `pnpm --filter @agentcomms/slack exec node --experimental-strip-types --test --test-timeout=600000 test/revocations.test.ts test/guard.test.ts`
    - `pnpm --filter @agentcomms/slack test`
-8. Guard mutations: read from the root store; accept a token parameter; hold the credentials lock across the network call; skip the live ref/store/kind/deadline/pending CAS; update a different entry with the same workspace; skip the second token after any first answer; delete a bundle with one pending token; remove the entry before bundle deletion; treat a network exception as final. Each focused test must watch one fail.
+8. Guard mutations: read from the root store; accept a token parameter; hold the credentials lock across the network call; skip the live ref/store/kind/deadline/pending CAS; update a different entry with the same workspace; skip the second token after any first answer; reuse the access answer/classification for refresh instead of persisting the second answer; send the access bearer on the refresh call; delete a bundle with one pending token; remove the entry before bundle deletion; treat a network exception as final. The explicit access table, second-token table, and no-cascade test must each watch their corresponding mutation fail.
 9. Commit the durable revocation engine before sign-in can enqueue work.
 
 ### Task 6: Resolve profile-driven adds and snapshot the exact target
@@ -180,7 +198,7 @@
 5. Add a second move while the first ledger entry is pending. It stages another unique ref and appends another entry without replacing or merging the first.
 6. Refactor `reauthTarget`/`planModeSet`: provenance selects the recorded role for a renewal and the opposite requested role for a move; own-app selection remains current. Carry a transition discriminator in the flow so `validateExchange` relaxes client/app equality only for that exact profile target.
 7. In profile app switches, replace the current post-write best-effort delete with `PendingRevocation` creation from the old bundle. Build the new account and ledger append in the same `writeWithConsent` mutation under `withCredentialsLock`; after commit, call the revocation engine and return its plain cleanup state. Leave ordinary same-app/own-app renewal behaviour unchanged.
-8. Cover every Slack §D8 row: core still refuses a workspace-id change while provenance accounts exist; a changed client id is reported and same-role reauth uses the replacement; a removed role is reported and cannot be selected; a changed port affects only later starts; removing Slack from the profile leaves the account usable but removes profile mode moves. Confirm a stated app id replaces a learned one and mismatch is reported.
+8. Cover every Slack §D8 consumer path: core still refuses a workspace-id change while provenance accounts exist; consume Task 1's affected-account report for a changed client id and use the replacement on same-role reauth; consume its removed-role report and refuse selection; a changed port affects only later starts; removing Slack from the profile leaves the account usable but removes profile mode moves. For the app-id-only case, begin with the core update already performed by Task 1: assert its record contains the newly stated app id and its result already reported the account whose recorded app id differs, then prove Slack reauth targets that stated id and refuses an exchange from the old learned id. Do not implement or duplicate organisation-record replacement/reporting in this Slack-only task.
 9. Run:
    - `pnpm --filter @agentcomms/slack exec node --experimental-strip-types --test --test-timeout=600000 test/organisation-mode.test.ts test/changes.test.ts test/signin.test.ts test/refresh-session.test.ts test/revocations.test.ts`
    - `pnpm --filter @agentcomms/slack test`
@@ -268,15 +286,20 @@
 - Modify: `packages/slack/test/strict-arguments.test.ts`
 - Modify: `packages/slack/test/cli.test.ts`
 - Modify: `packages/slack/test/render.test.ts`
-- Modify: `packages/slack/test/consumer-check.mjs`
 - Modify: `capabilities.json`
 - Regenerate: `docs/reference/slack-cli.md`
 - Regenerate: `docs/reference/slack-mcp-tools.md`
 
 1. Add surface tests first: `workspace add`/`slack_workspace_add` accept omitted client id and port only on the profile path; explicit client id still requires port; list/show/connected results expose provenance and app role; profile mode reports a direct app move rather than `appUpdateNeeded`; removal and doctor expose pending cleanup states; all strict unknown-argument checks remain.
-2. Update CLI help/command reconstruction so it never prints `--client-id undefined`, and distinguish “through Really Good Culture's read/send app” from own-app wording. Keep exit codes, JSON envelope, and untrusted-content wrapping unchanged.
-3. Update MCP schemas/descriptions and handlers over the same `connectWorkspace`, `reauthWorkspace`, `planModeSet`, `finishSignIn`, `removeWorkspaceChange`, and `runDoctor` functions. Make `clientId`/`port` optional in the add tool schema, not in a duplicate MCP selector.
-4. Change only the existing `capabilities.json` row descriptions required by §D9: `slack.workspace.add` explains profile selection versus explicit own-app arguments; the mode rows explain a profile app-to-app move while retaining own-app instructions. Keep their existing `operation` values and cover the changed optional argv/args in strict parity fixtures.
+2. In `packages/slack/src/cli/program.ts`, change the `workspace add` command/option help from unconditional client-id/port requirements to: omitting both chooses the named organisation profile's read app (or send app with `--mode send`), while providing `--client-id` selects the own-app path and still requires `--port`. Change `workspace mode` help to say profile accounts move between organisation apps and own-app accounts retain the manifest/update or removal procedure. In `packages/slack/src/cli/render.ts`, make reconstructed commands omit absent options rather than print `--client-id undefined`, and distinguish “through Really Good Culture's read/send app” from own-app wording. Keep exit codes, JSON envelope, and untrusted-content wrapping unchanged.
+3. In `packages/slack/src/mcp/server.ts`, make `clientId`/`port` optional in `slack_workspace_add`'s schema and description with the same profile-versus-own-app wording; update the descriptions of `slack_mode`, `slack_mode_request_send`, `slack_mode_narrow`, and `slack_mode_set` to distinguish a profile app-to-app sign-in from the retained own-app instructions. Keep every handler over the same `connectWorkspace`, `reauthWorkspace`, `planModeSet`, `finishSignIn`, `removeWorkspaceChange`, and `runDoctor` functions rather than adding an MCP-only selector.
+4. `capabilities.json` calls this explanatory field `reason`, not `description`. Replace only these existing `reason` strings (do not add a `description` key, and do not change `operation`, `status`, `argv`, `args`, or `expect`):
+   - `slack.workspace.add`: “`workspace add <name>` with no client id chooses the organisation profile's read app, or its send app for `mode: \"send\"`; an explicit client id and port keep the own-app path. Send is approved before sign-in; read starts at once.”
+   - `slack.mode.request-send`: “For a profile account, `workspace mode <name> send` starts a move to the profile's send app after approval and Slack consent; for an own-app account it still returns the manifest/app-update steps first.”
+   - `slack.mode.narrow`: “For a profile account, `workspace mode <name> read` starts an immediate move to the profile's read app followed by Slack consent; for an own-app account it still returns the existing manifest/removal/reauth procedure and changes nothing.”
+   - `slack.mode.set`: “`workspace mode <name> send|read` moves a profile account between the organisation's apps (`send` needs approval; `read` starts at once); an own-app account keeps the existing app-update/removal instructions.”
+
+   Leave `slack.mode.report` without a new `reason`; its user-visible explanation belongs in the CLI/MCP descriptions above and the generated references. Add strict parity assertions that an unknown literal `description` field is rejected and that the four rows still resolve to `connectWorkspace`/`planModeSet` with the changed optional arguments.
 5. Run `pnpm sync:reference`; inspect only generated Slack CLI/MCP changes and never edit those pages by hand.
 6. Run:
    - the focused surface files above;
@@ -286,26 +309,52 @@
 7. Guard mutations: make `clientId` required on only one surface; route CLI or MCP through a different function; restore own-app mode text for a provenance account; omit provenance/pending state from one renderer; change/remove a capability `operation`; skip regeneration. The surface/parity/reference tests must catch each.
 8. Commit the surface and generated-reference slice together.
 
-### Task 13: Rewrite the Slack setup skill for organisation apps
+### Task 13: Update shared contracts and every setup skill that teaches organisation apps
 
 **Files:**
+- Modify first: `skills/_shared/contract-comms.md`
+- Modify first: `skills/_shared/contract-slack.md`
+- Modify: `test/skill-contracts.test.mjs`
+- Modify: `skills/comms-onboarding/SKILL.md`
 - Modify: `skills/slack-setup/SKILL.md`
-- Regenerate if changed by the repository script: `skills/slack-setup/references/contract.md`
-- Regenerate if changed by the repository script: `skills/slack-setup/references/fit.json`
-- Regenerate if its generated row changes: `README.md`
+- Inspect, and modify only if a Slack-app reference has appeared by implementation time: `skills/gmail-setup/SKILL.md`
+- Regenerate: `skills/comms-onboarding/references/contract.md`
+- Regenerate: `skills/comms-update/references/contract.md`
+- Regenerate: `skills/slack-posting/references/contract.md`
+- Regenerate: `skills/slack-reading/references/contract.md`
+- Regenerate: `skills/slack-setup/references/contract.md`
+- Check as generator-owned but expect unchanged: every `skills/*/references/fit.json` and `README.md`
 
-1. Rewrite the profile-first setup path: after `agentcomms org add`, `agent-slack workspace add rgc/slack` automatically chooses the read app, or the send app for `--mode send`; no client id or port is repeated. Keep explicit `--client-id --port` as the person's own-app path.
-2. Rewrite mode instructions: provenance accounts move directly between the two profile apps; read→send still needs the change approval and Slack consent; send→read is immediate apart from Slack consent; neither asks to edit/uninstall an organisation app. Keep the existing manifest/update/uninstall procedure only for own-app accounts.
-3. Explain same-role reauth after an organisation replaces a role's app, durable pending revocation, `doctor` retry/status/deadlines, and that revocation does not uninstall an app. Include the cautious admin-approval failure wording and cancellation/finish retry guidance.
-4. Run `pnpm sync:skills`, inspect every generated difference, then run `pnpm verify:skills`. Do not hand-edit generated contract/fit/README content.
-5. This task introduces no runtime decision guard, so there is no code mutation to run. Its mechanical guards are `sync:skills --check` and the skill verifier's command/tool validation; semantic coverage is reviewed against the §D7/§D9 traceability rows below rather than encoded as a brittle sentence assertion.
-6. Commit the skill source and generator-owned outputs together.
+1. Add a table-driven semantic regression to `test/skill-contracts.test.mjs` before editing prose. It must fail on the present text and prove both paths remain documented: a profile example uses `workspace add <organisation>/slack` with no client id/port and describes direct role-to-role app moves; an own-app example still uses `--client-id`/`--port` and retains manifest/update/removal steps. Reject the stale promises “not used by `slack_workspace_add` yet”, “comes in a later release”, and “`workspace add` does not use the profile by itself”. This complements, rather than replaces, the generated-contract equality test.
+2. Update the shared contracts **before any individual skill**:
+   - `skills/_shared/contract-comms.md:34-37` currently says every Slack app is widened on api.slack.com or by `agent-slack app update`. Scope that instruction to a person's own app; add that a provenance account moves between the organisation profile's read/send apps and the agent must not ask someone to edit or uninstall those organisation apps.
+   - `skills/_shared/contract-slack.md:73-84`, especially “Changing the Slack app's manifest is the user's step too”, currently makes the own-app procedure universal. Preserve approval and Slack-consent rules, but say profile mode changes sign in through the other profile app while manifest editing/removal applies only to own-app accounts.
+3. Then update `skills/comms-onboarding/SKILL.md` at each contradictory passage:
+   - lines 78-81 (“the profile's client is not picked by itself yet” and Slack apps are “recorded, not used”) must describe the already-shipped Gmail profile selection and Phase 3's automatic Slack app selection;
+   - lines 92-96 must replace the required profile Client ID/port and “comes in a later release” with `slack_workspace_add`/`agent-slack workspace add rgc/slack`, default read or `mode: "send"`/`--mode send`, without client-id/port arguments;
+   - command-table line 149 must show **two** alternatives: the profile command above, and the existing manifest plus `--client-id --port` own-app sequence. Do not weaken the surrounding own-app instructions.
+4. Inspect `skills/gmail-setup/SKILL.md` after the shared-contract edit. At planning time it has no Slack-app reference (`rg -ni 'Slack app|slack_workspace|agent-slack' skills/gmail-setup/SKILL.md` is empty), and lines 146-163 already describe automatic Gmail organisation-client selection, so no hand edit is expected. If a Slack-app sentence has appeared by implementation time, update that exact sentence to the same profile-versus-own-app contract before continuing; otherwise record the no-match check and leave this file untouched.
+5. Then rewrite `skills/slack-setup/SKILL.md` at all current contradictions:
+   - lines 33-41: replace the “Bring your own Slack app” framing around profiles and the later-release claim with profile-first automatic selection, followed by a clearly separate own-app path;
+   - lines 87-99: give a profile command/tool example with no client-id/port and retain a second explicit own-app example with both;
+   - lines 188-207: make read→send for provenance accounts an approved sign-in through the profile's send app, with no manifest/app update; scope the existing two-step manifest/`--app-updated` procedure to own-app accounts;
+   - lines 217-228: make send→read for provenance accounts start immediately through the profile's read app and then require Slack consent; scope manifest replacement, app removal, and own-app reauth to own-app accounts only;
+   - lines 252-269: qualify manifest, app-update, second-app, and narrowing pitfalls as own-app pitfalls, and add profile guidance for replacement reauth, pending access/refresh revocations, fixed deadlines/`doctor` retry, and the fact that token revocation never uninstalls an app.
+
+   Also include the §D7 cautious admin-approval failure wording and explain that MCP cancellation or a detached CLI interrupt leaves the flow open for a later finish.
+6. Only after the two shared contracts and the three setup-skill checks/edits are complete, run `pnpm sync:skills`. Inspect the five generated contract copies listed above. Because no frontmatter description changes, every `fit.json` and the generated README skill table should remain byte-for-byte unchanged; investigate rather than accepting unrelated generator drift.
+7. Run:
+   - `pnpm exec node --test test/skill-contracts.test.mjs test/skill-commands.test.mjs`
+   - `pnpm sync:skills --check`
+   - `pnpm verify:skills`
+8. Mechanical/semantic guard mutations: restore each stale later-release sentence in turn; add `--client-id` to the profile example; remove it from the own-app example; make either shared contract universal again; or hand-edit one generated contract copy. The focused semantic test or `sync:skills --check` must fail for each mutation before it is restored.
+9. Commit the shared sources, setup skills, regression test, and generator-owned contract copies together.
 
 ### Task 14: Mutation-audit every new guard and close static escape hatches
 
-**Files:** all implementation and test files changed in Tasks 1–12
+**Files:** all implementation, test, capability, reference, and skill files changed in Tasks 1–13
 
-1. Re-run every mutation named in Tasks 1–12 as a one-line local change, run the smallest named focused test, record the failing test name, and restore the line immediately. A mutation that stays green means the guard needs a new test before continuing.
+1. Re-run every mutation named in Tasks 1–13 as a one-line local change, run the smallest named focused test, record the failing test name, and restore the line immediately. A mutation that stays green means the guard needs a new test before continuing.
 2. Add/retain static scans for: one production caller of `revokeWith`; no root export; no ordinary `auth.revoke` call; no direct Slack endpoint outside the guarded transport; no caller-supplied revoke token; CLI and MCP using the same operations; no new `apps.uninstall` path.
 3. Re-run the core and Slack package suites after all mutations are restored. `git diff` must contain no mutation residue.
 4. Commit only any tests needed to make a previously surviving mutation fail.
@@ -339,14 +388,14 @@
 | Spec rule | Implementation task(s) | Proof owned by the task |
 |---|---:|---|
 | §D2 Slack profile grammar and app-id grammar | 1, 6, 7 | Core target validation; exchange `app_id` grammar; safe profile display snapshot |
-| §D4 additive Slack provenance and learned app ids | 1, 7, 8 | Typed `organisation`/`profileApp`; atomic learn; retain/clear/replace rules |
+| §D4 additive Slack provenance and learned app ids | 1, 7, 8 | Typed `organisation`/`profileApp`; core stated-id replacement and differing-account report; atomic learn; Slack consumes the resolved current target |
 | §D5 own-app account beside a new profile | 7 | Matching ids never imply provenance; existing own-app account stays unchanged |
 | §D7.1 profile add/default-send selection, snapshot, mismatch, explicit path | 6, 7, 12 | Start matrix, exchange matrix, surface parity |
 | §D7.2 provenance is additive and explicit ids are unmanaged | 1, 7 | Schema round-trip and add-result assertions |
 | §D7.3 mode is a move, exact source/target snapshot, update invalidation, approval direction | 8 | Mode/race matrix and exact-transition validation |
 | §D7.4 ordered stage/switch+enqueue/revoke/delete and restart retry | 4, 5, 8, 9 | Event journal, executor, doctor restart |
-| §D7.5 top-level ledger, scans/migrations/recorded store/second move/remove | 1, 2, 8, 9 | Core migration matrix and Slack recovery/removal matrix |
-| §D7.6 app-id learning CAS and profile update retention/clearing | 1, 7, 8 | Core CAS and simultaneous sign-in race |
+| §D7.5 top-level ledger, scans/migrations/recorded store/second move/remove | 1, 2, 8, 9 | Core copy-versus-verify-in-place migration and truthful preview matrices; Slack recovery/removal matrix |
+| §D7.6 app-id learning CAS and profile update retention/clearing/replacement | 1, 7, 8 | Core stated-id replacement/report and CAS; simultaneous sign-in race; Slack reauth consumes the core result |
 | §D7.7 exchange app id required only for profile flows | 7 | Pre-stage missing/invalid/own-app matrix |
 | §D7.8 every revocation answer, independent tokens, fixed deadlines | 4, 5, 9 | Pure and guarded response tables; expiry/restart tests |
 | §D7.9 dedicated one-shot grant and status CAS | 3, 5, 14 | Transport matrix, operation binding, static caller scans |
@@ -358,7 +407,7 @@
 | §D8 Slack row: role removed | 1, 8 | Report plus target-role refusal |
 | §D8 Slack row: redirect port changed | 6, 8 | Existing flows keep snapshot; later starts use new port |
 | §D8 Slack row: Slack removed | 8 | Existing account works; profile move unavailable/reported |
-| §D9 capability descriptions, generated reference, setup skill | 12, 13 | Strict parity/reference/skill guards |
+| §D9 capability `reason` text, CLI/MCP descriptions, generated references, shared contracts and setup skills | 12, 13 | Exact capability-row replacements; strict parity/reference guards; shared-first skill regression and generator checks |
 | §4 phase 3 delivery boundary | 1–15 | Core prerequisites precede Slack; using-it surfaces and skill finish the phase |
 
 ## Traceability to the §5 Slack test debt
@@ -402,15 +451,15 @@
 | Existing flow expiry paths remain unchanged | 10 |
 | Profile update/remove during wait | 8, 10 |
 | Secrets migration by this release and prior release recorded-store recovery | 2, 9 |
-| Same-role reauth after app replacement | 8 |
-| App id learned once under simultaneous first signs; cleared for new client | 1, 7, 8 |
+| Same-role reauth after app replacement | 1, 8 |
+| App id learned once under simultaneous first signs; cleared for new client; stated id replaces learned and differing accounts are reported | 1, 7, 8 |
 | Redaction snapshots on every surface | 10, 12 |
 | CLI/MCP parity | 12 |
 | Full verification guards and `pnpm verify` | 15 |
 
 ## Risks and review focus
 
-- **Credential-store split brain:** an older binary may move the root store without the ledger bundle. Review every pending read for `entry.store`, every current-account read for the root store, and the current-release migration's single atomic rewrite.
+- **Credential-store split brain and self-cleanup:** an older binary may move the root store without the ledger bundle, leaving a pending ref already in the next migration's target. Review every pending read for `entry.store`, every current-account read for the root store, the current-release migration's single atomic rewrite, and the `entry.store === to` partition: verify it in place and exclude it from both copy and cleanup. The approval preview must describe that partition honestly.
 - **Lock scope and lost answers:** token selection and the status CAS use the machine-wide credential lock, but the external call must not hold it. Bound the request; re-check the exact entry after the call; ensure a timeout/drop leaves `pending`; confirm refresh/sign-in/migration tests show no deadlock or stranded bundle.
 - **Concurrent first sign-ins:** app-id learning and account creation share one config update. Review uncertain config commits and staged-secret withdrawal so the losing token is neither referenced nor silently leaked.
 - **Over-broad transition relaxation:** only a provenance mode move or documented same-role replacement may change app/client. Own-app reauth must still require the same person/workspace/app.
@@ -418,7 +467,7 @@
 - **Expiry parsing:** unreadable and absent fields use a fixed fallback from entry creation, never a sliding retry deadline. The result must expose the fixed value.
 - **Timeout/cancellation races:** a wait may end because its caller cancelled, its own wait elapsed, the flow expired, the profile changed, or an outcome arrived. Review ownership/claim/discard paths separately; no new timeout state is allowed.
 - **Untrusted wording:** errors and profile display fields cross CLI, MCP, logs, and HTML. Snapshot safe strings once, keep the envelope, and inspect redaction fixtures for bearer-like values and control-token injection.
-- **Generated drift:** edit CLI/MCP descriptions and skill source, then use `sync:reference`/`sync:skills`. Never repair generated pages by hand.
+- **Generated drift:** edit CLI/MCP descriptions and capability `reason` values, then use `sync:reference`; edit shared skill contracts before individual setup skills, then use `sync:skills`. Never repair generated pages or copied contracts by hand.
 - **Regression surface:** version-1 Slack fixtures and explicit own-app commands dominate the existing suite. Run the full Slack package after every profile slice, not only at Task 15.
 
 ## Planned task list
@@ -435,6 +484,6 @@
 10. Cautious, sanitised profile sign-in failure semantics.
 11. Detached-wait cancellation without flow consumption.
 12. CLI/MCP parity, capabilities, and generated references.
-13. `slack-setup` skill rewrite and generated skill outputs.
+13. Shared skill contracts plus `comms-onboarding`/`slack-setup` organisation-app guidance, with `gmail-setup` inspected and generated copies synced.
 14. Full guard mutation audit and static escape-hatch scan.
 15. Package suites, root guards, final `pnpm verify`, and handoff.
