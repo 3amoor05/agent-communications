@@ -9,6 +9,7 @@ import {
 } from './approvals.ts';
 import type { AuditRecord } from './audit.ts';
 import { channelApproveCommands } from './channel-words.ts';
+import { inlineCommand, type ShellCommand, shellCommand } from './cli-runtime.ts';
 import {
   type ChangePolicy,
   type Config,
@@ -73,11 +74,22 @@ export interface ChangeOptions {
    * naming it there sends the person to a command they do not have. `agentcomms approve` when left out.
    */
   approveCommand?: string | undefined;
+  /** The shell syntax used when the approval command is shown. */
+  platform?: NodeJS.Platform | undefined;
 }
 
 /** The terminal command that approves a change, for the channel that asked. */
 export function approveCommandOf(options: Pick<ChangeOptions, 'approveCommand'>): string {
   return options.approveCommand ?? 'agentcomms approve';
+}
+
+/** The channel's fixed approval-command prefix with this generated id, rendered by the common shell rule. */
+export function changeApprovalCommand(
+  approveCommand: string | undefined,
+  approvalId: string,
+  platform: NodeJS.Platform = process.platform,
+): ShellCommand {
+  return shellCommand([...(approveCommand ?? 'agentcomms approve').trim().split(/\s+/), approvalId], platform);
 }
 
 export interface PreparedChange {
@@ -220,7 +232,7 @@ export async function prepareChange(
       effects: binding.effects,
       preview: renderChangePreview({ ...record, change: binding }),
       expiresAt: record.expiresAt,
-      next: nextStep(record.approvalId, policy, approveCommandOf(options)),
+      next: nextStep(record.approvalId, policy, options),
     };
   } catch (error) {
     await auditRefusal(core, 'change.prepare', error, {
@@ -259,7 +271,7 @@ export async function claimChange(
       approvalId,
       { change: binding, policy },
       {
-        pendingHint: `Ask the user to run \`${approveCommandOf(options)} ${approvalId}\` in their own terminal, then try again with the same approval.`,
+        pendingHint: `Ask the user to run ${inlineCommand(changeApprovalCommand(options.approveCommand, approvalId, options.platform))} in their own terminal, then try again with the same approval.`,
       },
     );
     const decided = stricterPolicy(policy, record.requiredPolicy) === 'chat' ? 'chat' : 'confirm';
@@ -437,10 +449,10 @@ function changePolicyOf(record: Pick<ApprovalRecord, 'requiredPolicy'>): ChangeP
   return record.requiredPolicy === 'chat' ? 'chat' : 'confirm';
 }
 
-function nextStep(approvalId: string, policy: ChangePolicy, approveCommand: string): string {
+function nextStep(approvalId: string, policy: ChangePolicy, options: ChangeOptions): string {
   return policy === 'chat'
     ? `Show this preview to the user and ask. If they say yes, claim approval ${approvalId} and apply the change; if not, revoke it.`
-    : `The change policy is confirm: ask the user to run \`${approveCommand} ${approvalId}\` in their own terminal and type the code it shows. Then claim approval ${approvalId} and apply the change.`;
+    : `The change policy is confirm: ask the user to run ${inlineCommand(changeApprovalCommand(options.approveCommand, approvalId, options.platform))} in their own terminal and type the code it shows. Then claim approval ${approvalId} and apply the change.`;
 }
 
 interface ChangeAuditEntry {

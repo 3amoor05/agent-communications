@@ -13,6 +13,8 @@ import { errorEnvelope, okEnvelope } from './output.ts';
 export interface OutputOptions {
   json: boolean;
   color: boolean;
+  /** The shell syntax used for commands returned alongside this output. */
+  platform?: NodeJS.Platform | undefined;
 }
 
 export interface Streams {

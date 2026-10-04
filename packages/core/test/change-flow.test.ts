@@ -222,6 +222,24 @@ test('a command to run again with a word Windows cannot print is shown as its wo
   }
 });
 
+test('a terminal change handoff renders its approval command for the selected shell platform', async () => {
+  const core = coreWith('never', 'confirm');
+  await assert.rejects(
+    gatedChangeAtTerminal(core, setSendPolicy(core, 'chat'), {
+      env: { CLAUDECODE: '1' },
+      output: { json: true, color: false, platform: 'win32' },
+      command: 'agent-slack workspace policy acme/slack',
+      approveCommand: 'agent-slack 7',
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof CommsError);
+      const approvalId = String((error.details as { approvalId?: string }).approvalId);
+      assert.match(error.hint ?? '', new RegExp(`agent-slack "7" ${approvalId}`));
+      return true;
+    },
+  );
+});
+
 test('a command whose --approval is taken by another change names the flag that carries this one', async () => {
   /*
    * `agent-gmail setup` registers the OAuth client under `--approval` and the MCP server under `--mcp-approval`. A

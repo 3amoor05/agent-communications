@@ -10,6 +10,7 @@ import {
   type ListedFile,
   type RecordedSaveAnswer,
 } from './approvals.ts';
+import { changeApprovalCommand } from './changes.ts';
 import {
   agentMarker,
   canPrompt,
@@ -655,6 +656,7 @@ function questionText(input: {
   policy: ChangePolicy;
   approveCommand: string;
   choiceId: string;
+  platform?: NodeJS.Platform | undefined;
 }): string {
   const files = `${input.count} ${input.count === 1 ? 'file' : 'files'}`;
   const [downloads, current] = input.options;
@@ -671,7 +673,7 @@ function questionText(input: {
   for (const warning of input.warnings) lines.push(`  ! ${warning}`);
   if (input.policy !== 'chat') {
     lines.push(
-      `The change policy of ${input.account} is confirm: answer this yourself, at your own terminal — \`${input.approveCommand} ${input.choiceId}\` — or in the form your client shows you.`,
+      `The change policy of ${input.account} is confirm: answer this yourself, at your own terminal — ${inlineCommand(changeApprovalCommand(input.approveCommand, input.choiceId, input.platform))} — or in the form your client shows you.`,
     );
   }
   return lines.join('\n');
@@ -729,6 +731,7 @@ export async function askWhereToSave(core: Core, input: AskInput): Promise<Desti
     policy: record.requiredPolicy === 'chat' ? 'chat' : 'confirm',
     approveCommand: input.approveCommand,
     choiceId,
+    platform: input.platform,
   });
   const choices = [downloads, current]
     .filter((option) => option.unavailable === undefined)
@@ -749,8 +752,8 @@ export async function askWhereToSave(core: Core, input: AskInput): Promise<Desti
         ? `Nothing has been saved. Show the person this question and the files — each name and size — and wait for their answer; never choose for them.${warned} Then call ${input.tool} again with the same arguments, choiceId "${choiceId}", and saveTo: ${answers.join(', ')}.`
         : `Nothing has been saved. Show the person this question and the files, and wait for their answer; never choose for them.${warned} Then run the same command again with --choice ${choiceId} and ${answers.join(', ')}.`
       : input.surface === 'mcp'
-        ? `Nothing has been saved. The change policy of ${account} is confirm, so the person answers this themselves — you cannot answer it for them, and a saveTo you pass is refused. Show them the question and the files, and ask them to run \`${input.approveCommand} ${choiceId}\` in their own terminal.${warned} Then call ${input.tool} again with the same arguments and choiceId "${choiceId}" alone. A client trusted to show approval forms asks them in a form on that call instead.`
-        : `Nothing has been saved. The change policy of ${account} is confirm, so the person answers this themselves: ask them to run \`${input.approveCommand} ${choiceId}\` in their own terminal.${warned} Then run the same command again with --choice ${choiceId} alone.`;
+        ? `Nothing has been saved. The change policy of ${account} is confirm, so the person answers this themselves — you cannot answer it for them, and a saveTo you pass is refused. Show them the question and the files, and ask them to run ${inlineCommand(changeApprovalCommand(input.approveCommand, choiceId, input.platform))} in their own terminal.${warned} Then call ${input.tool} again with the same arguments and choiceId "${choiceId}" alone. A client trusted to show approval forms asks them in a form on that call instead.`
+        : `Nothing has been saved. The change policy of ${account} is confirm, so the person answers this themselves: ask them to run ${inlineCommand(changeApprovalCommand(input.approveCommand, choiceId, input.platform))} in their own terminal.${warned} Then run the same command again with --choice ${choiceId} alone.`;
   return {
     destinationRequired: true,
     choiceId,
@@ -856,8 +859,8 @@ export async function settleDestination(core: Core, input: SettleInput): Promise
   const { saveTo, choiceId: choiceWord } = words(input.surface);
   const pendingHint =
     input.surface === 'mcp'
-      ? `Ask the person to run \`${input.approveCommand} ${answer.choiceId}\` in their own terminal and answer there, then call again with the same arguments and choiceId "${answer.choiceId}" alone.`
-      : `Ask the person to run \`${input.approveCommand} ${answer.choiceId}\` in their own terminal and answer there, then run this again with --choice ${answer.choiceId} alone.`;
+      ? `Ask the person to run ${inlineCommand(changeApprovalCommand(input.approveCommand, answer.choiceId, platform))} in their own terminal and answer there, then call again with the same arguments and choiceId "${answer.choiceId}" alone.`
+      : `Ask the person to run ${inlineCommand(changeApprovalCommand(input.approveCommand, answer.choiceId, platform))} in their own terminal and answer there, then run this again with --choice ${answer.choiceId} alone.`;
   const asked = await core.approvals.get(answer.choiceId).catch(() => null);
   if (
     asked !== null &&
@@ -1003,7 +1006,7 @@ export interface DownloadAtTerminalOptions<Q extends DestinationQuestion> {
   /** `--choice`, as given. */
   choice?: string | undefined;
   env: NodeJS.ProcessEnv;
-  output: { json?: boolean | undefined; color: boolean };
+  output: { json?: boolean | undefined; color: boolean; platform?: NodeJS.Platform | undefined };
   noInput?: boolean | undefined;
   /** The command to run again, for the hint an agent gets: `agent-gmail attachments download … --inbox acme/gmail`. */
   command: string | ShellCommand;
@@ -1063,7 +1066,7 @@ export async function downloadAtTerminal<Q extends DestinationQuestion>(
       hint:
         question.policy === 'chat'
           ? `Show the person the question and the files. Once they answer, run ${runWith('--to', '<downloads|current|folder>', '--choice', question.choiceId)}.`
-          : `The change policy is confirm: ask the person to run \`${options.approveCommand} ${question.choiceId}\` in their own terminal and answer there. Then run ${runWith('--choice', question.choiceId)}.`,
+          : `The change policy is confirm: ask the person to run ${inlineCommand(changeApprovalCommand(options.approveCommand, question.choiceId, options.output.platform))} in their own terminal and answer there. Then run ${runWith('--choice', question.choiceId)}.`,
       details: { ...(question as unknown as Record<string, unknown>) },
     });
   }

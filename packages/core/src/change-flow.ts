@@ -1,8 +1,8 @@
 import {
-  approveCommandOf,
   beginChangeApproval,
   type ChangeRequest,
   type ChangeSurface,
+  changeApprovalCommand,
   claimChange,
   finishChangeApproval,
   type PreparedChange,
@@ -73,7 +73,12 @@ export type GatedOutcome<T> =
 export async function gatedChange<T>(
   core: Core,
   change: GatedChange<T>,
-  options: { surface: ChangeSurface; approvalId?: string | undefined; approveCommand?: string | undefined },
+  options: {
+    surface: ChangeSurface;
+    approvalId?: string | undefined;
+    approveCommand?: string | undefined;
+    platform?: NodeJS.Platform | undefined;
+  },
 ): Promise<GatedOutcome<T>> {
   const request = await change.plan(await core.config.load());
   const loosens = classifyChange(request.before, request.after).loosened.length > 0;
@@ -99,12 +104,14 @@ export async function gatedChange<T>(
       prepared: await prepareChange(core, request, {
         surface: options.surface,
         approveCommand: options.approveCommand,
+        platform: options.platform,
       }),
     };
   }
   const consent = await claimChange(core, options.approvalId, request, {
     surface: options.surface,
     approveCommand: options.approveCommand,
+    platform: options.platform,
   });
   return { status: 'applied', result: await change.apply(consent, request) };
 }
@@ -188,7 +195,12 @@ export async function gatedChangeAtTerminal<T>(
 ): Promise<T> {
   const streams = options.streams ?? defaultStreams;
   const { approveCommand } = options;
-  const first = await gatedChange(core, change, { surface: 'cli', approvalId: options.approvalId, approveCommand });
+  const first = await gatedChange(core, change, {
+    surface: 'cli',
+    approvalId: options.approvalId,
+    approveCommand,
+    platform: options.output.platform,
+  });
   if (first.status === 'applied') return first.result;
 
   const { prepared } = first;
@@ -207,6 +219,7 @@ export async function gatedChangeAtTerminal<T>(
         prepared,
         typeof command === 'string' ? `${command} ${carrying.join(' ')}` : withWords(command, ...carrying),
         approveCommand,
+        options.output.platform,
       ),
       details: {
         approvalId: prepared.approvalId,
@@ -228,7 +241,12 @@ export async function gatedChangeAtTerminal<T>(
       throw cancelled();
     }
   }
-  const second = await gatedChange(core, change, { surface: 'cli', approvalId: prepared.approvalId, approveCommand });
+  const second = await gatedChange(core, change, {
+    surface: 'cli',
+    approvalId: prepared.approvalId,
+    approveCommand,
+    platform: options.output.platform,
+  });
   if (second.status !== 'applied') throw new CommsError('UNEXPECTED', 'the approved change asked for approval again');
   return second.result;
 }
@@ -244,11 +262,12 @@ export function approvalHint(
   prepared: Pick<PreparedChange, 'approvalId' | 'policy'>,
   rerun: string | ShellCommand,
   approveCommand?: string | undefined,
+  platform: NodeJS.Platform = typeof rerun === 'string' ? process.platform : rerun.platform,
 ): string {
   // A command `shellCommand` has no line for is shown as its words, saying it has to be typed.
   const run = typeof rerun === 'string' ? `\`${rerun}\`` : inlineCommand(rerun);
   return prepared.policy === 'confirm'
-    ? `Show the person the preview. They run \`${approveCommandOf({ approveCommand })} ${prepared.approvalId}\`; then run ${run}.`
+    ? `Show the person the preview. They run ${inlineCommand(changeApprovalCommand(approveCommand, prepared.approvalId, platform))}; then run ${run}.`
     : `Show the person the preview. Once they say yes, run ${run}.`;
 }
 

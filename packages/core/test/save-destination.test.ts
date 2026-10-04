@@ -403,6 +403,17 @@ test('the question shows both folders by their exact paths, and names the files 
   assert.equal(record?.expect.subject, 'where to save 2 files from acme/gmail');
 });
 
+test('a download question renders its approval command for the selected shell platform', async () => {
+  const { core, env } = machine();
+  const question = await asking(core, env, {
+    policy: 'confirm',
+    approveCommand: 'agent-gmail 7',
+    platform: 'win32',
+  });
+  assert.match(question.question, new RegExp(`agent-gmail "7" ${question.choiceId}`));
+  assert.match(question.next, new RegExp(`agent-gmail "7" ${question.choiceId}`));
+});
+
 /** A question's answer settled over MCP under `policy`: the folders as they are now are the home's own. */
 function settling(
   core: Core,

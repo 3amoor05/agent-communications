@@ -374,7 +374,7 @@ export async function main(
         }
         const result = await gatedChangeAtTerminal(core, attachChange(core, env, { kind, path }, 'cli'), {
           ...approval,
-          command: shellCommand(['agentcomms', 'attach', list, action as string, path]),
+          command: shellCommand(['agentcomms', 'attach', list, action as string, path], platform),
         });
         writeResult(result, output, renderAttachChange);
         return;
@@ -410,7 +410,7 @@ export async function main(
               print: values.print,
               noVerify: values['no-verify'],
             }),
-            { ...approval, command: shellCommand(words) },
+            { ...approval, command: shellCommand(words, platform) },
           );
           // Asked to register and did not — the client's CLI is not on PATH — or registered an entry that did not
           // start. The result is still printed, but a zero exit told a script (or an agent) that it worked.
@@ -428,7 +428,7 @@ export async function main(
               dryRun: values['dry-run'],
               includePrinted: values['include-printed'],
             }),
-            { ...approval, command: shellCommand(words) },
+            { ...approval, command: shellCommand(words, platform) },
           );
           writeResult(result, output, (r) => renderPrune(r, output.color));
           return;
@@ -455,7 +455,7 @@ export async function main(
           if (values.auto !== 'on' && values.auto !== 'off') throw usage('--auto takes on or off');
           const result = await gatedChangeAtTerminal(core, updateAutoChange(core, values.auto), {
             ...approval,
-            command: shellCommand(['agentcomms', 'update', '--auto', values.auto]),
+            command: shellCommand(['agentcomms', 'update', '--auto', values.auto], platform),
           });
           writeResult(result, output, renderAuto);
           return;
@@ -471,7 +471,7 @@ export async function main(
         if (values['no-verify']) words.push('--no-verify');
         const result = await gatedChangeAtTerminal(core, updateChange(core, env, { noVerify: values['no-verify'] }), {
           ...approval,
-          command: shellCommand(words),
+          command: shellCommand(words, platform),
         });
         // Printed either way, but a step that did not work is not a success to a script, as for `mcp install`.
         softExit = result.ok ? EXIT_CODES.OK : EXIT_CODES.UNAVAILABLE;
@@ -530,12 +530,10 @@ export async function main(
         }
         const result = await gatedChangeAtTerminal(core, namesMigration(core, renames), {
           ...approval,
-          command: shellCommand([
-            'agentcomms',
-            'names',
-            'migrate',
-            ...renames.flatMap((rename) => ['--rename', rename]),
-          ]),
+          command: shellCommand(
+            ['agentcomms', 'names', 'migrate', ...renames.flatMap((rename) => ['--rename', rename])],
+            platform,
+          ),
         });
         writeResult(result, output, (data) =>
           data.status === 'already-migrated' || !('rows' in data)
@@ -553,7 +551,7 @@ export async function main(
         }
         const result = await gatedChangeAtTerminal(core, secretsMigration(core, values.to, { surface: 'cli' }), {
           ...approval,
-          command: shellCommand(['agentcomms', 'secrets', 'migrate', '--to', values.to]),
+          command: shellCommand(['agentcomms', 'secrets', 'migrate', '--to', values.to], platform),
         });
         /*
          * One document, whichever way it went.

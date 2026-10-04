@@ -186,7 +186,7 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
   /** One changing call: the change this tool plans, run through the one flow, returned in its one shape. */
   const change = async <T>(build: () => GatedChange<T>, approvalId: string | undefined) => {
     try {
-      return reply(changeToolResult(await gatedChange(core, build(), { surface: 'mcp', approvalId })));
+      return reply(changeToolResult(await gatedChange(core, build(), { surface: 'mcp', approvalId, platform })));
     } catch (error) {
       return fail(error);
     }
@@ -442,7 +442,11 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
           print: args.print,
           noVerify: args.noVerify,
         });
-        const outcome = await gatedChange(core, install, { surface: 'mcp', approvalId: args.approvalId });
+        const outcome = await gatedChange(core, install, {
+          surface: 'mcp',
+          approvalId: args.approvalId,
+          platform,
+        });
         /*
          * Registered nothing although it was asked to — the client's own command was not found — or registered an
          * entry that did not start: the command ends such an install non-zero (`installExitStatus`), and here it was
@@ -592,7 +596,11 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
           surface: 'mcp',
           ...(options.secretStores ? { stores: options.secretStores } : {}),
         });
-        const outcome = await gatedChange(core, migration, { surface: 'mcp', approvalId: args.approvalId });
+        const outcome = await gatedChange(core, migration, {
+          surface: 'mcp',
+          approvalId: args.approvalId,
+          platform,
+        });
         // Switched but not tidy is the CLI's error too, in the same words: see `migrationLeftoversError`.
         const leftovers = outcome.status === 'applied' ? migrationLeftoversError(outcome.result) : null;
         return leftovers ? fail(leftovers) : reply(changeToolResult(outcome));

@@ -823,3 +823,30 @@ test('agentcomms approve renders its terminal handoff for the selected shell pla
     },
   );
 });
+
+test('change approval handoffs render the configured approval command for the selected shell platform', async () => {
+  const { core } = coreWith({ defaults: { changePolicy: 'confirm' }, accounts: { 'acme/slack': account(ACME) } });
+  const spec = await widening(core);
+  const prepared = await prepareChange(
+    core,
+    { ...spec, summary: 'Let acme/slack post' },
+    {
+      surface: 'mcp',
+      approveCommand: 'agent-slack 7',
+      platform: 'win32',
+    },
+  );
+  assert.match(prepared.next, new RegExp(`agent-slack "7" ${prepared.approvalId}`));
+  await assert.rejects(
+    claimChange(core, prepared.approvalId, spec, {
+      surface: 'mcp',
+      approveCommand: 'agent-slack 7',
+      platform: 'win32',
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof CommsError);
+      assert.match(error.hint ?? '', new RegExp(`agent-slack "7" ${prepared.approvalId}`));
+      return true;
+    },
+  );
+});
