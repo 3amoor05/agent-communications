@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { commandText, EXIT_CODES, shellCommand } from '@agentcomms/core';
 import { run } from '../src/cli/program.ts';
-import { renderSendPreparation } from '../src/cli/render.ts';
+import { renderDoctor, renderSendPreparation } from '../src/cli/render.ts';
 import { GmailContext } from '../src/context.ts';
 import { createDraft } from '../src/operations/drafts.ts';
 import type { SendPreparation } from '../src/operations/send.ts';
@@ -97,6 +97,102 @@ interface Envelope<T> {
   data?: T;
   error?: { code: string; message: string; hint?: string; details?: Record<string, unknown> };
 }
+
+/**
+ * The quote removal and word splitting a POSIX shell applies to the lines `shellCommand` emits.
+ *
+ * It deliberately does not implement expansions: every value-bearing word the printer emits is quoted so a shell
+ * treats it as data. What matters here is that single quotes, the `'<close>\'<open>'` escape for a quote, double
+ * quotes and backslashes reconstruct exactly the argv handed to the real CLI parser.
+ */
+function splitPosixWords(line: string): string[] {
+  const words: string[] = [];
+  let word = '';
+  let started = false;
+  let quote: 'single' | 'double' | null = null;
+  for (let index = 0; index < line.length; index += 1) {
+    const character = line[index] ?? '';
+    if (quote === 'single') {
+      if (character === "'") quote = null;
+      else word += character;
+      continue;
+    }
+    if (quote === 'double') {
+      if (character === '"') {
+        quote = null;
+        continue;
+      }
+      if (character === '\\') {
+        const escaped = line[index + 1];
+        if (escaped === undefined) throw new Error('a POSIX command cannot end with a backslash');
+        if (escaped === '\n') {
+          index += 1;
+          continue;
+        }
+        if (['$', '`', '"', '\\'].includes(escaped)) {
+          word += escaped;
+          index += 1;
+          continue;
+        }
+      }
+      word += character;
+      continue;
+    }
+    if (/\s/.test(character)) {
+      if (started) {
+        words.push(word);
+        word = '';
+        started = false;
+      }
+      continue;
+    }
+    started = true;
+    if (character === "'") quote = 'single';
+    else if (character === '"') quote = 'double';
+    else if (character === '\\') {
+      const escaped = line[index + 1];
+      if (escaped === undefined) throw new Error('a POSIX command cannot end with a backslash');
+      index += 1;
+      if (escaped !== '\n') word += escaped;
+    } else word += character;
+  }
+  if (quote !== null) throw new Error(`an ${quote}-quoted word was not closed`);
+  if (started) words.push(word);
+  return words;
+}
+
+test('the POSIX test splitter reconstructs the quoting forms printed commands use', () => {
+  assert.deepEqual(splitPosixWords("agent 'single quoted' 'it'\\''s'"), ['agent', 'single quoted', "it's"]);
+  assert.deepEqual(splitPosixWords(String.raw`agent "a\$b\`c\"d\\e" back\ slash`), [
+    'agent',
+    'a$b`c"d\\e',
+    'back slash',
+  ]);
+  assert.deepEqual(splitPosixWords("agent 'line\nbreak' ''"), ['agent', 'line\nbreak', '']);
+});
+
+test('doctor prefixes every command in a multi-line repair', () => {
+  const rendered = renderDoctor(
+    {
+      healthy: false,
+      summary: { ok: 0, warn: 0, fail: 1, skipped: 0 },
+      checks: [
+        {
+          id: 'rivals',
+          title: 'Other servers',
+          status: 'fail',
+          detail: 'two unsafe entries are registered',
+          fix: 'claude mcp remove first\ncodex mcp remove second',
+        },
+      ],
+    },
+    false,
+  );
+  assert.match(
+    rendered,
+    /FAIL {2}Other servers: two unsafe entries are registered\n {6}fix: claude mcp remove first\n {6}fix: codex mcp remove second/,
+  );
+});
 
 /**
  * Runs a command that changes an account the way an agent does: the first run prepares the change and exits 10 with
@@ -770,8 +866,11 @@ test('send execute rendering preserves every subject and every recipient list on
           assert.notEqual(command.line, null, JSON.stringify({ subject, command }));
         }
         if (platform === 'darwin') {
+          assert.notEqual(command.line, null, JSON.stringify({ subject, command }));
+          const [executable, ...printedWords] = splitPosixWords(command.line as string);
+          assert.equal(executable, 'agent-gmail');
           let parsed: { inbox: string; request: Record<string, unknown> } | undefined;
-          const run = await cli(harness, [...command.words.slice(1), '--json'], {
+          const run = await cli(harness, [...printedWords, '--json'], {
             platform,
             onExecute: (inbox, request) => {
               parsed = { inbox, request };
@@ -849,7 +948,12 @@ test('--expect-subject none accepts only an empty, whitespace-only or literal no
       sends ? EXIT_CODES.OK : EXIT_CODES.APPROVAL,
       JSON.stringify({ subject, output: sent.stdout }),
     );
-    if (!sends) assert.equal(sent.json<Envelope<never>>().error?.code, 'APPROVAL_VOID');
+    if (!sends) {
+      assert.equal(sent.json<Envelope<never>>().error?.code, 'APPROVAL_VOID');
+      const approval = await harness.core.approvals.get(approvalId);
+      assert.equal(approval?.state, 'revoked', 'the rejected expectation was not persisted as voided');
+      assert.match(approval?.reason ?? '', /recipients or subject/);
+    }
   }
 });
 
