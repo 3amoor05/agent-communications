@@ -25,6 +25,12 @@ import { type Harness, newHarness } from './support/harness.ts';
 const CREATED = '2026-10-04T12:00:00.000Z';
 const FALLBACK = '2026-11-03T12:00:00.000Z';
 
+// These bundles have fixed deadlines. Keep revocation and recovery tests before them so the calendar cannot
+// silently replace their provider calls with expiry cleanup. Expiry tests below choose their own clocks.
+function beforeBundleExpiry(): Date {
+  return new Date('2026-10-04T13:00:00.000Z');
+}
+
 function bundle(over: Partial<TokenBundle> = {}): TokenBundle {
   return {
     v: 1,
@@ -444,7 +450,7 @@ test('wrong refs, caller tokens, final rows and bad stores make no revocation re
   const machine = await revocationMachine({ refreshToken: undefined });
   const fake = await startFakeSlack({ 'auth.revoke': () => ({ ok: true, revoked: true }) });
   try {
-    const context = machine.harness.context({ fetch: fake.fetch });
+    const context = machine.harness.context({ fetch: fake.fetch, now: beforeBundleExpiry });
     await assert.rejects(revokePendingEntry(context, 'slack/token/not-this-entry'), (error: CommsError) => {
       assert.equal(error.code, 'NOT_FOUND');
       return true;
@@ -471,7 +477,10 @@ test('the executor reads the bundle from the ledger entry’s recorded store, no
   }) as typeof machine.harness.core.secrets;
   const fake = await startFakeSlack({ 'auth.revoke': () => ({ ok: false, error: 'invalid_auth' }) });
   try {
-    const result = await revokePendingEntry(machine.harness.context({ fetch: fake.fetch }), machine.ref);
+    const result = await revokePendingEntry(
+      machine.harness.context({ fetch: fake.fetch, now: beforeBundleExpiry }),
+      machine.ref,
+    );
     assert.equal(result.tokens[0]?.status, 'pending');
     assert.deepEqual(opened, ['file']);
     assert.equal(fake.requests.length, 1);
@@ -547,7 +556,7 @@ test('a pending ref shared with any live secret owner or another ledger row is r
     const fake = await startFakeSlack({ 'auth.revoke': () => ({ ok: true, revoked: true }) });
     try {
       await assert.rejects(
-        revokePendingEntry(machine.harness.context({ fetch: fake.fetch }), ref),
+        revokePendingEntry(machine.harness.context({ fetch: fake.fetch, now: beforeBundleExpiry }), ref),
         /pending credential reference is not exclusive/,
         owner,
       );
@@ -571,7 +580,10 @@ test('an already-final token is not called and a deadline reached is expired wit
   }));
   const fake = await startFakeSlack({ 'auth.revoke': () => ({ ok: true, revoked: true }) });
   try {
-    const final = await revokePendingEntry(machine.harness.context({ fetch: fake.fetch }), machine.ref);
+    const final = await revokePendingEntry(
+      machine.harness.context({ fetch: fake.fetch, now: beforeBundleExpiry }),
+      machine.ref,
+    );
     assert.equal(final.tokens[0]?.status, 'revoked');
     assert.equal(fake.requests.length, 0);
   } finally {
@@ -674,7 +686,7 @@ test('a ref claimed after dispatch is refused before the answer can be persisted
   });
   try {
     await assert.rejects(
-      revokePendingEntry(machine.harness.context({ fetch: fake.fetch }), machine.ref),
+      revokePendingEntry(machine.harness.context({ fetch: fake.fetch, now: beforeBundleExpiry }), machine.ref),
       /not exclusive/,
     );
     assert.equal(fake.requests.length, 1);
@@ -704,7 +716,7 @@ test('one entry never updates another pending bundle in the same workspace', asy
   }));
   const fake = await startFakeSlack({ 'auth.revoke': () => ({ ok: true, revoked: true }) });
   try {
-    await revokePendingEntry(machine.harness.context({ fetch: fake.fetch }), machine.ref);
+    await revokePendingEntry(machine.harness.context({ fetch: fake.fetch, now: beforeBundleExpiry }), machine.ref);
     const entries = (await machine.harness.core.config.load()).pendingRevocations ?? [];
     assert.equal(entries.find((entry) => entry.ref === machine.ref)?.tokens.access.status, 'revoked');
     assert.equal(entries.find((entry) => entry.ref === otherRef)?.tokens.access.status, 'pending');
@@ -733,12 +745,15 @@ test('a lost answer leaves pending state, and a fresh context retries instead of
   }) as typeof machine.harness.core.config.update;
   try {
     await assert.rejects(
-      revokePendingEntry(machine.harness.context({ fetch: fake.fetch }), machine.ref),
+      revokePendingEntry(machine.harness.context({ fetch: fake.fetch, now: beforeBundleExpiry }), machine.ref),
       /process stopped/,
     );
     assert.equal((await ledgerEntry(machine))?.tokens.access.status, 'pending');
     machine.harness.core.config.update = update;
-    const retried = await revokePendingEntry(machine.harness.context({ fetch: fake.fetch }), machine.ref);
+    const retried = await revokePendingEntry(
+      machine.harness.context({ fetch: fake.fetch, now: beforeBundleExpiry }),
+      machine.ref,
+    );
     assert.equal(retried.tokens[0]?.status, 'revoked');
     assert.equal(fake.requests.length, 2);
   } finally {
@@ -757,7 +772,10 @@ test('cleanup restores a deleted bundle when ledger removal definitely fails', a
   }) as typeof machine.harness.core.config.update;
   const fake = await startFakeSlack({ 'auth.revoke': () => ({ ok: true, revoked: true }) });
   try {
-    const result = await revokePendingEntry(machine.harness.context({ fetch: fake.fetch }), machine.ref);
+    const result = await revokePendingEntry(
+      machine.harness.context({ fetch: fake.fetch, now: beforeBundleExpiry }),
+      machine.ref,
+    );
     assert.equal(result.cleaned, false);
     assert.equal(result.issue?.code, 'CONFIG_WRITE_FAILED');
     assert.equal((await ledgerEntry(machine))?.tokens.access.status, 'revoked');
@@ -793,7 +811,10 @@ test('cleanup restores the exact bundle when its ref is claimed immediately befo
   }) as typeof machine.harness.core.secrets;
   const fake = await startFakeSlack({ 'auth.revoke': () => ({ ok: true, revoked: true }) });
   try {
-    const result = await revokePendingEntry(machine.harness.context({ fetch: fake.fetch }), machine.ref);
+    const result = await revokePendingEntry(
+      machine.harness.context({ fetch: fake.fetch, now: beforeBundleExpiry }),
+      machine.ref,
+    );
     assert.equal(result.cleaned, false);
     assert.equal(result.issue?.code, 'CONFIG_WRITE_FAILED');
     assert.equal((await ledgerEntry(machine))?.tokens.access.status, 'revoked');
@@ -852,7 +873,10 @@ test('an unreadable cleanup-write outcome restores and verifies the exact bundle
   }) as typeof machine.harness.core.secrets;
   const fake = await startFakeSlack({ 'auth.revoke': () => ({ ok: true, revoked: true }) });
   try {
-    const result = await revokePendingEntry(machine.harness.context({ fetch: fake.fetch }), machine.ref);
+    const result = await revokePendingEntry(
+      machine.harness.context({ fetch: fake.fetch, now: beforeBundleExpiry }),
+      machine.ref,
+    );
     assert.equal(result.cleaned, false);
     assert.equal(result.issue?.code, 'CONFIG_OUTCOME_UNKNOWN');
     assert.deepEqual(restoration, ['set', 'verify']);
@@ -875,7 +899,10 @@ test('cleanup reconciles a committed ledger removal whose update reported failur
   }) as typeof machine.harness.core.config.update;
   const fake = await startFakeSlack({ 'auth.revoke': () => ({ ok: true, revoked: true }) });
   try {
-    const result = await revokePendingEntry(machine.harness.context({ fetch: fake.fetch }), machine.ref);
+    const result = await revokePendingEntry(
+      machine.harness.context({ fetch: fake.fetch, now: beforeBundleExpiry }),
+      machine.ref,
+    );
     assert.equal(result.cleaned, true);
     assert.equal(result.issue, undefined);
     assert.equal(await ledgerEntry(machine), undefined);
@@ -897,7 +924,10 @@ test('a final row whose bundle was already deleted completes cleanup after a res
   await (await machine.harness.core.secrets('file')).delete(machine.ref);
   const fake = await startFakeSlack({ 'auth.revoke': () => ({ ok: true, revoked: true }) });
   try {
-    const result = await revokePendingEntry(machine.harness.context({ fetch: fake.fetch }), machine.ref);
+    const result = await revokePendingEntry(
+      machine.harness.context({ fetch: fake.fetch, now: beforeBundleExpiry }),
+      machine.ref,
+    );
     assert.equal(result.cleaned, true);
     assert.equal(await ledgerEntry(machine), undefined);
     assert.equal(fake.requests.length, 0);
@@ -923,7 +953,9 @@ test('retrying all entries continues past one bad bundle and returns plain state
   }));
   const fake = await startFakeSlack({ 'auth.revoke': () => ({ ok: false, error: 'invalid_auth' }) });
   try {
-    const results = await retryPendingRevocations(machine.harness.context({ fetch: fake.fetch }));
+    const results = await retryPendingRevocations(
+      machine.harness.context({ fetch: fake.fetch, now: beforeBundleExpiry }),
+    );
     assert.deepEqual(
       results.map((result) => ({ ref: result.ref, status: result.tokens[0]?.status, issue: Boolean(result.issue) })),
       [
@@ -966,7 +998,9 @@ test('retrying all entries isolates a thrown first entry and continues with the 
   }) as typeof machine.harness.core.config.update;
   const fake = await startFakeSlack({ 'auth.revoke': () => ({ ok: false, error: 'invalid_auth' }) });
   try {
-    const results = await retryPendingRevocations(machine.harness.context({ fetch: fake.fetch }));
+    const results = await retryPendingRevocations(
+      machine.harness.context({ fetch: fake.fetch, now: beforeBundleExpiry }),
+    );
     assert.deepEqual(
       results.map((result) => ({ ref: result.ref, issue: result.issue?.code })),
       [
