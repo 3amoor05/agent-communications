@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
+import { closeSync, fstatSync, openSync } from 'node:fs';
 import { chmod, open, readFile, rm, stat } from 'node:fs/promises';
 import { homedir, platform } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -871,11 +872,25 @@ export class ConfigStore {
     // Cancellation is opt-in. Its linearization point is this transaction's resolution, not its mutator or
     // rename: abort during a write/lock release restores the exact preimage, while later aborts do nothing.
     let staged: { before: string | null; after: string } | undefined;
+    let pinnedFile: number | undefined;
+    let writtenIdentity: { dev: bigint; ino: bigint } | undefined;
     let restored = false;
     let rollbackFailed = false;
-    const restore = async () => {
+    const restore = async (continuousOwnership = false) => {
       if (!staged || restored) return;
       try {
+        if (!continuousOwnership) {
+          // Reacquiring the lock does not restore ownership of the file: another writer may have committed
+          // identical bytes meanwhile. Pinning our descriptor until resolution prevents inode-reuse/ABA too.
+          const liveIdentity = await stat(this.path, { bigint: true });
+          if (
+            !writtenIdentity ||
+            liveIdentity.dev !== writtenIdentity.dev ||
+            liveIdentity.ino !== writtenIdentity.ino
+          ) {
+            throw new Error('the config file is no longer owned by this update');
+          }
+        }
         const live = await readFileIfExists(this.path);
         if (live !== staged.before) {
           // A writer can run during lock release. Never overwrite its config with our old snapshot.
@@ -959,10 +974,16 @@ export class ConfigStore {
         if (options.signal) staged = { before: await readFileIfExists(this.path), after: serialized };
         try {
           await writeFileAtomic(this.path, serialized, FILE_MODE, options.signal);
+          if (options.signal) {
+            // Capture identity while still holding the original config lock, before any writer can replace it.
+            pinnedFile = openSync(this.path, 'r');
+            const identity = fstatSync(pinnedFile, { bigint: true });
+            writtenIdentity = { dev: identity.dev, ino: identity.ino };
+          }
           options.signal?.throwIfAborted();
         } catch (error) {
           if (options.signal?.aborted) {
-            await restore();
+            await restore(true);
             throw options.signal.reason;
           }
           throw error;
@@ -976,7 +997,7 @@ export class ConfigStore {
       if (options.signal?.aborted && staged && !restored && !rollbackFailed) {
         // Abort can arrive while withFileLock releases its lock after the callback has completed.
         try {
-          await withFileLock(this.#lockPath, restore);
+          await withFileLock(this.#lockPath, () => restore());
         } catch (recoveryError) {
           if (rollbackFailed) throw recoveryError;
           throw new CommsError('TRANSIENT', 'the interrupted config update could not be safely restored', {
@@ -987,6 +1008,10 @@ export class ConfigStore {
         throw options.signal.reason;
       }
       throw error;
+    } finally {
+      // No await may reopen an abort window after the final check. The descriptor only pins identity, never
+      // holds a lock; closing it synchronously also keeps the lease alive through every awaited recovery step.
+      if (pinnedFile !== undefined) closeSync(pinnedFile);
     }
   }
 

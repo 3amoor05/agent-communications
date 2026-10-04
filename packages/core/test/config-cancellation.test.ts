@@ -188,3 +188,56 @@ test('cancellation during lock release never restores over an intervening writer
   );
   assert.equal((await store.load()).defaults.timezone, 'Asia/Tokyo');
 });
+
+test('cancellation cannot erase an acknowledged identical-byte intervening writer', async (t) => {
+  const directory = tempDir();
+  const first = new ConfigStore(directory);
+  const second = new ConfigStore(directory);
+  await first.update((current) => current);
+  const controller = new AbortController();
+  const rm = fs.rm;
+  let intercepted = false;
+  let secondResolved = false;
+  t.mock.method(fs, 'rm', async (...args: Parameters<typeof rm>) => {
+    await rm(...args);
+    if (String(args[0]) !== join(directory, '.config.lock') || intercepted) return;
+    intercepted = true;
+    // A's lock is gone, but its release has not resolved. B independently commits and acknowledges precisely
+    // the same bytes. A must not confuse B's file with its own merely because their contents are identical.
+    const firstBytes = await fs.readFile(first.path, 'utf8');
+    const acknowledged = await second.update((current) => ({
+      ...current,
+      defaults: { ...current.defaults, timezone: 'Europe/London' },
+    }));
+    assert.equal(acknowledged.defaults.timezone, 'Europe/London');
+    secondResolved = true;
+    assert.equal(await fs.readFile(second.path, 'utf8'), firstBytes);
+    controller.abort();
+  });
+  syncBuiltinESMExports();
+  t.after(() => {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  });
+  const error = await first
+    .update(
+      (current) => ({
+        ...current,
+        defaults: { ...current.defaults, timezone: 'Europe/London' },
+      }),
+      { signal: controller.signal },
+    )
+    .then(
+      () => assert.fail('the interrupted transaction must reject'),
+      (reason: unknown) => reason,
+    );
+  assert.equal(secondResolved, true);
+  assert.equal(
+    (await second.load()).defaults.timezone,
+    'Europe/London',
+    'A erased the acknowledged identical-byte commit from B',
+  );
+  assert.ok(error instanceof CommsError);
+  assert.equal(error.details?.configRollbackFailed, true, 'lost ownership must be explicit, not a claimed rollback');
+  assert.deepEqual(await fs.readdir(directory), ['config.json']);
+});
