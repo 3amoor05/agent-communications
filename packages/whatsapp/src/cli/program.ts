@@ -15,8 +15,6 @@ import {
   type Handoff,
   handoffSentence,
   installExitStatus,
-  integrityRefusal,
-  kindOf,
   type OutputOptions,
   openCore,
   PATH_OPTIONS,
@@ -28,7 +26,6 @@ import {
   runCommand,
   type Streams,
   type SupportedClient,
-  sendApprovesHint,
   serverInstallChange,
   serverPruneChange,
   updateGateAtTerminal,
@@ -433,8 +430,8 @@ a macOS dialog may be waiting) · 77 permission needed (macOS privacy) · 78 con
          *
          * It approves only a change. `mcp install` and `mcp prune` are changes a person approves (core's), and under
          * the `confirm` change policy that is a code typed at a terminal; `agentcomms` may not be installed beside
-         * this package, so its own command does it, through core's terminal approval. A send it cannot have
-         * prepared — there is no send in this package — is refused and sent back to the command that did.
+         * this package, so its own command does it, through core's terminal approval. Any other kind's id is not
+         * found here, as an id nobody prepared is not.
          */
         const marker = agentMarker(env);
         if (marker) {
@@ -460,25 +457,12 @@ a macOS dialog may be waiting) · 77 permission needed (macOS privacy) · 78 con
             ),
           });
         }
-        const pending = await context.core.approvals.get(approvalId);
-        if (!pending) {
-          throw new CommsError('NOT_FOUND', `no approval ${approvalId}`, {
-            hint: 'It may have expired, been used, or been cancelled. Prepare the change again.',
-          });
-        }
-        // A record that cannot be used is refused for what it is, and says nothing of what it held.
-        if (pending.form === 'corrupt' || pending.form === 'unreadable') throw integrityRefusal(pending);
-        // A change an earlier release prepared goes on to the terminal approval, which refuses it by its version.
-        if (kindOf(pending) !== 'change') {
-          /*
-           * Each channel that can have prepared a send — whose accounts can be in `send`, from the manifests, so not
-           * WhatsApp's — by its approve command as this machine's registrations find it, or why there is none here.
-           * Read only now: looking through every MCP client's configuration is for this refusal, not every approve.
-           */
-          throw new CommsError('USAGE', `approval ${approvalId} is for a send, and WhatsApp never sends`, {
-            hint: sendApprovesHint(await context.handoffs.registered(), approvalId),
-          });
-        }
+        /*
+         * Straight to core's terminal approval of a change, as `agentcomms approve` goes: it looks at the record under
+         * its lock as a change before anything else (design 2026-10-05 §D2), so an id nobody prepared and another
+         * kind's — a send, a download's question — are the one identical NOT_FOUND, and a record that cannot be used,
+         * or one an earlier release prepared, is refused for what it is.
+         */
         const outcome = await approveChangeAtTerminal(
           context.core,
           approvalId,

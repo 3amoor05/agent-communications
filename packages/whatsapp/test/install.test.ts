@@ -3,13 +3,13 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
-import { gatedChange, openCore, sendApprovesHint, serverInstallChange } from '@agentcomms/core';
+import { gatedChange, openCore, serverInstallChange } from '@agentcomms/core';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { createWhatsAppMcpServer } from '../src/mcp/server.ts';
 import { VERSION } from '../src/version.ts';
 import { ALICE, buildFixtureStore } from './support/fixture.ts';
-import { assertNoBareCommand, whatsappHandoffs } from './support/handoffs.ts';
+import { assertNoBareCommand } from './support/handoffs.ts';
 import { type Harness, newHarness } from './support/harness.ts';
 
 /**
@@ -349,11 +349,27 @@ test('a pin follows its account through a rename, and a former name is answered 
   assert.match(String(reuse.json().error?.message), /was the name of another account and cannot be used again/);
 });
 
-test('a send’s approval is not approved here, and the refusal names every command that can have prepared a send', async () => {
+test('another kind’s approval given to `approve` is D2’s one NOT_FOUND, byte for byte an unknown id’s', async () => {
   const harness = await newHarness({ store: false });
   const core = openCore({ env: harness.personEnv });
-  // A send approval as a sending channel's prepare writes one.
-  const record = await core.approvals.create({
+  const asPerson = async (approvalId: string) => {
+    const stdin = Object.assign(new PassThrough(), { isTTY: true });
+    const stdout = Object.assign(new PassThrough(), { isTTY: true });
+    const stderr = new PassThrough();
+    let said = '';
+    for (const stream of [stdout, stderr]) {
+      stream.on('data', (chunk) => {
+        said += String(chunk);
+      });
+    }
+    const { code } = await harness.cli(['approve', approvalId], {
+      env: harness.personEnv,
+      streams: { stdin, stdout, stderr } as never,
+    });
+    return { code, said };
+  };
+  // A send approval as a sending channel's prepare writes one, and a download's question as Gmail's asks one.
+  const send = await core.approvals.create({
     channel: 'resend',
     inboxId: 'acc_RRRRRRRRRRRRRRRR',
     inboxSub: 'key_12345678',
@@ -366,27 +382,35 @@ test('a send’s approval is not approved here, and the refusal names every comm
     riskFlags: [],
     expect: { to: ['a@b.test'], cc: [], bcc: [], subject: 'x' },
   } as never);
-  const stdin = Object.assign(new PassThrough(), { isTTY: true });
-  const stdout = Object.assign(new PassThrough(), { isTTY: true });
-  const stderr = new PassThrough();
-  let said = '';
-  for (const stream of [stdout, stderr]) {
-    stream.on('data', (chunk) => {
-      said += String(chunk);
-    });
-  }
-  const refused = await harness.cli(['approve', record.approvalId], {
-    env: harness.personEnv,
-    streams: { stdin, stdout, stderr } as never,
+  const question = await core.approvals.createDownload({
+    channel: 'gmail',
+    policy: 'confirm',
+    download: {
+      summary: '1 file from jo@partner.test',
+      target: { kind: 'inbox', name: 'acme/gmail', id: 'ibx_AAAAAAAAAAAAAAAA' },
+      operation: 'gmail.attachments.download',
+      request: { messageId: 'm-1' },
+      files: ['a.pdf'],
+      names: ['a.pdf'],
+      folders: { downloads: harness.personEnv.HOME ?? '', current: harness.personEnv.HOME ?? '' },
+    },
   });
-  assert.equal(refused.code, 64, said);
-  assert.match(said, /is for a send, and WhatsApp never sends/);
-  // Each that can have prepared it, as this machine's registrations find it — none here, so each says why not.
-  const registered = await whatsappHandoffs(harness.personEnv).registered();
-  assert.ok(said.includes(sendApprovesHint(registered, record.approvalId)), said);
-  for (const product of ['Gmail', 'Slack', 'Resend']) {
-    assert.match(said, new RegExp(`${product} \\S+ \\(@agentcomms/\\w+\\) is not locatable here`), product);
+  const unknownId = `ap_${'0'.repeat(25)}N`;
+  const unknown = await asPerson(unknownId);
+  assert.equal(unknown.code, 66, unknown.said);
+  for (const [what, approvalId] of [
+    ['a send', send.approvalId],
+    ['a download’s question', question.approvalId],
+  ] as const) {
+    const file = join(core.paths.stateDir, 'approvals', `${approvalId}.json`);
+    const before = readFileSync(file, 'utf8');
+    const refused = await asPerson(approvalId);
+    assert.equal(refused.code, 66, `${what}: ${refused.said}`);
+    // The words an id nobody prepared gets, and nothing of the record in them: its kind, its channel, the commands
+    // that could approve it — none of that is this command's to say.
+    assert.equal(refused.said, unknown.said.replaceAll(unknownId, approvalId), what);
+    assert.doesNotMatch(refused.said, /send|download|resend|gmail/i, what);
+    assert.equal(readFileSync(file, 'utf8'), before, `${what}: untouched`);
   }
-  assert.ok(!said.includes('(@agentcomms/whatsapp)'), 'not this one, which never prepared a send');
-  assertNoBareCommand(said);
+  assertNoBareCommand(unknown.said);
 });

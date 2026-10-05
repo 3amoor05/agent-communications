@@ -418,19 +418,27 @@ test('a correction found from a Windows registration in another case names the l
     riskFlags: [],
     expect: { to: ['sam@partner.test'], cc: [], bcc: [], subject: 'hi' },
   });
+  // The correction a person is handed for a send's approval: the approve of each channel that can have prepared one,
+  // as this machine's registrations find it.
+  const registered = await whatsappHandoffs(harness.personEnv, 'win32').registered();
+  const approve = registered.of('gmail', ['approve', record.approvalId]);
+  assert.ok(isCommand(approve), 'message' in approve ? approve.message : '');
+  assert.equal(approve.words[0], process.execPath, 'this Node, not the registration’s');
+  assert.ok(approve.words.includes(join(root, 'dist', 'cli.mjs')), JSON.stringify(approve.words));
+  const hint = sendApprovesHint(registered, record.approvalId);
+  assert.doesNotMatch(hint, /Agent-Gmail\.CMD/i);
+  assertNoBareCommand(hint);
+
+  // WhatsApp's own approve is not where that is said: another kind's id is the one NOT_FOUND there (design
+  // 2026-10-05 §D2), naming no registration at all.
   const { streams, said } = terminal();
   const refused = await harness.cli(['approve', record.approvalId], {
     env: harness.personEnv,
     platform: 'win32',
     streams,
   });
-  assert.equal(refused.code, 64, said());
-  const registered = await whatsappHandoffs(harness.personEnv, 'win32').registered();
-  const approve = registered.of('gmail', ['approve', record.approvalId]);
-  assert.ok(isCommand(approve), 'message' in approve ? approve.message : '');
-  assert.equal(approve.words[0], process.execPath, 'this Node, not the registration’s');
-  assert.ok(approve.words.includes(join(root, 'dist', 'cli.mjs')), JSON.stringify(approve.words));
-  assert.ok(said().includes(sendApprovesHint(registered, record.approvalId)), said());
+  assert.equal(refused.code, 66, said());
+  assert.ok(!said().includes(hint), said());
   assert.doesNotMatch(said(), /Agent-Gmail\.CMD/i);
   assertNoBareCommand(said());
 });
