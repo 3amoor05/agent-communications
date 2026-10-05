@@ -181,6 +181,11 @@ export * from './state.ts';
 export * from './system-programs.ts';
 export * from './taint.ts';
 export * from './tool-arguments.ts';
+/*
+ * The unsent report (design 2026-10-05 §D9): drafts grouped by each channel's declared rule, worded to the evidence the
+ * scan read. A channel's own surfaces show it.
+ */
+export * from './unsent-report.ts';
 export * from './untrusted.ts';
 /*
  * The daily update check (design 2026-09-28). The reader and the gate carry no network code, and are all WhatsApp

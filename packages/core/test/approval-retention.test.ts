@@ -59,8 +59,14 @@ interface World {
   readonly clock: { t: number };
   readonly fs: Instrumented;
   readonly store: ApprovalStore;
-  /** Another store over the same directory — another process's, or this one reopened — with its own instrumented I/O. */
-  open(options?: { loadConfig?: LiveConfig['loadConfig'] }): { fs: Instrumented; store: ApprovalStore };
+  /**
+   * Another store over the same directory — another process's, or this one reopened — with its own instrumented I/O,
+   * on this world's clock unless given its own.
+   */
+  open(options?: { loadConfig?: LiveConfig['loadConfig']; clock?: { t: number } }): {
+    fs: Instrumented;
+    store: ApprovalStore;
+  };
 }
 
 function world(at: number = NOW, options: { loadConfig?: LiveConfig['loadConfig']; dir?: string } = {}): World {
@@ -68,11 +74,12 @@ function world(at: number = NOW, options: { loadConfig?: LiveConfig['loadConfig'
   const approvals = join(dir, 'approvals');
   mkdirSync(approvals, { recursive: true });
   const clock = { t: at };
-  const open = (opened: { loadConfig?: LiveConfig['loadConfig'] } = {}) => {
-    const fs = instrumentedIo({ stateDir: dir, now: () => clock.t });
+  const open = (opened: { loadConfig?: LiveConfig['loadConfig']; clock?: { t: number } } = {}) => {
+    const own = opened.clock ?? clock;
+    const fs = instrumentedIo({ stateDir: dir, now: () => own.t });
     const loadConfig = opened.loadConfig ?? options.loadConfig;
     const store = new ApprovalStore(dir, {
-      now: () => new Date(clock.t),
+      now: () => new Date(own.t),
       io: fs.io,
       audit: fs.audit,
       ...(loadConfig === undefined ? {} : { loadConfig }),
@@ -1044,7 +1051,8 @@ test('a batch held past the stale interval keeps its lock by renewal: another pr
   };
   const running = w.store.ensurePruned();
   await sleep(700);
-  const second = w.open();
+  // A process for which the next batch is due — a day on — so it does try the lock.
+  const second = w.open({ clock: { t: NOW + DAY } });
   storeInternals(second.store).timings = { staleMs: 300, renewMs: 80, recordStaleMs: 30_000 };
   const theirs = await second.store.ensurePruned();
   release();

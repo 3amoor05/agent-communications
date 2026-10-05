@@ -40,6 +40,18 @@ export interface ChannelRivalPackage {
   readonly unscoped?: boolean | undefined;
 }
 
+/**
+ * How the unsent report groups a channel's send approvals into drafts (design 2026-10-05 §D9), applied by core to the
+ * generic fields every approval stores, so a channel chooses without any edit to core:
+ *
+ * - `draft` — by mailbox or account and draft (`inboxId`, `draftId`): every approval for the draft counts, however its
+ *   content changed between preparations. Gmail's, and Resend's prepared sends'.
+ * - `draft-revision-digest` — by mailbox or account, draft, exact revision and exact content digest (`inboxId`,
+ *   `draftId`, `draftMessageId`, `contentDigest`): Slack's posts and files. A record whose revision is its own content
+ *   digest — the convention for an act with no draft to edit, such as a reaction — is in no group.
+ */
+export type ApprovalGrouping = 'draft' | 'draft-revision-digest';
+
 export interface ChannelManifest {
   readonly contract: typeof CHANNEL_CONTRACT;
   /**
@@ -109,6 +121,11 @@ export interface ChannelManifest {
   readonly approve?: string | undefined;
   /** Its skills: their name prefix, and the contract every one of them carries. */
   readonly skills?: { readonly prefix: string; readonly contract: string } | undefined;
+  /**
+   * How the unsent report groups its send approvals into drafts (`ApprovalGrouping`). Absent: its approvals take no
+   * part in the report. The core, which sends nothing, declares none.
+   */
+  readonly approvalGrouping?: ApprovalGrouping | undefined;
 }
 
 /** A manifest, and the package that declares it. */
@@ -210,6 +227,7 @@ const manifestSchema = z
     skills: z
       .strictObject({ prefix: z.string().regex(/^[a-z][a-z0-9]*-$/, 'a word and a hyphen: `gmail-`'), contract: line })
       .optional(),
+    approvalGrouping: z.enum(['draft', 'draft-revision-digest']).optional(),
   })
   .superRefine((manifest, ctx) => {
     const issue = (path: (string | number)[], message: string) => ctx.addIssue({ code: 'custom', path, message });
@@ -218,6 +236,9 @@ const manifestSchema = z
       // The core connects no account, so it has nothing to pin, narrow or be rivalled over.
       for (const key of ['accounts', 'narrowing', 'rivals', 'hosts'] as const) {
         if (manifest[key] !== undefined) issue([key], 'the core connects no account, so it has none');
+      }
+      if (manifest.approvalGrouping !== undefined) {
+        issue(['approvalGrouping'], 'the core sends nothing, so it groups no approvals');
       }
     } else {
       for (const key of ['accounts', 'narrowing', 'hosts', 'approve', 'skills'] as const) {

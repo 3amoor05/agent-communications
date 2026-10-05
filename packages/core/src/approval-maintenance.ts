@@ -307,6 +307,9 @@ export async function runMaintenance(
     errors: batch.errors,
     ...(skipped === undefined ? {} : { skipped }),
   });
+  // Not due, by a look without the lock: a batch began less than a day ago, so whatever another process writes now, this
+  // one has nothing to do. Anything else — due, unreadable, a time too far ahead — is decided again under the lock.
+  if (notDue(await readState(internals), internals.now().getTime())) return quiet('not-due');
   let result: TryLockResult<MaintenanceStatus>;
   try {
     result = await tryFileLock(
@@ -323,6 +326,24 @@ export async function runMaintenance(
   return result.acquired ? result.value : quiet('busy');
 }
 
+/** The prune state as read and validated (`parsePruneState`): never attempted when it cannot be read at all. */
+async function readState(internals: StoreInternals): Promise<ReadPruneState> {
+  try {
+    return parsePruneState(await internals.io.readText(join(internals.directory, PRUNE_STATE_FILE)));
+  } catch {
+    return NEVER;
+  }
+}
+
+/** Whether a batch began less than a day before `now`, by a recorded time no further ahead than skew explains. */
+function notDue(state: ReadPruneState, now: number): boolean {
+  return (
+    state.lastAttemptAt !== null &&
+    state.lastAttemptAt <= now + MAINTENANCE_FUTURE_SKEW_MS &&
+    now - state.lastAttemptAt < MAINTENANCE_INTERVAL_MS
+  );
+}
+
 async function runBatch(
   batch: Batch,
   held: HeldFileLock,
@@ -334,13 +355,8 @@ async function runBatch(
   const writeState = (state: PruneState) =>
     io.writeAtomic(statePath, `${JSON.stringify(state, null, 2)}\n`, { durable: true });
 
-  let text: string | null;
-  try {
-    text = await io.readText(statePath);
-  } catch {
-    text = null;
-  }
-  const state = parsePruneState(text);
+  // Read again under the lock: what decides is what no other batch can change meanwhile.
+  const state = await readState(internals);
   const now = internals.now().getTime();
   if (state.lastAttemptAt !== null && state.lastAttemptAt > now + MAINTENANCE_FUTURE_SKEW_MS) {
     // A time further ahead than skew explains: taken as now, and kept as now, so a clock that went back suppresses
@@ -352,7 +368,7 @@ async function runBatch(
     }
     return quiet('not-due');
   }
-  if (state.lastAttemptAt !== null && now - state.lastAttemptAt < MAINTENANCE_INTERVAL_MS) return quiet('not-due');
+  if (notDue(state, now)) return quiet('not-due');
 
   // The attempt is committed before any record is touched: a crash or a failed batch waits a day, never storms.
   const attemptedAt = new Date(now).toISOString();

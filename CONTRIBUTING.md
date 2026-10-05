@@ -270,8 +270,11 @@ the shared keychain namespace, so it is trusted exactly as far as it is reviewed
    also the platform word in account names and the tool prefix), `label`, `binary` (`agent-<something>`), `server`,
    `accounts` (`map: "accounts"`, `noun`, `modes` from `read` and `send`, and an honest `guarantee`), `narrowing`
    (exactly `[{ "option": "account", "flag": "--account", "kind": "pin" }]`), `rivals`, `hosts` (`[]` when it talks to
-   no host), `approve` and `skills`. The schema is `channelManifestSchema` in `packages/core/src/channel-manifest.ts`,
-   and it refuses Gmail's `inboxes`, `--inbox` and `--read-only`, and Slack's `--workspace`, to any other channel.
+   no host), `approve` and `skills`. A channel that sends drafts also says how the unsent report groups its approvals,
+   `approvalGrouping`: `"draft"` (account and draft, as Gmail and Resend) or `"draft-revision-digest"` (and the exact
+   revision and content digest, as Slack); without it, its approvals take no part in the report. The schema is
+   `channelManifestSchema` in `packages/core/src/channel-manifest.ts`, and it refuses Gmail's `inboxes`, `--inbox` and
+   `--read-only`, and Slack's `--workspace`, to any other channel.
 3. `pnpm sync:channels`, which validates every manifest and writes the core's snapshot of them. From it the core knows
    the channel: the installer, `comms_server_install`'s `channel`, the update, and the words of every preview.
 4. **Its accounts** in the config's `accounts` map: `platform` is the channel word, `mode` is `read` or `send` and

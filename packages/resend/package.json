@@ -91,6 +91,7 @@
       "inbound-cdn.resend.com"
     ],
     "approve": "agent-resend approve",
+    "approvalGrouping": "draft",
     "skills": {
       "prefix": "resend-",
       "contract": "skills/_shared/contract-resend.md"
