@@ -8,7 +8,7 @@ import {
   NEVER_NOTICE,
   type PublicApprovalView,
   publicApproval,
-  type SenderFieldWrapper,
+  type SenderField,
 } from './approval-outcome.ts';
 import { decodeStored, type StoredApproval } from './approval-stored.ts';
 import type { ApprovalGrouping } from './channel-manifest.ts';
@@ -29,6 +29,9 @@ import { type TryLockResult, tryFileLock } from './lock.ts';
  * whole report — the day's retention first, then the scan — and every gap in what was read is said, never filled in:
  * a capped scan says so, and anything unreadable, unverifiable, busy or left unread by the deadline makes the claims
  * it could affect indeterminate.
+ *
+ * A surface showing its own drafts may ask for just those (`drafts`), and — to annotate one exact draft — for a row
+ * where a claimed or standing approval decides it even though its newest preparation did not expire (`decided`).
  *
  * Reporting creates, sends and deletes nothing, and writes no record: what it derives (an expiry, an `unknown`), it
  * derives in memory.
@@ -92,7 +95,7 @@ export interface UnsentRow {
   /** The finding, in its exact words. */
   readonly said: string;
   readonly evidence: EvidenceScope;
-  /** The last preparation: the newest matching approval read, and when it expired. */
+  /** The last preparation: the newest matching approval read, and when it expired (always, but in a `decided` row). */
   readonly last: {
     readonly approvalId: string;
     readonly createdAt: string;
@@ -132,15 +135,72 @@ export interface UnsentReport {
   readonly maintenance: MaintenanceStatus;
 }
 
+/**
+ * One draft a surface asks about (`UnsentOptions.drafts`): its id, and — for a channel that groups by revision — the
+ * exact revision, under whichever content digests it was prepared with.
+ */
+export interface UnsentDraftFilter {
+  readonly draftId: string;
+  /** `draft-revision-digest` only: this revision and no other. Left out, every revision of the draft. */
+  readonly revision?: string | undefined;
+}
+
+/** Which approval a sender-written field belongs to, for a wrapper that names it in its envelope. */
+export interface UnsentFieldOwner {
+  readonly approvalId: string;
+  /** The mailbox or account it was prepared for, by id: the group's own. */
+  readonly inboxId: string;
+}
+
+/**
+ * How each sender-written field of a row's approvals is wrapped: as `SenderFieldWrapper`, told whose approval the field
+ * is — so a channel's envelope can name the mailbox and the approval each one came from.
+ */
+export type UnsentFieldWrapper = (text: string, field: SenderField, owner: UnsentFieldOwner) => string;
+
 export interface UnsentOptions {
   /** The manifest channel whose drafts to report. */
   readonly channel: string;
   /** Only this mailbox's or account's drafts. Everything any record says still counts toward the scan's evidence. */
   readonly owner?: string | undefined;
+  /**
+   * Only these drafts — what a surface showing its own drafts asks for, so that others cannot crowd them out of the 20
+   * rows. Applied to the groups, after every record in the window was opened and grouped: everything any record says
+   * still counts toward the scan's evidence, exactly as with `owner`.
+   */
+  readonly drafts?: readonly UnsentDraftFilter[] | undefined;
+  /**
+   * Also a row for a draft whose newest record did not expire, when a used, sending, unknown or approved record of it
+   * decides where it stands: what an annotation of one exact draft says (design 2026-10-05 §D9 — an expired revision
+   * never hides a used one). A draft with nothing deciding it still has no row, and the seven-day rule still applies.
+   */
+  readonly decided?: boolean | undefined;
   /** The shared deadline, on the store's clock, in milliseconds: five seconds from the call when left out. */
   readonly deadline?: number | undefined;
   /** How each sender-written field of an approval is wrapped: core's envelope when left out. */
-  readonly wrap?: SenderFieldWrapper | undefined;
+  readonly wrap?: UnsentFieldWrapper | undefined;
+}
+
+/** What decides a draft whose newest record did not expire, for `decided`: an approval claimed, or one still standing. */
+const DECIDING: ReadonlySet<string> = new Set(['used', 'sending', 'unknown', 'approved']);
+
+/** The report's shared deadline: when it falls, and whether a step may still start. */
+export interface UnsentDeadline {
+  /** On the approval store's clock, in milliseconds: what `UnsentOptions.deadline` takes. */
+  readonly at: number;
+  /** Whether the deadline has come, by the same clock: a step starts only while this is false. */
+  late(): boolean;
+}
+
+/**
+ * One deadline for a whole report and whatever a channel does after it — its live look-ups (design 2026-10-05 §D9:
+ * maintenance, the scan and the provider reads share one five-second work-start budget) — made once, before the
+ * report, on the approval store's own clock, so the report and the channel keep to the same time.
+ */
+export function unsentDeadline(core: Core, budgetMs: number = UNSENT_BUDGET_MS): UnsentDeadline {
+  const internals = storeInternals(core.approvals);
+  const at = internals.now().getTime() + budgetMs;
+  return { at, late: () => internals.now().getTime() >= at };
 }
 
 /** The grouping rule `channel` declares in its manifest, or null. */
@@ -439,13 +499,34 @@ export async function unsentReport(core: Core, options: UnsentOptions): Promise<
   const scope: EvidenceScope = tainted !== null ? 'indeterminate' : capped ? 'last-500' : 'complete-90-days';
 
   const now = internals.now().getTime();
+  const wrap = options.wrap;
+  const asked = options.drafts;
   const candidates: Array<{ row: UnsentRow; newest: Read }> = [];
   for (const group of groups.values()) {
     if (group.key.channel !== options.channel) continue;
     if (options.owner !== undefined && group.key.inboxId !== options.owner) continue;
+    // Only the drafts asked for, when some were: by id, and by the exact revision where one is named.
+    if (
+      asked !== undefined &&
+      !asked.some(
+        (wanted) =>
+          wanted.draftId === group.key.draftId &&
+          (wanted.revision === undefined || wanted.revision === group.key.draftMessageId),
+      )
+    ) {
+      continue;
+    }
     const ordered = [...group.reads].sort(newestFirst);
     const newest = ordered[0];
-    if (newest === undefined || newest.outcome.state !== 'expired') continue;
+    if (newest === undefined) continue;
+    // A candidate's newest preparation expired; with `decided`, so may a draft that a claimed or standing approval
+    // decides — and nothing else.
+    if (
+      newest.outcome.state !== 'expired' &&
+      !(options.decided === true && ordered.some((read) => DECIDING.has(read.outcome.state)))
+    ) {
+      continue;
+    }
     if (!ordered.some((read) => read.createdAt !== null && Date.parse(read.createdAt) >= now - UNSENT_CANDIDATE_MS)) {
       continue;
     }
@@ -465,7 +546,15 @@ export async function unsentReport(core: Core, options: UnsentOptions): Promise<
         },
         ...(decided.decidedBy === undefined ? {} : { decidedBy: decided.decidedBy }),
         approvals: ordered.map((read) =>
-          publicApproval(read.stored, read.outcome, options.wrap === undefined ? {} : { wrap: options.wrap }),
+          publicApproval(
+            read.stored,
+            read.outcome,
+            wrap === undefined
+              ? {}
+              : {
+                  wrap: (text, field) => wrap(text, field, { approvalId: read.approvalId, inboxId: group.key.inboxId }),
+                },
+          ),
         ),
       },
     });
