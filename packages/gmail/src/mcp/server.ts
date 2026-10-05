@@ -288,11 +288,16 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
    */
   const downloadNeedsPerson = async (choiceId: string, alias: string): Promise<boolean> => {
     // Whose and what first, under its lock (design 2026-10-05 §D2): only this mailbox's question, and only a valid
-    // version-2 one, is ever put to a person; any other id is refused by the operation for what it is.
-    const { inbox } = await context.inbox(alias);
+    // version-2 one, is ever put to a person; any other id — or a mailbox that is not there — is the operation's to
+    // refuse, for what it is.
+    const owner = await context.inbox(alias).then(
+      ({ inbox }) => inbox.id,
+      () => undefined,
+    );
+    if (owner === undefined) return false;
     const record = asV2(
       await context.core.approvals
-        .inspect(choiceId, { kind: 'download', owner: inbox.id })
+        .inspect(choiceId, { kind: 'download', owner })
         .then(({ stored }) => stored)
         .catch(() => null),
     );
@@ -2367,7 +2372,13 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
    * tightened. Under a live `never` it is no form to show: the claim that follows revokes it, with POLICY_NEVER.
    */
   const needsConfirmation = (outcome: ApprovalOutcome): boolean =>
-    outcome.state === 'pending' && !outcome.claimable && outcome.reason !== NEVER_NOTICE;
+    // Only a version-2 record a person can still approve: one an earlier release prepared reads `pending` too, and is
+    // refused — by its version, with no form — by the send that follows.
+    outcome.error === undefined &&
+    outcome.record !== null &&
+    outcome.state === 'pending' &&
+    !outcome.claimable &&
+    outcome.reason !== NEVER_NOTICE;
 
   const isAllowlisted = async (client: string): Promise<boolean> => {
     if (!client) return false;
@@ -2475,18 +2486,26 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
         try {
           const alias = targetInbox(inbox);
           /*
-           * Whose and what before anything of its state, and before a route is chosen (design 2026-10-05 §D2): this
-           * mailbox's send, or the one NOT_FOUND — another mailbox's is not this call's to show in a form, to count a
-           * wrong code against, or to void by claiming it for the wrong draft; nor is another kind's. Then its state, as
-           * the claim would classify it: anything that cannot be sent is refused for what it is, with where it stands.
+           * Whose and what before anything of its state, and before a route is chosen (design 2026-10-05 §D2): only this
+           * mailbox's send, looked at under its lock, can be put in a form here — another mailbox's is not this call's
+           * to show, to count a wrong code against, or to void by claiming it for the wrong draft; nor is another
+           * kind's. Anything the look cannot route — not this mailbox's, not a send, nothing at all, or nothing that a
+           * person can still approve — goes to the send itself, which classifies it the same way first and refuses it
+           * for what it is: the one NOT_FOUND, or its state, with where it stands.
            */
-          const { inbox: owner } = await context.inbox(alias);
-          const { outcome } = await context.core.approvals.inspect(approvalId, { kind: 'send', owner: owner.id });
-          if (outcome.error) throw outcome.error;
+          const owner = await context.inbox(alias).then(
+            ({ inbox: found }) => found.id,
+            () => undefined,
+          );
+          const seen =
+            owner === undefined
+              ? null
+              : await context.core.approvals.inspect(approvalId, { kind: 'send', owner }).catch(() => null);
+          const outcome = seen?.outcome;
           // Channel (a): a form the model cannot answer, but only from a client that has proved its forms reach a
           // person. An un-allowlisted client is told to use the terminal or Gmail — and the approval is left alone,
           // because being asked from the wrong client is not evidence that anything is wrong with the message.
-          if (needsConfirmation(outcome)) {
+          if (outcome !== undefined && needsConfirmation(outcome)) {
             const answered = inputResponse(ctx.mcpReq.inputResponses, APPROVAL_KEY);
             if (answered.kind === 'missing') {
               const client = server.server.getClientVersion()?.name ?? '';
