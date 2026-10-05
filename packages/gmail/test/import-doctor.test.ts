@@ -427,7 +427,9 @@ test('doctor with nothing registered says so, as something to look at — not as
   const scoped = byId((await doctor(context, { inbox: 'work' })).checks, 'registered-server-version');
   assert.equal(scoped?.status, 'warn', scoped?.detail);
   assert.match(scoped?.detail ?? '', /^none registered that serves work: /);
-  assert.doesNotMatch(`${scoped?.detail} ${scoped?.fix}`, /home/);
+  // The other mailbox's entry is not named — by its name, its mailbox or its pin. (Not a bare `home`: the fix is this
+  // installation's command, whose path can run through a /home folder.)
+  assert.doesNotMatch(`${scoped?.detail} ${scoped?.fix}`, /gmail-home|--inbox home\b|"home"|\bhome\/gmail\b/);
   // Unscoped, that entry is ours and current.
   const all = byId((await doctor(context)).checks, 'registered-server-version');
   assert.equal(all?.status, 'ok', all?.detail);
