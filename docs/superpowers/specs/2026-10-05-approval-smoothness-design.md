@@ -1,6 +1,6 @@
 # CUE-404 — approving a send without fighting the clock — design
 
-Status: **revised after round 15 (3 P2, all addressed)**, 2026-10-05, from Linear CUE-404 (High; the
+Status: **revised after round 16 (3 P2, all addressed)**, 2026-10-05, from Linear CUE-404 (High; the
 owner: "this is very not smooth") and a cited research pass over this repository, the MCP specification and the
 clients' documentation. Depends on CUE-403 (the CLIs on PATH,
 [its spec](2026-10-04-cli-path-shims-design.md)) for every printed terminal command to work; ships after it.
@@ -112,17 +112,12 @@ ever read for reporting.
 **Digest integrity.** Both fields are required on every version-2 record, each a lowercase hex SHA-256 (64
 characters). This is the **only** definition: one core helper, `bindingDigestOf(record)`, returns the SHA-256 of the
 canonical JSON (the existing `canonicalJson`) of `{ "v": 2, "kind", "contentDigest", "route", "pendingMs",
-"approvedMs", "groupKind", "groupKey" }` (downloads: `{ "v": 2, "kind": "download", "contentDigest", "profile":
-{ "pendingMs": 1800000 }, "groupKind": "core.download", "groupKey": {} }`). Version-2 records **store** two new fields
-set once at creation: `groupKind`, a string naming the channel's grouping scheme, and `groupKey`, a JSON object of
-strings. The **channel** supplies both when it creates the approval (from values it already has: Gmail
-`"gmail.draft"` with `{ inboxId, draftId }`; Slack posts and files `"slack.post"` with `{ inboxId, draftId, revision }`
-— today's revision is stored as `draftMessageId`, `packages/slack/src/operations/send.ts:464`; Slack reactions
-`"slack.reaction"` with `{ inboxId, channel, ts, emoji }` taken from the values `send.ts:1224` already maps; Resend
-`"resend.prepared"` with `{ inboxId, preparedId }` from the `draftId` it stores, `packages/resend/src/operations/send.ts:308`);
-changes use `"core.change"` with `{}`. Core never decodes a `groupKey`: it only canonicalises and hashes it, and D9
-groups by `(groupKind, canonical groupKey, contentDigest)` — so a new channel defines its own scheme with no core edit
-(the channel-plugins contract). A stored identifier altered after creation therefore fails recomputation, and every
+"approvedMs", "identity" }`, where `identity` is the record's **own top-level operational fields** that ownership and
+execution already use — `{ inboxId, inboxSub, draftId, draftMessageId, expect }` (`packages/core/src/approvals.ts:302`,
+used by claim at `approvals.ts:725` and by Gmail at `packages/gmail/src/operations/send.ts:472`). There is no second
+copy: no stored `groupKey`. For a download the object is `{ "v": 2, "kind": "download", "contentDigest", "profile":
+{ "pendingMs": 1800000 }, "identity", "offered" }`, where `offered` is the canonical list of folder meanings and paths
+offered when the question was created (today excluded from `downloadDigest`, `approvals.ts:95`). Any stored identity field or offered folder altered after creation therefore fails recomputation, and every
 read
 recomputes it from the record's own fields before classifying: a missing, malformed, non-canonical or mismatching value
 makes the record `corrupt` (never claimable). `contentDigest` is an opaque identity on reads that cannot reach the
@@ -137,7 +132,7 @@ record reaches `approved` only through the terminal or a trusted form — a chat
 |---|---|---|
 | send | `approvedVia` ∈ {`terminal`, `elicitation`}; `approvedBindingDigest` = `bindingDigest` | neither field |
 | change | `approvedVia` = `terminal` only (confirm changes are terminal-only, `approvals.ts:901`); `approvedBindingDigest` = `bindingDigest` | neither field |
-| download | today's evidence exactly — `approvedVia` and `approvedDigest`, **no** `approvedAt` — with `approvedDigest` = `contentDigest` | a chat-policy answer claimed straight from `pending` to `used` (`approvals.ts:1017`) carries no `approvedAt`, `approvedVia` or `approvedDigest`, in `used`, `revoked` or `expired` alike |
+| download | `approvedVia` as today, **no** `approvedAt`, and `approvedDigest` = SHA-256 of canonical `{ bindingDigest, answer }`, binding the recorded answer (`downloads`, `current`, `other` and its path) when it is accepted (`approvals.ts:979`); the save path re-verifies it before writing (`save-destination.ts:864`) | a chat-policy answer claimed straight from `pending` to `used` (`approvals.ts:1017`) carries no `approvedAt`, `approvedVia` or `approvedDigest`, in `used`, `revoked` or `expired` alike |
 
 `approvedVia: chat` does not exist; "form" in prose means the stored `elicitation`. Any violation makes the record
 `corrupt`. Legacy (version-1) records,
@@ -564,6 +559,14 @@ inventing a state:
 
 ### D9. Draft send history says only what the records read can prove
 
+**Grouping comes from the channel's manifest, as data.** Each channel declares `approvalGrouping` in its `"agentcomms"`
+manifest field: `"draft"` — group by `(inboxId, draftId)`, used by Gmail and by Resend's prepared sends — or
+`"draft-revision-digest"` — group by `(inboxId, draftId, draftMessageId, contentDigest)`, used by Slack posts and files.
+Reactions and channels without the field take no part in D9. Core applies the declared rule to the generic fields it
+already stores, so a new channel chooses a rule without any core edit; the manifest schema and the generated snapshot
+gain the field (`packages/core/src/channel-manifest.ts`). Gmail grouping never includes `contentDigest`: every approval
+for the same mailbox and draft counts, however the draft's content changed between preparations.
+
 The status of **one identified approval** is definitive about that approval. An expired record says **“this approval
 expired; nothing was sent with it”**, whether it expired pending or after approval. A `failed` record says the
 channel-specific equivalent only when the provider failure is known not to have sent. A `used` record says sent only
@@ -822,16 +825,20 @@ lookup failures stay attached to their draft and do not raise the concurrency or
 
 ## 5. Tests owed
 
+- **Round-16 cases:** independently mutating each identity field (`inboxId`, `inboxSub`, `draftId`, `draftMessageId`,
+  `expect`) makes the record `corrupt` before approval, claim, provider access or reporting; mutating a confirm
+  download's recorded answer or offered folder paths after approval saves no file and makes it `corrupt`; one Gmail
+  draft prepared with different content digests, where an approved, sending, used or unknown record for either blocks
+  the expired-draft wording; a malformed `approvalGrouping` in a manifest is refused by the manifest schema.
 - **Round-15 cases:** a chat-policy download claimed `pending → used` with no evidence stays valid through status,
-  listing and retention; create-path v2 round trips for every subtype prove the stored `groupKind`/`groupKey`; golden
-  vectors for the download profile and every `groupKind`; removed-account provider-free classification of Slack post,
-  file, reaction and Resend records; a synthetic new channel defines its own `groupKind` with no core edit; any binding
-  mismatch makes the whole report indeterminate across several drafts and accounts.
+  listing and retention; create-path v2 round trips for every subtype prove the exact `identity` hashed; golden vectors
+  for the download profile, `offered` and every kind; removed-account provider-free classification of Slack post,
+  file, reaction and Resend records; a synthetic new channel declares its `approvalGrouping` with no core edit; any
+  binding mismatch makes the whole report indeterminate across several drafts and accounts.
 - **Round-14 cases:** the per-kind evidence table, every row valid and invalid (a form-approved confirm change →
   `corrupt`); valid confirm downloads in `approved` and `used` without `approvedAt`; approved-then-revoked descendants
   keep valid evidence while direct-chat `failed`/`unknown` descendants carry none; golden canonical-JSON and SHA-256
-  vectors for every `groupKey` subtype including Slack reactions; a provider-free Slack round trip from the stored
-  `inboxId`; valid-value mutation of every attribution field → integrity failure → whole-report indeterminate; a used
+  vectors for every kind including Slack reactions; a provider-free Slack round trip from the stored `inboxId`; valid-value mutation of every attribution field → integrity failure → whole-report indeterminate; a used
   blocker's draft id moved from A to B gives no unsent wording for A, B or any other group.
 - **Round-13 cases:** every `kind × route × approvedVia × state` combination, valid and invalid; an approved-lineage
   record in every descendant state with missing, malformed or contradictory evidence → `corrupt`; direct-chat `sending`
