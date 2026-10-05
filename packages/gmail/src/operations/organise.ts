@@ -1,4 +1,4 @@
-import { CommsError, recipientDomains } from '@agentcomms/core';
+import { asLegacy, asV2, CommsError, recipientDomains } from '@agentcomms/core';
 import type { GmailContext } from '../context.ts';
 
 /**
@@ -131,8 +131,9 @@ async function refuseWhileSending(
   messageIds: readonly string[],
 ): Promise<void> {
   if (messageIds.length === 0) return;
+  // A send under way here, or one an earlier release has under way: either stands on the draft's message.
   const sending = await context.core.approvals.list({ inboxId, states: ['sending'] });
-  const held = new Set(sending.map((record) => record.draftMessageId));
+  const held = new Set(sending.map((stored) => (asV2(stored) ?? asLegacy(stored))?.draftMessageId));
   const clash = messageIds.find((id) => held.has(id));
   if (clash) {
     throw new CommsError('APPROVAL_PENDING', 'that message is a draft being sent right now, so it cannot be changed', {

@@ -1,6 +1,5 @@
 import {
   agentMarker,
-  approvalKind,
   approvalsOf,
   approveChangeAtTerminal,
   CommsError,
@@ -15,6 +14,8 @@ import {
   type Handoff,
   handoffSentence,
   installExitStatus,
+  integrityRefusal,
+  kindOf,
   type OutputOptions,
   openCore,
   PATH_OPTIONS,
@@ -458,7 +459,10 @@ a macOS dialog may be waiting) · 77 permission needed (macOS privacy) · 78 con
             hint: 'It may have expired, been used, or been cancelled. Prepare the change again.',
           });
         }
-        if (approvalKind(pending) !== 'change') {
+        // A record that cannot be used is refused for what it is, and says nothing of what it held.
+        if (pending.form === 'corrupt' || pending.form === 'unreadable') throw integrityRefusal(pending);
+        // A change an earlier release prepared goes on to the terminal approval, which refuses it by its version.
+        if (kindOf(pending) !== 'change') {
           /*
            * Each channel that can have prepared a send — whose accounts can be in `send`, from the manifests, so not
            * WhatsApp's — by its approve command as this machine's registrations find it, or why there is none here.

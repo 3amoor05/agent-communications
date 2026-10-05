@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
-import { ApprovalStore, CommsError, SENDING_STALE_MS } from '@agentcomms/core';
+import { ApprovalStore, asV2, CommsError, SENDING_STALE_MS } from '@agentcomms/core';
 import { writeOutcomeOf } from '../src/api/client.ts';
 import { renderSent } from '../src/cli/render.ts';
 import { SendRecords } from '../src/compose/store.ts';
@@ -30,7 +30,7 @@ async function prepared() {
   const context = harness.context();
   const approval = await prepareSend(context, 'acme/resend', message);
   const send = () => executeSend(context, 'acme/resend', { approvalId: approval.approvalId, expect: approval.expect });
-  const state = async () => (await harness.core.approvals.get(approval.approvalId))?.state;
+  const state = async () => asV2(await harness.core.approvals.get(approval.approvalId))?.state;
   return { context, approval, send, state };
 }
 
@@ -61,7 +61,7 @@ test('Resend acting before its answer is lost leaves the approval sending and te
       const later = new ApprovalStore(harness.core.paths.stateDir, {
         now: () => new Date(Date.now() + SENDING_STALE_MS),
       });
-      assert.equal((await later.get(approval.approvalId))?.state, 'unknown');
+      assert.equal(asV2(await later.get(approval.approvalId))?.state, 'unknown');
       assert.equal(harness.fake.sent.length, 1, 'Resend accepted one email');
       const local = await new SendRecords(harness.core.paths.stateDir).summary(
         (await harness.core.config.load()).accounts['acme/resend']?.id ?? '',

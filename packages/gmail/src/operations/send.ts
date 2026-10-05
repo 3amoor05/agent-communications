@@ -6,13 +6,16 @@ import {
   domainOf,
   type Expectation,
   handoffSentence,
-  isCurrentDigestVersion,
+  integrityRefusal,
   type MessagePreview,
   otherVersionRefusal,
-  publicView,
+  ownerOf,
+  type PublicApproval,
+  publicStored,
   renderMessagePreview,
   resolveName,
   type SendPolicy,
+  type StoredApproval,
   sendEpochOf,
   stricterPolicy,
 } from '@agentcomms/core';
@@ -482,15 +485,13 @@ export interface ApprovalPrompt {
  * Re-reading is the point — an approval must be for what is in the draft now, not for what was there at prepare.
  */
 export async function beginApproval(context: GmailContext, approvalId: string): Promise<ApprovalPrompt> {
-  const record = await context.core.approvals.get(approvalId);
-  if (!record) {
-    throw new CommsError('NOT_FOUND', `there is no approval ${approvalId}`, {
-      hint: 'Approvals last ten minutes. Prepare the send again.',
-    });
-  }
-  // A record an earlier release prepared is refused before the draft is read: this release cannot approve it, and an
-  // integrity check of it here would void it by rules it was not written under.
-  if (!isCurrentDigestVersion(record)) throw otherVersionRefusal(record);
+  // Before the draft is read: only a valid version-2 record is approved here, and an integrity check of any other
+  // would judge it by rules it was not written under.
+  const record = sendRecordOf(
+    await context.core.approvals.get(approvalId),
+    approvalId,
+    'Approvals last ten minutes. Prepare the send again.',
+  );
   const config = await context.config();
   const entry = Object.entries(config.inboxes).find(([, inbox]) => inbox.id === record.inboxId);
   if (!entry) {
@@ -533,9 +534,7 @@ export async function finishApproval(
   answer: string,
   via: 'terminal' | 'elicitation' = 'terminal',
 ): Promise<ApprovalRecord> {
-  const record = await context.core.approvals.get(approvalId);
-  if (!record) throw new CommsError('NOT_FOUND', `there is no approval ${approvalId}`);
-  if (!isCurrentDigestVersion(record)) throw otherVersionRefusal(record);
+  const record = sendRecordOf(await context.core.approvals.get(approvalId), approvalId);
   const config = await context.config();
   const entry = Object.entries(config.inboxes).find(([, inbox]) => inbox.id === record.inboxId);
   if (!entry) throw new CommsError('NOT_FOUND', 'the mailbox this approval belongs to is no longer connected');
@@ -587,14 +586,12 @@ export async function executeSend(
 
   // The record's own state first, before Google is called at all. A used approval means the draft has gone from
   // Drafts, and reading it would report a missing draft — true, but the wrong answer to "why did this not send".
-  const known = await context.core.approvals.get(options.approvalId);
-  if (!known) {
-    throw new CommsError('NOT_FOUND', `there is no approval ${options.approvalId}`, {
-      hint: 'Approvals last ten minutes. Prepare the send again and show the new preview.',
-    });
-  }
-  // Before anything else, as the claim would: a record an earlier release prepared is never claimed here.
-  if (!isCurrentDigestVersion(known)) throw otherVersionRefusal(known);
+  // Before anything else, as the claim would: only a valid version-2 record is ever claimed here.
+  const known = sendRecordOf(
+    await context.core.approvals.get(options.approvalId),
+    options.approvalId,
+    'Approvals last ten minutes. Prepare the send again and show the new preview.',
+  );
   if (known.state !== 'pending' && known.state !== 'approved') {
     throw new CommsError('APPROVAL_VOID', `nothing was sent: ${describeState(known.state)}`, {
       hint: 'Prepare the send again if it should still go.',
@@ -768,11 +765,16 @@ export async function executeSend(
   };
 }
 
-/** The approvals this mailbox has open, for `send list` and for the doctor. Never includes a challenge hash. */
+/**
+ * The approvals on this machine, for `send list` and for the doctor — every form, none skipped — each with the
+ * mailbox it belongs to by name, `(removed)` for one no longer connected, and null for a record whose owner cannot be
+ * trusted. Narrowed to a mailbox (`inbox`, or a pinned server's), only that mailbox's own: a record whose owner cannot
+ * be trusted never matches. Never includes a challenge hash, or anything of a record that cannot be read but its stub.
+ */
 export async function listApprovals(
   context: GmailContext,
   filter: { inbox?: string | undefined } = {},
-): Promise<Array<Omit<ApprovalRecord, 'challengeHash'> & { inbox: string }>> {
+): Promise<Array<PublicApproval & { inbox: string | null }>> {
   const config = await context.config();
   const byId = new Map(Object.entries(config.inboxes).map(([alias, inbox]) => [inbox.id, alias]));
   const name = filter.inbox;
@@ -780,20 +782,40 @@ export async function listApprovals(
     ? resolveName(config, 'inbox', name, () => new CommsError('NOT_FOUND', `there is no mailbox called "${name}"`))
         .inbox.id
     : undefined;
-  const records = await context.core.approvals.list(inboxId ? { inboxId } : {});
-  return records.map((record) => ({ ...publicView(record), inbox: byId.get(record.inboxId) ?? '(removed)' }));
+  const stored = await context.core.approvals.list(inboxId ? { inboxId } : {});
+  return stored.map((entry) => {
+    const owner = ownerOf(entry);
+    return { ...publicStored(entry), inbox: owner === null ? null : (byId.get(owner) ?? '(removed)') };
+  });
 }
 
-/** Cancels an approval. Anyone may cancel: refusing to send is never the dangerous direction. */
-export async function revokeApproval(context: GmailContext, approvalId: string): Promise<ApprovalRecord> {
-  const record = await context.core.approvals.revoke(approvalId, 'cancelled', { disposition: 'person' });
+/**
+ * Cancels an approval. Anyone may cancel: refusing to send is never the dangerous direction. One an earlier release
+ * prepared is retired in its own shape; a corrupt or unreadable one is refused, and nothing is written to it.
+ */
+export async function revokeApproval(context: GmailContext, approvalId: string): Promise<StoredApproval> {
+  const stored = await context.core.approvals.revoke(approvalId, 'cancelled', { disposition: 'person' });
   await context.core.audit.append({
-    inboxId: record.inboxId,
+    inboxId: ownerOf(stored) ?? '',
     alias: '',
     operation: 'send.revoke',
     outcome: 'ok',
     surface: context.surface,
     ids: { approvalIds: [approvalId] },
   });
-  return record;
+  return stored;
+}
+
+/**
+ * A send's approval as only a valid version-2 record may be acted on: none is `NOT_FOUND`; a corrupt or unreadable
+ * record is refused with only its stub (a pinned server has already answered `NOT_FOUND` for it); one an earlier
+ * release prepared gets the version refusal. Before any draft is read.
+ */
+function sendRecordOf(stored: StoredApproval | null, approvalId: string, hint?: string): ApprovalRecord {
+  if (stored === null) {
+    throw new CommsError('NOT_FOUND', `there is no approval ${approvalId}`, hint === undefined ? {} : { hint });
+  }
+  if (stored.form === 'corrupt' || stored.form === 'unreadable') throw integrityRefusal(stored);
+  if (stored.form === 'legacy') throw otherVersionRefusal(stored.view);
+  return stored.record;
 }

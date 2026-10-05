@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { test } from 'node:test';
-import { CommsError, deriveLegacyV1State } from '@agentcomms/core';
+import { CommsError, deriveLegacyV1State, stateOf } from '@agentcomms/core';
 import {
   readV1Record,
   v1RecordPath,
@@ -118,7 +118,7 @@ test('cancelling a fresh version-1 send in Gmail writes a v1-shaped revoked', as
   ] as const) {
     // What `gmail_send_cancel`, `agent-gmail send cancel` and Enter at `agent-gmail approve` all call.
     const result = await revokeApproval(context, approvalId);
-    assert.equal(result.state, 'revoked');
+    assert.equal(stateOf(result), 'revoked');
     const after = JSON.parse(readV1Record(stateDir, approvalId)) as Record<string, unknown>;
     assert.equal(typeof after.updatedAt, 'string');
     assert.equal(after.digestVersion, 1);

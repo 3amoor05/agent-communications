@@ -3,7 +3,7 @@ import { readdir } from 'node:fs/promises';
 import { join, relative, sep } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
-import { EXIT_CODES } from '@agentcomms/core';
+import { asV2, EXIT_CODES } from '@agentcomms/core';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import type { SlackFileRequest } from '../src/api/download.ts';
@@ -630,7 +630,7 @@ test('a hidden folder, one in ~/Library (AppData on Windows), or this package’
       );
       assert.equal(byCommand.code, 'BAD_DATA', saveTo);
     }
-    assert.equal((await harness.core.approvals.get(asked.choiceId))?.state, 'pending');
+    assert.equal(asV2(await harness.core.approvals.get(asked.choiceId))?.state, 'pending');
     assert.deepEqual(await readdir(cwd), []);
   } finally {
     await tool.close();

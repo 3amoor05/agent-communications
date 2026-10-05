@@ -3,7 +3,15 @@ import { writeFileSync } from 'node:fs';
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { type TestContext, test } from 'node:test';
-import { type ApprovalStore, type AuditRecord, CommsError, type Core, openCore, withFileLock } from '@agentcomms/core';
+import {
+  type ApprovalStore,
+  type AuditRecord,
+  asV2,
+  CommsError,
+  type Core,
+  openCore,
+  withFileLock,
+} from '@agentcomms/core';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { GMAIL_CALLER } from '../src/caller.ts';
@@ -293,7 +301,7 @@ test('a download cancelled while its destination claim waits saves nothing and l
     assert.equal(error.details?.reason, 'cancelled');
     return true;
   });
-  assert.equal((await store.get(asked.choiceId))?.state, 'pending', 'the answer was spent');
+  assert.equal(asV2(await store.get(asked.choiceId))?.state, 'pending', 'the answer was spent');
   assert.deepEqual(await listing(join(world.home, 'Downloads')), []);
   assert.equal(await auditOf(world), undefined, 'a download that never started was audited');
 

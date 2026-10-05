@@ -2,6 +2,8 @@ import { readFile, stat } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
 import {
   type AttachPolicy,
+  asLegacy,
+  asV2,
   CommsError,
   checkAttachable,
   decodeHeaderWords,
@@ -561,8 +563,9 @@ export async function deleteDraft(context: GmailContext, alias: string, draftId:
  * parallel. What remains is an edit made in Gmail web at that exact moment, and that is documented, not claimed.
  */
 async function refuseWhileSending(context: GmailContext, inboxId: string, draftId: string): Promise<void> {
+  // A send under way here, or one an earlier release has under way: either stands on the draft.
   const sending = await context.core.approvals.list({ inboxId, states: ['sending'] });
-  if (sending.some((record) => record.draftId === draftId)) {
+  if (sending.some((stored) => (asV2(stored) ?? asLegacy(stored))?.draftId === draftId)) {
     throw new CommsError('APPROVAL_PENDING', 'this draft is being sent right now, so it cannot be changed', {
       hint: 'Wait for the send to finish, then look at the message in Sent.',
       details: { draftId },

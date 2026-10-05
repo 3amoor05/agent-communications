@@ -1,6 +1,5 @@
 import {
   agentMarker,
-  approvalKind,
   approvalsOf,
   approveChangeAtTerminal,
   CommsError,
@@ -15,6 +14,7 @@ import {
   type Handoff,
   handoffSentence,
   installExitStatus,
+  kindOf,
   type OutputOptions,
   openCore,
   PATH_OPTIONS,
@@ -661,7 +661,7 @@ is out: update first, or put it off (the stop names both commands) Â· 64 usage Â
           });
         }
         const pending = await context.core.approvals.get(approvalId);
-        if (pending && approvalKind(pending) === 'change') {
+        if (kindOf(pending) === 'change') {
           const outcome = await approveChangeAtTerminal(
             context.core,
             approvalId,

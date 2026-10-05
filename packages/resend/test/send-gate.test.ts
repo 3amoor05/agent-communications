@@ -1,12 +1,20 @@
 import assert from 'node:assert/strict';
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, test } from 'node:test';
-import { CommsError } from '@agentcomms/core';
+import { asV2, CommsError, stateOf } from '@agentcomms/core';
+import { v1ChangeRecord, v1SendRecord, writeV1Record } from '../../core/test/fixtures/approval-v1-0.13.0.ts';
 import { APPROVAL_TAG } from '../src/api/guard.ts';
 import { REACH_CONFIRM_THRESHOLD, type SendInput } from '../src/compose/message.ts';
 import { showReceived } from '../src/operations/read.ts';
-import { beginSendApproval, executeSend, finishSendApproval, prepareSend, sendStatus } from '../src/operations/send.ts';
+import {
+  beginSendApproval,
+  executeSend,
+  finishSendApproval,
+  prepareSend,
+  revokeSendApproval,
+  sendStatus,
+} from '../src/operations/send.ts';
 import { assertNoBareCommand, resendInline } from './support/handoffs.ts';
 import { type Harness, newHarness } from './support/harness.ts';
 
@@ -98,7 +106,7 @@ test('without an approval there is no send: an invented id, another account’s 
     refusal('NOT_FOUND'),
   );
   assert.equal(
-    (await harness.core.approvals.get(theirs.approvalId))?.state,
+    asV2(await harness.core.approvals.get(theirs.approvalId))?.state,
     'pending',
     'the other account’s approval is untouched',
   );
@@ -331,7 +339,7 @@ test('an outcome that cannot be known is never retried: it is recorded, reported
     },
   );
   assert.equal(harness.fake.sends().length, 1, 'one request, never a second');
-  assert.equal((await harness.core.approvals.get(prepared.approvalId))?.state, 'sending');
+  assert.equal(asV2(await harness.core.approvals.get(prepared.approvalId))?.state, 'sending');
   await assert.rejects(
     executeSend(context, 'acme/resend', { approvalId: prepared.approvalId, expect: prepared.expect }),
     refusal('APPROVAL_VOID'),
@@ -529,6 +537,120 @@ test('a policy or mode tightened after the preview applies to that send', async 
     executeSend(context, 'zeta/resend', { approvalId: read.approvalId, expect: read.expect }),
     refusal('SCOPE_MISSING'),
   );
-  assert.equal((await harness.core.approvals.get(read.approvalId))?.state, 'pending', 'refused before the claim');
+  assert.equal(asV2(await harness.core.approvals.get(read.approvalId))?.state, 'pending', 'refused before the claim');
   assert.equal(harness.fake.sends().length, 0);
+});
+
+// ── Every form of an approval record at Resend's sites (CUE-404 Task 3) ─────────────────────────────────────────
+
+const formId = (c: string) => `ap_${'0'.repeat(25)}${c}`;
+
+/** acme's store holding a record of each form that cannot be used, and an approval of another account's. */
+async function unusableForAcme() {
+  harness = await newHarness();
+  await sendMode();
+  const other = await harness.addAccount({ name: 'zeta/resend', mode: 'send' });
+  const context = harness.context('mcp');
+  const acme = await context.accounts.require('acme/resend');
+  const prepared = await prepareSend(context, 'acme/resend', message());
+  const record = asV2(await harness.core.approvals.get(prepared.approvalId));
+  assert.ok(record);
+  const zeta = await prepareSend(context, 'zeta/resend', message());
+  void other;
+  const approvals = join(harness.core.paths.stateDir, 'approvals');
+  const files: Record<string, string> = {
+    [formId('Y')]: `{ "approvalId": "${formId('Y')}", "inboxId": "${acme.account.id}", "state": "pend`,
+    [formId('B')]: `${JSON.stringify({ ...record, approvalId: formId('B'), channel: 'gmail' }, null, 2)}\n`,
+  };
+  for (const [fileId, text] of Object.entries(files)) writeFileSync(join(approvals, `${fileId}.json`), text);
+  return { context, acme, files, zeta: zeta.approvalId, own: prepared.approvalId };
+}
+
+test('pins: an account-scoped call answers a stub and an unverifiable record exactly as another account’s approval', async () => {
+  const { context, files, zeta } = await unusableForAcme();
+  const said = async (call: Promise<unknown>, approvalId: string) => {
+    try {
+      await call;
+    } catch (error) {
+      const refused = error as CommsError;
+      return { code: refused.code, message: refused.message.replace(approvalId, '<id>') };
+    }
+    assert.fail('expected a refusal');
+  };
+  const execute = (approvalId: string) =>
+    said(
+      executeSend(context, 'acme/resend', {
+        approvalId,
+        expect: { to: ['sam@partner.test'], cc: [], bcc: [], subject: 'Phase 2 plan' },
+      }),
+      approvalId,
+    );
+  const status = (approvalId: string) => said(sendStatus(context, 'acme/resend', approvalId), approvalId);
+  const elsewhere = await execute(zeta);
+  assert.equal(elsewhere.code, 'NOT_FOUND');
+  assert.deepEqual(await execute(formId('Y')), elsewhere, 'an unreadable file is not this account’s');
+  assert.deepEqual(await execute(formId('B')), elsewhere, 'nor a record whose binding does not verify');
+  const elsewhereStatus = await status(zeta);
+  assert.equal(elsewhereStatus.code, 'NOT_FOUND');
+  assert.deepEqual(await status(formId('Y')), elsewhereStatus);
+  assert.deepEqual(await status(formId('B')), elsewhereStatus);
+  for (const [fileId, text] of Object.entries(files)) {
+    assert.equal(readFileSync(join(harness.core.paths.stateDir, 'approvals', `${fileId}.json`), 'utf8'), text);
+  }
+  assert.equal(harness.fake.sends().length, 0, 'nothing reached Resend');
+});
+
+test('kind dispatch at `agent-resend approve`: a stub gets the integrity refusal, a legacy change the version refusal', async () => {
+  await unusableForAcme();
+  const stub = await harness.cli(['approve', formId('Y')], { tty: true });
+  assert.equal(stub.code, 10, stub.stdout + stub.stderr);
+  assert.match(stub.stdout + stub.stderr, /could not be read \(truncated\)/);
+  writeV1Record(
+    harness.core.paths.stateDir,
+    v1ChangeRecord({
+      approvalId: formId('M'),
+      digest: 'f'.repeat(64),
+      change: { summary: 'Let acme send', target: null, loosened: [], effects: ['does a thing'] },
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+    }),
+  );
+  const legacy = await harness.cli(['approve', formId('M')], { tty: true });
+  assert.equal(legacy.code, 10, legacy.stdout + legacy.stderr);
+  assert.match(legacy.stdout + legacy.stderr, /prepared by a different version of agent-communications/);
+});
+
+test('owner filters: removing the account voids its own approvals and never matches a record whose owner cannot be trusted', async () => {
+  const { files, own } = await unusableForAcme();
+  const first = await harness.cli(['--json', 'account', 'remove', 'acme/resend'], { env: { CLAUDECODE: '1' } });
+  const approvalId = String(first.json().error?.details?.approvalId);
+  const second = await harness.cli(['--json', 'account', 'remove', 'acme/resend', '--approval', approvalId], {
+    env: { CLAUDECODE: '1' },
+  });
+  assert.equal(second.code, 0, second.stdout);
+  assert.deepEqual(second.json<{ approvalsVoided: string[] }>().data?.approvalsVoided, [own]);
+  for (const [fileId, text] of Object.entries(files)) {
+    assert.equal(readFileSync(join(harness.core.paths.stateDir, 'approvals', `${fileId}.json`), 'utf8'), text, fileId);
+  }
+});
+
+test('the terminal approval narrows to a valid version-2 send; its cancel takes an earlier release’s too', async () => {
+  const { context } = await unusableForAcme();
+  const acme = await context.accounts.require('acme/resend');
+  writeV1Record(
+    harness.core.paths.stateDir,
+    v1SendRecord({
+      approvalId: formId('S'),
+      inboxId: acme.account.id,
+      inboxSub: acme.account.userId,
+      draftId: `rp_${'0'.repeat(26)}`,
+      draftMessageId: 'e'.repeat(64),
+      digest: 'e'.repeat(64),
+      expect: { to: ['sam@partner.test'], cc: [], bcc: [], subject: 'Phase 2 plan' },
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+    }),
+  );
+  await assert.rejects(beginSendApproval(context, formId('S')), /prepared by a different version/);
+  await assert.rejects(finishSendApproval(context, formId('S'), 'ABCD'), /prepared by a different version/);
+  await revokeSendApproval(context, formId('S'));
+  assert.equal(stateOf((await harness.core.approvals.get(formId('S'))) as never), 'revoked');
 });

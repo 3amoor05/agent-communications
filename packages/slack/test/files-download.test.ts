@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { chmod, lstat, mkdir, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, sep } from 'node:path';
 import { test } from 'node:test';
-import { CommsError, downloadRecordPath, openCore } from '@agentcomms/core';
+import { asV2, CommsError, downloadRecordPath, openCore } from '@agentcomms/core';
 import type { SlackFileRequest } from '../src/api/download.ts';
 import { SLACK_CALLER } from '../src/caller.ts';
 import { SlackContext } from '../src/context.ts';
@@ -534,7 +534,7 @@ test('an answer is held to its question: other files, a second use, no question 
     call({ fileIds: ['F0AAA1'], saveTo: 'Invoices', choiceId: asked.choiceId }, { download: bytes.download }),
     refused(/is a relative path/, 'USAGE'),
   );
-  assert.equal((await harness.core.approvals.get(asked.choiceId))?.state, 'pending');
+  assert.equal(asV2(await harness.core.approvals.get(asked.choiceId))?.state, 'pending');
 
   // Asked about F0AAA1, answered for F0AAA2: the person never said where that one goes. Refused — and left open,
   // since the slip is the caller's: the call it was asked with still saves.
@@ -542,7 +542,7 @@ test('an answer is held to its question: other files, a second use, no question 
     call({ fileIds: ['F0AAA2'], saveTo: 'current', choiceId: asked.choiceId }, { download: bytes.download }),
     refused(/a different request.*; the question is still open/, 'USAGE'),
   );
-  assert.equal((await harness.core.approvals.get(asked.choiceId))?.state, 'pending');
+  assert.equal(asV2(await harness.core.approvals.get(asked.choiceId))?.state, 'pending');
 
   // Once, and only once.
   saved(await call({ fileIds: ['F0AAA1'], saveTo: 'current', choiceId: asked.choiceId }, { download: bytes.download }));
@@ -575,7 +575,7 @@ test('a file renamed on Slack between the question and the answer is not saved u
   assert.deepEqual(await listing(cwd), []);
   assert.deepEqual(bytes.asked, []);
   // Still open: were the name put back, the person's answer would stand for the file they were shown.
-  assert.equal((await harness.core.approvals.get(asked.choiceId))?.state, 'pending');
+  assert.equal(asV2(await harness.core.approvals.get(asked.choiceId))?.state, 'pending');
   records.F0AAA1 = fileRecord('F0AAA1', { name: 'report.pdf' });
   saved(await call({ fileIds: ['F0AAA1'], saveTo: 'current', choiceId: asked.choiceId }, { download: bytes.download }));
   assert.deepEqual(await listing(cwd), ['report.pdf']);

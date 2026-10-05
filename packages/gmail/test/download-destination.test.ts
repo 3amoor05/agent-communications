@@ -3,9 +3,10 @@ import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { gatedChange, updateCheckPath, updateLaterChange } from '@agentcomms/core';
+import { asV2, gatedChange, updateCheckPath, updateLaterChange } from '@agentcomms/core';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
+import { v1DownloadRecord, writeV1Record } from '../../core/test/fixtures/approval-v1-0.13.0.ts';
 import { createGmailMcpServer } from '../src/mcp/server.ts';
 import type { FakeMessage } from './support/fake-google.ts';
 import { assertNoBareCommand, gmailInline, locatedGmailLine } from './support/handoffs.ts';
@@ -386,7 +387,7 @@ test('the update stop lets the person’s answer through by its choice id, and s
     { cwd },
   );
   assert.equal(borrowed.code, 11, borrowed.stdout);
-  assert.equal((await harness.core.approvals.get(change))?.state, 'pending', 'the change’s approval was spent');
+  assert.equal(asV2(await harness.core.approvals.get(change))?.state, 'pending', 'the change’s approval was spent');
   updateOut(harness);
   const { call: ask, close: closeAsk } = await connect({
     core: harness.core,
@@ -473,7 +474,7 @@ test('under confirm, an answer in the tool’s arguments or the command’s flag
     );
     assert.equal(flagged.code, 10, flagged.stdout);
     assert.equal(flagged.envelope().error?.code, 'APPROVAL_PENDING');
-    assert.equal((await harness.core.approvals.get(choiceId))?.state, 'pending', 'the question was spent');
+    assert.equal(asV2(await harness.core.approvals.get(choiceId))?.state, 'pending', 'the question was spent');
     assert.deepEqual(await listing(downloads), []);
     assert.deepEqual(await listing(cwd), []);
   } finally {
@@ -595,7 +596,7 @@ test('under confirm, a client trusted to show forms asks the person in one, and 
     ]);
     assert.equal(saved.folder, chosen);
     assert.deepEqual(await listing(chosen), ['invoice.pdf']);
-    const record = await harness.core.approvals.get(String(asked.choiceId));
+    const record = asV2(await harness.core.approvals.get(String(asked.choiceId)));
     assert.equal(record?.approvedVia, 'elicitation');
     assert.equal(record?.state, 'used');
   } finally {
@@ -620,7 +621,7 @@ test('under confirm, an answer to a form nobody raised is refused, even from a t
     assert.equal(refused.code, 'APPROVAL_REQUIRED');
     assert.match(refused.message, /not to a form this asked/);
     assert.equal(form.asked.length, 0, 'a form was raised');
-    assert.equal((await harness.core.approvals.get(String(asked.choiceId)))?.state, 'pending');
+    assert.equal(asV2(await harness.core.approvals.get(String(asked.choiceId)))?.state, 'pending');
     assert.deepEqual(await listing(cwd), []);
     assert.deepEqual(await listing(downloads), []);
   } finally {
@@ -682,7 +683,7 @@ test('a hidden folder, one reached through a link, and this package’s own are 
       assert.equal(refused.code, 'BAD_DATA', saveTo);
       assert.match(refused.message, /^cannot save into /, saveTo);
     }
-    assert.equal((await harness.core.approvals.get(String(asked.choiceId)))?.state, 'pending');
+    assert.equal(asV2(await harness.core.approvals.get(String(asked.choiceId)))?.state, 'pending');
     assert.deepEqual(await listing(join(home, '.ssh')), []);
     assert.deepEqual(
       (await listing(approvals)).filter((name) => !name.startsWith('ap_')),
@@ -840,5 +841,43 @@ test('a file that could run is named in the question and in `next`, saved with .
     }
   } finally {
     await close();
+  }
+});
+
+test('a question an earlier release asked is never put in a form, and the download refuses it by its version', async () => {
+  // CUE-404 Task 3 (G11, G1): only a valid version-2 question reaches the form or the save checks.
+  const { harness, cwd } = await mailbox();
+  await confirmPolicy(harness);
+  await trustForms(harness, 'form-client');
+  const form = await formClient(harness, cwd, 'form-client', () => ({ choice: 'downloads' }));
+  const work = (await harness.core.config.load()).inboxes.work;
+  assert.ok(work);
+  const legacyId = `ap_${'0'.repeat(25)}Q`;
+  writeV1Record(
+    harness.core.paths.stateDir,
+    v1DownloadRecord({
+      approvalId: legacyId,
+      digest: 'd'.repeat(64),
+      download: {
+        summary: 'where to save 1 file from work',
+        target: { kind: 'inbox', name: 'work', id: work.id },
+        operation: 'attachments.download',
+        request: {},
+        files: ['m1/1'],
+        names: ['invoice.pdf'],
+        folders: { downloads: cwd, current: cwd },
+      },
+      policy: 'confirm',
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+    }),
+  );
+  try {
+    const refused = toolError(await form.call({ inbox: 'work', messageIds: ['m1'], choiceId: legacyId }));
+    assert.equal(refused.code, 'APPROVAL_VOID');
+    assert.match(refused.message, /prepared by a different version of agent-communications/);
+    assert.deepEqual(form.asked, [], 'no form was shown for it');
+    assert.deepEqual(await listing(cwd), [], 'nothing was saved');
+  } finally {
+    await form.close();
   }
 });

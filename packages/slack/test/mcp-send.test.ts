@@ -3,7 +3,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
-import { EXIT_CODES, handoffText } from '@agentcomms/core';
+import { asV2, EXIT_CODES, handoffText } from '@agentcomms/core';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { run } from '../src/cli/program.ts';
@@ -226,7 +226,7 @@ test('under `confirm`, slack_post_send waits for a person, hands over the termin
     assert.doesNotMatch(error.hint ?? '', /post send command/, 'not a command for a shell the agent is not in');
     assert.equal(fake.count('chat.postMessage'), 0, 'nothing is posted while it waits');
 
-    const record = await harness.core.approvals.get(approvalId);
+    const record = asV2(await harness.core.approvals.get(approvalId));
     assert.equal(record?.state, 'pending', 'asking did not approve it');
     assert.equal(record?.approvedVia, undefined);
 
@@ -510,7 +510,9 @@ test('under `chat`, slack_react adds the reaction the person said yes to, once',
     assert.match(String((made.structuredContent as { approvalId: string }).approvalId), /^ap_/);
     assert.equal(fake.count('reactions.add'), 1);
 
-    const record = await harness.core.approvals.get((made.structuredContent as { approvalId: string }).approvalId);
+    const record = asV2(
+      await harness.core.approvals.get((made.structuredContent as { approvalId: string }).approvalId),
+    );
     assert.equal(record?.state, 'used', 'through a real approval, spent by the reaction it permitted');
   } finally {
     await close();
@@ -579,7 +581,7 @@ test('under `confirm`, slack_react adds nothing and hands over the command; slac
     assert.equal(failure(early).code, 'APPROVAL_PENDING');
     assert.equal(failure(early).details?.approvalId, approvalId);
     assert.equal((await harness.core.approvals.list()).length, 1, 'no second approval was made');
-    assert.equal((await harness.core.approvals.get(approvalId))?.state, 'pending', 'and none was approved');
+    assert.equal(asV2(await harness.core.approvals.get(approvalId))?.state, 'pending', 'and none was approved');
 
     await personApproves(harness, approvalId, fake.read);
 

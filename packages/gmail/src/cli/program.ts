@@ -2,7 +2,6 @@ import {
   agentMarker,
   answerDownloadAtTerminal,
   approvalHint,
-  approvalKind,
   approvalsOf,
   approveChangeAtTerminal,
   CommsError,
@@ -24,6 +23,7 @@ import {
   homeDirectory,
   insertWordsBeforeSentinel,
   installExitStatus,
+  kindOf,
   type OutputOptions,
   openCore,
   orgAddChange,
@@ -31,6 +31,7 @@ import {
   paint,
   pathOverridesFromCliOptions,
   profileSourcePath,
+  publicStored,
   refuseRetiredOut,
   refuseUnclaimedApproval,
   resolvePaths,
@@ -1317,7 +1318,7 @@ update first, or put it off (the stop names both commands) · 64 usage · 65 bad
     .description('cancel an approval — refusing to send is never the dangerous direction')
     .action(
       act(async (context, _globalOptions, approvalId: string) => {
-        const result = await revokeApproval(context, approvalId);
+        const result = publicStored(await revokeApproval(context, approvalId));
         writeResult(
           result,
           output(),
@@ -1363,7 +1364,7 @@ update first, or put it off (the stop names both commands) · 64 usage · 65 bad
          * core's own terminal approval.
          */
         const pending = await context.core.approvals.get(approvalId);
-        if (pending && approvalKind(pending) === 'change') {
+        if (kindOf(pending) === 'change') {
           const outcome = await approveChangeAtTerminal(
             context.core,
             approvalId,
@@ -1383,7 +1384,7 @@ update first, or put it off (the stop names both commands) · 64 usage · 65 bad
          * terminal — the one way to answer it when the mailbox's change policy is `confirm`, since an agent cannot type
          * into this. The download that asked saves where this says, when it is made again with the choice id alone.
          */
-        if (pending && approvalKind(pending) === 'download') {
+        if (kindOf(pending) === 'download') {
           const outcome = await answerDownloadAtTerminal(context.core, approvalId, {
             env,
             color: globalOptions.color,

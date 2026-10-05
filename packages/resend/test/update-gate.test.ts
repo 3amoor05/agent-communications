@@ -3,6 +3,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import {
+  asV2,
   claimUpdateCheck,
   gatedChange,
   readUpdateCheck,
@@ -67,7 +68,7 @@ async function sendApproval(harness: Harness, accountId: string, used = false): 
       expect,
     });
     await harness.core.approvals.complete(record.approvalId, { sentMessageId: 'email_one' });
-    assert.equal((await harness.core.approvals.get(record.approvalId))?.state, 'used');
+    assert.equal(asV2(await harness.core.approvals.get(record.approvalId))?.state, 'used');
   }
   return record.approvalId;
 }
@@ -197,7 +198,7 @@ test('an approval the stop let through is refused by the policy report, over MCP
     assert.match(error.message, /an approval goes with a policy to set; without --send, --mode or --change/);
 
     assert.equal(JSON.stringify(await harness.core.config.load()), before, 'the account was changed');
-    assert.equal((await harness.core.approvals.get(later))?.state, 'pending', 'the approval was claimed');
+    assert.equal(asV2(await harness.core.approvals.get(later))?.state, 'pending', 'the approval was claimed');
   } finally {
     await harness.close();
   }

@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
-import { isDangerous } from '@agentcomms/core';
+import { isDangerous, openCore } from '@agentcomms/core';
+import { v1ChangeRecord, writeV1Record } from '../../core/test/fixtures/approval-v1-0.13.0.ts';
 import { defaultStorePath, responsibleApp } from '../src/source/location.ts';
 import { ALICE } from './support/fixture.ts';
 import { assertNoBareCommand, coreInline, ownInline, ownText, whatsappHandoffs } from './support/handoffs.ts';
@@ -265,4 +267,49 @@ test('the app macOS will ask about is named when the environment says which it i
   assert.equal(responsibleApp({ __CFBundleIdentifier: 'com.anthropic.claudefordesktop' }), 'Claude');
   assert.equal(responsibleApp({ __CFBundleIdentifier: 'com.example.unknown' }), null);
   assert.equal(responsibleApp({}), null);
+});
+
+// ── `approve` and every form of an approval record (CUE-404 Task 3) ─────────────────────────────────────────────
+
+test('kind dispatch at `agent-whatsapp approve`: absent is not found, a stub the integrity refusal, a legacy change the version refusal', async () => {
+  const harness = await newHarness({ store: false });
+  const core = openCore({ env: harness.personEnv });
+  const formId = (c: string) => `ap_${'0'.repeat(25)}${c}`;
+  const asPerson = async (approvalId: string) => {
+    const stdin = Object.assign(new PassThrough(), { isTTY: true });
+    const stdout = Object.assign(new PassThrough(), { isTTY: true });
+    const stderr = new PassThrough();
+    let said = '';
+    for (const stream of [stdout, stderr]) {
+      stream.on('data', (chunk) => {
+        said += String(chunk);
+      });
+    }
+    const { code } = await harness.cli(['approve', approvalId], {
+      env: harness.personEnv,
+      streams: { stdin, stdout, stderr } as never,
+    });
+    return { code, said };
+  };
+  const absent = await asPerson(formId('N'));
+  assert.equal(absent.code, 66, absent.said);
+  assert.match(absent.said, /no approval/);
+  const approvals = join(core.paths.stateDir, 'approvals');
+  mkdirSync(approvals, { recursive: true });
+  writeFileSync(join(approvals, `${formId('Y')}.json`), '{ "approvalId": ');
+  const stub = await asPerson(formId('Y'));
+  assert.equal(stub.code, 10, stub.said);
+  assert.match(stub.said, /could not be read \(truncated\)/);
+  writeV1Record(
+    core.paths.stateDir,
+    v1ChangeRecord({
+      approvalId: formId('M'),
+      digest: 'f'.repeat(64),
+      change: { summary: 'Let it read', target: null, loosened: [], effects: ['does a thing'] },
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+    }),
+  );
+  const legacy = await asPerson(formId('M'));
+  assert.equal(legacy.code, 10, legacy.said);
+  assert.match(legacy.said, /prepared by a different version of agent-communications/);
 });

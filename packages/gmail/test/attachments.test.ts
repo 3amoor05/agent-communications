@@ -3,7 +3,7 @@ import { rmSync, symlinkSync } from 'node:fs';
 import { chmod, type FileHandle, mkdir, readdir, readFile, stat, symlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { test } from 'node:test';
-import { CommsError, openCore } from '@agentcomms/core';
+import { asV2, CommsError, openCore } from '@agentcomms/core';
 import { buildAuthUrl, exchangeCode, newPkce } from '../src/auth/oauth.ts';
 import { SCOPES } from '../src/auth/scopes.ts';
 import { GMAIL_CALLER } from '../src/caller.ts';
@@ -345,7 +345,7 @@ test('another folder: absolute and made when missing, or from ~ in the environme
     );
   }
   // Refused before the question was spent: the person's answer can still be given.
-  assert.equal((await harness.core.approvals.get(question.choiceId))?.state, 'pending');
+  assert.equal(asV2(await harness.core.approvals.get(question.choiceId))?.state, 'pending');
 });
 
 test('the Downloads option is the folder a person set as defaults.downloadsDir, when they set one', async () => {
@@ -398,7 +398,7 @@ test('an answer without the question it answers is refused, and nothing is read 
     downloadAttachments(context, 'work', [{ messageId: 'm1', partId: '1' }], { choiceId: question.choiceId }),
     refusal(/`--choice` needs the person’s answer/, 'USAGE'),
   );
-  assert.equal((await harness.core.approvals.get(question.choiceId))?.state, 'pending');
+  assert.equal(asV2(await harness.core.approvals.get(question.choiceId))?.state, 'pending');
   assert.deepEqual(await everything(personal), []);
 });
 
@@ -430,7 +430,7 @@ test('a choiceId for other files, used already, or expired is refused, and nothi
     ),
   );
   // Refused, but left open: the call with the arguments it was asked with still saves, once, and only once.
-  assert.equal((await harness.core.approvals.get(first.choiceId))?.state, 'pending');
+  assert.equal(asV2(await harness.core.approvals.get(first.choiceId))?.state, 'pending');
   await downloadAttachments(context, 'work', target, { saveTo: 'current', choiceId: first.choiceId });
   await assert.rejects(
     downloadAttachments(context, 'work', target, { saveTo: 'downloads', choiceId: first.choiceId }),
@@ -460,7 +460,7 @@ test('a folder that is a file is refused before the question is spent; a link pl
     downloadAttachments(context, 'work', target, { saveTo: join(cwd, 'a-file'), choiceId: question.choiceId }),
     refusal(/it is a file/, 'BAD_DATA'),
   );
-  assert.equal((await harness.core.approvals.get(question.choiceId))?.state, 'pending');
+  assert.equal(asV2(await harness.core.approvals.get(question.choiceId))?.state, 'pending');
 
   // Somebody leaves a link where the file's name would go: the file is created beside it, and the link's target is
   // untouched.
@@ -1339,7 +1339,7 @@ test('a folder nothing can be written in is refused before the question is spent
       }),
       refusal(/^cannot save into .*locked: nothing can be written in it: permission denied \(EACCES\)$/, 'BAD_DATA'),
     );
-    assert.equal((await harness.core.approvals.get(question.choiceId))?.state, 'pending');
+    assert.equal(asV2(await harness.core.approvals.get(question.choiceId))?.state, 'pending');
   } finally {
     await chmod(locked, 0o700);
   }

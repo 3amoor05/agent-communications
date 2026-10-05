@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
 import {
+  asLegacy,
+  asV2,
   type ChangePolicy,
   type CliHandoffs,
   CommsError,
@@ -361,14 +363,18 @@ export function removeAccountChange(context: ResendContext, name: string): Gated
         return found;
       });
       const voided: string[] = [];
-      for (const record of await context.core.approvals.list({
+      // Every approval the account still held waiting — this release's, and an earlier one's by its own state — by
+      // its owner: a record whose owner cannot be trusted never matches.
+      for (const stored of await context.core.approvals.list({
         inboxId: removed.account.id,
         states: ['pending', 'approved'],
       })) {
+        const approvalId = (asV2(stored) ?? asLegacy(stored))?.approvalId;
+        if (approvalId === undefined) continue;
         // The person approved removing the account, and with it every approval it held: a lifecycle revoke, which
         // retires one an earlier release prepared in that release's own shape.
-        await context.core.approvals.revoke(record.approvalId, 'the account was removed', { disposition: 'lifecycle' });
-        voided.push(record.approvalId);
+        await context.core.approvals.revoke(approvalId, 'the account was removed', { disposition: 'lifecycle' });
+        voided.push(approvalId);
       }
       await context.core.audit.append({
         inboxId: removed.account.id,

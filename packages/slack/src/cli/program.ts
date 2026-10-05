@@ -1,7 +1,6 @@
 import {
   agentMarker,
   answerDownloadAtTerminal,
-  approvalKind,
   approvalsOf,
   approveChangeAtTerminal,
   CommsError,
@@ -17,6 +16,8 @@ import {
   gatedChangeAtTerminal,
   handoffSentence,
   installExitStatus,
+  integrityRefusal,
+  kindOf,
   type OutputOptions,
   openCore,
   PATH_OPTIONS,
@@ -1359,7 +1360,7 @@ temporary (retry later) · 77 sign-in or permission needed · 78 configuration p
          * core's own terminal approval.
          */
         const pending = await context.core.approvals.get(approvalId);
-        if (pending && approvalKind(pending) === 'change') {
+        if (kindOf(pending) === 'change') {
           const outcome = await approveChangeAtTerminal(
             context.core,
             approvalId,
@@ -1379,7 +1380,7 @@ temporary (retry later) · 77 sign-in or permission needed · 78 configuration p
          * terminal — the one way to answer it when the workspace's change policy is `confirm`, since an agent cannot
          * type into this. The download that asked saves where this says, when it is made again with the choice id alone.
          */
-        if (pending && approvalKind(pending) === 'download') {
+        if (kindOf(pending) === 'download') {
           const outcome = await answerDownloadAtTerminal(context.core, approvalId, {
             env,
             color: globalOptions.color,
@@ -1392,6 +1393,11 @@ temporary (retry later) · 77 sign-in or permission needed · 78 configuration p
               : 'Cancelled. Nothing was saved.\n',
           );
           return;
+        }
+        // A record that cannot be used is refused for what it is (N4) — this command is no workspace's in particular —
+        // before its workspace is looked for: whose it is cannot be read from it.
+        if (pending !== null && (pending.form === 'corrupt' || pending.form === 'unreadable')) {
+          throw integrityRefusal(pending);
         }
         void (await workspaceForApproval(context, approvalId));
         const slack = { fetch: deps.read, baseUrl: deps.slackBaseUrl };

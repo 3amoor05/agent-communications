@@ -1,8 +1,9 @@
 import {
   type ApprovalRecord,
   CommsError,
-  isCurrentDigestVersion,
+  integrityRefusal,
   otherVersionRefusal,
+  ownerOf,
   renderChannelPreview,
   truncateDisplay,
 } from '@agentcomms/core';
@@ -37,15 +38,17 @@ export interface ApprovalPrompt {
 
 /** The approval, and the workspace it belongs to by its current name. */
 async function approvalAndWorkspace(context: SlackContext, approvalId: string) {
-  const record = await context.core.approvals.get(approvalId);
-  if (!record) {
+  const stored = await context.core.approvals.get(approvalId);
+  if (!stored) {
     throw new CommsError('NOT_FOUND', `no approval ${approvalId}`, {
       hint: 'Prepare it again; an approval expires ten minutes after it is made.',
     });
   }
-  // A record an earlier release prepared is refused before the room or the draft is read: this release cannot approve
-  // it, and an integrity check of it (`currentPost`) would void it by rules it was not written under.
-  if (!isCurrentDigestVersion(record)) throw otherVersionRefusal(record);
+  // Only a valid version-2 record is approved here, and anything else is refused before the room or the draft is
+  // read: an integrity check of it (`currentPost`) would judge it by rules it was not written under.
+  if (stored.form === 'corrupt' || stored.form === 'unreadable') throw integrityRefusal(stored);
+  if (stored.form === 'legacy') throw otherVersionRefusal(stored.view);
+  const record = stored.record;
   const config = await context.config();
   const entry = Object.entries(config.accounts).find(([, account]) => account.id === record.inboxId);
   if (!entry) {
@@ -234,10 +237,12 @@ export async function revokeApproval(context: SlackContext, approvalId: string):
 
 /** The workspace an approval belongs to, by its current name. */
 export async function workspaceForApproval(context: SlackContext, approvalId: string): Promise<string> {
-  const record = await context.core.approvals.get(approvalId);
-  if (!record) throw new CommsError('NOT_FOUND', `no approval ${approvalId}`);
+  // Whose it is, from a record that can be trusted to say — a version-2 record, or the stored owner of one an earlier
+  // release prepared. One that cannot is not found, as an id nobody prepared is not.
+  const owner = ownerOf(await context.core.approvals.get(approvalId));
+  if (owner === null) throw new CommsError('NOT_FOUND', `no approval ${approvalId}`);
   const config = await context.config();
-  const entry = Object.entries(config.accounts).find(([, account]) => account.id === record.inboxId);
+  const entry = Object.entries(config.accounts).find(([, account]) => account.id === owner);
   if (!entry) throw new CommsError('NOT_FOUND', 'the workspace this approval belongs to is no longer connected');
   requireWorkspace(config, entry[0], context.handoffs);
   return entry[0];

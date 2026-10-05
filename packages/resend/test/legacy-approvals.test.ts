@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { afterEach, test } from 'node:test';
-import { CommsError, deriveLegacyV1State } from '@agentcomms/core';
+import { asV2, CommsError, deriveLegacyV1State } from '@agentcomms/core';
 import {
   readV1Record,
   v1RecordPath,
@@ -43,7 +43,7 @@ async function withLegacy(ageMs: number) {
     subject: EXPECT.subject,
     text: 'Hi Sam, the plan is attached to the thread.',
   });
-  const stored = await harness.core.approvals.get(prepared.approvalId);
+  const stored = asV2(await harness.core.approvals.get(prepared.approvalId));
   assert.ok(stored);
   const createdAt = new Date(Date.now() - ageMs).toISOString();
   const fields = {

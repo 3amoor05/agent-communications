@@ -4,7 +4,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { managedRuntimeDir, managedRuntimeEntry } from '@agentcomms/core';
+import { asV2, managedRuntimeDir, managedRuntimeEntry } from '@agentcomms/core';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { GmailContext } from '../src/context.ts';
@@ -298,7 +298,7 @@ test('`setup --mcp-client` stops for approval without registering, and only `--m
   assert.equal(refusal.code, 'USAGE');
   assert.match(refusal.message, /already registered, so this run registers none and takes no --approval/);
   assert.deepEqual(
-    (await harness.core.approvals.list()).map((record) => record.approvalId),
+    (await harness.core.approvals.list()).map((record) => asV2(record)?.approvalId),
     [report?.blocked.approvalId],
     'no new approval was prepared',
   );

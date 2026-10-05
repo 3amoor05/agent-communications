@@ -6,7 +6,7 @@ import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, test } from 'node:test';
-import { EXIT_CODES, gatedChange, updateLaterChange, withCredentialsLock } from '@agentcomms/core';
+import { asV2, EXIT_CODES, gatedChange, updateLaterChange, withCredentialsLock } from '@agentcomms/core';
 import { parseBundle } from '../src/auth/bundle.ts';
 import { openFlowStore } from '../src/auth/flow.ts';
 import { run } from '../src/cli/program.ts';
@@ -1158,7 +1158,7 @@ test('--finish takes no --approval: it is refused, and the sign-in is left to be
   const finished = await cli(harness, ['workspace', 'add', '--finish', start.flowId, '--wait', '20']);
   assert.equal(finished.code, EXIT_CODES.OK, finished.stderr);
   assert.equal((await harness.core.config.load()).accounts.acme?.workspace, 'T0001');
-  assert.equal((await harness.core.approvals.get(later.prepared.approvalId))?.state, 'pending');
+  assert.equal(asV2(await harness.core.approvals.get(later.prepared.approvalId))?.state, 'pending');
 });
 
 test('a reauth sign-in cannot be finished as an add', async () => {

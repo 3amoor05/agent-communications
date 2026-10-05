@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { CommsError } from '@agentcomms/core';
+import { asV2, CommsError } from '@agentcomms/core';
 import { GmailContext } from '../src/context.ts';
 import { createDraft } from '../src/operations/drafts.ts';
 import {
@@ -321,7 +321,7 @@ test('while a send is in flight, nothing else may touch the draft it is standing
   const prepared = await prepareSend(context, 'work', draftId);
 
   // Put the approval in `sending`, which is the window `executeSend` holds open around the final read.
-  const record = await harness.core.approvals.get(prepared.approvalId);
+  const record = asV2(await harness.core.approvals.get(prepared.approvalId));
   assert.ok(record);
   await harness.core.approvals.claimForSend(prepared.approvalId, {
     draftMessageId: record.draftMessageId,

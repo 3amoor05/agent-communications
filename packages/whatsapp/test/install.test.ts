@@ -359,7 +359,7 @@ test('a send’s approval is not approved here, and the refusal names every comm
     inboxSub: 'key_12345678',
     draftId: 'rsd_x',
     draftMessageId: 'd',
-    contentDigest: 'd',
+    contentDigest: 'd'.repeat(64),
     sendEpoch: 0,
     policy: 'confirm',
     requiredPolicy: 'confirm',

@@ -3,7 +3,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { ApprovalStore, CommsError } from '@agentcomms/core';
+import { ApprovalStore, asV2, CommsError } from '@agentcomms/core';
 import type { SlackCall } from '../src/api/call.ts';
 import { closedPermit } from '../src/api/guard.ts';
 import { compose } from '../src/compose/blocks.ts';
@@ -305,13 +305,13 @@ test('a person who left the channel after prepare is refused at send, before the
     false,
     'posted to a room the person has left',
   );
-  assert.equal((await approvals.get(prepared.approvalId))?.state, 'pending', 'the refusal spent the approval');
+  assert.equal(asV2(await approvals.get(prepared.approvalId))?.state, 'pending', 'the refusal spent the approval');
 
   // Back in the room, the same approval posts.
   script['conversations.info'] = roomReply();
   const posted = await postPrepared(deps, draft, prepared.approvalId, 'C1', book);
   assert.equal(posted.ts, '1700000000.000100');
-  assert.equal((await approvals.get(prepared.approvalId))?.state, 'used');
+  assert.equal(asV2(await approvals.get(prepared.approvalId))?.state, 'used');
 });
 
 test('a direct message and a group DM post, though Slack says nothing of membership for either', async () => {
@@ -530,7 +530,7 @@ test('a failed post is recorded rather than left in flight', async () => {
     }).call,
   };
   await assert.rejects(postPrepared(failing, draft, prepared.approvalId, 'C1', book));
-  const record = await approvals.get(prepared.approvalId);
+  const record = asV2(await approvals.get(prepared.approvalId));
   assert.notEqual(record?.state, 'sending', 'an approval left in `sending` is one whose outcome nobody knows');
 });
 
@@ -573,7 +573,7 @@ test('a reaction approval reads back as the reaction it binds, and is refused wh
     { channel: 'C2', ts: '2.2', name: 'eyes', remove: true },
   ]) {
     const prepared = await prepareReaction(deps, wanted);
-    const record = await approvals.get(prepared.approvalId);
+    const record = asV2(await approvals.get(prepared.approvalId));
     assert.ok(record);
     assert.deepEqual(reactionOfApproval(record, 'T0001'), wanted);
     assert.throws(() => reactionOfApproval(record, 'T0002'), /does not describe/, 'another workspace’s digest');
@@ -582,13 +582,13 @@ test('a reaction approval reads back as the reaction it binds, and is refused wh
   // A post's approval is not a reaction's, and is left for the post path.
   const post = await setUp({ policy: 'confirm' });
   const prepared = await preparePost(post.deps, post.draft, post.book);
-  const record = await post.approvals.get(prepared.approvalId);
+  const record = asV2(await post.approvals.get(prepared.approvalId));
   assert.ok(record);
   assert.equal(reactionOfApproval(record, 'T0001'), undefined);
 
   // A record whose words say one emoji while its digest binds another shows neither.
   const bound = await prepareReaction(deps, { channel: 'C1', ts: '1.1', name: 'thumbsdown' });
-  const honest = await approvals.get(bound.approvalId);
+  const honest = asV2(await approvals.get(bound.approvalId));
   assert.ok(honest);
   const relabelled = { ...honest, expect: { ...honest.expect, subject: ':tada: on 1.1' } };
   assert.throws(() => reactionOfApproval(relabelled, 'T0001'), /does not describe the reaction it is bound to/);

@@ -3,7 +3,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
-import { EXIT_CODES } from '@agentcomms/core';
+import { asV2, EXIT_CODES } from '@agentcomms/core';
 import { run } from '../src/cli/program.ts';
 import { assertNoBareCommand, slackInline } from './support/handoffs.ts';
 import { type Harness, newHarness } from './support/harness.ts';
@@ -334,7 +334,7 @@ test('an @channel prepared while the room could not be read is not approved whil
     'chat.postMessage': { ok: true, ts: '1700000000.000100' },
   });
   const { approvalId, send } = await preparedPost(harness, slack.read, ['--broadcast', 'channel']);
-  const record = await harness.core.approvals.get(approvalId);
+  const record = asV2(await harness.core.approvals.get(approvalId));
   assert.ok(record?.riskFlags.includes('reach-unknown'), 'the approval records that nobody counted the room');
 
   for (const attempt of ['first', 'second']) {

@@ -3,7 +3,7 @@ import { realpathSync, writeFileSync } from 'node:fs';
 import { mkdir, readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { type TestContext, test } from 'node:test';
-import { type ApprovalStore, type AuditRecord, CommsError, withFileLock } from '@agentcomms/core';
+import { type ApprovalStore, type AuditRecord, asV2, CommsError, withFileLock } from '@agentcomms/core';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { SlackContext } from '../src/context.ts';
@@ -241,7 +241,7 @@ test('a download cancelled before the person’s answer is claimed saves nothing
     downloadFiles(context, session, answer, { signal: cancel.signal }),
     isCancellation(/^cancelled: nothing was saved$/),
   );
-  assert.equal((await harness.core.approvals.get(asked.choiceId))?.state, 'pending', 'the answer was spent');
+  assert.equal(asV2(await harness.core.approvals.get(asked.choiceId))?.state, 'pending', 'the answer was spent');
   assert.deepEqual(fetched(), []);
   assert.deepEqual(await audited(harness, 'files.download'), [], 'a run that never started was recorded');
 
@@ -280,7 +280,7 @@ test('a download cancelled while the claim of the answer waits for the approval 
   await lock.release();
 
   await assert.rejects(run, isCancellation(/^cancelled: nothing was saved$/));
-  assert.equal((await store.get(asked.choiceId))?.state, 'pending', 'the answer was spent');
+  assert.equal(asV2(await store.get(asked.choiceId))?.state, 'pending', 'the answer was spent');
   assert.deepEqual(fetched(), []);
   assert.deepEqual(await audited(harness, 'files.download'), [], 'a run that never started was recorded');
 
@@ -329,7 +329,7 @@ async function prepared(harness: Harness, fetch: FakeSlack['fetch'], files: stri
       { draftId: draft.draftId, approvalId: draft.approvalId, expectChannel: 'C1', ...(signal ? { signal } : {}) },
       { fetch: through },
     );
-  const state = async () => (await harness.core.approvals.get(draft.approvalId))?.state;
+  const state = async () => asV2(await harness.core.approvals.get(draft.approvalId))?.state;
   return { draft, send, state };
 }
 
@@ -366,7 +366,7 @@ test('a post with files cancelled over MCP while a file uploads shares nothing, 
     const records = await audited(harness, 'slack.post');
     return records.length > 0 ? records : undefined;
   });
-  const settled = await harness.core.approvals.get(draft.approvalId);
+  const settled = asV2(await harness.core.approvals.get(draft.approvalId));
   assert.equal(settled?.state, 'failed', 'an approval of a post that never happened says it was used');
   assert.match(settled?.reason ?? '', /^cancelled: nothing was posted$/);
   assert.equal(uploads.issued.length, 1, 'the file was not on its way when the call was cancelled');
@@ -405,7 +405,7 @@ test('a post cancelled while its claim waits for the approval store posts nothin
   const { send, state, draft } = await prepared(harness, fake.fetch);
   const store = harness.core.approvals;
   // Approved by a person at a terminal, so "as it was" is a state no claim could put back by itself.
-  const record = await store.get(draft.approvalId);
+  const record = asV2(await store.get(draft.approvalId));
   assert.ok(record);
   const live = { draftMessageId: record.draftMessageId, contentDigest: record.contentDigest };
   await store.approve(draft.approvalId, 'terminal', live, await store.issueChallenge(draft.approvalId));
@@ -455,7 +455,7 @@ test('a post cancelled after its approval is claimed and before Slack has it pos
   await assert.rejects(send(cancel.signal), isCancellation(/^cancelled: nothing was posted$/));
   assert.equal(posted(), 0, 'it was posted after the cancellation');
   assert.equal(await state(), 'failed');
-  assert.equal((await store.get(draft.approvalId))?.reason, 'cancelled: nothing was posted');
+  assert.equal(asV2(await store.get(draft.approvalId))?.reason, 'cancelled: nothing was posted');
   const [record] = await audited(harness, 'slack.post');
   assert.equal(record?.outcome, 'failed');
   assert.equal(record?.reason, 'cancelled: nothing was posted');

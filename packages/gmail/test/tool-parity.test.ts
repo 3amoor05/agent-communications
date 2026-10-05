@@ -1,14 +1,24 @@
 import assert from 'node:assert/strict';
-import { mkdir, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { dirname, join } from 'node:path';
 import { afterEach, test } from 'node:test';
-import { type CommsError, type ConfigV2, clientSecretRef, managedRuntimeEntry, openCore } from '@agentcomms/core';
+import {
+  asV2,
+  bindingDigestOf,
+  type CommsError,
+  type ConfigV2,
+  clientSecretRef,
+  managedRuntimeEntry,
+  openCore,
+} from '@agentcomms/core';
+import { v1ChangeRecord, v1SendRecord, writeV1Record } from '../../core/test/fixtures/approval-v1-0.13.0.ts';
 import { GMAIL_CALLER } from '../src/caller.ts';
 import { GmailContext } from '../src/context.ts';
 import { searchContacts } from '../src/operations/contacts.ts';
-import { createDraft, getDraft } from '../src/operations/drafts.ts';
+import { createDraft, getDraft, updateDraft } from '../src/operations/drafts.ts';
 import { inboxPolicy, orphanedSecretsPath } from '../src/operations/inboxes.ts';
+import { modify } from '../src/operations/organise.ts';
 import { prepareSend } from '../src/operations/send.ts';
 import { assertNoBareCommand, GMAIL_SOURCE_CLI, gmailInline } from './support/handoffs.ts';
 import {
@@ -878,7 +888,7 @@ test('a pinned server refuses another mailbox’s change approval before it touc
     assert.equal(refused.code, 'NOT_FOUND');
     assert.match(refused.message, /for the "work" mailbox/);
     assert.equal(
-      (await harness.core.approvals.get(forHome.approvalId))?.state,
+      asV2(await harness.core.approvals.get(forHome.approvalId))?.state,
       'pending',
       'home’s approval was voided',
     );
@@ -915,7 +925,7 @@ test('a pinned server refuses another mailbox’s send approval rather than void
     draftMessageId: 'm-home',
     channel: 'gmail',
     sendEpoch: 0,
-    contentDigest: 'digest-home',
+    contentDigest: 'e'.repeat(64),
     policy: 'chat',
     requiredPolicy: 'chat',
     riskFlags: [],
@@ -935,7 +945,7 @@ test('a pinned server refuses another mailbox’s send approval rather than void
     );
     assert.equal(refused.code, 'NOT_FOUND');
     assert.equal(
-      (await harness.core.approvals.get(forHome.approvalId))?.state,
+      asV2(await harness.core.approvals.get(forHome.approvalId))?.state,
       'pending',
       'home’s approval was voided',
     );
@@ -944,7 +954,7 @@ test('a pinned server refuses another mailbox’s send approval rather than void
     const cancel = toolError(await pinned.call('gmail_send_cancel', { approvalId: forHome.approvalId }));
     assert.equal(cancel.code, refused.code);
     assert.equal(cancel.message, refused.message);
-    assert.equal((await harness.core.approvals.get(forHome.approvalId))?.state, 'pending');
+    assert.equal(asV2(await harness.core.approvals.get(forHome.approvalId))?.state, 'pending');
   } finally {
     await pinned.close();
   }
@@ -1965,5 +1975,191 @@ test('gmail_setup adds --profile through its own orgApproval, then reports the r
     assertRedacted(await core.audit.tail(), 'audit log');
   } finally {
     await close();
+  }
+});
+
+// ── Every form of an approval record at Gmail's sites (CUE-404 Task 3) ──────────────────────────────────────────
+
+const formId = (c: string) => `ap_${'0'.repeat(25)}${c}`;
+const UNREADABLE = formId('Y');
+const UNVERIFIABLE = formId('B');
+const CORRUPT_OWN = formId('C');
+const NOBODY = formId('N');
+
+/**
+ * Work's store holding a record of each form that cannot be used: an unreadable file naming work's inbox inside it, a
+ * work send whose channel was edited (its binding no longer verifies, so whose it is cannot be trusted), and a work
+ * send corrupt for another reason (its binding verifies: it is work's, and shown to work as corrupt).
+ */
+async function unusableForWork(harness: Harness): Promise<Record<string, string>> {
+  const work = (await harness.core.config.load()).inboxes.work;
+  assert.ok(work);
+  const approvals = join(harness.core.paths.stateDir, 'approvals');
+  await mkdir(approvals, { recursive: true });
+  const own = await harness.core.approvals.create({
+    channel: 'gmail',
+    inboxId: work.id,
+    inboxSub: 'sub-1',
+    draftId: 'r-work',
+    draftMessageId: 'm-work',
+    contentDigest: 'a'.repeat(64),
+    sendEpoch: 0,
+    policy: 'chat',
+    requiredPolicy: 'chat',
+    riskFlags: [],
+    expect: { to: ['kim@partner.test'], cc: [], bcc: [], subject: 'Work' },
+  });
+  const raw = JSON.parse(JSON.stringify(own)) as Record<string, unknown>;
+  const files: Record<string, string> = {
+    [UNREADABLE]: `{ "approvalId": "${UNREADABLE}", "inboxId": "${work.id}", "state": "pend`,
+    [UNVERIFIABLE]: `${JSON.stringify({ ...raw, approvalId: UNVERIFIABLE, channel: 'resend' }, null, 2)}\n`,
+    // `sendingAt` on a pending record: misplaced, so corrupt — but its binding still verifies.
+    [CORRUPT_OWN]: `${JSON.stringify(
+      {
+        ...raw,
+        approvalId: CORRUPT_OWN,
+        bindingDigest: bindingDigestOf({ ...raw, approvalId: CORRUPT_OWN } as never),
+        sendingAt: raw.createdAt,
+      },
+      null,
+      2,
+    )}\n`,
+  };
+  for (const [fileId, text] of Object.entries(files)) await writeFile(join(approvals, `${fileId}.json`), text);
+  await rm(join(approvals, `${own.approvalId}.json`));
+  return files;
+}
+
+async function bytesOf(harness: Harness, fileId: string): Promise<string> {
+  return readFile(join(harness.core.paths.stateDir, 'approvals', `${fileId}.json`), 'utf8');
+}
+
+test('pins: a pinned server answers a stub and an unverifiable record exactly as an id nobody prepared, and reads no owner from them', async () => {
+  const harness = await workAndHome();
+  const files = await unusableForWork(harness);
+  const pinned = await connect({ core: harness.core, env: harness.env, inbox: 'work' });
+  try {
+    const said = async (approvalId: string) => {
+      const refused = toolError(await pinned.call('gmail_send_cancel', { approvalId }));
+      return { code: refused.code, message: refused.message.replace(approvalId, '<id>'), hint: refused.hint };
+    };
+    const nobody = await said(NOBODY);
+    assert.equal(nobody.code, 'NOT_FOUND');
+    assert.deepEqual(await said(UNREADABLE), nobody, 'an unreadable file is not this mailbox’s');
+    assert.deepEqual(await said(UNVERIFIABLE), nobody, 'nor a record whose binding does not verify');
+    // Work's own corrupt record is work's, and refused as corrupt — never as not found, never used.
+    const own = toolError(await pinned.call('gmail_send_cancel', { approvalId: CORRUPT_OWN }));
+    assert.equal(own.code, 'APPROVAL_VOID');
+    assert.match(own.message, /is corrupt \(timestamp-misplaced\)/);
+    // The owner filter of a pinned list: work's corrupt record is shown to work, and nothing that cannot be trusted.
+    const listed = wire(await pinned.call('gmail_send_list', {})).approvals as Array<Record<string, unknown>>;
+    assert.deepEqual(
+      listed.map((approval) => [approval.approvalId, approval.state, approval.inbox]),
+      [[CORRUPT_OWN, 'corrupt', 'work']],
+    );
+    for (const [fileId, text] of Object.entries(files)) assert.equal(await bytesOf(harness, fileId), text, fileId);
+  } finally {
+    await pinned.close();
+  }
+  // Unpinned, the list shows every one — the stubs as stubs, owned by nobody.
+  const whole = await connect({ core: harness.core, env: harness.env });
+  try {
+    const listed = wire(await whole.call('gmail_send_list', {})).approvals as Array<Record<string, unknown>>;
+    const byId = Object.fromEntries(listed.map((approval) => [approval.approvalId, approval]));
+    assert.deepEqual(byId[UNREADABLE], { approvalId: UNREADABLE, state: 'corrupt', reason: 'truncated', inbox: null });
+    assert.deepEqual(byId[UNVERIFIABLE], {
+      approvalId: UNVERIFIABLE,
+      state: 'corrupt',
+      reason: 'binding-mismatch',
+      inbox: null,
+    });
+    assert.equal(byId[CORRUPT_OWN]?.inbox, 'work');
+  } finally {
+    await whole.close();
+  }
+});
+
+test('kind dispatch at `agent-gmail approve`: a stub gets the integrity refusal, a legacy change the version refusal', async () => {
+  const harness = await workAndHome();
+  await unusableForWork(harness);
+  const stub = await cli(harness, ['approve', UNREADABLE], { tty: true });
+  assert.equal(stub.code, 10, stub.stdout + stub.stderr);
+  assert.match(stub.stderr + stub.stdout, /could not be read \(truncated\)/);
+  const change = await (async () => {
+    const legacy = v1ChangeRecord({
+      approvalId: formId('M'),
+      digest: 'f'.repeat(64),
+      change: { summary: 'Let work send', target: null, loosened: [], effects: ['does a thing'] },
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+    });
+    writeV1Record(harness.core.paths.stateDir, legacy);
+    return cli(harness, ['approve', formId('M')], { tty: true });
+  })();
+  assert.equal(change.code, 10, change.stdout + change.stderr);
+  assert.match(change.stderr + change.stdout, /prepared by a different version of agent-communications/);
+});
+
+test('in-flight guards: a send an earlier release has under way blocks a draft edit and a move', async () => {
+  const harness = await workAndHome();
+  const context = new GmailContext({ core: harness.core, env: harness.env });
+  const draft = await createDraft(context, 'work', { to: ['sam@partner.test'], subject: 'Tue', text: 'Tuesday.' });
+  const shown = await getDraft(context, 'work', draft.draftId);
+  const work = (await harness.core.config.load()).inboxes.work;
+  assert.ok(work);
+  writeV1Record(
+    harness.core.paths.stateDir,
+    v1SendRecord({
+      approvalId: formId('S'),
+      inboxId: work.id,
+      inboxSub: 'sub-1',
+      draftId: draft.draftId,
+      draftMessageId: shown.messageId,
+      digest: 'a'.repeat(64),
+      expect: { to: ['sam@partner.test'], cc: [], bcc: [], subject: 'Tue' },
+      state: 'sending',
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      updatedAt: new Date(Date.now() - 30_000).toISOString(),
+    }),
+  );
+  const pending = (e: unknown) =>
+    (e as CommsError).code === 'APPROVAL_PENDING' && /being sent right now/.test((e as CommsError).message);
+  await assert.rejects(updateDraft(context, 'work', draft.draftId, { text: 'Wednesday.' }), pending);
+  await assert.rejects(modify(context, 'work', { messageIds: [shown.messageId], archive: true }), pending);
+});
+
+test('v2-only helpers: a legacy confirm send is never put in a form, and gmail_draft_send refuses it by its version', async () => {
+  const harness = await workAndHome();
+  const context = new GmailContext({ core: harness.core, env: harness.env });
+  const draft = await createDraft(context, 'work', { to: ['sam@partner.test'], subject: 'Tue', text: 'Tuesday.' });
+  const work = (await harness.core.config.load()).inboxes.work;
+  assert.ok(work);
+  writeV1Record(
+    harness.core.paths.stateDir,
+    v1SendRecord({
+      approvalId: formId('F'),
+      inboxId: work.id,
+      inboxSub: 'sub-1',
+      draftId: draft.draftId,
+      draftMessageId: 'm-at-prepare',
+      digest: 'a'.repeat(64),
+      policy: 'confirm',
+      expect: { to: ['sam@partner.test'], cc: [], bcc: [], subject: 'Tue' },
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+    }),
+  );
+  const whole = await connect({ core: harness.core, env: harness.env });
+  try {
+    const refused = toolError(
+      await whole.call('gmail_draft_send', {
+        inbox: 'work',
+        draftId: draft.draftId,
+        approvalId: formId('F'),
+        expect: { to: ['sam@partner.test'], cc: [], bcc: [], subject: 'Tue' },
+      }),
+    );
+    assert.equal(refused.code, 'APPROVAL_VOID');
+    assert.match(refused.message, /prepared by a different version of agent-communications/);
+  } finally {
+    await whole.close();
   }
 });

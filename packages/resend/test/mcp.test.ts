@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
+import { asV2 } from '@agentcomms/core';
 import { createResendMcpServer } from '../src/mcp/server.ts';
 import { assertNoBareCommand, resendInline } from './support/handoffs.ts';
 import { type Harness, newHarness, ok, refused, tempDir } from './support/harness.ts';
@@ -123,7 +124,7 @@ test('the greeting is scoped to a pinned account, and the pin refuses every othe
       await pinned.call('resend_send_execute', { approvalId: theirs.approvalId, expect: theirs.expect }),
     );
     assert.equal(refusal.code, 'NOT_FOUND');
-    assert.equal((await harness.core.approvals.get(theirs.approvalId))?.state, 'pending');
+    assert.equal(asV2(await harness.core.approvals.get(theirs.approvalId))?.state, 'pending');
     assert.equal(harness.fake.sends().length, 0);
   } finally {
     await pinned.close();

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { ApprovalStore, type AuditRecord, CommsError, SENDING_STALE_MS } from '@agentcomms/core';
+import { ApprovalStore, type AuditRecord, asV2, CommsError, SENDING_STALE_MS } from '@agentcomms/core';
 import { certainlyRefused } from '../src/api/call.ts';
 import { SlackContext } from '../src/context.ts';
 import { gateDepsFor } from '../src/operations/gate.ts';
@@ -53,7 +53,7 @@ async function world(remove = false) {
   const prepared = await prepareReaction(gate, wanted);
   const change = (through: typeof fake.fetch = fake.fetch): Promise<ReactionResult> =>
     reactPrepared({ ...gate, call: { ...gate.call, fetch: through } }, prepared.approvalId, wanted);
-  const state = async () => (await harness.core.approvals.get(prepared.approvalId))?.state;
+  const state = async () => asV2(await harness.core.approvals.get(prepared.approvalId))?.state;
   const changed = () => fake.requests.filter((seen) => seen === method).length;
   return { harness, fake, method, change, state, approvalId: prepared.approvalId, changed };
 }
@@ -209,7 +209,7 @@ test('a reaction Slack took whose answer was lost is left to read unknown, never
   assert.deepEqual(outcomes, [], 'an outcome nobody knows was recorded');
   assert.equal(await state(), 'sending');
   const later = new ApprovalStore(harness.core.paths.stateDir, { now: () => new Date(Date.now() + SENDING_STALE_MS) });
-  assert.equal((await later.get(approvalId))?.state, 'unknown');
+  assert.equal(asV2(await later.get(approvalId))?.state, 'unknown');
   const [record] = await audited(harness);
   assert.equal(record?.outcome, 'failed');
   assert.match(record?.reason ?? '', /^outcome unknown: could not reach Slack/);

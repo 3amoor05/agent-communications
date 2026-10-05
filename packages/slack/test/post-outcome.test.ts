@@ -3,7 +3,7 @@ import { realpathSync, writeFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { type TestContext, test } from 'node:test';
-import { ApprovalStore, type AuditRecord, CommsError, SENDING_STALE_MS } from '@agentcomms/core';
+import { ApprovalStore, type AuditRecord, asV2, CommsError, SENDING_STALE_MS } from '@agentcomms/core';
 import { SlackContext } from '../src/context.ts';
 import { prepareDraftPost, sendPost } from '../src/operations/post.ts';
 import { DROP, type FakeSlack, startFakeSlack } from './support/fake-slack.ts';
@@ -56,7 +56,7 @@ async function prepared(harness: Harness, fetch: FakeSlack['fetch'], files: stri
       { draftId: draft.draftId, approvalId: draft.approvalId, expectChannel: 'C1' },
       { fetch: through },
     );
-  const state = async () => (await harness.core.approvals.get(draft.approvalId))?.state;
+  const state = async () => asV2(await harness.core.approvals.get(draft.approvalId))?.state;
   return { draft, send, state };
 }
 
@@ -104,7 +104,7 @@ test('a post Slack took whose answer was lost on the way back is left to read un
   assert.deepEqual(outcomes, [], 'an outcome nobody knows was recorded');
   assert.equal(await state(), 'sending');
   const later = new ApprovalStore(harness.core.paths.stateDir, { now: () => new Date(Date.now() + SENDING_STALE_MS) });
-  assert.equal((await later.get(draft.approvalId))?.state, 'unknown');
+  assert.equal(asV2(await later.get(draft.approvalId))?.state, 'unknown');
   const [record] = await audited(harness);
   assert.equal(record?.outcome, 'failed');
   assert.match(record?.reason ?? '', /^outcome unknown: could not reach Slack/);

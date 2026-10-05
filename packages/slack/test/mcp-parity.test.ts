@@ -4,8 +4,10 @@ import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, test } from 'node:test';
+import { asV2 } from '@agentcomms/core';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
+import { v1ChangeRecord, writeV1Record } from '../../core/test/fixtures/approval-v1-0.13.0.ts';
 import { openFlowStore } from '../src/auth/flow.ts';
 import { run } from '../src/cli/program.ts';
 import { payloadOf } from '../src/compose/blocks.ts';
@@ -766,7 +768,7 @@ test('a pinned server refuses another workspace’s approval before touching it,
   await harness.addWorkspace({ alias: 'zeta', mode: 'send', sendPolicy: 'confirm', workspaceId: 'T0002' });
   const unpinned = await connect(harness);
   const pinned = await connect(harness, { workspace: 'acme' });
-  const state = async (approvalId: string) => (await harness.core.approvals.get(approvalId))?.state;
+  const state = async (approvalId: string) => asV2(await harness.core.approvals.get(approvalId))?.state;
   try {
     // zeta's person is asked to loosen zeta's policy; the approval waits for their yes.
     const zetaChange = ok<{ approvalId: string }>(
@@ -1417,4 +1419,106 @@ test('slack_draft_create writes the draft `draft create` writes, and prepares no
   } finally {
     await close();
   }
+});
+
+// ── Every form of an approval record at Slack's sites (CUE-404 Task 3) ──────────────────────────────────────────
+
+const formId = (c: string) => `ap_${'0'.repeat(25)}${c}`;
+
+/** The CLI as a person at a terminal runs it: what it prints, and its exit code. */
+async function atTerminal(harness: Harness, argv: string[]) {
+  let said = '';
+  const sink = () => {
+    const stream = Object.assign(new PassThrough(), { isTTY: true });
+    stream.on('data', (chunk) => {
+      said += String(chunk);
+    });
+    return stream;
+  };
+  const code = await run(argv, {
+    core: harness.core,
+    env: harness.env,
+    platform: 'darwin',
+    exchange: (params) => harness.exchange(params),
+    streams: { stdout: sink(), stderr: sink(), stdin: Object.assign(new PassThrough(), { isTTY: true }) },
+    openBrowser: () => undefined,
+    listenerCommand: LISTENER_COMMAND,
+    read: slack(),
+  });
+  return { code, said };
+}
+
+test('pins: a pinned Slack server answers a stub and an unverifiable record exactly as another workspace’s approval', async () => {
+  const harness = await newHarness();
+  const acme = await harness.addWorkspace({ alias: 'acme', mode: 'send', sendPolicy: 'chat' });
+  await harness.addWorkspace({ alias: 'zeta', mode: 'send', sendPolicy: 'chat', workspaceId: 'T0002' });
+  const unpinned = await connect(harness);
+  const pinned = await connect(harness, { workspace: 'acme' });
+  try {
+    const zetaPost = ok<{ approvalId: string }>(
+      await unpinned.call('slack_post_prepare', { workspace: 'zeta', channel: 'C1', text: 'theirs' }),
+    ).approvalId;
+    const acmePost = ok<{ approvalId: string }>(
+      await unpinned.call('slack_post_prepare', { workspace: 'acme', channel: 'C1', text: 'ours' }),
+    ).approvalId;
+    const record = asV2(await harness.core.approvals.get(acmePost));
+    assert.ok(record);
+    const approvals = join(harness.core.paths.stateDir, 'approvals');
+    const files: Record<string, string> = {
+      // An unreadable file, naming acme's account inside it.
+      [formId('Y')]: `{ "approvalId": "${formId('Y')}", "inboxId": "${acme.id}", "state": "pend`,
+      // An acme post whose channel was edited: its binding no longer verifies, so whose it is cannot be trusted.
+      [formId('B')]: `${JSON.stringify({ ...record, approvalId: formId('B'), channel: 'gmail' }, null, 2)}\n`,
+    };
+    for (const [fileId, text] of Object.entries(files)) await writeFile(join(approvals, `${fileId}.json`), text);
+    const ours = await cliData<{ draftId: string }>(harness, [
+      'draft',
+      'create',
+      '--workspace',
+      'acme',
+      '--channel',
+      'C1',
+      '--text',
+      'ours',
+    ]);
+    const said = async (approvalId: string) => {
+      const refused = failed(
+        await pinned.call('slack_post_send', { draftId: ours.draftId, approvalId, expectChannel: 'C1' }),
+      );
+      return { code: refused.code, message: refused.message.replace(approvalId, '<id>'), hint: refused.hint };
+    };
+    const pinnedAway = await said(zetaPost);
+    assert.equal(pinnedAway.code, 'NOT_FOUND');
+    assert.deepEqual(await said(formId('Y')), pinnedAway, 'an unreadable file is not this workspace’s');
+    assert.deepEqual(await said(formId('B')), pinnedAway, 'nor a record whose binding does not verify');
+    for (const [fileId, text] of Object.entries(files)) {
+      assert.equal(await readFile(join(approvals, `${fileId}.json`), 'utf8'), text, `${fileId} was not touched`);
+    }
+  } finally {
+    await Promise.all([unpinned.close(), pinned.close()]);
+  }
+});
+
+test('kind dispatch at `agent-slack approve`: a stub gets the integrity refusal, a legacy change the version refusal', async () => {
+  const harness = await newHarness();
+  await harness.addWorkspace({ alias: 'acme', mode: 'send', sendPolicy: 'confirm' });
+  const approvals = join(harness.core.paths.stateDir, 'approvals');
+  const { mkdir } = await import('node:fs/promises');
+  await mkdir(approvals, { recursive: true });
+  await writeFile(join(approvals, `${formId('Y')}.json`), '{ "approvalId": ');
+  const stub = await atTerminal(harness, ['approve', formId('Y')]);
+  assert.equal(stub.code, 10, stub.said);
+  assert.match(stub.said, /could not be read \(truncated\)/);
+  writeV1Record(
+    harness.core.paths.stateDir,
+    v1ChangeRecord({
+      approvalId: formId('M'),
+      digest: 'f'.repeat(64),
+      change: { summary: 'Let acme post', target: null, loosened: [], effects: ['does a thing'] },
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+    }),
+  );
+  const legacy = await atTerminal(harness, ['approve', formId('M')]);
+  assert.equal(legacy.code, 10, legacy.said);
+  assert.match(legacy.said, /prepared by a different version of agent-communications/);
 });

@@ -5,6 +5,7 @@ import {
   DOWNLOAD_CLAIM,
   type GatedChange,
   gatedChange,
+  ownerOf,
   refuseUnclaimedApproval,
   retiredOutHint,
   strictToolArguments,
@@ -322,8 +323,10 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
    */
   const ownApproval = async (approvalId: string | undefined, name: string): Promise<void> => {
     if (pinnedId === undefined || approvalId === undefined) return;
-    const record = await context.core.approvals.get(approvalId);
-    if (record && record.inboxId !== pinnedId) {
+    // Held, and not this workspace's — or whose it is cannot be trusted (`ownerOf` is null for an unreadable file, or
+    // a corrupt record whose binding does not verify): never let through as though it were absent.
+    const stored = await context.core.approvals.get(approvalId);
+    if (stored !== null && ownerOf(stored) !== pinnedId) {
       throw new CommsError('NOT_FOUND', `no approval "${approvalId}" for the "${name}" workspace`, {
         hint: `This server only serves "${name}".`,
       });

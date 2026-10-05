@@ -1,21 +1,25 @@
 import { readFile } from 'node:fs/promises';
 import {
   type ApprovalRecord,
-  approvalKind,
   type CliHandoffs,
   CommsError,
   canonicalAddress,
   type Expectation,
   handoffSentence,
   handoffSentenceToFill,
-  isCurrentDigestVersion,
+  integrityRefusal,
+  kindOf,
   type MessagePreview,
   otherVersionRefusal,
-  publicView,
+  ownerOf,
+  type PublicApproval,
+  publicStored,
   renderMessagePreview,
   type SendPolicy,
+  type StoredApproval,
   sendEpochOf,
   sha256Hex,
+  stateOf,
   stricterPolicy,
 } from '@agentcomms/core';
 import { keyPermissionOf, type NamedAccount } from '../accounts.ts';
@@ -86,15 +90,24 @@ export interface SendResult {
   note?: string | undefined;
 }
 
-/** A send's approval as the one account that may use it, or a refusal that does not touch it. */
+/**
+ * A send's approval as the one account that may use it, or a refusal that does not touch it.
+ *
+ * Whose it is comes from a record that can be trusted to say (`ownerOf`): any other — an unreadable file, a corrupt
+ * record whose binding does not verify — is not this account's, and is not found, as an id nobody prepared is not.
+ * Then only a valid version-2 send is used: this account's corrupt record is refused as that, and one an earlier
+ * release prepared by its version.
+ */
 async function ownRecord(context: ResendContext, named: NamedAccount, approvalId: string): Promise<ApprovalRecord> {
-  const record = await context.core.approvals.get(approvalId);
-  if (!record || approvalKind(record) !== 'send' || record.inboxId !== named.account.id) {
+  const stored = await context.core.approvals.get(approvalId);
+  if (stored === null || ownerOf(stored) !== named.account.id || kindOf(stored) !== 'send') {
     throw new CommsError('NOT_FOUND', `there is no send approval ${approvalId} for "${named.name}"`, {
       hint: 'Approvals last ten minutes. Prepare the send again.',
     });
   }
-  return record;
+  if (stored.form === 'legacy') throw otherVersionRefusal(stored.view);
+  if (stored.form !== 'v2') throw integrityRefusal(stored);
+  return stored.record;
 }
 
 function requireSendMode(named: NamedAccount, handoffs: CliHandoffs): void {
@@ -565,9 +578,8 @@ export async function executeSend(
 ): Promise<SendResult> {
   const named = await context.accounts.require(name);
   requireSendMode(named, context.handoffs);
+  // Before anything else, as the claim would: only a valid version-2 record is ever claimed here.
   const known = await ownRecord(context, named, options.approvalId);
-  // Before anything else, as the claim would: a record an earlier release prepared is never claimed here.
-  if (!isCurrentDigestVersion(known)) throw otherVersionRefusal(known);
   if (known.state !== 'pending' && known.state !== 'approved') {
     throw new CommsError('APPROVAL_VOID', `nothing was sent: ${describeState(known.state)}`, {
       hint:
@@ -791,7 +803,8 @@ export async function executeSend(
 export interface SendStatus {
   account: string;
   approvalId: string;
-  approval: Omit<ApprovalRecord, 'challengeHash'> | null;
+  /** The approval in its public shape — every form, an earlier release's and a corrupt one's included — or none. */
+  approval: PublicApproval | null;
   local: SendSummary | null;
   /** What Resend says now, when it could be asked. */
   resend: { id: string; lastEvent: string | null; messageId: string | null; scheduledAt: string | null } | null;
@@ -805,18 +818,19 @@ export interface SendStatus {
  */
 export async function sendStatus(context: ResendContext, name: string, approvalId: string): Promise<SendStatus> {
   const named = await context.accounts.require(name);
-  const record = await context.core.approvals.get(approvalId);
-  if (record && (approvalKind(record) !== 'send' || record.inboxId !== named.account.id)) {
+  // Held, and not this account's send — or whose it is cannot be trusted: not found, as an id nobody prepared.
+  const stored = await context.core.approvals.get(approvalId);
+  if (stored !== null && (kindOf(stored) !== 'send' || ownerOf(stored) !== named.account.id)) {
     throw new CommsError('NOT_FOUND', `there is no send approval ${approvalId} for "${name}"`);
   }
   const local = await new SendRecords(context.core.paths.stateDir, context.now).summary(named.account.id, approvalId);
-  const base = { account: name, approvalId, approval: record ? publicView(record) : null, local };
+  const base = { account: name, approvalId, approval: stored ? publicStored(stored) : null, local };
   if (!local) {
     return {
       ...base,
       resend: null,
-      verdict: record
-        ? `not sent: the approval is ${record.state} and no send was attempted`
+      verdict: stored
+        ? `not sent: the approval is ${stateOf(stored)} and no send was attempted`
         : 'nothing is known about this approval',
     };
   }
@@ -894,19 +908,32 @@ export interface SendApprovalPrompt {
   challenge: string;
 }
 
+/**
+ * An approval at the terminal, and the account it belongs to: one that cannot be used is refused for what it is, and
+ * says only that — this command is no account's in particular — and whose it is comes from `ownerOf`.
+ */
 async function recordAndAccount(
   context: ResendContext,
   approvalId: string,
-): Promise<{ record: ApprovalRecord; named: NamedAccount }> {
-  const record = await context.core.approvals.get(approvalId);
-  if (!record || approvalKind(record) !== 'send') {
+): Promise<{ stored: StoredApproval; named: NamedAccount }> {
+  const stored = await context.core.approvals.get(approvalId);
+  if (stored !== null && (stored.form === 'corrupt' || stored.form === 'unreadable')) throw integrityRefusal(stored);
+  const owner = ownerOf(stored);
+  if (stored === null || owner === null || kindOf(stored) !== 'send') {
     throw new CommsError('NOT_FOUND', `there is no send approval ${approvalId}`, {
       hint: 'Approvals last ten minutes. Prepare the send again.',
     });
   }
-  const named = await context.accounts.findById(record.inboxId);
+  const named = await context.accounts.findById(owner);
   if (!named) throw new CommsError('NOT_FOUND', 'the Resend account this approval belongs to is no longer connected');
-  return { record, named };
+  return { stored, named };
+}
+
+/** Only a valid version-2 send is approved at the terminal: one an earlier release prepared, by its version. */
+function sendRecordOf(stored: StoredApproval): ApprovalRecord {
+  if (stored.form === 'legacy') throw otherVersionRefusal(stored.view);
+  if (stored.form !== 'v2') throw integrityRefusal(stored);
+  return stored.record;
 }
 
 /**
@@ -915,10 +942,10 @@ async function recordAndAccount(
  * the record does not describe.
  */
 export async function beginSendApproval(context: ResendContext, approvalId: string): Promise<SendApprovalPrompt> {
-  const { record, named } = await recordAndAccount(context, approvalId);
-  // A record an earlier release prepared is refused before the message is read again: this release cannot approve it,
-  // and the integrity check below would void it by rules it was not written under.
-  if (!isCurrentDigestVersion(record)) throw otherVersionRefusal(record);
+  const { stored, named } = await recordAndAccount(context, approvalId);
+  // Refused before the message is read again: the integrity check below would judge any other form by rules it was
+  // not written under.
+  const record = sendRecordOf(stored);
   const { prepared, digest } = await reload(context, record);
   if (digest !== record.contentDigest) {
     await context.core.approvals.revoke(approvalId, 'the message or an attachment changed after the preview', {
@@ -955,8 +982,8 @@ export async function finishSendApproval(
   approvalId: string,
   answer: string,
 ): Promise<ApprovalRecord> {
-  const { record, named } = await recordAndAccount(context, approvalId);
-  if (!isCurrentDigestVersion(record)) throw otherVersionRefusal(record);
+  const { stored, named } = await recordAndAccount(context, approvalId);
+  const record = sendRecordOf(stored);
   const { digest } = await reload(context, record);
   const approved = await context.core.approvals.approve(
     approvalId,

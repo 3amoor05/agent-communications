@@ -774,16 +774,22 @@ export function renderSent(result: SendResult, color: boolean): string {
 
 export function renderApprovals(records: ApprovalView[], color: boolean): string {
   if (records.length === 0) return 'No approvals waiting.';
+  // Every form: what a record has of these columns, and a dash for what it has not — a stub has only its id, and
+  // `corrupt` with the reason as its state.
   return table(
     [
       ['APPROVAL', 'INBOX', 'STATE', 'DRAFT', 'TO', 'EXPIRES'],
       ...records.map((record) => [
         record.approvalId,
-        record.inbox,
-        record.state,
-        record.draftId,
-        record.expect.to.join(', ') || '—',
-        record.expiresAt.slice(11, 16),
+        record.inbox ?? '—',
+        record.state === 'corrupt'
+          ? `corrupt (${record.reason})`
+          : 'legacy' in record && record.legacy === true
+            ? `${record.state} (earlier release)`
+            : record.state,
+        'draftId' in record && record.draftId !== undefined ? record.draftId : '—',
+        ('expect' in record && record.expect !== undefined ? record.expect.to.join(', ') : '') || '—',
+        'expiresAt' in record && record.expiresAt !== undefined ? record.expiresAt.slice(11, 16) : '—',
       ]),
     ],
     color,

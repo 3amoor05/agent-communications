@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { type TestContext, test } from 'node:test';
 import { setFlagsFromString } from 'node:v8';
 import { runInNewContext } from 'node:vm';
-import { CommsError, renderChannelPreview } from '@agentcomms/core';
+import { asV2, CommsError, renderChannelPreview } from '@agentcomms/core';
 import { closedPermit, spendOn } from '../src/api/guard.ts';
 import { slackFileUpload, uploadDeadlineMs } from '../src/api/upload.ts';
 import { payloadOf } from '../src/compose/blocks.ts';
@@ -187,7 +187,7 @@ test('the approval is bound to each file’s hash: the same file with other byte
   const digestOf = async (files: string[] | undefined): Promise<string> => {
     const draft = await createDraft(context, 'acme', { channel: 'C1', text: 'the numbers', files });
     const prepared = await prepareDraftPost(context, 'acme', { draftId: draft.draftId }, slack);
-    return (await context.core.approvals.get(prepared.approvalId))?.contentDigest ?? '';
+    return asV2(await context.core.approvals.get(prepared.approvalId))?.contentDigest ?? '';
   };
   mkdirSync(join(docs, 'b'));
   // Same name, same size, same type, other bytes: only the hash tells them apart.
@@ -288,7 +288,7 @@ test('a post of text alone is previewed and bound exactly as it was before files
     text.replaceAll(draft.draftId, '<draft>').replaceAll(prepared.approvalId, '<approval>');
 
   assert.equal(
-    (await context.core.approvals.get(prepared.approvalId))?.contentDigest,
+    asV2(await context.core.approvals.get(prepared.approvalId))?.contentDigest,
     '03a877c2f1836d22301eba26b2916dfaa6bb9b02eef5c4982d4e3ca0029f25d0',
   );
   assert.deepEqual(prepared.riskFlags, []);
@@ -368,7 +368,7 @@ test('a bare URL typed into a file post’s words is flagged as it is written, a
   const prepared = await prepareDraftPost(w.context, 'acme', { draftId: draft.draftId }, w.slack);
   // Pinned first, so that a mutation to the flag or the warning is caught by the assertions below, not masked here.
   assert.equal(
-    (await w.context.core.approvals.get(prepared.approvalId))?.contentDigest,
+    asV2(await w.context.core.approvals.get(prepared.approvalId))?.contentDigest,
     'e8f5274ffc2e8ae4c65eb35c3d372f034973a068ad863c3bb47d01ce3320b9b9',
   );
   assert.deepEqual(prepared.preview.links, ['HTTPS://ci.example.com/runs/42']);
@@ -495,7 +495,7 @@ test('a file post goes up file by file, then one call names the channel, and the
       { id: second.fileId, name: 'totals.csv', size: Buffer.byteLength(csv), sha256: sha256(csv) },
     ],
   });
-  assert.equal((await w.context.core.approvals.get(prepared.approvalId))?.state, 'used');
+  assert.equal(asV2(await w.context.core.approvals.get(prepared.approvalId))?.state, 'used');
 });
 
 test('a file post in a thread goes into the thread', async (t) => {
@@ -531,7 +531,7 @@ test('a file edited after prepare is refused at send: nothing is uploaded, and t
   assert.equal(error.details?.file, 'b.txt');
   assert.deepEqual(sending(w.fake, before), [], 'something went to Slack for a post that was refused');
   assert.deepEqual(w.uploads.received, {});
-  assert.equal((await w.context.core.approvals.get(prepared.approvalId))?.state, 'failed');
+  assert.equal(asV2(await w.context.core.approvals.get(prepared.approvalId))?.state, 'failed');
 
   // Spent: sending again, even with the file put back, sends nothing.
   writeFileSync(edited, 'bbbb');
@@ -580,7 +580,7 @@ test('under confirm, a file post waits for the person, and nothing is uploaded m
   assert.deepEqual(w.uploads.issued, [], 'an upload URL was asked for before the person approved');
   assert.deepEqual(w.uploads.received, {});
   assert.deepEqual(w.uploads.completed, []);
-  assert.equal((await w.context.core.approvals.get(prepared.approvalId))?.state, 'pending', 'the wait spent it');
+  assert.equal(asV2(await w.context.core.approvals.get(prepared.approvalId))?.state, 'pending', 'the wait spent it');
 });
 
 test('a grant narrowed after prepare refuses the send, before anything is uploaded or claimed', async (t) => {
@@ -605,7 +605,7 @@ test('a grant narrowed after prepare refuses the send, before anything is upload
     error.hint,
   );
   assert.deepEqual(w.uploads.issued, []);
-  assert.equal((await w.context.core.approvals.get(prepared.approvalId))?.state, 'pending');
+  assert.equal(asV2(await w.context.core.approvals.get(prepared.approvalId))?.state, 'pending');
 });
 
 test('a file post to a channel this account has not joined is refused at prepare: no upload URL, nothing uploaded', async (t) => {
@@ -640,7 +640,7 @@ test('a file post whose sender left the channel after prepare is refused at send
   assert.deepEqual(sending(w.fake, before), [], 'something went to Slack after the room was read');
   assert.deepEqual(w.uploads.issued, []);
   assert.deepEqual(w.uploads.received, {});
-  assert.equal((await w.context.core.approvals.get(prepared.approvalId))?.state, 'pending');
+  assert.equal(asV2(await w.context.core.approvals.get(prepared.approvalId))?.state, 'pending');
 });
 
 test('a failure at the call that posts is a failed post, and is recorded as one', async (t) => {
@@ -652,7 +652,7 @@ test('a failure at the call that posts is a failed post, and is recorded as one'
   const error = await refusal(send());
   assert.equal(error.code, 'NOT_FOUND');
   assert.equal(error.details?.stage, 'complete');
-  assert.equal((await w.context.core.approvals.get(prepared.approvalId))?.state, 'failed');
+  assert.equal(asV2(await w.context.core.approvals.get(prepared.approvalId))?.state, 'failed');
   const [record] = (await w.context.core.audit.tail({ limit: 1 })).filter((entry) => entry.operation === 'slack.post');
   assert.equal(record?.outcome, 'failed');
   assert.equal(record?.approvalId, prepared.approvalId);
@@ -678,7 +678,7 @@ test('a failure before the post names the files already uploaded, which Slack di
   assert.match(error.hint ?? '', /a\.txt was uploaded and never shared; Slack discards it/);
   assert.deepEqual(w.uploads.completed, [], 'the files were shared after an upload failed');
   assert.equal(w.uploads.issued.length, 2, 'the third file was asked for after the second failed');
-  assert.equal((await w.context.core.approvals.get(prepared.approvalId))?.state, 'failed');
+  assert.equal(asV2(await w.context.core.approvals.get(prepared.approvalId))?.state, 'failed');
 });
 
 test('when Slack has not attached the files to a message yet, the ts is null and the result says so', async (t) => {
@@ -761,7 +761,7 @@ test('the order of the files is part of what is approved: reordering them on dis
   assert.equal(w.uploads.issued.length, 0, 'an upload URL was asked for, for files in an order nobody was shown');
   assert.deepEqual(w.uploads.received, {});
   assert.deepEqual(w.uploads.completed, []);
-  assert.notEqual((await w.context.core.approvals.get(prepared.approvalId))?.state, 'used');
+  assert.notEqual(asV2(await w.context.core.approvals.get(prepared.approvalId))?.state, 'used');
 });
 
 /**
@@ -890,7 +890,7 @@ test('a file changed after the first pass and before its upload voids the approv
   assert.equal(w.uploads.issued.length, 1, 'the URL was asked for, so the first pass had passed');
   assert.deepEqual(w.uploads.received, {}, 'bytes reached the upload URL from a file changed after it was approved');
   assert.deepEqual(w.uploads.completed, []);
-  assert.equal((await w.context.core.approvals.get(prepared.approvalId))?.state, 'failed');
+  assert.equal(asV2(await w.context.core.approvals.get(prepared.approvalId))?.state, 'failed');
 });
 
 // ── The time an upload is allowed ────────────────────────────────────────────────────────────────────────────

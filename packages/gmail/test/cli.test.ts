@@ -4,7 +4,7 @@ import { dirname, isAbsolute, join, relative } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { commandText, EXIT_CODES, externalCommand, isCommand, openCore, remedy } from '@agentcomms/core';
+import { asV2, commandText, EXIT_CODES, externalCommand, isCommand, openCore, remedy } from '@agentcomms/core';
 import { GMAIL_CALLER } from '../src/caller.ts';
 import { run } from '../src/cli/program.ts';
 import { renderDoctor, renderSendPreparation } from '../src/cli/render.ts';
@@ -1066,7 +1066,7 @@ test('--expect-subject none accepts only an empty, whitespace-only or literal no
     );
     if (!sends) {
       assert.equal(sent.json<Envelope<never>>().error?.code, 'APPROVAL_VOID');
-      const approval = await harness.core.approvals.get(approvalId);
+      const approval = asV2(await harness.core.approvals.get(approvalId));
       assert.equal(approval?.state, 'revoked', 'the rejected expectation was not persisted as voided');
       assert.match(approval?.reason ?? '', /recipients or subject/);
     }

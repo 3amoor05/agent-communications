@@ -406,7 +406,7 @@ test('a correction found from a Windows registration in another case names the l
     draftMessageId: 'm-1',
     channel: 'whatsapp',
     sendEpoch: 0,
-    contentDigest: 'd-1',
+    contentDigest: 'd'.repeat(64),
     policy: 'confirm',
     requiredPolicy: 'confirm',
     riskFlags: [],

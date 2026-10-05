@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { ApprovalStore, CommsError, SENDING_STALE_MS } from '@agentcomms/core';
+import { ApprovalStore, asV2, CommsError, SENDING_STALE_MS } from '@agentcomms/core';
 import { renderSent } from '../src/cli/render.ts';
 import { GmailContext } from '../src/context.ts';
 import { mapGoogleError, sendCertainlyRefused } from '../src/gmail-api/errors.ts';
@@ -43,7 +43,7 @@ async function prepared(setup: Awaited<ReturnType<typeof world>>) {
       approvalId: approval.approvalId,
       expect: approval.expect,
     });
-  const state = async () => (await setup.harness.core.approvals.get(approval.approvalId))?.state;
+  const state = async () => asV2(await setup.harness.core.approvals.get(approval.approvalId))?.state;
   return { approval, send, state };
 }
 
@@ -80,7 +80,7 @@ test('Gmail acting before its answer is lost leaves the approval sending and tel
   const later = new ApprovalStore(setup.harness.core.paths.stateDir, {
     now: () => new Date(Date.now() + SENDING_STALE_MS),
   });
-  assert.equal((await later.get(approval.approvalId))?.state, 'unknown');
+  assert.equal(asV2(await later.get(approval.approvalId))?.state, 'unknown');
   assert.equal(setup.harness.google.requests.filter((request) => request.path.endsWith('/send')).length, 1);
   const account = setup.harness.google.accounts.get('sub-1');
   assert.equal(

@@ -3,9 +3,11 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import {
+  asV2,
   claimUpdateCheck,
   gatedChange,
   readUpdateCheck,
+  stateOf,
   UPDATE_CHECK_CHILD_COMMAND,
   UPDATE_FIRST,
   updateCheckPath,
@@ -146,7 +148,7 @@ test('agent-gmail: an approval the stop let through is refused by a finish, and 
   }
   assert.equal(JSON.stringify(await harness.core.config.load()), before, 'a mailbox or a client was changed');
   assert.deepEqual(
-    (await harness.core.approvals.list()).map((record) => [record.approvalId, record.state]),
+    (await harness.core.approvals.list()).map((record) => [asV2(record)?.approvalId, stateOf(record)]),
     [[later, 'pending']],
     'an approval was claimed, or another prepared',
   );

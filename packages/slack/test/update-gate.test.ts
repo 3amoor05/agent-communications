@@ -4,6 +4,7 @@ import { join, relative } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import {
+  asV2,
   claimUpdateCheck,
   EXIT_CODES,
   gatedChange,
@@ -240,7 +241,7 @@ test('an approval the stop let through is refused by a report, the steps, the ap
   }
 
   assert.equal(JSON.stringify(await harness.core.config.load()), before, 'a workspace was changed');
-  assert.equal((await harness.core.approvals.get(later))?.state, 'pending', 'the approval was claimed');
+  assert.equal(asV2(await harness.core.approvals.get(later))?.state, 'pending', 'the approval was claimed');
 });
 
 // ── Saving files: `slack_file_download` and `agent-slack files download` ─────────────────────────────────────────
@@ -555,7 +556,7 @@ test('the download claims only its own question, so another approval cannot walk
   assert.equal(code(borrowed.result), 'UPDATE_REQUIRED', JSON.stringify(borrowed.result.structuredContent));
   const borrowedAtCommand = await downloadAtCommand(harness, ['--to', 'downloads', '--choice', approvalId]);
   assert.equal(borrowedAtCommand.exit, EXIT_CODES.UPDATE, `${borrowedAtCommand.stdout}${borrowedAtCommand.stderr}`);
-  assert.equal((await harness.core.approvals.get(approvalId))?.state, 'pending', 'the change’s approval was spent');
+  assert.equal(asV2(await harness.core.approvals.get(approvalId))?.state, 'pending', 'the change’s approval was spent');
 
   const tool = await downloadOverMcp(harness, { approvalId });
   assert.equal(code(tool.result), 'USAGE', JSON.stringify(tool.result.structuredContent));

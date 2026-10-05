@@ -1,6 +1,6 @@
 import {
   answerDownloadInForm,
-  approvalKind,
+  asV2,
   type CliHandoffs,
   CommsError,
   changeToolResult,
@@ -14,9 +14,11 @@ import {
   handoffSentence,
   lookupName,
   orgAddChange,
+  ownerOf,
   profileSourcePath,
   retiredOutHint,
   shownPath,
+  stateOf,
   stricterPolicy,
   strictToolArguments,
   toCommsError,
@@ -274,8 +276,9 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
    * operation refuses it for what it is.
    */
   const downloadNeedsPerson = async (choiceId: string, alias: string): Promise<boolean> => {
-    const record = await context.core.approvals.get(choiceId).catch(() => null);
-    if (!record || approvalKind(record) !== 'download' || record.state !== 'pending') return false;
+    // Only a valid version-2 question is ever put to a person: any other form is refused by the operation for what it is.
+    const record = asV2(await context.core.approvals.get(choiceId).catch(() => null));
+    if (!record || record.kind !== 'download' || record.state !== 'pending') return false;
     const { inbox } = await context.inbox(alias);
     if (inbox.id !== record.inboxId) return false;
     const config = await context.config();
@@ -395,8 +398,10 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
   const checkApprovalPin = async (approvalId: string | undefined): Promise<void> => {
     if (!pinned || !pinnedId || approvalId === undefined) return;
     // A malformed id is not this mailbox's either; the store refuses to read one, and that is the same answer.
-    const record = await context.core.approvals.get(approvalId).catch(() => null);
-    if (record?.inboxId === pinnedId) return;
+    // The owner only from a record it can be trusted of (`ownerOf`): an unreadable file, or a corrupt record whose
+    // binding does not verify, is not this mailbox's — answered exactly as an id that does not exist.
+    const stored = await context.core.approvals.get(approvalId).catch(() => null);
+    if (ownerOf(stored) === pinnedId) return;
     throw new CommsError('NOT_FOUND', `no approval "${approvalId}" for the "${pinned}" mailbox`, {
       hint: `This server only serves "${pinned}".`,
     });
@@ -2289,7 +2294,8 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
 
   /** Whether this approval must be approved outside the chat, read from config now rather than at prepare time. */
   const needsConfirmation = async (approvalId: string): Promise<boolean> => {
-    const record = await context.core.approvals.get(approvalId);
+    // Only a valid version-2 record: any other form is no form to show, and the execute that follows refuses it.
+    const record = asV2(await context.core.approvals.get(approvalId));
     if (!record || record.state === 'approved') return false;
     const config = await context.config();
     // By the approval's own inbox id, not the name the call used: the approval is for that mailbox, whatever it is
@@ -2594,8 +2600,8 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
           // person who prepared it has to notice and redo. The same check now stands before every tool that takes
           // an approval id.
           await checkApprovalPin(approvalId);
-          const record = await revokeApproval(context, approvalId);
-          return reply({ approvalId: record.approvalId, state: record.state });
+          const stored = await revokeApproval(context, approvalId);
+          return reply({ approvalId, state: stateOf(stored) });
         } catch (error) {
           return fail(error);
         }
@@ -2633,16 +2639,23 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
       inputSchema: z.object({ inbox: z.string().min(1).optional() }),
       outputSchema: z.object({
         approvals: z.array(
-          // Loose: the record as `send list --json` prints it, which never includes the code a person types.
+          // Loose: the record as `send list --json` prints it, which never includes the code a person types. Every
+          // form is listed — a version-2 record, one an earlier release prepared (`legacy: true`), a corrupt one shown
+          // to its owner, and the stub of one that cannot be read — so only the id and the state are always there.
           z.looseObject({
             approvalId: z.string(),
-            kind: z.string().optional().describe('"change" for a change to an account; absent for a send'),
-            inbox: z.string(),
-            state: z.string(),
-            draftId: z.string(),
-            policy: z.string(),
-            requiredPolicy: z.string(),
-            riskFlags: z.array(z.string()),
+            kind: z.string().optional().describe('"send", "change" or "download"; absent on a stub'),
+            inbox: z
+              .string()
+              .nullable()
+              .describe('the mailbox by name, `(removed)`, or null when whose it is cannot be trusted'),
+            state: z.string().describe('its state, or `corrupt` for a record that cannot be used'),
+            legacy: z.boolean().optional().describe('true for an approval an earlier release prepared'),
+            reason: z.string().optional(),
+            draftId: z.string().optional(),
+            policy: z.string().optional(),
+            requiredPolicy: z.string().optional(),
+            riskFlags: z.array(z.string()).optional(),
             expect: z
               .object({
                 to: z.array(z.string()),
@@ -2650,9 +2663,10 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
                 bcc: z.array(z.string()),
                 subject: z.string(),
               })
+              .optional()
               .describe('what it would send; for a change, its summary as the subject'),
-            createdAt: z.string(),
-            expiresAt: z.string(),
+            createdAt: z.string().optional(),
+            expiresAt: z.string().optional(),
           }),
         ),
       }),
