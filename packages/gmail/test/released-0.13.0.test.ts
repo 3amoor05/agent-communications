@@ -15,6 +15,8 @@ import {
   sealAttempts,
   TERMINAL_PYTHON,
 } from '../../../test/helpers/real-shell.mjs';
+// `agentcomms doctor`, in this process: a child would reach for the keychain, which the seal refuses.
+import { doctor } from '../../core/src/operations/maintenance.ts';
 import { GMAIL_CALLER } from '../src/caller.ts';
 import { run } from '../src/cli/program.ts';
 import { GmailContext } from '../src/context.ts';
@@ -589,7 +591,7 @@ test('a released claim holding the record lock when 0.14 converts completes, and
   nothingSealed(m);
 });
 
-test('a released send past its last config read when 0.14 converts is the documented limit: it is sent, once', async () => {
+test('a released send past its last config read when 0.14 converts is the documented limit: it is sent, once — and the conversion lists it, and doctor shows it (R29c, CUE-404)', async () => {
   const m = await machine();
   const approvalId = await releasedPrepare(m);
   const hold = await held(m, DRAFT_SEND_PATH);
@@ -598,11 +600,18 @@ test('a released send past its last config read when 0.14 converts is the docume
   await arrived(hold, 'drafts/send');
   assert.equal(JSON.parse(m.bytes(approvalId)).state, 'sending', 'claimed, and its draft read again, before');
 
-  // Being sent already, it is no record the drain retires: nothing pending or approved is left to track.
+  // Being sent already, it is no record the drain can retire — and so the one the stated limit says the conversion
+  // names: tracked as being sent from the start, listed by the call that converted, shown by doctor.
   const off = await turnSendingOff(m);
-  assert.equal(off.legacyDrain, undefined);
-  assert.equal(m.config().legacyDrain, undefined);
+  assert.deepEqual(off.legacyDrain, { couldNotRevoke: [], inFlight: [approvalId] }, 'the conversion lists it');
+  assert.deepEqual((m.config().legacyDrain as { tracked: Record<string, string> }).tracked, {
+    [approvalId]: 'sending',
+  });
   assert.equal(JSON.parse(m.bytes(approvalId)).state, 'sending', 'never revoked under it');
+  const shown = (await doctor(m.core, m.harness.env, { keyring: null })).checks.find(
+    (check) => check.name === 'earlier-release approvals',
+  );
+  assert.match(shown?.detail ?? '', new RegExp(`1 reached by an earlier release's send \\(${approvalId}\\)$`));
 
   hold.release();
   const sent = await executing;
