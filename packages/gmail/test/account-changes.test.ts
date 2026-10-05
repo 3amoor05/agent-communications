@@ -103,9 +103,12 @@ test('a loosening asked for in chat is made on the call that brings its approval
     assert.match(asked.next, /Show this preview to the user and ask/);
     assert.equal((await harness.core.config.load()).inboxes.work?.sendPolicy, 'never', 'asking changed it');
 
-    const made = applied(
-      await call('gmail_inbox_policy', { inbox: 'work', sendPolicy: 'chat', approvalId: asked.approvalId }),
-    );
+    const claimed = await call('gmail_inbox_policy', {
+      inbox: 'work',
+      sendPolicy: 'chat',
+      approvalId: asked.approvalId,
+    });
+    const made = applied(claimed);
     assert.deepEqual(made, {
       alias: 'work',
       sendPolicy: 'chat',
@@ -115,6 +118,10 @@ test('a loosening asked for in chat is made on the call that brings its approval
       fenced: { revoked: [], alreadySending: [], couldNotRevoke: [] },
     });
     assert.equal((await harness.core.config.load()).inboxes.work?.sendPolicy, 'chat');
+    // Beside what it did, where the approval it spent stands (design 2026-10-05 §D8; CUE-404): used, and when.
+    const spent = wire(claimed).approval as { id?: string; state?: string; claimable?: boolean; usedAt?: string };
+    assert.deepEqual([spent?.id, spent?.state, spent?.claimable], [asked.approvalId, 'used', false]);
+    assert.ok(spent?.usedAt, 'when it was used');
 
     // Spent. Tightened again, the same approval does not loosen it a second time.
     applied(await call('gmail_inbox_policy', { inbox: 'work', sendPolicy: 'never' }));
@@ -322,10 +329,12 @@ test('asking Google for more than a mailbox holds is approved before the sign-in
     assert.match(asked.preview, /label, archive and bin messages/);
     assert.doesNotMatch(JSON.stringify(asked), /accounts\.google|authUrl|flowId/, 'a link was made before approval');
 
-    const link = applied<{ flowId: string; authUrl: string; nextTool: string }>(
-      await call('gmail_inbox_reauth', { inbox: 'work', tier: 'organize', approvalId: asked.approvalId }),
-    );
+    const claimed = await call('gmail_inbox_reauth', { inbox: 'work', tier: 'organize', approvalId: asked.approvalId });
+    const link = applied<{ flowId: string; authUrl: string; nextTool: string }>(claimed);
     assert.equal(link.nextTool, 'gmail_inbox_finish');
+    // The link, and where the approval that made it stands: used (design 2026-10-05 §D8; CUE-404).
+    const spent = wire(claimed).approval as { id?: string; state?: string } | undefined;
+    assert.deepEqual([spent?.id, spent?.state], [asked.approvalId, 'used']);
     assert.match(decodeURIComponent(link.authUrl), /gmail\.modify/);
 
     await fetch(harness.google.consent(link.authUrl, { sub: 'sub-1' }));

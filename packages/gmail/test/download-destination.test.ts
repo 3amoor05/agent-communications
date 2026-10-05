@@ -661,9 +661,18 @@ test('under confirm, a declined form saves nothing and voids the question; a cli
   const untrusted = await formClient(harness, cwd, 'other-client', () => ({ choice: 'downloads' }));
   try {
     const asked = wire(await untrusted.call({ inbox: 'work', messageIds: ['m1'] }));
-    const refused = toolError(await untrusted.call({ inbox: 'work', messageIds: ['m1'], choiceId: asked.choiceId }));
+    const result = await untrusted.call({ inbox: 'work', messageIds: ['m1'], choiceId: asked.choiceId });
+    const refused = toolError(result);
     assert.equal(untrusted.asked.length, 0, 'an untrusted client was handed a form');
     assert.equal(refused.code, 'APPROVAL_PENDING');
+    assert.match(refused.message, /^nothing was saved: the change policy here is confirm, so the person answers/);
+    // And where the question stands (design 2026-10-05 §D8; CUE-404): pending, and not to be claimed from here.
+    const stands = (result.structuredContent?.error as { details?: { approval?: Record<string, unknown> } }).details
+      ?.approval;
+    assert.deepEqual(
+      [stands?.id, stands?.kind, stands?.state, stands?.claimable],
+      [asked.choiceId, 'download', 'pending', false],
+    );
     /*
      * This installation's own `approve`, located, as the test above holds the question to: made for this machine's
      * shell, which is what the answer's refusal is rendered for — not read back as a POSIX line, which a Windows one

@@ -454,7 +454,9 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
       preview: z.string().optional().describe('show this to the user exactly as it is, before asking'),
       expiresAt: z.string().optional(),
       next: z.string().optional().describe('what to do next'),
-      approval: approvalSchema.optional().describe('where the approval stands, while it waits'),
+      approval: approvalSchema
+        .optional()
+        .describe('where the approval stands: while it waits, and once the change was applied with it (used)'),
     });
 
   const approvalArgument = z
@@ -1996,7 +1998,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
               platform: context.platform,
             });
             if (outcome.status !== 'applied') return reply(changeToolResult(outcome));
-            return reply(changeToolResult({ status: 'applied', result: linkOf(outcome.result) }));
+            return reply(changeToolResult({ ...outcome, result: linkOf(outcome.result) }));
           } catch (error) {
             return fail(error);
           }
