@@ -1,6 +1,6 @@
 # CUE-404 — approving a send without fighting the clock — design
 
-Status: **revised after round 22 (3 P2, all addressed)**, 2026-10-05, from Linear CUE-404 (High; the
+Status: **revised after round 23 (4 P2, all addressed)**, 2026-10-05, from Linear CUE-404 (High; the
 owner: "this is very not smooth") and a cited research pass over this repository, the MCP specification and the
 clients' documentation. Depends on CUE-403 (the CLIs on PATH,
 [its spec](2026-10-04-cli-path-shims-design.md)) for every printed terminal command to work; ships after it.
@@ -272,6 +272,14 @@ lists and waits. Ownership and kind are checked before state or routing. A nonex
 foreign, wrong-kind or pinned away all return the identical `NOT_FOUND` code, message and details, with
 `approval: null` and without reading a foreign record far enough to classify or render it.
 
+**Legacy version-1 records, one rule everywhere.** A structurally valid v1 record (no `bindingDigest` by design) is
+not `corrupt`: every surface shows it as `{ approvalId, kind, state: <its stored state>, legacy: true, createdAt,
+expiresAt }` plus the same untrusted-wrapped summary fields a v2 record shows; ownership is its stored `inboxId`,
+trusted as the stated legacy limit (a pinned server shows it only to that owner); it is never claimable (D1's version
+gate); D9 reads it only through its isolated legacy decoder; and the v2 missing-`bindingDigest` rules — the
+attribution-unverifiable class and D9's whole-report indeterminacy — never apply to it. Only an unreadable or
+structurally invalid v1 file takes the unreadable-file path below.
+
 There are two corrupt paths. A parseable, structurally owned record with bad version, state or timestamps reaches
 `approvalOutcome` and returns its ordinary safe approval fields plus `state: corrupt`, `claimable: false` and an
 integrity reason. Invalid or truncated JSON, missing ownership or kind, and wrong-shaped fields cannot safely reach
@@ -326,7 +334,7 @@ needs the terminal.
 | provider response leaves this call's outcome uncertain | immediately return non-retryable `SEND_OUTCOME_UNKNOWN` with `approval.state: sending`, `claimable: false`, `sendingAt`, any `sendingHeartbeatAt` and derived `unknownAt`; the send may have happened |
 | `sending`, inside its renewed lease, observed by another call | retryable `APPROVAL_PENDING`: “being sent by another call since …; wait for it”; include `sendingAt`, any `sendingHeartbeatAt` and derived `unknownAt`; never “prepare again” |
 | `unknown` at or after the sending-lease limit | `SEND_OUTCOME_UNKNOWN`: final to every caller except the original claim token's `used`/`failed` completion; the send may have happened and its claimant may still record a late provider result; check Sent/the channel before doing anything else |
-| used send | `APPROVAL_VOID`: already used at `usedAt`, with its non-empty provider message id. `used` means the provider **accepted** the send; the approval record stores nothing more and no transition follows it. Wording: core's generic surfaces say "accepted by <provider> at <time>"; Gmail and Slack, where acceptance is sending, say "sent"; Resend's own surfaces derive "scheduled for <time>, not yet sent", "cancelled before sending" or "sent" from the send record Resend already keeps for scheduling and cancellation (`packages/resend/src/operations/send.ts:717`, `packages/resend/src/operations/scheduled.ts:104`) — the approval record is never rewritten by cancellation |
+| used send | `APPROVAL_VOID`: already used at `usedAt`, with its non-empty provider message id. `used` means the provider **accepted** the send; the approval record stores nothing more and no transition follows it. Wording: core's generic surfaces say "accepted by <provider> at <time>"; Gmail and Slack, where acceptance is sending, say "sent"; Resend's own surfaces say "accepted by Resend, scheduled for <time>" for a scheduled send (from the request's `scheduledAt`, `packages/resend/src/operations/send.ts:581, 717`) and "cancelled before sending" only when this machine's cancel operation recorded a successful provider cancellation (`packages/resend/src/operations/scheduled.ts:83-111`); a **current outcome** (delivered, bounced, cancelled elsewhere, still scheduled) is reported only from Resend's own `last_event`, read with a full-access key (`send.ts:765`), and otherwise as "current outcome unavailable" — never "sent" inferred from the local `sent` event (written at acceptance, `send.ts:694`) or from the scheduled time having passed. The approval record is never rewritten by cancellation |
 | used change | `APPROVAL_VOID`: the approved change was already claimed at `usedAt`; no provider-id or “sent” wording |
 | `failed` | `APPROVAL_VOID` with channel-specific truth. Gmail/Resend certain failures say nothing was sent. A Slack file failure says **“nothing was posted”** and preserves `uploaded` and `possiblyUploaded` ids/names because bytes may already have reached Slack (`packages/slack/src/operations/send.ts:1016-1018, 1032-1035, 1088-1111, 1137-1172`) |
 | `revoked` | `APPROVAL_VOID` with its reason; an explicit decline is “declined”, while cancellation is not a revoke |
@@ -560,6 +568,10 @@ inventing a state:
   preserve provider success across this failure in exactly that direction
   (`packages/gmail/src/operations/send.ts:691-728`; `packages/slack/src/operations/send.ts:883-910`;
   `packages/resend/src/operations/send.ts:685-715`).
+- **A Resend cancellation that the provider confirmed stays a success.** After Resend cancels a scheduled send
+  (`packages/resend/src/operations/scheduled.ts:83`), the send-record append and the audit append (`scheduled.ts:104,
+  111`) are attempted independently; a failure of either is reported as a bookkeeping gap in the hint of a successful
+  result, never as a failed cancellation — the 0.12.3 no-send bookkeeping pattern.
 - A provider success response with no non-empty id is reported exactly as **“sent; the provider returned no id”** —
   or, for a Resend request carrying a schedule (`packages/resend/src/operations/send.ts:616`), **“accepted (scheduled);
   the provider returned no id”** —
@@ -587,8 +599,9 @@ inventing a state:
   core `agentcomms approvals list` / `comms_approvals_list` → `listApprovals`
   (`capabilities.json:29-34`). There is no new Resend or Slack approval-list command or tool.
 - Skills call status or wait before saying anything about a send they did not just complete. They never report `used`
-  or “sent, message id …” without a non-empty provider id; the only no-id success wording is “sent; the provider
-  returned no id”. They never turn `SEND_OUTCOME_UNKNOWN` into an automatic new preparation, tell the person to check
+  or “sent, message id …” without a non-empty provider id; the only no-id success wordings are “sent; the provider
+  returned no id” and, for a scheduled Resend send, “accepted (scheduled); the provider returned no id”; and they never
+  call a scheduled Resend send sent unless Resend's own current outcome says delivered. They never turn `SEND_OUTCOME_UNKNOWN` into an automatic new preparation, tell the person to check
   Sent/the channel first, and surface `corrupt` instead of treating it as absent.
 
 ### D9. Draft send history says only what the records read can prove
@@ -615,9 +628,9 @@ matching records that the scan read**, not only the newest one:
 - **any `approved` record blocks “its approvals expired”, whether claimable or not**. A claimable one is “approved and
   ready to send”. If the live policy is `never`, the exact description is **“approved, but the mailbox's policy is now
   never”**. Any other non-claimable approved state names its actual reason rather than calling it expired;
-- a `corrupt` record whose `bindingDigest` recomputes correctly (it is corrupt for another reason — an inconsistent
+- a v2 `corrupt` record whose `bindingDigest` recomputes correctly (it is corrupt for another reason — an inconsistent
   state, timestamp or evidence) is attributable by its now-verified group key and makes exactly that group
-  indeterminate; a record whose `bindingDigest` is missing, malformed or mismatched has untrustworthy attribution fields
+  indeterminate; a **v2** record whose `bindingDigest` is missing, malformed or mismatched has untrustworthy attribution fields
   and makes the **whole report** indeterminate (Digest integrity, above). Declined, cancelled, otherwise
   revoked and failed records do not masquerade as expiry.
 
@@ -859,6 +872,13 @@ lookup failures stay attached to their draft and do not raise the concurrency or
 
 ## 5. Tests owed
 
+- **Round-23 cases:** a scheduled Resend send with a sending-only key → "accepted by Resend, scheduled for <time>" and
+  "current outcome unavailable", never "sent", also after its time; with a full-access key, `last_event` scheduled,
+  delivered and cancelled-elsewhere each reported as such; a provider lookup failure → "current outcome unavailable";
+  a successful provider cancellation followed independently by send-record and audit failures → success with a
+  bookkeeping-gap hint; the exact CLI, MCP and skill wording for a scheduled acceptance without an id; one scan mixing
+  valid v1 records (shown `legacy: true` with their stored state, never `corrupt`, never triggering the v2
+  missing-binding rule) with v2 records.
 - **Round-22 cases:** a Resend scheduled send: core status says "accepted by Resend", Resend's status says "scheduled,
   not yet sent" before its time, "cancelled before sending" after a cancel (approval record unchanged), "sent" after;
   a scheduled acceptance without an id → "accepted (scheduled); the provider returned no id", record stays `sending`
