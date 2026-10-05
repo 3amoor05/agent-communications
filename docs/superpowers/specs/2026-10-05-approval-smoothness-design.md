@@ -1,6 +1,6 @@
 # CUE-404 — approving a send without fighting the clock — design
 
-Status: **revised after round 16 (3 P2, all addressed)**, 2026-10-05, from Linear CUE-404 (High; the
+Status: **revised after round 17 (3 P2, 1 P3, all addressed)**, 2026-10-05, from Linear CUE-404 (High; the
 owner: "this is very not smooth") and a cited research pass over this repository, the MCP specification and the
 clients' documentation. Depends on CUE-403 (the CLIs on PATH,
 [its spec](2026-10-04-cli-path-shims-design.md)) for every printed terminal command to work; ships after it.
@@ -104,8 +104,8 @@ content/change digest, the immutable route and lifetime profile and the record's
 **Two digests, two jobs.** A version-2 record stores `contentDigest` — the outward content or change identity, computed
 exactly as today's message/change digest (`packages/core/src/digest.ts:130`) — and `bindingDigest` (defined under
 **Digest integrity**). Claims and approvals check
-`bindingDigest`; D9 groups records by `contentDigest` (with the exact Slack revision), so identical content prepared
-under different routes or profiles is still one outward post. A legacy record's single `digest` decodes as its
+`bindingDigest`; D9 groups records by each channel's declared `approvalGrouping` (D9) — Gmail and Resend by draft,
+Slack by draft, exact revision and `contentDigest` — so a route or lifetime difference never splits one outward post. A legacy record's single `digest` decodes as its
 `contentDigest` with no `bindingDigest`; such records are refused for claims by the digest-version gate and are only
 ever read for reporting.
 
@@ -113,11 +113,15 @@ ever read for reporting.
 characters). This is the **only** definition: one core helper, `bindingDigestOf(record)`, returns the SHA-256 of the
 canonical JSON (the existing `canonicalJson`) of `{ "v": 2, "kind", "contentDigest", "route", "pendingMs",
 "approvedMs", "identity" }`, where `identity` is the record's **own top-level operational fields** that ownership and
-execution already use — `{ inboxId, inboxSub, draftId, draftMessageId, expect }` (`packages/core/src/approvals.ts:302`,
+execution already use — `{ approvalId, inboxId, inboxSub, draftId, draftMessageId, expect }` (`packages/core/src/approvals.ts:302`,
 used by claim at `approvals.ts:725` and by Gmail at `packages/gmail/src/operations/send.ts:472`). There is no second
 copy: no stored `groupKey`. For a download the object is `{ "v": 2, "kind": "download", "contentDigest", "profile":
 { "pendingMs": 1800000 }, "identity", "offered" }`, where `offered` is the canonical list of folder meanings and paths
-offered when the question was created (today excluded from `downloadDigest`, `approvals.ts:95`). Any stored identity field or offered folder altered after creation therefore fails recomputation, and every
+offered when the question was created (today excluded from `downloadDigest`, `approvals.ts:95`), exactly the stored
+folders object `{ "downloads": "<absolute path>", "current": "<absolute path>" | null }` as written at creation
+(`approvals.ts:926`) — not the rendered options — canonicalised by `canonicalJson`. Every read also requires the stored
+`approvalId` to equal the id in the record's file name; a mismatch is `corrupt` before any lock, write or claim marker
+touches another id (`approvals.ts:494, 570, 801`). Any stored identity field or offered folder altered after creation therefore fails recomputation, and every
 read
 recomputes it from the record's own fields before classifying: a missing, malformed, non-canonical or mismatching value
 makes the record `corrupt` (never claimable). `contentDigest` is an opaque identity on reads that cannot reach the
@@ -132,7 +136,7 @@ record reaches `approved` only through the terminal or a trusted form — a chat
 |---|---|---|
 | send | `approvedVia` ∈ {`terminal`, `elicitation`}; `approvedBindingDigest` = `bindingDigest` | neither field |
 | change | `approvedVia` = `terminal` only (confirm changes are terminal-only, `approvals.ts:901`); `approvedBindingDigest` = `bindingDigest` | neither field |
-| download | `approvedVia` as today, **no** `approvedAt`, and `approvedDigest` = SHA-256 of canonical `{ bindingDigest, answer }`, binding the recorded answer (`downloads`, `current`, `other` and its path) when it is accepted (`approvals.ts:979`); the save path re-verifies it before writing (`save-destination.ts:864`) | a chat-policy answer claimed straight from `pending` to `used` (`approvals.ts:1017`) carries no `approvedAt`, `approvedVia` or `approvedDigest`, in `used`, `revoked` or `expired` alike |
+| download | `approvedVia` as today, **no** `approvedAt`, and `approvedDigest` = SHA-256 of canonical `{ bindingDigest, answer }`, binding the recorded answer (`downloads`, `current`, `other` and its path) when it is accepted (`approvals.ts:979`); the save path re-verifies it before writing (`save-destination.ts:864`) | a chat-policy answer claimed straight from `pending` to `used` (`approvals.ts:1017`) carries no `approvedAt`, `approvedVia` or `approvedDigest`, in `used`, `revoked` or `expired` alike; a stored `download.answer` may exist **only** with valid terminal or `elicitation` evidence, so a pending or direct-chat record carrying one is `corrupt` and saves nothing |
 
 `approvedVia: chat` does not exist; "form" in prose means the stored `elicitation`. Any violation makes the record
 `corrupt`. Legacy (version-1) records,
@@ -825,6 +829,10 @@ lookup failures stay attached to their draft and do not raise the concurrency or
 
 ## 5. Tests owed
 
+- **Round-17 cases:** file name A with stored `approvalId` B (B existing and not) → `corrupt`, no write or claim marker
+  touches B; a pending or direct-chat download with an injected stored answer → `corrupt`, nothing saved; golden
+  `offered` vectors for both folder choices, with and without `current`; the committed manifest values (Gmail and Resend
+  `draft`, Slack `draft-revision-digest`) and a Slack reaction producing no D9 group.
 - **Round-16 cases:** independently mutating each identity field (`inboxId`, `inboxSub`, `draftId`, `draftMessageId`,
   `expect`) makes the record `corrupt` before approval, claim, provider access or reporting; mutating a confirm
   download's recorded answer or offered folder paths after approval saves no file and makes it `corrupt`; one Gmail
