@@ -1,6 +1,6 @@
 # CUE-403 — runnable CLI handoffs from the running installation — design
 
-Status: **proposed for 0.13.1; revised after round 11 (2 P2, 1 P3), 2026-10-05. No implementation is in
+Status: **proposed for 0.13.1; revised after round 12 (3 P2), 2026-10-05. No implementation is in
 this change.**
 
 ## 1. What is being fixed
@@ -56,14 +56,18 @@ words, the resolved-directory uses of the target command, and the output platfor
 (D5); failure contains no command and names the reason, product, package and required version. Callers never supply
 word zero or quote a line.
 
-The interpreter rule is one rule: the running package's own CLI and channel→core use `process.execPath`; a command
-resolved from a registration uses that registration's recorded interpreter when it has one, otherwise
-`process.execPath`. Whichever interpreter is chosen must satisfy the **target** package's `engines.node` range, checked
-against that interpreter's own version (for a recorded interpreter, by running it with `--version` on **every** locator
-call — no cache, so an interpreter replaced in place is never vouched for by an old answer); lockstep packages do not share one floor — core accepts Node `>=22.12.0` while WhatsApp needs
+The interpreter rule is one rule: the running package's own CLI and channel→core use `process.execPath`. A command
+resolved from a **managed** registration uses the interpreter recorded by this project's own installer for that
+runtime; only such an interpreter is ever executed, and only to probe it. Every other registration uses
+`process.execPath`; an interpreter named by a client configuration is never run. Whichever interpreter is chosen must
+satisfy the **target** package's `engines.node` range, checked against that interpreter's version: `process.execPath`
+by `process.version`; a recorded managed interpreter by running it with `--version` on **every** locator call (no
+cache, so one replaced in place is never vouched for by an old answer), bounded to 2 seconds and 1 KiB of output, and
+accepted only on exit status 0 with a parseable `vMAJOR.MINOR.PATCH` line. A missing, non-executable, failing,
+slow, oversized or malformed probe yields no command, as does a version outside the range; the reason names the
+required Node range. Lockstep packages do not share one floor — core accepts Node `>=22.12.0` while WhatsApp needs
 `>=22.16.0` and checks it before every action (`packages/core/package.json:8-10`, `packages/whatsapp/package.json:8-10`,
-`packages/whatsapp/src/cli/program.ts:200, 477`). An interpreter outside the range yields no command, with the reason naming
-the required Node range. The only retained `process.execArgv` flags are `--experimental-strip-types`, and
+`packages/whatsapp/src/cli/program.ts:200, 477`). The only retained `process.execArgv` flags are `--experimental-strip-types`, and
 `--experimental-transform-types` when the running source invocation used it. Debug, test, eval, preload/loader,
 condition, warning, source-map, title and memory flags are not CLI requirements. The existing local launcher shows why
 source needs type stripping (`packages/core/src/mcp-install.ts:546-556`).
@@ -90,9 +94,12 @@ Resolution is directional:
    resolves the registration's version. It may print that product's command **only when that version equals the
    printing package's own version**. A different or unknown version is unusable: in particular 0.13.0 rejects the new
    path options in core's strict parser and Gmail's program (`packages/core/src/cli.ts:157-168`,
-   `packages/gmail/src/cli/program.ts:159-173`). Among matching registrations the priority is a managed runtime entry,
-   then another checked file entry, then npx; within a class sort by client, config path, server name, command and
-   arguments.
+   `packages/gmail/src/cli/program.ts:159-173`). npx registrations are not candidates (below). Among matching
+   registrations the priority is a managed runtime entry, then another checked file entry; within a class sort by
+   client, config path, server name, command and arguments. The recogniser is given the registration's words with the
+   operands of the five path options (`--x value` and `--x=value`, before any `--`) removed, so a pinned directory such
+   as `/tmp/@agentcomms/slack` can never make a Gmail registration read as Slack (today's recogniser searches every
+   argument for package-like text — `packages/core/src/mcp-clients.ts:453`, `packages/core/src/mcp-install.ts:371`).
 
    A managed registration supplies its checked runtime CLI entry; another file-backed registration supplies the
    checked package CLI entry resolved from its absolute command or entry. This includes an installer-written `local`
@@ -165,7 +172,7 @@ or writes downloads, downloads. It emits none for a suite directory the target d
 duplicate or relative values, and the cwd where a registered or retry command is later run cannot override the pins.
 Gmail's raw-argv retry builder goes through this same normalization after removing approval flags
 (`packages/gmail/src/cli/program.ts:369-388`); that approval removal also stops at the first `--`, and every generated
-approval option (`gatedChangeAtTerminal` today appends it at the end — `packages/core/src/change-flow.ts:217`,
+approval option — `--approval` and `--mcp-approval` alike — (`gatedChangeAtTerminal` today appends it at the end — `packages/core/src/change-flow.ts:217`,
 `packages/core/src/cli-runtime.ts:131`) is inserted immediately **before** an existing `--`, never after it, so the
 retry still claims its approval and every positional word after the sentinel survives. The independent pins override conflicting variables and defaults in the
 target shell for the named suite directories; they intentionally do not reproduce or override the environment used to
@@ -218,8 +225,7 @@ refusal covers argument words containing `|`, `<` or `>` in that position. Empty
 (such as `C:\Profiles\`) is printed unquoted, as today (`packages/core/src/cli-runtime.ts:144-150`,
 `packages/core/test/cli.test.ts:1384-1386`). The person sees the exact argv as non-runnable JSON and
 the manual-typing instruction, not a partial command
-(`packages/core/src/cli-runtime.ts:136-191`). An npx registration, including an absolute `npx.cmd` on Windows, goes
-through these same rules (`packages/core/src/mcp-install.ts:1017-1024`).
+(`packages/core/src/cli-runtime.ts:136-191`).
 
 This inert-JSON/manual-entry result is the acceptance criterion's second outcome. It is deliberately preferred to a
 wrong-but-runnable line, which could approve, overwrite or remove the wrong thing. It is rare: only Windows handoffs
@@ -385,8 +391,9 @@ excluded by construction, not by filename.
 ### D6. The guarantee is time-of-print identity, not immutability
 
 For a file launch, the printed command names the installation found at print time and the entry has passed the
-realpath/file/containment checks then. It does not make that path durable. If an npx cache is evicted, the pinned npx
-command fetches/runs that exact release or fails non-zero. If a global installation or checkout is changed in place,
+realpath/file/containment checks then. It does not make that path durable. A command printed by an npx-launched
+process for itself names its entry inside the npx cache; if that cache is evicted before the person runs it, the
+command fails cleanly with a missing file. If a global installation or checkout is changed in place,
 the command fails cleanly or runs the code then at that path. Approval is data-only, so a newer compatible CLI
 approving the stored id is harmless; all normal digest, kind, expiry and policy checks still run.
 
@@ -422,6 +429,11 @@ authoritative data roots, and CLI-MCP parity for the preference.
 
 ## 4. Tests
 
+000. **Round-12 cases:** same-version npx registrations (including an absolute `npx.cmd`) are never cross-product
+     candidates, cache present or absent; a managed Gmail registration whose pinned directories end in
+     `@agentcomms/slack` (POSIX and Windows) is recognised as Gmail; a client-configured interpreter is never executed;
+     a recorded managed interpreter that is missing, non-executable, exits non-zero, prints malformed or oversized output
+     or never exits yields no command within the 2-second bound; `--mcp-approval` is inserted before an existing `--`.
 00. **Round-11 cases:** a core process with only an npx registration of a channel prints no cross-product command and
     says why, with the npx cache present and evicted and with caller, registration-environment and paste-shell Node
     versions all different; `client add -- --approval` and `-- --approval=x` keep the positional words exactly while the
@@ -472,7 +484,8 @@ authoritative data roots, and CLI-MCP parity for the preference.
    accepted outcome byte for byte. POSIX quoting remains byte-exact. Shell runs leave sentinel parent/session
    environment variables unchanged, including on failure.
 5. **Containment and mutation:** lexical and realpath symlink escapes, root-prefix siblings and post-print replacement.
-   Delete an npx cache before execution and assert an exact-version run or clean non-zero failure. Upgrade a fake global
+   Delete the npx cache behind an npx-launched process's own printed command and assert a clean missing-file failure.
+   Upgrade a fake global
    install in place and assert the newer fixture runs. A hostile test `NODE_OPTIONS` preloader demonstrates the
    documented same-user boundary without changing path selection.
 6. **Packaging and channel policy:** the verifier's transitive closure is deduplicated and ordered. The packed
