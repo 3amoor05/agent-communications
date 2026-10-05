@@ -117,7 +117,14 @@ implement the first two. The short repeat preview is dropped for this release an
   also drains legacy records: right after the version-3 write it revokes, under each record's lock, every v1 send
   record still `pending` or `approved` by D2's derived state (reason `prepared by an earlier release; prepare it
   again`) — 0.14 can never claim them, and an in-flight 0.13 claim that takes the lock afterwards finds the record
-  revoked and stops. The drain **tracks** exactly the v1 send records that were `pending` or `approved` (derived) at
+  revoked and stops. The tracked set is **durable**: the version-3 write itself carries `legacyDrain: { since,
+  tracked: { <approvalId>: "open" | <outcome> } }`, filled from a scan of the approvals store made under the config
+  lock just before that write. Because a 0.13 prepare already past its config read can still write a v1 record after
+  the scan, every 0.14 epoch-governed operation while the drain is open first rescans, adds any untracked v1 record
+  that is active by derived state, and retries the open revocations, each update a locked config write; a restart
+  recovers from the stored set by the same rescan-and-retry. `legacyDrain` is removed only when every tracked record
+  has an outcome below, a rescan finds no untracked active v1 record, and the longest v1 pending lifetime has passed
+  since `since`. The drain **tracks** exactly the v1 send records that were `pending` or `approved` (derived) at
   the conversion — a v1 record already `used`, `failed`, `revoked` or expired then is history and is never tracked —
   and config records `legacyDrain: pending` until every tracked record has left those two states: `revoked`,
   `expired`, `used` or `failed`, or `sending`/`unknown` (an admitted in-flight 0.13 send, which can neither be revoked
@@ -173,7 +180,7 @@ ever read for reporting.
 characters). This is the **only** definition: one core helper, `bindingDigestOf(record)`, returns the SHA-256 of the
 canonical JSON (the existing `canonicalJson`) of `{ "v": 2, "kind", "contentDigest", "route", "pendingMs",
 "approvedMs", "identity" }`, where `identity` is the record's **own top-level operational fields** that ownership and
-execution already use — `{ approvalId, inboxId, inboxSub, draftId, draftMessageId, expect }`, plus `sendEpoch` on a
+execution already use — `{ approvalId, channel, inboxId, inboxSub, draftId, draftMessageId, expect }`, plus `sendEpoch` on a
 send record (D1, "`never` revokes") — (`packages/core/src/approvals.ts:302`,
 used by claim at `approvals.ts:725` and by Gmail at `packages/gmail/src/operations/send.ts:472`). There is no second
 copy: no stored `groupKey`. For a download the object is `{ "v": 2, "kind": "download", "contentDigest", "profile":
@@ -678,6 +685,17 @@ inventing a state:
 
 ### D9. Draft send history says only what the records read can prove
 
+**Every v2 record names its channel, bound.** A v2 record stores `channel` — a manifest channel id (`gmail`, `slack`,
+`resend`, `whatsapp`, `core`), validated against the snapshot at creation — and it is part of `identity`, so changing
+it breaks `bindingDigest`. Grouping, provider-specific status wording (D3's Resend mapping) and the approve-command
+alternative are chosen from this stored field, never by looking up the account, which may since have been removed
+(`packages/core/src/approvals.ts:302` stores only a generic owner id today). A v1 record has no channel: the shared
+legacy decoder (D2) attributes it only from evidence that cannot point elsewhere: an `ibx_` owner id is a Gmail inbox
+(`packages/core/src/config.ts:338`); an `acc_` owner id — Slack, Resend and WhatsApp accounts alike, all of which
+wrote v1 records (`packages/slack/src/operations/send.ts:464, 1268`; `packages/resend/src/operations/send.ts:310`;
+`config.ts:343`) — is attributed by that account's stored `platform` while the account still exists. Otherwise it is
+unattributable: it takes no part in any channel's grouping and gets only generic wording.
+
 **Grouping comes from the channel's manifest, as data.** Each channel declares `approvalGrouping` in its `"agentcomms"`
 manifest field: `"draft"` — group by `(inboxId, draftId)`, used by Gmail and by Resend's prepared sends — or
 `"draft-revision-digest"` — group by `(inboxId, draftId, draftMessageId, contentDigest)`, used by Slack posts and files.
@@ -953,6 +971,16 @@ lookup failures stay attached to their draft and do not raise the concurrency or
 
 ## 5. Tests owed
 
+- **Round-32 cases:** a crash after the version-3 write and one failed revocation, then a restart: the stored tracked
+  set survives, the next 0.14 epoch-governed operation retries it, and loosening stays refused until it closes; a v1
+  record written by a paused 0.13 prepare after the conversion scan is added by the next rescan; the drain does not
+  close before the v1 pending lifetime has passed, even with every tracked record finished; historical `used`/`failed`
+  v1 records are never tracked. A v2 Slack draft record and a v2 Resend send record whose accounts are then removed
+  still group by Slack's and Resend's rules and keep Resend's status wording; editing a stored `channel` breaks
+  `bindingDigest` (whole-report indeterminate in D9, unpinned stub elsewhere); a v2 record naming a channel the
+  snapshot does not know is refused at creation; a v1 record with an `ibx_` owner is attributed to Gmail, one with an
+  `acc_` owner to its account's platform while the account exists, and the same `acc_` record after the account is
+  removed is unattributable and takes part in no grouping.
 - **Round-29 cases:** freeze a real 0.13 `executeSend` (and a 0.13 terminal approval) after its last config read and
   before its record lock; with 0.14, convert to version 3 and set `never`; (a) the drain revokes the v1 record, so on
   release the frozen operation is refused, writes no transition and the provider stand-in records no call; (b) with
