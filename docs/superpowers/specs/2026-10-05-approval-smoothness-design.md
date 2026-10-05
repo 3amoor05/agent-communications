@@ -1,6 +1,6 @@
 # CUE-404 — approving a send without fighting the clock — design
 
-Status: **revised after round 11 (3 P2, all addressed)**, 2026-10-05, from Linear CUE-404 (High; the
+Status: **revised after round 12 (3 P2, all addressed)**, 2026-10-05, from Linear CUE-404 (High; the
 owner: "this is very not smooth") and a cited research pass over this repository, the MCP specification and the
 clients' documentation. Depends on CUE-403 (the CLIs on PATH,
 [its spec](2026-10-04-cli-path-shims-design.md)) for every printed terminal command to work; ships after it.
@@ -114,8 +114,14 @@ ever read for reporting.
 characters). `bindingDigest` is the SHA-256 of the canonical JSON (the existing `canonicalJson`) of
 `{ "contentDigest", "route", "pendingMs", "approvedMs" }` (downloads: `{ "contentDigest", "profile" }`), and every read
 recomputes it from the record's own fields before classifying: a missing, malformed, non-canonical or mismatching value
-makes the record `corrupt` (never claimable, never grouped by D9). Claims compare the recomputed `bindingDigest`; D9
-groups only records whose recomputation succeeded.
+makes the record `corrupt` (never claimable). `contentDigest` is an opaque identity on reads that cannot reach the
+provider (status, wait, lists, D9): they validate only its encoding and the `bindingDigest` coherence, because its
+canonical input (addresses, subject, body, attachments — `packages/core/src/digest.ts:139`) is not stored; approve and
+claim compare it against the live content, exactly as today. **Confirmation evidence**, version 2: `approvedDigest`
+becomes `approvedBindingDigest`, which must equal the record's `bindingDigest`, and `approvedVia` must be one of
+`terminal`, `form` or `chat` and consistent with the record's route (a confirm-route record cannot carry `chat`);
+download answers keep today's evidence. Absent, malformed or contradictory evidence on an approved record makes it
+`corrupt`. D9 treats a digest-corrupt record by the attribution rules in D9 — never by silently excluding it.
 
 Released 0.13.0 code already refuses any record whose `digestVersion` differs from its own constant, with “the approval
 was prepared by a different version of agent-communications” (`packages/core/src/approvals.ts:292-293, 570-588`). An
@@ -170,13 +176,18 @@ mixed-process casualty.
   `heartbeat(approvalId, claimToken)` and `complete(approvalId, claimToken, outcome)` validate that token against the
   private claim marker under the record lock. A matching holder may complete `sending` **or `unknown`** to `used` or
   `failed` when the provider result arrives, preserving the current recovery that accepts `unknown`
-  (`packages/core/src/approvals.ts:1068-1075`). Before its **first provider mutation** (Gmail `sendDraft`, Resend's send,
-  Slack's first upload or post or reaction — each after any ledger reservation and draft re-read, e.g.
+  (`packages/core/src/approvals.ts:1068-1075`). Before **every provider mutation** (Gmail `sendDraft`, Resend's send,
+  and each of Slack's steps — `files.getUploadURLExternal`, each upload, `files.completeUploadExternal`, the post or
+  reaction, `packages/slack/src/operations/send.ts:1048`; Gmail's first after the ledger reservation and draft re-read,
   `packages/gmail/src/operations/send.ts:596-652`) the claimant runs a token-checked `fence(approvalId, claimToken)`
-  under the record lock: if the record is still `sending` with its token, the heartbeat is refreshed and the request may
-  start; if it already reads `unknown` (the claimant was suspended past the lease before sending anything), the claimant
-  aborts without contacting the provider and completes the record `failed` with reason `lease-lost-before-send`, which
-  it may do because nothing was sent. A missing or different token cannot complete it; approve, claim,
+  under the record lock: if the record is still `sending` with its token, the heartbeat is refreshed and the step may
+  start; if it already reads `unknown`, the claimant starts no further step. If no step had started it completes the
+  record `failed` with reason `lease-lost-before-send` (nothing was sent); if earlier Slack steps ran, it completes
+  `failed` with the existing "nothing was posted" wording and the uploaded/possibly-uploaded file disclosure. **Stated
+  limit:** a fence narrows the window but cannot close it — a claimant suspended after a successful fence and before its
+  network call can still start that one step after another caller has persisted `unknown`. That is exactly why
+  `unknown` means "may have gone out": the skills never prepare again automatically after it, and the person checks
+  Sent or the channel first. A missing or different token cannot complete it; approve, claim,
   revoke, expiry, status, wait, maintenance and every other path leave `unknown` final. Heartbeat never changes
   `unknown` back to `sending`. Late completion clears the stale-lease reason: `used` carries the provider id and no
   failure reason, while `failed` carries the known provider failure;
@@ -543,7 +554,11 @@ matching records that the scan read**, not only the newest one:
 - **any `approved` record blocks “its approvals expired”, whether claimable or not**. A claimable one is “approved and
   ready to send”. If the live policy is `never`, the exact description is **“approved, but the mailbox's policy is now
   never”**. Any other non-claimable approved state names its actual reason rather than calling it expired;
-- an attributable `corrupt` record for the same group makes that group indeterminate. Declined, cancelled, otherwise
+- an attributable `corrupt` record for the same group makes that group indeterminate. A record is attributable when
+  its mailbox (or Slack workspace) and draft id are readable; when a Slack record's exact grouping key (revision and
+  `contentDigest`) cannot be trusted because its digest or revision is missing, malformed or mismatched, **every** group
+  for that draft id becomes indeterminate (conservative widening); a Gmail record with a corrupt digest makes its
+  draft's group indeterminate. Declined, cancelled, otherwise
   revoked and failed records do not masquerade as expiry.
 
 When the complete **retained** approval directory fits inside the 500-file read window and every selected record is
@@ -784,8 +799,13 @@ lookup failures stay attached to their draft and do not raise the concurrency or
 
 ## 5. Tests owed
 
-- **Round-11 cases:** missing, malformed, non-canonical and recomputation-mismatched `contentDigest`/`bindingDigest`
-  across claim, approve, status, wait and D9 → `corrupt`; a claimant suspended after claim and before each channel's
+- **Round-12 cases:** approved send, change and download records with absent, malformed or contradictory
+  confirmation evidence → `corrupt`; a claimant suspended immediately after a successful fence starts its one step (the
+  stated limit) but no later step; lease expiry between each Slack step stops further steps with the right failure
+  wording; D9 with attributable Gmail and Slack records in every missing/malformed/mismatched digest combination, and a
+  Slack record with an untrustworthy key widening to every group of its draft.
+- **Round-11 cases:** missing, malformed, non-canonical and `bindingDigest`-mismatched records (structure and coherence
+  only for `contentDigest` on provider-free reads; live comparison at approve and claim) → `corrupt`; a claimant suspended after claim and before each channel's
   first provider mutation, with another caller persisting `unknown`, makes no provider request and records
   `lease-lost-before-send`; hostile subjects, addresses and file names through core list, status and wait — including
   removed-account and legacy records — stay inside the envelope.
