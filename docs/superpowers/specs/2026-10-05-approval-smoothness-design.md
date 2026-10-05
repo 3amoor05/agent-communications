@@ -1,6 +1,6 @@
 # CUE-404 — approving a send without fighting the clock — design
 
-Status: **revised after round 8 (1 P2, 1 P3, all addressed)**, 2026-10-05, from Linear CUE-404 (High; the
+Status: **revised after round 9 (2 P2, 1 P3, all addressed)**, 2026-10-05, from Linear CUE-404 (High; the
 owner: "this is very not smooth") and a cited research pass over this repository, the MCP specification and the
 clients' documentation. Depends on CUE-403 (the CLIs on PATH,
 [its spec](2026-10-04-cli-path-shims-design.md)) for every printed terminal command to work; ships after it.
@@ -52,8 +52,9 @@ implement the first two. The short repeat preview is dropped for this release an
 | Terminal send approval currently re-renders the shared preview, asks for the challenge, and only approves; it does not send. The shared renderer truncates addresses, subject, attachment filenames, thread and URLs, so this is not proof that every digest-bound byte was displayed. | `packages/gmail/src/cli/program.ts:1345-1356`; `packages/core/src/render.ts:154-192` |
 | Approval records currently carry `digestVersion: 1`; every locked transition refuses another version with “prepared by a different version of agent-communications,” after persisting any derived state it observed. | `packages/core/src/approvals.ts:292-306, 570-588` |
 | The existing update gate stops a non-exempt tool on an older server after a newer release is known, while deliberately allowing a call that carries a matching `pending` **or `approved` record** this machine already holds; the approval store's digest-version check remains the backstop for that allowed call. | `packages/core/src/update-gate.ts:64-91, 126-154`; `packages/core/src/approvals.ts:570-588` |
-| Core stores `sentMessageId` only when the `used` transition is written. After a provider succeeds, Gmail, Slack and Resend each preserve the successful outward result if that write fails and say the approval will read as `unknown`; none may invent `used`. Gmail currently converts a missing API id to `""`, and Slack does the same for a missing message `ts`, so provider acceptance does not currently guarantee a reportable id. | `packages/core/src/approvals.ts:1068-1075`; `packages/gmail/src/operations/send.ts:691-728`; `packages/slack/src/operations/send.ts:771-775, 883-910, 1114-1133`; `packages/resend/src/operations/send.ts:685-715`; `packages/gmail/src/gmail-api/transport.ts:533-546`; `packages/slack/src/operations/send.ts:771-775` |
+| Core stores `sentMessageId` only when the `used` transition is written. Its current `complete()` deliberately accepts both `sending` and `unknown` and moves either to `used` or `failed`. After a provider succeeds, Gmail, Slack and Resend each preserve the successful outward result if that write fails and say the approval will read as `unknown`; none may invent `used`. Gmail currently converts a missing API id to `""`, and Slack does the same for a missing message `ts`, so provider acceptance does not currently guarantee a reportable id. | `packages/core/src/approvals.ts:1068-1075`; `packages/gmail/src/operations/send.ts:691-728`; `packages/slack/src/operations/send.ts:771-775, 883-910, 1114-1133`; `packages/resend/src/operations/send.ts:685-715`; `packages/gmail/src/gmail-api/transport.ts:533-546`; `packages/slack/src/operations/send.ts:771-775` |
 | Ambiguous provider responses currently leave the approval in `sending` and return retryable `TRANSIENT` (or preserve another retryable provider code): Gmail and Resend do this for email, and Slack does it for messages, file shares and reactions. | `packages/gmail/src/operations/send.ts:652-688`; `packages/resend/src/operations/send.ts:628-675`; `packages/slack/src/operations/send.ts:753-768, 831-862, 1079-1108, 1349-1384, 1468-1472` |
+| A Slack file upload may run for 1,600 seconds at the 100 MiB limit, and one post may contain ten files. A five-minute age by itself therefore does not show that its sending process died. | `packages/slack/src/api/upload.ts:30-41`; `packages/slack/src/compose/files.ts:34-38` |
 | Approval records currently have only generic `createdAt`, `expiresAt` and `updatedAt`; stale `sending` is derived from `updatedAt`, so state-specific transition times are not recoverable. | `packages/core/src/approvals.ts:302-330, 512-530` |
 | Current change and download claims enter `used` without a state-specific terminal timestamp; they receive only the transition's generic `updatedAt`. | `packages/core/src/approvals.ts:905, 1060` |
 | Every successful claim creates `<approvalId>.claim` with `O_EXCL` beside the JSON record; the marker is the cross-process single-use guarantee. | `packages/core/src/approvals.ts:797-813` |
@@ -61,7 +62,7 @@ implement the first two. The short repeat preview is dropped for this release an
 | Core's current `list()` reads every approval file sequentially and catches a failed `get()` as `null`, silently omitting that record. | `packages/core/src/approvals.ts:1085-1103` |
 | `openCore` constructs one `ApprovalStore`, and each Gmail, Slack and Resend MCP server constructs one context when the server starts. Maintenance tied only to store construction therefore does not recur in a long-lived server. | `packages/core/src/core.ts:29-42`; `packages/gmail/src/mcp/server.ts:200-207`; `packages/slack/src/mcp/server.ts:187-194`; `packages/resend/src/mcp/server.ts:118-121` |
 | The audit append API accepts a `durable` option. Its filesystem helper fsyncs the file everywhere; on POSIX it then fsyncs the containing directory and its parent, while on Windows directory sync is skipped and NTFS metadata journaling is relied on. | `packages/core/src/audit.ts:75-85`; `packages/core/src/fs.ts:107-145`, especially `fs.ts:129` |
-| The file lock becomes stale after 30 seconds by default and waits up to five seconds by default. Renewal is explicitly opt-in; when enabled, it touches the lock while the callback runs, and the final cleanup removes the lock only if its token is still the holder's. A long maintenance callback therefore has to enable renewal and fence its own writes. | `packages/core/src/lock.ts:14-21, 157-164, 219-232` |
+| The file lock becomes stale after 30 seconds by default and waits up to five seconds by default. Renewal is explicitly opt-in; when enabled, it touches the lock while the callback runs, and the final cleanup removes the lock only if its token is still the holder's. A long maintenance callback therefore has to enable renewal and check ownership before its writes; that separate check is not an atomic commit fence. | `packages/core/src/lock.ts:14-21, 157-164, 219-232` |
 | The existing taint store caps retained entries. Its locked `record()` path prunes then rewrites the file, so that is when expired entries are physically removed; `check()` prunes only the in-memory value it returns and does not rewrite the file. | `packages/core/src/taint.ts:253-264, 317-327, 341-349` |
 | Gmail draft edits and message organisation already use `APPROVAL_PENDING` with “being sent right now” and “wait for the send to finish” when a send is in flight. | `packages/gmail/src/operations/drafts.ts:561-567`; `packages/gmail/src/operations/organise.ts:128-141` |
 | Slack gives every saved draft a revision, binds an approval to that revision as `draftMessageId`, and also binds the composed post digest. | `packages/slack/src/operations/drafts.ts:151-190`; `packages/slack/src/operations/send.ts:446-469, 728-746` |
@@ -124,6 +125,13 @@ mixed-process casualty.
 - for an outward send, entering `sending` persists `sendingAt`. A send claimed directly from pending has
   `createdAt <= sendingAt < expiresAt` and no `approvedAt`; one claimed after approval has
   `approvedAt <= sendingAt < usableUntil`. `sendingAt` remains on `used`, `failed` and `unknown`;
+- the send claim also creates an opaque random claim token, stores it only in the private `O_EXCL` claim marker and
+  returns it only to the internal sender path. It never appears in a public approval, error, audit row or tool/CLI
+  result. While provider work is outstanding, that process renews the sending lease every 30 seconds: under the
+  record lock it presents the token and writes `sendingHeartbeatAt` only if the same claim still owns a `sending`
+  record. A heartbeat is finite and ordered `sendingAt <= sendingHeartbeatAt`; the latest successfully persisted
+  value remains on a later `unknown`, `used` or `failed` record. A missed or failed heartbeat does not revive or
+  otherwise transition the record;
 - entering `used` always persists a finite `usedAt`. For an outward send it also requires a non-empty provider
   `sentMessageId` and persists `sentAt`, with `sendingAt <= sentAt` and `usedAt == sentAt`. A change claimed directly
   from pending has `createdAt <= usedAt < expiresAt`; one claimed after approval has
@@ -137,21 +145,33 @@ mixed-process casualty.
   approved send/change expires at `now >= usableUntil`, while an answered-but-unused download expires at
   `now >= expiresAt`. An ordinary deadline transition persists `expiredAt` as that derived boundary, not as the later
   observation time. An expired-after-approval send/change retains `approvedAt` and `usableUntil`;
-- `unknownAt` is not persisted: it is exactly `sendingAt + SENDING_STALE_MS`. A `sending` record reads and is
-  persisted as final `unknown` at `now >= unknownAt`; equality is stale. There is no reconciliation transition out of
-  `unknown`. The stale limit remains the current five minutes (`packages/core/src/approvals.ts:409, 512-530`);
+- `unknownAt` is not persisted: it is exactly `(sendingHeartbeatAt ?? sendingAt) + 2 min`. A `sending` record reads
+  and is persisted as `unknown` at `now >= unknownAt`; equality is stale. A live claimant normally advances that
+  boundary every 30 seconds, so legitimate long provider work stays `sending`. The two-minute lease replaces the
+  current five-minute age check (`packages/core/src/approvals.ts:409, 512-530`). Slack needs renewal rather than a
+  longer fixed age: one permitted 100 MiB upload can take 1,600 seconds and one post can carry ten files
+  (`packages/slack/src/api/upload.ts:30-41`; `packages/slack/src/compose/files.ts:34-38`);
+- `unknown` is final for every transition except completion by the process that made the original send claim. Both
+  `heartbeat(approvalId, claimToken)` and `complete(approvalId, claimToken, outcome)` validate that token against the
+  private claim marker under the record lock. A matching holder may complete `sending` **or `unknown`** to `used` or
+  `failed` when the provider result arrives, preserving the current recovery that accepts `unknown`
+  (`packages/core/src/approvals.ts:1068-1075`). A missing or different token cannot complete it; approve, claim,
+  revoke, expiry, status, wait, maintenance and every other path leave `unknown` final. Heartbeat never changes
+  `unknown` back to `sending`. Late completion clears the stale-lease reason: `used` carries the provider id and no
+  failure reason, while `failed` carries the known provider failure;
 - `now < createdAt` and, for an active approved record, `now < approvedAt` fail closed as expired. This clock-anomaly
   transition persists `expiredAt` as the observation time and `reason: "clock-anomaly"`; status says that the clock
   moved backwards and the approval was expired safely. It deliberately does **not** pretend that a future normal
   deadline was reached. The timestamp-ordering invariants exempt only an `expired` record with this exact reason:
   its `expiredAt` may precede `createdAt` or `approvedAt`; every other timestamp and state invariant still applies.
-  Boundary equality is expired everywhere. The final states `used`, `failed`, `unknown`, `revoked` and `expired`
-  never change because of the observation clock, so a later clock rollback cannot turn one into `expired` or revive
-  it;
+  Boundary equality is expired everywhere. The states `used`, `failed`, `revoked` and `expired`, plus `unknown`
+  except for its one claim-token completion above, never change because of the observation clock, so a later clock
+  rollback cannot turn one into `expired` or revive it;
 - state-specific timestamps are finite and appear exactly where that state or its retained history requires them:
   every kind has `usedAt` only on `used`; a used send has `usedAt == sentAt`; sends have `sendingAt` on
-  `sending`/`used`/`failed`/`unknown`, `sentAt` only on `used`, and `failedAt` only on `failed`, while all kinds put
-  `revokedAt` only on `revoked` and `expiredAt` only on `expired`. `reason: "clock-anomaly"`
+  `sending`/`used`/`failed`/`unknown`, optional `sendingHeartbeatAt` only on those same states and never before
+  `sendingAt` or after a present `usedAt`/`failedAt`, `sentAt` only on `used`, and `failedAt` only on `failed`, while
+  all kinds put `revokedAt` only on `revoked` and `expiredAt` only on `expired`. `reason: "clock-anomaly"`
   appears only on the anomaly expiry above. `approvedAt` and `usableUntil` remain together on every later
   send/change state reached from approval. A contradictory field or any violation of the ordering above, other than
   that single stated anomaly exemption, is corrupt;
@@ -160,10 +180,12 @@ mixed-process casualty.
   This includes an on-disk approved record with `approvedAt == expiresAt`: the transition should have expired at that
   boundary, so the impossible stored combination is corrupt. A corrupt classification does not rewrite the raw state.
 
-Expiry and stale-send classification are monotonic. A locked read persists `expired` with `expiredAt`, or `unknown`
-when a valid active record crosses its boundary; this extends the locked transition's existing write-back rule
-(`packages/core/src/approvals.ts:570-588`) to `get`, list, status and wait. Valid final records are returned unchanged.
-A wait is therefore read-only except that it may persist one of those derived final states.
+Expiry is monotonic. Stale-send classification is monotonic for every caller except the original claim holder's
+token-authenticated completion: a locked read persists `expired` with `expiredAt`, or `unknown` when a valid active
+record crosses its lease boundary; this extends the locked transition's existing write-back rule
+(`packages/core/src/approvals.ts:570-588`) to `get`, list, status and wait. A valid `unknown` is returned unchanged by
+every other path, while the matching holder may still record the provider's known result as `used` or `failed`. A wait
+is therefore read-only except that it may persist one of those derived states.
 
 **Accepted risk:** an approved record can be claimed by any process sharing the store for up to 24 hours. Approvals
 are not bound to the preparing process. A hostile same-user process is outside the existing threat model
@@ -218,9 +240,9 @@ be claimed. Downloads retain their public `answered` classification for stored `
 | expired before approval | `state: expired`, `claimable: false`; `APPROVAL_EXPIRED`: “this approval expired; nothing was sent with it”, followed by prepared at …, expired at … and prepare-again guidance |
 | approved, then expired unused | `state: expired`, `claimable: false`; `APPROVAL_EXPIRED`: “this approval expired; nothing was sent with it”, followed by approved at …, expired unused at … and prepare-again guidance |
 | expiry forced because the observation clock is before `createdAt` or `approvedAt` | `state: expired`, `claimable: false`; `APPROVAL_EXPIRED`: “the clock moved backwards; this approval was expired safely at …; nothing was sent with it”, with `reason: clock-anomaly` and no false normal-deadline claim |
-| provider response leaves this call's outcome uncertain | immediately return non-retryable `SEND_OUTCOME_UNKNOWN` with `approval.state: sending`, `claimable: false`, `sendingAt` and derived `unknownAt`; the send may have happened |
-| `sending`, inside the stale limit, observed by another call | retryable `APPROVAL_PENDING`: “being sent by another call since …; wait for it”; never “prepare again” |
-| `unknown` at or after the stale-send limit | `SEND_OUTCOME_UNKNOWN`: final; the send may have happened; check Sent/the channel before doing anything else |
+| provider response leaves this call's outcome uncertain | immediately return non-retryable `SEND_OUTCOME_UNKNOWN` with `approval.state: sending`, `claimable: false`, `sendingAt`, any `sendingHeartbeatAt` and derived `unknownAt`; the send may have happened |
+| `sending`, inside its renewed lease, observed by another call | retryable `APPROVAL_PENDING`: “being sent by another call since …; wait for it”; include `sendingAt`, any `sendingHeartbeatAt` and derived `unknownAt`; never “prepare again” |
+| `unknown` at or after the sending-lease limit | `SEND_OUTCOME_UNKNOWN`: final to every caller except the original claim token's `used`/`failed` completion; the send may have happened and its claimant may still record a late provider result; check Sent/the channel before doing anything else |
 | used send | `APPROVAL_VOID`: already used at `usedAt == sentAt`, with its non-empty provider message id |
 | used change | `APPROVAL_VOID`: the approved change was already claimed at `usedAt`; no provider-id or “sent” wording |
 | `failed` | `APPROVAL_VOID` with channel-specific truth. Gmail/Resend certain failures say nothing was sent. A Slack file failure says **“nothing was posted”** and preserves `uploaded` and `possiblyUploaded` ids/names because bytes may already have reached Slack (`packages/slack/src/operations/send.ts:1016-1018, 1032-1035, 1088-1111, 1137-1172`) |
@@ -236,10 +258,12 @@ distinct code prevents consumers from following `APPROVAL_VOID`'s global “prep
 to this code as soon as they know the response is uncertain. A later caller that sees the still-fresh `sending`
 record gets the state-specific `APPROVAL_PENDING` result above, consistent with the existing edit/organise guard's
 “being sent right now; wait” behavior (`packages/gmail/src/operations/drafts.ts:561-567`;
-`packages/gmail/src/operations/organise.ts:128-141`). `unknown` is final and has no reconciliation command. Skills and
-machine consumers **must not prepare again while the record is `sending`**; they wait until `used`, `failed` or
-`unknown`. After `unknown`, they first tell the person to check Sent or the Slack channel and prepare again only after
-they establish that the outward action did not happen. No skill or machine consumer prepares automatically.
+`packages/gmail/src/operations/organise.ts:128-141`). `unknown` has no public reconciliation command and is final to
+every path except the original claimant's token-authenticated `used`/`failed` completion. Skills and machine consumers
+**must not prepare again while the record is `sending`**; they wait until `used`, `failed` or `unknown`. After
+`unknown`, they first tell the person that the claimant may still record a late provider result, check Sent or the
+Slack channel, and prepare again only after they establish that the outward action did not happen. No skill or machine
+consumer prepares automatically.
 
 The classifier runs **inside each locked transition**. Approve, claim, revoke and form resolution read, derive,
 validate, classify and write beneath the same record lock. Inspect/status/wait use the same locked read so that expiry
@@ -254,8 +278,9 @@ nonzero wait it keeps polling while the outcome is `pending` and not claimable, 
 `sending` record is an in-progress action, not a terminal refusal: the wait continues until the record becomes `used`,
 `failed` or `unknown`. It otherwise stops on the first claimable, non-sending terminal or expired outcome, on an
 approved record made non-claimable by live policy, caller cancellation or timeout. It never polls beyond the record's
-pending/usable deadline or a sending record's derived `unknownAt`. A pending, directly claimable chat-route
-send/change returns immediately as `{ state: "pending", claimable: true }`; a terminal approval ends the wait as
+pending/usable deadline or a sending record's current derived `unknownAt`, which moves forward after every persisted
+heartbeat. A pending, directly claimable chat-route send/change returns immediately as
+`{ state: "pending", claimable: true }`; a terminal approval ends the wait as
 `{ state: "approved", claimable: true, usableUntil }`. The persisted state stays `approved`. A download returns
 `state: answered` when approved/used and `state: expired` when expired, with no `usableUntil`.
 
@@ -263,9 +288,9 @@ The result carries `state` plus `claimable`; its states are `pending`, `approved
 `used`, `failed`, `unknown`, `corrupt`, `answered` (downloads) and, when it can be delivered, `cancelled` (the wait,
 not the approval, with `claimable: false`). A nonexistent, foreign, wrong-kind or pinned-away id is D2's `NOT_FOUND`
 error with `approval: null`, not another state. A timeout is `state: pending` with the same id and the correct
-`claimable` value when it was waiting for approval, or the current `state: sending` with `sendingAt` and `unknownAt`
-when it was waiting for an in-flight send. Neither timeout carries prepare-again guidance. Progress is sent every 15
-seconds only when the caller supplied a progress token.
+`claimable` value when it was waiting for approval, or the current `state: sending` with `sendingAt`, any
+`sendingHeartbeatAt` and `unknownAt` when it was waiting for an in-flight send. Neither timeout carries prepare-again
+guidance. Progress is sent every 15 seconds only when the caller supplied a progress token.
 
 At most **8 waits per server or CLI process** run at once; a ninth gets `TRANSIENT` “too many waits”. This bounds one
 process's resources, not all processes sharing the store: each slot costs one small file read per second. Every exit
@@ -434,10 +459,12 @@ inventing a state:
 
 - Every send-path result — success and refusal, on every surface D2 lists — has nullable
   `approval: { id, state, claimable, route, … }`. `pending` has `expiresAt` and the next step; `approved` has
-  `approvedAt` and `usableUntil`; `sending` has `sendingAt` and derived `unknownAt`; `expired` has persisted
-  `expiredAt` and `approvedAt` when approval happened first; `used` has `sendingAt`, `sentAt` and a non-empty
+  `approvedAt` and `usableUntil`; `sending` has `sendingAt`, any `sendingHeartbeatAt` and derived `unknownAt`;
+  `expired` has persisted `expiredAt` and `approvedAt` when approval happened first; `used` has `sendingAt`, `sentAt`
+  and a non-empty
   `sentMessageId`, with `usedAt == sentAt`; a used change or download has `usedAt`; `failed` has `sendingAt` and
-  `failedAt`; `unknown` has `sendingAt` and derived `unknownAt`; and `revoked` has `revokedAt`. These states carry
+  `failedAt`; `unknown` has `sendingAt`, any `sendingHeartbeatAt` and derived `unknownAt`; and `revoked` has
+  `revokedAt`. A `used` or `failed` send also retains any last `sendingHeartbeatAt`. These states carry
   their honest reasons. `corrupt` carries an integrity reason and is never claimable. A download uses `pending`,
   `answered`, `expired`, `revoked` and `corrupt`, with no `usableUntil`.
 - `approval` is null (or omitted on a surface whose schema omits nulls) for `NOT_FOUND` and every failure before an
@@ -451,7 +478,7 @@ inventing a state:
   (`packages/gmail/src/operations/send.ts:691-728`; `packages/slack/src/operations/send.ts:883-910`;
   `packages/resend/src/operations/send.ts:685-715`).
 - A provider success response with no non-empty id is reported exactly as **“sent; the provider returned no id”**,
-  never `used` and never “sent, message id …”. The record remains `sending` and becomes final `unknown` at its stale
+  never `used` and never “sent, message id …”. The record remains `sending` and becomes `unknown` at its lease
   boundary. This closes the current empty-string paths in Gmail and Slack
   (`packages/gmail/src/gmail-api/transport.ts:533-546`; `packages/slack/src/operations/send.ts:771-775`). `undefined`,
   `null`, `""` and a provider value rejected as empty are represented as **absence**, never as an empty string. No
@@ -495,7 +522,8 @@ matching records that the scan read**, not only the newest one:
   revoked and failed records do not masquerade as expiry.
 
 When the complete **retained** approval directory fits inside the 500-file read window and every selected record is
-readable, an otherwise eligible group may say exactly **“not sent with any approval in the last 90 days”**. That is
+readable, lockable without waiting and processed before the report deadline, an otherwise eligible group may say
+exactly **“not sent with any approval in the last 90 days”**. That is
 the strongest permitted draft-level claim: records at or beyond the 90-day retention boundary may already have been
 pruned, and the retained audit row does not carry the Gmail or Slack grouping key. The report therefore never makes an
 all-time claim from the approval directory. It is also still a local claim: approval records cannot prove what
@@ -506,9 +534,14 @@ is bounded.
 
 If any file selected inside the scan window is unreadable, its ownership and key cannot be proved. Every candidate
 row for every mailbox/account covered by that scan therefore says **“indeterminate (an approval record could not be
-read)”** and makes no unsent or approvals-expired claim. The unreadable file still appears as D2's safe corrupt stub on
-the unpinned approval surfaces; pinned surfaces keep hiding it. An unreadable file outside a capped window is covered
-by the last-500 wording, because its contents were not among the evidence the operation attempted to read.
+read)”** and makes no unsent or approvals-expired claim. A selected record whose lock is busy is likewise indeterminate
+evidence for its key: when the key cannot be established without the locked read, every candidate covered by the scan
+says **“indeterminate (an approval record was busy)”**; when the operation already has a safe attributable key, only
+that group does. A deadline that leaves selected approval evidence unread uses **“indeterminate (the report deadline
+left approval records unread)”** for every key that omitted evidence could affect. The unreadable file still appears
+as D2's safe corrupt stub on the unpinned approval surfaces; pinned surfaces keep hiding it. An unreadable or busy file
+outside a capped window is covered by the last-500 wording, because its contents were not among the evidence the
+operation attempted to read.
 
 At report time the Gmail operation performs a live `drafts.get` for each returned draft — the existing transport
 operation is a provider read (`packages/gmail/src/gmail-api/transport.ts:509-513`). This is an independent observation,
@@ -524,8 +557,8 @@ through D8's untrusted-field rules, the last preparation and expiry, the evidenc
 `gmail_draft_get` → `getDraft` and `agent-gmail draft list` / `gmail_draft_list` → `listDrafts` use the same wording;
 `agent-gmail doctor` / `gmail_doctor` → `doctor` counts the bounded last-seven-days result and points to the list
 (`capabilities.json:501-514, 550-555, 755-760`). A last-500 or 20-row doctor count is a lower bound; a scan with an
-unreadable selected record reports an indeterminate count instead of a number presented as complete. Reporting
-creates, sends and deletes nothing.
+unreadable or busy selected record, or one cut short by its deadline, reports an indeterminate count instead of a
+number presented as complete. Reporting creates, sends and deletes nothing.
 
 Slack's local draft inference is keyed by **workspace/account id, draft id, exact revision, and exact digest**, not
 draft id alone and not revision or digest. Both must match. A `used` revision A never hides an expired revision B, and
@@ -541,20 +574,24 @@ list surface is added (`capabilities.json:29-34, 1199-1204`).
 creation and before every approval list, D3 status/wait operation, and D9 report, doctor or draft-annotation operation.
 It is deliberately a store-use hook, not constructor work: one MCP context and its one `ApprovalStore` can remain
 alive across any number of daily boundaries and still run maintenance. Calls in several processes coordinate per
-state directory. The elapsed-time budget starts on entry to `ensurePruned()` and covers maintenance-lock acquisition,
-state validation, directory enumeration and metadata reads, record work and the cursor commit. The attempt starts no
-new maintenance step after **5 seconds elapsed** and starts no 201st record slot, whichever limit arrives first. An
-already-started local filesystem operation cannot be cancelled, so the caller's bound is about five seconds rather
-than a hard real-time deadline.
+state directory. A non-report hook gives `ensurePruned()` one five-second elapsed deadline. A D9 report creates that
+deadline once, before calling `ensurePruned()`, and passes the same deadline through maintenance, report enumeration,
+metadata and record reads, grouping and live draft lookups. Thus maintenance plus report have one **end-to-end
+five-second work-start budget**, not five seconds each. Neither phase starts another step after the deadline, and
+maintenance still starts no 201st record slot. An already-started filesystem or provider operation cannot necessarily
+be cancelled, so wall time is about five seconds rather than a hard real-time cutoff; the implementation never adds
+another ordinary lock timeout after the shared deadline.
 
 The pruner holds the approval store's maintenance lock for the entire attempt with `staleMs: 30_000` and renewal
 explicitly enabled at `renewMs: 10_000`. Renewal is not a default: `withFileLock` makes it opt-in and starts the
 renewal timer only when `renewMs` is supplied (`packages/core/src/lock.ts:14-21, 157-164, 219-225`). The
 maintenance callback captures its acquisition token and re-reads the lock to verify that token **before each record
-prune and again immediately before writing the cursor**. A missing or different token fences out the former holder:
-it starts no more record work, does not write the cursor, and reports the maintenance error. The record protocol
-remains safe if ownership is lost during an already-started record operation, because that operation has its own lock;
-the final fence prevents the stale maintenance holder from racing the current holder's cursor.
+prune and again immediately before writing the cursor**. A missing or different token stops the former holder from
+starting more work or intentionally writing the cursor and reports the maintenance error. This check is not a
+transactional fence: lock ownership can change after the read and before the atomic cursor rename, so a stale holder
+can still overwrite a newer cursor. Safety does not depend on preventing that write. Every prune decision re-reads,
+classifies and changes its record under that record's own lock, so a cursor overwrite can never make either holder
+prune a record wrongly.
 
 The persisted prune-state schema is exactly
 `{ version: 1, lastAttemptAt: <finite ISO timestamp>, cursor: null | { mtimeMs: <finite non-negative number>, approvalId: <valid approval id> } }`.
@@ -581,14 +618,18 @@ not wait through the ordinary five-second lock timeout. A busy record is not ope
 as skipped and left for the next run. Under an acquired record lock the pruner opens the JSON at most once, classifies
 it and applies the protocol below; a stray claim marker with no JSON also consumes one slot.
 
-The persisted cursor normally resumes strictly after the last attempted slot. If a record lock was busy, the cursor
-commit stays immediately before the earliest busy slot, so the next daily run considers that record again; work done
-after it may repeat safely. Reaching the end with no busy slot clears the cursor so the next maintenance cycle starts
-another oldest-first pass. Hitting either 200 slots or the five-second deadline returns `complete: false`; the cursor
-records only safe progress reached inside those bounds. The cursor is atomically persisted under the same renewed,
-fenced maintenance lock after the batch. A crash before that commit safely repeats work after the daily interval; a
-crash after it resumes strictly from the committed position. Per-record failures are reported in maintenance status,
-leave uncertain artifacts in place and do not extend either bound.
+The persisted cursor is advisory. It normally resumes strictly after the last attempted slot. If a record lock was
+busy and the run stops before the end, the cursor commit stays immediately before the earliest busy slot, so the next
+daily run considers that record again; work done after it may repeat safely. Every run that reaches the end of the
+directory clears the cursor, even if it skipped a busy record, so the next maintenance cycle starts another
+oldest-first pass. Hitting either 200 slots or the five-second deadline returns `complete: false`; the cursor
+records only safe progress reached inside those bounds. The cursor is atomically persisted after the final
+best-effort ownership check, with the TOCTOU window above accepted. If a stale holder overwrites a newer cursor with
+an earlier position, the next run merely rescans; if it writes a later position, the next run may skip ahead. Every
+run that reaches the end clears the cursor, so any skipped range is reached within one full oldest-first cycle. A crash
+before a cursor commit safely repeats work after the daily interval; a crash after it resumes from whichever advisory
+position won the last atomic rename. Per-record failures are reported in maintenance status, leave uncertain artifacts
+in place and do not extend either bound.
 
 Valid finished records in `used`, `failed`, `unknown`, `revoked` or `expired` are deleted at
 `now >= finishedAt + 90 days`, where `finishedAt` is the validated state-specific terminal time (`usedAt`, `failedAt`,
@@ -624,15 +665,16 @@ exceptions. The audit log remains durable terminal history, but D9 deliberately 
 rows to make draft-level claims beyond 90 days.
 
 `ensurePruned()` is bounded housekeeping, not an availability gate. Approval creation continues after its awaited
-attempt, whose five-second elapsed budget includes lock and metadata work; a contended record adds no lock wait. Lists,
-status and reports proceed whether the attempt skipped, completed, hit 200, hit the time budget or encountered a
-maintenance error; reporting returns `{ attempted, processed, skippedBusy, complete, errors }` maintenance status
-instead of waiting for the whole backlog. The ordinary list/report read can still fail on its own storage error. The
-evidence wording below remains governed by the files the report actually selected and read, never by a claim that
-maintenance finished.
+attempt, whose five-second elapsed budget includes lock and metadata work; a contended record adds no lock wait. Lists
+and status proceed whether the attempt skipped, completed, hit 200, hit the time budget or encountered a maintenance
+error. Reports do too, but use only the time remaining on their single shared deadline. Reporting returns
+`{ attempted, processed, skippedBusy, complete, errors }` maintenance status instead of waiting for the whole backlog.
+The ordinary list/report read can still fail on its own storage error. The evidence wording below remains governed by
+the files the report actually selected and read, never by a claim that maintenance finished.
 
-**Bounded content scan, with no index or migration.** After the awaited bounded prune attempt, the report separately
-enumerates the retained approval filenames and filesystem metadata, sorts them by modification time descending with
+**Bounded content scan, with no index or migration.** After the awaited bounded prune attempt, the report uses the
+remaining portion of the same five-second deadline to enumerate the retained approval filenames and filesystem
+metadata, sort them by modification time descending with
 approval id as the stable tie-breaker, and opens at most the **500 most recently modified approval files**. That
 500-file cap bounds only the report's record-content reads; it does not bound the preceding prune batch or either
 pass's directory enumeration and `stat` work. Enumeration/stat cost is bounded by the retained directory size: one
@@ -641,20 +683,33 @@ The 90-day rule bounds normal valid finished history only after the 200-per-day 
 preserved corrupt/unreadable files and an over-capacity maintenance backlog are explicit exceptions, so this design
 does not claim a fixed metadata-work bound or lifetime-constant directory size.
 
-For one report on which maintenance is due, the following are maxima in addition to the five-second elapsed ceiling;
-the deadline may stop maintenance below them. The semantic I/O ceilings are two approval-directory `readdir` calls;
+Every selected report record uses the same non-blocking record-lock try as pruning: no polling sleep and no ordinary
+five-second per-record timeout. The report opens and classifies the JSON only after acquiring that lock. A busy record
+is indeterminate evidence under D9's existing rules. When its already established owner/group key is safe to use, it
+makes that key's candidate indeterminate; when the lock prevents safe attribution of its owner or key, it has the same
+effect as an unreadable selected file and makes every candidate covered by that scan indeterminate. The result reports
+the approval id as busy without exposing record contents. If the shared deadline leaves any selected filename, lock
+try, record read or grouping step unstarted, the report sets `truncated: deadline`, never claims `complete-90-days` or
+`last-500` for evidence it did not read, and applies the same indeterminate wording to every key the omitted evidence
+could affect. A live draft lookup omitted at the later provider phase does not weaken already completed local-history
+evidence; it leaves only that independent live observation unknown.
+
+For one report on which maintenance is due, the following are maxima under the one end-to-end five-second elapsed
+ceiling; the deadline may stop either phase below them. The semantic I/O ceilings are two approval-directory
+`readdir` calls;
 at most `entries-before + entries-after` metadata stats; at most 200 prune record-content opens plus 500 report
-record-content opens; one renewed, fenced maintenance/store lock plus at most 700 record-lock attempts (prune attempts
-are non-blocking); at most 200 durable retention appends;
+record-content opens; one renewed maintenance/store lock plus at most 700 non-blocking record-lock attempts; at most
+200 durable retention appends;
 and at most 400 approval-artifact unlink attempts (claim marker plus JSON per processed slot). Lock-file cleanup adds
 at most 701 unlink attempts, for at most 1,101 total unlink attempts in an uncontended run. When maintenance is not
-due, the report has one enumeration/stat pass, at most 500 record-content opens and locks, and no retention append or
+due, the report has one enumeration/stat pass, at most 500 record-content opens and lock attempts, and no retention append or
 artifact unlink. These are logical filesystem-operation bounds; the test file adapter counts every directory read,
-record open, lock acquisition or try, renewal/fence check, durable append and unlink, including lock-file unlinks, so
-none is hidden behind a helper.
+record open, lock acquisition or try, renewal/ownership check, durable append and unlink, including lock-file unlinks,
+so none is hidden behind a helper.
 
 A `complete-90-days` scan means complete only
-for the retained horizon, never for the installation's lifetime. The operation then validates/classifies the
+for the retained horizon, never for the installation's lifetime, and requires every selected record lock and read plus
+the grouping work to finish inside the shared deadline. The operation validates/classifies the
 selected files and groups the requested mailbox/account's matching records by draft so repeated approvals produce one
 result. The last-seven-days rule selects candidate expiries; it does **not** discard an older matching `approved`,
 `sending`, `used`, `unknown` or corrupt blocker from the opened retained history. Gmail's group key is mailbox id plus
@@ -666,12 +721,14 @@ expired v1 record may support only the evidence-scoped wording above. Invalid or
 contract and never support an unsent claim.
 
 Eligible draft groups are ordered by their newest relevant approval, newest first. A report returns at most **20**
-such drafts and performs no more than one live draft lookup for each: at most 20 provider reads total, with concurrency
-**2**. The result sets an explicit `truncated` reason when the retained directory had more files than the 500-file
-window, when qualifying records may therefore have fallen outside it, or when more than 20 eligible draft groups were
-found. The first case changes every row to the exact last-500 wording above; the second result cap says that older rows
-may be absent. It never presents a capped result or doctor count as complete. Provider lookup failures stay attached
-to their draft and do not raise the concurrency or call limit.
+such drafts and, while time remains on the same deadline, performs no more than one live draft lookup for each: at most
+20 provider reads total, with concurrency **2**. The result sets an explicit `truncated` reason when the retained
+directory had more files than the 500-file window, when qualifying records may therefore have fallen outside it, when
+more than 20 eligible draft groups were found, or when the deadline stopped either local or provider work. The first
+case changes every row to the exact last-500 wording above; the second result cap says that older rows may be absent;
+deadline-omitted evidence is indeterminate as specified above, and a draft lookup not started before the deadline is
+reported as not observed rather than guessed. It never presents a capped result or doctor count as complete. Provider
+lookup failures stay attached to their draft and do not raise the concurrency or call limit.
 
 ## 4. Departures from the ticket
 
@@ -688,7 +745,7 @@ to their draft and do not raise the concurrency or call limit.
    approval expires happens only after a day. Proving that a person saw every digest-bound byte would require a
    full-content terminal renderer; today's shared renderer truncates addresses, subject, attachment filenames, thread
    and URLs (`packages/core/src/render.ts:154-192`). That renderer is its own design. Identical content prepared again
-   therefore gets the full ordinary preview. A final `unknown` record does not mechanically block a later explicit
+   therefore gets the full ordinary preview. An `unknown` record does not mechanically block a later explicit
    preparation after the person checks the provider; an active `sending` record instead produces wait guidance, and
    every skill forbids preparing again until it becomes `used`, `failed` or `unknown`.
 5. **“Previously mailed” is bounded to 50 hits per recipient and 200 history requests per operation.** Both Gmail
@@ -730,13 +787,26 @@ Each guard is watched failing under a mutation, then restored.
   `createdAt` and before `approvedAt` persist the
   observation time as `expiredAt`, persist exactly `reason: clock-anomaly`, use the “clock moved backwards” status
   prose, accept only that reason's ordering exemption, and stay expired after process restart and a corrected clock.
-  `unknownAt` is exactly `sendingAt + SENDING_STALE_MS` and is not stored, and equality at every boundary takes the
-  later state. A read that persists ordinary expiry or final `unknown`, followed by clock rollback, process restart
-  and another read, stays final; clock rollback after valid `used` and `failed` records also leaves their states
-  unchanged.
+  `sendingHeartbeatAt` is absent before a send claim, optional thereafter, finite and ordered after `sendingAt` and
+  before any terminal result. `unknownAt` is exactly `(sendingHeartbeatAt ?? sendingAt) + 2 min` and is not stored;
+  equality at every boundary takes the later state. A read that persists ordinary expiry or `unknown`, followed by
+  clock rollback, process restart and another ordinary read, stays final; clock rollback after valid `used` and
+  `failed` records also leaves their states unchanged.
 - **D1 — content and concurrency:** two simultaneous claims after the former ten-minute boundary of a confirm route
   have one winner; a changed draft, changed expected recipients/account or drifted plan voids at claim; old-server tool
   calls stopped by the update gate and its pending-or-approved exception both end closed on the digest version.
+- **D1 — sending lease:** the claim creates one private random token and no public/audit rendering exposes it. The
+  claimant writes `sendingHeartbeatAt` under the record lock every 30 seconds while provider work remains outstanding;
+  each write requires the matching token. A full Slack file-post operation against the loopback fake holds real
+  provider work open beyond five minutes, emits heartbeats, remains `sending` through status/wait, then separately
+  succeeds and fails and records the known `used`/`failed` result. This exercises the production post/upload/share
+  path rather than calling the approval store alone. A second process suspends the claimant's heartbeat for more than
+  two minutes: status persists `unknown`; when the original provider promise later settles, its matching token still
+  records `unknown → used` or `unknown → failed`, matching the recovery current `complete()` permits
+  (`packages/core/src/approvals.ts:1068-1075`). A missing, stale or different token cannot heartbeat or complete, and
+  approve, revoke, claim, status, wait and maintenance cannot move `unknown`. A resumed heartbeat cannot move it back
+  to `sending`. Late success clears the stale-lease reason; late failure replaces it with the provider failure.
+  Heartbeat-write failure and process suspension both exercise the same lease-expiry path.
 - **D2:** every table row on every named surface, Slack files and reactions included; ownership is checked before
   routing; nonexistent, foreign, wrong-kind and pinned-away ids have byte-identical `NOT_FOUND` envelopes with
   `approval: null`, and a spy proves no foreign record was classified or rendered. Prepare-time `POLICY_NEVER`,
@@ -753,20 +823,22 @@ Each guard is watched failing under a mutation, then restored.
   call. Before a successful share each error says “nothing was posted”, and details preserve exact `uploaded` and
   `possiblyUploaded` disclosure. Ambiguous responses from Gmail, Resend, Slack messages, Slack file shares and Slack
   reactions immediately return non-retryable `SEND_OUTCOME_UNKNOWN` with `approval.state: sending`; zero-wait/list
-  reports `sending` before the stale boundary and final `unknown` at equality. Gmail/Resend certain failures continue
+  reports `sending` before the current lease boundary and `unknown` at equality. Gmail/Resend certain failures continue
   to say nothing was sent. For Gmail, Slack and Resend, provider success followed by a failed approval-store `used`
   write still returns outward success, and zero-wait/list later reports `sending` then `unknown`, never invented
-  `used`. Skill evaluations forbid preparing while `sending`; after final `unknown`, they require checking Sent/the
-  channel first and forbid an automatic prepare.
+  `used`. Skill evaluations forbid preparing while `sending`; after `unknown`, they state that the original claimant
+  may still record a late result, require checking Sent/the channel first and forbid an automatic prepare.
 - **D3:** every result shape; `waitSeconds: 0`; default 30 and maximum 300; no poll beyond a pending or approved
-  record's deadline or a sending record's `unknownAt`; immediate `{state: pending, claimable: true}` for pending/chat;
+  record's deadline or a sending record's current heartbeat-derived `unknownAt`; immediate
+  `{state: pending, claimable: true}` for pending/chat;
   download `answered`/`expired` without `usableUntil`; timeout returns pending or sending with the same id and current
   actionability. A nonzero pending-confirm wait is proved to perform later polls instead of returning its first
   classified pending result. A wait that first sees `sending` continues polling and is separately driven to `used`,
   `failed` and stale-boundary `unknown`; it never returns prepare-again guidance while in progress. It otherwise stops
   as soon as approval becomes claimable, policy makes an approved record non-claimable, a terminal/expired outcome
-  appears, cancellation arrives or time runs out. The only permitted byte changes are valid derived expiry or
-  stale-send finalisation. A terminal approval ends a wait `{state: approved, claimable: true}` without changing the
+  appears, cancellation arrives or time runs out. The wait's only permitted byte changes are valid derived expiry or
+  stale-send finalisation; concurrent claimant heartbeats may advance `sendingHeartbeatAt` beneath the same record
+  lock. A terminal approval ends a wait `{state: approved, claimable: true}` without changing the
   stored state again. State change versus timeout/cancellation is classified by the final locked read.
 - **D3 — resources and cancellation:** the ninth simultaneous wait in one process is refused. Success, timeout,
   caller cancellation, thrown read/classification error and MCP disconnect each release the slot, proven by an eighth
@@ -824,7 +896,7 @@ Each guard is watched failing under a mutation, then restored.
   downloads use their own state fields; all four zero-wait CLI/MCP pairs agree. Nonexistent/foreign ids and every
   failure before creation are covered as in D2. Provider success with a missing Gmail id or Slack `ts` says exactly
   “sent; the provider returned no id”, never reports `used` or invents “message id”, and later classifies the record as
-  final `unknown`; ordinary success cannot enter `used` with an empty id. Spies assert that missing Gmail ids and
+  `unknown`; ordinary success cannot enter `used` with an empty id. Spies assert that missing Gmail ids and
   Slack message/file/reaction ids never write `""` into a completion or audit record and never issue a provider
   readback call with an empty id; the audit outcome omits the id and records accepted-without-id instead.
 - **D8 — integrity and untrusted data:** malformed timestamps and unknown versions are `corrupt` through direct get,
@@ -834,7 +906,8 @@ Each guard is watched failing under a mutation, then restored.
   them, pinned status/wait returns owner-hidden `NOT_FOUND`, and doctor reports the count. Hostile subjects, addresses,
   display prose and attachment filenames remain inside their untrusted envelopes in D8 and D9 list objects.
 - **D9 — evidence:** a directly inspected pending-expired and approved-then-expired record says exactly “this approval
-  expired; nothing was sent with it”. With a complete readable retained directory, an otherwise eligible draft group
+  expired; nothing was sent with it”. With a complete readable, uncontended retained directory processed before the
+  shared deadline, an otherwise eligible draft group
   may say exactly “not sent with any approval in the last 90 days” and reports evidence scope `complete-90-days`.
   Any matching `approved` record blocks “approvals expired”, whether claimable or not; an approved record plus a newer
   expired record is exercised, and live policy `never` produces exactly “approved, but the mailbox's policy is now
@@ -848,24 +921,33 @@ Each guard is watched failing under a mutation, then restored.
   both directions because Slack requires exact revision **and** digest. A used Slack record for exact revision/digest
   R is pruned at its 90-day boundary, then an unchanged R gets a newer expired approval; even with a complete readable
   retained directory, the row says only “not sent with any approval in the last 90 days”, never an all-time claim.
-- **D9 — capped, bounded and unreadable evidence:** fixtures contain far more than 500 approval files across several
-  mailboxes with controlled mtimes and repeated records per draft. A same-key `used`, `sending` and `unknown` record is placed at file 501 in
-  turn while a newer matching expiry remains inside the window; every row says only “not sent with any of the last
-  500 approvals”, never an all-time claim or the unqualified “its approvals expired”. An unreadable file at each
+- **D9 — capped, bounded, busy and unreadable evidence:** fixtures contain far more than 500 approval files across
+  several mailboxes with controlled mtimes and repeated records per draft. A same-key `used`, `sending` and `unknown`
+  record is placed at file 501 in turn while a newer matching expiry remains inside the window; every row says only
+  “not sent with any of the last 500 approvals”, never an all-time claim or the unqualified “its approvals expired”.
+  An unreadable file at each
   position inside the selected window makes every candidate row for the scan exactly “indeterminate (an
   approval record could not be read)”; its unknown ownership is never guessed. An unreadable file outside a capped
   window retains last-500 wording. An attributable parseable-corrupt record makes only its matching group
-  indeterminate. The scan opens only the newest 500, filters after opening, groups each Gmail draft and exact Slack
+  indeterminate. Every report record lock is a single non-blocking try. A safely attributable busy record makes its
+  exact key indeterminate; a busy record whose key cannot be learned without opening it makes all candidates in that
+  scan exactly “indeterminate (an approval record was busy)”. With all 500 selected record locks held by separate
+  processes, the report tries each once without polling, completes in about five seconds or less under the single
+  maintenance-plus-report deadline, opens none of them, and returns only indeterminate evidence. A separate fake-clock
+  case spends the shared deadline in maintenance and proves report enumeration, reads, grouping and provider lookups
+  start only while time remains; omitted approval evidence is indeterminate and an omitted live lookup is merely not
+  observed. The scan opens only the newest 500, filters after opening, groups each Gmail draft and exact Slack
   revision/digest once, orders newest groups first, returns at most 20, performs at most 20 live lookups with observed
   concurrency never above two, and reports every applicable evidence scope and cut-short reason. Existing on-disk v1
   records are found through the read-only historical decoder without an index or migration, remain unclaimable and
   support only the same evidence-scoped wording. With maintenance due, an instrumented filesystem counts every
-  `readdir`, retained-artifact `stat`, approval-record content open, maintenance renewal/fence, maintenance/record lock
-  attempt, durable audit append and unlink across prune plus report. On a fast uncontended fixture it enforces the
+  `readdir`, retained-artifact `stat`, approval-record content open, maintenance renewal/ownership check,
+  maintenance/record lock attempt, durable audit append and unlink across prune plus report. On a fast uncontended
+  fixture it enforces the
   stated two-enumeration, `entries-before + entries-after` stat, 700-content-open,
   one-maintenance-plus-700-record-lock, 200-append, 400-artifact-unlink and 1,101-total-unlink maxima; the five-second
-  deadline can only lower those counts, and the 500 cap is asserted only for the report half. The same fixture with
-  maintenance not due enforces the one-pass/500-open bounds.
+  end-to-end deadline can only lower those counts, and the 500 cap is asserted only for the report half. The same
+  fixture with maintenance not due enforces the one-pass/500-open bounds.
 - **D9 — retention:** one fake-clock MCP context and its one store stay alive across several 24-hour boundaries;
   approval creation and list/report/status calls trigger `ensurePruned()` without reconstructing either object. The
   persisted timestamp and concurrent callers prove each state directory starts at most one batch per 24 hours. Missing,
@@ -885,10 +967,15 @@ Each guard is watched failing under a mutation, then restored.
 
   A process holds one batch inside an already-started filesystem operation beyond the 30-second stale interval while a
   second process calls maintenance: renewal keeps the original token live, the second process never steals the lock,
-  only the first batch prunes, and only it commits the cursor. A forced token replacement proves both fences: the stale
-  holder starts no next record and cannot commit a cursor. Crash tests immediately after the durable attempt-timestamp
-  commit prove restart does not retry until 24 hours and retains the old cursor. Crashes immediately before and after
-  the atomic cursor commit prove the next due run respectively repeats safe work or resumes after the committed slot;
+  only the first batch prunes, and only it commits the cursor. A forced token replacement before a per-record
+  ownership check proves the stale holder starts no next record once it observes the replacement. A second forced
+  replacement lands **after** the stale holder's final ownership check but before its atomic cursor rename and proves
+  the stale cursor may overwrite: an earlier overwrite causes only a rescan, a later overwrite causes only a skip, no
+  record is pruned without its own
+  locked re-read, and the end-of-directory reset reaches the skipped range within one full cycle. Crash tests
+  immediately after the durable attempt-timestamp commit prove restart does not retry until 24 hours and retains the
+  old cursor. Crashes immediately before and after the atomic cursor commit prove the next due run respectively
+  repeats safe work or resumes after the committed slot;
   a truncated cursor write follows the schema-invalid recovery rule.
 
   Each valid `used`,
@@ -946,11 +1033,17 @@ approvals to the preparing process.
    confirm route; making it unconditional would prompt every chat send
    (`packages/gmail/src/mcp/server.ts:2366-2374`).
 8. **The draft-history report is deliberately evidence-scoped at scale** — retention attempts at most 200 oldest
-   record slots and stops starting work at five seconds per day. Directory enumeration and `stat` remain linear in the
-   retained artifacts within that elapsed budget: normal finished history is bounded by 90 days only when that drain
-   keeps pace, while active records, busy locks, preserved corrupt stubs and maintenance backlog are explicit
+   record slots and stops starting work at five seconds per day. A report shares one end-to-end five-second deadline
+   across that maintenance and its own scan and provider lookups. Directory enumeration and `stat` remain linear in
+   the retained artifacts within that elapsed budget: normal finished history is bounded by 90 days only when that
+   drain keeps pace, while active records, busy locks, preserved corrupt stubs and maintenance backlog are explicit
    exceptions. The report's 500-file cap bounds only its own opened record contents; a due prune can open up to 200
-   more first. The 20-row cap bounds provider reads, but a busy retained window can still push a mailbox's record
+   more first. Report record locks are non-blocking, but a busy retained window can still push a mailbox's record
    outside the scan. Even an uncapped readable scan says only “not sent with any approval in the last 90 days”; every
-   capped row says “not sent with any of the last 500 approvals”. An unreadable selected record makes the affected scan
-   indeterminate, and doctor never presents either count as complete.
+   fully read capped row says “not sent with any of the last 500 approvals”. An unreadable or busy selected record, or
+   approval evidence omitted at the deadline, makes the affected key/scan indeterminate under D9's rules, and doctor
+   never presents either count as complete.
+9. **`unknown` can receive one late claimant result** — process suspension or a failed heartbeat can exhaust the
+   two-minute lease while provider work still exists. Every public and maintenance transition treats `unknown` as
+   final, but the original private claim token may still record the eventual provider result as `used` or `failed`.
+   Status and skills therefore say that possibility plainly and never prepare automatically.
