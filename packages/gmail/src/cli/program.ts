@@ -20,6 +20,7 @@ import {
   homeDirectory,
   inlineCommand,
   installExitStatus,
+  normalizePathOptionWords,
   type OutputOptions,
   openCore,
   orgAddChange,
@@ -41,6 +42,7 @@ import {
   toCommsError,
   UPDATE_CHECK_CHILD_COMMAND,
   updateGateAtTerminal,
+  withoutOptionsBeforeSentinel,
   withWords,
   writeResult,
 } from '@agentcomms/core';
@@ -401,17 +403,9 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
    * same change. `setup` leaves out its `--mcp-approval` too, the second approval it can carry.
    */
   const again = (approvalFlags: readonly string[] = ['--approval']): ShellCommand => {
-    const kept: string[] = [];
-    for (let index = 0; index < argv.length; index++) {
-      const arg = argv[index] ?? '';
-      if (approvalFlags.includes(arg)) {
-        index++;
-        continue;
-      }
-      if (approvalFlags.some((flag) => arg.startsWith(`${flag}=`))) continue;
-      kept.push(arg);
-    }
-    return shellCommand(['agent-gmail', ...kept], platform);
+    const withoutApprovals = withoutOptionsBeforeSentinel(argv, approvalFlags);
+    const normalized = normalizePathOptionWords(withoutApprovals, coreForInvocation().pathOverrides, 0);
+    return shellCommand(['agent-gmail', ...normalized], platform);
   };
 
   /**

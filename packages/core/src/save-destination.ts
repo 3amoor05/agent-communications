@@ -16,6 +16,8 @@ import {
   canPrompt,
   defaultStreams,
   inlineCommand,
+  insertWordsBeforeSentinel,
+  lineWithWordsToFill,
   paint,
   type ShellCommand,
   type Streams,
@@ -1061,10 +1063,11 @@ export async function downloadAtTerminal<Q extends DestinationQuestion>(
      * cannot be printed safely is still shown as its words in JSON, with these after them.
      */
     const runWith = (...words: string[]) => {
-      if (typeof options.command === 'string') return `\`${options.command} ${words.join(' ')}\``;
-      return options.command.line === null
-        ? inlineCommand(withWords(options.command, ...words))
-        : `\`${options.command.line} ${words.join(' ')}\``;
+      if (typeof options.command === 'string') {
+        return `\`${insertWordsBeforeSentinel(options.command.split(' '), ...words).join(' ')}\``;
+      }
+      const line = lineWithWordsToFill(options.command, ...words);
+      return line === null ? inlineCommand(withWords(options.command, ...words)) : `\`${line}\``;
     };
     throw new CommsError('APPROVAL_PENDING', 'nothing was saved: where to save the files is the person’s to say', {
       hint:

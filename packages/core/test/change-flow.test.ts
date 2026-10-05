@@ -267,6 +267,32 @@ test('a command whose --approval is taken by another change names the flag that 
   );
 });
 
+test('--mcp-approval is generated before an existing sentinel and positional lookalikes stay untouched', async () => {
+  const core = coreWith('never');
+  await assert.rejects(
+    gatedChangeAtTerminal(core, setSendPolicy(core, 'chat'), {
+      env: { CLAUDECODE: '1' },
+      output: { json: true, color: false },
+      command: shellCommand(
+        ['agent-gmail', 'setup', '--mcp-client', 'cursor', '--', '--mcp-approval', 'literal', '--approval=x'],
+        'linux',
+      ),
+      approvalFlag: '--mcp-approval',
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof CommsError);
+      const approvalId = String((error.details as { approvalId?: string }).approvalId);
+      assert.match(
+        error.hint ?? '',
+        new RegExp(
+          `agent-gmail setup --mcp-client cursor --mcp-approval ${approvalId} -- --mcp-approval literal --approval=x`,
+        ),
+      );
+      return true;
+    },
+  );
+});
+
 test('at the CLI a person at a terminal approves there: yes applies, anything else cancels and revokes', async () => {
   const yes = coreWith('never');
   const person = terminal('yes');

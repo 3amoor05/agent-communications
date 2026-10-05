@@ -81,3 +81,14 @@ test('commands to run again quote a spaced word on POSIX and print words instead
   assert.match(windows.hint, /client 100\\u0025\.json/);
   assert.match(windows.hint, /cannot be quoted the same way for cmd\.exe and for PowerShell/);
 });
+
+test('Windows prints a bare-safe trailing backslash but refuses a quote-requiring trailing-backslash word', async () => {
+  const safe = await addClient('C:\\Profiles\\', 'safe-backslash', 'win32');
+  assert.doesNotMatch(safe.hint, /\["agent-gmail"/);
+  assert.ok(safe.hint.includes(safe.clientPath), safe.hint);
+
+  const refused = await addClient('C:\\Profiles\\First Last\\', 'refused-backslash', 'win32');
+  assert.match(refused.hint, /\["agent-gmail","client","add",/);
+  assert.match(refused.hint, /C:\\\\Profiles\\\\First Last\\\\/);
+  assert.match(refused.hint, /cannot be quoted the same way for cmd\.exe and for PowerShell/);
+});

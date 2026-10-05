@@ -1,3 +1,4 @@
+import { resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { styleText } from 'node:util';
 import { CommsError, EXIT_CODES, toCommsError } from './errors.ts';
@@ -38,6 +39,65 @@ export function pathOverridesFromCliOptions(
     overrides[key] = value;
   }
   return overrides;
+}
+
+/** Inserts generated option words immediately before the first end-of-options sentinel. */
+export function insertWordsBeforeSentinel(words: readonly string[], ...inserted: readonly string[]): string[] {
+  const sentinel = words.indexOf('--');
+  const at = sentinel < 0 ? words.length : sentinel;
+  return [...words.slice(0, at), ...inserted, ...words.slice(at)];
+}
+
+/**
+ * Removes the named options only where the CLI parser can see them: before the first `--`. Both `--x value` and
+ * `--x=value` are removed. The sentinel and every positional word after it are byte-for-byte data.
+ */
+export function withoutOptionsBeforeSentinel(words: readonly string[], flags: readonly string[]): string[] {
+  const kept: string[] = [];
+  for (let index = 0; index < words.length; index += 1) {
+    const word = words[index] as string;
+    if (word === '--') {
+      kept.push(...words.slice(index));
+      break;
+    }
+    const spaced = flags.find((flag) => word === flag);
+    if (spaced !== undefined) {
+      const value = words[index + 1];
+      if (value === undefined || value === '--') {
+        throw new CommsError('USAGE', `${spaced} needs a value before --`);
+      }
+      index += 1;
+      continue;
+    }
+    if (flags.some((flag) => word.startsWith(`${flag}=`))) continue;
+    kept.push(word);
+  }
+  return kept;
+}
+
+/**
+ * Replaces every pre-sentinel suite path option with one canonical pin per supplied directory. `insertAt` counts
+ * words after the old pins are removed: zero puts global options after the executable held elsewhere, one puts them
+ * after an entry/package word. Downloads are included only when the caller supplies that pin.
+ */
+export function normalizePathOptionWords(words: readonly string[], pins: PathOverrides, insertAt: number): string[] {
+  const stripped = withoutOptionsBeforeSentinel(
+    words,
+    PATH_OPTIONS.map(({ flag }) => flag),
+  );
+  const sentinel = stripped.indexOf('--');
+  const optionsEnd = sentinel < 0 ? stripped.length : sentinel;
+  if (!Number.isSafeInteger(insertAt) || insertAt < 0 || insertAt > optionsEnd) {
+    throw new TypeError(`path-option insertion point ${insertAt} is outside the option words`);
+  }
+  const pathWords = PATH_OPTIONS.flatMap(({ key, flag }) => {
+    const value = pins[key];
+    if (value === undefined) return [];
+    if (value.length === 0) throw new CommsError('USAGE', `${flag} needs a non-empty directory`);
+    // `resolve` removes redundant separators and a non-root trailing separator while retaining filesystem roots.
+    return [flag, resolve(value)];
+  });
+  return [...stripped.slice(0, insertAt), ...pathWords, ...stripped.slice(insertAt)];
 }
 
 export function colorEnabled(env: NodeJS.ProcessEnv, stream: { isTTY?: boolean }, flag?: boolean): boolean {
@@ -135,17 +195,43 @@ export interface ShellCommand {
  *   hint's `--force` replaced it — and before that, a word quoted for PowerShell's single quotes, which cmd.exe reads
  *   as characters, ran `whoami` from a server named `$x&whoami&`. See `commandAsJson` for why the JSON runs nothing.
  *
+ * - The program itself has to be left as it is. Quoted, it is a string to PowerShell rather than a command — PowerShell
+ *   runs a quoted program only after `&`, which cmd.exe reads as the end of a command — so a program whose path needs
+ *   quotes, as `C:\Program Files\nodejs\node.exe` does, leaves the command with no line either (CUE-403).
+ *
  * Everywhere else there is always a line: single quotes make any word safe.
  */
 export function shellCommand(words: readonly string[], platform: NodeJS.Platform = process.platform): ShellCommand {
   if (platform !== 'win32') return { words, line: words.map(posixShellWord).join(' '), platform };
   const printed = words.map(windowsShellWord);
-  return { words, line: printed.includes(null) ? null : printed.join(' '), platform };
+  const programBare = words.length === 0 || printed[0] === words[0];
+  return { words, line: printed.includes(null) || !programBare ? null : printed.join(' '), platform };
 }
 
-/** The same command with more words at its end — the approval it is to be run again with — for the same shell. */
+/**
+ * A printed command's line with words the agent is to fill in — a placeholder such as `<folder>`, printed as written,
+ * never quoted as a word — before the command's first `--`, where the CLI still reads them as options. Null when the
+ * command has no line.
+ */
+export function lineWithWordsToFill(command: ShellCommand, ...toFill: readonly string[]): string | null {
+  if (command.line === null) return null;
+  const sentinel = command.words.indexOf('--');
+  if (sentinel < 0) return [command.line, ...toFill].join(' ');
+  const word = command.platform === 'win32' ? windowsShellWord : posixShellWord;
+  // The command has a line, so every word in it has a printed form.
+  const printed = command.words.map((each) => word(each) as string);
+  return [...printed.slice(0, sentinel), ...toFill, ...printed.slice(sentinel)].join(' ');
+}
+
+/** Whether a Windows command has no line because its program's path needs quotes, which PowerShell would not run. */
+function programNeedsQuotes(command: ShellCommand): boolean {
+  const [program] = command.words;
+  return command.platform === 'win32' && program !== undefined && windowsShellWord(program) !== program;
+}
+
+/** The same command with generated options before positional data — the approval it is run again with. */
 export function withWords(command: ShellCommand, ...more: readonly string[]): ShellCommand {
-  return shellCommand([...command.words, ...more], command.platform);
+  return shellCommand(insertWordsBeforeSentinel(command.words, ...more), command.platform);
 }
 
 function posixShellWord(word: string): string {
@@ -196,14 +282,22 @@ export function commandAsJson(words: readonly string[]): string {
 const TO_TYPE =
   "the command's words, written as JSON: one of them cannot be quoted the same way for cmd.exe and for PowerShell, so type the command yourself, with that word quoted for the shell you use";
 
+/** What is said beside a command shown as JSON because its program's path needs quotes. */
+const TO_TYPE_PROGRAM =
+  "the command's words, written as JSON: the program's path needs quotes, and PowerShell runs a quoted program only after `&`, which cmd.exe does not accept, so type the command yourself, with each word quoted for the shell you use and, in PowerShell, `&` before the program";
+
+function toType(command: ShellCommand): string {
+  return programNeedsQuotes(command) ? TO_TYPE_PROGRAM : TO_TYPE;
+}
+
 /** A command in backticks, for a sentence — as its words in JSON, saying it has to be typed, when it has no line. */
 export function inlineCommand(command: ShellCommand): string {
-  return command.line === null ? `\`${commandAsJson(command.words)}\` (${TO_TYPE})` : `\`${command.line}\``;
+  return command.line === null ? `\`${commandAsJson(command.words)}\` (${toType(command)})` : `\`${command.line}\``;
 }
 
 /** A command as text of its own — a list's line, a field's value — or its words in JSON, saying it has to be typed. */
 export function commandText(command: ShellCommand): string {
-  return command.line === null ? `${commandAsJson(command.words)} (${TO_TYPE})` : command.line;
+  return command.line === null ? `${commandAsJson(command.words)} (${toType(command)})` : command.line;
 }
 
 /** Writes a successful result: the envelope with --json, otherwise the human rendering. */

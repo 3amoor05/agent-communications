@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { chmod, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname, isAbsolute, join } from 'node:path';
+import { dirname, isAbsolute, join, relative } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -365,6 +365,82 @@ test('client add stores the secret out of sight and reports what it did', async 
 
   const listed = await cli(harness, ['client', 'list', '--json']);
   assert.equal(listed.json<Envelope<Array<{ name: string }>>>().data?.[0]?.name, 'default');
+});
+
+test('a raw retry normalizes path pins and approvals before -- while preserving every positional word after it', async () => {
+  const beforeCwd = process.cwd();
+  try {
+    for (const [position, literal] of ['--approval', '--approval=x', '--config-dir', '--config-dir=value'].entries()) {
+      const harness = await newHarness();
+      process.chdir(harness.configDir);
+      await writeFile(
+        join(harness.configDir, literal),
+        JSON.stringify({
+          installed: {
+            client_id: TEST_CLIENT_ID,
+            client_secret: TEST_CLIENT_SECRET,
+            project_id: `sentinel-project-${position}`,
+          },
+        }),
+      );
+      const paths = harness.core.paths;
+      const clientName = `sentinel-client-${position}`;
+      const first = await cli(harness, [
+        '--data-dir=discarded',
+        '--config-dir',
+        'discarded',
+        '--downloads-dir',
+        relative(harness.configDir, paths.downloadsDir),
+        '--secrets-dir',
+        relative(harness.configDir, paths.secretsDir),
+        '--config-dir=.',
+        '--state-dir=discarded',
+        '--data-dir',
+        relative(harness.configDir, paths.dataDir),
+        '--state-dir',
+        relative(harness.configDir, paths.stateDir),
+        '--json',
+        'client',
+        'add',
+        '--name',
+        clientName,
+        '--store',
+        'file',
+        '--',
+        literal,
+      ]);
+      assert.equal(first.code, EXIT_CODES.APPROVAL, `${literal}: ${first.stdout}${first.stderr}`);
+      const error = first.json<Envelope<never>>().error;
+      assert.equal(error?.code, 'APPROVAL_PENDING');
+      const line = /run `([^`]+)`\./.exec(error?.hint ?? '')?.[1];
+      assert.ok(line, error?.hint);
+      const [executable, ...retry] = splitPosixWords(line);
+      assert.equal(executable, 'agent-gmail');
+      const sentinel = retry.indexOf('--');
+      assert.ok(sentinel >= 0, JSON.stringify(retry));
+      assert.deepEqual(retry.slice(sentinel + 1), [literal]);
+      const beforeSentinel = retry.slice(0, sentinel);
+      for (const [flag, value] of [
+        ['--config-dir', paths.configDir],
+        ['--state-dir', paths.stateDir],
+        ['--data-dir', paths.dataDir],
+        ['--secrets-dir', paths.secretsDir],
+        ['--downloads-dir', paths.downloadsDir],
+      ] as const) {
+        assert.equal(beforeSentinel.filter((word) => word === flag).length, 1, `${flag}: ${JSON.stringify(retry)}`);
+        assert.equal(beforeSentinel[beforeSentinel.indexOf(flag) + 1], value, flag);
+      }
+      const approvalId = String(error?.details?.approvalId);
+      assert.deepEqual(beforeSentinel.slice(-2), ['--approval', approvalId]);
+
+      const applied = await cli(harness, retry);
+      assert.equal(applied.code, 0, `${literal}: ${applied.stdout}${applied.stderr}`);
+      const config = await harness.core.config.load();
+      assert.ok(config.clients[clientName]);
+    }
+  } finally {
+    process.chdir(beforeCwd);
+  }
 });
 
 test('--finish finishes only the sign-in the command names', async () => {

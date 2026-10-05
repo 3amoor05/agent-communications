@@ -16,6 +16,7 @@ import {
   commandText,
   defaultStreams,
   inlineCommand,
+  insertWordsBeforeSentinel,
   paint,
   refuseUnlessPerson,
   type ShellCommand,
@@ -221,7 +222,9 @@ export async function gatedChangeAtTerminal<T>(
         options.pendingHint?.(prepared) ??
         approvalHint(
           prepared,
-          typeof command === 'string' ? `${command} ${carrying.join(' ')}` : withWords(command, ...carrying),
+          typeof command === 'string'
+            ? insertWordsBeforeSentinel(command.split(' '), ...carrying).join(' ')
+            : withWords(command, ...carrying),
           approveCommand,
           options.output.platform,
         ),

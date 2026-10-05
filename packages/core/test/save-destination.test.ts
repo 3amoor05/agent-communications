@@ -707,6 +707,38 @@ test('the answer to fill in follows the printed line as written, on Windows and 
   }
 });
 
+test('the answer to fill in goes before the command’s --, where the CLI still reads it as options (CUE-403)', async () => {
+  const commands = [
+    ...(['win32', 'darwin'] as const).map((platform) =>
+      shellCommand(['agent-gmail', 'attachments', 'download', '--inbox', 'work', '--', '--to'], platform),
+    ),
+    'agent-gmail attachments download --inbox work -- --to',
+  ];
+  for (const command of commands) {
+    const { core, env, home } = machine();
+    const { download } = recorder(core, env, home);
+    const thrown = await downloadAtTerminal({
+      core,
+      download,
+      env,
+      output: { color: false },
+      command,
+      approveCommand: 'agent-gmail approve',
+      render,
+      streams: terminal([], false).streams,
+    }).catch((error: unknown) => error);
+    assert.ok(thrown instanceof CommsError);
+    const dashes = typeof command === 'string' || command.platform !== 'win32' ? '--' : '"--"';
+    assert.match(
+      thrown.hint ?? '',
+      new RegExp(
+        `run \`agent-gmail attachments download --inbox work --to <downloads\\|current\\|folder> --choice ap_\\w+ ${dashes} --to\``,
+      ),
+      typeof command === 'string' ? 'string' : command.platform,
+    );
+  }
+});
+
 test('under confirm, an agent is told the person answers at their own terminal, and to come back with the id alone', async () => {
   const { core, env, home } = machine();
   const { download } = recorder(core, env, home, 'confirm');

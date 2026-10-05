@@ -1,11 +1,20 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { main, renderAttach } from '../src/cli.ts';
-import { commandAsJson, commandText, inlineCommand, type Streams, shellCommand } from '../src/cli-runtime.ts';
+import {
+  commandAsJson,
+  commandText,
+  inlineCommand,
+  normalizePathOptionWords,
+  type Streams,
+  shellCommand,
+  withoutOptionsBeforeSentinel,
+  withWords,
+} from '../src/cli-runtime.ts';
 import { secretsStoreOf } from '../src/config.ts';
 import { CommsError } from '../src/errors.ts';
 import { isInside } from '../src/jail.ts';
@@ -1269,6 +1278,58 @@ test('approve is refused to an agent and to anything without a terminal, touches
 
 // ── Commands printed to be run ──────────────────────────────────────────────────────────────────────────────────
 
+test('word helpers normalize pre-sentinel path pins and insert generated options before positional data', () => {
+  const root = tempDir('comms-word-options-');
+  const configDir = join(root, 'config');
+  const dataDir = join(root, 'data');
+  const original = [
+    'entry.mjs',
+    '--data-dir',
+    'old-data',
+    '--config-dir=old-config',
+    'mcp',
+    '--',
+    '--config-dir',
+    'literal-config',
+    '--data-dir=literal-data',
+  ];
+  assert.deepEqual(normalizePathOptionWords(original, { configDir: `${configDir}///`, dataDir: `${dataDir}//` }, 1), [
+    'entry.mjs',
+    '--config-dir',
+    resolve(configDir),
+    '--data-dir',
+    resolve(dataDir),
+    'mcp',
+    '--',
+    '--config-dir',
+    'literal-config',
+    '--data-dir=literal-data',
+  ]);
+  assert.deepEqual(normalizePathOptionWords(['entry.mjs', 'mcp'], { configDir: '/' }, 1), [
+    'entry.mjs',
+    '--config-dir',
+    '/',
+    'mcp',
+  ]);
+  assert.throws(
+    () => normalizePathOptionWords(['entry.mjs', '--config-dir', '--', 'literal'], {}, 1),
+    (error: unknown) =>
+      error instanceof CommsError && error.code === 'USAGE' && /--config-dir needs a value/.test(error.message),
+  );
+
+  assert.deepEqual(
+    withoutOptionsBeforeSentinel(
+      ['client', 'add', '--approval', 'old', '--approval=older', '--', '--approval', 'literal', '--approval=x'],
+      ['--approval'],
+    ),
+    ['client', 'add', '--', '--approval', 'literal', '--approval=x'],
+  );
+  assert.deepEqual(
+    withWords(shellCommand(['agent-gmail', 'setup', '--', '--mcp-approval=literal']), '--mcp-approval', 'ap_one').words,
+    ['agent-gmail', 'setup', '--mcp-approval', 'ap_one', '--', '--mcp-approval=literal'],
+  );
+});
+
 /*
  * Every command core prints for a person to copy — a change to run again with its approval, a folder to take out, an
  * entry to register again or remove — is quoted by `shellCommand`, for the shell it will be pasted into. Each platform
@@ -1358,9 +1419,9 @@ test('on Windows a command printed to be run is one cmd.exe and PowerShell both 
   // starts like a number, and one that starts with `-` but is not a plain option.
   const quoted = ['@name', 'a,b', '~/outgoing', ' outgoing ', 'a & b', 'x | y', 'a ^ b', 'a;b', '(a b)', 'a <b>'];
   const more = ['#a', '{a}', "it's", 'it’s here', 'café', 'a — b', '1kb', '0x10', '.5', '-name.x', '--name=x'];
-  for (const word of [...quoted, ...more]) assert.equal(win(word), `"${word}"`, word);
+  for (const word of [...quoted, ...more]) assert.equal(win('agentcomms', word), `agentcomms "${word}"`, word);
   // A backslash inside a quoted word is left alone: only one before the closing quote would be read as an escape.
-  assert.equal(win('C:\\Profiles\\First Last\\x'), '"C:\\Profiles\\First Last\\x"');
+  assert.equal(win('agentcomms', 'C:\\Profiles\\First Last\\x'), 'agentcomms "C:\\Profiles\\First Last\\x"');
 });
 
 /**
@@ -1514,7 +1575,10 @@ function windowsShells(): PastedInto[] {
     {
       name: 'cmd.exe',
       run: (line, env) =>
-        spawnSync('cmd.exe', ['/d', '/s', '/c', `"${line}"`], { ...options(env), windowsVerbatimArguments: true }),
+        spawnSync('cmd.exe', ['/d', '/v:on', '/s', '/c', `"${line}"`], {
+          ...options(env),
+          windowsVerbatimArguments: true,
+        }),
     },
     { name: 'Windows PowerShell', run: powershell('powershell.exe') },
   ];
@@ -1611,6 +1675,93 @@ test(
           assert.ok(refused, `${shell.name} took ${json} for a command that worked`);
         }
       }
+    }
+  },
+);
+
+test('on Windows a program whose path needs quotes leaves no line, and is shown as words with `&` named (CUE-403)', () => {
+  // Quoted, a program is a string to PowerShell, not a command; `&` would run it there, and cmd.exe does not accept it.
+  const spaced = shellCommand(
+    [
+      'C:\\Program Files\\nodejs\\node.exe',
+      'C:\\Users\\jo\\AppData\\Roaming\\npm\\node_modules\\@agentcomms\\core\\dist\\cli.mjs',
+      'approve',
+      'ap_1',
+    ],
+    'win32',
+  );
+  assert.equal(spaced.line, null);
+  assert.match(inlineCommand(spaced), /^`\["C:\\\\Program Files\\\\nodejs\\\\node\.exe",/);
+  assert.match(inlineCommand(spaced), /the program's path needs quotes, .*in PowerShell, `&` before the program\)$/);
+  assert.match(commandText(spaced), /in PowerShell, `&` before the program\)$/);
+
+  const bare = shellCommand(
+    ['C:\\hostedtoolcache\\windows\\node\\22.16.0\\x64\\node.exe', 'D:\\a\\cli.mjs', 'approve', 'ap_1'],
+    'win32',
+  );
+  assert.equal(bare.line, 'C:\\hostedtoolcache\\windows\\node\\22.16.0\\x64\\node.exe D:\\a\\cli.mjs approve ap_1');
+
+  // Another word with no common quoting keeps its own explanation.
+  const other = shellCommand(['agentcomms', 'approve', '50%'], 'win32');
+  assert.match(inlineCommand(other), /cannot be quoted the same way for cmd\.exe and for PowerShell/);
+  // POSIX quotes any program.
+  assert.equal(shellCommand(['/opt/node js/bin/node', 'cli.mjs'], 'linux').line, "'/opt/node js/bin/node' cli.mjs");
+});
+
+test(
+  'on Windows an absolute node.exe and an absolute .cmd program receive their words from every shell (CUE-403)',
+  ON_WINDOWS,
+  () => {
+    // The long form of the temporary folder: a runner's `RUNNER~1` would need quotes, and leave no line to run.
+    const dir = realpathSync.native(tempDir());
+    const { script, env } = argumentDumper(dir);
+    const words = ['--config-dir', 'C:\\Profiles\\First Last\\config', '--', '--approval=literal', 'C:\\Profiles\\'];
+    let runs = 0;
+    for (const shell of windowsShells()) {
+      for (const program of [[process.execPath, script], [join(dir, 'argdump.cmd')]]) {
+        const command = shellCommand([...program, ...words], 'win32');
+        if (command.line === null) {
+          // Only a program path that needs quotes may take the JSON form here.
+          assert.ok(programNeedsQuotesForTest(program[0] as string), `${shell.name}: ${commandText(command)}`);
+          continue;
+        }
+        const out = join(dir, `absolute-${runs++}.json`);
+        const result = shell.run(command.line, { ...env, ARGDUMP_OUT: out });
+        assert.deepEqual(dumped(out), words, `${shell.name}, ${program[0]}: ${command.line}\n${result.stderr}`);
+      }
+    }
+    assert.ok(runs >= 2, 'the absolute .cmd program at the least, from cmd.exe and Windows PowerShell');
+  },
+);
+
+/** Whether `shellCommand` would quote this program on Windows — the one reason an absolute program has no line. */
+function programNeedsQuotesForTest(program: string): boolean {
+  return shellCommand([program], 'win32').line === null;
+}
+
+test(
+  'Windows shell runs keep sentinel data literal and leave the parent environment unchanged on success and refusal',
+  ON_WINDOWS,
+  () => {
+    const dir = tempDir();
+    const { env } = argumentDumper(dir);
+    for (const [index, shell] of windowsShells().entries()) {
+      const parent = { ...env, CUE_SENTINEL: 'unchanged' };
+      const words = ['argdump', '--', 'CUE_SENTINEL=changed'];
+      const success = shellCommand(words, 'win32');
+      assert.ok(success.line !== null);
+      const out = join(dir, `sentinel-${index}.json`);
+      const ran = shell.run(success.line, { ...parent, ARGDUMP_OUT: out });
+      assert.equal(ran.status, 0, `${shell.name}: ${ran.stderr}`);
+      assert.deepEqual(dumped(out), words.slice(1), shell.name);
+      assert.equal(parent.CUE_SENTINEL, 'unchanged', shell.name);
+
+      const refused = shellCommand(['argdump', '--', '%CUE_SENTINEL%', '!CUE_SENTINEL!'], 'win32');
+      assert.equal(refused.line, null);
+      const refusedOut = join(dir, `sentinel-refused-${index}.json`);
+      const didNotRun = shell.run(commandAsJson(refused.words), { ...parent, ARGDUMP_OUT: refusedOut });
+      assert.equal(dumped(refusedOut), null, `${shell.name}: ${didNotRun.stderr}`);
+      assert.equal(parent.CUE_SENTINEL, 'unchanged', shell.name);
     }
   },
 );
