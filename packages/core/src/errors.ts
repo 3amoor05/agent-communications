@@ -35,6 +35,7 @@ export type ErrorCode =
   | 'APPROVAL_PENDING'
   | 'APPROVAL_EXPIRED'
   | 'APPROVAL_VOID'
+  | 'SEND_OUTCOME_UNKNOWN'
   | 'SEND_REFUSED'
   | 'POLICY_NEVER'
   | 'RATE_CAPPED'
@@ -73,6 +74,15 @@ export const ERROR_REGISTRY: Readonly<Record<ErrorCode, ErrorSpec>> = {
     summary: 'the approval window passed; prepare again',
   },
   APPROVAL_VOID: { exit: EXIT_CODES.APPROVAL, retryable: false, summary: 'the approval was voided; prepare again' },
+  /*
+   * Its own code, so nobody follows APPROVAL_VOID's "prepare again" after a send that may have gone out (design
+   * 2026-10-05 §D2): the provider's answer was lost, or the claimant's lease ran out before it recorded one.
+   */
+  SEND_OUTCOME_UNKNOWN: {
+    exit: EXIT_CODES.APPROVAL,
+    retryable: false,
+    summary: 'the send outcome is unknown; check before sending again',
+  },
   SEND_REFUSED: {
     exit: EXIT_CODES.APPROVAL,
     retryable: false,

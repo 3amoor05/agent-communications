@@ -1,4 +1,4 @@
-import type { ApprovalRoute } from './approval-binding.ts';
+import { type ApprovalRoute, unknownAtOf } from './approval-binding.ts';
 import { integrityRefusal, type StoredApproval } from './approval-stored.ts';
 import { CLOCK_ANOMALY } from './approval-validate.ts';
 import {
@@ -120,6 +120,8 @@ export interface ApprovalObject {
   readonly usableUntil?: string | undefined;
   readonly sendingAt?: string | undefined;
   readonly sendingHeartbeatAt?: string | undefined;
+  /** When a `sending` record reads `unknown` (`unknownAtOf`): derived, never stored. Also on an `unknown` one. */
+  readonly unknownAt?: string | undefined;
   readonly usedAt?: string | undefined;
   readonly sentAt?: string | undefined;
   readonly sentMessageId?: string | undefined;
@@ -212,6 +214,10 @@ function objectOf(
     ...optional('usableUntil', record.usableUntil),
     ...optional('sendingAt', record.sendingAt),
     ...optional('sendingHeartbeatAt', record.sendingHeartbeatAt),
+    ...optional(
+      'unknownAt',
+      record.state === 'sending' || record.state === 'unknown' ? unknownAtOf(record) : undefined,
+    ),
     ...optional('usedAt', record.usedAt),
     ...optional('sentAt', record.sentAt),
     ...optional('sentMessageId', record.state === 'used' ? record.sentMessageId : undefined),
@@ -436,20 +442,18 @@ function errorOf(
         approval,
       );
     case 'sending':
+      // Somebody else's call, under way and renewing its lease: retryable, and never "prepare again".
       return refuse(
         'APPROVAL_PENDING',
-        'it is being sent by another call; wait for it',
+        `it is being sent by another call since ${record.sendingAt}; wait for it`,
         record,
         approval,
-        'Wait for that call to finish, then look at the approval again. Do not prepare it again.',
+        `Wait for that call to finish — it holds the send until ${approval.unknownAt} unless it renews it — then look at the approval again. Do not prepare it again.`,
       );
     case 'unknown':
-      return refuse(
-        'APPROVAL_VOID',
-        'the outcome of its send is unknown, and it may have gone out',
-        record,
-        approval,
-        'Check Sent, or the channel, before sending again: do not prepare it again until you know it did not go.',
-      );
+      return new CommsError('SEND_OUTCOME_UNKNOWN', 'the outcome of its send is unknown: it may have gone out', {
+        hint: 'Check Sent, or the channel, before anything else: the call that claimed it may still record a late result. Prepare it again only once you know it did not go.',
+        details: { approvalId: record.approvalId, state: record.state, approval },
+      });
   }
 }

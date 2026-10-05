@@ -40,7 +40,7 @@ process.on('message', async (message: Request) => {
     if (message.op === 'claim') {
       if (message.live === undefined) throw new Error('a claim needs what it claims for');
       const claimed = await store.claimForSend(message.approvalId, message.live);
-      process.send?.({ id: message.id, ok: true, state: claimed.state });
+      process.send?.({ id: message.id, ok: true, state: claimed.record.state });
     } else {
       const revoked = await store.revoke(message.approvalId, 'cancelled by the person', { disposition: 'person' });
       process.send?.({ id: message.id, ok: true, state: revoked.form === 'v2' ? revoked.record.state : revoked.form });

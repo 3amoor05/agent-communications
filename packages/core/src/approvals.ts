@@ -1,3 +1,4 @@
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { open, readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
@@ -7,6 +8,7 @@ import {
   type OwnerScope,
   pendingMsOf,
   requireKnownChannel,
+  SENDING_LEASE_MS,
 } from './approval-binding.ts';
 import { decodeLegacyV1, deriveLegacyV1State, type LegacyApprovalRecord } from './approval-legacy.ts';
 import {
@@ -477,9 +479,22 @@ export interface ClaimOptions {
 export const DOWNLOAD_ANSWER_HINT =
   'It is answered, not approved with a code: the person says where in the chat, or — under a confirm change policy — at their own terminal, with the `approve` command of the channel the files come from and this id. The download that asked is then made again with this id.';
 
-/** A record left in `sending` this long belongs to a process that died mid-send: the outcome is unknown. */
-export const SENDING_STALE_MS: number = 5 * 60 * 1000;
 export const MAX_CHALLENGE_ATTEMPTS = 3;
+/** The reason a `sending` record reads `unknown` with when its lease ran out; a late completion replaces it. */
+export const STALE_LEASE_REASON = 'the sending process stopped before recording an outcome';
+
+/** What a send's claim gives its claimant: the record, and the private token only the claimant holds (`heartbeat`, `fence`, `complete`). */
+export interface SendClaim {
+  readonly record: ApprovalRecord;
+  /**
+   * 16 random bytes, hex: kept only in the claim's `O_EXCL` marker beside the record, and handed only to the call
+   * that claimed. Never in a record, a view, an approval object, an audit row, an error or a result.
+   */
+  readonly claimToken: string;
+}
+
+/** A send's outcome, as only its claimant records it. */
+export type SendOutcome = { readonly sentMessageId: string } | { readonly error: string };
 const POLICY_RANK: Record<SendPolicy, number> = { chat: 0, confirm: 1, never: 2 };
 
 /** The stricter of two policies. */
@@ -571,6 +586,18 @@ function cancelledClaim(record: ApprovalRecord): CommsError {
     hint: 'The approval was not used: the same call, made again, can still use it until it expires.',
     details: { approvalId: record.approvalId, state: record.state, reason: 'cancelled' },
   });
+}
+
+/** The refusal of a renewal or an outcome from a call that does not hold the send's claim. It names no token. */
+function notTheClaim(approvalId: string): CommsError {
+  return new CommsError(
+    'UNEXPECTED',
+    `nothing was recorded: this call does not hold the claim on approval ${approvalId}`,
+    {
+      hint: 'Only the call that claimed a send renews it or records its outcome. This is a bug — please report it.',
+      details: { approvalId },
+    },
+  );
 }
 
 /** The record as it may be shown to anyone, agents included: never the challenge hash. */
@@ -689,7 +716,7 @@ export class ApprovalStore {
 
   /**
    * Derived states (design 2026-10-05 §D1, "Version-2 timestamps fail closed"): expiry for an active record, and
-   * `unknown` for a send whose process died.
+   * `unknown` for a send whose claimant stopped renewing its lease (`SENDING_LEASE_MS`).
    *
    * Only `pending` and `approved` expire. A pending record expires at `expiresAt` — its route's lifetime from creation,
    * ten minutes on `chat` and thirty on `confirm` — and an approved send or change at `usableUntil`, a day from its
@@ -719,8 +746,10 @@ export class ApprovalStore {
       }
       return record;
     }
-    if (record.state === 'sending' && now - new Date(record.updatedAt).getTime() >= SENDING_STALE_MS) {
-      return { ...record, state: 'unknown', reason: 'the sending process stopped before recording an outcome' };
+    // The sending lease: from the claimant's last renewal, or its claim. At the boundary, its outcome is unknown.
+    const renewed = record.state === 'sending' ? (record.sendingHeartbeatAt ?? record.sendingAt) : undefined;
+    if (renewed !== undefined && now >= Date.parse(renewed) + SENDING_LEASE_MS) {
+      return { ...record, state: 'unknown', reason: STALE_LEASE_REASON };
     }
     return record;
   }
@@ -821,6 +850,7 @@ export class ApprovalStore {
     expect: ApprovalExpectation,
     action: OutcomeAction,
     decide: (current: ApprovalRecord, outcome: ApprovalOutcome, live: LiveGate | null) => ApprovalRecord,
+    options: { claimToken?: string | undefined } = {},
   ): Promise<ApprovalRecord> {
     const path = this.#path(approvalId);
     return withFileLock(`${path}.lock`, async () => {
@@ -832,6 +862,11 @@ export class ApprovalStore {
       const outcome = approvalOutcome(derived, { action, live, now: this.#now() });
       if (found.form !== 'v2' || derived.form !== 'v2' || outcome.record === null) {
         throw outcome.error ?? integrityRefusal(found);
+      }
+      // Only the call that claimed a send may renew or finish it: checked against the claim's marker, under this lock,
+      // before anything is written.
+      if (options.claimToken !== undefined && !(await this.#holdsClaim(approvalId, options.claimToken))) {
+        throw notTheClaim(approvalId);
       }
       const stored = found.record;
       const current = outcome.revokes && action !== 'inspect' && action !== 'wait' ? outcome.record : derived.record;
@@ -981,7 +1016,7 @@ export class ApprovalStore {
     approvalId: string,
     live: LiveDraft & { inboxId: string; inboxSub?: string | undefined; expect: Expectation },
     options: ClaimOptions = {},
-  ): Promise<ApprovalRecord> {
+  ): Promise<SendClaim> {
     let failure: Failure | null = null;
     const result = await this.#transition(
       approvalId,
@@ -1039,16 +1074,26 @@ export class ApprovalStore {
     );
     const failed = failure as Failure | null;
     if (failed) throw refuse(failed.code, failed.reason, result);
-    await this.#markClaimed(result);
-    return result;
+    const claimToken = randomBytes(16).toString('hex');
+    await this.#markClaimed(result, claimToken);
+    return { record: result, claimToken };
   }
 
-  /** The file system's O_EXCL is the single-use guarantee, independent of the lock. */
-  async #markClaimed(record: ApprovalRecord): Promise<void> {
+  /**
+   * The file system's O_EXCL is the single-use guarantee, independent of the lock. A send's marker also holds its
+   * claim token, the one thing that lets the claimant — and nobody else — renew its lease and record its outcome.
+   */
+  async #markClaimed(record: ApprovalRecord, claimToken?: string): Promise<void> {
     await ensurePrivateDir(this.directory);
     try {
       const marker = await open(this.#path(record.approvalId, '.claim'), 'wx', 0o600);
-      await marker.writeFile(JSON.stringify({ pid: process.pid, at: this.#now().toISOString() }));
+      await marker.writeFile(
+        JSON.stringify({
+          pid: process.pid,
+          at: this.#now().toISOString(),
+          ...(claimToken === undefined ? {} : { token: claimToken }),
+        }),
+      );
       await marker.close();
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
@@ -1056,6 +1101,51 @@ export class ApprovalStore {
       }
       throw error;
     }
+  }
+
+  /** Whether `claimToken` is the one in this record's claim marker. A marker without one is held by nobody. */
+  async #holdsClaim(approvalId: string, claimToken: string): Promise<boolean> {
+    let held: unknown;
+    try {
+      held = (JSON.parse(await readFile(this.#path(approvalId, '.claim'), 'utf8')) as { token?: unknown }).token;
+    } catch {
+      return false;
+    }
+    if (typeof held !== 'string' || typeof claimToken !== 'string' || held.length !== claimToken.length) return false;
+    return timingSafeEqual(Buffer.from(held), Buffer.from(claimToken));
+  }
+
+  /**
+   * Renews the sending lease of a send this call claimed: writes `sendingHeartbeatAt` while the claim still owns a
+   * `sending` record, and nothing otherwise. `renewed` while it is sending; `lost` once it reads `unknown` (or anything
+   * else) — a renewal never moves a record back to `sending`. Refused, writing nothing, without the claim's token.
+   */
+  async heartbeat(approvalId: string, claimToken: string): Promise<'renewed' | 'lost'> {
+    let renewed = false;
+    await this.#transition(
+      approvalId,
+      { kind: 'send' },
+      'inspect',
+      (current) => {
+        if (current.state !== 'sending') return current;
+        renewed = true;
+        const now = this.#now();
+        // A clock behind the last renewal writes nothing: the lease it gave is still good, and order is kept.
+        if (!(now.getTime() > Date.parse(current.sendingHeartbeatAt ?? current.sendingAt ?? ''))) return current;
+        return { ...current, sendingHeartbeatAt: now.toISOString() };
+      },
+      { claimToken },
+    );
+    return renewed ? 'renewed' : 'lost';
+  }
+
+  /**
+   * The check before each provider step (design 2026-10-05 §D1): `go`, with the lease renewed, while this claim still
+   * owns a `sending` record; `stop` once it reads `unknown` — another caller has decided its outcome cannot be known,
+   * and no further step may start. Refused, writing nothing, without the claim's token.
+   */
+  async fence(approvalId: string, claimToken: string): Promise<'go' | 'stop'> {
+    return (await this.heartbeat(approvalId, claimToken)) === 'renewed' ? 'go' : 'stop';
   }
 
   /**
@@ -1348,27 +1438,47 @@ export class ApprovalStore {
    * `used` needs a non-empty id. A provider that accepted a send without one has not given anything to record it by,
    * so the record is left as it is — `sending`, and then `unknown` — rather than made `used` with an empty id that
    * every later reader would take for one.
+   *
+   * Only the claimant records it, by its claim token, from `sending` or from `unknown`: a provider's answer that
+   * arrives after the lease ran out is still the truth. A late success clears the stale-lease reason; a late failure
+   * replaces it with its own.
    */
-  async complete(approvalId: string, outcome: { sentMessageId: string } | { error: string }): Promise<ApprovalRecord> {
+  async complete(approvalId: string, claimToken: string, outcome: SendOutcome): Promise<ApprovalRecord> {
     if ('sentMessageId' in outcome && outcome.sentMessageId === '') {
       throw new CommsError('BAD_DATA', 'the provider returned no id for the send, so it is not recorded as used', {
         hint: 'The send may have happened: check before sending again.',
         details: { approvalId },
       });
     }
-    return this.#transition(approvalId, { kind: 'send' }, 'claim', (current, classified) => {
-      if (current.state !== 'sending' && current.state !== 'unknown') {
-        throw (
-          classified.error ??
-          refuse('APPROVAL_VOID', 'the approval is not being sent, so it has no outcome to record', current)
-        );
-      }
-      const at = this.#now().toISOString();
-      // `usedAt` is the moment the provider accepted it, and so equal to `sentAt`.
-      return 'sentMessageId' in outcome
-        ? { ...current, state: 'used', sentMessageId: outcome.sentMessageId, sentAt: at, usedAt: at }
-        : { ...current, state: 'failed', reason: outcome.error, failedAt: at };
-    });
+    return this.#transition(
+      approvalId,
+      { kind: 'send' },
+      'claim',
+      (current, classified) => {
+        if (current.state !== 'sending' && current.state !== 'unknown') {
+          throw (
+            classified.error ??
+            refuse('APPROVAL_VOID', 'the approval is not being sent, so it has no outcome to record', current)
+          );
+        }
+        // Never before the claim or its last renewal, whatever the clock says: the record stays in order.
+        const floor = Date.parse(current.sendingHeartbeatAt ?? current.sendingAt ?? '');
+        const now = this.#now().getTime();
+        const at = new Date(Number.isFinite(floor) ? Math.max(now, floor) : now).toISOString();
+        // `usedAt` is the moment the provider accepted it, and so equal to `sentAt`.
+        return 'sentMessageId' in outcome
+          ? {
+              ...current,
+              state: 'used',
+              sentMessageId: outcome.sentMessageId,
+              sentAt: at,
+              usedAt: at,
+              reason: undefined,
+            }
+          : { ...current, state: 'failed', reason: outcome.error, failedAt: at };
+      },
+      { claimToken },
+    );
   }
 
   /**

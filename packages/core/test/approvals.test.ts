@@ -118,12 +118,13 @@ test('a new record is pending, has no challenge until one is issued, and expires
 
 test('chat: the matching draft is claimed once, then completed; later claims are refused', async () => {
   const { store, record } = await setup();
-  assert.equal((await store.claimForSend(record.approvalId, live())).state, 'sending');
+  const claim = await store.claimForSend(record.approvalId, live());
+  assert.equal(claim.record.state, 'sending');
   await assert.rejects(
     store.claimForSend(record.approvalId, live()),
-    isRefusal(/being sent by another call; wait for it/, 'APPROVAL_PENDING'),
+    isRefusal(/being sent by another call since .+; wait for it/, 'APPROVAL_PENDING'),
   );
-  assert.equal((await store.complete(record.approvalId, { sentMessageId: 'sent-1' })).state, 'used');
+  assert.equal((await store.complete(record.approvalId, claim.claimToken, { sentMessageId: 'sent-1' })).state, 'used');
   await assert.rejects(
     store.claimForSend(record.approvalId, live()),
     isRefusal(/used already: it was sent at .+, message id sent-1/, 'APPROVAL_VOID'),
@@ -151,7 +152,7 @@ test('a display name around the same address is not a different recipient', asyn
     record.approvalId,
     live({ expect: { ...EXPECT, to: EXPECT.to.map((address) => `Sam Lee <${address}>`) } }),
   );
-  assert.equal(claimed.state, 'sending');
+  assert.equal(claimed.record.state, 'sending');
 });
 
 test('integrity failures void the record for good; each carries its specific code', async () => {
@@ -197,13 +198,13 @@ test('a claim for another inbox is the one NOT_FOUND, and leaves the record as i
   assert.equal(foreign.code, 'NOT_FOUND');
   assert.deepEqual(foreign.details, { approval: null });
   assert.equal(asV2(await store.get(record.approvalId))?.state, 'pending', 'not voided: it is not the caller’s');
-  assert.equal((await store.claimForSend(record.approvalId, live())).state, 'sending');
+  assert.equal((await store.claimForSend(record.approvalId, live())).record.state, 'sending');
 });
 
 test('expect comparison ignores order and case but not content', async () => {
   const { store, record } = await setup();
   const reordered = { ...EXPECT, to: ['SAM@partner.test'] };
-  assert.equal((await store.claimForSend(record.approvalId, live({ expect: reordered }))).state, 'sending');
+  assert.equal((await store.claimForSend(record.approvalId, live({ expect: reordered }))).record.state, 'sending');
 });
 
 test('confirm: a claim before approval is refused without voiding; after a human approves, it succeeds', async () => {
@@ -218,7 +219,7 @@ test('confirm: a claim before approval is refused without voiding; after a human
   assert.equal(approved.approvedBindingDigest, approved.bindingDigest, 'the binding the person approved');
   assert.equal(approved.approvedDigest, undefined, 'a send carries the approved binding, not a content digest');
   assert.equal(approved.challengeHash, undefined, 'the challenge is spent');
-  assert.equal((await store.claimForSend(record.approvalId, live())).state, 'sending');
+  assert.equal((await store.claimForSend(record.approvalId, live())).record.state, 'sending');
 });
 
 test('a claim waiting for a person says what the product making it tells it to, and no product by default', async () => {
@@ -252,7 +253,7 @@ test('an escalated chat send needs a human approval; a looser live policy never 
     isRefusal(/outside the chat/, 'APPROVAL_PENDING'),
   );
   await humanApproves(store, record.approvalId);
-  assert.equal((await store.claimForSend(record.approvalId, live())).state, 'sending');
+  assert.equal((await store.claimForSend(record.approvalId, live())).record.state, 'sending');
 });
 
 test('a record that requires "never" is refused, whatever the live policy says', async () => {
@@ -338,10 +339,10 @@ test('approving without an issued challenge is refused', async () => {
 
 test('a send left in "sending" by a dead process reads as unknown and can still record its outcome', async () => {
   const { store, record, time } = await setup();
-  await store.claimForSend(record.approvalId, live());
+  const { claimToken } = await store.claimForSend(record.approvalId, live());
   time.advance(5 * 60 * 1000);
   assert.equal(asV2(await store.get(record.approvalId))?.state, 'unknown');
-  assert.equal((await store.complete(record.approvalId, { sentMessageId: 's1' })).state, 'used');
+  assert.equal((await store.complete(record.approvalId, claimToken, { sentMessageId: 's1' })).state, 'used');
 });
 
 test('the O_EXCL claim marker refuses a second claim even if the record file were reset', async () => {
@@ -357,8 +358,8 @@ test('the O_EXCL claim marker refuses a second claim even if the record file wer
 
 test('failed sends are recorded; revoke leaves finished records alone', async () => {
   const { store, record } = await setup();
-  await store.claimForSend(record.approvalId, live());
-  assert.equal((await store.complete(record.approvalId, { error: 'backendError' })).state, 'failed');
+  const { claimToken } = await store.claimForSend(record.approvalId, live());
+  assert.equal((await store.complete(record.approvalId, claimToken, { error: 'backendError' })).state, 'failed');
   assert.equal(stateOf(await store.revoke(record.approvalId, 'user', { disposition: 'person' })), 'failed');
 });
 
@@ -433,7 +434,7 @@ test('a change approval is never spent as a send, nor a send approval as a chang
   // Neither was voided or consumed by the attempts: each still works for what it is.
   assert.equal(asV2(await store.get(send.approvalId))?.state, 'pending');
   assert.equal(asV2(await store.get(change.approvalId))?.state, 'pending');
-  assert.equal((await store.claimForSend(send.approvalId, live())).state, 'sending');
+  assert.equal((await store.claimForSend(send.approvalId, live())).record.state, 'sending');
   assert.equal((await store.claimForChange(change.approvalId, { change: CHANGE, policy: 'chat' })).state, 'used');
 });
 
@@ -541,7 +542,7 @@ test('a send claim cancelled while it waits for the lock writes nothing: the rec
   );
   // Still approved, and with no claim marker: before the change it was `sending`, spent on a call nobody awaited.
   assert.equal(asV2(await store.get(record.approvalId))?.state, 'approved');
-  assert.equal((await claim()).state, 'sending');
+  assert.equal((await claim()).record.state, 'sending');
 });
 
 test('a change claim cancelled while it waits for the lock writes nothing, and the approval can still be claimed', async () => {
@@ -688,7 +689,7 @@ test('a version-1 record is refused by the version gate on every claim, approve,
       ['approve', V1_SEND_ID, bytes.send, () => store.approve(V1_SEND_ID, 'terminal', LIVE_DRAFT, 'ABCD')],
       ['claimForSend (pending)', V1_SEND_ID, bytes.send, () => store.claimForSend(V1_SEND_ID, live())],
       ['claimForSend (approved)', V1_APPROVED_ID, bytes.approved, () => store.claimForSend(V1_APPROVED_ID, live())],
-      ['complete', V1_SEND_ID, bytes.send, () => store.complete(V1_SEND_ID, { sentMessageId: 's1' })],
+      ['complete', V1_SEND_ID, bytes.send, () => store.complete(V1_SEND_ID, 'f'.repeat(32), { sentMessageId: 's1' })],
       ['issueChallenge (change)', V1_CHANGE_ID, bytes.change, () => store.issueChallenge(V1_CHANGE_ID, 'change')],
       [
         'approve (change)',
@@ -900,19 +901,24 @@ test('each send transition writes exactly its fields, and every record it leaves
   assert.equal(approved.after.usableUntil, '2026-09-19T10:01:00.000Z', '24 hours after approval');
   assert.equal(approved.after.approvedBindingDigest, record.bindingDigest);
   time.advance(60_000);
-  const sending = await writes(store, record.approvalId, () => store.claimForSend(record.approvalId, live()));
+  let token = '';
+  const sending = await writes(store, record.approvalId, async () => {
+    token = (await store.claimForSend(record.approvalId, live())).claimToken;
+  });
   assert.deepEqual([sending.added, sending.removed, sending.changed], [['sendingAt'], [], ['state']]);
   assert.equal(sending.after.sendingAt, '2026-09-18T10:02:00.000Z');
   // An empty provider id records nothing: the record stays `sending`.
-  const empty = await writes(store, record.approvalId, () => store.complete(record.approvalId, { sentMessageId: '' }));
+  const empty = await writes(store, record.approvalId, () =>
+    store.complete(record.approvalId, token, { sentMessageId: '' }),
+  );
   assert.deepEqual([empty.added, empty.removed, empty.changed], [[], [], []]);
   await assert.rejects(
-    store.complete(record.approvalId, { sentMessageId: '' }),
+    store.complete(record.approvalId, token, { sentMessageId: '' }),
     (e: unknown) => e instanceof CommsError && e.code === 'BAD_DATA',
   );
   time.advance(30_000);
   const used = await writes(store, record.approvalId, () =>
-    store.complete(record.approvalId, { sentMessageId: 's-1' }),
+    store.complete(record.approvalId, token, { sentMessageId: 's-1' }),
   );
   assert.deepEqual(used.added, ['sentAt', 'sentMessageId', 'usedAt']);
   assert.deepEqual(used.changed, ['state']);
@@ -920,10 +926,10 @@ test('each send transition writes exactly its fields, and every record it leaves
   assert.equal(used.after.sentAt, '2026-09-18T10:02:30.000Z');
 
   const failing = await setup();
-  await failing.store.claimForSend(failing.record.approvalId, live());
+  const failingClaim = await failing.store.claimForSend(failing.record.approvalId, live());
   failing.time.advance(1000);
   const failed = await writes(failing.store, failing.record.approvalId, () =>
-    failing.store.complete(failing.record.approvalId, { error: 'backendError' }),
+    failing.store.complete(failing.record.approvalId, failingClaim.claimToken, { error: 'backendError' }),
   );
   assert.deepEqual([failed.added, failed.changed], [['failedAt', 'reason'], ['state']]);
 });
@@ -1061,10 +1067,10 @@ test('a derived expiry is persisted with expiredAt at the boundary that applied;
   assert.equal(anomaly.after.expiredAt, '2026-09-18T09:55:00.000Z', 'the time the clock was seen');
 
   const stale = await setup();
-  await stale.store.claimForSend(stale.record.approvalId, live());
+  const staleClaim = await stale.store.claimForSend(stale.record.approvalId, live());
   stale.time.advance(5 * 60 * 1000);
   const unknown = await writes(stale.store, stale.record.approvalId, () =>
-    stale.store.complete(stale.record.approvalId, { error: 'x' }).then(() => undefined),
+    stale.store.complete(stale.record.approvalId, staleClaim.claimToken, { error: 'x' }).then(() => undefined),
   );
   assert.equal(unknown.after.state, 'failed', 'a late outcome still lands, from unknown');
 });
@@ -1126,7 +1132,7 @@ test('a confirm route never claims directly after loosening; a chat route tighte
   const code = await chat.store.issueChallenge(chat.record.approvalId);
   await chat.store.approve(chat.record.approvalId, 'terminal', LIVE_DRAFT, code);
   chat.time.advance(20 * MINUTE);
-  assert.equal((await chat.store.claimForSend(chat.record.approvalId, live())).state, 'sending');
+  assert.equal((await chat.store.claimForSend(chat.record.approvalId, live())).record.state, 'sending');
   // Unapproved, the tightened record does not outlive its original window.
   const late = await setup('chat');
   late.config.write(gate('confirm'));
@@ -1164,7 +1170,7 @@ test('an approved send survives its pending deadline and expires exactly a day a
   const again = await setup('confirm');
   await humanApproves(again.store, again.record.approvalId);
   again.time.advance(23 * 60 * MINUTE);
-  assert.equal((await again.store.claimForSend(again.record.approvalId, live())).state, 'sending');
+  assert.equal((await again.store.claimForSend(again.record.approvalId, live())).record.state, 'sending');
 });
 
 test('an approved change can be claimed until its own day ends, not its pending deadline', async () => {

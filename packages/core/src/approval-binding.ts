@@ -35,6 +35,30 @@ export type OwnerScope = 'owner' | 'prospective' | 'global';
 export const APPROVAL_LIFETIMES: Readonly<{ chat: number; confirm: number; approved: number; download: number }> =
   Object.freeze({ chat: 600_000, confirm: 1_800_000, approved: 86_400_000, download: 1_800_000 });
 
+/**
+ * The sending lease (design 2026-10-05 §D1): a `sending` record whose claimant has not renewed it for this long reads
+ * `unknown` — its outcome can no longer be known from here. Two minutes, renewed every thirty seconds by a claimant
+ * whose provider work is still outstanding (`SENDING_HEARTBEAT_MS`), so long work stays `sending` and a process that
+ * stopped is found out quickly.
+ */
+export const SENDING_LEASE_MS: number = 2 * 60 * 1000;
+/** How often a claimant renews its lease while provider work is outstanding. */
+export const SENDING_HEARTBEAT_MS: number = 30 * 1000;
+
+/**
+ * When a send claimed at `sendingAt` and last renewed at `sendingHeartbeatAt` reads `unknown`: never stored, always
+ * derived — `(sendingHeartbeatAt ?? sendingAt) + SENDING_LEASE_MS`. Undefined for a record never claimed.
+ */
+export function unknownAtOf(record: {
+  readonly sendingAt?: string | undefined;
+  readonly sendingHeartbeatAt?: string | undefined;
+}): string | undefined {
+  const renewed = record.sendingHeartbeatAt ?? record.sendingAt;
+  if (renewed === undefined) return undefined;
+  const at = Date.parse(renewed);
+  return Number.isFinite(at) ? new Date(at + SENDING_LEASE_MS).toISOString() : undefined;
+}
+
 /** How long a pending send or change on `route` stays open. */
 export function pendingMsOf(route: ApprovalRoute): number {
   return route === 'confirm' ? APPROVAL_LIFETIMES.confirm : APPROVAL_LIFETIMES.chat;

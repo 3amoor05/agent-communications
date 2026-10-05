@@ -387,7 +387,7 @@ test('a claim loads the config exactly once', async () => {
   await store.approve(record.approvalId, 'terminal', LIVE, code);
   assert.equal(loads, 1, 'one terminal approval, one read');
   loads = 0;
-  assert.equal((await store.claimForSend(record.approvalId, claimLive())).state, 'sending');
+  assert.equal((await store.claimForSend(record.approvalId, claimLive())).record.state, 'sending');
   assert.equal(loads, 1, 'one claim, one read');
 });
 
@@ -505,7 +505,7 @@ test('a Slack record is found by the account id it stores, whatever the account 
     contentDigest: 'b'.repeat(64),
     expect: { to: ['#engineering'], cc: [], bcc: [], subject: '' },
   });
-  assert.equal(claimed.state, 'sending');
+  assert.equal(claimed.record.state, 'sending');
 });
 
 test('pending, approved and used records whose owner is removed: shown so, revoked by the first action, and never owned again', async () => {
@@ -537,8 +537,8 @@ test('pending, approved and used records whose owner is removed: shown so, revok
     await store.approve(approved.approvalId, 'terminal', LIVE, await store.issueChallenge(approved.approvalId));
     const used = await make();
     await store.approve(used.approvalId, 'terminal', LIVE, await store.issueChallenge(used.approvalId));
-    await store.claimForSend(used.approvalId, claimLive(ownerId));
-    await store.complete(used.approvalId, { sentMessageId: 'sent-1' });
+    const { claimToken } = await store.claimForSend(used.approvalId, claimLive(ownerId));
+    await store.complete(used.approvalId, claimToken, { sentMessageId: 'sent-1' });
 
     config.write(owners('confirm', owner));
     for (const [record, state] of [

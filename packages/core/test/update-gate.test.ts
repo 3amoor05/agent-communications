@@ -672,13 +672,13 @@ test("a look-up of a send goes past the stop by the approval it went under, used
   await seed(m, { latest: LATEST, behind: true });
   const later = await preparedFor(m, updateLaterChange(m.core));
   // The store's own path for a send that went: claimed, then completed.
-  await m.core.approvals.claimForSend(send, {
+  const { claimToken } = await m.core.approvals.claimForSend(send, {
     inboxId: SEND_OWNER,
     draftMessageId: 'revision_one',
     contentDigest: 'a'.repeat(64),
     expect: { to: ['someone@example.test'], cc: [], bcc: [], subject: 'Hello' },
   });
-  await m.core.approvals.complete(send, { sentMessageId: 'email_one' });
+  await m.core.approvals.complete(send, claimToken, { sentMessageId: 'email_one' });
   assert.equal(asV2(await m.core.approvals.get(send))?.state, 'used');
 
   assert.equal(await claimsApproval(m.core, send, SEND_LOOKUP), true, 'a used send, looked up');
