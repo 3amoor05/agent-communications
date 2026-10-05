@@ -239,9 +239,10 @@ test('an unreadable draft can be deleted as its refusal says, and the result say
 
   const shown = await cli(harness, ['--json', 'draft', 'show', DAMAGED, '--workspace', 'acme']);
   assert.equal(shown.code, EXIT_CODES.BAD_DATA);
+  // For darwin, as the `cli` helper pins the command that printed it.
   assert.equal(
     shown.json<Envelope<never>>().error?.hint,
-    `Delete it with ${slackInlineToFill(harness.core.paths, ['draft', 'delete', DAMAGED, '--workspace'], ['<name>'])} and compose it again.`,
+    `Delete it with ${slackInlineToFill(harness.core.paths, ['draft', 'delete', DAMAGED, '--workspace'], ['<name>'], 'darwin')} and compose it again.`,
     'the refusal names the draft to delete, with this installation’s own command',
   );
 
@@ -309,8 +310,11 @@ test('a draft that names its workspace and nothing else is skipped by the list, 
     const refused = await cli(harness, ['--json', ...argv]);
     assert.equal(refused.code, EXIT_CODES.BAD_DATA, `${argv.join(' ')}: ${refused.stdout}`);
     const hint = refused.json<Envelope<never>>().error?.hint ?? '';
+    // For darwin, as the `cli` helper pins the command that printed it.
     assert.ok(
-      hint.includes(slackInlineToFill(harness.core.paths, ['draft', 'delete', DAMAGED, '--workspace'], ['<name>'])),
+      hint.includes(
+        slackInlineToFill(harness.core.paths, ['draft', 'delete', DAMAGED, '--workspace'], ['<name>'], 'darwin'),
+      ),
       hint,
     );
     assertNoBareCommand(hint);

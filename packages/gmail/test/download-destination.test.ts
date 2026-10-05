@@ -9,7 +9,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { v1DownloadRecord, writeV1Record } from '../../core/test/fixtures/approval-v1-0.13.0.ts';
 import { createGmailMcpServer } from '../src/mcp/server.ts';
 import type { FakeMessage } from './support/fake-google.ts';
-import { assertNoBareCommand, gmailInline, locatedGmailLine } from './support/handoffs.ts';
+import { assertNoBareCommand, gmailInline } from './support/handoffs.ts';
 import { type Harness, newHarness, tempDir } from './support/harness.ts';
 import { cli, connect, type ToolResult, toolError, wire } from './support/surfaces.ts';
 
@@ -648,7 +648,16 @@ test('under confirm, a declined form saves nothing; a client not trusted with fo
     const refused = toolError(await untrusted.call({ inbox: 'work', messageIds: ['m1'], choiceId: asked.choiceId }));
     assert.equal(untrusted.asked.length, 0, 'an untrusted client was handed a form');
     assert.equal(refused.code, 'APPROVAL_PENDING');
-    locatedGmailLine(refused.hint ?? '', ['approve', String(asked.choiceId)]);
+    /*
+     * This installation's own `approve`, located, as the test above holds the question to: made for this machine's
+     * shell, which is what the answer's refusal is rendered for — not read back as a POSIX line, which a Windows one
+     * is not.
+     */
+    assert.ok(
+      refused.hint?.includes(gmailInline(harness.core.paths, ['approve', String(asked.choiceId)])),
+      String(refused.hint),
+    );
+    assertNoBareCommand(refused.hint ?? '');
   } finally {
     await untrusted.close();
   }

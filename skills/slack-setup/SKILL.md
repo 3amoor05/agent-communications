@@ -2,7 +2,7 @@
 name: slack-setup
 description: "Connect a Slack workspace to agent-slack: the app manifest, the PKCE sign-in, read and send modes, and what doctor reports. Symptoms: 'connect my Slack', 'set up agent-slack', 'why can't it post', 'move this workspace to send mode', 'agent-slack doctor says something is wrong'. Not for reading or posting once it works — slack-reading and slack-posting do those."
 license: MIT
-compatibility: "@agentcomms/slack@0.13.0"
+compatibility: "@agentcomms/slack@0.13.1"
 metadata:
   group: communications
   lifecycle: release
@@ -136,9 +136,10 @@ Tightening — renewing a grant, narrowing, a stricter policy — applies at onc
 3. What counts as the person's approval is the workspace's **change policy**:
    - `chat` (the default): their yes in this conversation. Call the same tool again with `approvalId` (at a
      terminal, the same command with `--approval <approvalId>`).
-   - `confirm`: they run `agentcomms approve <approvalId>` in their own terminal — `npx -y @agentcomms/core approve
-     <approvalId>` where only `@agentcomms/slack` is installed — and type the code it shows. You cannot approve it
-     yourself; call the tool again with `approvalId` once they say they have.
+   - `confirm`: they run the approve command the result gives in their own terminal — this installation's own,
+     its folders pinned, whether core is installed beside Slack or only inside it; hand it over exactly as given —
+     and type the code it shows. You cannot approve it yourself; call the tool again with `approvalId` once they
+     say they have.
 4. The approval is single use, lasts ten minutes, and is bound to exactly the change shown. If the workspace changed
    in between, it is refused and has to be asked for again.
 
@@ -181,7 +182,7 @@ remove, asks nobody. The server appears after the client is restarted.
 
 What the agent gets is everything the CLI does except approving, and changing the Slack app itself. Posting and
 reacting go through the same approval gate as the CLI: under `chat` the person's yes in the conversation is the
-approval, under `confirm` they approve at their own terminal with `agent-slack approve`, and under `never` nothing
+approval, under `confirm` they approve at their own terminal with the approve command the result gives, and under `never` nothing
 posts — see `slack-posting`. Changing a workspace goes through a change approval, as above.
 
 | MCP tool | CLI |
@@ -202,8 +203,8 @@ posts — see `slack-posting`. Changing a workspace goes through a change approv
 
 `slack_mode_request_send`, `slack_mode_narrow` and `slack_manifest` return steps and change nothing. A server
 pinned to one workspace offers no `slack_workspace_add` or `slack_workspace_remove`: it reaches that workspace and no
-other. `app create` and `app update` have no tool, and neither do `agent-slack approve` and `agentcomms approve`: under
-`confirm`, approving a post or a change is a person at their own terminal.
+other. `app create` and `app update` have no tool, and neither does `approve`, Slack's or core's: under `confirm`,
+approving a post or a change is a person at their own terminal, with the command the result gives.
 
 ## Moving a workspace to `send`
 
@@ -291,7 +292,7 @@ the same JSON, with `offline` and `workspace`; on a server pinned to one workspa
   manifest step first; `workspace mode <name> send` enforces the order.
 - **Claiming an approval the person did not give.** Under `chat` their yes is the approval, and nothing can tell it
   from yours; call the tool with `approvalId` only after they said yes to that preview. Under `confirm` you cannot
-  claim it at all until they have run `agentcomms approve`.
+  claim it at all until they have run the approve command the result gave.
 
 - **An own-app port mismatch between the manifest and `workspace add`.** The sign-in completes at Slack and then fails to
   return. Check both numbers say the same thing.

@@ -181,12 +181,15 @@ const BARE =
 
 /**
  * The words of the backticked command in a help: its words as JSON where Windows has no line that every shell reads
- * the same (a Node under `C:\\Program Files`), or the line, whose words here hold no spaces or quotes.
+ * the same (a Node under `C:\\Program Files`), or the line read word by word. A word is quoted where the server's own
+ * shell needs it — `'…'` on POSIX, `"…"` on Windows, where a runner's temporary folder is `C:\\Users\\RUNNER~1\\…` — and
+ * the folders pinned here hold no quote of either kind, so a quoted word is what is between its quotes.
  */
 function helpCommand(help: string): string[] {
   const line = /`([^`]+)`/.exec(help)?.[1];
   assert.ok(line, `no command in the help: ${help}`);
-  return line.startsWith('[') ? (JSON.parse(line) as string[]) : line.split(' ');
+  if (line.startsWith('[')) return JSON.parse(line) as string[];
+  return [...line.matchAll(/'([^']*)'|"([^"]*)"|(\S+)/g)].map((match) => (match[1] ?? match[2] ?? match[3]) as string);
 }
 
 /** Gmail's built CLI, as the wrapper's dependency declares it: what a command located from Gmail runs. */

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { readdir, readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -107,3 +107,86 @@ for (const cli of CLIS) {
     assert.deepEqual(missing, [], `documented but not implemented: ${missing.join(', ')}`);
   });
 }
+
+// ── What a skill tells a person to run (CUE-403) ─────────────────────────────────────────────────────────────────
+
+/**
+ * Every contract and every skill of every channel, from the channel registry: a new channel's contract and the skills
+ * under its prefix are read here from their first commit.
+ */
+async function skillTexts() {
+  const files = REGISTRY.skillFamilies.map((family) => join(ROOT, family.contract));
+  for (const entry of await readdir(join(ROOT, 'skills'), { withFileTypes: true, recursive: true })) {
+    const path = join(entry.parentPath, entry.name);
+    // A skill's `references/contract.md` is a copy of its family's contract, which is read once, above.
+    if (!entry.isFile() || !entry.name.endsWith('.md') || /[/\\]_shared[/\\]/.test(path)) continue;
+    if (/[/\\]references[/\\]contract\.md$/.test(path)) continue;
+    if (!REGISTRY.skillFamilies.some((family) => path.includes(`${join('skills', family.prefix)}`))) continue;
+    files.push(path);
+  }
+  return Promise.all(
+    [...new Set(files)].map(async (path) => ({ path: relative(ROOT, path), text: await readFile(path, 'utf8') })),
+  );
+}
+
+const escapeRegExp = (text) => text.replace(/[\\^$.*+?()[\]{}|/]/g, '\\$&');
+/** Every command this suite installs, from the manifests: a channel's binary, its server's bins, its approve. */
+const SUITE = REGISTRY.channels.flatMap(({ manifest }) => [manifest.binary, ...(manifest.server?.bins ?? [])]);
+const NAME = `(?:${SUITE.map(escapeRegExp).join('|')})(?:\\.(?:cmd|exe|ps1|bat))?`;
+const PACKAGE = `@agentcomms/[a-z-]+(?:@\\S+)?`;
+/**
+ * A suite command for a person to run, made up rather than given: each manifest's `approve` (`agent-gmail approve`),
+ * in any case and with a Windows extension, or that approve through npx. 0.13.1's approvals hand over the command
+ * the result gives — this installation's Node and CLI file, its folders pinned — or say why there is none here.
+ */
+const APPROVES = REGISTRY.channels.map(({ manifest }) => {
+  const [binary, ...words] = manifest.approve.split(' ');
+  return new RegExp(
+    `(?<![\\w@/-])${escapeRegExp(binary)}(?:\\.(?:cmd|exe|ps1|bat))?\\s+${words.map(escapeRegExp).join('\\s+')}\\b`,
+    'i',
+  );
+});
+const NPX_APPROVE = new RegExp(
+  `\\b(?:npx|pnpx|bunx|npm exec|pnpm dlx|yarn dlx)\\b[^\`\\n]*${PACKAGE}\\s+approve\\b`,
+  'i',
+);
+/** A person told to run a suite command by its name: "the person runs `agent-whatsapp deny …`". */
+const PERSON_RUNS = new RegExp(
+  `(?:\\b(?:the person|the user|they)\\s+(?:then\\s+|first\\s+)?(?:runs?|types?|pastes?)|\\b(?:give|hand|tell)\\s+(?:them|the person|the user)|\\bask (?:them|the person|the user) to run)\\s+\`(?:${NAME}|(?:npx|pnpx|bunx)\\b[^\`]*${PACKAGE})(?:\\s|\`)`,
+  'i',
+);
+
+test('the skills read here are every channel’s contract and every skill under its prefix (CUE-403)', async () => {
+  const paths = (await skillTexts()).map(({ path }) => path.split(/[/\\]/).filter(Boolean).join('/'));
+  for (const family of REGISTRY.skillFamilies) assert.ok(paths.includes(family.contract), family.contract);
+  const read = paths.map((path) => path.split('/').slice(0, 2).join('/'));
+  const skills = (await readdir(join(ROOT, 'skills'), { withFileTypes: true }))
+    .filter((entry) => entry.isDirectory() && !entry.name.startsWith('_'))
+    .map((entry) => `skills/${entry.name}`);
+  for (const skill of skills) assert.ok(read.includes(skill), `${skill} is read`);
+});
+
+test('no skill or contract makes up an approve command: it hands over the one the result gives (CUE-403)', async () => {
+  const wrong = new Set();
+  for (const { path, text } of await skillTexts()) {
+    for (const line of text.split('\n')) {
+      if ([...APPROVES, NPX_APPROVE].some((pattern) => pattern.test(line))) wrong.add(`${path}: ${line.trim()}`);
+    }
+  }
+  assert.deepEqual(
+    [...wrong],
+    [],
+    `an approve command written by hand instead of the result's:\n${[...wrong].join('\n')}`,
+  );
+});
+
+test('no skill or contract tells a person to run a suite command by its name (CUE-403)', async () => {
+  const wrong = [];
+  for (const { path, text } of await skillTexts()) {
+    // Prose wraps, so a sentence is read across its line breaks.
+    for (const [found] of text.replace(/\s*\n\s*/g, ' ').matchAll(new RegExp(PERSON_RUNS.source, 'gi'))) {
+      wrong.push(`${path}: ${found}`);
+    }
+  }
+  assert.deepEqual(wrong, [], `a command handed to a person that is not the one a result gives:\n${wrong.join('\n')}`);
+});

@@ -57,7 +57,7 @@ Changing a policy to something weaker is a loosening, and a loosening is a chang
 `gmail_inbox_policy` from chat, shows you exactly what would change and does nothing until the approval it returns
 is claimed. How that is approved is the mailbox's **change policy**. Under `chat`, the default, the agent claims it
 after your yes in the conversation, and nothing can check that you said it. Under `confirm` it cannot be claimed
-until you have typed the code at a terminal with `agentcomms approve <id>`.
+until you have typed the code at a terminal with the approve command the result gives.
 `agent-gmail inbox policy <alias> --change confirm` sets it, and moving it back to `chat` is itself approved at a
 terminal. Making a policy stricter needs nobody — `agent-gmail inbox policy <alias> --send confirm`, or the same
 change from chat.
@@ -101,12 +101,20 @@ Stated plainly, because a security claim that overstates itself is worse than on
 
 ## Approvals
 
+Where Gmail is installed globally:
+
 ```bash
 agent-gmail send list --inbox acme/gmail        # prepared, not yet used
 agent-gmail send wait <approvalId>        # where one stands, now or once it changes: it only looks
 agent-gmail send cancel <approvalId>      # void one
-agent-gmail approve <approvalId>          # approve at this terminal, under `confirm`
+agent-gmail approve <approvalId>          # approve at this terminal, under `confirm`: the command the result gives
 ```
+
+To approve, run the command the result gave you exactly as given: it names this installation's own Node and CLI
+file, with its folders pinned, so it works without anything on your PATH and approves the very approval the agent
+holds. On Windows with Node under `C:\Program Files` it comes as words to type, each quoted for your shell; where it
+says the command is not locatable here, install or update that package the way you usually do and try again
+([troubleshooting](troubleshooting.md#a-command-a-result-gave-you-is-not-found)).
 
 An agent learns that a person approved by waiting, not by being told: `gmail_send_wait` (`agent-gmail send wait`),
 `slack_approval_wait` (`agent-slack approval wait`), `resend_send_wait` (`agent-resend send wait`) and

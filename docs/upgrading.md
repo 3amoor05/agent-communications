@@ -75,8 +75,9 @@ release is out:
   cancel?". Now runs `update`, with its own preview, and says "Updated. Run your command again." only when it
   brought this command to the latest release; otherwise it says what is left and exits non-zero. Later puts it off;
   cancel does nothing. Anything without a terminal — a script, an agent, `--json` — exits `11` (`UPDATE_REQUIRED`),
-  naming `agentcomms update` and `agentcomms update --later` (`npx -y @agentcomms/core@latest update`, and
-  `… update --later`, where `agentcomms` is not installed). A command whose release is installed globally while an
+  naming this installation's own `update` and `update --later` commands — its Node and core's CLI file, its folders
+  pinned — to run exactly as given; on Windows with Node under `C:\Program Files` they come as words to type. A
+  command whose release is installed globally while an
   older copy of it runs — from npx's cache, or a project's own install — stops the same way, and says to run the
   installed one.
 
@@ -347,9 +348,9 @@ Rules:
 - Never send mail, post to Slack, or start a sign-in. Never print a token, a secret, or an env value.
 - Before registering any server, tell me that from 0.5.0 a change is approved by my yes in chat unless the change
   policy is confirm, and ask me whether to run `npx -y @agentcomms/core@$V policy confirm`. Run it only if I say so.
-- When a preview says its policy is confirm, give me `npx -y @agentcomms/core@$V approve <id>` to run in my own
-  terminal and wait until I say it is done before running the command again with --approval <id>. Never run approve
-  yourself.
+- When a preview says its policy is confirm, give me the approve command the result gives, exactly as given, to run
+  in my own terminal, and wait until I say it is done before running the command again with --approval <id>. Never
+  run approve yourself, and never write one yourself.
 - Stop and tell me, changing nothing further, if any command fails or any of these is true:
   - `node --version` is older than 22.12, or `claude` is not on PATH;
   - the release (V=$(npm view @agentcomms/gmail version)) is older than 0.5.0;

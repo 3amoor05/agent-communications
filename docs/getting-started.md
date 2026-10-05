@@ -190,10 +190,10 @@ Or register the core server instead, and let the agent install the rest from the
 npx -y @agentcomms/core mcp install --client claude-code
 ```
 
-After a restart it has `comms_server_install`, which registers the Gmail or Slack server with any client, and the
-rest of the core's upkeep. Each of those changes comes back as a preview with an approval id for you to agree to —
-a yes in the chat under the default `chat` change policy, `agentcomms approve <id>` at your terminal under `confirm`
-— and a newly registered server appears after the client is restarted once more.
+After a restart it has `comms_server_install`, which registers the Gmail or Slack server with any client, and the rest
+of the core's upkeep. Each of those changes comes back as a preview with an approval id for you to agree to — a yes in
+the chat under the default `chat` change policy, the approve command the result gives, at your terminal, under
+`confirm` — and a newly registered server appears after the client is restarted once more.
 
 > **Remove any other Gmail MCP server once this one works.** Everything here assumes it owns the only route to
 > Gmail's send endpoints. A second server with an ungated send tool does not break that guarantee so much as stand

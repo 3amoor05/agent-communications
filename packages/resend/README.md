@@ -17,9 +17,9 @@ code, but the key itself would not stop anything else that held it. A sending-on
 enforces that — and it cannot read anything, so reads with it are reported as unavailable. `agent-resend doctor`
 says this on every run.
 
-**Nothing is sent without a person.** A send is prepared, previewed — every recipient, BCC included, the reach
-(unique recipients), the From domain and whether it is verified — and approved: a yes in the conversation under the
-account's `chat` policy, or `agent-resend approve <id>` and a typed code under `confirm`. Above ten recipients, or to
+**Nothing is sent without a person.** A send is prepared, previewed — every recipient, BCC included, the reach (unique
+recipients), the From domain and whether it is verified — and approved: a yes in the conversation under the account's
+`chat` policy, or the approve command the result gives and a typed code under `confirm`. Above ten recipients, or to
 an address that arrived in mail read here, a person at a terminal approves, whatever the policy. The approval id is
 the request's `Idempotency-Key` and an `agentcomms_approval` tag; a send whose outcome is unknown is never repeated,
 only checked.
@@ -99,7 +99,7 @@ terminal), `approve` (under `confirm`, a person at a terminal) and `mcp` (it sta
 | `agent-resend send wait <approvalId>` | `resend_send_wait` |
 | `agent-resend scheduled list` | `resend_scheduled_list` |
 | `agent-resend scheduled cancel <id>` | `resend_scheduled_cancel` |
-| `agent-resend approve <approvalId>` | — a person at a terminal |
+| `agent-resend approve <approvalId>` | — a person at a terminal, with the command the result gives |
 | `agent-resend mcp` | — it starts the server |
 | `agent-resend mcp install --client <client>` | `comms_server_install` (core) |
 | `agent-resend mcp prune` | `comms_server_prune` (core) |

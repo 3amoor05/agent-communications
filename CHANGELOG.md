@@ -3,6 +3,56 @@
 All notable changes to this project are recorded here, newest first. Every package in this repository is released
 together under one version.
 
+## 0.13.1
+
+**A command you are told to run now runs where you paste it.** When an approval waits for you at your terminal, a
+change has to be run again with its approval, or `doctor` names a repair, the command shown was a bare name —
+`agentcomms approve <id>`, `agent-gmail approve <id>` — which runs only where that package is installed globally.
+Installed the default way, through your MCP client, or with npx or from a checkout, you had nothing by that name on
+your PATH, so the one step only you can take failed with "command not found". Every such command now names the
+installation that printed it: its own Node and the file of its CLI, by full path, with the folders it keeps its
+configuration, state, data and secrets in — and, for a command that saves files, its downloads folder — given as
+options (`--config-dir` and the rest). It runs as pasted, from any folder, and reaches the same approval the agent is
+waiting on (CUE-403).
+- Where one of its words cannot be written the same way for cmd.exe and both PowerShells, the command is shown as
+  its words in JSON, with what to do: type them, quoted for your shell. On Windows this is the usual case when Node
+  is installed under `C:\Program Files`, the default, because that path needs quotes; Node from nvm-windows, Volta
+  or a tool cache gives a line to paste.
+- A command that belongs to another product — Gmail's, when core is the one printing — is found among the servers
+  registered with your MCP clients, at exactly this release, and is never run through npx. When there is none,
+  there is no command: the message names the product and the release it needs, says it is not locatable here, and
+  asks you to install or update it the way you usually do. It never guesses one.
+- Every CLI takes `--config-dir`, `--state-dir`, `--data-dir`, `--secrets-dir` and `--downloads-dir`, and every
+  server the first four. Each pins that one folder for that run and nothing else; `AGENT_COMMS_CONFIG_DIR` moves the
+  state and secrets folders with it, and these do not.
+
+**A server registered by `mcp install` now carries its folders.** The entry written for a client — managed, npx or
+local — names the configuration, state, data and secrets folders it was installed with, so the server, and the
+approvals it hands you, use the same ones whatever environment the client starts it in. On Windows this also stops
+a server registered with roaming and local AppData apart from looking for its file secrets in the wrong one. An entry
+from an earlier release keeps working as it did: `doctor` reports it as a warning with the command that registers it
+again with its folders, and the next `update` or `mcp install --force` you approve rewrites it.
+
+**The daily update check works in the folders it was started with.** A check started by a command run with path
+options reads and writes only those folders, wherever its environment points.
+
+**Skills hand you the command a result gives.** They no longer tell an agent to write out `… approve <id>` itself:
+they pass on the command the result gives, as it is, or say why there is none.
+
+What it means for you: a patch release. Nothing changes in how sends, posts or changes are approved, and no command,
+flag or tool was removed.
+- Commands printed for you are longer, because they name the Node, the file and the folders. Paste them as they are.
+- Each channel package now depends on `@agentcomms/core` of exactly the same version, which npm installs with it.
+- On Windows with Node under `C:\Program Files`, approvals and repairs come as words to type rather than a line to
+  paste. Putting `agentcomms` and the `agent-*` commands on your PATH is a separate follow-up: 0.13.1 adds, changes
+  and checks nothing on your PATH.
+- A command 0.13.0 or earlier printed by its bare name still needs that name on your PATH. Troubleshooting, "A
+  command a result gave you is not found", gives two best-effort ways round it: the managed registration's own Node
+  and runtime file, or `npx -y @agentcomms/<product>@0.13.0 …` — that exact release, never `latest` — with any
+  `AGENT_COMMS_*` folders you used set again. Neither works for every installation, which is why updating is the fix.
+- To get 0.13.1: your servers will say an update is out. Say "update my comms" in a chat, or run the update command
+  the stop gives, then restart your client.
+
 ## 0.13.0
 
 **An organisation can now set up its Google and Slack apps once, for every member.** Until now each person connecting

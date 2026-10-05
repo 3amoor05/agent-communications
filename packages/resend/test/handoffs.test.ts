@@ -378,8 +378,9 @@ test('a usage error and an empty command line point at this installation’s --h
   assert.ok(!isCommand(why));
   assert.equal(nothingToDo(why), why.message);
   assert.equal(usageHint(why), why.message);
-  // From the real CLI's own words, for a reader of the plain output: Resend's entry, then `--help`.
-  locatedResendLine((await harness.cli(['nonsense'])).stderr, ['--help']);
+  // From the real CLI's own words, for a reader of the plain output: Resend's entry, then `--help`. For this machine's
+  // own shell, which `locatedResendLine` reads: the harness otherwise gives the CLI darwin's, which quotes a Windows path.
+  locatedResendLine((await harness.cli(['nonsense'], { platform: process.platform })).stderr, ['--help']);
 });
 
 test('approving as an agent, or with no terminal, names the approve a person runs, located (7d-resend)', async () => {

@@ -2,7 +2,7 @@
 name: gmail-setup
 description: "Install agent-gmail and connect mailboxes: the Google Cloud OAuth client, inbox add and reauth, policies, import and removal, from chat or a terminal — every loosening and removal shown to the user as a change approval first — plus doctor and wiring MCP clients. Symptoms: 'set up Gmail', 'connect my work inbox', 'no mailbox is connected', 'it stopped working after a week'. Not for reading or writing mail — gmail-search and gmail-compose do that."
 license: MIT
-compatibility: "@agentcomms/gmail@0.13.0"
+compatibility: "@agentcomms/gmail@0.13.1"
 metadata:
   group: communications
   lifecycle: release
@@ -43,7 +43,7 @@ here. `doctor` reports that as a failing check, not a warning, and so should you
 | Sending anything | `gmail-send` | Never sends. The smoke test at the end of setup is a search — a fresh connection is the worst moment to test a send path. |
 | Reading and searching mail | `gmail-search` | Runs exactly one search to prove the grant works, reports the count, and stops. |
 | Writing drafts | `gmail-compose` | Not touched. A mailbox that can read is connected before anything can be written. |
-| Approving a change | the user | Every loosening and every removal comes back as a change approval with a preview. Shows it verbatim, asks, and claims it only after a yes; under the `confirm` change policy the user runs `agentcomms approve <id>` first. Never claims one the user has not agreed to. |
+| Approving a change | the user | Every loosening and every removal comes back as a change approval with a preview. Shows it verbatim, asks, and claims it only after a yes; under the `confirm` change policy the user first runs the approve command the result gives. Never claims one the user has not agreed to. |
 | Deciding which Google account belongs to which alias | the user | Passes their answer as `--email` so a wrong pick is refused rather than saved. |
 | Trusting a client's approval forms | the user, with `gmail-send` | The probe and the change approval are the user's; setup does not start either. Showing the list and taking a client off it need nobody. |
 
@@ -68,9 +68,9 @@ here:
   return a change approval instead of acting: `approvalRequired`, a `preview` and an `approvalId` from a
   tool; exit `10` with `APPROVAL_PENDING` and the same in `error.details` from the CLI. Show the preview
   verbatim and ask. Only after the user says yes, call the same tool again with `approvalId` (CLI: the same
-  command with `--approval <id>`). Under the `confirm` change policy the user runs
-  `agentcomms approve <id>` in their own terminal first; a claim before that is refused, and the approval
-  waits for them.
+  command with `--approval <id>`). Under the `confirm` change policy the user first runs the approve
+  command the result gives, in their own terminal, exactly as given (contract §10); a claim before that
+  is refused, and the approval waits for them.
 - **Every skill works without the MCP server.** That matters most here, because setup usually runs
   *before* any server is wired. The CLI with `--json` is the primary surface, and its exit codes are
   stable: `0` ok, `10` a send or a change was refused or needs approval, `64` usage, `65` bad data, `66` not found,
@@ -113,9 +113,9 @@ A change that needs approval returns, instead of acting:
 
 Show `preview` exactly as it is, ask, and call again with `approvalId` after a yes; the second answer is
 `{ "applied": true, "result": … }`, where `result` is what the command prints under `--json`. When
-`policy` is `confirm`, the user approves in their own terminal — `agent-gmail approve <id>`, or
-`agentcomms approve <id>` where the core is installed — and types the code it shows; you call again
-afterwards. An approval is for the change it previewed, for ten minutes, once: anything different — another
+`policy` is `confirm`, the user approves in their own terminal with the approve command the result gives —
+this installation's own, its folders pinned; hand it over as given, never one written from its name — and
+types the code it shows; you call again afterwards. An approval is for the change it previewed, for ten minutes, once: anything different — another
 value, another mailbox under the same name, a file that changed — is refused, and the change is prepared
 again.
 
@@ -482,7 +482,7 @@ declines, the seven-day expiry is something to say plainly, not to discover late
 - [ ] `mcp install` reported `verified`, and any `other-gmail-servers` finding was passed on as a failure.
 - [ ] No secret was printed into the conversation.
 - [ ] Every change approval was shown to the user as its preview, verbatim, and claimed only after they
-      said yes — under `confirm`, only after they had run `agentcomms approve <id>` themselves.
+      said yes — under `confirm`, only after they had run the approve command the result gave.
 
 ## Deeper reading
 

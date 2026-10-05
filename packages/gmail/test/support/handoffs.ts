@@ -168,10 +168,25 @@ export function gmailRetryWords(line: string): string[] {
   return rest;
 }
 
+/**
+ * The command in backticks in `text` whose words — read as a POSIX shell reads the line — end with `words`. Compared
+ * as words, not text: a path that needs quotes on this machine, as a Windows path with a backslash does, is quoted in
+ * the line and plain in `words`.
+ */
+function backtickedCommandEndingIn(text: string, words: readonly string[]): string | undefined {
+  return [...text.matchAll(/`([^`]+)`/g)]
+    .map((match) => match[1] as string)
+    .find((each) => {
+      const read = splitPosixWords(each);
+      const start = read.length - words.length;
+      return start >= 0 && words.every((word, index) => read[start + index] === word);
+    });
+}
+
 /** The command in backticks in `text` that ends with `words`, checked to be Gmail's own, located; its line. */
 export function locatedGmailLine(text: string, words: readonly string[]): string {
   const tail = ` ${words.join(' ')}`;
-  const line = [...text.matchAll(/`([^`]+)`/g)].map((match) => match[1] as string).find((each) => each.endsWith(tail));
+  const line = backtickedCommandEndingIn(text, words);
   assert.ok(line !== undefined, `no command ending in "${tail.trim()}" in: ${text}`);
   gmailRetryWords(line);
   assertNoBareCommand(text);
@@ -184,7 +199,7 @@ export function locatedGmailLine(text: string, words: readonly string[]): string
  */
 export function locatedCoreLine(text: string, words: readonly string[]): string {
   const tail = ` ${words.join(' ')}`;
-  const line = [...text.matchAll(/`([^`]+)`/g)].map((match) => match[1] as string).find((each) => each.endsWith(tail));
+  const line = backtickedCommandEndingIn(text, words);
   assert.ok(line !== undefined, `no command ending in "${tail.trim()}" in: ${text}`);
   const [program, flag, entry, ...rest] = splitPosixWords(line);
   assert.equal(program, process.execPath, `the program is this Node: ${line}`);

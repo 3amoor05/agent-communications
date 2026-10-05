@@ -30,6 +30,10 @@
  *   `serverInstallChange`'s `request.channel`. Several rows can share one operation — four Slack rows run
  *   `planModeSet`, one per mode — and reaching it cannot tell them apart; only what it was asked can. Swapping the
  *   tools of `slack.mode.report` and `slack.mode.narrow` passed until a row said, in `expect`, which mode it asks for.
+ * - **Every command is handed the five path options first** — `--config-dir`, `--state-dir`, `--data-dir`,
+ *   `--secrets-dir` and `--downloads-dir`, each a folder of its own — before its row's words (design 2026-10-04, D2).
+ *   They are flags, not capabilities, so no row names them; a command that refused one, or opened its folders before
+ *   it read them, would not reach its operation. `test/parity.test.mjs` checks every row's command was run that way.
  * - **The process is sealed** besides: a temp HOME and `AGENT_COMMS_*` directories with the file secret store pinned,
  *   no network (`fetch`, sockets, requests, datagrams, name lookups), no child processes or worker threads, the
  *   account's home directory answered with the temp HOME, and `@napi-rs/keyring` refused — so a stand-in that failed
@@ -78,6 +82,17 @@ const CALL_LIMIT = 200;
 const DRIVE_TIMEOUT_MS = 15_000;
 /** An approval id of the right shape that no approval has: a guard that reads the store finds nothing, and goes on. */
 export const PLACEHOLDER_APPROVAL = `ap_${'0'.repeat(26)}`;
+/**
+ * The five global path options every CLI takes before its command (`--config-dir` and the rest), with the folder each
+ * is given in a drive. Flags, not capabilities: no row names them, and the drive gives every command all five.
+ */
+const PATH_FLAGS = Object.freeze([
+  ['--config-dir', 'config'],
+  ['--state-dir', 'state'],
+  ['--data-dir', 'data'],
+  ['--secrets-dir', 'secrets'],
+  ['--downloads-dir', 'downloads'],
+]);
 
 // ── Resolving a row's operation names ────────────────────────────────────────────────────────────────────────────
 
@@ -221,8 +236,9 @@ export function namedOperations(rows, operations) {
  * a row that names none yet — to the end, so the check can say what its two sides share.
  *
  * Returns `{ operations, parameters, reports, fatal }`: every operation by package; the parameter names of each one a
- * row names; and per row `{ cli, mcp }` — what each side was run with, every operation it called in order to its end,
- * what the row's own operation received (`received`, by operation, as `recordArguments` keeps it), and how it ended —
+ * row names; and per row `{ cli, mcp }` — what each side was run with (a command's `argv` are its row's words, and
+ * `ran` everything it was handed: the five path options first), every operation it called in order to its end, what
+ * the row's own operation received (`received`, by operation, as `recordArguments` keeps it), and how it ended —
  * `limited` when it was stopped at `CALL_LIMIT`. `fatal` is set when a drive hung, after which nothing else is
  * driven.
  */
@@ -231,7 +247,10 @@ export async function driveOperations(table, { dir }) {
   await mkdir(home, { recursive: true });
   const input = join(dir, 'drive-input.json');
   const output = join(dir, 'drive-output.json');
-  await writeFile(input, JSON.stringify({ rows: table?.capabilities ?? [] }));
+  // Every command is run with the five suite folders pinned before its words (design 2026-10-04, D2): each a folder of
+  // its own, none of them the environment's, so a command reaches its operation only by parsing them first.
+  const pins = PATH_FLAGS.flatMap(([flag, name]) => [flag, join(dir, 'pinned', name)]);
+  await writeFile(input, JSON.stringify({ rows: table?.capabilities ?? [], pins }));
   // Nothing of the caller's environment but what starting Node needs: a token in it is not the drive's to see.
   const env = {
     NO_COLOR: '1',
@@ -604,7 +623,7 @@ function refusalOf(text) {
 
 /** Runs `body` as one drive, to its end, recording what `wanted` receives. */
 async function traced({ wanted }, body) {
-  const drive = { wanted, calls: [], received: {}, stopped: null };
+  const drive = { wanted, calls: [], received: {}, stopped: null, ran: undefined };
   current = drive;
   let timer;
   let text = '';
@@ -628,6 +647,7 @@ async function traced({ wanted }, body) {
   await new Promise((settle) => setImmediate(settle));
   current = null;
   return {
+    ...(drive.ran === undefined ? {} : { ran: drive.ran }),
     calls: drive.calls,
     received: drive.received,
     stopped: drive.stopped,
@@ -709,12 +729,15 @@ async function capturing(body) {
 
 async function drive(inputPath, outputPath) {
   await seal();
-  // The file store, pinned, so nothing so much as asks which store to use.
-  const configDir = process.env.AGENT_COMMS_CONFIG_DIR;
-  await mkdir(configDir, { recursive: true });
-  await writeFile(join(configDir, 'config.json'), `${JSON.stringify({ version: 2, secrets: { store: 'file' } })}\n`);
+  const { rows, pins } = JSON.parse(await readFile(inputPath, 'utf8'));
+  // The file store, chosen, so nothing so much as asks which store to use: in the environment's configuration, which
+  // the servers read, and in the one the commands are pinned to.
+  const pinnedConfig = pins[pins.indexOf('--config-dir') + 1];
+  for (const configDir of [process.env.AGENT_COMMS_CONFIG_DIR, pinnedConfig]) {
+    await mkdir(configDir, { recursive: true });
+    await writeFile(join(configDir, 'config.json'), `${JSON.stringify({ version: 2, secrets: { store: 'file' } })}\n`);
+  }
 
-  const { rows } = JSON.parse(await readFile(inputPath, 'utf8'));
   const { operations, modules, functions } = await indexOperations();
   const reexports = await coreReexports(modules);
   globalThis[Symbol.for('agentcomms.parity.stand-in')] = standIn;
@@ -741,8 +764,10 @@ async function drive(inputPath, outputPath) {
     for (const tool of (await client.listTools()).tools) tools.set(tool.name, { pkg, tool, client });
   }
 
-  const runCli = (pkg, argv) =>
-    capturing(async () => {
+  const runCli = (pkg, argv) => {
+    // What the command is handed, recorded as it is handed: `ran` in the report.
+    if (current) current.ran = [...argv];
+    return capturing(async () => {
       const out = new PassThrough();
       const err = new PassThrough();
       let text = '';
@@ -774,6 +799,7 @@ async function drive(inputPath, outputPath) {
       await new Promise((settle) => setImmediate(settle));
       process.stdout.write(text);
     });
+  };
 
   const named = namedOperations(rows, operations);
   // What every operation a row names takes, so the check can say when an `expect` names an argument it does not.
@@ -795,7 +821,7 @@ async function drive(inputPath, outputPath) {
       let outcome;
       for (let attempt = 0; attempt < 8; attempt += 1) {
         const argv = [...path, ...positionals, ...(row.argv ?? []), ...options, '--json'];
-        outcome = { argv, ...(await traced({ wanted }, () => runCli(row.package, argv))) };
+        outcome = { argv, ...(await traced({ wanted }, () => runCli(row.package, [...pins, ...argv]))) };
         if (outcome.calls.length > 0 || !outcome.refusal) break;
         const argument = /missing required argument '([^']+)'/.exec(outcome.refusal);
         const option = /required option '(-[^' ]+)(?: <([^>]+)>)?' not specified/.exec(outcome.refusal);

@@ -2,7 +2,7 @@
 name: slack-posting
 description: "Draft a Slack message, with local files if asked, and take it through the approval gate, including how many people a post would interrupt. Symptoms: 'post this to #engineering', 'reply in that thread', 'let the team know', 'send the report to the channel', 'share this file in Slack', 'react to that message'. Not for reading — slack-reading does that; not for connecting a workspace — slack-setup does."
 license: MIT
-compatibility: "@agentcomms/slack@0.13.0"
+compatibility: "@agentcomms/slack@0.13.1"
 metadata:
   group: communications
   lifecycle: release
@@ -42,15 +42,16 @@ Every prepare leaves a draft behind, so clear up the ones that will not be poste
 A draft whose file was changed outside agent-slack is refused there as the gate refuses it, or carries a `problem`
 (`BAD_DATA`), in `slack_draft_list` too. Do not prepare it; say so, and delete it.
 
-There is no tool that approves, and there will not be one. Under `confirm`, `agent-slack approve` is a person's
-command at their own terminal: that is what the policy means, and it is refused to an agent.
+There is no tool that approves, and there will not be one. Under `confirm`, Slack's `approve` is a person's
+command at their own terminal — the one the result gives, handed over as given: that is what the policy means, and
+it is refused to an agent.
 
 ## Which approval counts
 
 | Policy | What the person does | What you do then |
 |---|---|---|
 | `chat` | Says yes, in this conversation, to the whole preview you showed | `slack_post_send` (or `post send`), once |
-| `confirm` | Runs `agent-slack approve <approvalId>` in their own terminal and types the code it shows | Call the same `slack_post_send` again once they say they have |
+| `confirm` | Runs the approve command the result gives in their own terminal and types the code it shows | Call the same `slack_post_send` again once they say they have |
 | `never` | Nothing: posting is off for this workspace | Offer the text to paste; do not ask for a policy change |
 
 An `@here`, `@channel` or `@everyone`, or any post reaching fifty people or more, is held as `confirm` whatever the
@@ -76,7 +77,7 @@ this needs a person to approve it at a terminal before it posts
 
 `@channel` is eight characters whether the room holds three people or four hundred, and a person approving the
 four-hundred case is agreeing to something quite different. If the count could not be read, the preview says so —
-**never present a missing count as a small one.** `agent-slack approve` reads the room again and shows the same
+**never present a missing count as a small one.** Slack's `approve` reads the room again and shows the same
 channel and count; if either has changed since the preview it refuses, and the post has to be prepared again. If
 the room cannot be read at that moment it says so and approves nothing, and the approval is still there to retry.
 
@@ -86,7 +87,7 @@ it is not the draft's channel, nothing is posted.
 **Where a post can go.** A post goes to a conversation id: a channel's `C…` or `G…`, or a direct message's `D…`. A
 user id (`U…`, `W…`) is refused as a destination; for a direct message, find the DM's own id with `slack_channels`
 (`agent-slack channels --workspace <name>`). And it goes only to a room this account has joined: a post to a channel
-it is not a member of is refused before any preview — and again at `agent-slack approve` and at send, before the
+it is not a member of is refused before any preview — and again at Slack's `approve` and at send, before the
 approval is spent. Ask the person to join it in Slack themselves, then prepare again; nothing here joins a channel. A
 DM or a group DM is never refused for this. If the room could not be read, the preview says membership could not be
 checked; say so when you show it.
@@ -109,7 +110,7 @@ prepare it again and show the new preview.
 **Which files.** The rule Gmail's attachments follow: a regular file under the home folder, and not in one of its
 hidden folders (`~/.ssh`, `~/.config` and the like), a `.git` folder, or a `.env` file. A file anywhere else — `/tmp`
 included — is refused, and the refusal says so: ask the person to copy it under their home folder, then name the
-copy, or to allow its folder with `agentcomms attach roots add <folder>`, which needs their approval. Do not copy it
+copy, or to allow its folder with core's `attach roots add`, as the refusal gives it, which needs their approval. Do not copy it
 yourself without saying so. A link is refused too; name the file it points to.
 
 **Limits.** At most ten files a post, each at most 100 MiB, and none empty. Above either limit the draft is refused,
@@ -144,7 +145,8 @@ the prepare is refused with `SCOPE_MISSING` and the command that fixes it, which
 
 Under `confirm` — or for a broadcast or a large room under any policy — `slack_post_send` and `agent-slack post
 send` stop with `APPROVAL_PENDING`. That is waiting, not failure: the approval is still alive. The error's
-`details.command` is the one command the person runs, `agent-slack approve <approvalId>`, and its hint says what you
+`details.command` is the one command the person runs — Slack's approve as this installation runs it, its folders
+pinned; hand it over exactly as given — and its hint says what you
 do next on the surface you are using. Tell the person, and stop. Once they have approved, call the same
 `slack_post_send` (or run the same `post send`) again; it posts once.
 
@@ -154,14 +156,14 @@ do next on the surface you are using. Tell the person, and stop. Once they have 
 |---|---|
 | the draft was edited after the preview | The approved bytes are the posted bytes, or nothing is |
 | a file is not the one the draft recorded, or the one approved | It changed, or was replaced, after it was named; nothing was sent |
-| a file must come from an allowed folder | It is outside the allowed folders, or in a folder never sent from; ask the person to copy it under their home folder, or to allow its folder with `agentcomms attach roots add <folder>` (needs their approval) |
+| a file must come from an allowed folder | It is outside the allowed folders, or in a folder never sent from; ask the person to copy it under their home folder, or to allow its folder with core's `attach roots add`, as the refusal gives it (needs their approval) |
 | the draft is not what its text composes to (`BAD_DATA`) | Its file was changed outside agent-slack, so a preview of its text would not be what posts. Delete it and compose it again |
 | the room grew after the preview | The words did not change; who reads them did |
 | not a member of the channel (`SCOPE_MISSING`, `not-a-member`) | This account has not joined that room. The person joins it in Slack themselves, then you prepare again; a DM or group DM is never refused for this |
 | a user id is not a destination (`USAGE`) | A post goes to a conversation id. For a direct message use the DM's `D…` id, which `slack_channels` lists; mentions still take user ids |
 | the channel given is not the draft's | You were about to post somewhere other than where you think |
 | already claimed | An approval is single-use, across processes |
-| refused at `agent-slack approve` | The draft or the room changed since the preview; the screen is only shown when it is still what the approval binds |
+| refused at Slack's `approve` | The draft or the room changed since the preview; the screen is only shown when it is still what the approval binds |
 | prepared for a different account | Two accounts in one workspace are two different people speaking |
 | policy `never` | Posting is off for this workspace |
 
@@ -199,7 +201,7 @@ Under `confirm` it takes the same typed approval as a message, in the same two s
 1. `slack_react` (or `agent-slack react …`) adds nothing. It makes an approval and stops with `APPROVAL_PENDING`,
    naming the approval id and, in `details.command`, the command the person runs. Tell them which emoji and which
    message, and stop.
-2. The person runs `agent-slack approve <approvalId>` in their own terminal. It shows one line — the workspace,
+2. The person runs that command in their own terminal, exactly as given. It shows one line — the workspace,
    the channel, the message and the emoji — and they type the code.
 3. `slack_react_send` with that approval id and the same channel, message and emoji (or the same
    `agent-slack react` command with `--approval <approvalId>` added) adds the reaction once.

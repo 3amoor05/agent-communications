@@ -15,7 +15,7 @@ npx @agentcomms/core paths      # where config, state and downloads live
 npx @agentcomms/core doctor     # Node version, directory permissions, secret store
 npx @agentcomms/core audit tail # mailbox writes, Slack prepares and posts, and every step of a change, newest last (no bodies, no secrets)
 npx @agentcomms/core approvals list
-npx @agentcomms/core approve <id>  # approve a settings change an agent prepared: read it, type the code it shows
+npx @agentcomms/core approve <id>  # approve a change at your terminal: run the command the result gives, as given
 npx @agentcomms/core policy        # the change policy: how a loosening is approved — chat or confirm
 npx @agentcomms/core attach        # which files may be attached: the folders, your deny entries, the built-in list
 npx @agentcomms/core attach roots add ~/Documents/outgoing  # allow another folder (a change you approve)
@@ -65,9 +65,9 @@ is the one registration that cannot come from chat. After a restart of the clien
 | `comms_approvals_list`, `comms_approval_revoke` | as `approvals list` and `approvals revoke` |
 | `comms_approval_wait` | as `approval wait`: where an approval stands, now or once it changes — it only looks |
 
-Every change is shown to a person before it happens: the first call returns a preview and an approval id, and the
-same tool called again with that id applies it — after the person's yes in the conversation under the `chat` change
-policy, or after they run `agentcomms approve <id>` under `confirm`. No tool approves a change, and none applies a
+Every change is shown to a person before it happens: the first call returns a preview and an approval id, and the same
+tool called again with that id applies it — after the person's yes in the conversation under the `chat` change policy,
+or after they run the approve command the result gives under `confirm`. No tool approves a change, and none applies a
 change it did not plan itself.
 
 ## Licence

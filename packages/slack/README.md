@@ -56,10 +56,11 @@ agent-slack workspace remove acme/slack                    # a preview, then you
 
 How you agree is the workspace's **change policy**. Under `chat`, the default, a yes — in the conversation, or typed
 at the terminal running the command. Under `confirm`, a code typed at your own terminal: the command asks for it, and
-an agent asks you to run `agentcomms approve <id>` (`npx -y @agentcomms/core approve <id>` if only `@agentcomms/slack`
-is installed). `agent-slack workspace policy <name> --change confirm` switches to that; moving back to `chat` is itself
-approved under `confirm`. An agent that runs the command without your approval gets the preview and an approval id,
-exits 10, and runs it again with `--approval <id>` once you have agreed.
+an agent hands you the approve command the result gives, to run exactly as given — this installation's own, its
+folders pinned, whether core is installed beside Slack or only inside it.
+`agent-slack workspace policy <name> --change confirm` switches to that; moving back to `chat` is itself approved
+under `confirm`. An agent that runs the command without your approval gets the preview and an approval id, exits 10,
+and runs it again with `--approval <id>` once you have agreed.
 
 Every sign-in stops at Slack's own consent screen, which is yours to approve, and the app's manifest is yours to
 change.
@@ -124,7 +125,7 @@ on Slack after the question is refused rather than saved under a name you were n
 
 **Your answer follows the workspace's change policy.** Under `chat` (the default), the agent passes your answer back
 — `saveTo` with the `choiceId`, or `--to <answer> --choice <id>`. Under `confirm` you answer it yourself, at your own
-terminal: `agent-slack approve <choiceId>` shows the question again and asks `1`, `2` or `3`. The agent then calls
+terminal: the approve command the result gives shows the question again and asks `1`, `2` or `3`. The agent then calls
 again with the `choiceId` alone; an answer it passes in the arguments is refused, and the question is left open for
 you.
 
@@ -213,7 +214,7 @@ reported as the name it wore, never as identity.
 ```sh
 agent-slack draft create --workspace acme/slack --channel C024BE7LR --text 'ready when you are'
 agent-slack post prepare --workspace acme/slack --draft <draftId>   # prints the preview, posts nothing
-agent-slack approve <approvalId>                                    # under `confirm`: you, at your terminal
+agent-slack approve <approvalId>                                    # under `confirm`: the command the result gives
 agent-slack post send --workspace acme/slack --draft <draftId> --approval <approvalId> --expect-channel C024BE7LR
 ```
 
@@ -315,12 +316,13 @@ await server.connectStdio();
 ```
 
 No tool approves. `slack_post_send` and the reaction tools claim an approval through the gate the CLI uses: under
-`chat` your yes in the conversation is the approval; under `confirm` they return `APPROVAL_PENDING` with the
-`agent-slack approve <approvalId>` command for you to run, and post only after you have; under `never` they refuse.
-The tools that change a workspace return a preview and an approval id first, whenever the change loosens it or
-removes it, and apply it only when called again with that id — after your yes under the `chat` change policy, after
-`agentcomms approve` at your terminal under `confirm`. A server pinned to one workspace connects and removes none. No
-tool changes the Slack app itself: that needs an app configuration token, and a chat's transcript would keep it.
+`chat` your yes in the conversation is the approval; under `confirm` they return `APPROVAL_PENDING` with the approve
+command for you to run — this installation's own, its folders pinned — and post only after you have; under `never`
+they refuse. The tools that change a workspace return a preview and an approval id first, whenever the change loosens
+it or removes it, and apply it only when called again with that id — after your yes under the `chat` change policy,
+after the approve command the result gives, at your terminal, under `confirm`. A server pinned to one workspace
+connects and removes none. No tool changes the Slack app itself: that needs an app configuration token, and a chat's
+transcript would keep it.
 
 ## Modes
 

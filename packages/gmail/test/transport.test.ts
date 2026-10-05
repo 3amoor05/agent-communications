@@ -55,7 +55,8 @@ async function connect(
       tokens,
       endpoints: harness.endpoints,
       // As a context builds it: its fixes name this installation's own commands, located (CUE-403).
-      handoffs: gmailHandoffs(harness.core.paths),
+      // POSIX-pinned: the fix's command is read back with `locatedGmailLine`, a POSIX reader.
+      handoffs: gmailHandoffs(harness.core.paths, 'darwin'),
       retry: { sleep: async () => undefined },
     }),
     refreshToken: granted.refreshToken,

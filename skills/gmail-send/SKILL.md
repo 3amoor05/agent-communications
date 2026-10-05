@@ -2,7 +2,7 @@
 name: gmail-send
 description: "Send a Gmail draft the user has approved, under the approval policy their mailbox is set to. Symptoms: 'send it', 'ok send that', 'go ahead and send the reply', 'why won't it send', 'it says approval required'. Not for writing the message — gmail-compose writes drafts and hands them here."
 license: MIT
-compatibility: "@agentcomms/gmail@0.13.0"
+compatibility: "@agentcomms/gmail@0.13.1"
 metadata:
   group: communications
   lifecycle: release
@@ -128,10 +128,10 @@ exists.
 
    | Code | What happened | What to tell the user |
    |---|---|---|
-   | `APPROVAL_REQUIRED` | This mailbox needs approval outside the chat, and this client cannot give it — or the ten minutes already ran out, because this check reads the policy and not the clock | Run `agent-gmail approve <approvalId>` in a terminal, or send the draft from Gmail — unless the record reads `expired`, in which case prepare again |
+   | `APPROVAL_REQUIRED` | This mailbox needs approval outside the chat, and this client cannot give it — or the ten minutes already ran out, because this check reads the policy and not the clock | Run the approve command the result gives, in their own terminal, or send the draft from Gmail — unless the record reads `expired`, in which case prepare again |
    | `APPROVAL_PENDING` | Same, and the approval has not happened yet | The same, and the approval is still waiting — it has not been thrown away |
    | `APPROVAL_VOID` | The draft changed, or the recipients did not match, or the approval was already used, or the ten minutes ran out. The message says which | Prepare again; the preview will show what it says now |
-   | `APPROVAL_EXPIRED` | The ten minutes passed, said by the *approve* side — `agent-gmail approve`, or a trusted client's form. A send never uses this code: it reports expiry as `APPROVAL_VOID`, or as `APPROVAL_REQUIRED` under `confirm` | Prepare again and show the new preview — the old one is no longer what the draft says |
+   | `APPROVAL_EXPIRED` | The ten minutes passed, said by the *approve* side — Gmail's `approve` at a terminal, or a trusted client's form. A send never uses this code: it reports expiry as `APPROVAL_VOID`, or as `APPROVAL_REQUIRED` under `confirm` | Prepare again and show the new preview — the old one is no longer what the draft says |
    | `POLICY_NEVER` | This mailbox does not send through agents at all | The draft is in Gmail Drafts; send it from there |
    | `RATE_CAPPED` | The hourly or daily cap is reached | When it lifts, from the error |
    | `UNSENDABLE_HTML` | Something in the draft cannot be bound to an approval. Usually HTML an agent could not have written — a tracking image, hidden text, a form — but also a missing plain-text part, more than one body part of a kind, or an attachment whose bytes will not read | Read `details.refusals` and name what actually fired; then review it and send it from Gmail |
@@ -163,7 +163,7 @@ set to `confirm` or `never`. What it does **not** guarantee is that you actually
 preview. That part is yours, and it is why step 2 is written the way it is.
 
 **`confirm`.** The approval must come from somewhere you cannot reach: a person types a
-four-character code at a terminal (`agent-gmail approve <id>`), or into a form raised by a client
+four-character code at a terminal (the approve command the result gives), or into a form raised by a client
 whose forms are known to reach a human. No argument you pass will substitute for it. If the client
 you are running in is not on that list, you will be told to use the terminal or Gmail — say that
 plainly and stop.

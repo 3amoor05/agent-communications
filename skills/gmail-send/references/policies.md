@@ -64,8 +64,8 @@ There are exactly two channels:
 
 | Channel | How it happens | What stops an agent using it |
 |---|---|---|
-| Terminal | The user runs `agent-gmail approve <approvalId>`, reads the preview it prints, and types the code | The command refuses when an agent marker is present in the environment (`APPROVAL_REQUIRED`), and again when there is no interactive terminal |
-| Trusted client form | An MCP client raises a form carrying the preview and the code; the person types it back | The client's `clientInfo.name` must already be on `defaults.confirm.elicitationClients`, which is empty by default; a name is added by `gmail_confirm_client_add` or `agent-gmail confirm-clients add`, only after that client passed a probe in the last ten minutes, and only through a change approval (a yes in chat under the `chat` change policy, `agentcomms approve` under `confirm`). Taking a name off it needs nobody: `gmail_confirm_client_remove`, or `agent-gmail confirm-clients remove` |
+| Terminal | The user runs the approve command the result gives — this installation's own, its folders pinned — reads the preview it prints, and types the code | The command refuses when an agent marker is present in the environment (`APPROVAL_REQUIRED`), and again when there is no interactive terminal |
+| Trusted client form | An MCP client raises a form carrying the preview and the code; the person types it back | The client's `clientInfo.name` must already be on `defaults.confirm.elicitationClients`, which is empty by default; a name is added by `gmail_confirm_client_add` or `agent-gmail confirm-clients add`, only after that client passed a probe in the last ten minutes, and only through a change approval (a yes in chat under the `chat` change policy, the approve command the result gives under `confirm`). Taking a name off it needs nobody: `gmail_confirm_client_remove`, or `agent-gmail confirm-clients remove` |
 
 An un-allowlisted client asking to send under `confirm` gets `APPROVAL_REQUIRED` with the terminal
 command in the hint, and **the record is left pending** — being asked from the wrong client is not
@@ -236,7 +236,9 @@ silent success. And a record written by a different digest version of this packa
 ## 7. What to say when a policy stops you
 
 - Under `confirm`, the sentence is: this mailbox needs the send approved outside this conversation;
-  run `agent-gmail approve <approvalId>` in a terminal, or send the draft from Gmail. Then stop.
+  run this command in a terminal, or send the draft from Gmail — followed by the approve command the
+  result gave, exactly as given (where it says the command is not locatable here, that sentence
+  instead). Then stop.
 - Under `never`, the sentence is: this mailbox does not send through agents; the draft is in Gmail
   Drafts and can be sent from there.
 - Under either, changing the policy to get past it is the wrong instinct. Loosening is a change the

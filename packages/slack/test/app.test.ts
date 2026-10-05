@@ -213,15 +213,12 @@ test('app update validates first, then updates the recorded app, with the config
   assert.equal(data?.permissionsUpdated, true);
   assert.equal(data?.manifestPage, 'https://api.slack.com/apps/A0001/app-manifest');
   // The app is updated now, so the next step says so: without `--app-updated` the move would hand back the app step.
-  const move = slackInline(harness.core.paths, [
-    'workspace',
-    'mode',
-    'acme',
-    'send',
-    '--app-updated',
-    '--port',
-    '51234',
-  ]);
+  // For darwin, as the `cli` helper pins the command that printed it.
+  const move = slackInline(
+    harness.core.paths,
+    ['workspace', 'mode', 'acme', 'send', '--app-updated', '--port', '51234'],
+    'darwin',
+  );
   assert.ok(String((data?.next as string[] | undefined)?.[0]).startsWith(`${move} (slack_mode_set from a chat)`));
   assertNoBareCommand(JSON.stringify(data?.next));
 
@@ -241,9 +238,14 @@ test('updating an app to send says it changes no token, and names the sign-in th
   });
   assert.equal(result.code, EXIT_CODES.OK, result.stderr);
   assert.match(result.stdout, /not what any token already issued can do: "acme" is still in read mode/);
+  // For darwin, as the `cli` helper pins the command that printed it.
   assert.ok(
     result.stdout.includes(
-      slackInline(harness.core.paths, ['workspace', 'mode', 'acme', 'send', '--app-updated', '--port', '51234']),
+      slackInline(
+        harness.core.paths,
+        ['workspace', 'mode', 'acme', 'send', '--app-updated', '--port', '51234'],
+        'darwin',
+      ),
     ),
     result.stdout,
   );
@@ -265,9 +267,10 @@ test('updating a send workspace’s app to read leaves the two steps only a pers
   const next = (result.json<{ next: string[] }>().data?.next ?? []).join('\n');
   // The app step is done; what remains is removing the installation in Slack, then a narrowing reauth.
   assert.match(next, /Remove app/);
+  // For darwin, as the `cli` helper pins the command that printed it.
   assert.ok(
     next.includes(
-      slackInline(harness.core.paths, ['workspace', 'reauth', 'acme', '--mode', 'read', '--port', '51234']),
+      slackInline(harness.core.paths, ['workspace', 'reauth', 'acme', '--mode', 'read', '--port', '51234'], 'darwin'),
     ),
     next,
   );

@@ -54,11 +54,11 @@ match by segment, and anything else is treated as a directory path.
 The roots are the whole of what this machine will let leave as mail. A file outside them was never offered,
 and the check cannot tell a deliberate path from a mistaken one. The refusal's hint names both ways on: copy the
 file under the home folder, not into one of its hidden folders, and name the copy — or allow its folder with
-`agentcomms attach roots add <folder>`, which needs the user's approval. Slack's files and Resend's attachments
+core's `attach roots add`, as the hint gives it, which needs the user's approval. Slack's files and Resend's attachments
 meet the same refusal, in the same words.
 
 **Instead:** ask the user to move or copy the file under an allowed folder themselves, knowingly, or to allow
-its folder with `agentcomms attach roots add <folder>` — see *Changing the policy* below. Do not do either for
+its folder with the `attach roots add` command the refusal gives — see *Changing the policy* below. Do not do either for
 them unasked.
 
 ### A dot-entry directly under home
@@ -190,7 +190,7 @@ its bytes are written: the `com.apple.quarantine` attribute on macOS, a `Zone.Id
 under Linux, WSL writing to a Windows drive included.
 
 Under the mailbox's `confirm` change policy the answer has to come from the person where an agent cannot give it — at
-their own terminal (`agent-gmail approve <choiceId>`) or in a trusted client's form — and a `saveTo` in the arguments
+their own terminal (the approve command the result gives) or in a trusted client's form — and a `saveTo` in the arguments
 is refused with `APPROVAL_PENDING`.
 
 The folder is resolved through its links — the person named it, so a link in it goes where they meant. What is
@@ -211,7 +211,8 @@ empty, appended to the built-ins above). The configuration layer classifies **ad
 deny entry** as loosening a safety setting: a write that does either is refused with `LOOSENING_REFUSED`
 unless a person consented to exactly that change.
 
-One command changes both lists, from a terminal or a chat, as a change like any other:
+One command of core's changes both lists, from a terminal or a chat, as a change like any other — `agentcomms`
+where core is installed globally; anywhere else, the command a refusal gives:
 
 ```text
 agentcomms attach                          # the folders, the user's own deny entries, and the built-in list
@@ -223,13 +224,15 @@ agentcomms attach deny remove <path>       # one of the user's own entries away:
 
 From a chat it is `comms_attach` on the core server, with `rootsAdd`, `rootsRemove`, `denyAdd` or `denyRemove`.
 A path is absolute or starts with `~`, and is kept as written; the preview says where a link in it leads. The
-built-in list cannot be removed. Where only a channel's package is installed, `npx @agentcomms/core attach …` is
-the same command.
+built-in list cannot be removed. Where only a channel's package is installed, a jail's refusal names core's
+`attach roots add` as that installation runs it — through the core the channel carries — so hand over that
+command, as given, rather than one written from a name.
 
 What that means when you report a refusal:
 
-- **Name the command; do not run it to get a file through.** Allowing a folder is the user's decision, and the
-  preview they approve is where they make it. Offer it once, with the folder, and leave it there.
+- **Hand over the command the refusal gives; do not run it to get a file through.** Allowing a folder is the
+  user's decision, and the preview they approve is where they make it. Offer it once, with the folder, and leave it
+  there.
 - **Never edit `config.json` around it.** A hand edit that widens either list skips the preview the user would
   have read.
 

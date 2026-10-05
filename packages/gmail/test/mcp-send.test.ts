@@ -25,7 +25,9 @@ async function connect(
   harness: Harness,
   options: { clientName?: string; answer?: (message: string) => string | null } = {},
 ): Promise<{ client: Client; close: () => Promise<void> }> {
-  const built = await createGmailMcpServer({ core: harness.core, env: harness.env });
+  // POSIX-pinned, as the shared `connect` pins it: a refusal's command is read back with `locatedGmailLine`, a POSIX
+  // reader. On Windows the server's own shell quotes this Node's path otherwise.
+  const built = await createGmailMcpServer({ core: harness.core, env: harness.env, platform: 'darwin' });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client(
     { name: options.clientName ?? 'test-client', version: '1.0.0' },

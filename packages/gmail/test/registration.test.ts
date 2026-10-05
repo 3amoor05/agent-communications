@@ -4,14 +4,21 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { asV2, managedRuntimeDir, managedRuntimeEntry } from '@agentcomms/core';
+import { asV2, handoffText, isCommand, managedRuntimeDir, managedRuntimeEntry } from '@agentcomms/core';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { GmailContext } from '../src/context.ts';
 import { clientServesInbox } from '../src/mcp/install.ts';
 import { clientAdd } from '../src/operations/clients.ts';
 import { VERSION } from '../src/version.ts';
-import { assertNoBareCommand, gmailCommand, gmailRetryWords, locatedGmailLine } from './support/handoffs.ts';
+import {
+  assertNoBareCommand,
+  GMAIL_SOURCE_CLI,
+  gmailCommand,
+  gmailHandoffs,
+  gmailRetryWords,
+  locatedGmailLine,
+} from './support/handoffs.ts';
 import { type Harness, newHarness, TEST_CLIENT_ID, TEST_CLIENT_SECRET, tempDir } from './support/harness.ts';
 import {
   applied,
@@ -409,8 +416,21 @@ test('an agent at a terminal that picked the client from the list is told to run
   assertNoBareCommand(asked.stderr);
   assert.equal(existsSync(join(home, '.cursor', 'mcp.json')), false);
 
-  // This installation's own command, located: the words after its entry are what the person runs again.
-  const again = gmailRetryWords(rerun?.[1] ?? '');
+  /*
+   * This installation's own command, located: the words after its entry are what the person runs again. Rendered for
+   * this machine's shell — the registration's gate is not given `cli`'s darwin — so it is held to the command made for
+   * that shell, and its words are read from that command rather than from a POSIX reading of a Windows line.
+   */
+  const expected = gmailHandoffs(harness.core.paths).own([
+    ...argv,
+    '--mcp-client',
+    'cursor',
+    '--mcp-approval',
+    rerun?.[2] ?? '',
+  ]);
+  assert.ok(isCommand(expected));
+  assert.equal(rerun?.[1], handoffText(expected));
+  const again = expected.words.slice(expected.words.indexOf(GMAIL_SOURCE_CLI) + 1);
   const claimed = await cli(harness, again, { env: agentEnv, tty: true });
   assert.equal(claimed.code, 0, `${claimed.stdout}${claimed.stderr}`);
   assert.ok(existsSync(join(home, '.cursor', 'mcp.json')));
@@ -654,16 +674,12 @@ test('finishing it without a terminal connects the mailbox and hands back the re
   // This installation's own `mcp install`, located, carrying the approval (CUE-403).
   assert.equal(
     registration?.claim,
-    gmailCommand(machine.harness.core.paths, [
-      'mcp',
-      'install',
-      '--client',
-      'cursor',
-      '--launcher',
-      'local',
-      '--approval',
-      String(registration?.approvalId),
-    ]),
+    // For darwin, the shell `cli` gives the command that printed the claim.
+    gmailCommand(
+      machine.harness.core.paths,
+      ['mcp', 'install', '--client', 'cursor', '--launcher', 'local', '--approval', String(registration?.approvalId)],
+      'darwin',
+    ),
   );
   assert.equal(existsSync(machine.cursor), false, 'nothing is registered before the person agrees');
   // The mailbox is connected whatever the registration is waiting for.
@@ -933,17 +949,22 @@ test('`setup --replace-server` travels with the sign-in, and the finish replaces
   assert.match(written.mcpServers.gmail.args.join(' '), /packages[/\\]+gmail[/\\]+(src|dist)[/\\]+cli\./);
   assert.equal(
     finished.registration?.claim,
-    gmailCommand(machine.harness.core.paths, [
-      'mcp',
-      'install',
-      '--client',
-      'cursor',
-      '--launcher',
-      'local',
-      '--force',
-      '--approval',
-      String(finished.registration?.approvalId),
-    ]),
+    // For darwin, the shell `cli` gives the command that printed the claim.
+    gmailCommand(
+      machine.harness.core.paths,
+      [
+        'mcp',
+        'install',
+        '--client',
+        'cursor',
+        '--launcher',
+        'local',
+        '--force',
+        '--approval',
+        String(finished.registration?.approvalId),
+      ],
+      'darwin',
+    ),
   );
 });
 
@@ -966,19 +987,24 @@ test('`setup --replace-server` over an entry pinned to another mailbox pins the 
   assert.doesNotMatch(preview, /keeping --inbox other/);
   assert.equal(
     finished.registration?.claim,
-    gmailCommand(machine.harness.core.paths, [
-      'mcp',
-      'install',
-      '--client',
-      'cursor',
-      '--launcher',
-      'local',
-      '--inbox',
-      'home',
-      '--force',
-      '--approval',
-      String(finished.registration?.approvalId),
-    ]),
+    // For darwin, the shell `cli` gives the command that printed the claim.
+    gmailCommand(
+      machine.harness.core.paths,
+      [
+        'mcp',
+        'install',
+        '--client',
+        'cursor',
+        '--launcher',
+        'local',
+        '--inbox',
+        'home',
+        '--force',
+        '--approval',
+        String(finished.registration?.approvalId),
+      ],
+      'darwin',
+    ),
   );
 
   // The printed claim is the prepared change: it claims, and the entry serves `home`.

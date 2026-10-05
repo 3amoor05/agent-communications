@@ -169,6 +169,52 @@ does not break that guarantee so much as stand beside it.
 
 ## Agents and MCP
 
+### A command a result gave you is not found
+
+From 0.13.1, every command a result hands you to run — an `approve`, a change run again with `--approval`, a
+repair — names the Node and the file of the installation that printed it, with the suite folders that command uses
+pinned: `--config-dir`, `--state-dir`, `--data-dir` and `--secrets-dir`, and `--downloads-dir` for one that saves
+files. It runs as pasted, from any folder, with nothing of this suite on your `PATH`. Two cases say so themselves:
+
+- **Words to type.** Where one of its words cannot be written the same way for cmd.exe and both PowerShells, the
+  command comes as words to type: its words in JSON, with what to do — type them, each quoted for your shell. On
+  Windows that is the usual case when Node is installed under `C:\Program Files`, the default, because that path
+  needs quotes; Node from nvm-windows, Volta or a tool cache gives a line to paste.
+- **None here.** A command of another product — Slack's, from core, say — is found among the servers registered
+  with your MCP clients, at exactly this release, and never through npx. With no such registration there is no
+  command: the result names the product and the release it needs, and says it is not locatable here. Install or
+  update that product the way you usually do, then try again.
+
+0.13.0 and earlier printed bare names — `agentcomms approve <id>`, `agent-gmail approve <id>` — which run only where
+that package is installed globally. Those releases cannot be changed now; updating is the fix. Until then there are
+two ways round, both best effort:
+
+1. **A managed registration**, the one `mcp install` writes by default: your client's configuration names an
+   absolute Node and an entry under the data folder,
+   `<data dir>/runtime/0.13.0-<product>/node_modules/@agentcomms/<product>/dist/cli.mjs`. Run that Node with that
+   entry, then the words after the bare name:
+
+   ```bash
+   "<the node your client's configuration names>" "<data dir>/runtime/0.13.0-<product>/node_modules/@agentcomms/<product>/dist/cli.mjs" approve <id>
+   ```
+
+   This does not cover a global install or a checkout: there, find your own Node and the package's `dist/cli.mjs`
+   (`src/cli.ts`, with `--experimental-strip-types`, in a checkout).
+2. **Where npx is installed**, the exact package and release that printed it, never a newer one:
+
+   ```bash
+   npx -y @agentcomms/<product>@0.13.0 approve <id>
+   ```
+
+Neither can recover the folders the printing process used. `agentcomms paths` and `comms_paths` show the folders a
+process resolved, and cannot show the variables or relative values that produced them: if you ran with
+`AGENT_COMMS_CONFIG_DIR`, `AGENT_COMMS_STATE_DIR` or `AGENT_COMMS_DATA_DIR` set, set the same values for this
+command, quoted for your shell. npx may not be installed; an old result may not name its Node; and skills are
+installed separately from the servers, so an agent's skills may still describe the old way.
+
+PATH shims — putting `agentcomms` and the `agent-*` commands on your `PATH` — are a separate follow-up. 0.13.1
+creates, changes and checks none.
+
 ### The client does not see the tools
 
 Restart it. MCP clients read their server list at startup.
@@ -355,8 +401,8 @@ that. `agent-slack workspace mode <name>` says which mode a workspace is in and 
 manifest first, which is the person's to change, then `workspace mode <name> send --app-updated` (`slack_mode_set`
 from a chat), a change the person approves before a new sign-in starts. In `send` mode a post goes out only once its approval allows it: `slack_post_prepare` returns a
 preview, and `slack_post_send` (or `agent-slack post send`) posts it after a yes under `chat`. Under `confirm`, and for
-any broadcast or room of fifty or more, it waits with `APPROVAL_PENDING` until the person runs `agent-slack approve`
-in their own terminal. Under `never` nothing posts.
+any broadcast or room of fifty or more, it waits with `APPROVAL_PENDING` until the person runs the approve command it
+gives, in their own terminal. Under `never` nothing posts.
 
 ### A prepared post was refused because the room grew
 
