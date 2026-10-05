@@ -282,7 +282,9 @@ function applies(action, row) {
  *
  * `world(row)` makes a fresh home with an approval its surfaces prepared on `routeOf(row)`, and returns at least
  * `{ core, clock, approvalId }`, `notFound(action)` — the ids that must be the one `NOT_FOUND` there, each with its
- * variant's name — and, for a send, `fault()`, which makes the provider's next answer to a claim uncertain. Each surface
+ * variant's name — for a send, `fault()`, which makes the provider's next answer to a claim uncertain, and, where it
+ * has a provider, `asked()`: how many requests of any kind the provider has had, so each observation says how many
+ * its act made (`asked`). Each surface
  * is `{ name, action, act(world, approvalId, row) }`: `look` and `list` never change anything, so the looks and lists
  * of a row share one world; every claim and approval has a world of its own, arranged the same way.
  */
@@ -292,12 +294,18 @@ export async function drive(kind, { world, surfaces, emit, lib }) {
     await arrange(row, { core: made.core, lib, clock: made.clock, approvalId: made.approvalId });
     return made;
   };
+  // What the act asked of the provider, of any kind — a read included — when the world can count it.
+  const acting = async (surface, made, approvalId, row) => {
+    const before = made.asked?.();
+    const seen = await surface.act(made, approvalId, row);
+    return before === undefined ? seen : { ...seen, asked: made.asked() - before };
+  };
   for (const row of ROWS[kind]) {
     if (row === 'not-found') {
       for (const surface of surfaces.filter((each) => applies(each.action, row))) {
         const made = await world(row);
         for (const [variant, approvalId] of await made.notFound(surface.action, surface)) {
-          const seen = await surface.act(made, approvalId, row);
+          const seen = await acting(surface, made, approvalId, row);
           emit(row, surface, { ...seen, extra: { ...seen.extra, variant, id: approvalId } });
         }
       }
@@ -308,14 +316,14 @@ export async function drive(kind, { world, surfaces, emit, lib }) {
     );
     if (lookers.length > 0) {
       const made = await arranged(row);
-      for (const surface of lookers) emit(row, surface, await surface.act(made, made.approvalId, row));
+      for (const surface of lookers) emit(row, surface, await acting(surface, made, made.approvalId, row));
     }
     for (const surface of surfaces.filter(
       (each) => (each.action === 'claim' || each.action === 'approve') && applies(each.action, row),
     )) {
       const made = await arranged(row);
       if (row === 'provider-uncertain') await made.fault();
-      emit(row, surface, await surface.act(made, made.approvalId, row));
+      emit(row, surface, await acting(surface, made, made.approvalId, row));
     }
   }
 }

@@ -21,11 +21,12 @@ import {
 import { SlackContext } from '../../src/context.ts';
 import { createSlackMcpServer } from '../../src/mcp/server.ts';
 import { beginApproval, finishApproval } from '../../src/operations/approve.ts';
+import type { FileDownloader } from '../../src/operations/files.ts';
 import { gateDepsFor } from '../../src/operations/gate.ts';
 import { prepareDraftPost } from '../../src/operations/post.ts';
 import { prepareReaction } from '../../src/operations/send.ts';
 import { DROP, type FakeSlack, startFakeSlack } from './fake-slack.ts';
-import { type Harness, newHarness } from './harness.ts';
+import { type Harness, newHarness, tempDir } from './harness.ts';
 
 /*
  * Slack's posts, posts with files and reactions in the D2 matrix (CUE-404 Task 24): `test/approval-matrix.test.mjs`
@@ -56,6 +57,7 @@ interface World {
   notFound(action: string): Promise<ReadonlyArray<readonly [string, string]>>;
   fault(): void;
   sends(): number;
+  asked(): number;
 }
 
 const TS = '1700000000.000100';
@@ -196,6 +198,7 @@ function worldOf(what: What) {
         };
       },
       sends: () => fake.requests.filter((request) => request.method === ACT[what]).length,
+      asked: () => fake.requests.length,
     };
   };
 }
@@ -338,6 +341,161 @@ for (const what of ['post', 'files', 'reaction'] as const) {
   const surface = { name: NAMES.files.claim, action: 'claim' as const, act: async () => refused };
   emit('failed', surface, { ...refused, extra: { stored: stored?.state } }, 'provider-refused');
 }
+
+// ── Downloads: a question of where a stranger's files are saved ────────────────────────────────────────────────
+
+interface DownloadWorld {
+  harness: Harness;
+  core: lib.Core;
+  clock: MatrixClock;
+  approvalId: string;
+  route: 'chat' | 'confirm';
+  cwd: string;
+  saved(): number;
+  asked(): number;
+  call(name: string, args: Record<string, unknown>): Promise<ToolResult>;
+  notFound(action: string): Promise<ReadonlyArray<readonly [string, string]>>;
+}
+
+const FILE_TS = '1700000000.000100';
+const FILE = {
+  id: 'F0AAA1',
+  name: 'numbers.pdf',
+  title: 'Numbers',
+  mimetype: 'application/pdf',
+  user: 'U0001',
+  url_private_download: 'https://files.slack.com/files-pri/T0001-F0AAA1/download/numbers.pdf',
+  shares: { public: { C0AAA1: [{ ts: FILE_TS }] } },
+};
+
+/** A question asked by `slack_file_download` itself, under the workspace's change policy: the row's route. */
+async function downloadWorld(row: string): Promise<DownloadWorld> {
+  const route = routeOf(row);
+  const harness = await newHarness();
+  await harness.addWorkspace({ alias: 'acme', mode: 'read' });
+  if (route === 'confirm') {
+    // A tightening: nobody's approval needed.
+    await harness.core.config.update((config) => ({
+      ...config,
+      accounts: Object.fromEntries(
+        Object.entries(config.accounts).map(([name, account]) => [
+          name,
+          { ...account, changePolicy: 'confirm' as const },
+        ]),
+      ),
+    }));
+  }
+  const clock = matrixClock();
+  harness.core.approvals = new ApprovalStore(harness.core.paths.stateDir, {
+    now: clock.now,
+    handoffs: harness.core.handoffs,
+    loadConfig: () => harness.core.config.load(),
+    audit: harness.core.audit,
+  });
+  const fetch = async (input: string | URL | Request) => {
+    asks += 1;
+    const url = String(input instanceof Request ? input.url : input);
+    const method = url.split('/api/')[1]?.split('?')[0] ?? '';
+    const answer =
+      method === 'files.info'
+        ? { ok: true, file: FILE }
+        : method === 'users.info'
+          ? { ok: true, user: { id: 'U0001', profile: { display_name: 'sam' } } }
+          : { ok: false, error: 'unknown_method' };
+    return new Response(JSON.stringify(answer));
+  };
+  let saves = 0;
+  let asks = 0;
+  const fileDownload: FileDownloader = async () => {
+    saves += 1;
+    asks += 1;
+    return { bytes: Buffer.from('numbers'), contentType: 'application/pdf' };
+  };
+  const cwd = tempDir('agent-slack-matrix-cwd-');
+  const call = async (name: string, args: Record<string, unknown>) => {
+    const { server } = await createSlackMcpServer({
+      core: harness.core,
+      env: harness.env,
+      fetch,
+      platform: 'darwin',
+      cwd,
+      fileDownload,
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'test-client', version: '0' });
+    await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+    try {
+      return (await client.callTool({ name, arguments: args })) as ToolResult;
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+  };
+  const asked = await call('slack_file_download', { workspace: 'acme', fileIds: ['F0AAA1'] });
+  const approvalId = String(asked.structuredContent?.choiceId);
+  if (!approvalId.startsWith('ap_')) throw new Error(`no question was asked: ${JSON.stringify(asked)}`);
+  const change = async () => {
+    const binding: ChangeBinding = {
+      summary: 'Let the default send policy be chat',
+      target: null,
+      loosened: [{ path: 'defaults.sendPolicy', before: 'confirm', after: 'chat' }],
+      settings: [],
+      effects: [],
+    };
+    return (await harness.core.approvals.createChange({ channel: 'slack', change: binding, policy: 'chat' }))
+      .approvalId;
+  };
+  return {
+    harness,
+    core: harness.core,
+    clock,
+    approvalId,
+    route,
+    cwd,
+    saved: () => saves,
+    asked: () => asks,
+    call,
+    notFound: async (action) =>
+      action === 'look'
+        ? [['nobody', NOBODY]]
+        : [
+            ['nobody', NOBODY],
+            ['another kind', await change()],
+          ],
+  };
+}
+
+/**
+ * The claim: the download made again with the question's id — and, under `chat`, the person's answer relayed in the
+ * arguments; under `confirm` the answer is the one recorded at the terminal.
+ */
+async function download(w: DownloadWorld, approvalId: string): Promise<Observation> {
+  const before = w.saved();
+  const result = await w.call('slack_file_download', {
+    workspace: 'acme',
+    fileIds: ['F0AAA1'],
+    choiceId: approvalId,
+    ...(w.route === 'chat' ? { saveTo: 'downloads' } : {}),
+  });
+  const seen = observeTool(result, w.saved() - before);
+  if (!seen.ok) return seen;
+  const record = lib.asV2(await w.core.approvals.get(approvalId));
+  return { ...seen, approval: record ? { ...(await w.core.approvals.approvalOf(record)) } : null };
+}
+
+await drive('download', {
+  world: downloadWorld,
+  surfaces: [
+    {
+      name: 'slack_approval_wait (a download’s question)',
+      action: 'look',
+      act: async (w, id) =>
+        observeTool(await w.call('slack_approval_wait', { approvalId: id, waitSeconds: 0 }), 0, { look: true }),
+    },
+    { name: 'slack_file_download', action: 'claim', act: (w, id) => download(w, id) },
+  ],
+  emit: emitter('download', 'slack'),
+  lib,
+});
 
 // Every fake Slack this run started is still listening; the observations are written, so the run is over.
 process.exit(0);

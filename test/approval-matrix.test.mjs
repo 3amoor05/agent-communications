@@ -60,6 +60,10 @@ const SURFACES = {
       claim: ['gmail_draft_send', 'gmail_draft_send (a client trusted with forms)', 'send execute'],
       approve: ['approve (terminal)'],
     },
+    download: {
+      look: ['gmail_send_wait (a download’s question)'],
+      claim: ['gmail_attachment_download'],
+    },
   },
   slack: {
     send: {
@@ -74,6 +78,10 @@ const SURFACES = {
         'approve (terminal, a post with a file)',
         'approve (terminal, a reaction)',
       ],
+    },
+    download: {
+      look: ['slack_approval_wait (a download’s question)'],
+      claim: ['slack_file_download'],
     },
   },
   resend: {
@@ -194,6 +202,8 @@ function refused(code, pattern, state, extra = () => {}) {
     assert.equal(o.code, code, o.message);
     assert.match(o.message, pattern);
     assert.equal(o.sends, 0, 'nothing was sent, posted, reacted or saved');
+    // D2: every surface classifies before it acts — a refusal for the record's state asks the provider nothing at all.
+    if (o.asked !== undefined) assert.equal(o.asked, 0, 'the provider was asked nothing, not even a read');
     if (state !== null) {
       assert.ok(o.approval, `the refusal says where the approval stands: ${JSON.stringify(o)}`);
       assert.equal(o.approval.state, state);
@@ -226,6 +236,25 @@ function approvedNow(o) {
 }
 
 /** Waiting for a person outside the chat: the person's command and the wait that learns it, named. */
+/**
+ * Where a refusal may come after the provider was read — never after it was written to:
+ *
+ * - a download's question binds the files as they are now, so the download reads what it would save before it looks
+ *   at the question (design 2026-10-05 §D2, downloads; CUE-404 Task 19);
+ * - a terminal approval shows the preview — the draft, the room — before it asks for the code a wrong answer is to;
+ * - a claim waiting for a person outside the chat is not refused by its record's state: the record is pending, and the
+ *   claim reads the draft or the room before the store says it is not yet approved.
+ *
+ * Everywhere else a refusal comes from the record's state alone, before the provider is asked anything.
+ */
+function readsAllowed(kind, row, action) {
+  return (
+    kind === 'download' ||
+    (action === 'approve' && /^wrong-code-/.test(row)) ||
+    (action === 'claim' && row === 'pending-confirm')
+  );
+}
+
 function waitingForPerson(code) {
   return refused(code, /needs approval outside the chat/, 'pending', (o) => {
     assert.ok(o.hint?.includes(o.approval.id), `the hint names this approval: ${o.hint}`);
@@ -588,7 +617,67 @@ const CHANGE = {
   },
 };
 
-const EXPECT = { send: SEND, change: CHANGE };
+/** Saved, once, where the answer said, and the question spent: answered, and never claimable again. */
+function saved(o) {
+  assert.equal(o.ok, true, `saved: ${JSON.stringify(o)}`);
+  assert.equal(o.sends, 1, 'one file saved');
+  assert.equal(o.approval?.state, 'answered');
+  assert.equal(o.approval?.claimable, false);
+}
+
+/**
+ * D2 for a download's question: `pending` until answered, `answered` once answered (in the chat, at the terminal or in
+ * a form) — claimable until it is used — and `expired` said for whether the person had answered it.
+ */
+const DOWNLOAD = {
+  corrupt: {
+    look: shows('corrupt', false),
+    claim: refused('APPROVAL_VOID', /^nothing was done: approval \S+ is corrupt \(timestamp-misplaced\)$/, 'corrupt'),
+  },
+  // Under chat, the answer may be relayed in the chat: claimable now, and a wait returns at once.
+  'pending-chat': { look: shows('pending', true), claim: saved },
+  // Under confirm, the answer comes from the terminal or a trusted form: not claimable, and the claim says where to go.
+  'pending-confirm': {
+    look: shows('pending', false),
+    claim: (o) => {
+      assert.equal(o.ok, false, JSON.stringify(o));
+      assert.equal(o.code, 'APPROVAL_PENDING');
+      assert.match(
+        o.message,
+        /^nothing was saved: the change policy here is confirm, so the person answers where to save/,
+      );
+      assert.equal(o.sends, 0);
+      if (o.asked !== undefined) assert.equal(o.asked, 0, 'the provider was asked nothing');
+      assert.match(o.hint ?? '', /approve ap_\w+/, 'the person’s command');
+      assert.match(o.hint ?? '', /_wait/, 'and the wait');
+      // A question's refusal names it in its words; an approval object, when one is given, is the pending question.
+      if (o.approval !== undefined) assert.deepEqual([o.approval.state, o.approval.claimable], ['pending', false]);
+    },
+  },
+  answered: { look: shows('answered', true), claim: saved },
+  used: {
+    look: shows('answered', false),
+    claim: refused(
+      'APPROVAL_VOID',
+      /^nothing was saved: the question was answered already, and an answer is used once$/,
+      'answered',
+    ),
+  },
+  'expired-unanswered': {
+    look: shows('expired', false),
+    claim: refused('APPROVAL_EXPIRED', /^nothing was saved: the question expired before it was answered$/, 'expired'),
+  },
+  'expired-answered': {
+    look: shows('expired', false),
+    claim: refused(
+      'APPROVAL_EXPIRED',
+      /^nothing was saved: the question was answered and expired before it was used$/,
+      'expired',
+    ),
+  },
+};
+
+const EXPECT = { send: SEND, change: CHANGE, download: DOWNLOAD };
 
 /** D2's one NOT_FOUND: no record detail, `approval: null`, nothing asked of the provider. */
 function notFound(o) {
@@ -597,6 +686,8 @@ function notFound(o) {
   assert.match(o.message, /: no approval ap_\w+$/);
   if (NOT_FOUND_APPROVAL_NULL) assert.equal(o.approval, null, 'approval: null');
   assert.equal(o.sends, 0);
+  // Nothing of another's record is read far enough to act on it: the provider is asked nothing.
+  if (o.asked !== undefined) assert.equal(o.asked, 0, 'the provider was asked nothing, not even a read');
 }
 
 function known(line) {
@@ -614,7 +705,7 @@ const labelOf = (line) =>
     line.observation.extra?.variant ? ` · ${line.observation.extra.variant}` : ''
   }`;
 
-for (const kind of ['send', 'change']) {
+for (const kind of ['send', 'change', 'download']) {
   test(`${kind}: every surface reported every row its actions meet`, () => {
     for (const [channel, kinds] of Object.entries(SURFACES)) {
       for (const [action, surfaces] of Object.entries(kinds[kind] ?? {})) {
@@ -643,10 +734,13 @@ for (const kind of ['send', 'change']) {
       for (const line of lines) {
         const todo = known(line);
         await t.test(labelOf(line), todo ? { todo: todo.todo } : {}, () => {
-          if (row === 'not-found') return notFound(line.observation);
+          const observation = readsAllowed(kind, row, line.action)
+            ? { ...line.observation, asked: undefined }
+            : line.observation;
+          if (row === 'not-found') return notFound(observation);
           const expect = EXPECT[kind][row]?.[line.action];
           assert.ok(expect, `D2 says nothing here for ${row} on ${line.action}`);
-          return expect(line.observation, line);
+          return expect(observation, line);
         });
       }
       if (row === 'not-found') {

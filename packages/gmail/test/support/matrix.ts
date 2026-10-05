@@ -1,3 +1,5 @@
+import { readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import * as lib from '@agentcomms/core';
 import { ApprovalStore, type ChangeBinding } from '@agentcomms/core';
@@ -23,8 +25,8 @@ import { GmailContext } from '../../src/context.ts';
 import { createGmailMcpServer } from '../../src/mcp/server.ts';
 import { createDraft } from '../../src/operations/drafts.ts';
 import { beginApproval, finishApproval, prepareSend } from '../../src/operations/send.ts';
-import { DRAFT_SEND_PATH } from './fake-google.ts';
-import { type Harness, newHarness } from './harness.ts';
+import { DRAFT_SEND_PATH, type FakeMessage } from './fake-google.ts';
+import { type Harness, newHarness, tempDir } from './harness.ts';
 
 /*
  * Gmail's sends in the D2 matrix (CUE-404 Task 24): `test/approval-matrix.test.mjs` runs this as its own program,
@@ -52,6 +54,7 @@ interface World {
   expect: { to: string[]; cc: string[]; bcc: string[]; subject: string };
   notFound(action: string): Promise<ReadonlyArray<readonly [string, string]>>;
   fault(): void;
+  asked(): number;
 }
 
 const TRUSTED = 'trusted-client';
@@ -190,7 +193,13 @@ async function world(row: string): Promise<World> {
       return [['nobody', NOBODY]];
     },
     fault: () => harness.google.failNext(DRAFT_SEND_PATH, 1, 500),
+    asked: () => gmailAsked(harness),
   };
+}
+
+/** Every request made of Gmail's own API — reading a draft, a message, Sent — apart from signing in. */
+function gmailAsked(harness: Harness): number {
+  return harness.google.requests.filter((request) => request.path.startsWith('/gmail/')).length;
 }
 
 const sendsOf = (w: World) => w.harness.google.requests.filter((request) => request.path === DRAFT_SEND_PATH).length;
@@ -388,6 +397,182 @@ for (const form of ['decline', 'cancel'] as const) {
   };
   emit('pending-confirm', { ...surface, act: async () => seen }, { ...seen, extra: { stored: stored?.state } }, form);
 }
+
+// ── Downloads: a question of where a stranger's files are saved ────────────────────────────────────────────────
+
+interface DownloadWorld {
+  harness: Harness;
+  core: lib.Core;
+  clock: MatrixClock;
+  approvalId: string;
+  route: 'chat' | 'confirm';
+  downloads: string;
+  cwd: string;
+  asked(): number;
+  notFound(action: string): Promise<ReadonlyArray<readonly [string, string]>>;
+}
+
+const INVOICE: FakeMessage = {
+  id: 'm1',
+  threadId: 'm1',
+  labelIds: ['INBOX'],
+  internalDate: String(Date.parse('2026-09-15T09:00:00Z')),
+  payload: {
+    partId: '',
+    mimeType: 'multipart/mixed',
+    headers: [
+      { name: 'From', value: 'Sam Lee <sam@partner.test>' },
+      { name: 'Subject', value: 'Invoice for August' },
+    ],
+    parts: [
+      { partId: '0', mimeType: 'text/plain', body: { size: 2, data: Buffer.from('hi').toString('base64url') } },
+      {
+        partId: '1',
+        mimeType: 'application/pdf',
+        filename: 'invoice.pdf',
+        headers: [{ name: 'Content-Disposition', value: 'attachment; filename="invoice.pdf"' }],
+        body: { size: 13, attachmentId: 'a1' },
+      },
+    ],
+  },
+};
+
+/** A question asked by `gmail_attachment_download` itself, under the mailbox's change policy: the row's route. */
+async function downloadWorld(row: string): Promise<DownloadWorld> {
+  const route = routeOf(row);
+  const harness = await newHarness({
+    accounts: [
+      { sub: 'sub-1', email: 'jo@example.test', messages: { m1: INVOICE }, attachments: { a1: 'invoice bytes' } },
+    ],
+  });
+  await harness.connectInbox({ alias: 'work', email: 'jo@example.test', sub: 'sub-1' });
+  if (route === 'confirm') {
+    // A tightening: nobody's approval needed.
+    await harness.core.config.update((config) => ({
+      ...config,
+      inboxes: Object.fromEntries(
+        Object.entries(config.inboxes).map(([alias, inbox]) => [alias, { ...inbox, changePolicy: 'confirm' as const }]),
+      ),
+    }));
+  }
+  // A home of its own, apart from this package's configuration folder, which nothing is ever saved into.
+  const home = tempDir('agent-gmail-matrix-home-');
+  harness.env.HOME = home;
+  harness.env.USERPROFILE = home;
+  const clock = matrixClock();
+  harness.core.approvals = new ApprovalStore(harness.core.paths.stateDir, {
+    now: clock.now,
+    handoffs: harness.core.handoffs,
+    loadConfig: () => harness.core.config.load(),
+    audit: harness.core.audit,
+  });
+  const cwd = tempDir('agent-gmail-matrix-cwd-');
+  const w = { harness, cwd } as DownloadWorld;
+  const asked = await downloadCall(w, {});
+  const approvalId = String(asked.structuredContent?.choiceId);
+  if (!approvalId.startsWith('ap_')) throw new Error(`no question was asked: ${JSON.stringify(asked)}`);
+  const change = async () => {
+    const binding: ChangeBinding = {
+      summary: 'Let the default send policy be chat',
+      target: null,
+      loosened: [{ path: 'defaults.sendPolicy', before: 'confirm', after: 'chat' }],
+      settings: [],
+      effects: [],
+    };
+    return (await harness.core.approvals.createChange({ channel: 'gmail', change: binding, policy: 'chat' }))
+      .approvalId;
+  };
+  return Object.assign(w, {
+    core: harness.core,
+    clock,
+    approvalId,
+    route,
+    downloads: join(home, 'Downloads'),
+    asked: () => gmailAsked(harness),
+    notFound: async (action: string) =>
+      action === 'look'
+        ? ([['nobody', NOBODY]] as const)
+        : ([
+            ['nobody', NOBODY],
+            ['another kind', await change()],
+          ] as const),
+  });
+}
+
+async function downloadCall(w: Pick<DownloadWorld, 'harness' | 'cwd'>, args: Record<string, unknown>) {
+  const built = await createGmailMcpServer({
+    core: w.harness.core,
+    env: w.harness.env,
+    platform: 'darwin',
+    cwd: w.cwd,
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'test-client', version: '1.0.0' });
+  await Promise.all([built.server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    return (await client.callTool({
+      name: 'gmail_attachment_download',
+      arguments: { inbox: 'work', messageIds: ['m1'], ...args },
+    })) as ToolResult;
+  } finally {
+    await client.close();
+    await built.close();
+  }
+}
+
+/** Files saved in either folder the question offered: what a download does. */
+function savedIn(w: DownloadWorld): number {
+  return [w.downloads, w.cwd].reduce((count, folder) => {
+    try {
+      return count + readdirSync(folder).length;
+    } catch {
+      return count;
+    }
+  }, 0);
+}
+
+/**
+ * The claim: the download made again with the question's id — and, under `chat`, the person's answer relayed in the
+ * arguments; under `confirm` the answer is the one recorded at the terminal, and an answer passed is refused.
+ */
+async function download(w: DownloadWorld, approvalId: string): Promise<Observation> {
+  const before = savedIn(w);
+  const result = await downloadCall(w, {
+    choiceId: approvalId,
+    ...(w.route === 'chat' ? { saveTo: 'downloads' } : {}),
+  });
+  const seen = observeTool(result, savedIn(w) - before);
+  if (!seen.ok) return seen;
+  const record = lib.asV2(await w.core.approvals.get(approvalId));
+  return { ...seen, approval: record ? { ...(await w.core.approvals.approvalOf(record)) } : null };
+}
+
+async function downloadLook(w: DownloadWorld, approvalId: string): Promise<Observation> {
+  const built = await createGmailMcpServer({ core: w.harness.core, env: w.harness.env, platform: 'darwin' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'test-client', version: '1.0.0' });
+  await Promise.all([built.server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const result = (await client.callTool({
+      name: 'gmail_send_wait',
+      arguments: { approvalId, waitSeconds: 0 },
+    })) as ToolResult;
+    return observeTool(result, 0, { look: true });
+  } finally {
+    await client.close();
+    await built.close();
+  }
+}
+
+await drive('download', {
+  world: downloadWorld,
+  surfaces: [
+    { name: 'gmail_send_wait (a download’s question)', action: 'look', act: (w, id) => downloadLook(w, id) },
+    { name: 'gmail_attachment_download', action: 'claim', act: (w, id) => download(w, id) },
+  ],
+  emit: emitter('download', 'gmail'),
+  lib,
+});
 
 // Every fake Google this run started is still listening; the observations are written, so the run is over.
 process.exit(0);

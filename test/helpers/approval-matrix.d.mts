@@ -42,6 +42,8 @@ export interface Observation {
   hint?: string;
   approval?: Record<string, unknown> | null;
   sends: number;
+  /** How many requests of any kind the act made of the provider, where the driver can count them. */
+  asked?: number;
   details?: Record<string, unknown>;
   extra?: Record<string, unknown>;
 }
@@ -60,6 +62,8 @@ export interface MatrixWorld {
   approvalId: string;
   notFound(action: MatrixAction, surface: MatrixSurface<never>): Promise<ReadonlyArray<readonly [string, string]>>;
   fault?(): Promise<void> | void;
+  /** How many requests of any kind the provider has had: each observation says how many its act made. */
+  asked?(): number;
 }
 
 export function drive<W extends MatrixWorld>(

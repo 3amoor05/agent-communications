@@ -37,6 +37,7 @@ interface World {
   expect: Record<string, unknown>;
   notFound(action: string, surface?: { name: string }): Promise<ReadonlyArray<readonly [string, string]>>;
   fault(): void;
+  asked(): number;
 }
 
 const ACCOUNT = 'acme/resend';
@@ -143,6 +144,7 @@ async function world(row: string): Promise<World> {
     fault: () => {
       harness.fake.afterSend = () => ({ status: 500, body: { name: 'internal_server_error', message: 'answer lost' } });
     },
+    asked: () => harness.fake.requests.length,
   };
 }
 
