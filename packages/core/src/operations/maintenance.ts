@@ -287,6 +287,7 @@ async function registrationChecks(
   config: Config | null,
   platform: NodeJS.Platform,
 ): Promise<DoctorCheck[]> {
+  const REGISTRATION_PATH_KEYS = ['configDir', 'stateDir', 'dataDir', 'secretsDir'] as const;
   const report = await channelsAvailable(core, env);
   const checks: DoctorCheck[] = report.unreadable.map((file) => ({
     name: 'client config',
@@ -301,6 +302,15 @@ async function registrationChecks(
   for (const channel of report.channels) {
     const name = `${channel.channel} server`;
     for (const entry of channel.registered) {
+      const missingPins = REGISTRATION_PATH_KEYS.filter((key) => entry.pathPins[key] === undefined);
+      if (missingPins.length > 0) {
+        checks.push({
+          name,
+          ok: false,
+          detail: `registered with ${where(entry)}, but its suite path pins are incomplete (missing ${missingPins.map((key) => `--${key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`).join(', ')})`,
+          fix: registerAgain(channel.channel, entry, platform),
+        });
+      }
       if (entry.missing === null) continue;
       checks.push({
         name,
@@ -309,7 +319,9 @@ async function registrationChecks(
         fix: registerAgain(channel.channel, entry, platform),
       });
     }
-    const working = channel.registered.filter((entry) => entry.missing === null);
+    const working = channel.registered.filter(
+      (entry) => entry.missing === null && REGISTRATION_PATH_KEYS.every((key) => entry.pathPins[key] !== undefined),
+    );
     if (working.length > 0) {
       checks.push({ name, ok: true, detail: `registered with ${working.map(where).join('; ')}` });
       continue;

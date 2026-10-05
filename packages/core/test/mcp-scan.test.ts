@@ -2,7 +2,11 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
+import { openCore } from '../src/core.ts';
 import { displayUrl, knownClientConfigs, listRegisteredServers, scanRegisteredServers } from '../src/mcp-clients.ts';
+import { managedRuntimeEntry } from '../src/mcp-install.ts';
+import { channelsAvailable } from '../src/operations/servers.ts';
+import { VERSION } from '../src/version.ts';
 import { tempDir } from './helpers/temp.ts';
 
 /**
@@ -24,6 +28,44 @@ function fileOf(env: NodeJS.ProcessEnv, client: string): string {
   assert.ok(path, `no config file for ${client}`);
   return path;
 }
+
+test('channel registrations retain and classify the four suite path pins', async () => {
+  const home = tempDir();
+  const env = { HOME: home, USERPROFILE: home, AGENT_COMMS_CONFIG_DIR: join(home, 'config'), PATH: '' };
+  const core = openCore({ env });
+  const entry = managedRuntimeEntry(core.paths.dataDir, '@agentcomms/gmail', VERSION);
+  write(
+    fileOf(env, 'cursor'),
+    JSON.stringify({
+      mcpServers: {
+        legacy: { command: process.execPath, args: [entry, 'mcp'] },
+        pinned: {
+          command: process.execPath,
+          args: [
+            entry,
+            '--config-dir',
+            core.paths.configDir,
+            `--state-dir=${core.paths.stateDir}`,
+            '--data-dir',
+            core.paths.dataDir,
+            `--secrets-dir=${core.paths.secretsDir}`,
+            'mcp',
+          ],
+        },
+      },
+    }),
+  );
+  const gmail = (await channelsAvailable(core, env)).channels.find((channel) => channel.channel === 'gmail');
+  assert.ok(gmail);
+  const by = (name: string) => gmail.registered.find((registration) => registration.name === name);
+  assert.deepEqual(by('legacy')?.pathPins, {});
+  assert.deepEqual(by('pinned')?.pathPins, {
+    configDir: core.paths.configDir,
+    stateDir: core.paths.stateDir,
+    dataDir: core.paths.dataDir,
+    secretsDir: core.paths.secretsDir,
+  });
+});
 
 test('VS Code and Gemini entries written with comments and trailing commas are read, as those clients read them', async () => {
   const home = tempDir();

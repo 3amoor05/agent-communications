@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { type McpProduct, mcpInstall } from '../src/mcp-install.ts';
 import { tempDir } from './helpers/temp.ts';
@@ -40,7 +40,13 @@ async function npxArgs(runsCli: boolean | undefined): Promise<string[]> {
   // The scanner follows these to where codex and Claude Code keep their real configs; this test reads neither.
   delete env.CODEX_HOME;
   delete env.CLAUDE_CONFIG_DIR;
-  const context = { env, core: { paths: { dataDir: join(home, 'data'), configDir: join(home, 'config') } } };
+  const paths = {
+    configDir: join(home, 'config'),
+    stateDir: join(home, 'state'),
+    dataDir: join(home, 'data'),
+    secretsDir: join(home, 'secrets'),
+  };
+  const context = { env, core: { paths } };
   const result = await mcpInstall(context, product(runsCli), {
     client: 'json',
     launcher: 'npx',
@@ -48,14 +54,32 @@ async function npxArgs(runsCli: boolean | undefined): Promise<string[]> {
     noVerify: true,
   });
   assert.equal(result.applied, false);
+  assert.equal(result.entry.env.AGENT_COMMS_CONFIG_DIR, undefined);
+  assert.ok(!result.entry.args.includes('--downloads-dir'));
   return result.entry.args;
 }
 
+const pins = (home: string): string[] => [
+  '--config-dir',
+  join(home, 'config'),
+  '--state-dir',
+  join(home, 'state'),
+  '--data-dir',
+  join(home, 'data'),
+  '--secrets-dir',
+  join(home, 'secrets'),
+];
+
 test('a CLI package run through npx is told to start the server', async () => {
-  assert.deepEqual(await npxArgs(true), ['-y', '@agentcomms/example@9.9.9', 'mcp', '--pin', 'acme']);
+  const args = await npxArgs(true);
+  const home = dirname(args[3] ?? '');
+  assert.deepEqual(args, ['-y', '@agentcomms/example@9.9.9', ...pins(home), 'mcp', '--pin', 'acme']);
 });
 
 test('a server-only package run through npx is not handed `mcp` as an argument', async () => {
-  assert.deepEqual(await npxArgs(false), ['-y', '@agentcomms/example-mcp@9.9.9', '--pin', 'acme']);
-  assert.deepEqual(await npxArgs(undefined), ['-y', '@agentcomms/example-mcp@9.9.9', '--pin', 'acme']);
+  for (const runsCli of [false, undefined]) {
+    const args = await npxArgs(runsCli);
+    const home = dirname(args[3] ?? '');
+    assert.deepEqual(args, ['-y', '@agentcomms/example-mcp@9.9.9', ...pins(home), '--pin', 'acme']);
+  }
 });

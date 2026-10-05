@@ -10,6 +10,7 @@ import { type Core, openCore } from '../src/core.ts';
 import { CommsError } from '../src/errors.ts';
 import { createCoreMcpServer } from '../src/mcp/server.ts';
 import { knownClientConfigs } from '../src/mcp-clients.ts';
+import { doctor } from '../src/operations/maintenance.ts';
 import { type ServerInstallRequest, serverInstallChange } from '../src/operations/servers.ts';
 import { VERSION } from '../src/version.ts';
 import { tempDir } from './helpers/temp.ts';
@@ -111,6 +112,64 @@ function racingPath(env: Record<string, string>, first: string, then: string): (
 
 /** Our own Gmail entry of this release, pinned to one mailbox, as the npx launcher writes it. */
 const PINNED = { command: 'npx', args: ['-y', `@agentcomms/gmail-mcp@${VERSION}`, '--inbox', 'acme/gmail'] };
+
+test('doctor diagnoses a legacy registration without mutating it, and its approved repair writes all four pins', async () => {
+  const m = machine();
+  standIn(m.bin, 'node');
+  const npx = standIn(m.bin, 'npx');
+  const cursor = knownClientConfigs(m.env).find((file) => file.client === 'cursor')?.path;
+  assert.ok(cursor);
+  const legacy = {
+    command: npx,
+    args: ['-y', `@agentcomms/gmail-mcp@${VERSION}`, '--inbox', 'acme/gmail'],
+  };
+  mkdirSync(dirname(cursor), { recursive: true });
+  writeFileSync(cursor, `${JSON.stringify({ mcpServers: { work: legacy } }, null, 2)}\n`);
+  const before = readFileSync(cursor, 'utf8');
+
+  const report = await doctor(m.core, m.env, { keyring: null });
+  const incomplete = report.checks.find((check) => !check.ok && /suite path pins/.test(check.detail));
+  assert.ok(incomplete, JSON.stringify(report.checks));
+  for (const word of ['--name work', '--inbox acme/gmail', '--launcher npx', '--force']) {
+    assert.match(incomplete.fix ?? '', new RegExp(word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  }
+  assert.equal(readFileSync(cursor, 'utf8'), before, 'doctor only diagnosed; it did not rewrite the client file');
+
+  const request = {
+    channel: 'gmail',
+    client: 'cursor',
+    name: 'work',
+    inbox: 'acme/gmail',
+    launcher: 'npx',
+    force: true,
+    noVerify: true,
+  } as const;
+  const asked = await gatedChange(m.core, serverInstallChange(m.core, m.env, request), { surface: 'mcp' });
+  assert.equal(asked.status, 'approval-required');
+  if (asked.status !== 'approval-required') return;
+  const repaired = await gatedChange(m.core, serverInstallChange(m.core, m.env, request), {
+    surface: 'mcp',
+    approvalId: asked.prepared.approvalId,
+  });
+  assert.equal(repaired.status, 'applied');
+  if (repaired.status !== 'applied') return;
+  const written = JSON.parse(readFileSync(cursor, 'utf8')).mcpServers.work as { args: string[] };
+  assert.deepEqual(written.args, [
+    '-y',
+    `@agentcomms/gmail-mcp@${VERSION}`,
+    '--config-dir',
+    m.core.paths.configDir,
+    '--state-dir',
+    m.core.paths.stateDir,
+    '--data-dir',
+    m.core.paths.dataDir,
+    '--secrets-dir',
+    m.core.paths.secretsDir,
+    '--inbox',
+    'acme/gmail',
+  ]);
+  assert.ok(!written.args.includes('--downloads-dir'));
+});
 
 /**
  * A stand-in for `codex` or `claude` that records every call and succeeds.

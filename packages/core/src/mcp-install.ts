@@ -265,9 +265,8 @@ export async function resolveNode(env: NodeJS.ProcessEnv): Promise<string> {
 
 function minimalEnv(context: InstallContext, node: string): Record<string, string> {
   const env: Record<string, string> = {
-    // Clients start servers with a minimal environment; the config directory has to be named explicitly, or the
-    // server would look in the wrong place and report no inboxes.
-    AGENT_COMMS_CONFIG_DIR: context.core.paths.configDir,
+    // Clients start servers with a minimal environment. Suite identity travels in argv; this keeps only what the
+    // interpreter and, on Linux, the system keychain need from the launching environment.
     PATH: [dirname(node), '/usr/local/bin', '/usr/bin', '/bin'].join(delimiter),
   };
   if (process.platform === 'linux') {
@@ -283,9 +282,15 @@ function minimalEnv(context: InstallContext, node: string): Record<string, strin
 /** What this needs from whichever package is calling: its environment and where its data lives. */
 export interface InstallContext {
   env: NodeJS.ProcessEnv;
-  core: { paths: { dataDir: string; configDir: string } };
+  core: { paths: { configDir: string; stateDir: string; dataDir: string; secretsDir: string } };
   /** The shell the commands it prints are quoted for: this machine's, unless a test asks for another by name. */
   platform?: NodeJS.Platform | undefined;
+}
+
+/** The complete suite identity every installer-written server registration carries. Downloads are operation-local. */
+function registrationPathArgs(context: InstallContext): string[] {
+  const { configDir, stateDir, dataDir, secretsDir } = context.core.paths;
+  return ['--config-dir', configDir, '--state-dir', stateDir, '--data-dir', dataDir, '--secrets-dir', secretsDir];
 }
 
 function unscoped(packageName: string): string {
@@ -530,13 +535,20 @@ async function buildEntry(
   const launcher = options.launcher ?? 'managed';
   const { node } = resolved;
   const env = minimalEnv(context, node);
+  const pathArgs = registrationPathArgs(context);
   const serverArgs = product.serverArgs(options);
 
   if (launcher === 'npx') {
     return {
       entry: {
         command: resolved.command,
-        args: ['-y', `${product.npxPackage}@${product.version}`, ...(product.npxArgs ?? []), ...serverArgs],
+        args: [
+          '-y',
+          `${product.npxPackage}@${product.version}`,
+          ...pathArgs,
+          ...(product.npxArgs ?? []),
+          ...serverArgs,
+        ],
         env,
       },
       launcher,
@@ -553,7 +565,7 @@ async function buildEntry(
       ? ['--experimental-strip-types', '--disable-warning=ExperimentalWarning']
       : [];
     return {
-      entry: { command: node, args: [...flags, entryPath, 'mcp', ...serverArgs], env },
+      entry: { command: node, args: [...flags, entryPath, ...pathArgs, 'mcp', ...serverArgs], env },
       launcher,
       runtimeMissing: false,
     };
@@ -569,7 +581,12 @@ async function buildEntry(
     return {
       entry: {
         command: node,
-        args: [ready ?? managedRuntimeEntry(dataDir, product.packageName, product.version), 'mcp', ...serverArgs],
+        args: [
+          ready ?? managedRuntimeEntry(dataDir, product.packageName, product.version),
+          ...pathArgs,
+          'mcp',
+          ...serverArgs,
+        ],
         env,
       },
       launcher,
@@ -577,7 +594,11 @@ async function buildEntry(
     };
   }
   const installed = await installManagedRuntime(context, product, product.version);
-  return { entry: { command: node, args: [installed, 'mcp', ...serverArgs], env }, launcher, runtimeMissing: false };
+  return {
+    entry: { command: node, args: [installed, ...pathArgs, 'mcp', ...serverArgs], env },
+    launcher,
+    runtimeMissing: false,
+  };
 }
 
 /**
@@ -1318,8 +1339,8 @@ export async function mcpInstall(
                 'mcp',
                 'add-json',
                 name,
-                // The env too: ours carries AGENT_COMMS_CONFIG_DIR, and an entry restored without it points the
-                // client at the wrong directory — a server that starts, finds nothing, and says nothing about why.
+                // The env too: an entry restored without its own launch environment may not find the same
+                // interpreter or, on Linux, the same system keychain session.
                 JSON.stringify({
                   command: replacing.command,
                   args: replacing.args,

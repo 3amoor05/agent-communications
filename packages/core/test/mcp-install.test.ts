@@ -57,9 +57,47 @@ function context(dataDir: string, home: string): InstallContext {
   // No client command beyond PATH but in this home: a real `claude` or `codex` elsewhere is never found, nor run.
   return {
     env: { HOME: home, USERPROFILE: home, PATH: '', AGENT_COMMS_CLIENT_CLI_DIRS: '' },
-    core: { paths: { dataDir, configDir: join(home, 'config') } },
+    core: {
+      paths: {
+        configDir: join(home, 'config'),
+        stateDir: join(home, 'state'),
+        dataDir,
+        secretsDir: join(home, 'secrets'),
+      },
+    },
   };
 }
+
+function registrationPins(context: InstallContext): string[] {
+  const { configDir, stateDir, dataDir, secretsDir } = context.core.paths;
+  return ['--config-dir', configDir, '--state-dir', stateDir, '--data-dir', dataDir, '--secrets-dir', secretsDir];
+}
+
+test('managed and local entries pin all four suite roots before mcp, without a downloads pin or config env', async () => {
+  const data = tempDir();
+  const home = tempDir();
+  const installing = context(data, home);
+  const product = pinnedProduct();
+  const managed = await mcpInstall(installing, product, { client: 'json', apply: false, noVerify: true });
+  assert.deepEqual(managed.entry.args, [
+    managedRuntimeEntry(data, product.packageName, product.version),
+    ...registrationPins(installing),
+    'mcp',
+  ]);
+  assert.equal(managed.entry.env.AGENT_COMMS_CONFIG_DIR, undefined);
+  assert.ok(!managed.entry.args.includes('--downloads-dir'));
+
+  const checkout = tempDir();
+  writeFileSync(join(checkout, 'cli.mjs'), '');
+  const local = await mcpInstall(
+    installing,
+    { ...product, moduleUrl: pathToFileURL(join(checkout, 'module.mjs')).href },
+    { client: 'json', launcher: 'local', apply: false, noVerify: true },
+  );
+  assert.deepEqual(local.entry.args, [join(checkout, 'cli.mjs'), ...registrationPins(installing), 'mcp']);
+  assert.equal(local.entry.env.AGENT_COMMS_CONFIG_DIR, undefined);
+  assert.ok(!local.entry.args.includes('--downloads-dir'));
+});
 
 /** A runtime as `installManagedRuntime` leaves one: the package inside, and a manifest pinning it. */
 function makeRuntime(root: string, packageName: string, version: string, pin: string = version): void {
@@ -485,7 +523,11 @@ test(
       assert.equal(result.applied, true, where);
       assert.equal(result.method, 'cli', where);
       const written = JSON.parse(readFileSync(config, 'utf8'));
-      assert.deepEqual(written.mcpServers.example.args, ['-y', '@agentcomms/example@0.0.1'], where);
+      assert.deepEqual(
+        written.mcpServers.example.args,
+        ['-y', '@agentcomms/example@0.0.1', ...registrationPins(installing)],
+        where,
+      );
     };
     await lookIn('home');
     await lookIn('system');
@@ -645,7 +687,8 @@ test('with a data directory it cannot write, --print still prints the entry and 
 test('--force keeps the pin and --read-only of the entry it replaces, unless the caller gives its own', async () => {
   const data = tempDir();
   const home = tempDir();
-  const cursor = knownClientConfigs(context(data, home).env).find((file) => file.client === 'cursor')?.path ?? '';
+  const installing = context(data, home);
+  const cursor = knownClientConfigs(installing.env).find((file) => file.client === 'cursor')?.path ?? '';
   const narrowed = {
     command: 'node',
     args: [managedRuntimeEntry(data, '@agentcomms/example', '0.0.0'), 'mcp', '--inbox', 'acme/work', '--read-only'],
@@ -655,7 +698,7 @@ test('--force keeps the pin and --read-only of the entry it replaces, unless the
   const asked = { client: 'cursor', launcher: 'npx', noVerify: true } as const;
 
   // The hint is the command that replaces this entry as it is, so following it keeps what it narrowed.
-  const hint = await mcpInstall(context(data, home), product, asked).then(
+  const hint = await mcpInstall(installing, product, asked).then(
     () => assert.fail('it was not refused'),
     (error: { hint?: string }) => /`([^`]+)`/.exec(error.hint ?? '')?.[1] ?? '',
   );
@@ -664,8 +707,15 @@ test('--force keeps the pin and --read-only of the entry it replaces, unless the
   }
 
   // And so does the bare `--force` that the upgrade instructions give, saying what it kept.
-  const forced = await mcpInstall(context(data, home), product, { ...asked, force: true });
-  assert.deepEqual(forced.entry.args, ['-y', '@agentcomms/example@0.0.1', '--inbox', 'acme/work', '--read-only']);
+  const forced = await mcpInstall(installing, product, { ...asked, force: true });
+  assert.deepEqual(forced.entry.args, [
+    '-y',
+    '@agentcomms/example@0.0.1',
+    ...registrationPins(installing),
+    '--inbox',
+    'acme/work',
+    '--read-only',
+  ]);
   const written = JSON.parse(readFileSync(cursor, 'utf8')) as { mcpServers: { example: { args: string[] } } };
   assert.deepEqual(written.mcpServers.example.args, forced.entry.args, 'the file holds what the result says');
   assert.ok(
@@ -674,16 +724,23 @@ test('--force keeps the pin and --read-only of the entry it replaces, unless the
   );
 
   // A flag the caller gives wins over the one it replaces; what the caller leaves out is still kept.
-  const repinned = await mcpInstall(context(data, home), product, { ...asked, force: true, inbox: 'acme/home' });
-  assert.deepEqual(repinned.entry.args, ['-y', '@agentcomms/example@0.0.1', '--inbox', 'acme/home', '--read-only']);
+  const repinned = await mcpInstall(installing, product, { ...asked, force: true, inbox: 'acme/home' });
+  assert.deepEqual(repinned.entry.args, [
+    '-y',
+    '@agentcomms/example@0.0.1',
+    ...registrationPins(installing),
+    '--inbox',
+    'acme/home',
+    '--read-only',
+  ]);
 
   // Nothing to keep is nothing to say.
   writeConfig(
     cursor,
     JSON.stringify({ mcpServers: { example: { command: 'node', args: [narrowed.args[0], 'mcp'] } } }),
   );
-  const plain = await mcpInstall(context(data, home), product, { ...asked, force: true });
-  assert.deepEqual(plain.entry.args, ['-y', '@agentcomms/example@0.0.1']);
+  const plain = await mcpInstall(installing, product, { ...asked, force: true });
+  assert.deepEqual(plain.entry.args, ['-y', '@agentcomms/example@0.0.1', ...registrationPins(installing)]);
   assert.deepEqual(plain.warnings, []);
 
   // The launcher, too, comes off the entry when the caller named none, as the doctors' repair reads it.
@@ -693,7 +750,7 @@ test('--force keeps the pin and --read-only of the entry it replaces, unless the
       mcpServers: { example: { command: 'npx', args: ['-y', '@agentcomms/example@0.0.0', '--read-only'] } },
     }),
   );
-  const npx = await mcpInstall(context(data, home), product, { client: 'cursor', noVerify: true }).then(
+  const npx = await mcpInstall(installing, product, { client: 'cursor', noVerify: true }).then(
     () => assert.fail('it was not refused'),
     (error: { hint?: string }) => /`([^`]+)`/.exec(error.hint ?? '')?.[1] ?? '',
   );

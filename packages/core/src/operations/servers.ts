@@ -45,6 +45,7 @@ import {
 } from '../mcp-install.ts';
 import { resolveName } from '../names.ts';
 import { isBehind } from '../npm.ts';
+import { PATH_OPTIONS, type PathName, type PathOverrides } from '../paths.ts';
 import { VERSION } from '../version.ts';
 
 /**
@@ -513,6 +514,8 @@ export interface ChannelRegistration {
   version: string | null;
   /** What the entry narrows the server to: its pin and `--read-only`. */
   narrowing: string[];
+  /** The four suite roots explicitly pinned in the registration. Downloads are never a server-registration pin. */
+  pathPins: Omit<PathOverrides, 'downloadsDir'>;
   /** A file the entry starts that is no longer there — a runtime deleted by hand, a Node a version manager removed. */
   missing: string | null;
   /**
@@ -520,6 +523,34 @@ export interface ChannelRegistration {
    * whether a newer release exists — `comms_update` with `check` asks npm that — and false for an entry that pins none.
    */
   behindCore: boolean;
+}
+
+const REGISTRATION_PATH_OPTIONS = PATH_OPTIONS.filter(({ key }) => key !== 'downloadsDir') as readonly {
+  key: Exclude<PathName, 'downloadsDir'>;
+  flag: string;
+}[];
+
+/** Retains both supported flag forms, stopping where option parsing stops. Invalid or empty pins are absent. */
+function registrationPathPins(args: readonly string[]): Omit<PathOverrides, 'downloadsDir'> {
+  const pins: Omit<PathOverrides, 'downloadsDir'> = {};
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === '--') break;
+    for (const { key, flag } of REGISTRATION_PATH_OPTIONS) {
+      if (argument === flag) {
+        const value = args[index + 1];
+        if (value !== undefined && value !== '--' && value.length > 0) pins[key] = value;
+        index += 1;
+        break;
+      }
+      if (argument?.startsWith(`${flag}=`)) {
+        const value = argument.slice(flag.length + 1);
+        if (value.length > 0) pins[key] = value;
+        break;
+      }
+    }
+  }
+  return pins;
 }
 
 export interface ChannelAvailability {
@@ -608,6 +639,7 @@ export async function channelsAvailable(core: Core, env: NodeJS.ProcessEnv): Pro
         launcher: launcherOf(server, facts),
         version,
         narrowing,
+        pathPins: registrationPathPins(server.args),
         missing: await missingEntryFile(server),
         behindCore: version !== null && isBehind(version, VERSION),
       });
