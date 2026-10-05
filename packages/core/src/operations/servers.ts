@@ -16,6 +16,7 @@ import { accountNoun, hasNarrowing, narrowingOwner, pinOption } from '../channel
 import type { Config } from '../config.ts';
 import type { Core } from '../core.ts';
 import { CommsError } from '../errors.ts';
+import { handoffSentence, handoffsFor, registeredFor } from '../handoffs.ts';
 import { scanRegisteredServers, type UnreadableConfig } from '../mcp-clients.ts';
 import {
   checkServerName,
@@ -23,6 +24,7 @@ import {
   type InstallContext,
   type InstallOptions,
   type InstallResult,
+  installRemedyOf,
   isProductServer,
   type Launcher,
   listManagedRuntimes,
@@ -354,7 +356,9 @@ export function serverInstallChange(
       const product = await productNow();
       const { version } = product;
       // Refuses here what the install would refuse, before anybody is asked; and says what a replacement keeps.
-      const preflight = await preflightInstall(context, product, installOptions(request));
+      const preflight = await preflightInstall(context, product, installOptions(request)).catch(async (error) => {
+        throw await remedyLocated(error, core);
+      });
       const { target, previous, effective, kept, command } = preflight;
       planned = { product, install: plannedInstall(preflight) };
       const effects: string[] = [];
@@ -422,7 +426,11 @@ export function serverInstallChange(
     apply: async () => {
       if (planned === undefined)
         throw new CommsError('UNEXPECTED', 'the registration was applied before it was planned');
-      const result = await mcpInstall(context, planned.product, installOptions(request), planned.install);
+      const result = await mcpInstall(context, planned.product, installOptions(request), planned.install).catch(
+        async (error) => {
+          throw await remedyLocated(error, core);
+        },
+      );
       return {
         ...result,
         restart: result.applied
@@ -431,6 +439,24 @@ export function serverInstallChange(
       };
     },
   };
+}
+
+/**
+ * A refusal of `mcp install` with its remedy — another install of the same product — said with the command located:
+ * the printing package's own, core's, or another product's found among this machine's registrations (CUE-403). The
+ * installer says only the words; it may not import the locator.
+ */
+async function remedyLocated(error: unknown, core: Core): Promise<unknown> {
+  const remedy = installRemedyOf(error);
+  if (remedy === undefined || !(error instanceof CommsError)) return error;
+  const channel = CHANNELS.find((each) => channelServer(each).binary === remedy.binary);
+  if (channel === undefined) return error;
+  const maker = await registeredFor(handoffsFor(core));
+  return new CommsError(error.code, error.message, {
+    hint: handoffSentence(maker.of(channel, remedy.words), remedy.say),
+    ...(error.details === undefined ? {} : { details: error.details }),
+    ...(error.cause === undefined ? {} : { cause: error.cause }),
+  });
 }
 
 // ── Prune ───────────────────────────────────────────────────────────────────────────────────────────────────────

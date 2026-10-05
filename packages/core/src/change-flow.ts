@@ -176,6 +176,8 @@ export async function gatedChangeAtTerminal<T>(
      * as the printing package's own CLI (`core.handoffs`), the approval inserted before any `--`.
      */
     rerun?: readonly string[] | undefined;
+    /** Whose CLI `rerun` is: the printing package's own (left out), or core's — `update --later` from a channel's gate. */
+    rerunOn?: 'own' | 'core' | undefined;
     /**
      * The command to run again with `--approval <id>`, for the message an agent gets: as `shellCommand` printed it, so
      * that one it has no line for is shown as its words, to be typed, or a fixed string with nobody's words in it.
@@ -234,12 +236,12 @@ export async function gatedChangeAtTerminal<T>(
         approvalHint(
           prepared,
           rerun !== undefined && core.handoffs !== undefined
-            ? maker.own(insertWordsBeforeSentinel(rerun, ...carrying))
+            ? maker[options.rerunOn ?? 'own'](insertWordsBeforeSentinel(rerun, ...carrying))
             : typeof command === 'string'
               ? insertWordsBeforeSentinel(command.split(' '), ...carrying).join(' ')
               : command !== undefined
                 ? withWords(command, ...carrying)
-                : maker.own(insertWordsBeforeSentinel(rerun ?? [], ...carrying)),
+                : maker[options.rerunOn ?? 'own'](insertWordsBeforeSentinel(rerun ?? [], ...carrying)),
           maker,
         ),
       details: {

@@ -2,9 +2,9 @@ import { execFile, spawn } from 'node:child_process';
 import { access, constants, lstat, mkdir, readdir, readFile, realpath, rm, stat } from 'node:fs/promises';
 import { delimiter, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { inlineCommand, type ShellCommand, shellCommand } from './cli-runtime.ts';
+import { inlineCommand } from './cli-runtime.ts';
 import { externalCommand } from './command-brands.ts';
-import { CommsError, EXIT_CODES } from './errors.ts';
+import { CommsError, type ErrorCode, EXIT_CODES } from './errors.ts';
 import { appendPrivateLine, replaceFileInPlace, writeFileAtomic } from './fs.ts';
 import {
   codexServerFromGet,
@@ -723,7 +723,7 @@ function claimName(
   options: InstallOptions,
   name: string,
   existing: readonly RegisteredServer[],
-  platform: NodeJS.Platform | undefined,
+  _platform: NodeJS.Platform | undefined,
 ): RegisteredServer[] {
   const taken = existing.filter(
     (server) => server.client === options.client && server.name === name && server.scope !== 'project',
@@ -736,11 +736,14 @@ function claimName(
       (foreign.url ? displayUrl(foreign.url) : undefined) ??
       (foreign.command || 'something else');
     const other = name === product.binary ? `${product.binary}-${product.defaultServerName}` : product.binary;
-    throw new CommsError(
+    throw refusedWithRemedy(
       'CONFIG',
       `${options.client} already has an MCP server called "${name}", and it is not this one (it runs ${what})`,
       {
-        hint: `Register this one under another name: ${inlineCommand(installCommand(product, options, other, [], platform))}. --force does not replace a server this did not install.`,
+        binary: product.binary,
+        words: installWords(product, options, other, []),
+        say: (command) =>
+          `Register this one under another name: ${command}. --force does not replace a server this did not install.`,
       },
     );
   }
@@ -755,8 +758,11 @@ function claimName(
       const served = taken.map((server) => product.narrowingOf(server.args)[pin]).find(Boolean);
       if (!wanted || !served || served === wanted) continue;
       const second = `${product.defaultServerName}-${wanted.split('/')[0]}`;
-      throw new CommsError('CONFIG', `${options.client} already has this server registered as "${name}"`, {
-        hint: `That entry serves ${served}; to serve ${wanted} as well, register a second entry under its own name: ${inlineCommand(installCommand(product, options, second === name ? `${name}-2` : second, [], platform))}.`,
+      throw refusedWithRemedy('CONFIG', `${options.client} already has this server registered as "${name}"`, {
+        binary: product.binary,
+        words: installWords(product, options, second === name ? `${name}-2` : second, []),
+        say: (command) =>
+          `That entry serves ${served}; to serve ${wanted} as well, register a second entry under its own name: ${command}.`,
       });
     }
     /*
@@ -769,8 +775,10 @@ function claimName(
       ...keepNarrowing(product, options, taken).options,
       launcher: options.launcher ?? (npx ? ('npx' as const) : undefined),
     };
-    throw new CommsError('CONFIG', `${options.client} already has this server registered as "${name}"`, {
-      hint: `Pass --force to replace it — that is how an upgrade reaches a client: ${inlineCommand(installCommand(product, again, name, ['--force'], platform))}.`,
+    throw refusedWithRemedy('CONFIG', `${options.client} already has this server registered as "${name}"`, {
+      binary: product.binary,
+      words: installWords(product, again, name, ['--force']),
+      say: (command) => `Pass --force to replace it — that is how an upgrade reaches a client: ${command}.`,
     });
   }
   return taken;
@@ -804,30 +812,63 @@ function keepNarrowing(
 }
 
 /**
- * The `mcp install` that repeats this one under `name`, with every flag that decides what the server may reach.
+ * The `mcp install` that repeats this one under `name`, with every flag that decides what the server may reach: its
+ * words after the program.
  *
  * The hints used to be `mcp install --client <c> --force` whatever had been asked. Refused for `--name slack-acme
  * --workspace acme/slack`, the hint registered a second server under the default name, pinned to nothing — every
  * workspace on the machine; for Gmail it dropped `--inbox` and `--read-only` the same way. Doctor's repair already
  * rebuilds these flags for exactly that reason. The product's `serverArgs` are the install command's own flags for
  * the pin and the narrowing, so they are repeated as they are.
- *
- * A pin kept from the entry being replaced was read from the client's file, which may hold anything, so on Windows the
- * command can come back with no line to paste; every hint gives it with `inlineCommand`, which shows it as words then.
  */
-function installCommand(
-  product: McpProduct,
-  options: InstallOptions,
-  name: string,
-  extra: string[],
-  platform: NodeJS.Platform | undefined,
-): ShellCommand {
-  const words = [product.binary, 'mcp', 'install', '--client', options.client];
+function installWords(product: McpProduct, options: InstallOptions, name: string, extra: string[]): string[] {
+  const words = ['mcp', 'install', '--client', options.client];
   if (name !== product.defaultServerName) words.push('--name', name);
   words.push(...product.serverArgs(options));
   if (options.launcher && options.launcher !== 'managed') words.push('--launcher', options.launcher);
   words.push(...extra);
-  return shellCommand(words, platform);
+  return words;
+}
+
+/**
+ * What a refusal of `mcp install` says to run instead: another `mcp install` of the same product. This module locates
+ * no command — it may not import the locator (CUE-403) — so it says which product, the words after its program and the
+ * sentence around the command, and the operation that called it puts the located command in (`installRemedyOf`,
+ * read by `operations/servers.ts`). A pin kept from the entry being replaced was read from the client's file, which
+ * may hold anything; the located command shows it as words to type where no Windows line is safe.
+ */
+export interface InstallRemedy {
+  /** The product whose `mcp install` it is, by the command its manifest names. */
+  readonly binary: string;
+  /** Its words after the program: `mcp install --client …`. */
+  readonly words: readonly string[];
+  /** The sentence the command goes in. */
+  readonly say: (command: string) => string;
+}
+
+const REMEDIES = new WeakMap<object, InstallRemedy>();
+
+/** The remedy a refusal of `mcp install` carries, for the operation that called it to locate; undefined for any other. */
+export function installRemedyOf(error: unknown): InstallRemedy | undefined {
+  return typeof error === 'object' && error !== null ? REMEDIES.get(error) : undefined;
+}
+
+/**
+ * A refusal whose remedy is another install: until the caller locates it, its hint says the words in prose — never a
+ * command with a bare program.
+ */
+function refusedWithRemedy(
+  code: ErrorCode,
+  message: string,
+  remedy: InstallRemedy,
+  options: { cause?: unknown } = {},
+): CommsError {
+  const error = new CommsError(code, message, {
+    hint: remedy.say(`its own \`mcp install\` with ${remedy.words.slice(2).join(' ')}`),
+    ...(options.cause === undefined ? {} : { cause: options.cause }),
+  });
+  REMEDIES.set(error, remedy);
+  return error;
 }
 
 /**
@@ -1399,17 +1440,21 @@ export async function mcpInstall(
         } catch {
           restored = false;
         }
-        throw new CommsError(
-          'CONFIG',
-          restored
-            ? `could not register "${name}"; the previous entry was put back`
-            : `could not register "${name}", and the previous entry could not be put back either — ${cliName} now has no server called "${name}"`,
-          {
-            hint: restored
-              ? 'Check the client is not running, then try again.'
-              : `Re-register it with ${inlineCommand(installCommand(product, effective, name, [], context.platform))}. The old entry is in ${backupPath}.`,
+        if (restored) {
+          throw new CommsError('CONFIG', `could not register "${name}"; the previous entry was put back`, {
+            hint: 'Check the client is not running, then try again.',
             cause: error,
+          });
+        }
+        throw refusedWithRemedy(
+          'CONFIG',
+          `could not register "${name}", and the previous entry could not be put back either — ${cliName} now has no server called "${name}"`,
+          {
+            binary: product.binary,
+            words: installWords(product, effective, name, []),
+            say: (command) => `Re-register it with ${command}. The old entry is in ${backupPath}.`,
           },
+          { cause: error },
         );
       }
     } else {

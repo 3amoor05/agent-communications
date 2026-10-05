@@ -1403,11 +1403,12 @@ test('with nobody to ask, the command does not run and ends with UPDATE_REQUIRED
   const error = (JSON.parse(json.stdout) as { error: { code: string; message: string } }).error;
   assert.equal(error.code, 'UPDATE_REQUIRED');
   assert.ok(error.message.startsWith(UPDATE_FIRST));
-  assert.match(error.message, /`agentcomms update`/);
-  assert.match(error.message, /`agentcomms update --later`/);
+  // This installation's own update and "not now", located.
+  locatedCoreLine(error.message, ['update']);
+  locatedCoreLine(error.message, ['update', '--later']);
   const plain = run(['audit', 'tail']);
   assert.equal(plain.status, 11);
-  assert.match(plain.stderr, /agentcomms update --later/);
+  locatedCoreLine(plain.stderr, ['update', '--later']);
   assert.equal(plain.stdout, '', 'the command printed nothing');
   // The exempt ones run.
   for (const args of [['paths', '--json'], ['approvals', 'list', '--json'], ['--version']]) {

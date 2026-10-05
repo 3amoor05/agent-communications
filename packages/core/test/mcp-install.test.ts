@@ -15,13 +15,16 @@ import { test } from 'node:test';
 import { pathToFileURL } from 'node:url';
 import { CHANNEL_SERVERS } from '../src/channel-servers.ts';
 import { ERROR_REGISTRY, EXIT_CODES } from '../src/errors.ts';
+import { handoffSentence } from '../src/handoffs.ts';
 import { knownClientConfigs } from '../src/mcp-clients.ts';
 import {
   clientCliDirectories,
   handedOutRuntimesPath,
   type InstallContext,
+  type InstallRemedy,
   installExitStatus,
   installFailure,
+  installRemedyOf,
   installTarget,
   isProductServer,
   type McpProduct,
@@ -36,7 +39,9 @@ import {
   runningCommandLines,
   whichExecutable,
 } from '../src/mcp-install.ts';
+import { resolvePaths } from '../src/paths.ts';
 import { renderInstall } from '../src/render.ts';
+import { coreHandoffs } from './helpers/handoffs.ts';
 import { tempDir } from './helpers/temp.ts';
 
 /**
@@ -698,10 +703,11 @@ test('--force keeps the pin and --read-only of the entry it replaces, unless the
   const product = pinnedProduct();
   const asked = { client: 'cursor', launcher: 'npx', noVerify: true } as const;
 
-  // The hint is the command that replaces this entry as it is, so following it keeps what it narrowed.
+  // The remedy is the command that replaces this entry as it is, so following it keeps what it narrowed. The installer
+  // says its words; the operation that called it locates the command (CUE-403).
   const hint = await mcpInstall(installing, product, asked).then(
     () => assert.fail('it was not refused'),
-    (error: { hint?: string }) => /`([^`]+)`/.exec(error.hint ?? '')?.[1] ?? '',
+    (error: unknown) => installRemedyOf(error)?.words.join(' ') ?? '',
   );
   for (const flag of ['--inbox acme/work', '--read-only', '--launcher npx', '--force']) {
     assert.ok(hint.includes(flag), `the hint dropped ${flag}: ${hint}`);
@@ -753,7 +759,7 @@ test('--force keeps the pin and --read-only of the entry it replaces, unless the
   );
   const npx = await mcpInstall(installing, product, { client: 'cursor', noVerify: true }).then(
     () => assert.fail('it was not refused'),
-    (error: { hint?: string }) => /`([^`]+)`/.exec(error.hint ?? '')?.[1] ?? '',
+    (error: unknown) => installRemedyOf(error)?.words.join(' ') ?? '',
   );
   for (const flag of ['--read-only', '--launcher npx', '--force']) {
     assert.ok(npx.includes(flag), `the hint dropped ${flag}: ${npx}`);
@@ -892,12 +898,14 @@ test('a refusal hint repeats every flag that narrows the server, so following it
     noVerify: true,
   } as const;
 
-  // The command the hint gives, not the prose around it.
+  // The command the remedy gives — its words after the program, which the operation locates — not the prose around it.
   const hintOf = async (name: string) => {
     try {
       await mcpInstall(context(data, home), pinnedProduct(), { ...options, name });
     } catch (error) {
-      return /`([^`]+)`/.exec((error as { hint?: string }).hint ?? '')?.[1] ?? '';
+      const remedy = installRemedyOf(error);
+      assert.equal(remedy?.binary, 'agent-example');
+      return remedy?.words.join(' ') ?? '';
     }
     assert.fail('it was not refused');
   };
@@ -912,53 +920,89 @@ test('a refusal hint repeats every flag that narrows the server, so following it
   assert.doesNotMatch(elsewhere, /--force/);
 });
 
-test('a refusal hint with a pin Windows cannot print shows the command as its words, never as a line (CUE-306)', async () => {
+test('a refusal names its remedy as words to locate, a pin Windows cannot print among them, and never a line (CUE-306)', async () => {
   /*
    * A pin kept from the entry being replaced is read from the client's file, which may hold anything. Quoted for
-   * PowerShell, a word with a `$` or a `%` came out in single quotes, which cmd.exe reads as characters. Asked for
-   * Windows by name, each of the refusal's hints shows the command's words instead, and no line that would run.
+   * PowerShell, a word with a `$` or a `%` came out in single quotes, which cmd.exe reads as characters. The installer
+   * now names the remedy as words — the operation that called it locates the command, and on Windows a located command
+   * with such a word is shown as its words to type (`handoffSentence`). Until then its hint is prose: no line runs.
    */
   const data = tempDir();
   const home = tempDir();
   const windows: InstallContext = { ...context(data, home), platform: 'win32' };
   const cursor = knownClientConfigs(windows.env).find((file) => file.client === 'cursor')?.path ?? '';
   const runtime = managedRuntimeEntry(data, '@agentcomms/example', '0.0.0');
-  const said =
-    "(the command's words, written as JSON: one of them cannot be quoted the same way for cmd.exe and for PowerShell, so type the command yourself, with that word quoted for the shell you use)";
-  const hintOf = async (options: Parameters<typeof mcpInstall>[2]) =>
+  const refusal = async (options: Parameters<typeof mcpInstall>[2]) =>
     mcpInstall(windows, pinnedProduct(), options).then(
       () => assert.fail('it was not refused'),
-      (error: { hint?: string }) => String(error.hint),
+      (error: { hint?: string }) => {
+        const remedy = installRemedyOf(error);
+        assert.ok(remedy !== undefined, 'the refusal names its remedy');
+        assert.doesNotMatch(String(error.hint), /`agent-example|`\[/, 'no command, and no words to type, in the hint');
+        return { hint: String(error.hint), remedy };
+      },
     );
+  const located = (remedy: InstallRemedy) =>
+    handoffSentence(coreHandoffs(resolvePaths({ env: windows.env }), 'win32').own(remedy.words), remedy.say);
 
   // Ours, pinned in the file to what no quoting makes safe on Windows: the command that replaces it as it is.
   writeConfig(
     cursor,
     JSON.stringify({ mcpServers: { example: { command: 'node', args: [runtime, 'mcp', '--inbox', 'acme/50%'] } } }),
   );
+  const force = await refusal({ client: 'cursor', launcher: 'npx', noVerify: true });
+  assert.deepEqual(force.remedy.words, [
+    'mcp',
+    'install',
+    '--client',
+    'cursor',
+    '--inbox',
+    'acme/50%',
+    '--launcher',
+    'npx',
+    '--force',
+  ]);
   assert.equal(
-    await hintOf({ client: 'cursor', launcher: 'npx', noVerify: true }),
-    `Pass --force to replace it — that is how an upgrade reaches a client: \`["agent-example","mcp","install","--client","cursor","--inbox","acme/50\\u0025","--launcher","npx","--force"]\` ${said}.`,
+    force.hint,
+    'Pass --force to replace it — that is how an upgrade reaches a client: its own `mcp install` with --client cursor --inbox acme/50% --launcher npx --force.',
   );
+  // Located for Windows, as an operation does: the words as JSON, saying they are to be typed, and no line.
+  assert.match(located(force.remedy), /`\[.*"acme\/50\\u0025".*\]` \(the command's words, written as JSON/);
 
   // Somebody else's under the name asked for: register this one under another.
   writeConfig(cursor, JSON.stringify({ mcpServers: { theirs: { command: 'npx', args: ['x'] } } }));
-  const elsewhere = await hintOf({ client: 'cursor', name: 'theirs', inbox: 'acme/50%', noVerify: true });
-  assert.ok(
-    elsewhere.startsWith(
-      `Register this one under another name: \`["agent-example","mcp","install","--client","cursor","--name","agent-example","--inbox","acme/50\\u0025"]\` ${said}. `,
-    ),
-    elsewhere,
-  );
+  const elsewhere = await refusal({ client: 'cursor', name: 'theirs', inbox: 'acme/50%', noVerify: true });
+  assert.deepEqual(elsewhere.remedy.words, [
+    'mcp',
+    'install',
+    '--client',
+    'cursor',
+    '--name',
+    'agent-example',
+    '--inbox',
+    'acme/50%',
+  ]);
+  assert.ok(elsewhere.remedy.say('X').startsWith('Register this one under another name: X. '));
 
   // Ours, serving another mailbox: a second entry under a name of its own.
   writeConfig(
     cursor,
     JSON.stringify({ mcpServers: { example: { command: 'node', args: [runtime, 'mcp', '--inbox', 'acme/work'] } } }),
   );
+  const second = await refusal({ client: 'cursor', inbox: 'acme/50%', noVerify: true });
+  assert.deepEqual(second.remedy.words, [
+    'mcp',
+    'install',
+    '--client',
+    'cursor',
+    '--name',
+    'example-acme',
+    '--inbox',
+    'acme/50%',
+  ]);
   assert.equal(
-    await hintOf({ client: 'cursor', inbox: 'acme/50%', noVerify: true }),
-    `That entry serves acme/work; to serve acme/50% as well, register a second entry under its own name: \`["agent-example","mcp","install","--client","cursor","--name","example-acme","--inbox","acme/50\\u0025"]\` ${said}.`,
+    second.remedy.say('X'),
+    'That entry serves acme/work; to serve acme/50% as well, register a second entry under its own name: X.',
   );
 });
 

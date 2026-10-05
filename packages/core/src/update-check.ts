@@ -6,6 +6,7 @@ import { channelServer } from './channel-servers.ts';
 import { type OutputOptions, type Streams, writeResult } from './cli-runtime.ts';
 import type { Core } from './core.ts';
 import { CommsError } from './errors.ts';
+import { handoffSentence, handoffsFor } from './handoffs.ts';
 import { npmLatestVersion } from './npm.ts';
 import { type UpdateDeps, updateChange, updateCheck } from './operations/update.ts';
 import { PATH_OPTIONS, type ResolvedPaths } from './paths.ts';
@@ -389,7 +390,10 @@ export async function runUpdateCheckChild(
 ): Promise<void> {
   if (claimedAt === undefined || !Number.isFinite(Date.parse(claimedAt))) {
     throw new CommsError('USAGE', `${UPDATE_CHECK_CHILD_COMMAND} takes the time of the claim it asks under`, {
-      hint: 'Nothing runs this but a command finishing the day’s update check; `agentcomms update --check` asks now.',
+      hint: handoffSentence(
+        handoffsFor(core).core(['update', '--check']),
+        (command) => `Nothing runs this but a command finishing the day’s update check; ${command} asks now.`,
+      ),
     });
   }
   try {
@@ -446,6 +450,8 @@ export function terminalUpdateHooks(
         env,
         output: options.output,
         command: 'agentcomms update',
+        rerun: ['update'],
+        rerunOn: 'core',
         approveCommand: options.approveCommand,
         streams: options.streams,
       });

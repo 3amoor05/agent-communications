@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { delimiter, dirname, join } from 'node:path';
@@ -9,16 +9,18 @@ import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { CHANNEL_SERVERS } from '../src/channel-servers.ts';
-import { shellCommand } from '../src/cli-runtime.ts';
+import { inlineCommand } from '../src/cli-runtime.ts';
 import type { AccountConfig, InboxConfig } from '../src/config.ts';
 import { type Core, openCore } from '../src/core.ts';
+import { CORE_CALLER, isCommand } from '../src/handoffs.ts';
 import { type CoreMcpOptions, createCoreMcpServer } from '../src/mcp/server.ts';
 import { managedRuntimeDir, managedRuntimeEntry, whichExecutable } from '../src/mcp-install.ts';
 import { compareVersions, npmLatestVersion } from '../src/npm.ts';
 import type { UpdateDeps } from '../src/operations/update.ts';
 import { readUpdateCheck, updateCheckPath } from '../src/update-state.ts';
 import { VERSION } from '../src/version.ts';
-import { locatedCoreLine } from './helpers/handoffs.ts';
+import { registration, writeManaged } from './fixtures/cli-command/trees.ts';
+import { assertNoBareCommand, coreHandoffs, locatedCoreLine } from './helpers/handoffs.ts';
 import { tempDir } from './helpers/temp.ts';
 
 /*
@@ -137,7 +139,8 @@ function machine(body: Record<string, unknown> = ACCOUNTS): Machine {
     // not make. The gate's own tests turn it back on, with a registry and a clock of their own (design 2026-09-28).
     AGENT_COMMS_UPDATE_CHECK: 'off',
   };
-  const core = openCore({ env });
+  // Opened as core's own server and CLI open it: the commands it hands a person are located from here.
+  const core = openCore({ env, caller: CORE_CALLER });
   return { home, bin, configDir, dataDir: core.paths.dataDir, env, core };
 }
 
@@ -548,10 +551,15 @@ test('an entry pinned to a renamed account, or written by hand, is behind and le
     assert.match(String(renamed?.reason), /"work" was renamed to "acme\/gmail"/);
     assert.equal(hand?.launcher, 'other');
     assert.equal(hand?.updatable, false);
-    assert.match(
+    // Gmail's own `mcp install` registers it again, and nothing registered here is a Gmail of this release in a file
+    // core can check: so it says that, and invents no command (CUE-403).
+    assert.ok(
+      String(hand?.reason).startsWith(
+        `it was not written by \`mcp install\`, so how it starts cannot be carried over; Gmail ${VERSION} (@agentcomms/gmail) is not locatable here: `,
+      ),
       String(hand?.reason),
-      /`agent-gmail mcp install --client cursor --name gmail-hand --read-only --force`/,
     );
+    assertNoBareCommand(String(hand?.reason));
     assert.deepEqual(of(check.behind, 'runtime'), [], 'no runtime is needed by what cannot be moved');
 
     const update = await ok('comms_update', {});
@@ -573,15 +581,27 @@ test('an entry pinned to a renamed account, or written by hand, is behind and le
 test('the command that registers an entry again by hand gives its name as one word, quoted for the shell (CUE-306)', async () => {
   // A client's configuration may name an entry anything. Pasted into a command unquoted, this one was three words.
   const m = machine();
-  cursor(m, { 'gmail by hand': { command: 'npx', args: ['-y', `${PACKAGES.gmail}@${OLD}`, 'mcp', '--read-only'] } });
+  // A Gmail of this release, registered too: its own `mcp install` is located from it.
+  const gmail = writeManaged(m.dataDir, 'gmail', { version: VERSION });
+  cursor(m, {
+    'gmail by hand': { command: 'npx', args: ['-y', `${PACKAGES.gmail}@${OLD}`, 'mcp', '--read-only'] },
+    gmail: { command: process.execPath, args: [gmail.entry, 'mcp'] },
+  });
   const { ok, close } = await connect(m, { platform: 'darwin', update: fakes(m) });
   try {
-    const [hand] = of((await ok('comms_update', { check: true })).behind, 'registration');
-    const words = ['agent-gmail', 'mcp', 'install', '--client', 'cursor', '--name', 'gmail by hand', '--read-only'];
-    assert.ok(
-      String(hand?.reason).includes(`\`${shellCommand([...words, '--force'], 'darwin').line}\``),
-      String(hand?.reason),
+    const hand = of((await ok('comms_update', { check: true })).behind, 'registration').find(
+      (item) => item.name === 'gmail by hand',
     );
+    const words = ['mcp', 'install', '--client', 'cursor', '--name', 'gmail by hand', '--read-only', '--force'];
+    const located = coreHandoffs(m.core.paths, 'darwin')
+      .withRegistrations([registration({ command: process.execPath, args: [gmail.entry, 'mcp'] })])
+      .of('gmail', words);
+    assert.ok(
+      isCommand(located) && located.words[1] === realpathSync(gmail.entry),
+      'Gmail is located from its registration',
+    );
+    assert.ok(String(hand?.reason).includes(inlineCommand(located)), String(hand?.reason));
+    assert.ok(String(hand?.reason).includes("--name 'gmail by hand' --read-only --force`"), String(hand?.reason));
     assert.doesNotMatch(String(hand?.reason), /--name gmail by hand/);
   } finally {
     await close();
@@ -595,7 +615,14 @@ test('a command to register again with a name Windows cannot print is shown as i
    * entry written by hand, and one whose client has no command here to replace it with.
    */
   const m = machine();
-  cursor(m, { '$x&whoami&': { command: 'npx', args: ['-y', `${PACKAGES.gmail}@${OLD}`, 'mcp', '--read-only'] } });
+  // A Gmail and a Slack of this release, registered too: each one's own `mcp install` is located from it.
+  const gmail = writeManaged(m.dataDir, 'gmail', { version: VERSION });
+  const slack = writeManaged(m.dataDir, 'slack', { version: VERSION });
+  cursor(m, {
+    '$x&whoami&': { command: 'npx', args: ['-y', `${PACKAGES.gmail}@${OLD}`, 'mcp', '--read-only'] },
+    gmail: { command: process.execPath, args: [gmail.entry, 'mcp'] },
+    slack: { command: process.execPath, args: [slack.entry, 'mcp'] },
+  });
   writeFileSync(
     join(m.home, '.claude.json'),
     JSON.stringify({ mcpServers: { 'slack 50%': managed(m, PACKAGES.slack, OLD) } }),
@@ -603,20 +630,24 @@ test('a command to register again with a name Windows cannot print is shown as i
   const { ok, close } = await connect(m, { platform: 'win32', update: fakes(m) });
   try {
     const registrations = of((await ok('comms_update', { check: true })).behind, 'registration');
-    const hand = registrations.find((item) => item.client === 'cursor');
+    const said =
+      "(the command's words, written as JSON: one of them cannot be quoted the same way for cmd.exe and for PowerShell, so type the command yourself, with that word quoted for the shell you use)";
+    const hand = registrations.find((item) => item.name === '$x&whoami&');
     assert.ok(
       String(hand?.reason).endsWith(
-        `register it again with \`["agent-gmail","mcp","install","--client","cursor","--name","\\u0024x&whoami&","--read-only","--force"]\` (the command's words, written as JSON: one of them cannot be quoted the same way for cmd.exe and for PowerShell, so type the command yourself, with that word quoted for the shell you use)`,
+        `"mcp","install","--client","cursor","--name","\\u0024x&whoami&","--read-only","--force"]\` ${said}`,
       ),
       String(hand?.reason),
     );
+    assert.ok(String(hand?.reason).includes(`register it again with \`["`), String(hand?.reason));
     const noClaude = registrations.find((item) => item.client === 'claude-code');
     assert.ok(
       String(noClaude?.reason).endsWith(
-        `run \`["agent-slack","mcp","install","--client","claude-code","--name","slack 50\\u0025","--force"]\` (the command's words, written as JSON: one of them cannot be quoted the same way for cmd.exe and for PowerShell, so type the command yourself, with that word quoted for the shell you use) where it is`,
+        `"mcp","install","--client","claude-code","--name","slack 50\\u0025","--force"]\` ${said} where it is`,
       ),
       String(noClaude?.reason),
     );
+    for (const item of [hand, noClaude]) assertNoBareCommand(String(item?.reason));
   } finally {
     await close();
   }
@@ -742,8 +773,10 @@ test('update prepares one approval listing every step, writes nothing before it,
 
     assert.match(String(result.next), /Restart cursor to load the new servers/);
     assert.match(String(result.next), /comms_server_prune/);
-    assert.match(String(result.next), /agentcomms mcp prune/);
-    assert.match(String(result.next), /agent-gmail mcp prune/);
+    // Core's own `mcp prune`, located; the others, registered here at another release, say they are not locatable.
+    locatedCoreLine(String(result.next), ['mcp', 'prune']);
+    assert.match(String(result.next), new RegExp(`Gmail ${VERSION} \\(@agentcomms/gmail\\) is not locatable here`));
+    assertNoBareCommand(String(result.next));
 
     // The approval was claimed, once, and is spent…
     assert.deepEqual(
@@ -1073,7 +1106,8 @@ test('an approval for an update applied meanwhile says nothing is left to apply,
     assert.equal(late.code, 'USAGE');
     assert.equal(late.message, nothingBehind(stale, await waiting(m.core, stale)));
     assert.doesNotMatch(String(late.hint), /applies at once/);
-    assert.match(String(late.hint), /comms_update with `check`, or `agentcomms update --check` at a terminal/);
+    assert.match(String(late.hint), /comms_update with `check`, or `[^`]+` at a terminal/);
+    locatedCoreLine(String(late.hint), ['update', '--check']);
     assert.equal((await m.core.approvals.get(stale))?.state, 'pending', 'the approval was claimed');
 
     // What had become of it, when that is why it could not have been used anyway.
@@ -1086,7 +1120,7 @@ test('an approval for an update applied meanwhile says nothing is left to apply,
   }
 
   // Eleven minutes on, past its ten: the same, and that it had expired.
-  const later = openCore({ env: m.env, now: () => new Date(Date.now() + 11 * 60 * 1000) });
+  const later = openCore({ env: m.env, caller: CORE_CALLER, now: () => new Date(Date.now() + 11 * 60 * 1000) });
   const expired = await connect({ ...m, core: later }, { update: fakes(m) });
   try {
     const record = await later.approvals.get(stale);

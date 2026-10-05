@@ -9,10 +9,12 @@ import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { gatedChange } from '../src/change-flow.ts';
 import { beginChangeApproval, finishChangeApproval } from '../src/changes.ts';
 import { CHANNEL_SERVERS } from '../src/channel-servers.ts';
-import { commandAsJson, shellCommand } from '../src/cli-runtime.ts';
+import type { PrintedCommand } from '../src/cli-command.ts';
+import { commandAsJson, inlineCommand } from '../src/cli-runtime.ts';
 import type { AccountConfig, InboxConfig } from '../src/config.ts';
 import { type Core, openCore } from '../src/core.ts';
 import { CommsError, ERROR_REGISTRY, EXIT_CODES } from '../src/errors.ts';
+import { CORE_CALLER, isCommand } from '../src/handoffs.ts';
 import { type CoreMcpOptions, createCoreMcpServer } from '../src/mcp/server.ts';
 import { type McpProduct, managedRuntimeDir, managedRuntimeEntry, pruneManagedRuntimes } from '../src/mcp-install.ts';
 import { changePolicyReport } from '../src/operations/change-policy.ts';
@@ -21,7 +23,8 @@ import { serverInstallChange, serverPruneChange } from '../src/operations/server
 import { renderDoctor } from '../src/render.ts';
 import type { SecretStore } from '../src/secrets.ts';
 import { VERSION } from '../src/version.ts';
-import { locatedCoreLine } from './helpers/handoffs.ts';
+import { pinArgs, registration, writeManaged } from './fixtures/cli-command/trees.ts';
+import { assertNoBareCommand, coreHandoffs, coreInline, locatedCoreLine } from './helpers/handoffs.ts';
 import { tempDir } from './helpers/temp.ts';
 
 /*
@@ -118,7 +121,8 @@ function machine(body?: Record<string, unknown>): Machine {
     // not make. The gate's own tests turn it back on, with a registry and a clock of their own (design 2026-09-28).
     AGENT_COMMS_UPDATE_CHECK: 'off',
   };
-  return { home, bin, configDir, env, core: openCore({ env }) };
+  // Opened as core's own server opens it: the commands it hands a person are located from here.
+  return { home, bin, configDir, env, core: openCore({ env, caller: CORE_CALLER }) };
 }
 
 /** A stand-in for `claude` that records every call and succeeds. Returns what it was asked, one call a line. */
@@ -414,6 +418,15 @@ async function doctorChecks(
   }
 }
 
+/**
+ * A Slack of this release that starts, registered with every folder pinned: another product core can locate a command
+ * of, beside the broken entry a test repairs.
+ */
+function workingSlack(m: Machine): { command: string; args: string[] } {
+  const { entry } = writeManaged(join(m.home, 'elsewhere'), 'slack', { version: VERSION });
+  return { command: process.execPath, args: [entry, ...pinArgs(m.core.paths), 'mcp'] };
+}
+
 test('the doctor: a channel with accounts that no client starts is something to look at, and not a failure', async () => {
   /*
    * An install that registered nothing left the doctor green: it looked at Node, the directories and the secret
@@ -426,11 +439,18 @@ test('the doctor: a channel with accounts that no client starts is something to 
   assert.equal(gmail?.warn, true, JSON.stringify(checks));
   assert.equal(gmail?.ok, true, 'to look at, not a failure');
   assert.equal(gmail?.detail, 'acme/gmail is set up here, but no MCP client starts the Gmail server');
-  assert.match(gmail?.fix ?? '', /`agent-gmail mcp install --help`/);
-  assert.match(gmail?.fix ?? '', /comms_server_install with channel "gmail"/);
+  // Registered nowhere, Gmail's own command cannot be found from here: the chat route is given, and why not the other.
+  assert.equal(
+    gmail?.fix,
+    `Register it with comms_server_install with channel "gmail" from a chat. Gmail ${VERSION} (@agentcomms/gmail) is not locatable here: no MCP client on this machine has it registered. Install or update it through your usual route, then try again. Used only from a terminal, it needs nothing.`,
+  );
   const slack = checks.find((check) => check.name === 'slack server');
   assert.equal(slack?.warn, true);
-  assert.match(slack?.fix ?? '', /`agent-slack mcp install --help`/);
+  assert.match(
+    slack?.fix ?? '',
+    /comms_server_install with channel "slack" from a chat\. Slack \S+ \(@agentcomms\/slack\) is not locatable here/,
+  );
+  for (const check of checks) assertNoBareCommand(check.fix ?? '', check.name);
   assert.equal(
     checks.some((check) => check.name === 'core server' || check.name === 'resend server'),
     false,
@@ -441,9 +461,8 @@ test('the doctor: a channel with accounts that no client starts is something to 
 
   // Registered with Cursor before 0.13.1, without its folder pins (CUE-403): it starts, so it is something to look at,
   // in one row, with the command that pins them — and the client's file is left as it was.
-  const entry = managedRuntimeEntry(m.core.paths.dataDir, '@agentcomms/gmail', VERSION);
-  mkdirSync(dirname(entry), { recursive: true });
-  writeFileSync(entry, '');
+  // A runtime of this release, as the installer leaves one: its own registration is where Gmail's command is found.
+  const { entry } = writeManaged(m.core.paths.dataDir, 'gmail', { version: VERSION });
   const cursor = join(m.home, '.cursor', 'mcp.json');
   mkdirSync(dirname(cursor));
   const legacy = JSON.stringify({ mcpServers: { gmail: { command: process.execPath, args: [entry, 'mcp'] } } });
@@ -457,7 +476,11 @@ test('the doctor: a channel with accounts that no client starts is something to 
         ok: true,
         warn: true,
         detail: `registered with cursor as "gmail" in ${cursor}, but its suite path pins are incomplete (missing --config-dir, --state-dir, --data-dir, --secrets-dir), so it finds its folders from whatever environment cursor starts it with`,
-        fix: 'Register it again: `agent-gmail mcp install --client cursor --force`.',
+        fix: `Register it again: ${inlineCommand(
+          coreHandoffs(m.core.paths, 'darwin')
+            .withRegistrations([registration({ command: process.execPath, args: [entry, 'mcp'] })])
+            .of('gmail', ['mcp', 'install', '--client', 'cursor', '--force']) as PrintedCommand,
+        )}.`,
       },
     ],
   );
@@ -518,7 +541,8 @@ test('the doctor fails a registration whose runtime has gone, and says what regi
       ok: false,
       // One row for the entry, naming both of its problems: the one command repairs them both.
       detail: `registered with claude-code as "slack" in ${claude}, but ${gone} is no longer there, so claude-code cannot start it; its suite path pins are incomplete (missing --config-dir, --state-dir, --data-dir, --secrets-dir) too`,
-      fix: 'Register it again: `agent-slack mcp install --client claude-code --workspace acme/slack --force`.',
+      // The one registration of Slack is the broken one, so Slack's own command is not locatable here: it says that.
+      fix: `Slack ${VERSION} (@agentcomms/slack) is not locatable here: none of the 1 registration of it is ${VERSION} in a file this can check (1 whose package cannot be found or read). Install or update it through your usual route, then try again.`,
     },
   ]);
   assert.equal(report.ok, false, 'a server a client cannot start is a failure');
@@ -543,17 +567,35 @@ test('the doctor gives the name of an entry to register again as one word, quote
   // A client's configuration may name an entry anything. Pasted into the command unquoted, this one was two words.
   const m = doctorMachine();
   const gone = managedRuntimeEntry(m.core.paths.dataDir, '@agentcomms/slack', VERSION);
+  const working = workingSlack(m);
   writeFileSync(
     join(m.home, '.claude.json'),
     JSON.stringify({
-      mcpServers: { 'slack acme': { command: process.execPath, args: [gone, 'mcp', '--workspace', 'acme/slack'] } },
+      mcpServers: {
+        'slack acme': { command: process.execPath, args: [gone, 'mcp', '--workspace', 'acme/slack'] },
+        slack: working,
+      },
     }),
   );
   const { checks } = await doctorChecks(m);
-  const words = ['agent-slack', 'mcp', 'install', '--client', 'claude-code', '--name', 'slack acme'];
+  const words = [
+    'mcp',
+    'install',
+    '--client',
+    'claude-code',
+    '--name',
+    'slack acme',
+    '--workspace',
+    'acme/slack',
+    '--force',
+  ];
+  const repair = coreHandoffs(m.core.paths, 'darwin')
+    .withRegistrations([registration(working)])
+    .of('slack', words);
+  assert.ok(isCommand(repair) && repair.line?.includes(" --name 'slack acme' "), JSON.stringify(repair));
   assert.equal(
-    checks.find((check) => check.name === 'slack server')?.fix,
-    `Register it again: \`${shellCommand([...words, '--workspace', 'acme/slack', '--force'], 'darwin').line}\`.`,
+    checks.find((check) => check.name === 'slack server' && check.ok === false)?.fix,
+    `Register it again: ${inlineCommand(repair)}.`,
   );
 });
 
@@ -564,17 +606,26 @@ test('the doctor shows a repair with a name Windows cannot print as its words, n
    */
   const m = doctorMachine();
   const gone = managedRuntimeEntry(m.core.paths.dataDir, '@agentcomms/slack', VERSION);
+  const working = workingSlack(m);
   writeFileSync(
     join(m.home, '.claude.json'),
     JSON.stringify({
-      mcpServers: { '$x&whoami&': { command: process.execPath, args: [gone, 'mcp', '--workspace', 'acme/slack'] } },
+      mcpServers: {
+        '$x&whoami&': { command: process.execPath, args: [gone, 'mcp', '--workspace', 'acme/slack'] },
+        slack: working,
+      },
     }),
   );
   const { report } = await doctorChecks(m, 'win32');
-  assert.equal(
-    report.checks.find((check) => check.name === 'slack server')?.fix,
-    `Register it again: \`["agent-slack","mcp","install","--client","claude-code","--name","\\u0024x&whoami&","--workspace","acme/slack","--force"]\` (the command's words, written as JSON: one of them cannot be quoted the same way for cmd.exe and for PowerShell, so type the command yourself, with that word quoted for the shell you use).`,
+  const fix = String(report.checks.find((check) => check.name === 'slack server' && check.ok === false)?.fix);
+  assert.ok(
+    fix.endsWith(
+      `"mcp","install","--client","claude-code","--name","\\u0024x&whoami&","--workspace","acme/slack","--force"]\` (the command's words, written as JSON: one of them cannot be quoted the same way for cmd.exe and for PowerShell, so type the command yourself, with that word quoted for the shell you use).`,
+    ),
+    fix,
   );
+  assert.ok(fix.startsWith('Register it again: `["'), fix);
+  assertNoBareCommand(fix);
 });
 
 test(
@@ -594,6 +645,34 @@ test(
     );
   },
 );
+
+test('an install refused for a name another server holds says what to run instead, located here (CUE-403)', async () => {
+  /*
+   * The installer names its remedy as words — it may not import the locator — and the operation that called it says it
+   * with this installation's own command. Before, the hint named a bare `agentcomms mcp install`, which a person with
+   * core from npx or a checkout does not have on PATH.
+   */
+  const m = machine();
+  const cursorConfig = join(m.home, '.cursor', 'mcp.json');
+  mkdirSync(dirname(cursorConfig), { recursive: true });
+  writeFileSync(
+    cursorConfig,
+    JSON.stringify({ mcpServers: { agentcomms: { command: 'npx', args: ['-y', 'someone-elses-server'] } } }),
+  );
+  const { call, close } = await connect(m);
+  try {
+    const refused = await call('comms_server_install', { channel: 'core', client: 'cursor', noVerify: true });
+    assert.equal(refused.isError, true);
+    const error = (refused.structuredContent as { error: { message: string; hint: string } }).error;
+    assert.match(error.message, /already has an MCP server called "agentcomms", and it is not this one/);
+    assert.equal(
+      error.hint,
+      `Register this one under another name: ${coreInline(m.core.paths, ['mcp', 'install', '--client', 'cursor', '--name', 'agentcomms-agentcomms'])}. --force does not replace a server this did not install.`,
+    );
+  } finally {
+    await close();
+  }
+});
 
 // ── The change policy ───────────────────────────────────────────────────────────────────────────────────────────
 
@@ -725,7 +804,7 @@ test('loosening the change policy from chat needs a code typed at a terminal, wh
     // The policy in force before the change decides how it is approved: `confirm`, so a terminal.
     assert.equal(first.policy, 'confirm');
     assert.match(String(first.preview), /default change policy: confirm → chat/);
-    assert.match(String(first.next), new RegExp(`agentcomms approve ${first.approvalId}`));
+    locatedCoreLine(String(first.next), ['approve', String(first.approvalId)]);
 
     // Called again before anybody approved it: refused, and the approval is still there to be approved.
     const early = await call('comms_change_policy', { set: 'chat', approvalId: first.approvalId });

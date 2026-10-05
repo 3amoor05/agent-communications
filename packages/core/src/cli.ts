@@ -720,7 +720,7 @@ export async function main(
           if (values.approval !== undefined) {
             throw usage('--check only reads, so it takes no --approval; leave out --check to update');
           }
-          writeResult(await updateCheck(core, env), output, renderUpdateCheck);
+          writeResult(await updateCheck(core, env), output, (report) => renderUpdateCheck(report, handoffs));
           return;
         }
         const words = ['update'];

@@ -3,6 +3,7 @@ import { gatedChangeAtTerminal } from './change-flow.ts';
 import { agentMarker, canPrompt, type OutputOptions, paint, type Streams } from './cli-runtime.ts';
 import type { Core } from './core.ts';
 import { CommsError, EXIT_CODES } from './errors.ts';
+import { handoffSentence } from './handoffs.ts';
 import { updateLaterChange } from './operations/update-settings.ts';
 import {
   type PendingUpdate,
@@ -10,11 +11,15 @@ import {
   readUpdateCheck,
   UPDATE_FIRST,
   UPDATE_WAYS,
+  type UpdateCommands,
   updateCheckDue,
   updateCheckEnabled,
   updateCheckSwitchedOff,
+  updateCommandSaid,
+  updateCommands,
   updateStopMessage,
   updateVerdict,
+  updateWaysOf,
 } from './update-state.ts';
 
 /**
@@ -151,7 +156,7 @@ export function updateToolGate(options: UpdateToolGateOptions): ToolGate {
     if (pending === null) return null;
     const claim = options.approvals?.[tool];
     if (await claimsApproval(options.core, args[claim?.argument ?? 'approvalId'], claim)) return null;
-    return stoppedCall(pending, { server: options.server, tool });
+    return stoppedCall(pending, { server: options.server, tool }, updateCommands(options.core));
   };
 }
 
@@ -160,8 +165,13 @@ export function updateToolGate(options: UpdateToolGateOptions): ToolGate {
  * a client that shows the model only text blocks (Cursor) reads it there. Claude Code and Codex show only
  * `structuredContent`, so the same words are its `message`, with the versions and the two ways on beside them.
  */
-export function stoppedCall(pending: PendingUpdate, where: { server: string; tool: string }): object {
-  const message = updateStopMessage(pending, where);
+export function stoppedCall(
+  pending: PendingUpdate,
+  where: { server: string; tool: string },
+  commands: UpdateCommands = updateCommands(undefined),
+): object {
+  const message = updateStopMessage(pending, where, commands);
+  const ways = updateWaysOf(commands);
   return {
     isError: true,
     content: [{ type: 'text' as const, text: message }],
@@ -179,8 +189,8 @@ export function stoppedCall(pending: PendingUpdate, where: { server: string; too
           running: pending.running,
           latest: pending.latest,
           installed: pending.kind === 'restart',
-          update: UPDATE_WAYS.update,
-          later: UPDATE_WAYS.later,
+          update: ways.update,
+          later: ways.later,
         },
       },
     },
@@ -330,7 +340,8 @@ export async function updateGateAtTerminal(options: TerminalGateOptions): Promis
 
   const person =
     agentMarker(env) === null && canPrompt(env, streams, { json: output.json, noInput: options.noInput === true });
-  if (!person) throw updateRequired(pending, options.binary);
+  const commands = updateCommands(core, output.platform);
+  if (!person) throw updateRequired(pending, options.binary, commands);
 
   const bold = (word: string) => paint(output.color, 'bold', word);
   const answer = (
@@ -353,7 +364,7 @@ export async function updateGateAtTerminal(options: TerminalGateOptions): Promis
     if (!options.update) {
       // WhatsApp: it has no network code, so it cannot fetch an update itself; `agentcomms update` does it for all.
       streams.stdout.write(
-        `${options.binary} reads only this machine and cannot fetch the update itself. Run \`${UPDATE_WAYS.update.command}\` (\`${UPDATE_WAYS.update.npx}\` where agentcomms is not installed), then run your command again.\n`,
+        `${options.binary} reads only this machine and cannot fetch the update itself. ${updateCommandSaid(commands, 'update', (command) => `Run ${command}, then run your command again.`)}\n`,
       );
       return EXIT_CODES.UPDATE;
     }
@@ -366,6 +377,8 @@ export async function updateGateAtTerminal(options: TerminalGateOptions): Promis
       env,
       output,
       command: UPDATE_WAYS.later.command,
+      rerun: ['update', '--later'],
+      rerunOn: 'core',
       approveCommand: options.approveCommand,
       answered: true,
       streams,
@@ -376,7 +389,7 @@ export async function updateGateAtTerminal(options: TerminalGateOptions): Promis
     return null;
   }
   throw new CommsError('USAGE', `cancelled: ${options.binary} did not run, and nothing was changed`, {
-    hint: `Update with \`${UPDATE_WAYS.update.command}\`, or put it off until tomorrow with \`${UPDATE_WAYS.later.command}\`.`,
+    hint: bothSaid(commands, (update, later) => `Update with ${update}, or put it off until tomorrow with ${later}.`),
   });
 }
 
@@ -384,34 +397,42 @@ export async function updateGateAtTerminal(options: TerminalGateOptions): Promis
  * The stop where nobody can be asked: the command does not run. "Update" names the update and "not now"; "restart"
  * — the update installed, and an older copy running — says to run the command from the installed one.
  */
-function updateRequired(pending: PendingUpdate, binary: string): CommsError {
-  const later = `\`${UPDATE_WAYS.later.command}\` to put it off until tomorrow`;
-  const npx = `Where agentcomms is not installed: \`${UPDATE_WAYS.update.npx}\`, and \`${UPDATE_WAYS.later.npx}\`.`;
+function updateRequired(pending: PendingUpdate, binary: string, commands: UpdateCommands): CommsError {
+  // Through the bridge the npx forms follow, as before; a located command needs none.
+  const npx = commands.located
+    ? ''
+    : ` Where agentcomms is not installed: \`${UPDATE_WAYS.update.npx}\`, and \`${UPDATE_WAYS.later.npx}\`.`;
+  const ways = updateWaysOf(commands);
   const details = {
     running: pending.running,
     latest: pending.latest,
     installed: pending.kind === 'restart',
-    update: UPDATE_WAYS.update,
-    later: UPDATE_WAYS.later,
+    update: ways.update,
+    later: ways.later,
   };
   if (pending.kind === 'restart') {
     return new CommsError(
       'UPDATE_REQUIRED',
-      `Hang on a minute, the update is installed, but this command isn't running it yet. ${pending.latest} is installed globally, and this ${binary} is ${pending.running}: run the command again from the installed one, or ${later}`,
+      `Hang on a minute, the update is installed, but this command isn't running it yet. ${pending.latest} is installed globally, and this ${binary} is ${pending.running}: ${handoffSentence(commands.later, (later) => `run the command again from the installed one, or ${later} to put it off until tomorrow`)}`,
       {
-        hint: `Nothing was done. An older copy is running — npx's cache, a project's own install, a checkout. "Not now" is a change a person approves: an agent gets the preview and an approval id (exit 10), and runs the same command again with --approval <id> once the person agrees. ${npx}`,
+        hint: `Nothing was done. An older copy is running — npx's cache, a project's own install, a checkout. "Not now" is a change a person approves: an agent gets the preview and an approval id (exit 10), and runs the same command again with --approval <id> once the person agrees.${npx}`,
         details,
       },
     );
   }
   return new CommsError(
     'UPDATE_REQUIRED',
-    `${UPDATE_FIRST} ${pending.latest} is out (you have ${pending.running}): run \`${UPDATE_WAYS.update.command}\` first, or ${later}`,
+    `${UPDATE_FIRST} ${pending.latest} is out (you have ${pending.running}): ${bothSaid(commands, (update, later) => `run ${update} first, or ${later} to put it off until tomorrow`)}`,
     {
-      hint: `Nothing was done. Both are changes a person approves: an agent gets the preview and an approval id (exit 10), and runs the same command again with --approval <id> once the person agrees. ${npx}`,
+      hint: `Nothing was done. Both are changes a person approves: an agent gets the preview and an approval id (exit 10), and runs the same command again with --approval <id> once the person agrees.${npx}`,
       details,
     },
   );
+}
+
+/** The update and "not now" in one sentence; with no command here — the same core gives both or neither — why not. */
+function bothSaid(commands: UpdateCommands, say: (update: string, later: string) => string): string {
+  return handoffSentence(commands.update, (update) => handoffSentence(commands.later, (later) => say(update, later)));
 }
 
 /**
@@ -427,6 +448,7 @@ async function afterUpdate(
 ): Promise<number> {
   const { streams, binary } = options;
   const notRun = `${binary} did not run`;
+  const commands = updateCommands(options.core, options.output.platform);
   if (outcome === 'failed') {
     streams.stdout.write(`${notRun}: the update did not finish — each step says how it went, above.\n`);
     return EXIT_CODES.UNAVAILABLE;
@@ -446,7 +468,7 @@ async function afterUpdate(
   // Nothing the update reaches runs this command: `agentcomms update` moves registrations and global packages, and
   // this copy is neither. Saying "Updated" here would send the person round the same question again.
   streams.stdout.write(
-    `${notRun}: the update did not bring it to ${before.latest}. \`${UPDATE_WAYS.update.command}\` updates what this machine registers and has installed globally — what it found is said above — and this ${binary} ${before.running} is started from somewhere else: npx's cache, a project's own install, a checkout. Run it from ${before.latest}, or put this off until tomorrow with \`${UPDATE_WAYS.later.command}\`.\n`,
+    `${notRun}: the update did not bring it to ${before.latest}. The update moves what this machine registers and has installed globally — what it found is said above — and this ${binary} ${before.running} is started from somewhere else: npx's cache, a project's own install, a checkout. ${handoffSentence(commands.later, (later) => `Run it from ${before.latest}, or put this off until tomorrow with ${later}.`)}\n`,
   );
   return EXIT_CODES.UPDATE;
 }

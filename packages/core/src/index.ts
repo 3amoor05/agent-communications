@@ -51,6 +51,7 @@ export {
   isCommand,
   registeredFor,
   requireHandoffs,
+  withRegistrationsFor,
 } from './handoffs.ts';
 export * from './ids.ts';
 export * from './internet-mark.ts';

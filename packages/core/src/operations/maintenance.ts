@@ -4,12 +4,13 @@ import type { AuditRecord } from '../audit.ts';
 import { revokeChange } from '../changes.ts';
 import { type Channel, channelServer } from '../channel-servers.ts';
 import { listed, manifestOf } from '../channel-words.ts';
-import { commandText, inlineCommand, shellCommand } from '../cli-runtime.ts';
+import { commandText, inlineCommand } from '../cli-runtime.ts';
 import { externalCommand } from '../command-brands.ts';
 import { type Config, emptyConfig, secretsStoreOf } from '../config.ts';
 import type { Core } from '../core.ts';
 import { CommsError } from '../errors.ts';
 import { isGroupOrWorldAccessible } from '../fs.ts';
+import { type HandoffMaker, handoffSentence, handoffsFor, isCommand, registeredFor } from '../handoffs.ts';
 import { resolveName } from '../names.ts';
 import { organisationDrift, organisationsOf, orphanMarkedRows, shownText } from '../organisations.ts';
 import type { ResolvedPaths } from '../paths.ts';
@@ -93,6 +94,8 @@ function ownerOnly(dir: string, platform: NodeJS.Platform): string {
 export async function doctor(core: Core, env: NodeJS.ProcessEnv, options: DoctorOptions = {}): Promise<DoctorReport> {
   const checks: DoctorCheck[] = [];
   const platform = options.platform ?? process.platform;
+  // Every repair below is a command to run: this installation's own, or another product's where it is registered.
+  const handoffs = await registeredFor(handoffsFor(core, { platform }));
   const [major = 0, minor = 0] = process.versions.node.split('.').map(Number);
   const nodeOk = major > 22 || (major === 22 && minor >= 12);
   checks.push({
@@ -160,12 +163,16 @@ export async function doctor(core: Core, env: NodeJS.ProcessEnv, options: Doctor
         : 'organisation/platform',
     ...(toMigrate
       ? {
-          fix: 'See what they would become with `agentcomms names migrate --dry-run`, once everything sharing this config is on 0.2.0 or later.',
+          fix: handoffSentence(
+            handoffs.core(['names', 'migrate', '--dry-run']),
+            (command) =>
+              `See what they would become with ${command}, once everything sharing this config is on 0.2.0 or later.`,
+          ),
         }
       : {}),
   });
 
-  if (readable) checks.push(...organisationChecks(config, platform));
+  if (readable) checks.push(...organisationChecks(config, handoffs));
 
   const keyring = options.keyring !== undefined ? options.keyring : await loadKeyringModule();
   // `probeKeychain` loads the real module when handed none, so a machine without it is answered here instead.
@@ -179,15 +186,20 @@ export async function doctor(core: Core, env: NodeJS.ProcessEnv, options: Doctor
     detail: probe.ok ? 'readable and writable' : `unavailable: ${probe.reason}`,
     ...(probe.ok || !usesKeychain
       ? {}
-      : { fix: 'Unlock the keychain, or move secrets to files: `agentcomms secrets migrate --to file`.' }),
+      : {
+          fix: handoffSentence(
+            handoffs.core(['secrets', 'migrate', '--to', 'file']),
+            (command) => `Unlock the keychain, or move secrets to files: ${command}.`,
+          ),
+        }),
   });
   checks.push({
     name: 'secret backend',
     ok: true,
     detail: config.secrets?.store ?? 'not chosen yet (keychain by default)',
   });
-  checks.push(await updateCheckLine(core, env));
-  checks.push(...(await registrationChecks(core, env, readable ? config : null, platform)));
+  checks.push(await updateCheckLine(core, env, handoffs));
+  checks.push(...(await registrationChecks(core, env, readable ? config : null, handoffs)));
   return { checks, ok: checks.every((c) => c.ok) };
 }
 
@@ -204,10 +216,10 @@ export async function doctor(core: Core, env: NodeJS.ProcessEnv, options: Doctor
  *
  * Nothing at all is said on a machine with no profile, so every other doctor reads as it always did.
  */
-function organisationChecks(config: Config, platform: NodeJS.Platform): DoctorCheck[] {
+function organisationChecks(config: Config, handoffs: HandoffMaker): DoctorCheck[] {
   const checks: DoctorCheck[] = [];
   for (const organisation of Object.keys(organisationsOf(config)).sort()) {
-    const drift = organisationDrift(config, organisation, platform);
+    const drift = organisationDrift(config, organisation, handoffs.platform);
     const record = organisationsOf(config)[organisation];
     const active = record?.gmail?.active ?? null;
     if (drift.length === 0) {
@@ -234,11 +246,13 @@ function organisationChecks(config: Config, platform: NodeJS.Platform): DoctorCh
       ok: true,
       warn: true,
       detail: `the OAuth client "${client}" is marked as belonging to "${shownText(organisation, 40)}", which has no profile here`,
-      fix: `It is treated as a client of your own: ${inlineCommand(
-        shellCommand(['agent-gmail', 'client', '--help'], platform),
-      )} shows commands that can change or remove it. To give it back to the organisation, add its profile with ${inlineCommand(
-        shellCommand(['agentcomms', 'org', 'add', '--help'], platform),
-      )}.`,
+      fix: `It is treated as a client of your own. ${handoffSentence(
+        handoffs.of('gmail', ['client', '--help'], { uses: [] }),
+        (command) => `${command} shows commands that can change or remove it.`,
+      )} ${handoffSentence(
+        handoffs.core(['org', 'add', '--help'], { uses: [] }),
+        (command) => `To give it back to the organisation, add its profile with ${command}.`,
+      )}`,
     });
   }
   return checks;
@@ -249,13 +263,13 @@ function organisationChecks(config: Config, platform: NodeJS.Platform): DoctorCh
  * was last asked, the latest release it named, and the release running here. Never a failure: an update that is out
  * is something to look at, with the two ways on, and the rest is information.
  */
-async function updateCheckLine(core: Core, env: NodeJS.ProcessEnv): Promise<DoctorCheck> {
+async function updateCheckLine(core: Core, env: NodeJS.ProcessEnv, handoffs: HandoffMaker): Promise<DoctorCheck> {
   const enabled = await updateCheckEnabled(core, env);
   const record = await readUpdateCheck(core.paths.stateDir);
   const now = new Date();
   const off = enabled.on
     ? 'on'
-    : `off (${enabled.by === 'setting' ? 'agentcomms update --auto off' : enabled.by === 'CI' ? 'CI is set' : `${UPDATE_CHECK_ENV} is set`})`;
+    : `off (${enabled.by === 'setting' ? 'set off with update --auto off' : enabled.by === 'CI' ? 'CI is set' : `${UPDATE_CHECK_ENV} is set`})`;
   const latest =
     record.latest === null
       ? 'unknown'
@@ -282,7 +296,12 @@ async function updateCheckLine(core: Core, env: NodeJS.ProcessEnv): Promise<Doct
           fix:
             asServer?.kind === 'restart' && asCommand?.kind === 'restart'
               ? `${pending.latest} is installed on this machine: restart the MCP clients, and run commands from it.`
-              : 'Run `agentcomms update` (comms_update from a chat), or `agentcomms update --later` to put it off until tomorrow.',
+              : handoffSentence(handoffs.core(['update']), (update) =>
+                  handoffSentence(
+                    handoffs.core(['update', '--later']),
+                    (later) => `Run ${update} (comms_update from a chat), or ${later} to put it off until tomorrow.`,
+                  ),
+                ),
         }),
   };
 }
@@ -307,7 +326,7 @@ async function registrationChecks(
   core: Core,
   env: NodeJS.ProcessEnv,
   config: Config | null,
-  platform: NodeJS.Platform,
+  handoffs: HandoffMaker,
 ): Promise<DoctorCheck[]> {
   const REGISTRATION_PATH_KEYS = ['configDir', 'stateDir', 'dataDir', 'secretsDir'] as const;
   const report = await channelsAvailable(core, env);
@@ -335,7 +354,7 @@ async function registrationChecks(
           name,
           ok: false,
           detail: `registered with ${where(entry)}, but ${entry.missing} is no longer there, so ${entry.client} cannot start it${unpinned === '' ? '' : `; ${unpinned} too`}`,
-          fix: registerAgain(channel.channel, entry, platform),
+          fix: registerAgain(channel.channel, entry, handoffs),
         });
         continue;
       }
@@ -347,7 +366,7 @@ async function registrationChecks(
           ok: true,
           warn: true,
           detail: `registered with ${where(entry)}, but ${unpinned}, so it finds its folders from whatever environment ${entry.client} starts it with`,
-          fix: registerAgain(channel.channel, entry, platform),
+          fix: registerAgain(channel.channel, entry, handoffs),
         });
       }
     }
@@ -368,7 +387,15 @@ async function registrationChecks(
       ok: true,
       warn: true,
       detail: `${listed(accounts, 'and')} ${accounts.length === 1 ? 'is' : 'are'} set up here, but no MCP client${blind.length > 0 ? ' this could read' : ''} starts the ${channel.label} server${blind.length > 0 ? ` — ${listed(blind, 'and')} could not be read` : ''}`,
-      fix: `Register it with the client you use: ${inlineCommand(shellCommand([channel.binary, 'mcp', 'install', '--help'], platform))} (${clients}), or comms_server_install with channel "${channel.channel}" from a chat. Used only from a terminal, it needs nothing.`,
+      // Its terminal route is its own `mcp install`, found only where it is registered — which here it is not, unless
+      // with another client — so the route from a chat, which core itself takes, is said either way.
+      fix: (() => {
+        const install = handoffs.of(channel.channel, ['mcp', 'install', '--help'], { uses: [] });
+        const fromChat = `comms_server_install with channel "${channel.channel}" from a chat`;
+        return isCommand(install)
+          ? `Register it with the client you use: ${inlineCommand(install)} (${clients}), or ${fromChat}. Used only from a terminal, it needs nothing.`
+          : `Register it with ${fromChat}. ${install.message} Used only from a terminal, it needs nothing.`;
+      })(),
     });
   }
   return checks;
@@ -390,18 +417,19 @@ function accountsOf(config: Config, channel: Channel): string[] {
  * the flags `mcp install`'s own hint repeats when it refuses to replace an entry without `--force`, so following it
  * narrows or widens nothing. A project's entry is not one `mcp install` writes, and is said to be where it is instead.
  */
-function registerAgain(channel: Channel, entry: ChannelRegistration, platform: NodeJS.Platform): string {
+function registerAgain(channel: Channel, entry: ChannelRegistration, handoffs: HandoffMaker): string {
   if (entry.scope === 'project') {
     return `It is registered for one project, in ${entry.path}, and \`mcp install\` registers at user scope only: remove it or register it again there, with ${entry.client}'s own command.`;
   }
   const facts = channelServer(channel);
-  const words = [facts.binary, 'mcp', 'install', '--client', entry.client];
+  const words = ['mcp', 'install', '--client', entry.client];
   if (entry.name !== facts.defaultServerName) words.push('--name', entry.name);
   words.push(...entry.narrowing);
   if (entry.launcher === 'npx' || entry.launcher === 'local') words.push('--launcher', entry.launcher);
   words.push('--force');
-  // The entry's name and pins are read from the client's file, which may hold anything: see `shellCommand`.
-  return `Register it again: ${inlineCommand(shellCommand(words, platform))}.`;
+  // The entry's name and pins are read from the client's file, which may hold anything: a located command shows them
+  // as words to type where no Windows line is safe, and a product not locatable here says so instead.
+  return handoffSentence(handoffs.of(channel, words), (command) => `Register it again: ${command}.`);
 }
 
 /** An inbox's id from its name — the current one, so a former name is answered with what it is called now. */

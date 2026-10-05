@@ -62,6 +62,8 @@ export interface CliHandoffs extends HandoffMaker {
    * the environment these were made with. Read once per call; nothing a registration names is run.
    */
   registered(): Promise<CliHandoffs>;
+  /** The same, finding another product among these registrations: a scan the caller has already read. */
+  withRegistrations(registrations: readonly RegisteredServer[]): CliHandoffs;
 }
 
 export interface CliHandoffsOptions {
@@ -129,6 +131,7 @@ export function cliHandoffs(options: CliHandoffsOptions): CliHandoffs {
         ...options,
         registrations: (await scanRegisteredServers(options.env ?? process.env, platform)).servers,
       }),
+    withRegistrations: (servers: readonly RegisteredServer[]) => cliHandoffs({ ...options, registrations: servers }),
   });
   return handoffs;
 }
@@ -169,6 +172,13 @@ export function handoffsFor(
     of: (channel: string, words: readonly string[]) =>
       shellCommand([entryOf(channel).manifest.binary, ...words], platform),
   });
+}
+
+/** The same maker, finding another product among these registrations when it is a real one. */
+export function withRegistrationsFor(maker: HandoffMaker, registrations: readonly RegisteredServer[]): HandoffMaker {
+  return 'withRegistrations' in maker && typeof maker.withRegistrations === 'function'
+    ? (maker as CliHandoffs).withRegistrations(registrations)
+    : maker;
 }
 
 /** The same maker, able to find another product when it is a real one: registrations read now. */
@@ -217,12 +227,19 @@ export function handoffSentenceToFill(
  * Commands that each could do it — one per channel, say — as one phrase: the commands joined by "or", then, for each
  * that has none here, the sentence saying why. `none` is said when not one of them is a command.
  */
-export function handoffChoices(handoffs: readonly (Handoff | ShellCommand)[], none: string): string {
+export function handoffChoices(
+  handoffs: readonly (Handoff | ShellCommand)[],
+  none: string,
+  options: { conjunction?: 'or' | 'and' } = {},
+): string {
   const commands = handoffs.filter(isCommand).map((handoff) => inlineCommand(handoff));
   const missing = handoffs.filter((handoff): handoff is CliCommandNotLocated => !isCommand(handoff));
   const reasons = missing.map((handoff) => handoff.message).join(' ');
   if (commands.length === 0) return `${none} ${reasons}`.trim();
+  const conjunction = options.conjunction ?? 'or';
   const joined =
-    commands.length === 1 ? (commands[0] as string) : `${commands.slice(0, -1).join(', ')} or ${commands.at(-1)}`;
+    commands.length === 1
+      ? (commands[0] as string)
+      : `${commands.slice(0, -1).join(', ')} ${conjunction} ${commands.at(-1)}`;
   return reasons === '' ? joined : `${joined} (${reasons.replace(/\.$/, '')})`;
 }

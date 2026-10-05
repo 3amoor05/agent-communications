@@ -1,11 +1,19 @@
 import type { ApprovalRecord, ApprovalState } from '../approvals.ts';
 import type { GatedChange } from '../change-flow.ts';
 import { CHANNELS, type Channel, channelLabel, channelServer, requireChannelManifest } from '../channel-servers.ts';
-import { accountNoun, listed, pinOption } from '../channel-words.ts';
-import { inlineCommand, type ShellCommand, shellCommand } from '../cli-runtime.ts';
+import { accountNoun, pinOption } from '../channel-words.ts';
+import type { ShellCommand } from '../cli-runtime.ts';
 import type { Config } from '../config.ts';
 import type { Core } from '../core.ts';
 import { CommsError, toCommsError } from '../errors.ts';
+import {
+  type Handoff,
+  type HandoffMaker,
+  handoffChoices,
+  handoffSentence,
+  handoffsFor,
+  withRegistrationsFor,
+} from '../handoffs.ts';
 import { APPROVAL_ID_PATTERN } from '../ids.ts';
 import { type RegisteredServer, scanRegisteredServers, type UnreadableConfig } from '../mcp-clients.ts';
 import {
@@ -212,6 +220,8 @@ interface Found {
 
 interface Inspection {
   report: UpdateReport;
+  /** The commands this update hands a person: core's, and each channel's found among the registrations it read. */
+  handoffs: HandoffMaker;
   /** Behind, and updatable as far as the files show. */
   candidates: Found[];
   /** Behind, and not updatable from here. */
@@ -267,17 +277,18 @@ async function latestReleases(
 }
 
 /**
- * How to register an entry again by hand: its channel's own `mcp install`, with every flag that decides its reach.
+ * How to register an entry again by hand: its channel's own `mcp install`, with every flag that decides its reach —
+ * located as that channel's command among this machine's registrations, or why it is not locatable here (CUE-403).
  *
  * The entry's name and pins are read from the client's file, which may hold anything, so on Windows the command may
- * have no line to paste: the reasons below give it with `inlineCommand`, which shows it as words then.
+ * have no line to paste: the reasons below give it with `handoffSentence`, which shows it as words then.
  */
-function installCommand(item: RegistrationItem, platform: NodeJS.Platform | undefined): ShellCommand {
+function installHandoff(item: RegistrationItem, handoffs: HandoffMaker): Handoff | ShellCommand {
   const facts = channelServer(item.channel);
-  const words = [facts.binary, 'mcp', 'install', '--client', item.client];
+  const words = ['mcp', 'install', '--client', item.client];
   if (item.name !== facts.defaultServerName) words.push('--name', item.name);
   words.push(...item.narrowing, '--force');
-  return shellCommand(words, platform);
+  return handoffs.of(item.channel, words);
 }
 
 /**
@@ -293,9 +304,10 @@ async function whyNotUpdatable(
   config: Config | null,
   item: RegistrationItem,
   narrowing: Narrowing,
+  handoffs: HandoffMaker,
 ): Promise<string | undefined> {
   if (item.launcher !== 'managed' && item.launcher !== 'npx') {
-    return `it was not written by \`mcp install\`, so how it starts cannot be carried over; register it again with ${inlineCommand(installCommand(item, context.platform))}`;
+    return `it was not written by \`mcp install\`, so how it starts cannot be carried over; ${handoffSentence(installHandoff(item, handoffs), (command) => `register it again with ${command}`)}`;
   }
   if (item.scope !== 'user') {
     return `it is registered for one project (in ${item.path}), and \`mcp install\` registers at user scope only; register it again from that project with ${item.client}'s own command`;
@@ -304,7 +316,7 @@ async function whyNotUpdatable(
   const target = await installTarget(context, { client: item.client as SupportedClient, apply: true });
   if (!target.writes) {
     return target.cliName
-      ? `\`${target.cliName}\` is not ${clientCliSearch(context.env)}, so the entry cannot be replaced from here; run ${inlineCommand(installCommand(item, context.platform))} where it is`
+      ? `\`${target.cliName}\` is not ${clientCliSearch(context.env)}, so the entry cannot be replaced from here; ${handoffSentence(installHandoff(item, handoffs), (command) => `run ${command} where it is`)}`
       : `this environment names no ${item.client} configuration to write to`;
   }
   const own = pinOption(item.channel);
@@ -363,6 +375,7 @@ async function runtimesNeeded(
 async function inspect(core: Core, env: NodeJS.ProcessEnv, deps: UpdateDeps): Promise<Inspection> {
   const context: InstallContext = { env, core, platform: deps.platform };
   const scan = await scanRegisteredServers(env);
+  const handoffs = withRegistrationsFor(handoffsFor(core, { platform: deps.platform }), scan.servers);
   const unreadable: UnreadableConfig[] = [...scan.unreadable];
   const found = registrations(scan.servers).map(({ channel, server }) => {
     const facts = channelServer(channel);
@@ -449,7 +462,7 @@ async function inspect(core: Core, env: NodeJS.ProcessEnv, deps: UpdateDeps): Pr
       upToDate.push(item);
       continue;
     }
-    const reason = await whyNotUpdatable(context, config, item, entry.narrowing);
+    const reason = await whyNotUpdatable(context, config, item, entry.narrowing, handoffs);
     const listed: RegistrationItem = { ...item, updatable: reason === undefined, ...(reason ? { reason } : {}) };
     behind.push(listed);
     if (reason === undefined) candidates.push({ server: entry.server, item: listed });
@@ -491,6 +504,7 @@ async function inspect(core: Core, env: NodeJS.ProcessEnv, deps: UpdateDeps): Pr
 
   return {
     report: { core: VERSION, latest, behind, upToDate, unpinned, unreadable },
+    handoffs,
     candidates,
     manual,
     globals,
@@ -641,6 +655,7 @@ interface RegistrationStep {
 interface Planned {
   /** The report the plan was made from: what the daily check's file records, as the update leaves it. */
   report: UpdateReport;
+  handoffs: HandoffMaker;
   latest: Record<string, string>;
   runtimes: RuntimeItem[];
   registrations: RegistrationStep[];
@@ -716,6 +731,7 @@ async function planRegistrations(
   context: InstallContext,
   candidates: readonly Found[],
   request: UpdateRequest,
+  handoffs: HandoffMaker,
 ): Promise<{ steps: RegistrationStep[]; manual: RegistrationItem[] }> {
   const steps: RegistrationStep[] = [];
   const manual: RegistrationItem[] = [];
@@ -747,7 +763,7 @@ async function planRegistrations(
     if (JSON.stringify(keeps) !== JSON.stringify(item.narrowing)) {
       leave(
         item,
-        `registering it again would not keep exactly ${item.narrowing.length > 0 ? item.narrowing.join(' ') : 'no pin'}: ${item.client} itself has the entry as ${keeps.length > 0 ? keeps.join(' ') : 'not pinned'}. Register it again yourself with the pins it should have: ${inlineCommand(installCommand(item, context.platform))}`,
+        `registering it again would not keep exactly ${item.narrowing.length > 0 ? item.narrowing.join(' ') : 'no pin'}: ${item.client} itself has the entry as ${keeps.length > 0 ? keeps.join(' ') : 'not pinned'}. ${handoffSentence(installHandoff(item, handoffs), (command) => `Register it again yourself with the pins it should have: ${command}`)}`,
       );
       continue;
     }
@@ -779,7 +795,7 @@ export function updateChange(
   return {
     plan: async (config) => {
       const inspection = await inspect(core, env, deps);
-      const { steps, manual } = await planRegistrations(context, inspection.candidates, request);
+      const { steps, manual } = await planRegistrations(context, inspection.candidates, request, inspection.handoffs);
       const runtimes = await runtimesNeeded(
         core.paths.dataDir,
         inspection.report.latest,
@@ -791,6 +807,7 @@ export function updateChange(
         runtimes,
         registrations: steps,
         globals: inspection.globals,
+        handoffs: inspection.handoffs,
         manual: [...inspection.manual, ...manual],
         nothingBehind: inspection.report.behind.length === 0,
       };
@@ -841,10 +858,16 @@ export function updateChange(
  * id that is not one is said to be that.
  */
 async function nothingToApply(core: Core, approvalId: string, planned: Planned): Promise<CommsError> {
+  // A check: comms_update with `check`, or this installation's own `update --check` at a terminal.
+  const check = (say: (command: string) => string) =>
+    handoffSentence(planned.handoffs.core(['update', '--check']), say);
   // Refused before the store is asked, in a change's words: the store's own refusal of it begins "nothing was sent".
   if (!APPROVAL_ID_PATTERN.test(approvalId)) {
     return new CommsError('USAGE', `nothing was changed: "${approvalId}" is not an approval id`, {
-      hint: 'An approval id is the `approvalId` a call that needs approval returns, and nothing here needs one: a check — comms_update with `check`, or `agentcomms update --check` at a terminal — shows what is behind.',
+      hint: check(
+        (command) =>
+          `An approval id is the \`approvalId\` a call that needs approval returns, and nothing here needs one: a check — comms_update with \`check\`, or ${command} at a terminal — shows what is behind.`,
+      ),
       details: { approvalId },
     });
   }
@@ -853,12 +876,18 @@ async function nothingToApply(core: Core, approvalId: string, planned: Planned):
   const details = { approvalId, ...(record ? { state: record.state } : {}) };
   if (planned.nothingBehind) {
     return new CommsError('USAGE', `nothing was changed: nothing is behind the latest release, ${unused}`, {
-      hint: 'Nothing needs doing: a check — comms_update with `check`, or `agentcomms update --check` at a terminal — shows everything here up to date. A release published later is another update, with a preview and an approval of its own.',
+      hint: check(
+        (command) =>
+          `Nothing needs doing: a check — comms_update with \`check\`, or ${command} at a terminal — shows everything here up to date. A release published later is another update, with a preview and an approval of its own.`,
+      ),
       details,
     });
   }
   return new CommsError('USAGE', `nothing was changed: what is behind cannot be updated from here, ${unused}`, {
-    hint: 'Each is left for a person: a check — comms_update with `check`, or `agentcomms update --check` at a terminal — lists them, with why and what to run. The same call without the approval reports them too, and changes nothing.',
+    hint: check(
+      (command) =>
+        `Each is left for a person: a check — comms_update with \`check\`, or ${command} at a terminal — lists them, with why and what to run. The same call without the approval reports them too, and changes nothing.`,
+    ),
     details,
   });
 }
@@ -893,11 +922,17 @@ function runtimeProduct(packageName: string, version: string): Promise<McpProduc
   return channelProduct(channel, 'managed', version);
 }
 
-/** Every channel's `mcp prune`, as a person types it: "`agentcomms mcp prune`, `agent-gmail mcp prune` and …". */
-const PRUNE_COMMANDS = listed(
-  CHANNELS.map((channel) => `\`${channelServer(channel).binary} mcp prune\``),
-  'and',
-);
+/**
+ * Every channel's `mcp prune`, as a person runs it at a terminal: each located among this machine's registrations, and
+ * for one that is not, why — never a bare name (CUE-403).
+ */
+function pruneCommands(handoffs: HandoffMaker): string {
+  return handoffChoices(
+    CHANNELS.map((channel) => handoffs.of(channel, ['mcp', 'prune'])),
+    'none of their commands is locatable here:',
+    { conjunction: 'and' },
+  );
+}
 
 function message(error: unknown): string {
   return error instanceof CommsError ? error.message : error instanceof Error ? error.message : String(error);
@@ -1001,7 +1036,7 @@ async function applyUpdate(context: InstallContext, planned: Planned, deps: Upda
   ];
   const next =
     clients.length > 0
-      ? `Restart ${clients.length === 1 ? clients[0] : `${clients.slice(0, -1).join(', ')} and ${clients.at(-1)}`} to load the new servers: no MCP client loads a new server into a session that is already running. Then, from the restarted server, prune the runtimes the old versions leave behind: comms_server_prune for each channel — at a terminal, ${PRUNE_COMMANDS}.`
+      ? `Restart ${clients.length === 1 ? clients[0] : `${clients.slice(0, -1).join(', ')} and ${clients.at(-1)}`} to load the new servers: no MCP client loads a new server into a session that is already running. Then, from the restarted server, prune the runtimes the old versions leave behind: comms_server_prune for each channel — at a terminal, ${pruneCommands(planned.handoffs)}.`
       : null;
   return { status, latest: planned.latest, steps, manual: planned.manual, ok, next };
 }

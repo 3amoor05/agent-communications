@@ -1,6 +1,7 @@
 import { channelLabel } from './channel-servers.ts';
 import { isDangerous } from './chars.ts';
 import { paint } from './cli-runtime.ts';
+import { type HandoffMaker, handoffSentence, handoffsFor } from './handoffs.ts';
 import type { InstallResult, PruneResult } from './mcp-install.ts';
 import type { DoctorReport } from './operations/maintenance.ts';
 import type { UpdateItem, UpdateReport, UpdateResult } from './operations/update.ts';
@@ -450,7 +451,7 @@ function describeItem(item: UpdateItem): string {
   return `${channelLabel(item.channel)} with ${item.client} as "${item.name}" ${where} (${item.launcher}, ${version}${pins})`;
 }
 
-export function renderUpdateCheck(report: UpdateReport): string {
+export function renderUpdateCheck(report: UpdateReport, handoffs: HandoffMaker = handoffsFor(undefined)): string {
   const latest = Object.entries(report.latest)
     .map(([name, version]) => `${name} ${version}`)
     .join(', ');
@@ -473,7 +474,10 @@ export function renderUpdateCheck(report: UpdateReport): string {
     report.behind.length === 0
       ? 'Everything here is at the latest release.'
       : updatable
-        ? 'Run `agentcomms update` to bring what is behind to the latest release.'
+        ? handoffSentence(
+            handoffs.core(['update']),
+            (command) => `Run ${command} to bring what is behind to the latest release.`,
+          )
         : 'Nothing behind can be updated from here; each says why above.',
   );
   return lines.join('\n');
