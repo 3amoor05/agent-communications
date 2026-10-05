@@ -32,7 +32,7 @@ async function fixture(platform: NodeJS.Platform = 'darwin', interrupted?: Abort
       return slackOk({ team: { id: 'TRGC0001', name: 'RGC' }, app_id: 'A0READ' });
     },
   });
-  const profile = resolveProfileSlackTarget(await context.config(), 'rgc', 'read');
+  const profile = resolveProfileSlackTarget(await context.config(), 'rgc', 'read', context.handoffs);
   const started = await startSignIn(context, {
     alias: 'rgc/slack',
     clientId: profile.clientId,

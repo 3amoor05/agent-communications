@@ -6,17 +6,16 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { main, renderAttach } from '../src/cli.ts';
 import {
-  commandAsJson,
-  commandText,
   inlineCommand,
+  insertWordsBeforeSentinel,
   normalizePathOptionWords,
   type Streams,
-  shellCommand,
   withoutOptionsBeforeSentinel,
-  withWords,
 } from '../src/cli-runtime.ts';
+import { commandAsJson, inlineQuoted, quoteCommand, quotedText } from '../src/command-line.ts';
 import { secretsStoreOf } from '../src/config.ts';
 import { CommsError } from '../src/errors.ts';
+import { CORE_CALLER, isCommand } from '../src/handoffs.ts';
 import { isInside } from '../src/jail.ts';
 import { resolvePaths } from '../src/paths.ts';
 import { assertNoBareCommand, coreCommand, coreHandoffs, locatedCoreLine } from './helpers/handoffs.ts';
@@ -451,7 +450,7 @@ const TARGET_PENDING_REF = 'slack/token/target-pending';
 async function coreWithPendingLocations() {
   const { openCore } = await import('../src/core.ts');
   const dir = tempDir();
-  const core = openCore({ env: { AGENT_COMMS_CONFIG_DIR: dir, HOME: dir, USERPROFILE: dir } });
+  const core = openCore({ env: { AGENT_COMMS_CONFIG_DIR: dir, HOME: dir, USERPROFILE: dir }, caller: CORE_CALLER });
   await core.config.update((config) => ({
     ...config,
     secrets: { store: 'file' },
@@ -673,7 +672,7 @@ test('the frozen 0.12.1 migration switches only the root and preserves an unknow
 async function coreWithTwoSlackTokens() {
   const { openCore } = await import('../src/core.ts');
   const dir = tempDir();
-  const core = openCore({ env: { AGENT_COMMS_CONFIG_DIR: dir, HOME: dir, USERPROFILE: dir } });
+  const core = openCore({ env: { AGENT_COMMS_CONFIG_DIR: dir, HOME: dir, USERPROFILE: dir }, caller: CORE_CALLER });
   const account = (id: string) => ({
     id,
     platform: 'slack',
@@ -1236,10 +1235,13 @@ test('names migrate runs one mapping on a computer that has only some of its nam
 
 test('requirePerson refuses an agent before it asks about a terminal, and names the command either way', async () => {
   const { requirePerson } = await import('../src/cli-runtime.ts');
+  const paths = resolvePaths({ env: { HOME: tempDir(), AGENT_COMMS_CONFIG_DIR: tempDir() } });
+  const command = coreHandoffs(paths).own(['do-the-thing']);
+  assert.ok(isCommand(command));
   const gate = {
     refusedToAgent: 'not an agent’s to do',
     refusedWithoutTerminal: 'needs a terminal',
-    command: 'agentcomms do-the-thing',
+    command,
     prompt: 'This does the thing.',
     color: false,
   };
@@ -1259,14 +1261,14 @@ test('requirePerson refuses an agent before it asks about a terminal, and names 
   await assert.rejects(requirePerson({ CLAUDECODE: '1' }, tty, gate), (error: CommsError) => {
     assert.equal(error.code, 'LOOSENING_REFUSED');
     assert.equal(error.message, 'not an agent’s to do');
-    assert.equal(error.hint, 'Ask the user to run `agentcomms do-the-thing` in their own terminal.');
+    assert.equal(error.hint, `Ask the user to run ${inlineCommand(command)} in their own terminal.`);
     assert.deepEqual(error.details, { marker: 'CLAUDECODE' });
     return true;
   });
 
   await assert.rejects(requirePerson({}, quiet, gate), (error: CommsError) => {
     assert.equal(error.message, 'needs a terminal');
-    assert.equal(error.hint, 'Run `agentcomms do-the-thing` directly in a terminal.');
+    assert.equal(error.hint, `Run ${inlineCommand(command)} directly in a terminal.`);
     return true;
   });
 });
@@ -1275,7 +1277,10 @@ test('approve is refused to an agent and to anything without a terminal, touches
   const { openCore } = await import('../src/core.ts');
   const { prepareChange } = await import('../src/changes.ts');
   const config = tempDir();
-  const core = openCore({ env: { AGENT_COMMS_CONFIG_DIR: config, HOME: config, USERPROFILE: config } });
+  const core = openCore({
+    env: { AGENT_COMMS_CONFIG_DIR: config, HOME: config, USERPROFILE: config },
+    caller: CORE_CALLER,
+  });
   const before = await core.config.load();
   const after = structuredClone(before);
   after.defaults.riskEscalation = false;
@@ -1367,10 +1372,13 @@ test('word helpers normalize pre-sentinel path pins and insert generated options
     ),
     ['client', 'add', '--', '--approval', 'literal', '--approval=x'],
   );
-  assert.deepEqual(
-    withWords(shellCommand(['agent-gmail', 'setup', '--', '--mcp-approval=literal']), '--mcp-approval', 'ap_one').words,
-    ['agent-gmail', 'setup', '--mcp-approval', 'ap_one', '--', '--mcp-approval=literal'],
-  );
+  assert.deepEqual(insertWordsBeforeSentinel(['setup', '--', '--mcp-approval=literal'], '--mcp-approval', 'ap_one'), [
+    'setup',
+    '--mcp-approval',
+    'ap_one',
+    '--',
+    '--mcp-approval=literal',
+  ]);
 });
 
 /*
@@ -1407,7 +1415,7 @@ const UNSAFE_ON_WINDOWS = [
 
 test('a command printed to be run is quoted for a POSIX shell everywhere but Windows, where any word can be quoted', () => {
   for (const platform of ['darwin', 'linux'] as const) {
-    const posix = (...words: string[]) => shellCommand(words, platform);
+    const posix = (...words: string[]) => quoteCommand(words, platform);
     assert.deepEqual(posix('agentcomms', 'update', '--auto', 'off'), {
       words: ['agentcomms', 'update', '--auto', 'off'],
       line: 'agentcomms update --auto off',
@@ -1433,7 +1441,7 @@ test('a command printed to be run is quoted for a POSIX shell everywhere but Win
 
 test('on Windows a command printed to be run is one cmd.exe and PowerShell both read alike (CUE-306)', () => {
   const win = (...words: string[]) => {
-    const printed = shellCommand(words, 'win32');
+    const printed = quoteCommand(words, 'win32');
     assert.notEqual(printed.line, null, `${JSON.stringify(words)} were printed whole`);
     return printed.line;
   };
@@ -1566,7 +1574,7 @@ test('on Windows a printed command reaches the program as the words it was given
   ];
   for (const word of words) {
     const argv = ['agentcomms', 'attach', 'roots', 'add', word];
-    const { line } = shellCommand(argv, 'win32');
+    const { line } = quoteCommand(argv, 'win32');
     const shown = JSON.stringify(word);
     if (line === null) {
       assert.ok(UNSAFE_ON_WINDOWS.includes(word), `${shown} could have been printed`);
@@ -1692,7 +1700,7 @@ test(
     let runs = 0;
     for (const shell of windowsShells()) {
       for (const program of [['node', script], ['argdump']]) {
-        const { line } = shellCommand([...program, ...words], 'win32');
+        const { line } = quoteCommand([...program, ...words], 'win32');
         assert.ok(line !== null, 'every word was printed');
         const out = join(dir, `argv-${runs++}.json`);
         const result = shell.run(line, { ...env, ARGDUMP_OUT: out });
@@ -1707,7 +1715,7 @@ test(
     for (const shell of windowsShells()) {
       for (const program of [['node', script], ['argdump']]) {
         for (const word of [...unprintable, ...more]) {
-          const command = shellCommand([...program, word], 'win32');
+          const command = quoteCommand([...program, word], 'win32');
           assert.equal(command.line, null, JSON.stringify(word));
           const json = commandAsJson(command.words);
           const out = join(dir, `argv-${runs++}.json`);
@@ -1724,7 +1732,7 @@ test(
 
 test('on Windows a program whose path needs quotes leaves no line, and is shown as words with `&` named (CUE-403)', () => {
   // Quoted, a program is a string to PowerShell, not a command; `&` would run it there, and cmd.exe does not accept it.
-  const spaced = shellCommand(
+  const spaced = quoteCommand(
     [
       'C:\\Program Files\\nodejs\\node.exe',
       'C:\\Users\\jo\\AppData\\Roaming\\npm\\node_modules\\@agentcomms\\core\\dist\\cli.mjs',
@@ -1734,21 +1742,21 @@ test('on Windows a program whose path needs quotes leaves no line, and is shown 
     'win32',
   );
   assert.equal(spaced.line, null);
-  assert.match(inlineCommand(spaced), /^`\["C:\\\\Program Files\\\\nodejs\\\\node\.exe",/);
-  assert.match(inlineCommand(spaced), /the program's path needs quotes, .*in PowerShell, `&` before the program\)$/);
-  assert.match(commandText(spaced), /in PowerShell, `&` before the program\)$/);
+  assert.match(inlineQuoted(spaced), /^`\["C:\\\\Program Files\\\\nodejs\\\\node\.exe",/);
+  assert.match(inlineQuoted(spaced), /the program's path needs quotes, .*in PowerShell, `&` before the program\)$/);
+  assert.match(quotedText(spaced), /in PowerShell, `&` before the program\)$/);
 
-  const bare = shellCommand(
+  const bare = quoteCommand(
     ['C:\\hostedtoolcache\\windows\\node\\22.16.0\\x64\\node.exe', 'D:\\a\\cli.mjs', 'approve', 'ap_1'],
     'win32',
   );
   assert.equal(bare.line, 'C:\\hostedtoolcache\\windows\\node\\22.16.0\\x64\\node.exe D:\\a\\cli.mjs approve ap_1');
 
   // Another word with no common quoting keeps its own explanation.
-  const other = shellCommand(['agentcomms', 'approve', '50%'], 'win32');
-  assert.match(inlineCommand(other), /cannot be quoted the same way for cmd\.exe and for PowerShell/);
+  const other = quoteCommand(['agentcomms', 'approve', '50%'], 'win32');
+  assert.match(inlineQuoted(other), /cannot be quoted the same way for cmd\.exe and for PowerShell/);
   // POSIX quotes any program.
-  assert.equal(shellCommand(['/opt/node js/bin/node', 'cli.mjs'], 'linux').line, "'/opt/node js/bin/node' cli.mjs");
+  assert.equal(quoteCommand(['/opt/node js/bin/node', 'cli.mjs'], 'linux').line, "'/opt/node js/bin/node' cli.mjs");
 });
 
 test(
@@ -1762,10 +1770,10 @@ test(
     let runs = 0;
     for (const shell of windowsShells()) {
       for (const program of [[process.execPath, script], [join(dir, 'argdump.cmd')]]) {
-        const command = shellCommand([...program, ...words], 'win32');
+        const command = quoteCommand([...program, ...words], 'win32');
         if (command.line === null) {
           // Only a program path that needs quotes may take the JSON form here.
-          assert.ok(programNeedsQuotesForTest(program[0] as string), `${shell.name}: ${commandText(command)}`);
+          assert.ok(programNeedsQuotesForTest(program[0] as string), `${shell.name}: ${quotedText(command)}`);
           continue;
         }
         const out = join(dir, `absolute-${runs++}.json`);
@@ -1779,7 +1787,7 @@ test(
 
 /** Whether `shellCommand` would quote this program on Windows — the one reason an absolute program has no line. */
 function programNeedsQuotesForTest(program: string): boolean {
-  return shellCommand([program], 'win32').line === null;
+  return quoteCommand([program], 'win32').line === null;
 }
 
 test(
@@ -1791,7 +1799,7 @@ test(
     for (const [index, shell] of windowsShells().entries()) {
       const parent = { ...env, CUE_SENTINEL: 'unchanged' };
       const words = ['argdump', '--', 'CUE_SENTINEL=changed'];
-      const success = shellCommand(words, 'win32');
+      const success = quoteCommand(words, 'win32');
       assert.ok(success.line !== null);
       const out = join(dir, `sentinel-${index}.json`);
       const ran = shell.run(success.line, { ...parent, ARGDUMP_OUT: out });
@@ -1799,7 +1807,7 @@ test(
       assert.deepEqual(dumped(out), words.slice(1), shell.name);
       assert.equal(parent.CUE_SENTINEL, 'unchanged', shell.name);
 
-      const refused = shellCommand(['argdump', '--', '%CUE_SENTINEL%', '!CUE_SENTINEL!'], 'win32');
+      const refused = quoteCommand(['argdump', '--', '%CUE_SENTINEL%', '!CUE_SENTINEL!'], 'win32');
       assert.equal(refused.line, null);
       const refusedOut = join(dir, `sentinel-refused-${index}.json`);
       const didNotRun = shell.run(commandAsJson(refused.words), { ...parent, ARGDUMP_OUT: refusedOut });
@@ -1815,18 +1823,18 @@ test('on Windows a command with a word that cannot be printed has no line, and i
    * `NAME`, and an install hint's `--force` replaced one. So there is no line at all, and the printers show the words.
    */
   const words = ['agent-gmail', 'mcp', 'install', '--name', '$x&whoami&', '--force'];
-  const command = shellCommand(words, 'win32');
+  const command = quoteCommand(words, 'win32');
   assert.deepEqual(command, { words, line: null, platform: 'win32' });
   const json = '["agent-gmail","mcp","install","--name","\\u0024x&whoami&","--force"]';
   assert.equal(commandAsJson(words), json);
   const said =
     "the command's words, written as JSON: one of them cannot be quoted the same way for cmd.exe and for PowerShell, so type the command yourself, with that word quoted for the shell you use";
-  assert.equal(inlineCommand(command), `\`${json}\` (${said})`);
-  assert.equal(commandText(command), `${json} (${said})`);
+  assert.equal(inlineQuoted(command), `\`${json}\` (${said})`);
+  assert.equal(quotedText(command), `${json} (${said})`);
   // With a line, it is the line, and nothing is said.
-  const plain = shellCommand(['claude', 'mcp', 'remove', 'old gmail'], 'win32');
-  assert.equal(inlineCommand(plain), '`claude mcp remove "old gmail"`');
-  assert.equal(commandText(plain), 'claude mcp remove "old gmail"');
+  const plain = quoteCommand(['claude', 'mcp', 'remove', 'old gmail'], 'win32');
+  assert.equal(inlineQuoted(plain), '`claude mcp remove "old gmail"`');
+  assert.equal(quotedText(plain), 'claude mcp remove "old gmail"');
 });
 
 test('a command shown as JSON gives back its words, and nothing in it is anything either Windows shell acts on (CUE-306)', () => {
@@ -1888,8 +1896,8 @@ test('core quotes a command to be run in one place, and pastes no word into one 
   /*
    * A second quoter is a second set of rules to drift: `mcp install`'s hints carried a copy of the POSIX one, and the
    * update's and the doctor's "register it again" quoted nothing at all. So the POSIX escape for a quote, `'\''`,
-   * appears in `cli-runtime.ts` alone, and no `mcp get`, `mcp remove` or `mcp install` is built by pasting a word into
-   * a template — each goes through `shellCommand`.
+   * appears in `command-line.ts` alone, and no `mcp get`, `mcp remove` or `mcp install` is built by pasting a word
+   * into a template — each goes through `quoteCommand`.
    */
   const src = fileURLToPath(new URL('../src/', import.meta.url));
   const files = (readdirSync(src, { recursive: true }) as string[]).filter((file) => file.endsWith('.ts'));
@@ -1898,7 +1906,7 @@ test('core quotes a command to be run in one place, and pastes no word into one 
   const pasted: string[] = [];
   for (const file of files) {
     const source = readFileSync(join(src, file), 'utf8');
-    if (source.includes("'\\\\''") && file !== 'cli-runtime.ts') quoters.push(file);
+    if (source.includes("'\\\\''") && file !== 'command-line.ts') quoters.push(file);
     for (const line of source.split('\n')) {
       if (/mcp (?:get|remove|install)[^`'"\n]*\$\{/.test(line)) pasted.push(`${file}: ${line.trim()}`);
     }

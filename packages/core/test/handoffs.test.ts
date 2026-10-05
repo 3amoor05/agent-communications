@@ -7,28 +7,22 @@ import { fileURLToPath } from 'node:url';
 import { sendApprovesHint } from '../src/approvals.ts';
 import { beginChangeApproval, claimChange } from '../src/changes.ts';
 import type { NodeRuntime } from '../src/cli-command.ts';
-import {
-  commandText,
-  inlineCommand,
-  lineWithWordsToFill,
-  type ShellCommand,
-  shellCommand,
-} from '../src/cli-runtime.ts';
+import { commandText, inlineCommand, lineWithWordsToFill } from '../src/cli-runtime.ts';
+import { quoteCommand } from '../src/command-line.ts';
 import { parseConfig, secretsStoreFor } from '../src/config.ts';
 import { openCore } from '../src/core.ts';
 import { CommsError } from '../src/errors.ts';
 import {
+  type CliHandoffs,
   CORE_CALLER,
   cliHandoffs,
   type Handoff,
-  type HandoffMaker,
   handoffChoices,
   handoffSentence,
   handoffSentenceToFill,
-  handoffsFor,
   handoffText,
+  handoffTextToFill,
   isCommand,
-  registeredFor,
   requireHandoffs,
 } from '../src/handoffs.ts';
 import { checkAttachable } from '../src/jail.ts';
@@ -88,7 +82,7 @@ function gmailHandoffs(
   return { checkout, gmail, handoffs };
 }
 
-function words(handoff: Handoff | ShellCommand): readonly string[] {
+function words(handoff: Handoff): readonly string[] {
   assert.ok(isCommand(handoff), 'message' in handoff ? handoff.message : '');
   return handoff.words;
 }
@@ -149,7 +143,7 @@ test('a command pins the four folders every command opens, the downloads folder 
   const windows = handoffs.on('win32').own(['inbox', 'remove', 'old mail']);
   assert.ok(isCommand(windows));
   assert.equal(windows.platform, 'win32');
-  assert.equal(windows.line, shellCommand(windows.words, 'win32').line);
+  assert.equal(windows.line, quoteCommand(windows.words, 'win32').line);
   assert.equal(handoffs.on('linux'), handoffs, 'the same shell is the same handoffs');
 });
 
@@ -163,10 +157,6 @@ test("registered() reads this machine's registrations from the environment the h
   assert.ok(!isCommand(handoffs.of('slack', ['doctor'])), 'nothing read yet');
   const registered = await handoffs.registered();
   assert.deepEqual(words(registered.of('slack', ['doctor'])), [process.execPath, entry, ...FOUR, 'doctor']);
-  assert.deepEqual(
-    words((await registeredFor(handoffs)).of('slack', ['doctor'])),
-    words(registered.of('slack', ['doctor'])),
-  );
 });
 
 test('a command renders as a line, as words to type, or — with none — as the sentence saying why', () => {
@@ -203,6 +193,16 @@ test('a command renders as a line, as words to type, or — with none — as the
     handoffSentenceToFill(missing, ['<folder>'], (command) => command),
     missing.message,
   );
+  // As a value of its own, with words to fill: as written before `--`, or among the words as JSON when there is no
+  // line; with no command, why.
+  assert.ok(handoffTextToFill(download, ['--to', '<folder>']).endsWith(' attachments download --to <folder> -- --odd'));
+  const lineless = handoffs.on('win32').own(['attachments', 'download', '$x&whoami&', '--', '--odd']);
+  assert.ok(isCommand(lineless) && lineless.line === null);
+  const json = handoffTextToFill(lineless, ['--to', '<folder>']);
+  assert.ok(json.startsWith('['), json);
+  assert.ok(json.includes('"\\u0024x&whoami&"'), json);
+  assert.ok(json.includes('"--to","<folder>","--","--odd"]'), json);
+  assert.equal(handoffTextToFill(missing, ['<folder>']), missing.message);
   // Choices: the commands, then why the others have none.
   assert.equal(handoffChoices([printed], 'none:'), inlineCommand(printed));
   assert.equal(handoffChoices([printed, printed], 'none:'), `${inlineCommand(printed)} or ${inlineCommand(printed)}`);
@@ -216,21 +216,44 @@ test('a command renders as a line, as words to type, or — with none — as the
   );
 });
 
-test('the bridge: without its caller, a package gets the bare commands it printed before CUE-403', () => {
-  const bridge = handoffsFor(undefined, { platform: 'linux', approveCommand: 'agent-gmail approve' });
-  assert.deepEqual(bridge.own(['approve', 'ap_1']), shellCommand(['agent-gmail', 'approve', 'ap_1'], 'linux'));
-  assert.deepEqual(bridge.own(['inbox', 'add']), shellCommand(['agent-gmail', 'inbox', 'add'], 'linux'));
-  assert.deepEqual(bridge.core(['update']), shellCommand(['agentcomms', 'update'], 'linux'));
-  assert.deepEqual(bridge.of('slack', ['approve']), shellCommand(['agent-slack', 'approve'], 'linux'));
-  // The approve command as the package named it, whatever its words.
-  assert.deepEqual(
-    handoffsFor({}, { approveCommand: 'agent-slack 7' }).own(['approve', 'ap_1']),
-    shellCommand(['agent-slack', '7', 'ap_1'], process.platform),
+test('without its caller there is no command at all: asking for one is a programming error, never a bare name', async () => {
+  // Nothing in core prints a suite command by its bare name any more (CUE-403 task 15): the bridge that did, for a
+  // package that had not given core its caller, is gone, and so is every input it served.
+  assert.throws(
+    () => requireHandoffs({}),
+    (error: unknown) => {
+      assert.ok(error instanceof TypeError && /opened without its caller/.test(error.message), String(error));
+      return true;
+    },
   );
-  // With its caller, the package's own: located.
+  const home = realTemp('home-');
+  const env = { HOME: home, USERPROFILE: home, AGENT_COMMS_CONFIG_DIR: join(home, 'config') };
+  const bare = openCore({ env });
+  // A store core made without a caller, asked for a refusal that names a command: the same programming error.
+  mkdirSync(join(bare.paths.secretsDir, `${createHash('sha256').update('ref').digest('hex').slice(0, 32)}.json`), {
+    recursive: true,
+  });
+  await assert.rejects((await bare.secrets('file')).get('ref'), /opened without its caller/);
+  // And the public entry no longer has the bridge's pieces.
+  const entry = await import('../src/index.ts');
+  for (const gone of [
+    'handoffsFor',
+    'bareHandoffs',
+    'asHandoffMaker',
+    'platformOf',
+    'registeredFor',
+    'withRegistrationsFor',
+    'channelApproveCommands',
+    'shellCommand',
+    'withWords',
+    'UPDATE_WAYS',
+  ]) {
+    assert.equal(gone in entry, false, `${gone} is not exported`);
+  }
+  // With its caller, a package's own: located.
   const { handoffs } = gmailHandoffs();
-  assert.equal(handoffsFor({ handoffs }), handoffs);
-  assert.deepEqual(handoffsFor({ handoffs }, { platform: 'win32' }).own(['x']), handoffs.on('win32').own(['x']));
+  assert.equal(requireHandoffs({ handoffs }), handoffs);
+  assert.deepEqual(requireHandoffs({ handoffs }, 'win32').own(['x']), handoffs.on('win32').own(['x']));
 });
 
 test('openCore gives core its handoffs from a caller, and core’s own CLI and server always give one', () => {
@@ -344,16 +367,26 @@ test("a change's approval offered as a send is approved with this installation's
 
 /*
  * The deep refusals — the attachment jail, the secret stores, the configuration's one store, a profile's guards — are
- * made where no `core` is in reach, so each is handed the printing package's handoffs (`HandoffsOrPlatform`, or an
- * option). Given core's own, they name its command located; given a maker with no command, the other way and why; given
- * a bare platform, or nothing, the bridge's bare command, as a channel that has not given core its caller still prints.
+ * made where no `core` is in reach, so each is handed the printing package's handoffs (a parameter, or an option).
+ * Given core's own, they name its command located; given handoffs with no command, the other way and why; given none,
+ * where they are optional, it is the programming error `requiredHandoffs` throws — never a bare name.
  */
 test("core's deep refusals name core's command from the handoffs they are given, or why there is none (7d-core)", async () => {
   const located = coreHandoffs(PATHS, 'linux');
   const { handoffs: gmail } = gmailHandoffs();
   const why = gmail.of('slack', ['doctor']);
   assert.ok(!isCommand(why));
-  const nowhere: HandoffMaker = { platform: 'linux', own: () => why, core: () => why, of: () => why };
+  const nowhere: CliHandoffs = {
+    caller: gmail.caller,
+    platform: 'linux',
+    own: () => why,
+    core: () => why,
+    of: () => why,
+    on: () => nowhere,
+    registered: async () => nowhere,
+    withRegistrations: () => nowhere,
+  };
+  const unlocated = /opened without its caller/;
   const command = (words: readonly string[]) => coreInline(PATHS, words, 'linux');
   const hintOf = async (attempt: () => unknown): Promise<string> => {
     try {
@@ -384,10 +417,7 @@ test("core's deep refusals name core's command from the handoffs they are given,
     await hintOf(() => checkAttachable(outside, { ...policy, handoffs: nowhere })),
     `${copy} allow its folder with comms_attach from a chat (needs your approval). ${why.message}`,
   );
-  assert.equal(
-    await hintOf(() => checkAttachable(outside, policy)),
-    `${copy} allow its folder with \`agentcomms attach roots add <folder>\` (needs your approval).`,
-  );
+  await assert.rejects(checkAttachable(outside, policy), unlocated);
 
   // The file store: a secret's file that cannot be read.
   const secrets = realTemp('secrets-');
@@ -400,10 +430,7 @@ test("core's deep refusals name core's command from the handoffs they are given,
     await hintOf(() => new FileSecretStore(secrets, { handoffs: nowhere }).get('ref')),
     `Call comms_doctor from a chat. ${why.message} Re-authorise the inbox if the file is damaged.`,
   );
-  assert.equal(
-    await hintOf(() => new FileSecretStore(secrets).get('ref')),
-    'Run `agentcomms doctor`. Re-authorise the inbox if the file is damaged.',
-  );
+  await assert.rejects(new FileSecretStore(secrets).get('ref'), unlocated);
 
   // The keychain, refusing.
   const refusing: KeyringModule = {
@@ -435,10 +462,6 @@ test("core's deep refusals name core's command from the handoffs they are given,
     await hintOf(() => secretsStoreFor(keychain, 'file', nowhere)),
     `${oneStore} To change it, call comms_secrets_migrate from a chat, then run this again. ${why.message}`,
   );
-  assert.equal(
-    await hintOf(() => secretsStoreFor(keychain, 'file', 'linux')),
-    `${oneStore} To change it, run \`agentcomms secrets migrate --to file\`, then run this again.`,
-  );
 
   // A profile's guards: no file named, and a Slack sign-in for a profile that is not there.
   assert.equal(
@@ -452,10 +475,6 @@ test("core's deep refusals name core's command from the handoffs they are given,
   assert.equal(
     await hintOf(() => resolveProfileSlackTarget(keychain, 'acme', 'read', nowhere)),
     `Call comms_org_update from a chat to reconcile the profile, then start the sign-in again. ${why.message}`,
-  );
-  assert.equal(
-    await hintOf(() => resolveProfileSlackTarget(keychain, 'acme', 'read', 'linux')),
-    'Run `agentcomms org update acme` to reconcile the profile, then start the sign-in again.',
   );
 });
 

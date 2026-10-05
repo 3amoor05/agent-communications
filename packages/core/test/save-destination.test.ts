@@ -17,9 +17,10 @@ import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { ApprovalStore, type DownloadBinding, type DownloadRequest, downloadDigest } from '../src/approvals.ts';
 import { beginChangeApproval } from '../src/changes.ts';
-import { type Streams, shellCommand } from '../src/cli-runtime.ts';
+import type { Streams } from '../src/cli-runtime.ts';
 import { type Core, openCore } from '../src/core.ts';
 import { CommsError } from '../src/errors.ts';
+import { CORE_CALLER } from '../src/handoffs.ts';
 import {
   checkSaveFolder,
   parseMounts,
@@ -50,6 +51,7 @@ import {
   saveFolders,
   settleDestination,
 } from '../src/save-destination.ts';
+import { coreInline } from './helpers/handoffs.ts';
 import { tempDir } from './helpers/temp.ts';
 
 /*
@@ -102,7 +104,7 @@ function machine(): { home: string; env: NodeJS.ProcessEnv; core: Core } {
     AGENT_COMMS_UPDATE_CHECK: 'off',
     NO_COLOR: '1',
   };
-  return { home, env, core: openCore({ env }) };
+  return { home, env, core: openCore({ env, caller: CORE_CALLER }) };
 }
 
 // ── The question in the approval store ─────────────────────────────────────────────────────────────────────────
@@ -383,7 +385,6 @@ function asking(core: Core, env: NodeJS.ProcessEnv, overrides: Partial<Parameter
       { name: 'receipt.pdf', size: 1024 },
     ],
     policy: 'chat',
-    approveCommand: 'agent-gmail approve',
     surface: 'mcp',
     tool: 'gmail_attachment_download',
     env,
@@ -414,13 +415,11 @@ test('the question shows both folders by their exact paths, and names the files 
 
 test('a download question renders its approval command for the selected shell platform', async () => {
   const { core, env } = machine();
-  const question = await asking(core, env, {
-    policy: 'confirm',
-    approveCommand: 'agent-gmail 7',
-    platform: 'win32',
-  });
-  assert.match(question.question, new RegExp(`agent-gmail "7" ${question.choiceId}`));
-  assert.match(question.next, new RegExp(`agent-gmail "7" ${question.choiceId}`));
+  const question = await asking(core, env, { policy: 'confirm', platform: 'win32' });
+  // This installation's own `approve`, quoted for Windows.
+  const approve = coreInline(core.paths, ['approve', question.choiceId], 'win32');
+  assert.ok(question.question.includes(approve), question.question);
+  assert.ok(question.next.includes(approve), question.next);
 });
 
 /** A question's answer settled over MCP under `policy`: the folders as they are now are the home's own. */
@@ -436,7 +435,6 @@ function settling(
     request: REQUEST,
     folders: () => ({ downloads: join(home, 'Downloads'), current: join(home, 'somewhere-else') }),
     policy,
-    approveCommand: 'agent-gmail approve',
     surface: 'mcp',
     env,
   });
@@ -541,8 +539,7 @@ test('a person at a terminal answers 1, 2 or 3 — Enter is 1, 3 asks for the fo
       download,
       env,
       output: { color: false },
-      command: 'agent-gmail attachments download m1 --inbox acme/gmail',
-      approveCommand: 'agent-gmail approve',
+      rerun: ['attachments', 'download', 'm1', '--inbox', 'acme/gmail'],
       render,
       streams: term.streams,
     });
@@ -571,8 +568,7 @@ test('a download answer typed at a terminal keeps the command platform selected 
     download,
     env,
     output: { color: false, platform: 'win32' },
-    command: shellCommand(['agent-gmail', 'attachments', 'download', 'm1'], 'win32'),
-    approveCommand: 'agent-gmail approve',
+    rerun: ['attachments', 'download', 'm1'],
     render,
     streams: terminal(['1']).streams,
   });
@@ -589,8 +585,7 @@ test('anything else at the terminal cancels, saves nothing, and revokes the ques
       download,
       env,
       output: { color: false },
-      command: 'x',
-      approveCommand: 'agent-gmail approve',
+      rerun: ['x'],
       render,
       streams: term.streams,
     }),
@@ -610,8 +605,7 @@ test('at the terminal, a folder no download may use is said so and asked again, 
     download,
     env,
     output: { color: false },
-    command: 'x',
-    approveCommand: 'agent-gmail approve',
+    rerun: ['x'],
     render,
     streams: term.streams,
   });
@@ -639,8 +633,7 @@ test('an agent, or no terminal, gets the question and its choice id, exit 10, an
         download,
         env: { ...env, ...extraEnv },
         output: { color: false, json },
-        command: 'agent-gmail attachments download m1 --inbox acme/gmail',
-        approveCommand: 'agent-gmail approve',
+        rerun: ['attachments', 'download', 'm1', '--inbox', 'acme/gmail'],
         render,
         streams: term.streams,
       });
@@ -655,7 +648,7 @@ test('an agent, or no terminal, gets the question and its choice id, exit 10, an
     assert.match(
       thrown.hint ?? '',
       new RegExp(
-        `agent-gmail attachments download m1 --inbox acme/gmail --to <downloads\\|current\\|folder> --choice ${choiceId}`,
+        ` attachments download m1 --inbox acme/gmail --to <downloads\\|current\\|folder> --choice ${choiceId}\``,
       ),
       label,
     );
@@ -672,14 +665,14 @@ test('a download command with no common Windows quoting is shown as words, not a
     core,
     download,
     env,
-    output: { color: false },
-    command: shellCommand(['agent-gmail', 'attachments', 'download', 'report 100%.pdf'], 'win32'),
-    approveCommand: 'agent-gmail approve',
+    output: { color: false, platform: 'win32' },
+    rerun: ['attachments', 'download', 'report 100%.pdf'],
     render,
     streams: terminal([], false).streams,
   }).catch((error: unknown) => error);
   assert.ok(thrown instanceof CommsError);
-  assert.match(thrown.hint ?? '', /\["agent-gmail","attachments","download","report 100\\u0025\.pdf"/);
+  assert.match(thrown.hint ?? '', /\[".*","attachments","download","report 100\\u0025\.pdf"/);
+  assert.doesNotMatch(thrown.hint ?? '', /`[^`[]* attachments download /, 'no line to run');
   assert.match(thrown.hint ?? '', /cannot be quoted the same way for cmd\.exe and for PowerShell/);
 });
 
@@ -691,9 +684,8 @@ test('the answer to fill in follows the printed line as written, on Windows and 
       core,
       download,
       env,
-      output: { color: false },
-      command: shellCommand(['agent-gmail', 'attachments', 'download', 'm1', '--inbox', 'work'], platform),
-      approveCommand: 'agent-gmail approve',
+      output: { color: false, platform },
+      rerun: ['attachments', 'download', 'm1', '--inbox', 'work'],
       render,
       streams: terminal([], false).streams,
     }).catch((error: unknown) => error);
@@ -701,40 +693,33 @@ test('the answer to fill in follows the printed line as written, on Windows and 
     // Quoted as a word, the placeholder would read as the value itself; on Windows its `<` and `|` would leave no line.
     assert.match(
       thrown.hint ?? '',
-      /run `agent-gmail attachments download m1 --inbox work --to <downloads\|current\|folder> --choice ap_\w+`/,
+      / attachments download m1 --inbox work --to <downloads\|current\|folder> --choice ap_\w+`/,
       platform,
     );
   }
 });
 
 test('the answer to fill in goes before the command’s --, where the CLI still reads it as options (CUE-403)', async () => {
-  const commands = [
-    ...(['win32', 'darwin'] as const).map((platform) =>
-      shellCommand(['agent-gmail', 'attachments', 'download', '--inbox', 'work', '--', '--to'], platform),
-    ),
-    'agent-gmail attachments download --inbox work -- --to',
-  ];
-  for (const command of commands) {
+  for (const platform of ['win32', 'darwin'] as const) {
     const { core, env, home } = machine();
     const { download } = recorder(core, env, home);
     const thrown = await downloadAtTerminal({
       core,
       download,
       env,
-      output: { color: false },
-      command,
-      approveCommand: 'agent-gmail approve',
+      output: { color: false, platform },
+      rerun: ['attachments', 'download', '--inbox', 'work', '--', '--to'],
       render,
       streams: terminal([], false).streams,
     }).catch((error: unknown) => error);
     assert.ok(thrown instanceof CommsError);
-    const dashes = typeof command === 'string' || command.platform !== 'win32' ? '--' : '"--"';
+    const dashes = platform !== 'win32' ? '--' : '"--"';
     assert.match(
       thrown.hint ?? '',
       new RegExp(
-        `run \`agent-gmail attachments download --inbox work --to <downloads\\|current\\|folder> --choice ap_\\w+ ${dashes} --to\``,
+        ` attachments download --inbox work --to <downloads\\|current\\|folder> --choice ap_\\w+ ${dashes} --to\``,
       ),
-      typeof command === 'string' ? 'string' : command.platform,
+      platform,
     );
   }
 });
@@ -747,14 +732,16 @@ test('under confirm, an agent is told the person answers at their own terminal, 
     download,
     env: { ...env, CLAUDECODE: '1' },
     output: { color: false },
-    command: 'agent-gmail attachments download m1 --inbox acme/gmail',
-    approveCommand: 'agent-gmail approve',
+    rerun: ['attachments', 'download', 'm1', '--inbox', 'acme/gmail'],
     render,
     streams: terminal([], true).streams,
   }).catch((error: unknown) => error);
   assert.ok(thrown instanceof CommsError);
   const choiceId = String(thrown.details?.choiceId);
-  assert.match(thrown.hint ?? '', new RegExp(`\`agent-gmail approve ${choiceId}\` in their own terminal`));
+  assert.ok(
+    thrown.hint?.includes(`${coreInline(core.paths, ['approve', choiceId])} in their own terminal`),
+    thrown.hint,
+  );
   assert.match(thrown.hint ?? '', new RegExp(`--inbox acme/gmail --choice ${choiceId}\`\\.$`));
   assert.doesNotMatch(thrown.hint ?? '', /--to/);
 });
@@ -780,8 +767,7 @@ test('a bare `--to` is a person’s own answer only at a real terminal: never fr
       choice: given,
       env: { ...env, ...extraEnv },
       output: { color: false, json },
-      command: 'x',
-      approveCommand: 'agent-gmail approve',
+      rerun: ['x'],
       render,
       streams: terminal([], tty).streams,
     });
@@ -1465,7 +1451,6 @@ test('a refused folder is refused before the question is spent, whoever gave the
       request: REQUEST,
       folders: () => ({ downloads: join(home, 'Downloads'), current: home }),
       policy: 'chat',
-      approveCommand: 'agent-gmail approve',
       surface: 'cli',
       env,
     }),
@@ -1508,7 +1493,6 @@ test('a folder offered by default that is refused is shown as unavailable, with 
       request: REQUEST,
       folders: () => ({ downloads: join(home, 'Downloads'), current: DISK_ROOT }),
       policy: 'chat',
-      approveCommand: 'agent-gmail approve',
       surface: 'mcp',
       env,
     }),
@@ -1619,7 +1603,10 @@ test('under confirm, an answer in the arguments is refused with the terminal com
     assert.ok(thrown instanceof CommsError);
     assert.equal(thrown.code, 'APPROVAL_PENDING');
     assert.match(thrown.message, /change policy here is confirm/);
-    assert.match(thrown.hint ?? '', new RegExp(`\`agent-gmail approve ${approvalId}\` in their own terminal`));
+    assert.ok(
+      thrown.hint?.includes(`${coreInline(core.paths, ['approve', approvalId])} in their own terminal`),
+      thrown.hint,
+    );
   }
   assert.equal((await core.approvals.get(approvalId))?.state, 'pending');
   assert.equal(existsSync(offered.downloads), false, 'a folder was made');
@@ -1711,7 +1698,6 @@ test('`approve` at a terminal shows the question again and records the person’
   const outcome = await answerDownloadAtTerminal(core, asked.choiceId, {
     env,
     color: false,
-    approveCommand: 'agent-gmail approve',
     streams: term.streams,
   });
   assert.deepEqual(outcome, { state: 'approved', answer: { choice: 'downloads' } });
@@ -1734,7 +1720,6 @@ test('`approve` at a terminal shows the question again and records the person’
     answerDownloadAtTerminal(core, asked.choiceId, {
       env,
       color: false,
-      approveCommand: 'agent-gmail approve',
       streams: terminal([]).streams,
     }),
     refusal(/answered already/, 'APPROVAL_VOID'),
@@ -1743,7 +1728,6 @@ test('`approve` at a terminal shows the question again and records the person’
   const cancelled = await answerDownloadAtTerminal(core, other.choiceId, {
     env,
     color: false,
-    approveCommand: 'agent-gmail approve',
     streams: terminal(['n']).streams,
   });
   assert.deepEqual(cancelled, { state: 'revoked' });
@@ -1755,9 +1739,11 @@ test('under confirm the question says so, and names the command that answers it'
   const question = await asking(core, env, { policy: 'confirm' });
   assert.equal(question.policy, 'confirm');
   assert.equal((await core.approvals.get(question.choiceId))?.requiredPolicy, 'confirm');
-  assert.match(
+  assert.ok(
+    question.question.includes(
+      `answer this yourself, at your own terminal — ${coreInline(core.paths, ['approve', question.choiceId])}`,
+    ),
     question.question,
-    new RegExp(`answer this yourself, at your own terminal — \`agent-gmail approve ${question.choiceId}\``),
   );
   assert.match(question.next, /you cannot answer it for them/);
   assert.match(question.next, new RegExp(`choiceId "${question.choiceId}" alone`));
@@ -1891,7 +1877,6 @@ test('each file is proved, once created, to be in the folder that was checked; o
       request: REQUEST,
       folders: () => ({ downloads: join(home, 'Downloads'), current: home }),
       policy: 'chat',
-      approveCommand: 'agent-gmail approve',
       surface: 'cli',
       env,
     });

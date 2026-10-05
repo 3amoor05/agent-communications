@@ -3,7 +3,8 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { fileURLToPath } from 'node:url';
 import type { ChannelEntry } from './channel-manifest.ts';
 import { CHANNEL_SNAPSHOT } from './channels.generated.ts';
-import { normalizePathOptionWords, shellCommand } from './cli-runtime.ts';
+import { normalizePathOptionWords } from './cli-runtime.ts';
+import { quoteCommand } from './command-line.ts';
 import type { RegisteredServer } from './mcp-clients.ts';
 import { isWithin, nearestPackage, readPackageManifest, realpathOfExisting, suiteCommandOf } from './package-roots.ts';
 import { type PathName, type PathOverrides, type ResolvedPaths, withoutPathOptions } from './paths.ts';
@@ -65,7 +66,7 @@ class PrintedCommand {
     if (gate !== GATE) throw new TypeError('a printed command is made by locateCliCommand, and only there');
     this.#entry = entry;
     this.words = Object.freeze([...words]);
-    this.line = shellCommand(this.words, platform).line;
+    this.line = quoteCommand(this.words, platform).line;
     this.platform = platform;
     Object.freeze(this);
   }

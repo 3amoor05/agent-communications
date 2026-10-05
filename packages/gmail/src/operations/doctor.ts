@@ -12,6 +12,7 @@ import {
   formerNameRefusal,
   handoffSentence,
   handoffText,
+  handoffTextToFill,
   homeDirectory,
   type InboxConfig,
   isGroupOrWorldAccessible,
@@ -27,7 +28,6 @@ import {
 import { capabilitiesOf, scopesFor, TIERS, type Tier } from '../auth/scopes.ts';
 import { TokenSource } from '../auth/session.ts';
 import type { GmailContext } from '../context.ts';
-import { handoffTextToFill } from '../handoffs.ts';
 import { GMAIL_MCP } from '../mcp/install.ts';
 import { VERSION } from '../version.ts';
 import { orphanedSecretsPath } from './inboxes.ts';
@@ -270,7 +270,7 @@ async function secretStoreCheck(context: GmailContext): Promise<Check> {
       detail: 'owner-only files in the config directory',
     };
   }
-  const probe = await probeKeychain();
+  const probe = await probeKeychain(null, 'probe', context.handoffs);
   return {
     id: 'secret-store',
     title: 'Secret store',

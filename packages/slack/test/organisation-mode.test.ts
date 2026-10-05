@@ -15,6 +15,7 @@ import {
   type SecretStore,
 } from '@agentcomms/core';
 import { openCore } from '../../core/src/core.ts';
+import { CORE_CALLER } from '../../core/src/handoffs.ts';
 import { orgUpdateChange } from '../../core/src/operations/organisations.ts';
 import { parseBundle, serialiseBundle } from '../src/auth/bundle.ts';
 import { FLOW_TTL_MS, newFlowId, type SlackFlow } from '../src/auth/flow.ts';
@@ -68,7 +69,7 @@ async function fixture(mode: InstallMode = 'read') {
 async function savedMove(f: Awaited<ReturnType<typeof fixture>>, mode: InstallMode) {
   const config = await f.h.core.config.load();
   const source = present(config.accounts[alias]);
-  const target = resolveProfileSlackTarget(config, 'rgc', mode);
+  const target = resolveProfileSlackTarget(config, 'rgc', mode, f.context.handoffs);
   const now = new Date();
   const flow: SlackFlow = {
     flowId: newFlowId(),
@@ -522,7 +523,8 @@ async function coreUpdate(
     path,
     JSON.stringify({ agentcomms: 'organisation-profile', version: 1, organisation: 'rgc', label: 'RGC', slack }),
   );
-  const core = openCore({ env: f.h.env });
+  // Core's own update, as core's CLI and server open core: with its caller.
+  const core = openCore({ env: f.h.env, caller: CORE_CALLER });
   const build = (approvalId?: string) =>
     orgUpdateChange(
       core,

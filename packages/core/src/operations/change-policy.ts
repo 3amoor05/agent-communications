@@ -8,7 +8,7 @@ import {
 } from '../config.ts';
 import type { Core } from '../core.ts';
 import { CommsError } from '../errors.ts';
-import { asHandoffMaker, type HandoffMaker, type HandoffsOrPlatform, handoffsFor, handoffText } from '../handoffs.ts';
+import { type CliHandoffs, handoffText, requireHandoffs } from '../handoffs.ts';
 import { resolveName } from '../names.ts';
 
 /**
@@ -98,11 +98,7 @@ function resolveScope(
   return null;
 }
 
-export function changePolicyReport(
-  config: Config,
-  scope: PolicyScope = {},
-  handoffs: HandoffsOrPlatform = process.platform,
-): ChangePolicyReport {
+export function changePolicyReport(config: Config, scope: PolicyScope, handoffs: CliHandoffs): ChangePolicyReport {
   const target = resolveScope(config, scope);
   if (target === null) {
     const overrides: PolicyOverride[] = [
@@ -114,8 +110,7 @@ export function changePolicyReport(
       ),
     ];
     const changePolicy = defaultChangePolicy(config);
-    const looser =
-      changePolicy === 'confirm' ? overrides.flatMap((override) => stillChat(override, asHandoffMaker(handoffs))) : [];
+    const looser = changePolicy === 'confirm' ? overrides.flatMap((override) => stillChat(override, handoffs)) : [];
     return {
       scope: 'defaults',
       name: null,
@@ -135,7 +130,7 @@ export function changePolicyReport(
 }
 
 /** An override that approves in chat, with how to tighten it; nothing for one that does not. */
-function stillChat(override: PolicyOverride, handoffs: HandoffMaker): LooserOverride[] {
+function stillChat(override: PolicyOverride, handoffs: CliHandoffs): LooserOverride[] {
   if (override.changePolicy !== 'chat') return [];
   // Names are held to a grammar of letters, digits, `-` and `/`, so they go into a command line as they are.
   const flag = override.kind === 'inbox' ? '--inbox' : '--account';
@@ -202,7 +197,7 @@ export function changePolicyChange(
   if (!isChangePolicy(to)) {
     throw new CommsError('USAGE', `"${String(to)}" is not a change policy`, { hint: 'Use `chat` or `confirm`.' });
   }
-  const handoffs = handoffsFor(core, { platform });
+  const handoffs = requireHandoffs(core, platform);
   return {
     plan: (config) => {
       const before = changePolicyReport(config, scope, handoffs);

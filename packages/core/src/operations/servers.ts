@@ -16,7 +16,7 @@ import { accountNoun, hasNarrowing, narrowingOwner, pinOption } from '../channel
 import type { Config } from '../config.ts';
 import type { Core } from '../core.ts';
 import { CommsError } from '../errors.ts';
-import { handoffSentence, handoffsFor, registeredFor } from '../handoffs.ts';
+import { handoffSentence, requireHandoffs } from '../handoffs.ts';
 import { scanRegisteredServers, type UnreadableConfig } from '../mcp-clients.ts';
 import {
   checkServerName,
@@ -451,7 +451,7 @@ async function remedyLocated(error: unknown, core: Core): Promise<unknown> {
   if (remedy === undefined || !(error instanceof CommsError)) return error;
   const channel = CHANNELS.find((each) => channelServer(each).binary === remedy.binary);
   if (channel === undefined) return error;
-  const maker = await registeredFor(handoffsFor(core));
+  const maker = await requireHandoffs(core).registered();
   return new CommsError(error.code, error.message, {
     hint: handoffSentence(maker.of(channel, remedy.words), remedy.say),
     ...(error.details === undefined ? {} : { details: error.details }),

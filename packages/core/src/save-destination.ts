@@ -10,22 +10,11 @@ import {
   type ListedFile,
   type RecordedSaveAnswer,
 } from './approvals.ts';
-import {
-  agentMarker,
-  canPrompt,
-  defaultStreams,
-  inlineCommand,
-  insertWordsBeforeSentinel,
-  lineWithWordsToFill,
-  paint,
-  type ShellCommand,
-  type Streams,
-  withWords,
-} from './cli-runtime.ts';
+import { agentMarker, canPrompt, defaultStreams, paint, type Streams } from './cli-runtime.ts';
 import type { ChangePolicy } from './config.ts';
 import type { Core } from './core.ts';
 import { CommsError } from './errors.ts';
-import { type Handoff, handoffSentence, handoffSentenceToFill, handoffsFor } from './handoffs.ts';
+import { type Handoff, handoffSentence, handoffSentenceToFill, requireHandoffs } from './handoffs.ts';
 import { APPROVAL_ID_PATTERN } from './ids.ts';
 import { createUniqueFile } from './jail.ts';
 import { DOWNLOADS_KNOWN_FOLDER, knownFolder } from './known-folders.ts';
@@ -589,8 +578,6 @@ export interface AskInput {
   listing: ListedFile[];
   /** The change policy of the mailbox or workspace the files come from, as it stands now. */
   policy: ChangePolicy;
-  /** The channel's command that answers the question at a terminal: `agent-gmail approve`. */
-  approveCommand: string;
   surface: DownloadSurface;
   /** The tool to call again, over MCP. */
   tool: string;
@@ -660,7 +647,7 @@ function questionText(input: {
   warnings: readonly string[];
   policy: ChangePolicy;
   /** The printing package's `approve` with this choice id: what answers the question at a terminal, under `confirm`. */
-  approve?: Handoff | ShellCommand | undefined;
+  approve?: Handoff | undefined;
 }): string {
   const files = `${input.count} ${input.count === 1 ? 'file' : 'files'}`;
   const [downloads, current] = input.options;
@@ -729,11 +716,8 @@ export async function askWhereToSave(core: Core, input: AskInput): Promise<Desti
   const choiceId = record.approvalId;
   const options = [downloads, current, other];
   const warnings = listingWarnings(input.listing);
-  // The printing package's own `approve` answers it (`core.handoffs`); before it locates its commands, the one it named.
-  const approve = handoffsFor(core, { platform: input.platform, approveCommand: input.approveCommand }).own([
-    'approve',
-    choiceId,
-  ]);
+  // The printing package's own `approve` answers it (`core.handoffs`).
+  const approve = requireHandoffs(core, input.platform).own(['approve', choiceId]);
   const question = questionText({
     count: input.count,
     bytes: input.bytes,
@@ -800,8 +784,6 @@ export interface SettleInput {
   folders: () => OfferedFolders;
   /** The change policy of the mailbox or workspace now; the stricter of it and the question's decides. */
   policy: ChangePolicy;
-  /** The channel's command that answers a question at a terminal, for the refusal under `confirm`. */
-  approveCommand: string;
   surface: DownloadSurface;
   env: NodeJS.ProcessEnv;
   platform?: NodeJS.Platform | undefined;
@@ -868,10 +850,7 @@ export async function settleDestination(core: Core, input: SettleInput): Promise
   }
 
   const { saveTo, choiceId: choiceWord } = words(input.surface);
-  const answerHere = handoffsFor(core, { platform, approveCommand: input.approveCommand }).own([
-    'approve',
-    answer.choiceId,
-  ]);
+  const answerHere = requireHandoffs(core, platform).own(['approve', answer.choiceId]);
   const pendingHint =
     input.surface === 'mcp'
       ? handoffSentence(
@@ -1036,19 +1015,7 @@ export interface DownloadAtTerminalOptions<Q extends DestinationQuestion> {
    * The words of this command after its program — `['attachments', 'download', …, '--inbox', 'acme/gmail']` — to run
    * again with the answer: located as the printing package's own CLI (`core.handoffs`), the downloads folder pinned.
    */
-  rerun?: readonly string[] | undefined;
-  /**
-   * The command to run again, for the hint an agent gets: `agent-gmail attachments download … --inbox acme/gmail`.
-   *
-   * @deprecated For a package that does not locate its commands yet; `rerun` replaces it (CUE-403 task 15).
-   */
-  command?: string | ShellCommand | undefined;
-  /**
-   * The channel's command that answers a question at a terminal: `agent-gmail approve`.
-   *
-   * @deprecated Read only without `core.handoffs`, whose own `approve` is used instead (CUE-403 task 15).
-   */
-  approveCommand?: string | undefined;
+  rerun: readonly string[];
   /** The question with its files, as a person reads it. */
   render: (question: Q) => string;
   streams?: Streams | undefined;
@@ -1093,22 +1060,9 @@ export async function downloadAtTerminal<Q extends DestinationQuestion>(
      * the value itself, and on Windows its `<` and `|` would leave no line to print at all. A command whose own words
      * cannot be printed safely is still shown as its words in JSON, with these after them.
      */
-    const maker = handoffsFor(options.core, {
-      platform: options.output.platform,
-      approveCommand: options.approveCommand,
-    });
-    const { command, rerun } = options;
-    const runWith = (say: (command: string) => string, ...words: string[]) => {
-      if (rerun !== undefined && options.core.handoffs !== undefined) {
-        return handoffSentenceToFill(maker.own(rerun, { downloads: true }), words, say);
-      }
-      if (command === undefined) return handoffSentenceToFill(maker.own(rerun ?? []), words, say);
-      if (typeof command === 'string') {
-        return say(`\`${insertWordsBeforeSentinel(command.split(' '), ...words).join(' ')}\``);
-      }
-      const line = lineWithWordsToFill(command, ...words);
-      return say(line === null ? inlineCommand(withWords(command, ...words)) : `\`${line}\``);
-    };
+    const maker = requireHandoffs(options.core, options.output.platform);
+    const runWith = (say: (command: string) => string, ...words: string[]) =>
+      handoffSentenceToFill(maker.own(options.rerun, { downloads: true }), words, say);
     const approve = maker.own(['approve', question.choiceId]);
     throw new CommsError('APPROVAL_PENDING', 'nothing was saved: where to save the files is the person’s to say', {
       hint:
@@ -1236,8 +1190,6 @@ export interface AnswerAtTerminalOptions {
   color: boolean;
   /** The shell syntax used if the stored record is another kind of approval. */
   platform?: NodeJS.Platform | undefined;
-  /** The channel's `approve`, for the words the question is shown with: `agent-gmail approve`. */
-  approveCommand: string;
   streams?: Streams | undefined;
 }
 

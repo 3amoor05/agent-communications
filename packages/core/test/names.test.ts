@@ -85,7 +85,9 @@ function v2(parts: Partial<ConfigV2> = {}): ConfigV2 {
 function storeWith(config: unknown): ConfigStore {
   const dir = tempDir('comms-names-');
   writeFileSync(join(dir, 'config.json'), `${JSON.stringify(config, null, 2)}\n`);
-  return new ConfigStore(dir);
+  // Core's own handoffs, as `openCore({ caller })` hands the store: a refusal names the migration's command.
+  const paths = { configDir: dir, stateDir: dir, dataDir: dir, secretsDir: dir, downloadsDir: dir };
+  return new ConfigStore(dir, { handoffs: coreHandoffs(paths) });
 }
 
 /** The row, or a failed assertion — in place of a non-null assertion the linter rightly forbids. */
@@ -807,14 +809,21 @@ test('a refused migration names the migration again: core’s command, located f
     const dir = tempDir('comms-names-');
     writeFileSync(join(dir, 'config.json'), `${JSON.stringify(machine(), null, 2)}\n`);
     const paths = { configDir: dir, stateDir: dir, dataDir: dir, secretsDir: dir, downloadsDir: dir };
-    // Core's own, as `openCore({ caller })` gives the store; without them, the bridge's bare command.
+    // Core's own, as `openCore({ caller })` gives the store; without them there is no command to name at all, and
+    // asking for one is the programming error `requiredHandoffs` throws — never a bare name.
     const store = new ConfigStore(dir, located ? { handoffs: coreHandoffs(paths) } : {});
     const plan = ready(planNamesMigration(await store.load()));
     await store.update((config) => renameEntry(config, 'inbox', 'cue', 'cue-old'));
-    const again = located ? coreInline(paths, ['names', 'migrate']) : '`agentcomms names migrate`';
     await assert.rejects(migrateNames(store, plan), (error: unknown) => {
+      if (!located) {
+        assert.ok(error instanceof TypeError && /opened without its caller/.test(error.message), String(error));
+        return true;
+      }
       assert.ok(error instanceof CommsError && error.code === 'TRANSIENT', String(error));
-      assert.equal(error.hint, `Run ${again} again to see the mapping for the configuration as it is now.`);
+      assert.equal(
+        error.hint,
+        `Run ${coreInline(paths, ['names', 'migrate'])} again to see the mapping for the configuration as it is now.`,
+      );
       return true;
     });
   }

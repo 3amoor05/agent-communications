@@ -21,7 +21,6 @@ import {
   isPlainFileName,
   markFromInternet,
   newBoundary,
-  requireChannelManifest,
   type SaveChoice,
   savedName,
   saveFailure,
@@ -98,14 +97,6 @@ function capsOf(deps: FileDownloadDeps): Caps {
     wanted !== undefined && Number.isSafeInteger(wanted) && wanted > 0 ? Math.min(wanted, most) : most;
   return { perFile: lower(deps.caps?.perFile, MAX_FILE_BYTES), perRun: lower(deps.caps?.perRun, MAX_RUN_BYTES) };
 }
-
-/**
- * This package's `approve`, as its manifest names it, for core's deprecated bridge only: core reads it when it was
- * opened without this package's caller, which this package never does — the command a question names is located from
- * `core.handoffs` (CUE-403). The field goes with the bridge (task 15).
- */
-// Slack's manifest declares it.
-export const BRIDGE_APPROVE_COMMAND = requireChannelManifest('slack').approve as string;
 
 /** How many files one run saves at most: `--max-files` on the command line, `maxFiles` in a tool call. */
 export const MAX_FILES: NumberOption = { flag: '--max-files', arg: 'maxFiles', min: 1, max: 200 };
@@ -794,7 +785,6 @@ export async function downloadFiles(
         flags: [...(described.files[index]?.riskFlags ?? [])],
       })),
       policy,
-      approveCommand: BRIDGE_APPROVE_COMMAND,
       surface: context.surface,
       tool: 'slack_file_download',
       env: context.env,
@@ -829,7 +819,6 @@ export async function downloadFiles(
     request: binding,
     folders,
     policy,
-    approveCommand: BRIDGE_APPROVE_COMMAND,
     surface: context.surface,
     env: context.env,
     signal,

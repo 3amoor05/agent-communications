@@ -1,6 +1,6 @@
 import { type ClientConfig, type Config, type StoreKind, secretsStoreFor } from './config.ts';
 import { CommsError } from './errors.ts';
-import type { HandoffMaker } from './handoff-text.ts';
+import type { CliHandoffs } from './handoff-text.ts';
 import { keepAndReport, writeOutcome } from './reconcile.ts';
 import { type KeyringModule, probeKeychain, type SecretStore } from './secrets.ts';
 
@@ -77,22 +77,17 @@ export async function chooseSecretStore(
   requested: StoreKind | undefined,
   options: {
     keyring?: KeyringModule | null | undefined;
-    platform?: NodeJS.Platform | undefined;
     /** The caller's handoffs, for the command a refusal names (CUE-403); they carry their platform. */
-    handoffs?: HandoffMaker | undefined;
-  } = {},
+    handoffs: CliHandoffs;
+  },
 ): Promise<{ store: StoreKind; choosing: boolean }> {
-  const chosen: { store: StoreKind; choosing: boolean } = secretsStoreFor(
-    config,
-    requested,
-    options.handoffs ?? options.platform,
-  );
+  const chosen: { store: StoreKind; choosing: boolean } = secretsStoreFor(config, requested, options.handoffs);
   if (!chosen.choosing || chosen.store !== 'keychain') return chosen;
   // `null` is a machine without the module, answered here: `probeKeychain` loads the real one when handed none.
   const probe =
     options.keyring === null
       ? { ok: false, reason: 'the optional @napi-rs/keyring package is not installed for this platform' }
-      : await probeKeychain(options.keyring);
+      : await probeKeychain(options.keyring ?? null, 'probe', options.handoffs);
   if (!probe.ok) {
     throw new CommsError('SECRET_STORE_UNAVAILABLE', `the system keychain cannot be used here: ${probe.reason}`, {
       hint: 'Run the command again with `--store file` to keep secrets in owner-only files in the config directory.',

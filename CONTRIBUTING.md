@@ -166,14 +166,16 @@ not locatable here. `use` pins folders: the four every command opens by default 
 - In a sentence: `handoffSentence(handoff, (command) => \`Run ${command} to …\`)`. With no command, the whole sentence
   is the not-locatable one — never the template with something else in the command's place.
 - As a value of its own — a list item, a `fix`, a `command` field: `handoffText(handoff)`.
-- With words the agent fills in (`<folder>`): `handoffSentenceToFill(handoff, ['<folder>'], say)`.
+- With words the agent fills in (`<folder>`): `handoffSentenceToFill(handoff, ['<folder>'], say)`, or as a value of its
+  own, `handoffTextToFill(handoff, ['<folder>'])`.
 - Several that could each do it (each sending channel's `approve`): `handoffChoices(handoffs, none)`.
 - Where something else does it with no command — a tool from a chat — say so for when there is none:
   `handoffSentence(handoff, say, { instead: 'Call gmail_inbox_reauth from a chat.' })` says that, then why.
 
 **3. A command run again with its approval.** Give `gatedChangeAtTerminal` and `downloadAtTerminal` the words of the
-command after its program as `rerun`; the approval goes in before any `--`. `command` and `approveCommand` are the
-deprecated bridge for a package without its caller, and are ignored once core has it.
+command after its program as `rerun`; the approval goes in before any `--`. There is no other way to name it: the
+bare-name bridge for a package without its caller, and every `command` and `approveCommand` input it served, are gone
+(CUE-403 task 15).
 
 **4. On every surface it is the same text.** The CLI prints the rendered sentence or value; `--json` envelopes and MCP
 `structuredContent` carry the same strings in the fields they always had — a command's line, or its words as JSON with
@@ -181,12 +183,12 @@ what to do when no Windows line is safe, or the not-locatable sentence. Do not p
 result yet: typing those fields is CUE-403 task 15.
 
 **5. Core functions that print for you take your handoffs.** Where one took the `platform` its hint is quoted for, it
-takes a `HandoffsOrPlatform`: pass your handoffs, already `.on(context.platform)` — they carry their platform
-(`secretsStoreFor`, `profileSourcePath`, `requireLiveOrganisationGeneration`, `resolveProfileSlackTarget`,
-`learnProfileSlackAppId`, `organisationDrift`, `changePolicyReport`). An options bag takes `handoffs`
-(`chooseSecretStore`, `checkAttachable`'s `AttachPolicy`). The configuration store, the secret stores and the approval
-store get `core.handoffs` from `openCore` themselves. A bare platform, or nothing, still prints the bridge's bare
-command until task 15 removes it.
+takes your `CliHandoffs`, already `.on(context.platform)` — they carry their platform (`secretsStoreFor`,
+`profileSourcePath`, `requireLiveOrganisationGeneration`, `resolveProfileSlackTarget`, `learnProfileSlackAppId`,
+`organisationDrift`, `changePolicyReport`, `probeKeychain`). An options bag takes `handoffs` (`chooseSecretStore`,
+`checkAttachable`'s `AttachPolicy`). The configuration store, the secret stores and the approval store get
+`core.handoffs` from `openCore` themselves. A core opened without its caller has none, and there is no bare name to
+print in their place: a refusal that has to name a command is then the programming error `requireHandoffs` throws.
 
 **6. Never put a command where an approval binds it.** A change's `summary`, `effects` and `preview` are digested: the
 process that claims an approval must make the same bytes as the one that prepared it, and a located command is each
@@ -196,7 +198,8 @@ process's own. Commands go in `hint`, `next`, a note or a result field, which ar
 result. `registered()` reads every MCP client's configuration, so read it where the command is needed — an error path,
 a report that names one — not on every call.
 
-Before:
+Before — the 0.13.0 way, which no longer compiles: `shellCommand` is not exported, and `commandText` takes only a located
+or an external command:
 
 ```ts
 fix: commandText(shellCommand(['agent-gmail', 'inbox', 'reauth', alias], context.platform)),

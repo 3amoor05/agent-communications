@@ -1,7 +1,7 @@
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { shellCommand } from './cli-runtime.ts';
+import { quoteCommand } from './command-line.ts';
 import { EXECUTABLE_EXTENSION, SUITE_COMMANDS, suitePackageRootOf } from './package-roots.ts';
 
 /**
@@ -45,7 +45,7 @@ class ExternalCommand {
     if (gate !== GATE) throw new TypeError('an external command is made by externalCommand, and only there');
     this.#reason = reason;
     this.words = Object.freeze([...words]);
-    this.line = shellCommand(this.words, platform).line;
+    this.line = quoteCommand(this.words, platform).line;
     this.platform = platform;
     Object.freeze(this);
   }

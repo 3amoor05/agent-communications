@@ -1,7 +1,7 @@
 import { approvalKind } from '../approvals.ts';
 import type { GatedChange } from '../change-flow.ts';
 import { type ChangeRequest, type ChangeSurface, revokeChange } from '../changes.ts';
-import { inlineCommand, type ShellCommand } from '../cli-runtime.ts';
+import { inlineCommand } from '../cli-runtime.ts';
 import {
   type ClientConfig,
   type Config,
@@ -15,13 +15,12 @@ import {
 import type { Core } from '../core.ts';
 import { CommsError, toCommsError } from '../errors.ts';
 import {
+  type CliHandoffs,
   type Handoff,
-  type HandoffMaker,
   handoffSentence,
   handoffSentenceToFill,
-  handoffsFor,
   isCommand,
-  registeredFor,
+  requireHandoffs,
 } from '../handoffs.ts';
 import { withCredentialsLock } from '../lock.ts';
 import { organisationProblem } from '../name-grammar.ts';
@@ -204,7 +203,7 @@ function organisationArgument(value: unknown): string {
   return word;
 }
 
-function requireRecord(config: Config, organisation: string, handoffs: HandoffMaker): OrganisationRecord {
+function requireRecord(config: Config, organisation: string, handoffs: CliHandoffs): OrganisationRecord {
   const record = recordOf(config, organisation);
   if (!record) {
     const known = Object.keys(organisationsOf(config));
@@ -231,16 +230,16 @@ function requireRecord(config: Config, organisation: string, handoffs: HandoffMa
  * another product, and done once.
  */
 interface OrgHandoffs {
-  readonly handoffs: HandoffMaker;
+  readonly handoffs: CliHandoffs;
   /** The same handoffs, able to find another product's command. */
-  crossProduct(): Promise<HandoffMaker>;
+  crossProduct(): Promise<CliHandoffs>;
 }
 
 /**
  * How to put things right once the store can be written to, as the clause that ends the secret writer's sentence:
  * `org update`, located — or the tool, with why there is no command in brackets after it.
  */
-function restoreClause(update: Handoff | ShellCommand): string {
+function restoreClause(update: Handoff): string {
   return isCommand(update)
     ? `run ${inlineCommand(update)} once the store can be written to.`
     : `call comms_org_update from a chat once the store can be written to (${update.message.replace(/\.$/, '')}).`;
@@ -251,18 +250,18 @@ async function slackFor(
   commands: OrgHandoffs,
   accounts: readonly string[],
   words: readonly string[],
-): Promise<(Handoff | ShellCommand)[]> {
+): Promise<Handoff[]> {
   const handoffs = await commands.crossProduct();
   return accounts.map((name) => handoffs.of('slack', [...words, name]));
 }
 
 function orgHandoffs(core: Core, platform: NodeJS.Platform): OrgHandoffs {
-  const handoffs = handoffsFor(core, { platform });
-  let registered: Promise<HandoffMaker> | undefined;
+  const handoffs = requireHandoffs(core, platform);
+  let registered: Promise<CliHandoffs> | undefined;
   return {
     handoffs,
     crossProduct: () => {
-      registered ??= registeredFor(handoffs);
+      registered ??= handoffs.registered();
       return registered;
     },
   };
@@ -971,7 +970,6 @@ function profileChange(
     if (profilePlan.secret) {
       const chosen = await chooseSecretStore(config, spec.store, {
         keyring: options.keyring,
-        platform: options.platform,
         handoffs: commands.handoffs,
       });
       if (chosen.choosing) profilePlan.needsApproval = true;
@@ -1263,12 +1261,7 @@ async function applyProfile(
 export function orgAddChange(core: Core, request: OrgAddRequest, options: OrgOptions): GatedChange<OrgChangeResult> {
   // Checked before anything is read, so a word that is no store is refused before any approval is prepared.
   const store = storeWord(request.store);
-  const path = profileSourcePath(
-    request.file,
-    options.env,
-    options.cwd,
-    handoffsFor(core, { platform: options.platform }),
-  );
+  const path = profileSourcePath(request.file, options.env, options.cwd, requireHandoffs(core, options.platform));
   if (request.loadedProfile !== undefined && request.loadedProfile.path !== path) {
     throw new CommsError('UNEXPECTED', 'the loaded organisation profile does not match the file being added');
   }
@@ -1300,13 +1293,13 @@ export function orgUpdateChange(
   const given =
     request.source === undefined
       ? undefined
-      : profileSourcePath(request.source, options.env, options.cwd, handoffsFor(core, { platform: options.platform }));
+      : profileSourcePath(request.source, options.env, options.cwd, requireHandoffs(core, options.platform));
   return profileChange(core, options, {
     mode: 'update',
     organisation,
     path: (config) => {
       if (given !== undefined) return given;
-      const record = requireRecord(config, organisation, handoffsFor(core, { platform: options.platform }));
+      const record = requireRecord(config, organisation, requireHandoffs(core, options.platform));
       if (record.source.kind !== 'file') {
         throw new CommsError('CONFIG', `"${organisation}" was added from a source this release cannot read`, {
           hint: 'Update agent-communications, or give the profile’s file with --source <file>.',
@@ -1544,15 +1537,15 @@ async function viewHandoffs(
   commands: OrgHandoffs,
   config: Config,
   organisations: readonly string[],
-): Promise<HandoffMaker> {
+): Promise<CliHandoffs> {
   const drifted = organisations.some(
-    (organisation) => organisationDrift(config, organisation, commands.handoffs.platform).length > 0,
+    (organisation) => organisationDrift(config, organisation, commands.handoffs).length > 0,
   );
   return drifted ? commands.crossProduct() : commands.handoffs;
 }
 
 /** A record as it is shown: every string that came from a profile neutralised and on one line. */
-export function viewOf(config: Config, organisation: string, handoffs: HandoffMaker): OrganisationView {
+export function viewOf(config: Config, organisation: string, handoffs: CliHandoffs): OrganisationView {
   const record = requireRecord(config, organisation, handoffs);
   const active = activeGeneration(record);
   const app = (role: 'read' | 'send'): SlackAppView | null => {

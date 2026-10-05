@@ -161,7 +161,7 @@ interface Envelope<T> {
 }
 
 /**
- * The quote removal and word splitting a POSIX shell applies to the lines `shellCommand` emits.
+ * The quote removal and word splitting a POSIX shell applies to the lines a printed command emits.
  *
  * It deliberately does not implement expansions: every value-bearing word the printer emits is quoted so a shell
  * treats it as data. What matters here is that single quotes, the `'<close>\'<open>'` escape for a quote, double

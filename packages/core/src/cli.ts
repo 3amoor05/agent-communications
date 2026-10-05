@@ -18,7 +18,6 @@ import {
   CORE_CALLER,
   cliHandoffs,
   type Handoff,
-  type HandoffMaker,
   handoffSentence,
   handoffSentenceToFill,
   handoffText,
@@ -873,7 +872,7 @@ function renderAttachEntries(entries: readonly AttachEntry[]): string[] {
 }
 
 /** Exported for its test, which asks for Windows' quoting by name. */
-export function renderAttach(report: AttachReport, handoffs: HandoffMaker): string {
+export function renderAttach(report: AttachReport, handoffs: CliHandoffs): string {
   return [
     'Files may be attached from under:',
     ...renderAttachEntries(report.roots),
@@ -884,7 +883,7 @@ export function renderAttach(report: AttachReport, handoffs: HandoffMaker): stri
           '',
           'Listed, but allowing nothing — they do not say which drive or folder they are on. To take one out, run the',
           'command shown for it:',
-          // The whole command, quoted for the shell it is pasted into (`shellCommand`): the entry as written, a space
+          // The whole command, quoted for the shell it is pasted into (`quoteCommand`): the entry as written, a space
           // at either end or nothing at all, and never a `$HOME` or a `$(…)` the shell would expand or run. On Windows a
           // command with an entry no quoting brings through — a `%USERPROFILE%`, nothing at all — is shown as words.
           ...report.ignored.map((root) => `  ${handoffText(handoffs.own(['attach', 'roots', 'remove', root]))}`),
@@ -911,7 +910,7 @@ export function renderAttach(report: AttachReport, handoffs: HandoffMaker): stri
   ].join('\n');
 }
 
-function renderAttachChange(result: AttachChangeResult, handoffs: HandoffMaker): string {
+function renderAttachChange(result: AttachChangeResult, handoffs: CliHandoffs): string {
   const done = result.changed ? 'Done.' : 'Nothing was changed.';
   return [result.note ?? done, '', renderAttach(result, handoffs)].join('\n');
 }
@@ -925,7 +924,7 @@ function rerunPath(path: string): string | null {
   return shownPath(path) === path ? path : null;
 }
 
-function hiddenPathApprovalHint(prepared: PreparedChange, handoffs: HandoffMaker): string {
+function hiddenPathApprovalHint(prepared: PreparedChange, handoffs: CliHandoffs): string {
   // The approval option to add, as words: the command it goes on is the one the person just ran, which is not shown.
   const carrying = `\`--approval ${prepared.approvalId}\``;
   const hidden = ' Its file path is not repeated here because it contains text this output neutralises.';
@@ -978,7 +977,7 @@ function renderOrg(view: OrganisationView): string {
   return lines.join('\n');
 }
 
-function renderOrgList(views: readonly OrganisationView[], handoffs: HandoffMaker): string {
+function renderOrgList(views: readonly OrganisationView[], handoffs: CliHandoffs): string {
   if (views.length === 0) {
     return handoffSentence(
       handoffs.own(['org', 'add', '--help']),

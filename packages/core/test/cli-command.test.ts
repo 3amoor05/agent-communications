@@ -23,8 +23,9 @@ import {
   type NodeRuntime,
   type PrintedCommand,
 } from '../src/cli-command.ts';
-import { commandAsJson, commandText, inlineCommand, shellCommand } from '../src/cli-runtime.ts';
+import { commandText, inlineCommand } from '../src/cli-runtime.ts';
 import { type ExternalCommand, externalCommand } from '../src/command-brands.ts';
+import { commandAsJson, inlineQuoted, quoteCommand, quotedText } from '../src/command-line.ts';
 import type { RegisteredServer } from '../src/mcp-clients.ts';
 import { findUngatedGmailServers, otherSlackServerRemoval } from '../src/other-servers.ts';
 import type { PathName, ResolvedPaths } from '../src/paths.ts';
@@ -150,7 +151,7 @@ test('own locator: a managed runtime, an npx cache, a global prefix and a built 
       assert.deepEqual(command.words, words, `${shape} on ${platform}`);
       assert.equal(command.platform, platform);
       // Rendered by the one quoting contract every printed command uses.
-      assert.equal(command.line, shellCommand(words, platform).line, `${shape} on ${platform}`);
+      assert.equal(command.line, quoteCommand(words, platform).line, `${shape} on ${platform}`);
       assert.equal(command.entry, entry);
       assert.ok(result.ok && result.basis.direction === 'own' && result.basis.entryKind === 'bin', shape);
       assert.ok(result.ok && result.basis.callerRoot === root && result.basis.targetRoot === root, shape);
@@ -169,7 +170,7 @@ test("own locator: a checkout run from source — the local launcher's shape —
     const command = located(result);
     const words = [process.execPath, STRIP, join(root, 'src', 'cli.ts'), ...PINS, 'approve', 'abc123'];
     assert.deepEqual(command.words, words);
-    assert.equal(command.line, shellCommand(words, platform).line);
+    assert.equal(command.line, quoteCommand(words, platform).line);
     assert.ok(result.ok && result.basis.callerSource && result.basis.entryKind === 'source');
   }
 });
@@ -1377,12 +1378,12 @@ test('a located and an external command render through the same contract as ever
   const printed = located(
     locateCliCommand(request(moduleUrl(root, 'dist', 'cli.mjs'), 'gmail', 'gmail', { platform: 'darwin' }), NODE),
   );
-  assert.equal(inlineCommand(printed), `\`${shellCommand(printed.words, 'darwin').line}\``);
-  assert.equal(commandText(printed), shellCommand(printed.words, 'darwin').line);
+  assert.equal(inlineCommand(printed), `\`${quoteCommand(printed.words, 'darwin').line}\``);
+  assert.equal(commandText(printed), quoteCommand(printed.words, 'darwin').line);
   const windows: ExternalCommand = externalCommand(['claude', 'mcp', 'remove', '$x&whoami&'], 'removal', 'win32');
   assert.equal(windows.line, null);
-  assert.equal(commandText(windows), commandText(shellCommand(windows.words, 'win32')));
-  assert.equal(inlineCommand(windows), inlineCommand(shellCommand(windows.words, 'win32')));
+  assert.equal(commandText(windows), quotedText(quoteCommand(windows.words, 'win32')));
+  assert.equal(inlineCommand(windows), inlineQuoted(quoteCommand(windows.words, 'win32')));
   assert.match(
     commandText(windows),
     new RegExp(`^${escapeRegExp(commandAsJson(windows.words))} \\(the command's words`),
@@ -1488,7 +1489,7 @@ test('the reviewed external commands are accepted: chmod 700, claude and codex m
   for (const [words, platform] of accepted) {
     const command = externalCommand(words, 'a reviewed external program', platform);
     assert.deepEqual(command.words, words);
-    assert.equal(command.line, shellCommand(words, platform).line);
+    assert.equal(command.line, quoteCommand(words, platform).line);
     assert.equal(command.reason, 'a reviewed external program');
     assert.ok(Object.isFrozen(command) && Object.isFrozen(command.words));
   }

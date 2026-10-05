@@ -14,7 +14,6 @@ import {
 } from '../src/channel-servers.ts';
 import {
   accountNoun,
-  channelApproveCommands,
   connectMailboxWords,
   hasNarrowing,
   listed,
@@ -24,6 +23,7 @@ import {
 import { type Config, effectiveAccountSendPolicy, parseConfig } from '../src/config.ts';
 import { type Core, openCore } from '../src/core.ts';
 import { CommsError } from '../src/errors.ts';
+import { CORE_CALLER } from '../src/handoffs.ts';
 import { type McpProduct, preflightInstall } from '../src/mcp-install.ts';
 import { type ServerInstallRequest, serverInstallChange } from '../src/operations/servers.ts';
 import { tempDir } from './helpers/temp.ts';
@@ -86,7 +86,7 @@ function machine(
     npm_config_offline: 'true',
     AGENT_COMMS_UPDATE_CHECK: 'off', // no test asks the real npm registry, or stops for a release
   };
-  return { home, env, core: openCore({ env }) };
+  return { home, env, core: openCore({ env, caller: CORE_CALLER }) };
 }
 
 const refused = (code: string, pattern: RegExp) => (error: unknown) => {
@@ -136,15 +136,6 @@ test('what the core says about a channel is read from its manifest', () => {
   assert.equal(accountNoun('slack'), 'workspace');
   assert.equal(accountNoun('whatsapp'), 'account');
   assert.equal(accountNoun('discord'), 'account');
-  // Every channel's approve command approves a change; only those whose accounts can send approve a send.
-  assert.equal(
-    channelApproveCommands(),
-    '`agent-gmail approve`, `agent-resend approve`, `agent-slack approve` or `agent-whatsapp approve`',
-  );
-  assert.equal(
-    channelApproveCommands({ sending: true }),
-    '`agent-gmail approve`, `agent-resend approve` or `agent-slack approve`',
-  );
   assert.equal(connectMailboxWords(), "Gmail's inbox add", 'in words: core has not got Gmail to name its command');
   assert.equal(listed([], 'or'), '');
   assert.equal(listed(['a'], 'or'), 'a');

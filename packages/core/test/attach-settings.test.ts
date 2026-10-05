@@ -36,7 +36,7 @@ interface Machine {
   core: Core;
 }
 
-function machine(defaults?: Record<string, unknown>, options: { located?: boolean } = {}): Machine {
+function machine(defaults?: Record<string, unknown>): Machine {
   const home = tempDir('comms-attach-');
   const configDir = join(home, 'config');
   mkdirSync(configDir);
@@ -53,8 +53,8 @@ function machine(defaults?: Record<string, unknown>, options: { located?: boolea
     AGENT_COMMS_CLIENT_CLI_DIRS: '',
     AGENT_COMMS_UPDATE_CHECK: 'off',
   };
-  // `located`: opened as core's own server opens it, so what it names is located (CUE-403).
-  return { home, configDir, env, core: openCore(options.located ? { env, caller: CORE_CALLER } : { env }) };
+  // Opened as core's own CLI and server open it, so what it names is located (CUE-403).
+  return { home, configDir, env, core: openCore({ env, caller: CORE_CALLER }) };
 }
 
 function cli(m: Machine, args: string[], extra: Record<string, string> = {}) {
@@ -96,15 +96,18 @@ const NOT_ON_WINDOWS = { skip: process.platform === 'win32' && 'needs a POSIX sh
 const defaultsOf = async (m: Machine) => (await m.core.config.load()).defaults;
 
 test('on Windows a folder is named with its drive or share: a path with no drive would be whichever drive is current', () => {
+  const pins = { configDir: '/c', stateDir: '/s', dataDir: '/d', secretsDir: '/k', downloadsDir: '/w' };
+  const windows = coreHandoffs(pins, 'win32');
   for (const ok of ['C:\\outgoing', 'd:/outgoing', '\\\\server\\share\\outgoing', '~\\outgoing', '~/outgoing', '~']) {
-    assert.equal(checkedPath(ok, 'win32'), ok, ok);
+    assert.equal(checkedPath(ok, 'win32', windows), ok, ok);
   }
   for (const bad of ['\\outgoing', '/outgoing', 'outgoing', 'C:outgoing', '\\\\?\\C:\\x', '\\\\.\\pipe\\x']) {
-    assert.throws(() => checkedPath(bad, 'win32'), /does not name its drive|relative path/, bad);
+    assert.throws(() => checkedPath(bad, 'win32', windows), /does not name its drive|relative path/, bad);
   }
   // Elsewhere a path from the root is absolute, as it always was.
-  assert.equal(checkedPath('/srv/outgoing', 'linux'), '/srv/outgoing');
-  assert.throws(() => checkedPath('outgoing', 'linux'), /relative path/);
+  const linux = coreHandoffs(pins, 'linux');
+  assert.equal(checkedPath('/srv/outgoing', 'linux', linux), '/srv/outgoing');
+  assert.throws(() => checkedPath('outgoing', 'linux', linux), /relative path/);
 });
 
 test('the report lists the folders, the person’s own deny entries and the built-in list, the same from both surfaces', async () => {
@@ -248,7 +251,7 @@ test('a deny entry is added at once, and removing one is approved first', async 
 });
 
 test('what the attachment lists name to run is core’s own command, located — a note, a refusal, an example (7d-core)', async () => {
-  const m = machine({ attachRoots: ['~/outgoing'], attachDeny: [] }, { located: true });
+  const m = machine({ attachRoots: ['~/outgoing'], attachDeny: [] });
   const lists = coreInline(m.core.paths, ['attach']);
   const { ok, error, close } = await connect(m);
   try {

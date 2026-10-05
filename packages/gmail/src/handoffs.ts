@@ -1,14 +1,4 @@
-import {
-  type CliHandoffs,
-  commandText,
-  type Handoff,
-  handoffSentence,
-  inlineCommand,
-  insertWordsBeforeSentinel,
-  isCommand,
-  lineWithWordsToFill,
-  shellCommand,
-} from '@agentcomms/core';
+import { type CliHandoffs, type Handoff, handoffSentence, inlineCommand, isCommand } from '@agentcomms/core';
 
 /*
  * Sentences several of Gmail's refusals share, each naming a command of this installation located from Gmail's caller
@@ -46,17 +36,4 @@ export function orgUpdateHint(handoffs: CliHandoffs, organisation: string, then:
  */
 export function handoffClause(handoff: Handoff, say: (command: string) => string, instead: string): string {
   return isCommand(handoff) ? say(inlineCommand(handoff)) : `${instead} (${handoff.message.replace(/\.$/, '')})`;
-}
-
-/**
- * As core's `handoffText` — a command as a value of its own, a doctor's `fix` — with words the agent fills in, such as
- * `<client_secret.json>`, printed as written before any `--`. With no line, its words as JSON, these among them, saying
- * it has to be typed; with no command, why there is none here.
- */
-export function handoffTextToFill(handoff: Handoff, toFill: readonly string[]): string {
-  if (!isCommand(handoff)) return handoff.message;
-  return (
-    lineWithWordsToFill(handoff, ...toFill) ??
-    commandText(shellCommand(insertWordsBeforeSentinel(handoff.words, ...toFill), handoff.platform))
-  );
 }

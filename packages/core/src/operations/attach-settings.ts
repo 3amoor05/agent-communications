@@ -5,7 +5,7 @@ import type { ChangeSurface } from '../changes.ts';
 import { type Config, comparablePath, isInsideDirectory } from '../config.ts';
 import type { Core } from '../core.ts';
 import { CommsError } from '../errors.ts';
-import { type HandoffMaker, handoffSentence, handoffSentenceToFill, handoffsFor } from '../handoffs.ts';
+import { type CliHandoffs, handoffSentence, handoffSentenceToFill, requireHandoffs } from '../handoffs.ts';
 import { defaultAttachDeny, namesItsPlace } from '../jail.ts';
 import { expandHome, homeDirectory } from '../paths.ts';
 
@@ -96,7 +96,7 @@ export function attachChange(
   }
   const removing = change.kind === 'rootsRemove' || change.kind === 'denyRemove';
   // Core's own commands, located from whatever is printing (CUE-403), for what a refusal or a note names.
-  const handoffs = handoffsFor(core);
+  const handoffs = requireHandoffs(core);
   const path = removing ? listedPath(change.path, handoffs) : checkedPath(change.path, process.platform, handoffs);
   const { kind } = change;
   const home = homeDirectory(env);
@@ -166,7 +166,7 @@ const AUDIT_OPERATIONS: Readonly<Record<AttachChangeKind, string>> = {
 };
 
 /** "`attach` lists them": core's command that shows the lists, located — or the tool that shows them from a chat. */
-function listsThem(handoffs: HandoffMaker, what: string): string {
+function listsThem(handoffs: CliHandoffs, what: string): string {
   return handoffSentence(handoffs.core(['attach']), (command) => `${command} lists ${what}.`, {
     instead: `comms_attach, from a chat, lists ${what}.`,
   });
@@ -177,14 +177,9 @@ function listsThem(handoffs: HandoffMaker, what: string): string {
  * path means whatever folder the command or the server happened to start in, which is not something a person reads
  * in a preview and knows.
  *
- * `platform` is the system the path is read on; `handoffs` make the command a refusal gives as its example (CUE-403),
- * the bridge's bare one when left out.
+ * `platform` is the system the path is read on; `handoffs` make the command a refusal gives as its example (CUE-403).
  */
-export function checkedPath(
-  path: unknown,
-  platform: NodeJS.Platform = process.platform,
-  handoffs: HandoffMaker = handoffsFor(undefined, { platform }),
-): string {
+export function checkedPath(path: unknown, platform: NodeJS.Platform, handoffs: CliHandoffs): string {
   // Not trimmed: a space at the end is part of a folder's name on macOS and Linux, and `/outgoing ` is not `/outgoing`.
   const value = typeof path === 'string' ? path : '';
   if (value.trim() === '') {
@@ -217,7 +212,7 @@ export function checkedPath(
  * place — `\outgoing` on Windows — and the one way to be rid of it must not be to edit the file again. An entry that is
  * not listed is refused when the change is planned.
  */
-function listedPath(path: unknown, handoffs: HandoffMaker): string {
+function listedPath(path: unknown, handoffs: CliHandoffs): string {
   // Not trimmed: an entry written by hand may begin or end with a space, or be empty, and it is taken out as it is.
   if (typeof path !== 'string') {
     throw new CommsError('USAGE', 'name the folder or path to take out, as it is listed', {
@@ -284,7 +279,7 @@ async function planChange(
   config: Config,
   kind: AttachChangeKind,
   path: string,
-  context: { core: Core; env: NodeJS.ProcessEnv; home: string; handoffs: HandoffMaker },
+  context: { core: Core; env: NodeJS.ProcessEnv; home: string; handoffs: CliHandoffs },
 ): Promise<{ changes: boolean; effects: string[]; note: string | null }> {
   const { home, handoffs } = context;
   const roots = config.defaults.attachRoots;

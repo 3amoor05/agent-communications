@@ -2,9 +2,9 @@ import { chmod, readFile, rename, stat } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import {
   ACCOUNT_ID_PATTERN,
+  type CliHandoffs,
   type Config,
   type Core,
-  type HandoffMaker,
   handoffSentence,
   nameAvailable,
   nameShapeProblem,
@@ -75,7 +75,7 @@ export interface SpikeMigration {
 export interface MigrationContext {
   core: Core;
   /** What the log names to run: core's `names migrate`, located. */
-  handoffs: HandoffMaker;
+  handoffs: CliHandoffs;
   lists: ChatListStore;
   env: NodeJS.ProcessEnv;
   now: () => Date;

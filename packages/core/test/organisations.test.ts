@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
-import { inlineCommand, shellCommand } from '../src/cli-runtime.ts';
 import {
   type ClientConfig,
   type ConfigV2,
@@ -39,7 +38,18 @@ import {
   resolveProfileSlackTarget,
   shownText,
 } from '../src/organisations.ts';
+import { coreHandoffs, coreInline } from './helpers/handoffs.ts';
 import { tempDir } from './helpers/temp.ts';
+
+/** Core's own handoffs, for the commands a refusal names: core is the printing package here. */
+const PINS = {
+  configDir: resolve('/pins/config'),
+  stateDir: resolve('/pins/state'),
+  dataDir: resolve('/pins/data'),
+  secretsDir: resolve('/pins/secrets'),
+  downloadsDir: resolve('/pins/downloads'),
+};
+const CORE = coreHandoffs(PINS, 'darwin');
 
 /*
  * An organisation profile as a document (design 2026-10-02 §D1–§D3): the organisation word, shared with the name
@@ -176,7 +186,7 @@ test('only explicit provenance makes a Slack account one of an organisation’s'
 });
 
 test('a profile Slack role resolves to one complete, validated target', () => {
-  const target = resolveProfileSlackTarget(configWithSlackRecord(), 'acme', 'send');
+  const target = resolveProfileSlackTarget(configWithSlackRecord(), 'acme', 'send', CORE);
   assert.deepEqual(target, {
     organisation: 'acme',
     role: 'send',
@@ -190,29 +200,29 @@ test('a profile Slack role resolves to one complete, validated target', () => {
   });
 
   const missingOrganisation = configWithSlackRecord();
-  assert.throws(() => resolveProfileSlackTarget(missingOrganisation, 'other', 'read'), /organisation.*other/i);
+  assert.throws(() => resolveProfileSlackTarget(missingOrganisation, 'other', 'read', CORE), /organisation.*other/i);
   const missingSlack = configWithSlackRecord();
   delete missingSlack.organisations?.acme?.slack;
-  assert.throws(() => resolveProfileSlackTarget(missingSlack, 'acme', 'read'), /Slack/i);
+  assert.throws(() => resolveProfileSlackTarget(missingSlack, 'acme', 'read', CORE), /Slack/i);
   const missingRole = configWithSlackRecord();
   delete missingRole.organisations?.acme?.slack?.apps.send;
-  assert.throws(() => resolveProfileSlackTarget(missingRole, 'acme', 'send'), /send app/i);
+  assert.throws(() => resolveProfileSlackTarget(missingRole, 'acme', 'send', CORE), /send app/i);
   const invalid = configWithSlackRecord();
   if (invalid.organisations?.acme?.slack) invalid.organisations.acme.slack.workspace = 'wrong';
   assert.throws(
-    () => resolveProfileSlackTarget(invalid, 'acme', 'read'),
-    (error: unknown) => error instanceof CommsError && /agentcomms org update acme/i.test(error.hint ?? ''),
+    () => resolveProfileSlackTarget(invalid, 'acme', 'read', CORE),
+    (error: unknown) => error instanceof CommsError && / org update acme/i.test(error.hint ?? ''),
   );
 });
 
 test('learning a profile Slack app id is a compare-and-set over the exact target', () => {
   const original = configWithSlackRecord();
-  const target = resolveProfileSlackTarget(original, 'acme', 'read');
-  const learned = learnProfileSlackAppId(original, target, 'A0READ') as ConfigV2;
+  const target = resolveProfileSlackTarget(original, 'acme', 'read', CORE);
+  const learned = learnProfileSlackAppId(original, target, 'A0READ', CORE) as ConfigV2;
   assert.equal(original.organisations?.acme?.slack?.apps.read?.appId, undefined, 'the input is unchanged');
   assert.equal(learned.organisations?.acme?.slack?.apps.read?.appId, 'A0READ');
-  assert.deepEqual(learnProfileSlackAppId(learned, target, 'A0READ'), learned, 'the same id is idempotent');
-  assert.throws(() => learnProfileSlackAppId(learned, target, 'A0OTHER'), /another app id/i);
+  assert.deepEqual(learnProfileSlackAppId(learned, target, 'A0READ', CORE), learned, 'the same id is idempotent');
+  assert.throws(() => learnProfileSlackAppId(learned, target, 'A0OTHER', CORE), /another app id/i);
 
   for (const mutate of [
     (config: ConfigV2) => {
@@ -231,13 +241,17 @@ test('learning a profile Slack app id is a compare-and-set over the exact target
   ]) {
     const changed = structuredClone(original);
     mutate(changed);
-    assert.throws(() => learnProfileSlackAppId(changed, target, 'A0READ'), /changed.*sign-in|org update acme/i);
+    assert.throws(() => learnProfileSlackAppId(changed, target, 'A0READ', CORE), /changed.*sign-in|org update acme/i);
   }
 
   const stated = configWithSlackRecord();
-  const statedTarget: ProfileSlackTarget = resolveProfileSlackTarget(stated, 'acme', 'send');
-  assert.deepEqual(learnProfileSlackAppId(stated, statedTarget, 'A0SEND'), stated, 'a stated id is already learned');
-  assert.throws(() => learnProfileSlackAppId(stated, statedTarget, 'A0OTHER'), /another app id/i);
+  const statedTarget: ProfileSlackTarget = resolveProfileSlackTarget(stated, 'acme', 'send', CORE);
+  assert.deepEqual(
+    learnProfileSlackAppId(stated, statedTarget, 'A0SEND', CORE),
+    stated,
+    'a stated id is already learned',
+  );
+  assert.throws(() => learnProfileSlackAppId(stated, statedTarget, 'A0OTHER', CORE), /another app id/i);
 });
 
 function refused(document: Record<string, unknown>, pattern: RegExp): CommsError {
@@ -424,7 +438,7 @@ test('a profile is read from a file in version 1: a URL is refused, and nothing 
     'ftp://example.test/x',
   ]) {
     assert.throws(
-      () => profileSourcePath(url, env, '/work', 'darwin'),
+      () => profileSourcePath(url, env, '/work', coreHandoffs(PINS, 'darwin')),
       (error: unknown) =>
         error instanceof CommsError &&
         error.code === 'USAGE' &&
@@ -437,11 +451,10 @@ test('a profile is read from a file in version 1: a URL is refused, and nothing 
   }
   for (const platform of ['darwin', 'win32'] as const) {
     assert.throws(
-      () => profileSourcePath('', env, '/work', platform),
+      () => profileSourcePath('', env, '/work', coreHandoffs(PINS, platform)),
       (error: unknown) =>
         error instanceof CommsError &&
-        error.hint ===
-          `For example: ${inlineCommand(shellCommand(['agentcomms', 'org', 'add', './rgc.agentcomms.json'], platform))}.`,
+        error.hint === `For example: ${coreInline(PINS, ['org', 'add', './rgc.agentcomms.json'], platform)}.`,
       platform,
     );
   }
@@ -450,14 +463,20 @@ test('a profile is read from a file in version 1: a URL is refused, and nothing 
 test('a relative path is resolved against the working directory, and ~ against the home, to an absolute path', () => {
   const env = { HOME: join('/Profiles', 'jo'), USERPROFILE: join('/Profiles', 'jo') };
   const cwd = join('/Profiles', 'jo', 'src');
-  assert.equal(profileSourcePath(join('.', 'rgc.json'), env, cwd, 'darwin'), resolve(cwd, 'rgc.json'));
   assert.equal(
-    profileSourcePath(join('..', 'rgc', 'rgc.json'), env, cwd, 'darwin'),
+    profileSourcePath(join('.', 'rgc.json'), env, cwd, coreHandoffs(PINS, 'darwin')),
+    resolve(cwd, 'rgc.json'),
+  );
+  assert.equal(
+    profileSourcePath(join('..', 'rgc', 'rgc.json'), env, cwd, coreHandoffs(PINS, 'darwin')),
     resolve('/Profiles', 'jo', 'rgc', 'rgc.json'),
   );
-  assert.equal(profileSourcePath('~/rgc.json', env, cwd, 'darwin'), resolve('/Profiles', 'jo', 'rgc.json'));
+  assert.equal(
+    profileSourcePath('~/rgc.json', env, cwd, coreHandoffs(PINS, 'darwin')),
+    resolve('/Profiles', 'jo', 'rgc.json'),
+  );
   // A Windows drive is a path, not a scheme.
-  assert.doesNotThrow(() => profileSourcePath('C:\\profiles\\rgc.json', env, cwd, 'win32'));
+  assert.doesNotThrow(() => profileSourcePath('C:\\profiles\\rgc.json', env, cwd, coreHandoffs(PINS, 'win32')));
 });
 
 test('reading a profile: the SHA-256 of the exact bytes, a 64 KiB bound, and no directory or missing file read', async () => {
@@ -517,7 +536,7 @@ test('a read error names the path as it is shown, never as it is spelt', async (
     return true;
   });
   assert.throws(
-    () => profileSourcePath('acme‮nosj.json', { HOME: '/Profiles/jo' }, '/Profiles/jo', 'darwin'),
+    () => profileSourcePath('acme‮nosj.json', { HOME: '/Profiles/jo' }, '/Profiles/jo', coreHandoffs(PINS, 'darwin')),
     (error: unknown) => error instanceof CommsError && !error.message.includes('‮') && /<U\+202E>/.test(error.message),
   );
 });
@@ -528,13 +547,13 @@ test('the live-generation validator accepts the exact owned client row and ignor
   const gen = generation();
   const config = generationConfig(gen);
   config.clients[gen.name] = { ...clientRow(config, gen.name), projectId: 'renamed-project' };
-  assert.equal(requireLiveOrganisationGeneration(config, 'acme', gen), config.clients[gen.name]);
+  assert.equal(requireLiveOrganisationGeneration(config, 'acme', gen, CORE), config.clients[gen.name]);
 });
 
 test('the live-generation validator accepts an adopted row only while no other organisation holds it', () => {
   const gen = generation({ name: 'shared', ownership: 'adopted' });
   const config = generationConfig(gen);
-  assert.equal(requireLiveOrganisationGeneration(config, 'acme', gen), config.clients.shared);
+  assert.equal(requireLiveOrganisationGeneration(config, 'acme', gen, CORE), config.clients.shared);
 
   if (!config.organisations) throw new Error('the fixture has organisations');
   config.organisations.other = {
@@ -543,7 +562,7 @@ test('the live-generation validator accepts an adopted row only while no other o
     gmail: { active: gen.name, generations: [{ ...gen }] },
   };
   assert.throws(
-    () => requireLiveOrganisationGeneration(config, 'acme', gen),
+    () => requireLiveOrganisationGeneration(config, 'acme', gen, CORE),
     (error: unknown) =>
       error instanceof CommsError && error.code === 'CONFIG' && /org update acme/.test(error.hint ?? ''),
   );
@@ -563,7 +582,7 @@ test('the live-generation validator refuses every missing or altered part of an 
     if (row === undefined) delete config.clients[gen.name];
     else config.clients[gen.name] = row;
     assert.throws(
-      () => requireLiveOrganisationGeneration(config, 'acme', gen),
+      () => requireLiveOrganisationGeneration(config, 'acme', gen, CORE),
       (error: unknown) => {
         assert.ok(error instanceof CommsError, part);
         assert.equal(error.code, 'CONFIG', part);
@@ -587,7 +606,7 @@ test('the live-generation validator applies provider, id and canonical-secret ch
     const config = generationConfig(gen);
     config.clients.shared = { ...clientRow(config, 'shared'), ...change };
     assert.throws(
-      () => requireLiveOrganisationGeneration(config, 'acme', gen),
+      () => requireLiveOrganisationGeneration(config, 'acme', gen, CORE),
       (error: unknown) =>
         error instanceof CommsError && error.code === 'CONFIG' && /org update acme/.test(error.hint ?? ''),
     );
@@ -602,9 +621,9 @@ test('the live-generation validator quotes its repair command for darwin and win
     if (!acme) throw new Error('the fixture has an organisation');
     config.organisations = { '7': acme };
     delete config.clients[gen.name];
-    const repair = inlineCommand(shellCommand(['agentcomms', 'org', 'update', '7'], platform));
+    const repair = coreInline(PINS, ['org', 'update', '7'], platform);
     assert.throws(
-      () => requireLiveOrganisationGeneration(config, '7', gen, platform),
+      () => requireLiveOrganisationGeneration(config, '7', gen, coreHandoffs(PINS, platform)),
       (error: unknown) =>
         error instanceof CommsError && error.hint?.includes(repair) === true && !error.hint.includes('<organisation>'),
       platform,

@@ -3,7 +3,7 @@ import { type FileHandle, open, realpath, stat } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { isDangerous } from './chars.ts';
 import { CommsError } from './errors.ts';
-import { asHandoffMaker, type HandoffMaker, handoffSentenceToFill } from './handoff-text.ts';
+import { type CliHandoffs, handoffSentenceToFill, requiredHandoffs } from './handoff-text.ts';
 import { expandHome } from './paths.ts';
 
 /*
@@ -152,10 +152,10 @@ export interface AttachPolicy {
   deny: string[];
   home?: string;
   /**
-   * The printing package's handoffs, for the command a refusal names (`core.handoffs`, CUE-403). Left out, it names the
-   * bare command it always has — the deprecated bridge, until every package gives core its caller.
+   * The printing package's handoffs, for the command a refusal names (`core.handoffs`, CUE-403). Left out, a refusal
+   * that has to name one is a programming error (`requiredHandoffs`).
    */
-  handoffs?: HandoffMaker | undefined;
+  handoffs?: CliHandoffs | undefined;
 }
 
 async function realOrResolved(path: string): Promise<string> {
@@ -209,7 +209,7 @@ export async function checkAttachable(path: string, policy: AttachPolicy): Promi
      * printing (CUE-403) — or, where none is, the tool that does it from a chat, and why there is no command.
      */
     const allow = handoffSentenceToFill(
-      asHandoffMaker(policy.handoffs).core(['attach', 'roots', 'add']),
+      requiredHandoffs(policy.handoffs).core(['attach', 'roots', 'add']),
       ['<folder>'],
       (command) => `allow its folder with ${command} (needs your approval).`,
       { instead: 'allow its folder with comms_attach from a chat (needs your approval).' },

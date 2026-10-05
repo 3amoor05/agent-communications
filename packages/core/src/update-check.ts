@@ -6,7 +6,7 @@ import { channelServer } from './channel-servers.ts';
 import { type OutputOptions, type Streams, writeResult } from './cli-runtime.ts';
 import type { Core } from './core.ts';
 import { CommsError } from './errors.ts';
-import { handoffSentence, handoffsFor } from './handoffs.ts';
+import { handoffSentence, requireHandoffs } from './handoffs.ts';
 import { npmLatestVersion } from './npm.ts';
 import { type UpdateDeps, updateChange, updateCheck } from './operations/update.ts';
 import { PATH_OPTIONS, type ResolvedPaths } from './paths.ts';
@@ -391,7 +391,7 @@ export async function runUpdateCheckChild(
   if (claimedAt === undefined || !Number.isFinite(Date.parse(claimedAt))) {
     throw new CommsError('USAGE', `${UPDATE_CHECK_CHILD_COMMAND} takes the time of the claim it asks under`, {
       hint: handoffSentence(
-        handoffsFor(core).core(['update', '--check']),
+        requireHandoffs(core).core(['update', '--check']),
         (command) => `Nothing runs this but a command finishing the day’s update check; ${command} asks now.`,
       ),
     });
@@ -424,8 +424,6 @@ export function terminalUpdateHooks(
   options: {
     output: OutputOptions;
     streams: Streams;
-    /** The command that approves a change beside this CLI — see `gatedChangeAtTerminal`. */
-    approveCommand?: string | undefined;
     /** Stand-ins for the registry and `npm ls`, for a test: the check is then asked in this process. */
     deps?: UpdateDeps | undefined;
     now?: (() => Date) | undefined;
@@ -449,10 +447,8 @@ export function terminalUpdateHooks(
       const result = await gatedChangeAtTerminal(core, updateChange(core, env, {}, options.deps), {
         env,
         output: options.output,
-        command: 'agentcomms update',
         rerun: ['update'],
         rerunOn: 'core',
-        approveCommand: options.approveCommand,
         streams: options.streams,
       });
       writeResult(result, options.output, (r) => renderUpdate(r, options.output.color), options.streams);

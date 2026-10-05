@@ -6,10 +6,12 @@ import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
 import { type GatedChange, gatedChange, gatedChangeAtTerminal } from '../src/change-flow.ts';
-import { type Streams, shellCommand } from '../src/cli-runtime.ts';
+import { inlineCommand, type Streams } from '../src/cli-runtime.ts';
 import type { AccountConfig, SendPolicy } from '../src/config.ts';
 import { openCore } from '../src/core.ts';
 import { CommsError } from '../src/errors.ts';
+import { CORE_CALLER, isCommand } from '../src/handoffs.ts';
+import { coreHandoffs } from './helpers/handoffs.ts';
 import { tempDir } from './helpers/temp.ts';
 
 const ACME = 'acc_AAAAAAAAAAAAAAAA';
@@ -38,7 +40,7 @@ function coreWith(sendPolicy: SendPolicy, changePolicy?: 'chat' | 'confirm') {
     accounts: { 'acme/slack': account({ sendPolicy }) },
   };
   writeFileSync(join(dir, 'config.json'), `${JSON.stringify(body, null, 2)}\n`);
-  return openCore({ env: { AGENT_COMMS_CONFIG_DIR: dir, HOME: dir, USERPROFILE: dir } });
+  return openCore({ env: { AGENT_COMMS_CONFIG_DIR: dir, HOME: dir, USERPROFILE: dir }, caller: CORE_CALLER });
 }
 
 /** Moves acme/slack's send policy to `to`, through the store, with whatever consent the flow hands over. */
@@ -137,7 +139,7 @@ test('at the CLI an agent gets the preview and the approval id, and exits 10; --
   const options = {
     env: { CLAUDECODE: '1' },
     output: { color: false },
-    command: 'agent-slack workspace policy acme/slack',
+    rerun: ['policy', '--account', 'acme/slack', 'chat'],
   };
 
   let approvalId = '';
@@ -179,26 +181,28 @@ test('a command to run again with a word Windows cannot print is shown as its wo
    * the command, approval and all, is shown as its words in JSON, under `chat` and under `confirm` alike.
    */
   const folder = 'C:\\Profiles\\50% off';
-  const words = ['agentcomms', 'attach', 'roots', 'add', folder];
+  const words = ['attach', 'roots', 'add', folder];
   for (const policy of ['chat', 'confirm'] as const) {
     const core = coreWith('never', policy);
     await assert.rejects(
       gatedChangeAtTerminal(core, setSendPolicy(core, 'chat'), {
         env: { CLAUDECODE: '1' },
-        output: { json: true, color: false },
-        command: shellCommand(words, 'win32'),
+        output: { json: true, color: false, platform: 'win32' },
+        rerun: words,
       }),
       (error: unknown) => {
         assert.ok(error instanceof CommsError && error.code === 'APPROVAL_PENDING', String(error));
         const approvalId = String((error.details as { approvalId?: string }).approvalId);
-        const json = `["agentcomms","attach","roots","add","C:\\\\Profiles\\\\50\\u0025 off","--approval","${approvalId}"]`;
-        assert.ok(
-          error.hint?.endsWith(
-            `run \`${json}\` (the command's words, written as JSON: one of them cannot be quoted the same way for cmd.exe and for PowerShell, so type the command yourself, with that word quoted for the shell you use).`,
-          ),
-          `${policy}: ${error.hint}`,
+        const rerun = coreHandoffs(core.paths, 'win32').own([...words, '--approval', approvalId]);
+        assert.ok(isCommand(rerun) && rerun.line === null, 'the folder leaves the command no line');
+        assert.ok(rerun.words.includes('C:\\Profiles\\50% off'));
+        const json = inlineCommand(rerun);
+        assert.match(
+          json,
+          /^`\[.*"C:\\\\Profiles\\\\50\\u0025 off","--approval","ap_\w+"\]` \(the command's words, written as JSON/,
         );
-        assert.doesNotMatch(String(error.hint), /agentcomms attach/, 'and no line to run');
+        assert.ok(error.hint?.endsWith(`run ${json}.`), `${policy}: ${error.hint}`);
+        assert.doesNotMatch(String(error.hint), / attach roots add /, 'and no line to run');
         return true;
       },
     );
@@ -206,16 +210,19 @@ test('a command to run again with a word Windows cannot print is shown as its wo
     await assert.rejects(
       gatedChangeAtTerminal(core, setSendPolicy(core, 'chat'), {
         env: { CLAUDECODE: '1' },
-        output: { json: true, color: false },
-        command: shellCommand(words, 'linux'),
+        output: { json: true, color: false, platform: 'linux' },
+        rerun: words,
       }),
       (error: unknown) => {
         assert.ok(error instanceof CommsError);
         const approvalId = String((error.details as { approvalId?: string }).approvalId);
         assert.ok(
-          error.hint?.endsWith(`run \`agentcomms attach roots add '${folder}' --approval ${approvalId}\`.`),
+          error.hint?.endsWith(` attach roots add '${folder}' --approval ${approvalId}\`.`),
           `${policy}: ${error.hint}`,
         );
+        const rerun = coreHandoffs(core.paths, 'linux').own([...words, '--approval', approvalId]);
+        assert.ok(isCommand(rerun));
+        assert.ok(error.hint?.endsWith(`run ${inlineCommand(rerun)}.`), `${policy}: ${error.hint}`);
         return true;
       },
     );
@@ -228,13 +235,20 @@ test('a terminal change handoff renders its approval command for the selected sh
     gatedChangeAtTerminal(core, setSendPolicy(core, 'chat'), {
       env: { CLAUDECODE: '1' },
       output: { json: true, color: false, platform: 'win32' },
-      command: 'agent-slack workspace policy acme/slack',
-      approveCommand: 'agent-slack 7',
+      rerun: ['policy', '--account', 'acme/slack', 'chat'],
     }),
     (error: unknown) => {
       assert.ok(error instanceof CommsError);
       const approvalId = String((error.details as { approvalId?: string }).approvalId);
-      assert.match(error.hint ?? '', new RegExp(`agent-slack "7" ${approvalId}`));
+      // This installation's own `approve`, quoted for Windows: the approve and the rerun both.
+      const windows = coreHandoffs(core.paths, 'win32');
+      const approve = windows.own(['approve', approvalId]);
+      const rerun = windows.own(['policy', '--account', 'acme/slack', 'chat', '--approval', approvalId]);
+      assert.ok(isCommand(approve) && isCommand(rerun));
+      assert.equal(
+        error.hint,
+        `Show the person the preview. They run ${inlineCommand(approve)}; then run ${inlineCommand(rerun)}.`,
+      );
       return true;
     },
   );
@@ -251,16 +265,13 @@ test('a command whose --approval is taken by another change names the flag that 
     gatedChangeAtTerminal(core, setSendPolicy(core, 'chat'), {
       env: { CLAUDECODE: '1' },
       output: { json: true, color: false },
-      command: 'agent-gmail setup --mcp-client cursor',
+      rerun: ['setup', '--mcp-client', 'cursor'],
       approvalFlag: '--mcp-approval',
     }),
     (error: unknown) => {
       assert.ok(error instanceof CommsError);
       const approvalId = String((error.details as { approvalId?: string }).approvalId);
-      assert.match(
-        error.hint ?? '',
-        new RegExp(`agent-gmail setup --mcp-client cursor --mcp-approval ${approvalId}\``),
-      );
+      assert.match(error.hint ?? '', new RegExp(` setup --mcp-client cursor --mcp-approval ${approvalId}\``));
       assert.doesNotMatch(error.hint ?? '', / --approval /);
       return true;
     },
@@ -273,10 +284,7 @@ test('--mcp-approval is generated before an existing sentinel and positional loo
     gatedChangeAtTerminal(core, setSendPolicy(core, 'chat'), {
       env: { CLAUDECODE: '1' },
       output: { json: true, color: false },
-      command: shellCommand(
-        ['agent-gmail', 'setup', '--mcp-client', 'cursor', '--', '--mcp-approval', 'literal', '--approval=x'],
-        'linux',
-      ),
+      rerun: ['setup', '--mcp-client', 'cursor', '--', '--mcp-approval', 'literal', '--approval=x'],
       approvalFlag: '--mcp-approval',
     }),
     (error: unknown) => {
@@ -284,9 +292,7 @@ test('--mcp-approval is generated before an existing sentinel and positional loo
       const approvalId = String((error.details as { approvalId?: string }).approvalId);
       assert.match(
         error.hint ?? '',
-        new RegExp(
-          `agent-gmail setup --mcp-client cursor --mcp-approval ${approvalId} -- --mcp-approval literal --approval=x`,
-        ),
+        new RegExp(` setup --mcp-client cursor --mcp-approval ${approvalId} -- --mcp-approval literal --approval=x`),
       );
       return true;
     },
@@ -299,7 +305,7 @@ test('at the CLI a person at a terminal approves there: yes applies, anything el
   const applied = await gatedChangeAtTerminal(yes, setSendPolicy(yes, 'chat'), {
     env: {},
     output: { color: false },
-    command: 'agent-slack workspace policy acme/slack',
+    rerun: ['policy', '--account', 'acme/slack', 'chat'],
     streams: person.streams,
   });
   assert.equal(applied, 'chat');
@@ -310,7 +316,7 @@ test('at the CLI a person at a terminal approves there: yes applies, anything el
     gatedChangeAtTerminal(no, setSendPolicy(no, 'chat'), {
       env: {},
       output: { color: false },
-      command: 'agent-slack workspace policy acme/slack',
+      rerun: ['policy', '--account', 'acme/slack', 'chat'],
       streams: terminal('no').streams,
     }),
     /cancelled: nothing was changed/,

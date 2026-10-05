@@ -14,6 +14,7 @@ import {
 import { CommsError } from '../src/errors.ts';
 import { APPROVAL_ID_PATTERN } from '../src/ids.ts';
 import { withFileLock } from '../src/lock.ts';
+import { coreHandoffs } from './helpers/handoffs.ts';
 import { tempDir } from './helpers/temp.ts';
 
 const INBOX = 'ibx_AAAAAAAAAAAAAAAA';
@@ -28,7 +29,16 @@ function clock(start = Date.parse('2026-09-18T10:00:00.000Z')) {
 
 async function setup(policy: 'chat' | 'confirm' = 'chat', escalated = false) {
   const time = clock();
-  const store = new ApprovalStore(tempDir(), { now: time.now });
+  const dir = tempDir();
+  // Core's own handoffs, as `openCore({ caller })` hands the store: a refusal that names a command needs them.
+  const handoffs = coreHandoffs({
+    configDir: dir,
+    stateDir: dir,
+    dataDir: dir,
+    secretsDir: dir,
+    downloadsDir: dir,
+  });
+  const store = new ApprovalStore(dir, { now: time.now, handoffs });
   const record = await store.create({
     inboxId: INBOX,
     inboxSub: 'sub-1',

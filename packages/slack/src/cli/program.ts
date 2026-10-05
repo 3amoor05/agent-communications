@@ -66,7 +66,6 @@ import {
 import { runDoctor } from '../operations/doctor.ts';
 import { createDraft, deleteOwnDraft, listDrafts, showDraft, updateDraft } from '../operations/drafts.ts';
 import {
-  BRIDGE_APPROVE_COMMAND,
   downloadFiles,
   downloadSelection,
   type FileDownloader,
@@ -1384,8 +1383,6 @@ temporary (retry later) · 77 sign-in or permission needed · 78 configuration p
             env,
             color: globalOptions.color,
             platform,
-            // Read by core only without this package's caller, which it always has: see `BRIDGE_APPROVE_COMMAND`.
-            approveCommand: BRIDGE_APPROVE_COMMAND,
             streams,
           });
           streams.stdout.write(

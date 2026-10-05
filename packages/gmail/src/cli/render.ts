@@ -3,6 +3,7 @@ import {
   handoffSentence,
   handoffSentenceToFill,
   handoffText,
+  handoffTextToFill,
   type InstallResult,
   paint,
   renderInstall,
@@ -10,7 +11,6 @@ import {
   sizeOf,
 } from '@agentcomms/core';
 import type { RegistrationIntent } from '../auth/flows.ts';
-import { handoffTextToFill } from '../handoffs.ts';
 import type { LabelSummary, SendAsSummary } from '../operations/analyse.ts';
 import type { DownloadQuestion, DownloadResult, FindAttachmentsResult } from '../operations/attachments.ts';
 import type { ClientAddResult, ClientView } from '../operations/clients.ts';

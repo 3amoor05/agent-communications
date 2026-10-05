@@ -5,7 +5,7 @@ import { CHANNELS } from '../channel-servers.ts';
 import { accountChannels, listed, narrowingOwner } from '../channel-words.ts';
 import { type Core, openCore } from '../core.ts';
 import { CommsError, toCommsError } from '../errors.ts';
-import { CORE_CALLER, handoffsFor } from '../handoffs.ts';
+import { CORE_CALLER, requireHandoffs } from '../handoffs.ts';
 import { installFailure, SERVER_NAME_MESSAGE, SERVER_NAME_PATTERN } from '../mcp-install.ts';
 import { ATTACH_CHANGE_KINDS, attachChange, attachReport } from '../operations/attach-settings.ts';
 import {
@@ -341,7 +341,7 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
           return changePolicyReport(
             await core.config.load(),
             { inbox: args.inbox, account: args.account },
-            handoffsFor(core, { platform }),
+            requireHandoffs(core, platform),
           );
         });
       }

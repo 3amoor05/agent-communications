@@ -1,6 +1,8 @@
-import { CHANNEL_SNAPSHOT } from './channels.generated.ts';
-import type { CliCommandNotLocated, PrintedCommand } from './cli-command.ts';
-import { commandText, inlineCommand, lineWithWordsToFill, type ShellCommand, shellCommand } from './cli-runtime.ts';
+import type { CliCommandCaller, CliCommandNotLocated, PrintedCommand } from './cli-command.ts';
+import { commandText, inlineCommand, lineWithWordsToFill } from './cli-runtime.ts';
+import type { ExternalCommand } from './command-brands.ts';
+import { inlineQuoted, quotedText, quotedWithWordsToFill } from './command-line.ts';
+import type { RegisteredServer } from './mcp-clients.ts';
 import type { PathName } from './paths.ts';
 
 /**
@@ -10,8 +12,8 @@ import type { PathName } from './paths.ts';
  * Kept apart from the locator on purpose: the configuration store, the secret stores and the attachment jail print
  * handoffs too, and the locator's own imports reach the configuration store, so importing it from them would be a
  * cycle. Nothing here locates anything or imports a module that does: a located command is made by `handoffs.ts` and
- * handed in, and what is here only renders one — or, with none handed in, prints the bare commands of the deprecated
- * bridge.
+ * handed in, and what is here only renders one. With none handed in, there is nothing to render: a package that did not
+ * give core its caller and is asked for a command has a programming error, not a bare name to fall back on.
  */
 
 /** A command for a person to run, located, or the sentence saying why there is none here. */
@@ -25,62 +27,46 @@ export interface HandoffUse {
 }
 
 /**
- * What makes a package's commands. `CliHandoffs` is the real one; a package that has not given core its caller yet gets
- * the deprecated bridge from `handoffsFor`, whose commands are bare names, as before CUE-403.
+ * The commands a package tells a person to run, made once per printing process from its caller (`handoffs.ts`,
+ * `cliHandoffs`): `openCore({ caller })` puts them on `core.handoffs`. Each method takes the CLI's own words, never the
+ * program, and returns a `Handoff`.
  */
-export interface HandoffMaker {
+export interface CliHandoffs {
+  /** The printing package: one of its own modules and its name. */
+  readonly caller: CliCommandCaller;
   /** The shell the commands are quoted for. */
   readonly platform: NodeJS.Platform;
   /** The printing package's own CLI, with these words after the program. */
-  own(words: readonly string[], use?: HandoffUse): Handoff | ShellCommand;
+  own(words: readonly string[], use?: HandoffUse): Handoff;
   /** The core CLI: the printing package's own when that is core, the core it has installed otherwise. */
-  core(words: readonly string[], use?: HandoffUse): Handoff | ShellCommand;
+  core(words: readonly string[], use?: HandoffUse): Handoff;
   /** The CLI of `channel` — `core`, `gmail`, `slack` …: own, core, or another product found among its registrations. */
-  of(channel: string, words: readonly string[], use?: HandoffUse): Handoff | ShellCommand;
+  of(channel: string, words: readonly string[], use?: HandoffUse): Handoff;
+  /** The same commands, quoted for another shell. */
+  on(platform: NodeJS.Platform): CliHandoffs;
+  /**
+   * The same, able to find another product: with the servers registered with this machine's MCP clients read now, from
+   * the environment these were made with. Read once per call; nothing a registration names is run.
+   */
+  registered(): Promise<CliHandoffs>;
+  /** The same, finding another product among these registrations: a scan the caller has already read. */
+  withRegistrations(registrations: readonly RegisteredServer[]): CliHandoffs;
 }
 
 /**
- * What a core function that prints a command for its caller takes where it used to take the shell's `platform`: the
- * caller's handoffs, which carry their platform. A bare platform still works, and prints the deprecated bridge's bare
- * commands, until every package gives core its caller (CUE-403 task 15).
+ * The handoffs a store or a deep function was given (`core.handoffs`, handed on by `openCore`), for the command one of
+ * its refusals names. A programming error when there are none: the package that opened core did not give it its
+ * caller (`openCore({ caller })`), and there is no command to print in its place — not a bare name, not a guess.
  */
-export type HandoffsOrPlatform = HandoffMaker | NodeJS.Platform;
-
-/**
- * The deprecated bridge: commands by their bare names, as before CUE-403 — its own named by `approveCommand`
- * (`agent-gmail approve`), or `agentcomms`. Only `handoffsFor` and `asHandoffMaker` make one.
- */
-export function bareHandoffs(platform: NodeJS.Platform, approveCommand?: string | undefined): HandoffMaker {
-  // The approve command as the package named it — its own words for `approve` — and its program for everything else.
-  const approve = (approveCommand ?? 'agentcomms approve').trim().split(/\s+/);
-  const ownBinary = approve[0] as string;
-  return Object.freeze({
-    platform,
-    own: (words: readonly string[]) =>
-      shellCommand(words[0] === 'approve' ? [...approve, ...words.slice(1)] : [ownBinary, ...words], platform),
-    core: (words: readonly string[]) => shellCommand(['agentcomms', ...words], platform),
-    of: (channel: string, words: readonly string[]) => {
-      const entry = CHANNEL_SNAPSHOT.find((each) => each.manifest.channel === channel);
-      if (entry === undefined) throw new TypeError(`"${channel}" is not a channel of this release`);
-      return shellCommand([entry.manifest.binary, ...words], platform);
-    },
-  });
-}
-
-/** The handoffs a core function was given — or, for a bare platform or none, the bridge's for that shell. */
-export function asHandoffMaker(handoffs: HandoffsOrPlatform | undefined): HandoffMaker {
-  if (handoffs === undefined) return bareHandoffs(process.platform);
-  return typeof handoffs === 'string' ? bareHandoffs(handoffs) : handoffs;
-}
-
-/** The shell a function's `HandoffsOrPlatform` quotes for. */
-export function platformOf(handoffs: HandoffsOrPlatform | undefined): NodeJS.Platform {
-  if (handoffs === undefined) return process.platform;
-  return typeof handoffs === 'string' ? handoffs : handoffs.platform;
+export function requiredHandoffs(handoffs: CliHandoffs | undefined): CliHandoffs {
+  if (handoffs === undefined) {
+    throw new TypeError('core was opened without its caller, so it cannot locate a command: pass openCore({ caller })');
+  }
+  return handoffs;
 }
 
 /** Whether a handoff is a command to run, rather than the sentence saying why there is none. */
-export function isCommand(handoff: Handoff | ShellCommand): handoff is PrintedCommand | ShellCommand {
+export function isCommand(handoff: Handoff | ExternalCommand): handoff is PrintedCommand | ExternalCommand {
   return !('message' in handoff);
 }
 
@@ -88,8 +74,18 @@ export function isCommand(handoff: Handoff | ShellCommand): handoff is PrintedCo
  * A handoff as a value of its own — a list's line, a field's value: the command's line, or its words as JSON with what
  * to do when no line is safe in every Windows shell; or, with no command, the sentence saying why.
  */
-export function handoffText(handoff: Handoff | ShellCommand): string {
+export function handoffText(handoff: Handoff | ExternalCommand): string {
   return isCommand(handoff) ? commandText(handoff) : handoff.message;
+}
+
+/**
+ * As `handoffText`, with words the agent fills in — a placeholder such as `<client_secret.json>`, printed as written —
+ * before the command's first `--`. With no line, its words as JSON, these among them, saying it has to be typed; with
+ * no command, why there is none here.
+ */
+export function handoffTextToFill(handoff: Handoff | ExternalCommand, toFill: readonly string[]): string {
+  if (!isCommand(handoff)) return handoff.message;
+  return lineWithWordsToFill(handoff, ...toFill) ?? quotedText(quotedWithWordsToFill(handoff, toFill));
 }
 
 export interface HandoffSentenceOptions {
@@ -110,7 +106,7 @@ function noCommand(handoff: CliCommandNotLocated, options: HandoffSentenceOption
  * none — after `instead`, when given — never `say` with something else in the command's place.
  */
 export function handoffSentence(
-  handoff: Handoff | ShellCommand,
+  handoff: Handoff | ExternalCommand,
   say: (command: string) => string,
   options: HandoffSentenceOptions = {},
 ): string {
@@ -123,7 +119,7 @@ export function handoffSentence(
  * them, saying it has to be typed.
  */
 export function handoffSentenceToFill(
-  handoff: Handoff | ShellCommand,
+  handoff: Handoff | ExternalCommand,
   toFill: readonly string[],
   say: (command: string) => string,
   options: HandoffSentenceOptions = {},
@@ -131,7 +127,7 @@ export function handoffSentenceToFill(
   if (!isCommand(handoff)) return noCommand(handoff, options);
   const line = lineWithWordsToFill(handoff, ...toFill);
   if (line !== null) return say(`\`${line}\``);
-  return say(inlineCommand(shellCommand([...handoff.words, ...toFill], handoff.platform)));
+  return say(inlineQuoted(quotedWithWordsToFill(handoff, toFill)));
 }
 
 /**
@@ -139,11 +135,13 @@ export function handoffSentenceToFill(
  * that has none here, the sentence saying why. `none` is said when not one of them is a command.
  */
 export function handoffChoices(
-  handoffs: readonly (Handoff | ShellCommand)[],
+  handoffs: readonly Handoff[],
   none: string,
   options: { conjunction?: 'or' | 'and' } = {},
 ): string {
-  const commands = handoffs.filter(isCommand).map((handoff) => inlineCommand(handoff));
+  const commands = handoffs
+    .filter((handoff): handoff is PrintedCommand => isCommand(handoff))
+    .map((handoff) => inlineCommand(handoff));
   const missing = handoffs.filter((handoff): handoff is CliCommandNotLocated => !isCommand(handoff));
   // The same reason for each is said once: five mailboxes on a product that is not registered are one reason.
   const reasons = [...new Set(missing.map((handoff) => handoff.message))].join(' ');

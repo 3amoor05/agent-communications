@@ -10,7 +10,6 @@ import {
   pendingUpdate,
   readUpdateCheck,
   UPDATE_FIRST,
-  UPDATE_WAYS,
   type UpdateCommands,
   updateCheckDue,
   updateCheckEnabled,
@@ -168,7 +167,7 @@ export function updateToolGate(options: UpdateToolGateOptions): ToolGate {
 export function stoppedCall(
   pending: PendingUpdate,
   where: { server: string; tool: string },
-  commands: UpdateCommands = updateCommands(undefined),
+  commands: UpdateCommands,
 ): object {
   const message = updateStopMessage(pending, where, commands);
   const ways = updateWaysOf(commands);
@@ -278,8 +277,6 @@ export interface TerminalGateOptions extends TerminalUpdateHooks {
   output: OutputOptions;
   noInput?: boolean | undefined;
   streams: Streams;
-  /** The command that approves a change beside this CLI, for "later" under the `confirm` change policy. */
-  approveCommand?: string | undefined;
   /**
    * The approval ids the command carries — `--approval`, `--mcp-approval` (`approvalsOf`). One this machine holds lets
    * the command run, as a tool call carrying it does over MCP (§2): the person said yes to exactly that.
@@ -376,10 +373,8 @@ export async function updateGateAtTerminal(options: TerminalGateOptions): Promis
     const result = await gatedChangeAtTerminal(core, updateLaterChange(core, { now }), {
       env,
       output,
-      command: UPDATE_WAYS.later.command,
       rerun: ['update', '--later'],
       rerunOn: 'core',
-      approveCommand: options.approveCommand,
       answered: true,
       streams,
     });
@@ -398,10 +393,6 @@ export async function updateGateAtTerminal(options: TerminalGateOptions): Promis
  * — the update installed, and an older copy running — says to run the command from the installed one.
  */
 function updateRequired(pending: PendingUpdate, binary: string, commands: UpdateCommands): CommsError {
-  // Through the bridge the npx forms follow, as before; a located command needs none.
-  const npx = commands.located
-    ? ''
-    : ` Where agentcomms is not installed: \`${UPDATE_WAYS.update.npx}\`, and \`${UPDATE_WAYS.later.npx}\`.`;
   const ways = updateWaysOf(commands);
   const details = {
     running: pending.running,
@@ -415,7 +406,7 @@ function updateRequired(pending: PendingUpdate, binary: string, commands: Update
       'UPDATE_REQUIRED',
       `Hang on a minute, the update is installed, but this command isn't running it yet. ${pending.latest} is installed globally, and this ${binary} is ${pending.running}: ${handoffSentence(commands.later, (later) => `run the command again from the installed one, or ${later} to put it off until tomorrow`)}`,
       {
-        hint: `Nothing was done. An older copy is running — npx's cache, a project's own install, a checkout. "Not now" is a change a person approves: an agent gets the preview and an approval id (exit 10), and runs the same command again with --approval <id> once the person agrees.${npx}`,
+        hint: `Nothing was done. An older copy is running — npx's cache, a project's own install, a checkout. "Not now" is a change a person approves: an agent gets the preview and an approval id (exit 10), and runs the same command again with --approval <id> once the person agrees.`,
         details,
       },
     );
@@ -424,7 +415,7 @@ function updateRequired(pending: PendingUpdate, binary: string, commands: Update
     'UPDATE_REQUIRED',
     `${UPDATE_FIRST} ${pending.latest} is out (you have ${pending.running}): ${bothSaid(commands, (update, later) => `run ${update} first, or ${later} to put it off until tomorrow`)}`,
     {
-      hint: `Nothing was done. Both are changes a person approves: an agent gets the preview and an approval id (exit 10), and runs the same command again with --approval <id> once the person agrees.${npx}`,
+      hint: `Nothing was done. Both are changes a person approves: an agent gets the preview and an approval id (exit 10), and runs the same command again with --approval <id> once the person agrees.`,
       details,
     },
   );

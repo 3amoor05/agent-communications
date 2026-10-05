@@ -4,7 +4,6 @@ import { type FileHandle, open } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { z } from 'zod';
 import { isDangerous } from './chars.ts';
-import type { ShellCommand } from './cli-runtime.ts';
 import type {
   ClientConfig,
   Config,
@@ -14,14 +13,7 @@ import type {
   OrganisationSlackApp,
 } from './config.ts';
 import { CommsError } from './errors.ts';
-import {
-  asHandoffMaker,
-  type Handoff,
-  type HandoffsOrPlatform,
-  handoffChoices,
-  handoffSentence,
-  isCommand,
-} from './handoff-text.ts';
+import { type CliHandoffs, type Handoff, handoffChoices, handoffSentence, isCommand } from './handoff-text.ts';
 import { organisationProblem, parseName, parseOrganisation } from './name-grammar.ts';
 import { clientSecretRef, GOOGLE_CLIENT_ID_PATTERN } from './oauth-client-records.ts';
 import { expandHome, homeDirectory } from './paths.ts';
@@ -243,13 +235,13 @@ export function profileSourcePath(
   given: unknown,
   env: NodeJS.ProcessEnv,
   cwd: string | undefined,
-  handoffs: HandoffsOrPlatform,
+  handoffs: CliHandoffs,
 ): string {
   const value = typeof given === 'string' ? given : '';
   if (value.trim() === '') {
     throw new CommsError('USAGE', 'name the profile file', {
       hint: handoffSentence(
-        asHandoffMaker(handoffs).core(['org', 'add', './rgc.agentcomms.json']),
+        handoffs.core(['org', 'add', './rgc.agentcomms.json']),
         (command) => `For example: ${command}.`,
         { instead: 'Name it by its path: ./rgc.agentcomms.json, for example.' },
       ),
@@ -495,7 +487,7 @@ export function requireLiveOrganisationGeneration(
   config: Config,
   organisation: string,
   generation: OrganisationGeneration,
-  handoffs: HandoffsOrPlatform = process.platform,
+  handoffs: CliHandoffs,
 ): ClientConfig {
   const row = own(config.clients, generation.name);
   const commonMatches =
@@ -514,7 +506,7 @@ export function requireLiveOrganisationGeneration(
       `the organisation ${organisation} cannot use its Google client "${generation.name}" because its registered row is missing or no longer matches`,
       {
         hint: handoffSentence(
-          asHandoffMaker(handoffs).core(['org', 'update', organisation]),
+          handoffs.core(['org', 'update', organisation]),
           (command) =>
             `Run ${command} (or comms_org_update from a chat) to repair the organisation profile before signing in.`,
           { instead: 'Call comms_org_update from a chat to repair the organisation profile before signing in.' },
@@ -706,22 +698,18 @@ export interface OrganisationDrift {
  * and why there is none. For another product's commands, which core finds only among the servers registered here
  * (CUE-403): a profile names Gmail's and Slack's, and this core may be installed with neither.
  */
-export function withEach(handoffs: readonly (Handoff | ShellCommand)[], tool: string): string {
+export function withEach(handoffs: readonly Handoff[], tool: string): string {
   return handoffs.some(isCommand)
     ? `with ${handoffChoices(handoffs, '', { conjunction: 'and' })}`
     : `with ${tool} from a chat (${handoffChoices(handoffs, '').replace(/\.$/, '')})`;
 }
 
 /** Every drift of one organisation's record from the configuration, in a stable order. */
-export function organisationDrift(
-  config: Config,
-  organisation: string,
-  handoffs: HandoffsOrPlatform,
-): OrganisationDrift[] {
+export function organisationDrift(config: Config, organisation: string, handoffs: CliHandoffs): OrganisationDrift[] {
   const record = recordOf(config, organisation);
   if (!record) return [];
   const drift: OrganisationDrift[] = [];
-  const maker = asHandoffMaker(handoffs);
+  const maker = handoffs;
   const update = handoffSentence(
     maker.core(['org', 'update', organisation]),
     (command) => `Run ${command} (comms_org_update from a chat).`,
@@ -894,10 +882,10 @@ const profileSlackTargetSchema: z.ZodType<ProfileSlackTarget, unknown> = z.stric
   sha256: z.string().regex(/^[0-9a-f]{64}$/, 'a SHA-256 is 64 lowercase hex digits'),
 });
 
-function slackTargetProblem(organisation: string, message: string, handoffs: HandoffsOrPlatform): CommsError {
+function slackTargetProblem(organisation: string, message: string, handoffs: CliHandoffs): CommsError {
   return new CommsError('CONFIG', message, {
     hint: handoffSentence(
-      asHandoffMaker(handoffs).core(['org', 'update', organisation]),
+      handoffs.core(['org', 'update', organisation]),
       (command) => `Run ${command} to reconcile the profile, then start the sign-in again.`,
       { instead: 'Call comms_org_update from a chat to reconcile the profile, then start the sign-in again.' },
     ),
@@ -909,7 +897,7 @@ export function resolveProfileSlackTarget(
   config: Config,
   organisation: string,
   role: 'read' | 'send',
-  handoffs: HandoffsOrPlatform = process.platform,
+  handoffs: CliHandoffs,
 ): ProfileSlackTarget {
   const record = recordOf(config, organisation);
   if (!record) {
@@ -966,7 +954,7 @@ export function learnProfileSlackAppId(
   config: Config,
   expected: ProfileSlackTarget,
   appId: string,
-  handoffs: HandoffsOrPlatform = process.platform,
+  handoffs: CliHandoffs,
 ): Config {
   if (!SLACK_APP_ID_PATTERN.test(appId)) {
     throw slackTargetProblem(

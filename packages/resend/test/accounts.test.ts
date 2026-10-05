@@ -251,7 +251,7 @@ test('an invalid account renders its repair for the selected shell platform', as
     },
     { consent: { kind: 'loosening-consent', paths: ['accounts.7/resend.mode'] } },
   );
-  // Resend's own `account remove`, located and quoted for Windows: the name is quoted there, as `shellCommand` does.
+  // Resend's own `account remove`, located and quoted for Windows: the name is quoted there, as every printed command is.
   const repair = `Remove it with ${resendInline(harness.core, ['account', 'remove', '7/resend'], 'win32')} and add it again, or fix it in the configuration file.`;
   assert.match(repair, /"7\/resend"/);
   await assert.rejects(harness.context('cli', 'win32').accounts.require('7/resend'), (error: CommsError) => {

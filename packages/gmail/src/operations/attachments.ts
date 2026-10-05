@@ -32,7 +32,6 @@ import {
   type WarnedFile,
   writeFileAtomic,
 } from '@agentcomms/core';
-import { BRIDGE_APPROVE_COMMAND } from '../caller.ts';
 import type { GmailContext } from '../context.ts';
 import { type DecodedPart, headerValue, readParts } from '../domain/mime.ts';
 import { compileQuery } from '../domain/query.ts';
@@ -532,7 +531,6 @@ export async function downloadAttachments(
         flags: entry.listed.riskFlags,
       })),
       policy,
-      approveCommand: BRIDGE_APPROVE_COMMAND,
       surface: context.surface,
       tool: 'gmail_attachment_download',
       env: context.env,
@@ -553,7 +551,6 @@ export async function downloadAttachments(
     request,
     folders,
     policy,
-    approveCommand: BRIDGE_APPROVE_COMMAND,
     surface: context.surface,
     env: context.env,
     signal: options.signal,

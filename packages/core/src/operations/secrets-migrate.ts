@@ -4,7 +4,7 @@ import type { ChangeSurface } from '../changes.ts';
 import { type Config, classifyChange, type LooseningConsent, secretsStoreOf } from '../config.ts';
 import type { Core } from '../core.ts';
 import { CommsError } from '../errors.ts';
-import { handoffSentence, handoffsFor } from '../handoffs.ts';
+import { handoffSentence, requireHandoffs } from '../handoffs.ts';
 import { APPROVAL_KEY_REF } from '../keys.ts';
 import { withCredentialsLock } from '../lock.ts';
 import { keychainNamespace, openSecretStore, type SecretStore, type SecretStoreKind } from '../secrets.ts';
@@ -233,7 +233,7 @@ async function migrateUnderLock(
   if (from === to) return { from, to, moved: 0, leftovers: [] };
   const plan = physicalMigrationPlan(config, to);
   // The migration again, as a command: core's own, located from whatever is printing (CUE-403).
-  const again = handoffsFor(core, { platform }).core(['secrets', 'migrate', '--to', to]);
+  const again = requireHandoffs(core, platform).core(['secrets', 'migrate', '--to', to]);
   /*
    * Consent is checked again here, under the lock, before any store is opened.
    *

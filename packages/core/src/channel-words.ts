@@ -36,25 +36,6 @@ export function listed(words: readonly string[], conjunction: string, options: {
   return `${rest.join(', ')}${options.oxford && rest.length > 1 ? ',' : ''} ${conjunction} ${last}`;
 }
 
-/**
- * Every channel's own approve command, quoted: "`agent-gmail approve` or `agent-slack approve`".
- *
- * @deprecated Bare names from the manifests, for the bridge alone — a package that has not given core its caller
- * (`handoffsFor`). Located, the approve commands come from `CliHandoffs.of`; this goes with the bridge (CUE-403 task 15).
- *
- * `sending` keeps only the channels whose accounts can be in `send`: the commands that can have prepared a send. A
- * channel that never sends — WhatsApp — has an approve command for the changes its `mcp install` and `mcp prune`
- * make, and naming it where the approval in hand is a send would send a person to a command that never prepared one.
- */
-export function channelApproveCommands(options: { sending?: boolean } = {}): string {
-  return listed(
-    accountChannels()
-      .filter((manifest) => options.sending !== true || manifest.accounts?.modes.includes('send') === true)
-      .flatMap((manifest) => (manifest.approve ? [`\`${manifest.approve}\``] : [])),
-    'or',
-  );
-}
-
 /** The noun for one account on `channel` — `mailbox`, `workspace` — or `account` for a channel that names none. */
 export function accountNoun(channel: string): string {
   return manifestOf(channel)?.accounts?.noun ?? 'account';

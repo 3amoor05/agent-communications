@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { claimChange, prepareChange } from '../src/changes.ts';
 import { type Config, parseConfig } from '../src/config.ts';
 import { type Core, openCore } from '../src/core.ts';
+import { CORE_CALLER } from '../src/handoffs.ts';
 import { createCoreMcpServer } from '../src/mcp/server.ts';
 import { managedRuntimeDir, managedRuntimeEntry } from '../src/mcp-install.ts';
 import { resolveName } from '../src/names.ts';
@@ -77,7 +78,8 @@ interface Machine {
 }
 
 function machine(body: Record<string, unknown> = {}): Machine {
-  const home = tempDir('comms-wording-');
+  // The long form of the temporary folder: a Windows runner's `RUNNER~1` needs quotes in a located command's pins.
+  const home = realpathSync.native(tempDir('comms-wording-'));
   mkdirSync(join(home, 'bin'));
   mkdirSync(join(home, 'config'));
   writeFileSync(join(home, 'config', 'config.json'), `${JSON.stringify({ version: 2, ...body }, null, 2)}\n`);
@@ -93,7 +95,7 @@ function machine(body: Record<string, unknown> = {}): Machine {
     npm_config_offline: 'true',
     AGENT_COMMS_UPDATE_CHECK: 'off', // no test asks the real npm registry, or stops for a release
   };
-  const core = openCore({ env, now: () => new Date('2026-09-26T10:00:00.000Z') });
+  const core = openCore({ env, now: () => new Date('2026-09-26T10:00:00.000Z'), caller: CORE_CALLER });
   return { home, env, core, dataDir: core.paths.dataDir };
 }
 
@@ -433,7 +435,7 @@ test('every sentence the core builds about a channel is byte for byte what it wa
     'deletes the unused Gmail runtime',
     'registers the Slack MCP server with cursor as "slack" again',
     'it will be able to send, not only read',
-    '`agent-gmail approve`, `agent-resend approve` or `agent-slack approve`',
+    'It is approved with the command that prepared it — and none is locatable here:',
     "add one with Gmail's inbox add",
     'is not a Slack workspace',
     'is an option of the Gmail server; the Slack server has no such option',

@@ -20,6 +20,7 @@ import {
   handoffSentence,
   handoffSentenceToFill,
   handoffText,
+  handoffTextToFill,
   homeDirectory,
   insertWordsBeforeSentinel,
   installExitStatus,
@@ -49,9 +50,8 @@ import {
 import { Command, CommanderError, InvalidArgumentError, Option } from 'commander';
 import type { RegistrationIntent } from '../auth/flows.ts';
 import { TIERS } from '../auth/scopes.ts';
-import { BRIDGE_APPROVE_COMMAND, GMAIL_CALLER } from '../caller.ts';
+import { GMAIL_CALLER } from '../caller.ts';
 import { GmailContext, type GmailContextOptions } from '../context.ts';
-import { handoffTextToFill } from '../handoffs.ts';
 import type { Launcher, SupportedClient } from '../mcp/install.ts';
 import { listLabels, listSendAs, threadTimeline } from '../operations/analyse.ts';
 import {
@@ -1386,7 +1386,6 @@ update first, or put it off (the stop names both commands) · 64 usage · 65 bad
             env,
             color: globalOptions.color,
             platform,
-            approveCommand: BRIDGE_APPROVE_COMMAND,
             streams,
           });
           streams.stdout.write(

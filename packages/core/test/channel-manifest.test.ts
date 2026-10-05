@@ -11,7 +11,7 @@ import {
   narrowingFromArgs,
 } from '../src/channel-servers.ts';
 import { CHANNEL_SNAPSHOT } from '../src/channels.generated.ts';
-import { shellCommand } from '../src/cli-runtime.ts';
+import { quoteCommand } from '../src/command-line.ts';
 import type { RegisteredServer } from '../src/mcp-clients.ts';
 import { type InstallOptions, isProductServer, managedRuntimeEntry, type SupportedClient } from '../src/mcp-install.ts';
 import {
@@ -234,12 +234,12 @@ test('a command that removes another server gives its name as one word, quoted f
     const helper = entry({ name: 'Slack Helper', client, command: 'node', args: ['/opt/helper.js'] });
     assert.equal(
       otherSlackServerRemoval(helper, 'darwin'),
-      shellCommand([binary, 'mcp', 'remove', 'Slack Helper'], 'darwin').line,
+      quoteCommand([binary, 'mcp', 'remove', 'Slack Helper'], 'darwin').line,
     );
     const rival = entry({ name: 'old gmail', client, args: ['-y', '@artymclabin/gmail-mcp'] });
     assert.equal(
       findUngatedGmailServers([rival], 'darwin')[0]?.removal,
-      shellCommand([binary, 'mcp', 'remove', 'old gmail'], 'darwin').line,
+      quoteCommand([binary, 'mcp', 'remove', 'old gmail'], 'darwin').line,
     );
   }
 });

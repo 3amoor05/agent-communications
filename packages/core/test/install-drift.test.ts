@@ -8,11 +8,13 @@ import { gatedChange } from '../src/change-flow.ts';
 import type { InboxConfig } from '../src/config.ts';
 import { type Core, openCore } from '../src/core.ts';
 import { CommsError } from '../src/errors.ts';
+import { CORE_CALLER } from '../src/handoffs.ts';
 import { createCoreMcpServer } from '../src/mcp/server.ts';
 import { knownClientConfigs } from '../src/mcp-clients.ts';
 import { doctor } from '../src/operations/maintenance.ts';
 import { type ServerInstallRequest, serverInstallChange } from '../src/operations/servers.ts';
 import { VERSION } from '../src/version.ts';
+import { writeManaged } from './fixtures/cli-command/trees.ts';
 import { tempDir } from './helpers/temp.ts';
 
 /*
@@ -90,7 +92,7 @@ function machine(): Machine {
     // not make. The gate's own tests turn it back on, with a registry and a clock of their own (design 2026-09-28).
     AGENT_COMMS_UPDATE_CHECK: 'off',
   };
-  return { home, bin, later, env, core: openCore({ env }) };
+  return { home, bin, later, env, core: openCore({ env, caller: CORE_CALLER }) };
 }
 
 /**
@@ -126,6 +128,21 @@ test('doctor diagnoses a legacy registration without mutating it, and its approv
   mkdirSync(dirname(cursor), { recursive: true });
   writeFileSync(cursor, `${JSON.stringify({ mcpServers: { work: legacy } }, null, 2)}\n`);
   const before = readFileSync(cursor, 'utf8');
+  /*
+   * Gmail's command is found only where Gmail is registered from a file this release can check (CUE-403): an npx entry
+   * is never one, so the repair is located through a managed Gmail Claude Code also starts — pinned already, so it is
+   * no finding of its own.
+   */
+  const claude = knownClientConfigs(m.env).find((file) => file.client === 'claude-code')?.path;
+  assert.ok(claude);
+  const { paths } = m.core;
+  const pins = ['--config-dir', paths.configDir, '--state-dir', paths.stateDir, '--data-dir', paths.dataDir];
+  const managed = {
+    command: process.execPath,
+    args: [writeManaged(paths.dataDir, 'gmail').entry, ...pins, '--secrets-dir', paths.secretsDir, 'mcp'],
+  };
+  mkdirSync(dirname(claude), { recursive: true });
+  writeFileSync(claude, `${JSON.stringify({ mcpServers: { gmail: managed } }, null, 2)}\n`);
 
   const report = await doctor(m.core, m.env, { keyring: null });
   // It still starts, so it is something to look at — a warning, not a failure — with the command that pins it.

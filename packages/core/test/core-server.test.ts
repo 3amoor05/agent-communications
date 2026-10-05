@@ -10,7 +10,8 @@ import { gatedChange } from '../src/change-flow.ts';
 import { beginChangeApproval, finishChangeApproval } from '../src/changes.ts';
 import { CHANNEL_SERVERS } from '../src/channel-servers.ts';
 import type { PrintedCommand } from '../src/cli-command.ts';
-import { commandAsJson, inlineCommand } from '../src/cli-runtime.ts';
+import { inlineCommand } from '../src/cli-runtime.ts';
+import { commandAsJson } from '../src/command-line.ts';
 import type { AccountConfig, InboxConfig } from '../src/config.ts';
 import { type Core, openCore } from '../src/core.ts';
 import { CommsError, ERROR_REGISTRY, EXIT_CODES } from '../src/errors.ts';
@@ -193,7 +194,7 @@ test('a loosening refused by the store names both ways to approve it: from a cha
   // chat. A hint that names one route sends an agent to a terminal it may not have, for a change it could have asked
   // for in the conversation.
   const dir = configDirWith({ defaults: { changePolicy: 'confirm' }, accounts: { 'acme/slack': account() } });
-  const core = openCore({ env: { AGENT_COMMS_CONFIG_DIR: dir, HOME: dir, USERPROFILE: dir } });
+  const core = openCore({ env: { AGENT_COMMS_CONFIG_DIR: dir, HOME: dir, USERPROFILE: dir }, caller: CORE_CALLER });
   await assert.rejects(
     core.config.update((config) => {
       config.defaults.changePolicy = 'chat';
@@ -361,7 +362,7 @@ test('a core server opened with path pins reports the already-resolved directory
     secretsDir: join(m.home, 'pinned-secrets'),
     downloadsDir: join(m.home, 'pinned-downloads'),
   };
-  const core = openCore({ env: m.env, pathOverrides: wanted });
+  const core = openCore({ env: m.env, pathOverrides: wanted, caller: CORE_CALLER });
   const linked = await connect({ ...m, core });
   try {
     assert.deepEqual(await linked.ok('comms_paths'), wanted);
@@ -584,7 +585,7 @@ test(
     mkdirSync(configDir);
     chmodSync(configDir, 0o755);
     const env = { ...m.env, AGENT_COMMS_CONFIG_DIR: configDir };
-    const { checks } = await doctorChecks({ ...m, configDir, env, core: openCore({ env }) });
+    const { checks } = await doctorChecks({ ...m, configDir, env, core: openCore({ env, caller: CORE_CALLER }) });
     assert.equal(checks.find((check) => check.name === 'config dir')?.fix, `chmod 700 '${configDir}'`);
   },
 );
@@ -664,7 +665,7 @@ test(
     mkdirSync(configDir);
     chmodSync(configDir, 0o755);
     const env = { ...m.env, AGENT_COMMS_CONFIG_DIR: configDir };
-    const report = await doctor(openCore({ env }), env, { keyring: null, platform: 'win32' });
+    const report = await doctor(openCore({ env, caller: CORE_CALLER }), env, { keyring: null, platform: 'win32' });
     assert.equal(
       report.checks.find((check) => check.name === 'config dir')?.fix,
       `${commandAsJson(['chmod', '700', configDir])} (the command's words, written as JSON: one of them cannot be quoted the same way for cmd.exe and for PowerShell, so type the command yourself, with that word quoted for the shell you use)`,
@@ -707,10 +708,7 @@ test('change-policy repair commands use the selected shell platform', async () =
     defaults: { changePolicy: 'confirm' },
     accounts: { '7/slack': account({ changePolicy: 'chat' }) },
   });
-  // A bare platform is the bridge's bare command, as before CUE-403, quoted for that shell.
-  const report = changePolicyReport(await m.core.config.load(), {}, 'win32');
-  assert.equal(report.looser?.[0]?.tighten.command, 'agentcomms policy --account "7/slack" confirm');
-  // Core's own handoffs, for that shell: its located command, quoted the same way.
+  // Core's own handoffs, for that shell: its located command, quoted for it.
   const located = changePolicyReport(await m.core.config.load(), {}, coreHandoffs(m.core.paths, 'win32'));
   const command = coreCommand(m.core.paths, ['policy', '--account', '7/slack', 'confirm'], 'win32');
   assert.equal(located.looser?.[0]?.tighten.command, command);

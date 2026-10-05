@@ -10,7 +10,7 @@ import { type Config, emptyConfig, secretsStoreOf } from '../config.ts';
 import type { Core } from '../core.ts';
 import { CommsError } from '../errors.ts';
 import { isGroupOrWorldAccessible } from '../fs.ts';
-import { type HandoffMaker, handoffSentence, handoffsFor, isCommand, registeredFor } from '../handoffs.ts';
+import { type CliHandoffs, handoffSentence, isCommand, requireHandoffs } from '../handoffs.ts';
 import { resolveName } from '../names.ts';
 import { organisationDrift, organisationsOf, orphanMarkedRows, shownText } from '../organisations.ts';
 import type { ResolvedPaths } from '../paths.ts';
@@ -95,7 +95,7 @@ export async function doctor(core: Core, env: NodeJS.ProcessEnv, options: Doctor
   const checks: DoctorCheck[] = [];
   const platform = options.platform ?? process.platform;
   // Every repair below is a command to run: this installation's own, or another product's where it is registered.
-  const handoffs = await registeredFor(handoffsFor(core, { platform }));
+  const handoffs = await requireHandoffs(core, platform).registered();
   const [major = 0, minor = 0] = process.versions.node.split('.').map(Number);
   const nodeOk = major > 22 || (major === 22 && minor >= 12);
   checks.push({
@@ -177,7 +177,7 @@ export async function doctor(core: Core, env: NodeJS.ProcessEnv, options: Doctor
   const keyring = options.keyring !== undefined ? options.keyring : await loadKeyringModule();
   // `probeKeychain` loads the real module when handed none, so a machine without it is answered here instead.
   const probe = keyring
-    ? await probeKeychain(keyring, keychainNamespace(core.paths.configDir))
+    ? await probeKeychain(keyring, keychainNamespace(core.paths.configDir), handoffs)
     : { ok: false, reason: 'the optional @napi-rs/keyring package is not installed for this platform' };
   const usesKeychain = secretsStoreOf(config) === 'keychain';
   checks.push({
@@ -216,7 +216,7 @@ export async function doctor(core: Core, env: NodeJS.ProcessEnv, options: Doctor
  *
  * Nothing at all is said on a machine with no profile, so every other doctor reads as it always did.
  */
-function organisationChecks(config: Config, handoffs: HandoffMaker): DoctorCheck[] {
+function organisationChecks(config: Config, handoffs: CliHandoffs): DoctorCheck[] {
   const checks: DoctorCheck[] = [];
   for (const organisation of Object.keys(organisationsOf(config)).sort()) {
     const drift = organisationDrift(config, organisation, handoffs);
@@ -263,7 +263,7 @@ function organisationChecks(config: Config, handoffs: HandoffMaker): DoctorCheck
  * was last asked, the latest release it named, and the release running here. Never a failure: an update that is out
  * is something to look at, with the two ways on, and the rest is information.
  */
-async function updateCheckLine(core: Core, env: NodeJS.ProcessEnv, handoffs: HandoffMaker): Promise<DoctorCheck> {
+async function updateCheckLine(core: Core, env: NodeJS.ProcessEnv, handoffs: CliHandoffs): Promise<DoctorCheck> {
   const enabled = await updateCheckEnabled(core, env);
   const record = await readUpdateCheck(core.paths.stateDir);
   const now = new Date();
@@ -326,7 +326,7 @@ async function registrationChecks(
   core: Core,
   env: NodeJS.ProcessEnv,
   config: Config | null,
-  handoffs: HandoffMaker,
+  handoffs: CliHandoffs,
 ): Promise<DoctorCheck[]> {
   const REGISTRATION_PATH_KEYS = ['configDir', 'stateDir', 'dataDir', 'secretsDir'] as const;
   const report = await channelsAvailable(core, env);
@@ -417,7 +417,7 @@ function accountsOf(config: Config, channel: Channel): string[] {
  * the flags `mcp install`'s own hint repeats when it refuses to replace an entry without `--force`, so following it
  * narrows or widens nothing. A project's entry is not one `mcp install` writes, and is said to be where it is instead.
  */
-function registerAgain(channel: Channel, entry: ChannelRegistration, handoffs: HandoffMaker): string {
+function registerAgain(channel: Channel, entry: ChannelRegistration, handoffs: CliHandoffs): string {
   if (entry.scope === 'project') {
     return `It is registered for one project, in ${entry.path}, and \`mcp install\` registers at user scope only: remove it or register it again there, with ${entry.client}'s own command.`;
   }

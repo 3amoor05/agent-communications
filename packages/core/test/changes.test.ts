@@ -11,7 +11,7 @@ import {
   governingChangePolicy,
   prepareChange,
 } from '../src/changes.ts';
-import type { Streams } from '../src/cli-runtime.ts';
+import { inlineCommand, type Streams } from '../src/cli-runtime.ts';
 import {
   type AccountConfig,
   type Config,
@@ -24,6 +24,8 @@ import {
 } from '../src/config.ts';
 import { type Core, openCore } from '../src/core.ts';
 import { CommsError } from '../src/errors.ts';
+import { CORE_CALLER, isCommand } from '../src/handoffs.ts';
+import { coreHandoffs } from './helpers/handoffs.ts';
 import { tempDir } from './helpers/temp.ts';
 
 /*
@@ -91,7 +93,11 @@ function coreWith(body: Record<string, unknown>) {
   const write = (next: Record<string, unknown>) =>
     writeFileSync(join(dir, 'config.json'), `${JSON.stringify({ version: 2, ...next }, null, 2)}\n`);
   write(body);
-  const core = openCore({ env: { AGENT_COMMS_CONFIG_DIR: dir, HOME: dir, USERPROFILE: dir }, now: time.now });
+  const core = openCore({
+    env: { AGENT_COMMS_CONFIG_DIR: dir, HOME: dir, USERPROFILE: dir },
+    now: time.now,
+    caller: CORE_CALLER,
+  });
   return { core, time, write, dir };
 }
 
@@ -424,12 +430,14 @@ test('under confirm, a change is not claimable until a person approved it at a t
   const prepared = await prepareChange(core, { ...spec, summary: 'Let acme/slack post' }, { surface: 'mcp' });
   assert.equal(prepared.policy, 'confirm');
   assert.match(prepared.preview, /approved by a code typed at a terminal/);
-  assert.match(prepared.next, new RegExp(`\`agentcomms approve ${prepared.approvalId}\``));
+  const approve = coreHandoffs(core.paths).own(['approve', prepared.approvalId]);
+  assert.ok(isCommand(approve));
+  assert.ok(prepared.next.includes(inlineCommand(approve)), prepared.next);
 
   await assert.rejects(claimChange(core, prepared.approvalId, spec, { surface: 'mcp' }), (error: CommsError) => {
     assert.equal(error.code, 'APPROVAL_PENDING');
     assert.match(error.message, /needs a person to approve it at a terminal first/);
-    assert.match(error.hint ?? '', new RegExp(`agentcomms approve ${prepared.approvalId}`));
+    assert.ok(error.hint?.includes(inlineCommand(approve)), error.hint);
     return true;
   });
   assert.equal((await core.approvals.get(prepared.approvalId))?.state, 'pending', 'waiting is not voiding');
@@ -811,41 +819,37 @@ test('agentcomms approve: a person reads the change and types the code; Enter ca
   assert.equal((await core.approvals.get(second.approvalId))?.state, 'revoked');
 });
 
-test('agentcomms approve renders its terminal handoff for the selected shell platform', async () => {
+test("the terminal's approve renders its handoff for the selected shell platform", async () => {
   const { approveChangeAtTerminal } = await import('../src/change-flow.ts');
   const { core } = coreWith({});
+  const approve = coreHandoffs(core.paths, 'win32').own(['approve', '7']);
+  assert.ok(isCommand(approve) && / approve "7"$/.test(approve.line ?? ''), JSON.stringify(approve));
   await assert.rejects(
     approveChangeAtTerminal(core, '7', { CODEX_SANDBOX: '1' }, { color: false, platform: 'win32' }),
     (error: unknown) => {
       assert.ok(error instanceof CommsError);
-      assert.match(error.hint ?? '', /agentcomms approve "7"/);
+      assert.equal(error.hint, `Ask the user to run ${inlineCommand(approve)} in their own terminal.`);
       return true;
     },
   );
 });
 
-test('change approval handoffs render the configured approval command for the selected shell platform', async () => {
+test("change approval handoffs render this installation's own approve for the selected shell platform", async () => {
   const { core } = coreWith({ defaults: { changePolicy: 'confirm' }, accounts: { 'acme/slack': account(ACME) } });
   const spec = await widening(core);
   const prepared = await prepareChange(
     core,
     { ...spec, summary: 'Let acme/slack post' },
-    {
-      surface: 'mcp',
-      approveCommand: 'agent-slack 7',
-      platform: 'win32',
-    },
+    { surface: 'mcp', platform: 'win32' },
   );
-  assert.match(prepared.next, new RegExp(`agent-slack "7" ${prepared.approvalId}`));
+  const approve = coreHandoffs(core.paths, 'win32').own(['approve', prepared.approvalId]);
+  assert.ok(isCommand(approve));
+  assert.ok(prepared.next.includes(inlineCommand(approve)), prepared.next);
   await assert.rejects(
-    claimChange(core, prepared.approvalId, spec, {
-      surface: 'mcp',
-      approveCommand: 'agent-slack 7',
-      platform: 'win32',
-    }),
+    claimChange(core, prepared.approvalId, spec, { surface: 'mcp', platform: 'win32' }),
     (error: unknown) => {
       assert.ok(error instanceof CommsError);
-      assert.match(error.hint ?? '', new RegExp(`agent-slack "7" ${prepared.approvalId}`));
+      assert.ok(error.hint?.includes(inlineCommand(approve)), error.hint);
       return true;
     },
   );

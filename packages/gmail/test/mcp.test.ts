@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { type ConfigV2, openCore, profileSourcePath, renameEntry, shownPath } from '@agentcomms/core';
+import { type ConfigV2, openCore, profileSourcePath, renameEntry, requireHandoffs, shownPath } from '@agentcomms/core';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { GMAIL_CALLER } from '../src/caller.ts';
@@ -211,7 +211,7 @@ test('read-only gmail_setup refuses its profile-writing arguments', async () => 
         arguments: { profile },
       })) as ToolResult;
       assert.equal(result.isError, true);
-      const source = profileSourcePath(profile, env, process.cwd(), platform);
+      const source = profileSourcePath(profile, env, process.cwd(), requireHandoffs(core, platform));
       // This installation's own `setup`, located and quoted for the platform asked for (CUE-403).
       const command = gmailInline(core.paths, ['setup', '--profile', source], platform);
       const error = result.structuredContent?.error as { message: string; hint: string };
@@ -796,7 +796,7 @@ test('a pinned or read-only gmail_setup validates and neutralises a refused prof
       })) as ToolResult;
       assert.equal(refused.isError, true);
       const error = refused.structuredContent?.error as { code: string; message: string; hint: string };
-      const source = profileSourcePath(tokenPath, harness.env, process.cwd(), 'darwin');
+      const source = profileSourcePath(tokenPath, harness.env, process.cwd(), requireHandoffs(harness.core, 'darwin'));
       assert.equal(error.code, 'CONFIG');
       assert.ok(error.hint.includes(shownPath(source)));
       assert.doesNotMatch(error.hint, /\[INST\]/);

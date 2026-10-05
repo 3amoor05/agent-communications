@@ -15,6 +15,7 @@ import { CHANNEL_SERVERS } from '../src/channel-servers.ts';
 import type { Streams } from '../src/cli-runtime.ts';
 import { type Core, openCore } from '../src/core.ts';
 import { CommsError } from '../src/errors.ts';
+import { CORE_CALLER } from '../src/handoffs.ts';
 import { type CoreMcpOptions, createCoreMcpServer } from '../src/mcp/server.ts';
 import { changePolicyChange } from '../src/operations/change-policy.ts';
 import { orgAddChange, orgRemoveChange } from '../src/operations/organisations.ts';
@@ -60,7 +61,7 @@ import {
   updateVerdict,
 } from '../src/update-state.ts';
 import { VERSION } from '../src/version.ts';
-import { locatedCoreLine } from './helpers/handoffs.ts';
+import { coreInline, locatedCoreLine } from './helpers/handoffs.ts';
 import { tempDir } from './helpers/temp.ts';
 
 /*
@@ -120,7 +121,7 @@ function machine(extra: Record<string, string> = {}): Machine {
     npm_config_registry: 'http://127.0.0.1:9/',
     ...extra,
   };
-  const core = openCore({ env });
+  const core = openCore({ env, caller: CORE_CALLER });
   return { home, env, core, stateDir: core.paths.stateDir };
 }
 
@@ -488,11 +489,11 @@ test('an update that is out stops a tool with the owner’s words, and never the
       new RegExp(`agentcomms ${VERSION.replaceAll('.', '\\.')}; the latest release is 99\\.0\\.0`),
     );
     assert.match(textOf(result), /comms_update/);
-    assert.match(textOf(result), /`agentcomms update`/);
+    // Both ways on as this installation's own commands, located, and no npx form beside them.
+    assert.ok(textOf(result).includes(coreInline(m.core.paths, ['update'])), textOf(result));
+    assert.ok(textOf(result).includes(coreInline(m.core.paths, ['update', '--later'])), textOf(result));
     assert.match(textOf(result), /`later: true`/);
-    // Both ways on have an npx form, for a machine with neither the core server nor `agentcomms` — a plugin's alone.
-    assert.match(textOf(result), /`npx -y @agentcomms\/core@latest update`/);
-    assert.match(textOf(result), /`npx -y @agentcomms\/core@latest update --later`/);
+    assert.doesNotMatch(textOf(result), /npx/);
     assert.match(textOf(result), /a plugin's, an extension's — is updated where it was installed/);
     assert.match(textOf(result), /comms_channels_available did not run/);
     // Claude Code and Codex show the model only the structured content: the same words are there.
@@ -1093,7 +1094,7 @@ test('not now lasts until local midnight, and holds for every server on the mach
   assert.notEqual(await at(midnight), null, 'at midnight it asks again');
 
   // Machine-wide: a second server — another process, another core, the same state directory — reads it too.
-  const other = { ...m, core: openCore({ env: m.env }) };
+  const other = { ...m, core: openCore({ env: m.env, caller: CORE_CALLER }) };
   const gate = updateToolGate({
     core: other.core,
     env: m.env,
@@ -1390,7 +1391,7 @@ test('at a terminal: "Update now, later today, or cancel?" — and each answer d
   await seed(reader, { latest: LATEST, behind: true });
   const handoff = await gateAt(reader, ['now'], { check: undefined, update: undefined, binary: 'agent-whatsapp' });
   assert.equal(handoff.value, 11);
-  assert.match(handoff.tty.out(), /Run `agentcomms update`/);
+  assert.ok(handoff.tty.out().includes(`Run ${coreInline(reader.core.paths, ['update'])}`), handoff.tty.out());
 });
 
 test('with nobody to ask, the command does not run and ends with UPDATE_REQUIRED, exit 11, naming both commands', async () => {
@@ -1829,7 +1830,7 @@ test('at a terminal, an update installed and an older copy running stops as the 
     /^Hang on a minute, the update is installed, but this command isn't running it yet\./,
   );
   assert.match(String(script.error?.message), /99\.0\.0 is installed globally, and this agentcomms is /);
-  assert.match(String(script.error?.message), /`agentcomms update --later`/);
+  assert.ok(String(script.error?.message).includes(coreInline(m.core.paths, ['update', '--later'])));
   // A person: now says to run it again from the installed one, ends 11, and runs nothing and updates nothing.
   let updated = false;
   const person = await gateAt(m, ['now'], {
@@ -2164,7 +2165,7 @@ test('the doctor gives the check one line: on or off, when last checked, the lat
     assert.equal(line.length, 1);
     assert.equal(line[0]?.detail, `on · last checked ${checked.toISOString()} · latest ${LATEST} · running ${VERSION}`);
     assert.equal(line[0]?.warn, true);
-    assert.match(String(line[0]?.fix), /agentcomms update --later/);
+    assert.ok(String(line[0]?.fix).includes(coreInline(m.core.paths, ['update', '--later'])), String(line[0]?.fix));
     // "Installed: restart" only when both the core's server and its command would start the latest: the doctor
     // speaks for both.
     const fixFor = async (current: UpdateCheckRecord['current']) => {
@@ -2172,8 +2173,9 @@ test('the doctor gives the check one line: on or off, when last checked, the lat
       const again = (await call('comms_doctor')).structuredContent as { checks: { name: string; fix?: string }[] };
       return String(again.checks.find((check) => check.name === 'update check')?.fix);
     };
-    assert.match(await fixFor({ registered: ['core'], global: [] }), /^Run `agentcomms update`/);
-    assert.match(await fixFor({ registered: [], global: ['core'] }), /^Run `agentcomms update`/);
+    const runUpdate = `Run ${coreInline(m.core.paths, ['update'])}`;
+    assert.ok((await fixFor({ registered: ['core'], global: [] })).startsWith(runUpdate));
+    assert.ok((await fixFor({ registered: [], global: ['core'] })).startsWith(runUpdate));
     assert.match(await fixFor({ registered: ['core'], global: ['core'] }), /is installed on this machine: restart/);
   } finally {
     await close();

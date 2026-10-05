@@ -1,7 +1,6 @@
 import { open, readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { accountChannels, channelApproveCommands } from './channel-words.ts';
-import { inlineCommand, shellCommand } from './cli-runtime.ts';
+import { accountChannels } from './channel-words.ts';
 import {
   type ChangePolicy,
   canonicalLoosening,
@@ -13,7 +12,7 @@ import {
 import { canonicalJson, normaliseAddress, sha256Hex } from './digest.ts';
 import { CommsError, type ErrorCode } from './errors.ts';
 import { ensurePrivateDir, writeFileAtomic } from './fs.ts';
-import { type CliHandoffs, type HandoffMaker, handoffChoices, handoffSentence } from './handoffs.ts';
+import { type CliHandoffs, handoffChoices, handoffSentence, requiredHandoffs } from './handoff-text.ts';
 import { APPROVAL_ID_PATTERN, challengeMatches, hashChallenge, newApprovalId, newChallenge } from './ids.ts';
 import { withFileLock } from './lock.ts';
 import type { RenameReason } from './saved-files.ts';
@@ -372,7 +371,7 @@ export interface ClaimOptions {
   platform?: NodeJS.Platform | undefined;
   /**
    * The commands the printing package gives a person (`core.handoffs`), for a refusal that names one: the store's own
-   * when left out. With neither, a refusal names the bare commands it did before CUE-403.
+   * when left out. With neither, a refusal that has to name one is a programming error (`requiredHandoffs`).
    */
   handoffs?: CliHandoffs | undefined;
   /**
@@ -493,18 +492,18 @@ const MISDIRECTED_SENDS = new WeakSet<CommsError>();
 
 /**
  * What an agent is told when a change waits for a person at a terminal: the printing package's own `approve` with this
- * id, located — or, before that package gives core its caller, `agentcomms approve` as it was.
+ * id, located, or why there is none here.
  */
 function approvePendingHint(
   handoffs: CliHandoffs | undefined,
   approvalId: string,
   platform: NodeJS.Platform | undefined,
 ): string {
-  const say = (command: string) =>
-    `Ask the user to run ${command} in their own terminal, then try again with the same approval.`;
-  return handoffs === undefined
-    ? say(inlineCommand(shellCommand(['agentcomms', 'approve', approvalId], platform ?? process.platform)))
-    : handoffSentence(handoffs.on(platform ?? handoffs.platform).own(['approve', approvalId]), say);
+  const located = requiredHandoffs(handoffs);
+  return handoffSentence(
+    located.on(platform ?? located.platform).own(['approve', approvalId]),
+    (command) => `Ask the user to run ${command} in their own terminal, then try again with the same approval.`,
+  );
 }
 
 /** Whether `error` is the refusal of a send's approval offered as a change's. */
@@ -516,7 +515,7 @@ export function isMisdirectedSend(error: unknown): error is CommsError {
  * What approves the send `approvalId`: the `approve` of every channel that sends, one of which prepared it — a send
  * record does not say which (D1). Each is a located command, or why it has none here.
  */
-export function sendApprovesHint(maker: HandoffMaker, approvalId: string): string {
+export function sendApprovesHint(maker: CliHandoffs, approvalId: string): string {
   const sending = accountChannels().filter((manifest) => manifest.accounts?.modes.includes('send') === true);
   return `It is approved with the command that prepared it — ${handoffChoices(
     sending.map((manifest) => maker.of(manifest.channel, ['approve', approvalId])),
@@ -676,7 +675,9 @@ export class ApprovalStore {
     platform: NodeJS.Platform,
     handoffs: CliHandoffs | undefined = this.#handoffs,
   ): void {
-    const maker = handoffs?.on(platform);
+    // Only the refusals that name a command need the printing package's handoffs; asked for one without them is a
+    // programming error (`requiredHandoffs`).
+    const maker = () => requiredHandoffs(handoffs).on(platform);
     const actual = approvalKind(record);
     if (actual === kind) return;
     const id = record.approvalId;
@@ -704,21 +705,17 @@ export class ApprovalStore {
         `approval ${id} is for a configuration change, not a send`,
         record,
         // A change is approved by any of the suite's `approve` commands, so the printing package's own does it.
-        maker === undefined
-          ? `A person approves it with ${inlineCommand(shellCommand(['agentcomms', 'approve', id], platform))} — or ${channelApproveCommands()}, whichever is installed — and it permits only the change it was prepared for.`
-          : handoffSentence(
-              maker.own(['approve', id]),
-              (command) => `A person approves it with ${command}, and it permits only the change it was prepared for.`,
-            ),
+        handoffSentence(
+          maker().own(['approve', id]),
+          (command) => `A person approves it with ${command}, and it permits only the change it was prepared for.`,
+        ),
       );
     }
     const misdirected = refuseChange(
       'USAGE',
       `approval ${id} is for a send, not a configuration change`,
       record,
-      maker === undefined
-        ? `It is approved with the command that prepared it — ${channelApproveCommands({ sending: true })} — and permits only that send.`
-        : sendApprovesHint(maker, id),
+      sendApprovesHint(maker(), id),
     );
     MISDIRECTED_SENDS.add(misdirected);
     throw misdirected;

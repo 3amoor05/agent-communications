@@ -10,7 +10,6 @@ import {
   stricterPolicy,
 } from './approvals.ts';
 import type { AuditRecord } from './audit.ts';
-import { channelApproveCommands } from './channel-words.ts';
 import {
   type ChangePolicy,
   type Config,
@@ -23,7 +22,7 @@ import {
 } from './config.ts';
 import type { Core } from './core.ts';
 import { CommsError, toCommsError } from './errors.ts';
-import { handoffSentence, handoffsFor, registeredFor } from './handoffs.ts';
+import { handoffSentence, requireHandoffs } from './handoffs.ts';
 import { lookupName, resolveName } from './names.ts';
 import { truncateDisplay } from './render.ts';
 
@@ -75,15 +74,6 @@ export interface ChangeRequest extends ChangeSpec {
 export interface ChangeOptions {
   /** Where the call came from, for the audit trail. */
   surface: ChangeSurface;
-  /**
-   * The command a person runs to approve a change under `confirm`, as it is installed beside whatever asked: `agent-gmail
-   * approve` and `agent-slack approve` approve changes too, and `agentcomms` is not installed with either package, so
-   * naming it there sends the person to a command they do not have. `agentcomms approve` when left out.
-   *
-   * @deprecated Read only when `core.handoffs` is not there: the printing package's own `approve` is located from it
-   * instead (CONTRIBUTING.md, "Telling a person what to run"). Goes with the bridge (CUE-403 task 15).
-   */
-  approveCommand?: string | undefined;
   /** The shell syntax used when the approval command is shown. */
   platform?: NodeJS.Platform | undefined;
 }
@@ -270,7 +260,7 @@ export async function claimChange(
       { change: binding, policy },
       {
         pendingHint: handoffSentence(
-          handoffsFor(core, options).own(['approve', approvalId]),
+          requireHandoffs(core, options.platform).own(['approve', approvalId]),
           (command) => `Ask the user to run ${command} in their own terminal, then try again with the same approval.`,
         ),
         platform: options.platform,
@@ -297,13 +287,12 @@ export async function claimChange(
     };
   } catch (caught) {
     // A send's approval offered here: said again with every sending channel's `approve` found where it is registered.
-    const error =
-      isMisdirectedSend(caught) && core.handoffs !== undefined
-        ? new CommsError(caught.code, caught.message, {
-            hint: sendApprovesHint(await registeredFor(handoffsFor(core, options)), approvalId),
-            ...(caught.details === undefined ? {} : { details: caught.details }),
-          })
-        : caught;
+    const error = isMisdirectedSend(caught)
+      ? new CommsError(caught.code, caught.message, {
+          hint: sendApprovesHint(await requireHandoffs(core, options.platform).registered(), approvalId),
+          ...(caught.details === undefined ? {} : { details: caught.details }),
+        })
+      : caught;
     await auditRefusal(core, 'change.claim', error, {
       surface: options.surface,
       approvalId,
@@ -318,7 +307,7 @@ export async function claimChange(
 async function changeRecord(
   core: Core,
   approvalId: string,
-  options: Pick<ChangeOptions, 'approveCommand' | 'platform'> = {},
+  options: Pick<ChangeOptions, 'platform'> = {},
 ): Promise<ApprovalRecord & { change: ChangeBinding }> {
   const record = await core.approvals.get(approvalId);
   if (!record) {
@@ -335,10 +324,7 @@ async function changeRecord(
   }
   if (approvalKind(record) !== 'change') {
     throw new CommsError('USAGE', `approval ${approvalId} is for a send, not a configuration change`, {
-      hint:
-        core.handoffs === undefined
-          ? `Approve it with the command that prepared it: ${channelApproveCommands({ sending: true })}.`
-          : sendApprovesHint(await registeredFor(handoffsFor(core, options)), approvalId),
+      hint: sendApprovesHint(await requireHandoffs(core, options.platform).registered(), approvalId),
     });
   }
   /*
@@ -472,7 +458,7 @@ function nextStep(approvalId: string, policy: ChangePolicy, core: Core, options:
   return policy === 'chat'
     ? `Show this preview to the user and ask. If they say yes, claim approval ${approvalId} and apply the change; if not, revoke it.`
     : handoffSentence(
-        handoffsFor(core, options).own(['approve', approvalId]),
+        requireHandoffs(core, options.platform).own(['approve', approvalId]),
         (command) =>
           `The change policy is confirm: ask the user to run ${command} in their own terminal and type the code it shows. Then claim approval ${approvalId} and apply the change.`,
       );

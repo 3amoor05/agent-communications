@@ -3,9 +3,9 @@ import { constants } from 'node:fs';
 import { type FileHandle, lstat, open, readdir, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import {
+  type CliHandoffs,
   CommsError,
   ensurePrivateDir,
-  type HandoffMaker,
   handoffSentence,
   handoffSentenceToFill,
 } from '@agentcomms/core';
@@ -116,7 +116,7 @@ export interface SourceOptions {
    * What a refusal names to run — `status` at a terminal, an `add` for another store — located as the package printing
    * it finds its own command (`WhatsAppContext.handoffs`). Required: there is no bare `agent-whatsapp` to fall back on.
    */
-  handoffs: HandoffMaker;
+  handoffs: CliHandoffs;
   io?: SourceIo | undefined;
   env?: NodeJS.ProcessEnv | undefined;
   platform?: NodeJS.Platform | undefined;

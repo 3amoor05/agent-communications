@@ -2,18 +2,10 @@ import type { ApprovalRecord, ApprovalState } from '../approvals.ts';
 import type { GatedChange } from '../change-flow.ts';
 import { CHANNELS, type Channel, channelLabel, channelServer, requireChannelManifest } from '../channel-servers.ts';
 import { accountNoun, pinOption } from '../channel-words.ts';
-import type { ShellCommand } from '../cli-runtime.ts';
 import type { Config } from '../config.ts';
 import type { Core } from '../core.ts';
 import { CommsError, toCommsError } from '../errors.ts';
-import {
-  type Handoff,
-  type HandoffMaker,
-  handoffChoices,
-  handoffSentence,
-  handoffsFor,
-  withRegistrationsFor,
-} from '../handoffs.ts';
+import { type CliHandoffs, type Handoff, handoffChoices, handoffSentence, requireHandoffs } from '../handoffs.ts';
 import { APPROVAL_ID_PATTERN } from '../ids.ts';
 import { type RegisteredServer, scanRegisteredServers, type UnreadableConfig } from '../mcp-clients.ts';
 import {
@@ -221,7 +213,7 @@ interface Found {
 interface Inspection {
   report: UpdateReport;
   /** The commands this update hands a person: core's, and each channel's found among the registrations it read. */
-  handoffs: HandoffMaker;
+  handoffs: CliHandoffs;
   /** Behind, and updatable as far as the files show. */
   candidates: Found[];
   /** Behind, and not updatable from here. */
@@ -283,7 +275,7 @@ async function latestReleases(
  * The entry's name and pins are read from the client's file, which may hold anything, so on Windows the command may
  * have no line to paste: the reasons below give it with `handoffSentence`, which shows it as words then.
  */
-function installHandoff(item: RegistrationItem, handoffs: HandoffMaker): Handoff | ShellCommand {
+function installHandoff(item: RegistrationItem, handoffs: CliHandoffs): Handoff {
   const facts = channelServer(item.channel);
   const words = ['mcp', 'install', '--client', item.client];
   if (item.name !== facts.defaultServerName) words.push('--name', item.name);
@@ -304,7 +296,7 @@ async function whyNotUpdatable(
   config: Config | null,
   item: RegistrationItem,
   narrowing: Narrowing,
-  handoffs: HandoffMaker,
+  handoffs: CliHandoffs,
 ): Promise<string | undefined> {
   if (item.launcher !== 'managed' && item.launcher !== 'npx') {
     return `it was not written by \`mcp install\`, so how it starts cannot be carried over; ${handoffSentence(installHandoff(item, handoffs), (command) => `register it again with ${command}`)}`;
@@ -375,7 +367,7 @@ async function runtimesNeeded(
 async function inspect(core: Core, env: NodeJS.ProcessEnv, deps: UpdateDeps): Promise<Inspection> {
   const context: InstallContext = { env, core, platform: deps.platform };
   const scan = await scanRegisteredServers(env);
-  const handoffs = withRegistrationsFor(handoffsFor(core, { platform: deps.platform }), scan.servers);
+  const handoffs = requireHandoffs(core, deps.platform).withRegistrations(scan.servers);
   const unreadable: UnreadableConfig[] = [...scan.unreadable];
   const found = registrations(scan.servers).map(({ channel, server }) => {
     const facts = channelServer(channel);
@@ -655,7 +647,7 @@ interface RegistrationStep {
 interface Planned {
   /** The report the plan was made from: what the daily check's file records, as the update leaves it. */
   report: UpdateReport;
-  handoffs: HandoffMaker;
+  handoffs: CliHandoffs;
   latest: Record<string, string>;
   runtimes: RuntimeItem[];
   registrations: RegistrationStep[];
@@ -731,7 +723,7 @@ async function planRegistrations(
   context: InstallContext,
   candidates: readonly Found[],
   request: UpdateRequest,
-  handoffs: HandoffMaker,
+  handoffs: CliHandoffs,
 ): Promise<{ steps: RegistrationStep[]; manual: RegistrationItem[] }> {
   const steps: RegistrationStep[] = [];
   const manual: RegistrationItem[] = [];
@@ -926,7 +918,7 @@ function runtimeProduct(packageName: string, version: string): Promise<McpProduc
  * Every channel's `mcp prune`, as a person runs it at a terminal: each located among this machine's registrations, and
  * for one that is not, why — never a bare name (CUE-403).
  */
-function pruneCommands(handoffs: HandoffMaker): string {
+function pruneCommands(handoffs: CliHandoffs): string {
   return handoffChoices(
     CHANNELS.map((channel) => handoffs.of(channel, ['mcp', 'prune'])),
     'none of their commands is locatable here:',

@@ -6,8 +6,8 @@ import { test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
-import { inlineCommand, shellCommand } from '../src/cli-runtime.ts';
 import { type Core, openCore } from '../src/core.ts';
+import { CORE_CALLER } from '../src/handoffs.ts';
 import { createCoreMcpServer } from '../src/mcp/server.ts';
 import { resolvePaths } from '../src/paths.ts';
 import { assertNoBareCommand, coreInline } from './helpers/handoffs.ts';
@@ -63,7 +63,7 @@ function machine(): Machine {
     AGENT_COMMS_CLIENT_CLI_DIRS: '',
     AGENT_COMMS_UPDATE_CHECK: 'off',
   };
-  return { home, configDir, env, core: openCore({ env }), profile };
+  return { home, configDir, env, core: openCore({ env, caller: CORE_CALLER }), profile };
 }
 
 function cli(m: Machine, args: string[], cwd?: string) {
@@ -287,8 +287,8 @@ test('the org MCP surface threads its selected platform into operation hints', a
       const refused = await call('comms_org_add', { file: m.profile });
       assert.equal(refused.isError, true, platform);
       const error = (refused.structuredContent as { error: { hint: string } }).error;
-      const update = inlineCommand(shellCommand(['agentcomms', 'org', 'update', '7'], platform));
-      assert.match(error.hint, new RegExp(update.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), platform);
+      const update = coreInline(m.core.paths, ['org', 'update', '7'], platform);
+      assert.ok(error.hint.includes(update), `${platform}: ${error.hint}`);
     } finally {
       await close();
     }

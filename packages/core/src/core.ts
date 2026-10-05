@@ -26,8 +26,9 @@ export interface Core {
   secrets(kind?: SecretStoreKind): Promise<SecretStore>;
   /**
    * The commands this process tells a person to run — its own CLI's, core's, another product's — located from the
-   * caller it was opened with (`OpenCoreOptions.caller`), for these folders. Undefined when none was given: then core's
-   * own sentences fall back to the bare names they printed before CUE-403 (`handoffsFor`), until every package gives one.
+   * caller it was opened with (`OpenCoreOptions.caller`), for these folders. Undefined when none was given: then there
+   * is no command to print at all, and anything that asks for one meets the programming error `requireHandoffs` throws —
+   * never a bare name. Every package opens core with its caller.
    */
   handoffs?: CliHandoffs | undefined;
 }

@@ -7,7 +7,7 @@ import { CHANNEL_SNAPSHOT } from './channels.generated.ts';
 import { type ConfigVersion, NEW_CONFIG_VERSION } from './config-version.ts';
 import { CommsError } from './errors.ts';
 import { FILE_MODE, writeFileAtomic } from './fs.ts';
-import { asHandoffMaker, type HandoffMaker, type HandoffsOrPlatform, handoffSentence } from './handoff-text.ts';
+import { type CliHandoffs, handoffSentence, requiredHandoffs } from './handoff-text.ts';
 import { namesItsPlace } from './jail.ts';
 import { withCredentialsLock, withFileLock } from './lock.ts';
 import { NAME_MESSAGE, NAME_PATTERN, ORGANISATION_PATTERN, parseName, parseOrganisation } from './name-grammar.ts';
@@ -718,18 +718,18 @@ export function committedSecretsStore(config: Config): StoreKind | null {
  *
  * A different backend asked for is refused, not taken: one backend holds everything here, and changing it has to move
  * what is already stored, which is what `agentcomms secrets migrate` does and nothing else does. The refusal names that
- * command, made by `handoffs` — the caller's, located (CUE-403) — or, for a bare platform, the bridge's bare one.
+ * command, made by `handoffs` — the caller's, located (CUE-403).
  */
 export function secretsStoreFor(
   config: Config,
   requested: StoreKind | undefined,
-  handoffs: HandoffsOrPlatform = process.platform,
+  handoffs: CliHandoffs,
 ): { store: StoreKind; choosing: boolean } {
   const committed = committedSecretsStore(config);
   if (committed === null) return { store: requested ?? 'keychain', choosing: true };
   if (requested !== undefined && requested !== committed) {
     const migrate = handoffSentence(
-      asHandoffMaker(handoffs).core(['secrets', 'migrate', '--to', requested]),
+      handoffs.core(['secrets', 'migrate', '--to', requested]),
       (command) => `To change it, run ${command}, then run this again.`,
       { instead: 'To change it, call comms_secrets_migrate from a chat, then run this again.' },
     );
@@ -851,14 +851,14 @@ export function parseConfig(text: string, source = 'config.json'): Config {
 export class ConfigStore {
   readonly path: string;
   readonly #lockPath: string;
-  readonly #handoffs: HandoffMaker | undefined;
+  readonly #handoffs: CliHandoffs | undefined;
   #cache: { key: string; config: Config } | null = null;
 
   /**
    * @param options.handoffs the printing package's handoffs (`core.handoffs`, CUE-403), for the command a refusal
-   *   names; left out, it names the bare command it always has — the deprecated bridge.
+   *   names; left out, a refusal that has to name one is a programming error (`requiredHandoffs`).
    */
-  constructor(configDir: string, options: { readonly handoffs?: HandoffMaker | undefined } = {}) {
+  constructor(configDir: string, options: { readonly handoffs?: CliHandoffs | undefined } = {}) {
     this.path = join(configDir, 'config.json');
     // The lock sits next to the file it guards, so an overridden state directory cannot split it.
     this.#lockPath = join(configDir, '.config.lock');
@@ -868,7 +868,7 @@ export class ConfigStore {
   /** "Run the names migration again", as core's command — located from whatever is printing — or the tool. */
   #namesMigrateAgain(why: string): string {
     return handoffSentence(
-      asHandoffMaker(this.#handoffs).core(['names', 'migrate']),
+      requiredHandoffs(this.#handoffs).core(['names', 'migrate']),
       (command) => `Run ${command} again ${why}.`,
       { instead: `Call comms_names_migrate again ${why}.` },
     );

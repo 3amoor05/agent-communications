@@ -2,9 +2,9 @@ import { createHash } from 'node:crypto';
 import { basename, dirname } from 'node:path';
 import {
   type AccountConfig,
+  type CliHandoffs,
   CommsError,
   type Config,
-  type HandoffMaker,
   handoffSentence,
   handoffSentenceToFill,
   newAccountId,
@@ -107,7 +107,7 @@ export function newWhatsAppAccount(options: {
  * channel adds and reads nothing rather than invent a flat name for a platform that never had one. The refusal names
  * core's command as `handoffs` find it: the core this package installs.
  */
-export function requireNamedConfig(config: Config, handoffs: HandoffMaker): void {
+export function requireNamedConfig(config: Config, handoffs: CliHandoffs): void {
   if (config.version !== 2) {
     throw new CommsError(
       'CONFIG',
@@ -135,7 +135,7 @@ export function whatsappAccountNames(config: Config): string[] {
     .sort();
 }
 
-function notFound(config: Config, name: string, handoffs: HandoffMaker): () => CommsError {
+function notFound(config: Config, name: string, handoffs: CliHandoffs): () => CommsError {
   return () => {
     const known = whatsappAccountNames(config);
     return new CommsError('NOT_FOUND', `no WhatsApp account called "${name}"`, {
@@ -161,7 +161,7 @@ function notFound(config: Config, name: string, handoffs: HandoffMaker): () => C
 export function requireAccount(
   config: Config,
   name: string | undefined,
-  handoffs: HandoffMaker,
+  handoffs: CliHandoffs,
 ): { name: string; account: WhatsAppAccount } {
   if (name === undefined || name === '') {
     throw new CommsError('USAGE', 'which WhatsApp account? there is no default', {

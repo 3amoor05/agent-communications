@@ -58,7 +58,7 @@ function rivalsOf(channel: string): NonNullable<ChannelManifest['rivals']> {
 /**
  * The command that removes a registered server, in its client's own terms — the name as the client's file has it,
  * which may be anything, so on Windows it can have no line to paste, and is shown as its words, to be typed
- * (`shellCommand`). Never as a line with the name left out: that removed whatever entry had the stand-in's name.
+ * (`quoteCommand`). Never as a line with the name left out: that removed whatever entry had the stand-in's name.
  *
  * The client's own command, so an external one (`externalCommand`). A name that is also one of this suite's commands,
  * or a path into one of its packages, is refused there, since such words are how a suite command would get round the

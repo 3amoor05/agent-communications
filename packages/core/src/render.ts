@@ -1,7 +1,7 @@
 import { channelLabel } from './channel-servers.ts';
 import { isDangerous } from './chars.ts';
 import { paint } from './cli-runtime.ts';
-import { type HandoffMaker, handoffSentence, handoffsFor } from './handoffs.ts';
+import { type CliHandoffs, handoffSentence } from './handoffs.ts';
 import type { InstallResult, PruneResult } from './mcp-install.ts';
 import type { DoctorReport } from './operations/maintenance.ts';
 import type { UpdateItem, UpdateReport, UpdateResult } from './operations/update.ts';
@@ -451,7 +451,7 @@ function describeItem(item: UpdateItem): string {
   return `${channelLabel(item.channel)} with ${item.client} as "${item.name}" ${where} (${item.launcher}, ${version}${pins})`;
 }
 
-export function renderUpdateCheck(report: UpdateReport, handoffs: HandoffMaker = handoffsFor(undefined)): string {
+export function renderUpdateCheck(report: UpdateReport, handoffs: CliHandoffs): string {
   const latest = Object.entries(report.latest)
     .map(([name, version]) => `${name} ${version}`)
     .join(', ');

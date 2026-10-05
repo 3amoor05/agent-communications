@@ -5,12 +5,12 @@ import { test } from 'node:test';
 import {
   CommsError,
   commandText,
+  externalCommand,
   findUngatedGmailServers,
   listRegisteredServers,
   managedRuntimeEntry,
   openCore,
   secretsStoreOf,
-  shellCommand,
 } from '@agentcomms/core';
 import { buildAuthUrl, exchangeCode, newPkce } from '../src/auth/oauth.ts';
 import { SCOPES } from '../src/auth/scopes.ts';
@@ -49,7 +49,9 @@ test('doctor quotes a loose directory repair for the selected shell', {
 
   const result = await doctor(context);
   const check = result.checks.find((candidate) => candidate.id === 'config-dir');
-  assert.equal(check?.fix, commandText(shellCommand(['chmod', '700', configDir], 'darwin')));
+  // The system's own `chmod`, an external command, quoted for the shell the context prints for.
+  const owner = externalCommand(['chmod', '700', configDir], 'the system command that sets permissions', 'darwin');
+  assert.equal(check?.fix, commandText(owner));
 });
 
 /** A refresh token the fake Google will renew, as the legacy server's files would hold. */

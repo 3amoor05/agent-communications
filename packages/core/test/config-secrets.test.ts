@@ -27,7 +27,17 @@ import {
   probeKeychain,
 } from '../src/secrets.ts';
 import { InboxStateStore } from '../src/state.ts';
+import { coreHandoffs } from './helpers/handoffs.ts';
 import { tempDir } from './helpers/temp.ts';
+
+/** Core's own handoffs, as `openCore({ caller })` hands its stores: a refusal that names a command needs them. */
+const HANDOFFS = coreHandoffs({
+  configDir: '/pins/config',
+  stateDir: '/pins/state',
+  dataDir: '/pins/data',
+  secretsDir: '/pins/secrets',
+  downloadsDir: '/pins/downloads',
+});
 
 const posix = process.platform !== 'win32';
 
@@ -355,9 +365,9 @@ test('KeychainSecretStore round-trips through the keyring pinned to Secret Servi
 });
 
 test('a locked or hanging keychain fails fast with a CONFIG error, never a silent fallback', async () => {
-  const locked = new KeychainSecretStore(fakeKeyring('locked').module, 'ns');
+  const locked = new KeychainSecretStore(fakeKeyring('locked').module, 'ns', undefined, { handoffs: HANDOFFS });
   await assert.rejects(locked.get('a'), /refused to read a stored secret/);
-  const hanging = new KeychainSecretStore(fakeKeyring('hang').module, 'ns', 50);
+  const hanging = new KeychainSecretStore(fakeKeyring('hang').module, 'ns', 50, { handoffs: HANDOFFS });
   await assert.rejects(
     hanging.get('a'),
     (e: unknown) =>
@@ -391,7 +401,9 @@ test('settled() waits out a keychain call that outlived its timeout, so the next
       return super.setPassword(value);
     }
   };
-  const store = new KeychainSecretStore({ AsyncEntry: Stalling } as unknown as KeyringModule, 'ns', 30);
+  const store = new KeychainSecretStore({ AsyncEntry: Stalling } as unknown as KeyringModule, 'ns', 30, {
+    handoffs: HANDOFFS,
+  });
   await assert.rejects(store.set('a', 'first'), /did not answer/);
   await assert.rejects(store.set('a', 'second'), /did not answer/, 'a stuck call makes the next one fail fast');
 
@@ -411,14 +423,14 @@ test('settled() waits out a keychain call that outlived its timeout, so the next
 
 test('probeKeychain reports ok only after a full round trip through the keychain itself', async () => {
   const { module, data } = fakeKeyring();
-  assert.deepEqual(await probeKeychain(module), { ok: true });
+  assert.deepEqual(await probeKeychain(module, 'probe', HANDOFFS), { ok: true });
   assert.equal(data.size, 0, 'the probe entry is removed');
   // A keychain that accepts writes but returns nothing must fail the probe, not pass via a cache.
   const forgetful = fakeKeyring();
   const originalGet = forgetful.data.get.bind(forgetful.data);
   forgetful.data.get = (key: string) => (key.includes(':probe:') ? undefined : originalGet(key));
-  assert.equal((await probeKeychain(forgetful.module)).ok, false);
-  const result = await probeKeychain(fakeKeyring('locked').module);
+  assert.equal((await probeKeychain(forgetful.module, 'probe', HANDOFFS)).ok, false);
+  const result = await probeKeychain(fakeKeyring('locked').module, 'probe', HANDOFFS);
   assert.equal(result.ok, false);
   assert.match(result.reason ?? '', /refused/);
 });

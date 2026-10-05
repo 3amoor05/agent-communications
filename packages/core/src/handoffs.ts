@@ -1,23 +1,21 @@
 import type { ChannelEntry } from './channel-manifest.ts';
 import { CHANNEL_SNAPSHOT } from './channels.generated.ts';
 import { type CliCommandCaller, locateCliCommand, type NodeRuntime } from './cli-command.ts';
-import { bareHandoffs, type Handoff, type HandoffMaker, type HandoffUse } from './handoff-text.ts';
+import { type CliHandoffs, type Handoff, type HandoffUse, requiredHandoffs } from './handoff-text.ts';
 import { type RegisteredServer, scanRegisteredServers } from './mcp-clients.ts';
 import type { PathName, ResolvedPaths } from './paths.ts';
 
 export {
-  asHandoffMaker,
+  type CliHandoffs,
   type Handoff,
-  type HandoffMaker,
   type HandoffSentenceOptions,
-  type HandoffsOrPlatform,
   type HandoffUse,
   handoffChoices,
   handoffSentence,
   handoffSentenceToFill,
   handoffText,
+  handoffTextToFill,
   isCommand,
-  platformOf,
 } from './handoff-text.ts';
 
 /**
@@ -32,23 +30,6 @@ export {
 
 /** The suite folders every CLI command opens: what a command is pinned to unless it says otherwise. */
 export const HANDOFF_FOLDERS: readonly PathName[] = Object.freeze(['configDir', 'stateDir', 'dataDir', 'secretsDir']);
-
-export interface CliHandoffs extends HandoffMaker {
-  /** The printing package: one of its own modules and its name. */
-  readonly caller: CliCommandCaller;
-  own(words: readonly string[], use?: HandoffUse): Handoff;
-  core(words: readonly string[], use?: HandoffUse): Handoff;
-  of(channel: string, words: readonly string[], use?: HandoffUse): Handoff;
-  /** The same commands, quoted for another shell. */
-  on(platform: NodeJS.Platform): CliHandoffs;
-  /**
-   * The same, able to find another product: with the servers registered with this machine's MCP clients read now, from
-   * the environment these were made with. Read once per call; nothing a registration names is run.
-   */
-  registered(): Promise<CliHandoffs>;
-  /** The same, finding another product among these registrations: a scan the caller has already read. */
-  withRegistrations(registrations: readonly RegisteredServer[]): CliHandoffs;
-}
 
 export interface CliHandoffsOptions {
   /** A module of the printing package (`import.meta.url`) and that package's name. */
@@ -121,40 +102,14 @@ export function cliHandoffs(options: CliHandoffsOptions): CliHandoffs {
 }
 
 /**
- * `core.handoffs`, for code that runs only where its package opened core with its caller — a channel's own CLI and
- * server, once migrated. A programming error otherwise: the package has to give core its caller (`openCore({ caller })`).
+ * `core.handoffs` — quoted for `platform` when one is given — for anything that prints a command. A programming error
+ * when core was opened without its caller: the package has to give it one (`openCore({ caller })`), and there is no
+ * bare name to print instead.
  */
-export function requireHandoffs(core: { readonly handoffs?: CliHandoffs | undefined }): CliHandoffs {
-  if (core.handoffs === undefined) {
-    throw new TypeError('core was opened without its caller, so it cannot locate a command: pass openCore({ caller })');
-  }
-  return core.handoffs;
-}
-
-/**
- * The commands of whatever is printing: `core.handoffs` when the package gave core its caller, quoted for `platform`.
- *
- * @deprecated Otherwise — a package that has not given core its caller yet — a bridge whose commands are bare names, as
- * before CUE-403, its own named by `approveCommand` (`agent-gmail approve`) or `agentcomms`. It goes once every package
- * gives core its caller (CUE-403 task 15); nothing new should rely on it.
- */
-export function handoffsFor(
-  core: { readonly handoffs?: CliHandoffs | undefined } | undefined,
-  options: { platform?: NodeJS.Platform | undefined; approveCommand?: string | undefined } = {},
-): HandoffMaker {
-  const located = core?.handoffs;
-  if (located !== undefined) return options.platform === undefined ? located : located.on(options.platform);
-  return bareHandoffs(options.platform ?? process.platform, options.approveCommand);
-}
-
-/** The same maker, finding another product among these registrations when it is a real one. */
-export function withRegistrationsFor(maker: HandoffMaker, registrations: readonly RegisteredServer[]): HandoffMaker {
-  return 'withRegistrations' in maker && typeof maker.withRegistrations === 'function'
-    ? (maker as CliHandoffs).withRegistrations(registrations)
-    : maker;
-}
-
-/** The same maker, able to find another product when it is a real one: registrations read now. */
-export async function registeredFor(maker: HandoffMaker): Promise<HandoffMaker> {
-  return 'registered' in maker && typeof maker.registered === 'function' ? (maker as CliHandoffs).registered() : maker;
+export function requireHandoffs(
+  core: { readonly handoffs?: CliHandoffs | undefined },
+  platform?: NodeJS.Platform | undefined,
+): CliHandoffs {
+  const handoffs = requiredHandoffs(core.handoffs);
+  return platform === undefined ? handoffs : handoffs.on(platform);
 }

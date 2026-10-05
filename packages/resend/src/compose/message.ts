@@ -3,6 +3,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { basename, extname } from 'node:path';
 import {
   analyseOutboundHtml,
+  type CliHandoffs,
   CommsError,
   canonicalAddress,
   canonicalJson,
@@ -10,7 +11,6 @@ import {
   collapseWhitespace,
   defaultAttachDeny,
   domainOf,
-  type HandoffMaker,
   homeDirectory,
   isControl,
   isInvisible,
@@ -183,7 +183,7 @@ export interface AttachPolicyInput {
   roots: readonly string[];
   deny: readonly string[];
   /** The context's handoffs, for the command the jail's refusal names: core's `attach roots add`, located from here. */
-  handoffs: HandoffMaker;
+  handoffs: CliHandoffs;
 }
 
 /** Reads an attachment through core's attachment jail, and says exactly what it is. */

@@ -59,7 +59,7 @@ async function savedProfileFlow(
     exchange: async (params) => (options.reply ? options.reply(params) : harness.exchange(params)),
   });
   const mode = options.mode ?? 'read';
-  const target = resolveProfileSlackTarget(await harness.core.config.load(), 'rgc', mode);
+  const target = resolveProfileSlackTarget(await harness.core.config.load(), 'rgc', mode, context.handoffs);
   const profile = {
     ...target,
     label: neutralise(target.label).text,

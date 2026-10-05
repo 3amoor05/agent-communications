@@ -4,7 +4,7 @@ import { open, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { CommsError } from './errors.ts';
 import { writeFileAtomic } from './fs.ts';
-import { asHandoffMaker, type HandoffMaker, handoffSentence } from './handoff-text.ts';
+import { type CliHandoffs, handoffSentence, requiredHandoffs } from './handoff-text.ts';
 
 /**
  * Where refresh tokens, client secrets and approval keys live. Two backends, chosen per inbox or client and recorded
@@ -44,19 +44,21 @@ export const KEYCHAIN_TIMEOUT_MS = 12_000;
 
 /** What a store's refusals are told with: the printing package's handoffs, for the command one names (CUE-403). */
 export interface SecretStoreOptions {
-  /** `core.handoffs`; left out, a refusal names the bare command it always has (the deprecated bridge). */
-  readonly handoffs?: HandoffMaker | undefined;
+  /** `core.handoffs`; left out, a refusal that has to name a command is a programming error (`requiredHandoffs`). */
+  readonly handoffs?: CliHandoffs | undefined;
 }
 
 /** "Run the doctor": core's, located from whatever is printing, or why there is none here. */
-function doctorSentence(handoffs: HandoffMaker | undefined, say: (command: string) => string): string {
-  return handoffSentence(asHandoffMaker(handoffs).core(['doctor']), say, { instead: 'Call comms_doctor from a chat.' });
+function doctorSentence(handoffs: CliHandoffs | undefined, say: (command: string) => string): string {
+  return handoffSentence(requiredHandoffs(handoffs).core(['doctor']), say, {
+    instead: 'Call comms_doctor from a chat.',
+  });
 }
 
 export class FileSecretStore implements SecretStore {
   readonly kind = 'file' as const;
   readonly directory: string;
-  readonly #handoffs: HandoffMaker | undefined;
+  readonly #handoffs: CliHandoffs | undefined;
 
   constructor(directory: string, options: SecretStoreOptions = {}) {
     this.directory = directory;
@@ -142,7 +144,7 @@ function keychainError(
   action: string,
   cause: unknown,
   timeoutMs: number,
-  handoffs: HandoffMaker | undefined,
+  handoffs: CliHandoffs | undefined,
 ): CommsError {
   const timedOut = cause instanceof KeychainTimeout;
   return new CommsError(
@@ -181,7 +183,7 @@ export class KeychainSecretStore implements SecretStore {
   readonly #module: KeyringModule;
   readonly #timeoutMs: number;
   readonly #namespace: string;
-  readonly #handoffs: HandoffMaker | undefined;
+  readonly #handoffs: CliHandoffs | undefined;
   /** One keychain call at a time: parallel calls would each raise their own OS prompt and exhaust the thread pool. */
   #queue: Promise<unknown> = Promise.resolve();
   /**
@@ -284,16 +286,23 @@ export interface ProbeResult {
   reason?: string;
 }
 
-/** A full round trip — write, read back, delete — on a scratch entry. The only honest test that the store works. */
-export async function probeKeychain(module: KeyringModule | null = null, namespace = 'probe'): Promise<ProbeResult> {
+/**
+ * A full round trip — write, read back, delete — on a scratch entry. The only honest test that the store works.
+ * `handoffs` are the printing package's, which the stores it opens make their refusals with, as every store does.
+ */
+export async function probeKeychain(
+  module: KeyringModule | null,
+  namespace: string,
+  handoffs: CliHandoffs,
+): Promise<ProbeResult> {
   const keyring = module ?? (await loadKeyringModule());
   if (!keyring)
     return { ok: false, reason: 'the optional @napi-rs/keyring package is not installed for this platform' };
   const ref = `probe:${process.pid}:${Date.now()}`;
   try {
-    await new KeychainSecretStore(keyring, namespace).set(ref, 'probe');
+    await new KeychainSecretStore(keyring, namespace, KEYCHAIN_TIMEOUT_MS, { handoffs }).set(ref, 'probe');
     // A separate instance, so the read goes to the keychain rather than to the writer's cache.
-    const reader = new KeychainSecretStore(keyring, namespace);
+    const reader = new KeychainSecretStore(keyring, namespace, KEYCHAIN_TIMEOUT_MS, { handoffs });
     const value = await reader.get(ref);
     await reader.delete(ref);
     return value === 'probe' ? { ok: true } : { ok: false, reason: 'the keychain did not return what was stored' };

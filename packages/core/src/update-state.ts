@@ -1,10 +1,9 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { inlineCommand, type ShellCommand } from './cli-runtime.ts';
 import { type UpdateCheckSetting, updateCheckSetting } from './config.ts';
 import type { Core } from './core.ts';
 import { writeFileAtomic } from './fs.ts';
-import { type CliHandoffs, type Handoff, handoffSentence, handoffsFor, handoffText, isCommand } from './handoffs.ts';
+import { type CliHandoffs, type Handoff, handoffSentence, handoffText, requireHandoffs } from './handoffs.ts';
 import { withFileLock } from './lock.ts';
 import { isBehind, isPrerelease, isVersion } from './versions.ts';
 
@@ -305,72 +304,36 @@ export async function pendingUpdate(
 }
 
 /**
- * The two ways on, as a tool call and as a command — and the command through npx, for a machine with no `agentcomms`
- * installed: one that runs only a plugin's server, say, has neither the core server nor the command.
- */
-export const UPDATE_WAYS: {
-  readonly update: { readonly tool: 'comms_update'; readonly command: string; readonly npx: string };
-  readonly later: {
-    readonly tool: 'comms_update';
-    readonly arguments: { readonly later: true };
-    readonly command: string;
-    readonly npx: string;
-  };
-} = Object.freeze({
-  update: { tool: 'comms_update', command: 'agentcomms update', npx: 'npx -y @agentcomms/core@latest update' },
-  later: {
-    tool: 'comms_update',
-    arguments: { later: true },
-    command: 'agentcomms update --later',
-    npx: 'npx -y @agentcomms/core@latest update --later',
-  },
-});
-
-/**
  * The update and "not now" as commands a person runs at a terminal: core's, located from whatever is printing
- * (`handoffsFor`) — a channel finds the core it is installed with. Through the bridge, for a package that has not
- * given core its caller, they are the bare commands they were, with their npx form beside them.
+ * (`core.handoffs`) — a channel finds the core it is installed with — or, for each, why there is none here.
  */
 export interface UpdateCommands {
-  readonly update: Handoff | ShellCommand;
-  readonly later: Handoff | ShellCommand;
-  /** Whether they were located; the bridge's are not. */
-  readonly located: boolean;
+  readonly update: Handoff;
+  readonly later: Handoff;
 }
 
 export function updateCommands(
-  core: { readonly handoffs?: CliHandoffs | undefined } | undefined,
+  core: { readonly handoffs?: CliHandoffs | undefined },
   platform?: NodeJS.Platform | undefined,
 ): UpdateCommands {
-  const maker = handoffsFor(core, { platform });
-  return {
-    update: maker.core(['update']),
-    later: maker.core(['update', '--later']),
-    located: core?.handoffs !== undefined,
-  };
+  const handoffs = requireHandoffs(core, platform);
+  return { update: handoffs.core(['update']), later: handoffs.core(['update', '--later']) };
 }
 
-/**
- * One of them in a sentence `say` makes: in backticks — beside its npx form, through the bridge, as before — or, with
- * no command here, the sentence saying why.
- */
+/** One of them in a sentence `say` makes: in backticks, or, with no command here, the sentence saying why. */
 export function updateCommandSaid(
   commands: UpdateCommands,
   which: 'update' | 'later',
   say: (command: string) => string,
 ): string {
-  const handoff = commands[which];
-  if (commands.located || !isCommand(handoff)) return handoffSentence(handoff, say);
-  return say(`${inlineCommand(handoff)} (\`${UPDATE_WAYS[which].npx}\` where agentcomms is not installed)`);
+  return handoffSentence(commands[which], say);
 }
 
 /** The two ways on, as a stop's details give them: the tool, and the command — its line, or why there is none. */
 export function updateWaysOf(commands: UpdateCommands): {
-  update: { tool: 'comms_update'; command: string; npx?: string };
-  later: { tool: 'comms_update'; arguments: { later: true }; command: string; npx?: string };
+  update: { tool: 'comms_update'; command: string };
+  later: { tool: 'comms_update'; arguments: { later: true }; command: string };
 } {
-  if (!commands.located)
-    return { update: { ...UPDATE_WAYS.update }, later: { ...UPDATE_WAYS.later, arguments: { later: true } } };
   return {
     update: { tool: 'comms_update', command: handoffText(commands.update) },
     later: { tool: 'comms_update', arguments: { later: true }, command: handoffText(commands.later) },
@@ -384,7 +347,7 @@ export function updateWaysOf(commands: UpdateCommands): {
 export function updateStopMessage(
   pending: PendingUpdate,
   where: { server: string; tool: string },
-  commands: UpdateCommands = updateCommands(undefined),
+  commands: UpdateCommands,
 ): string {
   const didNotRun = `Nothing was done: ${where.tool} did not run.`;
   const later = `Not now: call comms_update with \`later: true\` — a change the person approves — and nothing stops again until midnight; the next request after it asks again. ${updateCommandSaid(commands, 'later', (command) => `At a terminal: ${command}.`)}`;

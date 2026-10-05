@@ -3,11 +3,11 @@ import { chmod, rename, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import {
+  type CliHandoffs,
   CommsError,
   DIR_MODE,
   ensurePrivateDir,
   FILE_MODE,
-  type HandoffMaker,
   handoffSentence,
   isGroupOrWorldAccessible,
 } from '@agentcomms/core';
@@ -303,7 +303,7 @@ export class WhatsAppIndex {
     directory: string,
     accountName: string,
     visibility: Visibility,
-    handoffs: HandoffMaker,
+    handoffs: CliHandoffs,
   ): Promise<WhatsAppIndex> {
     const path = join(directory, INDEX_FILE);
     // Located only for a refusal: locating reads this package's files, which a read that goes ahead has no need of.

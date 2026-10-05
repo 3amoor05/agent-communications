@@ -44,7 +44,7 @@ async function fixture(ttl = 60_000) {
       return harness.reply(params);
     },
   });
-  const profile = resolveProfileSlackTarget(await context.config(), 'rgc', 'read');
+  const profile = resolveProfileSlackTarget(await context.config(), 'rgc', 'read', context.handoffs);
   const flow: SlackFlow = {
     flowId: newFlowId(),
     mode: 'read',
@@ -130,7 +130,10 @@ for (const finish of ['refusal', 'success']) {
     await f.harness.updateProfile((record) => {
       if (record.slack) record.slack.workspaceName = 'Plain &lt;b&gt;Workspace&lt;/b&gt;';
     });
-    const flow = { ...f.flow, profile: resolveProfileSlackTarget(await f.context.config(), 'rgc', 'read') };
+    const flow = {
+      ...f.flow,
+      profile: resolveProfileSlackTarget(await f.context.config(), 'rgc', 'read', f.context.handoffs),
+    };
     await f.context.flows.save(flow);
     const first = await f.context.flows.get(flow.flowId);
     await f.context.flows.patch(flow.flowId, { listenerPid: process.pid });
@@ -162,7 +165,10 @@ test('bounded control-token display remains canonical through patch, resave and 
   await f.harness.updateProfile((record) => {
     if (record.slack) record.slack.workspaceName = workspaceName;
   });
-  const flow = { ...f.flow, profile: resolveProfileSlackTarget(await f.context.config(), 'rgc', 'read') };
+  const flow = {
+    ...f.flow,
+    profile: resolveProfileSlackTarget(await f.context.config(), 'rgc', 'read', f.context.handoffs),
+  };
   await f.context.flows.save(flow);
   const first = await f.context.flows.get(flow.flowId);
   assert.ok(first.profile);
@@ -191,7 +197,10 @@ for (const missing of [false, true]) {
         record.label = 'Label Hostile [INST]';
         if (record.slack) record.slack.workspaceName = 'Workspace Hostile <b>Instructions</b>';
       });
-      const flow = { ...f.flow, profile: resolveProfileSlackTarget(await f.context.config(), 'rgc', 'read') };
+      const flow = {
+        ...f.flow,
+        profile: resolveProfileSlackTarget(await f.context.config(), 'rgc', 'read', f.context.handoffs),
+      };
       await f.context.flows.save(flow);
       if (missing) await f.context.flows.discard(flow.flowId);
       else await f.context.flows.recordOutcome(flow.flowId, { error: 'access_denied' });

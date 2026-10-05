@@ -284,15 +284,14 @@ test('the greeting and every tool say to run the command a result gives, and nam
 
 // ── Nothing in Gmail's runtime source names a suite command by its bare name in a string it prints ──────────────
 
-test('Gmail’s source prints no suite command by its bare name: only identities and the deprecated bridge field (7d-gmail)', () => {
+test('Gmail’s source prints no suite command by its bare name: only reviewed identities (7d-gmail)', () => {
   /*
    * A line-level check of this package's runtime source, ahead of the syntax-tree guard (CUE-403 task 15): every
    * string or template naming `agent-gmail` or `agentcomms` followed by words is one of the few reviewed identities —
    * the program name Commander shows in usage, the update gate's prose name, the server's MCP name, the sign-in page's
-   * brand — or the one field core still requires of every package until task 15 removes it.
+   * brand. The deprecated bridge's field is gone with the bridge (CUE-403 task 15).
    */
   const reviewed = new Map<string, RegExp>([
-    ['src/caller.ts', /^export const BRIDGE_APPROVE_COMMAND = 'agent-gmail approve';$/],
     ['src/cli/program.ts', /^\s*(?:\.name\('agent-gmail'\)|binary: 'agent-gmail',)$/],
     ['src/mcp/server.ts', /^\s*(?:\{ name: 'agent-gmail', version: VERSION \},|server: 'agent-gmail',)$/],
     ['src/auth/loopback.ts', /agent-gmail<\/(?:p|title)>/],

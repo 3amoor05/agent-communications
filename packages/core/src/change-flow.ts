@@ -12,20 +12,17 @@ import {
 import {
   agentMarker,
   canPrompt,
-  commandText,
   defaultStreams,
   inlineCommand,
   insertWordsBeforeSentinel,
   paint,
   refuseUnlessPerson,
-  type ShellCommand,
   type Streams,
-  withWords,
 } from './cli-runtime.ts';
 import { type Config, classifyChange, type LooseningConsent } from './config.ts';
 import type { Core } from './core.ts';
 import { CommsError } from './errors.ts';
-import { type Handoff, type HandoffMaker, handoffSentence, handoffsFor, isCommand } from './handoffs.ts';
+import { type CliHandoffs, type Handoff, handoffSentence, isCommand, requireHandoffs } from './handoffs.ts';
 
 /**
  * One changing operation, run the same way from the CLI and from MCP.
@@ -76,7 +73,6 @@ export async function gatedChange<T>(
   options: {
     surface: ChangeSurface;
     approvalId?: string | undefined;
-    approveCommand?: string | undefined;
     platform?: NodeJS.Platform | undefined;
   },
 ): Promise<GatedOutcome<T>> {
@@ -101,16 +97,11 @@ export async function gatedChange<T>(
   if (!options.approvalId) {
     return {
       status: 'approval-required',
-      prepared: await prepareChange(core, request, {
-        surface: options.surface,
-        approveCommand: options.approveCommand,
-        platform: options.platform,
-      }),
+      prepared: await prepareChange(core, request, { surface: options.surface, platform: options.platform }),
     };
   }
   const consent = await claimChange(core, options.approvalId, request, {
     surface: options.surface,
-    approveCommand: options.approveCommand,
     platform: options.platform,
   });
   return { status: 'applied', result: await change.apply(consent, request) };
@@ -175,16 +166,9 @@ export async function gatedChangeAtTerminal<T>(
      * The words of this command after its program — `['policy', 'chat']` — to run again with `--approval <id>`: located
      * as the printing package's own CLI (`core.handoffs`), the approval inserted before any `--`.
      */
-    rerun?: readonly string[] | undefined;
+    rerun: readonly string[];
     /** Whose CLI `rerun` is: the printing package's own (left out), or core's — `update --later` from a channel's gate. */
     rerunOn?: 'own' | 'core' | undefined;
-    /**
-     * The command to run again with `--approval <id>`, for the message an agent gets: as `shellCommand` printed it, so
-     * that one it has no line for is shown as its words, to be typed, or a fixed string with nobody's words in it.
-     *
-     * @deprecated For a package that does not locate its commands yet; `rerun` replaces it (CUE-403 task 15).
-     */
-    command?: string | ShellCommand | undefined;
     /** A safe replacement when the command cannot be repeated, for example because showing its path changes it. */
     pendingHint?: ((prepared: PreparedChange) => string) | undefined;
     /**
@@ -192,12 +176,6 @@ export async function gatedChangeAtTerminal<T>(
      * with `--mcp-approval`, because its `--approval` is already the OAuth client's, a different change.
      */
     approvalFlag?: string | undefined;
-    /**
-     * The command that approves a change beside this CLI — see `ChangeOptions.approveCommand`.
-     *
-     * @deprecated Read only without `core.handoffs`, whose own `approve` is used instead (CUE-403 task 15).
-     */
-    approveCommand?: string | undefined;
     /**
      * The person at this terminal has already said yes to this change, in this command, a moment ago — `agent-gmail
      * setup`'s "Connect this to an agent?". Under `chat` that answer is the approval: asking again for what they have
@@ -209,11 +187,9 @@ export async function gatedChangeAtTerminal<T>(
   },
 ): Promise<T> {
   const streams = options.streams ?? defaultStreams;
-  const { approveCommand } = options;
   const first = await gatedChange(core, change, {
     surface: 'cli',
     approvalId: options.approvalId,
-    approveCommand,
     platform: options.output.platform,
   });
   if (first.status === 'applied') return first.result;
@@ -228,21 +204,14 @@ export async function gatedChangeAtTerminal<T>(
      */
     if (options.output.json !== true) streams.stdout.write(`${prepared.preview}\n\n`);
     const carrying = [options.approvalFlag ?? '--approval', prepared.approvalId];
-    const { command, rerun } = options;
-    const maker = handoffsFor(core, { platform: options.output.platform, approveCommand });
+    const handoffs = requireHandoffs(core, options.output.platform);
     throw new CommsError('APPROVAL_PENDING', `this change needs approval first: ${prepared.summary}`, {
       hint:
         options.pendingHint?.(prepared) ??
         approvalHint(
           prepared,
-          rerun !== undefined && core.handoffs !== undefined
-            ? maker[options.rerunOn ?? 'own'](insertWordsBeforeSentinel(rerun, ...carrying))
-            : typeof command === 'string'
-              ? insertWordsBeforeSentinel(command.split(' '), ...carrying).join(' ')
-              : command !== undefined
-                ? withWords(command, ...carrying)
-                : maker[options.rerunOn ?? 'own'](insertWordsBeforeSentinel(rerun ?? [], ...carrying)),
-          maker,
+          handoffs[options.rerunOn ?? 'own'](insertWordsBeforeSentinel(options.rerun, ...carrying)),
+          handoffs,
         ),
       details: {
         approvalId: prepared.approvalId,
@@ -267,7 +236,6 @@ export async function gatedChangeAtTerminal<T>(
   const second = await gatedChange(core, change, {
     surface: 'cli',
     approvalId: prepared.approvalId,
-    approveCommand,
     platform: options.output.platform,
   });
   if (second.status !== 'applied') throw new CommsError('UNEXPECTED', 'the approved change asked for approval again');
@@ -283,16 +251,13 @@ export async function gatedChangeAtTerminal<T>(
  */
 export function approvalHint(
   prepared: Pick<PreparedChange, 'approvalId' | 'policy'>,
-  rerun: string | ShellCommand | Handoff,
-  approveCommand?: string | HandoffMaker | undefined,
-  platform: NodeJS.Platform = typeof rerun === 'string' || !isCommand(rerun) ? process.platform : rerun.platform,
+  rerun: Handoff,
+  maker: CliHandoffs,
 ): string {
-  // A command `shellCommand` has no line for is shown as its words, saying it has to be typed.
-  const run = typeof rerun === 'string' ? `\`${rerun}\`` : isCommand(rerun) ? inlineCommand(rerun) : null;
-  const maker =
-    typeof approveCommand === 'object' ? approveCommand : handoffsFor(undefined, { platform, approveCommand });
+  // A command with no line is shown as its words, saying it has to be typed.
+  const run = isCommand(rerun) ? inlineCommand(rerun) : null;
   // With either command missing, the sentence saying why stands in for it, never something else in its place.
-  const rerunSaid = run ?? (rerun as { message: string }).message;
+  const rerunSaid = isCommand(rerun) ? '' : rerun.message;
   if (prepared.policy !== 'confirm') {
     return run === null
       ? `Show the person the preview. ${rerunSaid}`
@@ -328,12 +293,11 @@ export async function approveChangeAtTerminal(
   streams: Streams = defaultStreams,
 ): Promise<{ approvalId: string; state: 'approved' | 'cancelled' }> {
   try {
-    const approve = handoffsFor(core, { platform: output.platform }).own(['approve', approvalId]);
+    const approve = requireHandoffs(core, output.platform).own(['approve', approvalId]);
     refuseUnlessPerson(env, streams, {
       refusedToAgent: 'only a person can approve a change, not an agent',
       refusedWithoutTerminal: 'approving a change needs an interactive terminal',
-      // Bare, as it was, before the package locates its commands; located once it does.
-      command: core.handoffs === undefined && isCommand(approve) ? commandText(approve) : approve,
+      command: approve,
       color: output.color,
       json: output.json,
     });

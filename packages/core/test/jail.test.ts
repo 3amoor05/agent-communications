@@ -4,7 +4,9 @@ import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { lineWithWordsToFill } from '../src/cli-runtime.ts';
 import { CommsError } from '../src/errors.ts';
+import { isCommand } from '../src/handoffs.ts';
 import {
   checkAttachable,
   createUniqueFile,
@@ -15,7 +17,17 @@ import {
   safeFilename,
   slug,
 } from '../src/jail.ts';
+import { coreHandoffs } from './helpers/handoffs.ts';
 import { tempDir } from './helpers/temp.ts';
+
+/** Core's own handoffs, as `openCore({ caller })` hands the jail: its refusal names core's command. */
+const HANDOFFS = coreHandoffs({
+  configDir: '/pins/config',
+  stateDir: '/pins/state',
+  dataDir: '/pins/data',
+  secretsDir: '/pins/secrets',
+  downloadsDir: '/pins/downloads',
+});
 
 const posix = process.platform !== 'win32';
 const NUL = String.fromCharCode(0);
@@ -115,7 +127,7 @@ test('checkAttachable enforces allowed roots, the deny list and dotenv files', a
   writeFileSync(join(home, 'docs', 'plan.pdf'), 'pdf');
   writeFileSync(join(home, '.ssh', 'id_ed25519'), 'key');
   writeFileSync(join(home, 'project', '.env.local'), 'X=1');
-  const policy = { roots: ['~'], deny: ['~/.ssh', '**/.env*'], home };
+  const policy = { roots: ['~'], deny: ['~/.ssh', '**/.env*'], home, handoffs: HANDOFFS };
 
   assert.equal(await checkAttachable('~/docs/plan.pdf', policy), join(await realpath(home), 'docs', 'plan.pdf'));
   await assert.rejects(checkAttachable('~/.ssh/id_ed25519', policy), /refusing to attach a file from ~\/\.ssh/);
@@ -130,11 +142,13 @@ test('checkAttachable enforces allowed roots, the deny list and dotenv files', a
    * folders when there was none, and then only the copy. There is one now (#45), and it is a change the person
    * approves, so both ways are named. Gmail, Resend and Slack all meet this refusal, so it is said once, here.
    */
+  const add = HANDOFFS.core(['attach', 'roots', 'add']);
+  assert.ok(isCommand(add));
   await assert.rejects(checkAttachable(elsewhere, policy), (error: CommsError) => {
     assert.match(error.message, /must come from an allowed folder/);
     assert.equal(
       error.hint,
-      'Copy the file under your home folder — not into one of its hidden folders — and name the copy instead, or allow its folder with `agentcomms attach roots add <folder>` (needs your approval).',
+      `Copy the file under your home folder — not into one of its hidden folders — and name the copy instead, or allow its folder with \`${lineWithWordsToFill(add, '<folder>')}\` (needs your approval).`,
     );
     return true;
   });
@@ -188,7 +202,11 @@ test('a configured folder that does not name its own place allows nothing: a rel
   // This file is inside the folder the tests run in; a root of "." or "test" would be that folder, wherever it is.
   const here = fileURLToPath(import.meta.url);
   for (const roots of [['.'], ['test'], ['./test']]) {
-    await assert.rejects(checkAttachable(here, { roots, deny: [] }), /must come from an allowed folder/, roots.join());
+    await assert.rejects(
+      checkAttachable(here, { roots, deny: [], handoffs: HANDOFFS }),
+      /must come from an allowed folder/,
+      roots.join(),
+    );
   }
   for (const place of ['~', '~/Documents', '~\\Documents', '/srv/outgoing'])
     assert.equal(namesItsPlace(place, 'linux'), true, place);

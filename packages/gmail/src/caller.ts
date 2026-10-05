@@ -14,11 +14,3 @@ export const GMAIL_CALLER: CliCommandCaller = Object.freeze({
   url: import.meta.url,
   packageName: '@agentcomms/gmail',
 });
-
-/**
- * Gmail's `approve` by its bare name, for the one field core still requires of every package — the download question's
- * `approveCommand`, read only by the deprecated bridge for a package that has not given core its caller (CUE-403 task
- * 15 removes it). Gmail always gives core its caller, so core names its located `approve` instead and never reads this;
- * nothing optional is given it.
- */
-export const BRIDGE_APPROVE_COMMAND = 'agent-gmail approve';

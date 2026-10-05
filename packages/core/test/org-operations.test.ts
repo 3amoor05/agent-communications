@@ -4,7 +4,8 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { type GatedChange, gatedChange } from '../src/change-flow.ts';
 import { beginChangeApproval, type PreparedChange } from '../src/changes.ts';
-import { inlineCommand, lineWithWordsToFill, shellCommand } from '../src/cli-runtime.ts';
+import type { PrintedCommand } from '../src/cli-command.ts';
+import { inlineCommand, lineWithWordsToFill } from '../src/cli-runtime.ts';
 import type { AccountConfig, ClientConfig, Config, ConfigV2, InboxConfig } from '../src/config.ts';
 import { type Core, openCore } from '../src/core.ts';
 import { CommsError } from '../src/errors.ts';
@@ -59,11 +60,7 @@ interface Machine {
 }
 
 /** A machine whose configuration is `body` at version 2, the file store chosen unless the body says otherwise. */
-function machine(
-  body: Record<string, unknown> = { secrets: { store: 'file' } },
-  version: 1 | 2 = 2,
-  options: { located?: boolean } = {},
-): Machine {
+function machine(body: Record<string, unknown> = { secrets: { store: 'file' } }, version: 1 | 2 = 2): Machine {
   const home = tempDir('comms-org-');
   const configDir = join(home, 'config');
   mkdirSync(configDir);
@@ -78,9 +75,8 @@ function machine(
     AGENT_COMMS_CLIENT_CLI_DIRS: '',
     AGENT_COMMS_UPDATE_CHECK: 'off',
   };
-  // `located`: opened as core's own CLI and server open it, so the commands it names are located (CUE-403). Otherwise
-  // the deprecated bridge's bare names, as a package that has not given core its caller still gets them.
-  return { home, configDir, env, core: openCore(options.located ? { env, caller: CORE_CALLER } : { env }), files };
+  // Opened as core's own CLI and server open it, so the commands it names are located (CUE-403): there is no other way.
+  return { home, configDir, env, core: openCore({ env, caller: CORE_CALLER }), files };
 }
 
 function profile(over: Record<string, unknown> = {}): Record<string, unknown> {
@@ -112,6 +108,47 @@ function writeProfile(m: Machine, document: Record<string, unknown>, name = 'acm
 
 function options(m: Machine, over: Partial<OrgOptions> = {}): OrgOptions {
   return { env: m.env, platform: 'darwin', surface: 'mcp', keyring: null, cwd: m.files, ...over } as OrgOptions;
+}
+
+/**
+ * Gmail's and Slack's managed runtimes registered with Claude Code in this machine's home, at this release: core finds
+ * their commands there and nowhere else (CUE-403). The command each is run with, quoted for `platform`.
+ */
+async function productHandoff(
+  m: Machine,
+  channel: 'gmail' | 'slack',
+  words: readonly string[],
+  platform: NodeJS.Platform,
+  use?: HandoffUse,
+): Promise<PrintedCommand> {
+  const claude = knownClientConfigs(m.env, process.platform).find((file) => file.client === 'claude-code');
+  assert.ok(claude !== undefined);
+  writeFileSync(
+    claude.path,
+    JSON.stringify({
+      mcpServers: Object.fromEntries(
+        (['gmail', 'slack'] as const).map((each) => [
+          each,
+          { command: '/n', args: [writeManaged(m.core.paths.dataDir, each).entry, 'mcp'] },
+        ]),
+      ),
+    }),
+  );
+  const handoffs = await cliHandoffs({ caller: CORE_CALLER, paths: m.core.paths, env: m.env, platform }).registered();
+  const handoff = handoffs.of(channel, words, use);
+  assert.ok(isCommand(handoff), 'message' in handoff ? handoff.message : '');
+  return handoff;
+}
+
+/** The same, in backticks, as a sentence gives it. */
+async function productCommand(
+  m: Machine,
+  channel: 'gmail' | 'slack',
+  words: readonly string[],
+  platform: NodeJS.Platform,
+  use?: HandoffUse,
+): Promise<string> {
+  return inlineCommand(await productHandoff(m, channel, words, platform, use));
 }
 
 type Outcome<T> = { prepared: PreparedChange | null; result: T };
@@ -212,7 +249,7 @@ test('org add refuses a version-1 configuration, with `names migrate` as the fix
   writeProfile(m, profile());
   await assert.rejects(
     gatedChange(m.core, orgAddChange(m.core, { file: 'acme.agentcomms.json' }, options(m)), { surface: 'mcp' }),
-    is('CONFIG', /agentcomms names migrate/),
+    is('CONFIG', / names migrate/),
   );
   assert.equal(JSON.parse(readFileSync(join(m.configDir, 'config.json'), 'utf8')).organisations, undefined);
 });
@@ -345,7 +382,7 @@ test('an already-added profile quotes its organisation and source path for the s
       assert.equal(
         error.hint,
         // The file as `--source` of a whole command — never `--source <file>` on its own, which is not a command.
-        `To read it again, run ${inlineCommand(shellCommand(['agentcomms', 'org', 'update', '7'], platform))}; to read it from this file from now on, run ${inlineCommand(shellCommand(['agentcomms', 'org', 'update', '7', '--source', path], platform))}.`,
+        `To read it again, run ${coreInline(m.core.paths, ['org', 'update', '7'], platform)}; to read it from this file from now on, run ${coreInline(m.core.paths, ['org', 'update', '7', '--source', path], platform)}.`,
         platform,
       );
       return true;
@@ -363,7 +400,7 @@ test('an already-added profile shows a neutralised source path as text, never as
       assert.ok(error instanceof CommsError);
       assert.equal(
         error.hint,
-        `To read it again, run ${inlineCommand(shellCommand(['agentcomms', 'org', 'update', '7'], platform))}; the source file shown here is ${shownPath(path)}. Its path is not repeated in a command because it contains text this output neutralises.`,
+        `To read it again, run ${coreInline(m.core.paths, ['org', 'update', '7'], platform)}; the source file shown here is ${shownPath(path)}. Its path is not repeated in a command because it contains text this output neutralises.`,
         platform,
       );
       assert.doesNotMatch(error.hint, /--source|\[INST\]/, platform);
@@ -465,7 +502,7 @@ test('a different --store refusal is rendered with the organisation operation pl
   for (const platform of ['darwin', 'win32'] as const) {
     const m = machine();
     writeProfile(m, profile());
-    const migrate = inlineCommand(shellCommand(['agentcomms', 'secrets', 'migrate', '--to', 'keychain'], platform));
+    const migrate = coreInline(m.core.paths, ['secrets', 'migrate', '--to', 'keychain'], platform);
     await assert.rejects(
       gatedChange(
         m.core,
@@ -708,7 +745,7 @@ test('secret-write recovery advice quotes org show and update for darwin and win
       if (blind) throw new Error('the configuration cannot be read');
       return load0();
     }) as typeof uncertain.core.config.load;
-    const show = inlineCommand(shellCommand(['agentcomms', 'org', 'show', '7'], platform));
+    const show = coreInline(uncertain.core.paths, ['org', 'show', '7'], platform);
     await assert.rejects(
       gatedChange(
         uncertain.core,
@@ -736,7 +773,7 @@ test('secret-write recovery advice quotes org show and update for darwin and win
       if (sets > 1) throw new Error('the store stayed locked');
       return set0(ref, value);
     };
-    const update = inlineCommand(shellCommand(['agentcomms', 'org', 'update', '7'], platform));
+    const update = coreInline(unrestored.core.paths, ['org', 'update', '7'], platform);
     await assert.rejects(
       gatedChange(
         unrestored.core,
@@ -853,7 +890,7 @@ test('a different profile quotes its path as one add-command word for darwin and
       assert.ok(error instanceof CommsError);
       assert.equal(
         error.hint,
-        `It is a different profile: add it with ${inlineCommand(shellCommand(['agentcomms', 'org', 'add', path], platform))}.`,
+        `It is a different profile: add it with ${coreInline(m.core.paths, ['org', 'add', path], platform)}.`,
         platform,
       );
       return true;
@@ -875,7 +912,7 @@ test('a different profile shows a neutralised path as text, never in a runnable 
         `It is a different profile. Its file shown here is ${shownPath(path)}. Its path is not repeated in a command because it contains text this output neutralises.`,
         platform,
       );
-      assert.doesNotMatch(error.hint, /agentcomms org add|\[INST\]/, platform);
+      assert.doesNotMatch(error.hint, / org add |\[INST\]/, platform);
       return true;
     });
   }
@@ -1127,7 +1164,7 @@ test('Slack recovery hints quote each concrete account for darwin and win32', as
       m,
       profile({ slack: { workspace: 'TOTHER01', workspaceName: 'Other', redirectPort: 51234, apps: {} } }),
     );
-    const removeAccount = inlineCommand(shellCommand(['agent-slack', 'workspace', 'remove', '7/slack'], platform));
+    const removeAccount = await productCommand(m, 'slack', ['workspace', 'remove', '7/slack'], platform);
     await assert.rejects(
       update(m, {}, { platform }),
       (error: unknown) =>
@@ -1148,16 +1185,7 @@ test('Slack recovery hints quote each concrete account for darwin and win32', as
     );
     const dropped = await update(m, {}, { platform });
     const report = dropped.result.reported.join('\n');
-    assert.match(
-      report,
-      new RegExp(
-        inlineCommand(shellCommand(['agent-slack', 'workspace', 'mode', '7/slack'], platform)).replace(
-          /[.*+?^${}()|[\]\\]/g,
-          '\\$&',
-        ),
-      ),
-      platform,
-    );
+    assert.ok(report.includes(await productCommand(m, 'slack', ['workspace', 'mode', '7/slack'], platform)), report);
     assert.match(report, new RegExp(removeAccount.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), platform);
     assert.doesNotMatch(report, /<name>/, platform);
   }
@@ -1340,11 +1368,9 @@ test('(d) an earlier generation gone is reported with a concrete mailbox move qu
       delete raw.clients['acme-1'];
       raw.inboxes = { '7/gmail': mailbox('acme-1') };
     });
+    const move = await productCommand(m, 'gmail', ['inbox', 'reauth', '7/gmail', '--client', 'acme-2'], platform);
     const { result } = await update(m, {}, { platform } as Partial<OrgOptions>);
     assert.equal(result.changed, false, 'nothing here can rebuild it');
-    const move = inlineCommand(
-      shellCommand(['agent-gmail', 'inbox', 'reauth', '7/gmail', '--client', 'acme-2'], platform),
-    );
     assert.match(result.reported.join('\n'), /"acme-1".*cannot be rebuilt without its old client file/);
     assert.match(result.reported.join('\n'), new RegExp(move.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
     assert.doesNotMatch(result.reported.join('\n'), /<mailbox>/);
@@ -1470,7 +1496,7 @@ test('org remove quotes the organisation in its repair for darwin and win32', as
       const row = raw.clients['7-1'];
       if (row) row.secretRef = 'client:elsewhere:secret';
     });
-    const repair = inlineCommand(shellCommand(['agentcomms', 'org', 'update', '7'], platform));
+    const repair = coreInline(m.core.paths, ['org', 'update', '7'], platform);
     await assert.rejects(
       remove(m, '7', { platform }),
       (error: unknown) => error instanceof CommsError && error.hint?.includes(repair) === true,
@@ -1487,7 +1513,7 @@ test('org remove uses help instead of a runnable mailbox placeholder for darwin 
     await edit(m, (raw) => {
       raw.inboxes = { '7/gmail': mailbox('acme-1') };
     });
-    const help = inlineCommand(shellCommand(['agent-gmail', 'inbox', 'reauth', '--help'], platform));
+    const help = await productCommand(m, 'gmail', ['inbox', 'reauth', '--help'], platform, { uses: [] });
     await assert.rejects(
       remove(m, 'acme', { platform }),
       (error: unknown) =>
@@ -1569,18 +1595,13 @@ test('doctor reports drift with platform-quoted repairs, help instead of placeho
     assert.match(failing?.detail ?? '', /"acme-1".*has gone/);
     assert.match(
       failing?.fix ?? '',
-      new RegExp(
-        inlineCommand(shellCommand(['agentcomms', 'org', 'update', 'acme'], platform)).replace(
-          /[.*+?^${}()|[\]\\]/g,
-          '\\$&',
-        ),
-      ),
+      new RegExp(coreInline(m.core.paths, ['org', 'update', 'acme'], platform).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
     );
     assert.equal(drifted.ok, false);
     const orphan = drifted.checks.find((check) => check.name === 'organisation mark');
     assert.equal(orphan?.warn, true);
     assert.match(orphan?.detail ?? '', /"stray" is marked as belonging to "gone", which has no profile here/);
-    assert.match(orphan?.fix ?? '', /agentcomms org add --help/);
+    assert.ok((orphan?.fix ?? '').includes(coreInline(m.core.paths, ['org', 'add', '--help'], platform, { uses: [] })));
     assert.doesNotMatch(orphan?.fix ?? '', /<file>/);
   }
 });
@@ -1957,15 +1978,18 @@ test('an adopted client made active again is held to the profile’s secret: a r
     // Meanwhile the organisation rotated A's secret — or the person's store lost theirs.
     if (which === 'missing') await (await m.core.secrets('file')).delete(clientSecretRef('desktop'));
     writeProfile(m, profile({ gmail: gmail({ clientSecret: which === 'rotated' ? SECRET_A2 : SECRET_A }) }));
+    const replace = await productHandoff(m, 'gmail', ['client', 'add', '--name', 'desktop', '--replace'], 'darwin');
     const { result } = await update(m);
     assert.equal(result.gmail.action, 'reactivated', which);
+    const reported = result.reported.join('\n');
     assert.match(
-      result.reported.join('\n'),
+      reported,
       which === 'rotated'
-        ? /the profile carries another secret for "desktop".*`agent-gmail client add --name desktop --replace <client-file>`/
-        : /"desktop", which you registered yourself, has no secret stored on this machine.*`agent-gmail client add --name desktop --replace <client-file>`/,
+        ? /the profile carries another secret for "desktop"/
+        : /"desktop", which you registered yourself, has no secret stored on this machine/,
       which,
     );
+    assert.ok(reported.includes(`\`${lineWithWordsToFill(replace, '<client-file>')}\``), reported);
     const stored = await (await m.core.secrets('file')).get(clientSecretRef('desktop'));
     assert.equal(stored, which === 'rotated' ? SECRET_A : null, 'the person’s secret is never changed by a profile');
   }
@@ -1976,8 +2000,8 @@ test('an adopted client mismatch prints a whole platform-quoted command with its
     const m = machine({ secrets: { store: 'file' }, clients: { '7-client': personsRow(CLIENT_A, '7-client') } });
     await (await m.core.secrets('file')).set(clientSecretRef('7-client'), SECRET_B);
     writeProfile(m, profile());
+    const command = await productHandoff(m, 'gmail', ['client', 'add', '--name', '7-client', '--replace'], platform);
     const { result } = await add(m, {}, { platform });
-    const command = shellCommand(['agent-gmail', 'client', 'add', '--name', '7-client', '--replace'], platform);
     const report = result.reported.join('\n');
     assert.ok(report.includes(`\`${lineWithWordsToFill(command, '<client-file>')}\``), `${platform}: ${report}`);
     // `--name 7-client --replace` on its own was printed as if it were a command (CUE-403, D5).
@@ -2184,7 +2208,7 @@ function slackAccount(): AccountConfig {
 }
 
 test("core's own commands in a profile's refusals are located; another product's are never invented (7d-core)", async () => {
-  const m = machine(undefined, 2, { located: true });
+  const m = machine();
   // Core's own: `org add --help` for none added, `org update` for one added already, with `--source` in a whole command.
   await assert.rejects(orgShow(m.core, 'acme', process.platform), (error: unknown) => {
     assert.ok(error instanceof CommsError);
@@ -2208,7 +2232,7 @@ test("core's own commands in a profile's refusals are located; another product's
 });
 
 test("a profile names Gmail's commands only as this machine's registrations find them: a report, a drift, a refusal (7d-core)", async () => {
-  const m = machine(undefined, 2, { located: true });
+  const m = machine();
   writeProfile(m, profile());
   await add(m);
   writeProfile(m, profile({ gmail: gmail({ clientId: CLIENT_B, clientSecret: SECRET_B }) }));
@@ -2218,7 +2242,7 @@ test("a profile names Gmail's commands only as this machine's registrations find
     raw.inboxes = { 'acme/gmail': mailbox('acme-1') };
   });
   // A second machine whose mailbox still signs in through the profile's client, so its removal is refused.
-  const signedIn = machine(undefined, 2, { located: true });
+  const signedIn = machine();
   writeProfile(signedIn, profile());
   await add(signedIn);
   await edit(signedIn, (raw) => {
@@ -2263,7 +2287,7 @@ test("a profile names Gmail's commands only as this machine's registrations find
 });
 
 test("a profile names Slack's commands only as this machine's registrations find them (7d-core)", async () => {
-  const m = machine(undefined, 2, { located: true });
+  const m = machine();
   writeProfile(m, profile());
   await add(m);
   await edit(m, (raw) => {
