@@ -21,6 +21,10 @@ mutation and the failing test in the commit message or the review notes. Line nu
 tasks land; the function names are the anchor. The §5 case labels used in each task are defined in the ownership
 table at the end, and each label is owned by exactly one task.
 
+**The only release is Task 25.** No release, tag or publish is cut from this branch before it. In particular, nothing
+between Task 7, which adds the sending fence, and Task 17, which fences the last provider step, ever ships, so a
+build with some provider steps unfenced is never published.
+
 **AGENTS.md, as it applies here.**
 
 - **Tests use fakes and fake credentials only. They never send email, post to Slack or call Resend.**
@@ -58,8 +62,8 @@ table at the end, and each label is owned by exactly one task.
 
 ## Decisions the spec leaves to the plan
 
-The spec is silent on each of these. Each is a choice a reviewer can veto before Task 1, and none changes a design
-decision.
+The spec is silent on each of these. None changes a design decision, and the coordinator accepted all eleven on
+2026-10-05.
 
 1. **A version-1 config converts to version 3 without renaming anything.** Version 3 carries `naming: 1 | 2`, and its
    body is validated by the version-1 or version-2 body rules. `ConfigStore.migrateNames` (`config.ts:1044`) also
@@ -94,10 +98,11 @@ decision.
     already use", but none exists. The newest frozen fixture is hand-copied 0.12.1 source
     (`packages/core/test/fixtures/config-v2-0.12.1.ts`).
 
-Citations corrected against the code (the spec's other citations match):
+Citations corrected against the code (the spec's other citations match). Spec errata commit `cd2306d` fixed four
+errors in the spec itself: its status line, the line-116 citation, the Resend status claim and the WhatsApp v1 claim.
+The ranges below are where the code actually is:
 
-- Spec line 116, `send.ts:518`, is `finishApproval`. Released `executeSend` reads policy at `send.ts:565-566`, reads
-  the draft at `586` and claims at `596-605`.
+- `executeSend` reads policy at `send.ts:565-566`, reads the draft at `586` and claims at `596-605`.
 - Gmail's last provider step before the send is `send.ts:630-654`: the reservation at 632, the re-read at 641 and
   `sendDraft` at 654.
 - Slack's file steps are at `send.ts:1048-1087`. The message post is at `756-765`.
@@ -145,6 +150,9 @@ Citations corrected against the code (the spec's other citations match):
        (872-911) and `claimForDownload` (1026-1066) compare against `contentDigest`.
      - The comment at 304 ("byte for byte what it was before change approvals") is replaced, because version-2
        sends write `kind: 'send'`.
+     - `#transition` (571-589) checks the digest version **before** its derived-state write-back (577), so a record
+       of another version is refused with nothing written. Today a v1 record past its expiry is persisted `expired`
+       first. The design never rewrites a v1 record except for the drain's revocation (Task 4).
    - **New module `packages/core/src/send-epoch.ts`** with `sendEpochOf(config, ownerId)`, which reads an absent value
      as 0. Version 3 does not exist until Task 4, so every epoch reads 0 until then.
    - **Callers.**
@@ -171,15 +179,23 @@ Citations corrected against the code (the spec's other citations match):
    - Editing `channel`, `ownerScope`, `sendEpoch`, `route` or any other identity field changes `bindingDigest`.
    - An unknown channel is refused at creation.
    - The real create path writes the v2 fixture.
-   - A v1 record is refused by the version gate on every claim, execute and approve: Gmail `executeSend` and terminal
-     approve, Slack `sendPost`/`react`, and Resend `executeSend`/`finishSendApproval`.
+   - A v1 record is refused by the version gate on every claim, execute, approve and answer path, **with no write**:
+     the file is byte-identical afterwards and no `<id>.claim` marker exists. Each path is tested with a fresh v1
+     record and with one past its original expiry:
+     - the sends: Gmail `executeSend` and terminal approve, Slack `sendPost`/`react`, and Resend
+       `executeSend`/`finishSendApproval`;
+     - the core change claim, `claimForChange` (`approvals.ts:872`), and the terminal change approval;
+     - the download answer and claim, `answerDownload` (`approvals.ts:979`) and `claimForDownload`
+       (`approvals.ts:1026`).
 
-   Mutations, each of which must fail a named vector or round-trip test:
+   Mutations, each of which must fail a named vector, round-trip or refusal test:
 
    - drop a field from `identityOf`;
    - keep an absent optional listing member as `undefined`;
    - skip channel validation;
-   - leave `DIGEST_VERSION` at 1.
+   - leave `DIGEST_VERSION` at 1;
+   - put the version check back after the derived-state write-back (`#transition`), which must fail the
+     past-expiry v1 cases' "byte-identical file" assertions.
 
    **Done when.** Every new record is version 2 with both digests. The binding recomputes from stored fields alone.
    Every caller compiles against `contentDigest`. The existing approval suites pass on version-2 fixtures.
@@ -319,6 +335,11 @@ Citations corrected against the code (the spec's other citations match):
      - New `ConfigStore.convertToVersion3(scan)`, the one door, modelled on `migrateNames` (1044-1116). It runs under
        the config lock: it re-reads the file, returns an existing version 3 unchanged (idempotent), runs `scan` under
        the lock, and writes version 3 atomically, with `legacyDrain` only when something was tracked.
+       - The re-read bypasses the `ConfigStore` stat cache (`#cache`, 838-863), as `migrateNames` does.
+       - The version 3 it writes is built only from that locked re-read. No config value read before the lock is
+         used.
+       - Test-only barrier hooks (`beforeLock`, `afterScan`, `beforeWrite`) are injected through the constructor and
+         are unreachable from the package's public API, as `enableNamesMigrationForTests` is (`release-gate.ts`).
    - **`approvals.ts`: new `revokeLegacy(id, reason)`.** This is the one write a v1 record ever receives. Under the
      record lock, it rewrites a record that is `pending` or `approved` by v1 derivation to `revoked` **in v1 shape**,
      so 0.13 still parses it, with the reason `prepared by an earlier release; prepare it again`. It reports each
@@ -364,8 +385,35 @@ Citations corrected against the code (the spec's other citations match):
 
    The 0.13 process cases R28a and R29a–c are Task 24's.
 
-   Mutations: decrement on loosening; skip owners that inherit the default; allow loosening while the drain is open;
-   close the drain without the time check; let `update` change the version; write the revoked v1 record in v2 shape.
+   **The conversion's barrier test.** `config-v3.test.ts`, "a config update racing the conversion is neither lost nor
+   let in between its scan and its write". A child process stands in for another program sharing the config. The
+   conversion runs from a version-2 config, paused at the barrier hooks:
+
+   - At `beforeLock`, after this process's pre-lock read of the file and before it takes the config lock, the child
+     writes a v1 send record (`pending`) and commits a config update through `ConfigStore.update`: a change-policy
+     setting and an unknown key.
+   - At `afterScan`, between the conversion's scan and its write, the child starts a second `ConfigStore.update`.
+     The test asserts that this commit **cannot land there**: the child is still waiting for the config lock when
+     `beforeWrite` fires, and its commit lands only after the version-3 write, on top of version 3.
+   - The final file is version 3. It holds both of the child's updates. The record the child wrote at `beforeLock`
+     is in the version-3 write's own `legacyDrain.tracked` (asserted before any later operation could rescan).
+
+   Three mutations, each of which must fail a named test:
+
+   - **(a) Scan before taking the config lock.** The record written at `beforeLock` is missing from the version-3
+     write's tracked set. This fails "the conversion tracks a v1 record written after its pre-lock read".
+   - **(b) Skip the locked re-read** (decide from the pre-lock read or the stat cache). Two 0.14 processes convert
+     concurrently, and the winner then records a `never` change (epoch 1). The loser, which read version 2 before the
+     winner's write, must find version 3 under the lock and return it unchanged. Under the mutation it converts again
+     and drops the winner's `sendEpochs` and drain outcomes. This fails "a conversion that lost the race returns the
+     winner's version 3 unchanged".
+   - **(c) Write the final config from the stale pre-lock read.** The child's `beforeLock` update is overwritten.
+     This fails "a config update committed while the conversion waited for the lock survives in the version-3
+     write".
+
+   Other mutations: decrement on loosening; skip owners that inherit the default; allow loosening while the drain is
+   open; close the drain without the time check; let `update` change the version; write the revoked v1 record in v2
+   shape.
 
    **Done when.** Version 3 is reachable only through the door, epochs only grow, the drain is durable and retried, and
    0.14 cannot loosen a send policy while it is open.
@@ -518,12 +566,31 @@ Citations corrected against the code (the spec's other citations match):
      after `used` or `failed` changes nothing.
    - **The new code.** The registry entry is exit 10 and non-retryable, as JSON and CLI consumers branch on it. Fresh
      `sending` gets the `APPROVAL_PENDING` wording above.
+   - **The fence, directly, with no provider.** Named tests in `sending-lease.test.ts`:
+     - "fence stops once another caller persisted unknown": a claimant whose lease another call persisted as
+       `unknown` gets `stop` from `fence` and its heartbeat is not refreshed.
+     - "fence refreshes the heartbeat and proceeds while the claim owns sending".
+     - "fenceOrStop before any provider step completes the record failed with lease-lost-before-send": the record
+       reads `failed` with `failedAt`, `reason: 'lease-lost-before-send'`, and the outcome says nothing was sent.
+     - "fenceOrStop after a started step leaves the failure to its caller": no `lease-lost-before-send` is written.
 
-   Mutations: compare tokens loosely; let a heartbeat write `unknown → sending`; base the lease on `updatedAt`; make the
-   new code retryable.
+   Mutations, each of which must fail a named test:
+
+   - compare tokens loosely;
+   - let a heartbeat write `unknown → sending`;
+   - base the lease on `updatedAt`;
+   - make the new code retryable;
+   - make `fence` always return `go` (fails "fence stops once another caller persisted unknown");
+   - make `fenceOrStop`'s zero-steps path return without recording `failed` (fails "fenceOrStop before any provider
+     step completes the record failed with lease-lost-before-send").
+
+   **No release between Task 7 and Task 17.** This task adds the fence, and Tasks 12, 16 and 17 put it before each
+   provider step, so a build from Tasks 7–16 has some steps unfenced. No release, tag or publish is cut from this
+   branch before Task 25, which is the only release. Each task still leaves `pnpm verify` green.
 
    **Done when.** Only the original claimant can finish a send. Its lease survives long work and lapses when it stops.
-   An uncertain outcome has its own non-retryable code.
+   An uncertain outcome has its own non-retryable code. Both fence paths fail their named tests under their
+   mutations.
 
 8. **Risky — `never` fences every earlier approval: the epoch at claim and approval, the sweep, and the
    linearization.**
@@ -789,8 +856,13 @@ Citations corrected against the code (the spec's other citations match):
 
     - A production-shaped fake `sendDraft` held across several heartbeat intervals keeps `sending`, then records
       success; and again, failure.
-    - A claimant suspended after the claim and before `sendDraft`, while another caller persists `unknown`: no request
-      reaches the fake, and the record shows `lease-lost-before-send`.
+    - **The fence-site table.** The fence tests are parameterised over a `GMAIL_FENCE_SITES` table in
+      `send-outcome.test.ts` that lists every provider mutation `executeSend` makes. Today that is one site,
+      `drafts/send` via `transport.sendDraft`. For each site, the claimant is suspended just before it while another
+      caller persists `unknown`. No request for that site reaches the fake, and the record shows
+      `lease-lost-before-send`.
+    - **The table is complete.** A companion test fails if `executeSend` gains a provider mutation the table does not
+      list. It counts the fake's mutating routes hit by a successful send against the table.
     - A claim across the hourly cap rollover.
     - An ambiguous response gives `SEND_OUTCOME_UNKNOWN` at once.
     - A certain failure says nothing was sent.
@@ -798,8 +870,15 @@ Citations corrected against the code (the spec's other citations match):
     - A missing id gets the exact no-id wording and never `used`. Spies show no `''` in the completion or the audit,
       and no read-back.
 
-    Mutations: move the fence before the reservation; map the ambiguous case to `TRANSIENT`; turn a missing id into
-    `''`; call the read-back with no id; add a second `sendDraft` call site (`test/send-path.test.mjs` must fail).
+    Mutations:
+
+    - remove the fence at each site in the table, in turn (today, the one before `sendDraft`): that site's
+      parameterised case must fail;
+    - move the fence before the reservation;
+    - map the ambiguous case to `TRANSIENT`;
+    - turn a missing id into `''`;
+    - call the read-back with no id;
+    - add a second `sendDraft` call site (`test/send-path.test.mjs` must fail).
 
     **Done when.** Gmail starts its one send only under a live lease. Every uncertainty is `SEND_OUTCOME_UNKNOWN`, and
     no id is ever invented.
@@ -957,10 +1036,27 @@ Citations corrected against the code (the spec's other citations match):
     - **Long work.** A full file post against the loopback fake holds real provider work for more than five minutes.
       It sends heartbeats, stays `sending` through status and wait, and then, run once each way, records success and
       failure.
-    - **Fences.**
-      - A claimant suspended before its first step makes no request, and the record shows `lease-lost-before-send`.
-      - One suspended right after a successful fence starts that one step and no later step.
-      - The lease expiring between any two steps stops further steps, with the right wording.
+    - **The fence-site table.** The fence tests are parameterised over a `SLACK_FENCE_SITES` table in a new
+      `packages/slack/test/support/fence-sites.ts`, shared by `post-outcome.test.ts`, `send-files.test.ts` and
+      `reaction-outcome.test.ts`. It lists all five provider-step fence sites:
+
+      | Site | Method | Code |
+      |---|---|---|
+      | 1 | `chat.postMessage` | `postPrepared` (`send.ts:756`) |
+      | 2 | `files.getUploadURLExternal` | `postFiles` (1056) |
+      | 3 | each `slackFileUpload` | `postFiles` (1066), exercised with two files so the second upload is fenced too |
+      | 4 | `files.completeUploadExternal` | `postFiles` (1080) |
+      | 5 | `reactions.add` and `reactions.remove` | `reactPrepared` (1420-…) |
+
+      For each site, the claimant is suspended just before it while another caller persists `unknown`. The fake
+      records no request for that site or any later one.
+      - At the first step of a post, file post or reaction, the record shows `lease-lost-before-send`.
+      - After earlier steps, it is `failed`, with "nothing was posted" and the exact `uploaded` and
+        `possiblyUploaded` disclosure.
+      - These cases are the lease expiring between any two steps.
+    - **The table is complete.** A companion test fails if a successful message post, two-file post or reaction hits
+      a mutating Slack method that the table does not list. It reads the loopback fake's request log.
+    - One claimant suspended right after a successful fence starts that one step and no later step.
     - **Failures.**
       - Injected failures before an upload, during one, after a known upload and at the share call each say "nothing
         was posted", with exact disclosure.
@@ -969,8 +1065,12 @@ Citations corrected against the code (the spec's other citations match):
     - **Missing ids.** A missing `ts` gets the no-id wording. Spies show no `''` in the completion or the audit, and no
       read-back, for message, file and reaction ids.
 
-    Mutations: drop the fence before one step; map ambiguous outcomes back to `TRANSIENT`; record `''` for a missing
-    `ts`.
+    Mutations:
+
+    - remove the fence at each of the five sites in turn: five mutations, each of which must fail that site's
+      parameterised case while the other four pass;
+    - map ambiguous outcomes back to `TRANSIENT`;
+    - record `''` for a missing `ts`.
 
     **Done when.** Every Slack step starts only under a live lease, long uploads stay `sending`, and no outcome is
     guessed.
@@ -996,15 +1096,26 @@ Citations corrected against the code (the spec's other citations match):
     **Tests first.** Extend Resend `send-gate.test.ts`, `send-outcome.test.ts`, `send-path.test.ts`, `mcp.test.ts`
     and `parity.test.ts`. Cover §5 R11d, R22b, R23e, D2pt-d, D2pt-g and D2pt-j:
 
-    - A claimant suspended before the send makes no request, and the record shows `lease-lost-before-send`.
+    - **The fence-site table.** The fence tests are parameterised over a `RESEND_FENCE_SITES` table in
+      `send-outcome.test.ts`. Today that is one site, `emails.send` via the single `spendOn(` in `executeSend`. For
+      each site, the claimant is suspended just before it while another caller persists `unknown`. The fake records
+      no send, and the record shows `lease-lost-before-send`.
+    - **The table is complete.** A companion test fails if a successful send hits a mutating Resend route that the
+      table does not list. It reads `fake-resend.ts`'s `requests`.
     - A scheduled acceptance without an id gets its exact CLI and MCP wording. The record stays `sending`, then reads
       `unknown`.
     - An ambiguous response is `SEND_OUTCOME_UNKNOWN` at once.
     - A certain failure says nothing was sent.
     - Success followed by a failed `used` write later reads as `unknown`.
 
-    Mutations: map ambiguous outcomes back to `TRANSIENT`; throw on a missing id; fence after `spendOn`; add a second
-    `spendOn(` (the send-path test must fail).
+    Mutations:
+
+    - remove the fence at each site in the table, in turn (today, the one before `emails.send`): that site's
+      parameterised case must fail;
+    - map ambiguous outcomes back to `TRANSIENT`;
+    - throw on a missing id;
+    - fence after `spendOn`;
+    - add a second `spendOn(` (the send-path test must fail).
 
     **Done when.** Resend sends only under a live lease. An uncertain outcome is never retryable, and a scheduled
     acceptance is never called sent.
@@ -1378,6 +1489,17 @@ Citations corrected against the code (the spec's other citations match):
       - surface `corrupt`.
 
       Then run `pnpm sync:skills`.
+    - **The revoke-on-"no" rule reaches the setup skills.** The spec says every send and change skill tells the agent
+      to call the revoke tool as soon as the person says no (spec line 163). Two setup skills hold change-approval
+      procedures: `skills/gmail-setup/SKILL.md` (the "Safety settings need a person's yes" rule, 66-73) and
+      `skills/slack-setup/SKILL.md` ("How a change is approved", 126-…). It reaches them two ways:
+      - **Through the skill sync.** The rule goes into `skills/_shared/contract-gmail.md` and
+        `skills/_shared/contract-slack.md`, which `scripts/sync-skills.mjs` (`contractFor`, 30) copies into each
+        skill's `references/contract.md`. That includes `skills/gmail-setup/references/contract.md` and
+        `skills/slack-setup/references/contract.md`.
+      - **In the procedure itself.** Each setup skill's change-approval steps name its revoke tool:
+        `comms_approval_revoke`, or the channel's change revoke where it has one, and the CLI `agentcomms approvals
+        revoke <id>`.
     - **Docs.**
       - `docs/sending.md`: lifetimes, waits, `unknown`, D9 and §7's risks.
       - `docs/upgrading.md`: config version 3 locks out 0.13. Restart clients still running 0.13 servers, and prepare
@@ -1395,14 +1517,27 @@ Citations corrected against the code (the spec's other citations match):
 
     **Tests first.** Cover §5 R23f, D1rr-b, D2-i and D2pt-k:
 
-    - The skill and contract text requires revoke on a "no".
+    - The skill and contract text requires revoke on a "no". The assertions in `test/skill-contracts.test.mjs` run over
+      the **rendered** contracts, every `skills/*/references/contract.md` that `scripts/sync-skills.mjs` produces for a
+      send or change skill family. That set comes from the channel registry's `skillFamilies`, not a fixed list, and
+      names `gmail-setup` and `slack-setup` explicitly. The same assertions run over the change-approval procedures
+      in `skills/gmail-setup/SKILL.md` and `skills/slack-setup/SKILL.md`. `pnpm verify:skills` (`sync-skills.mjs
+      --check`) fails if a rendered contract is stale.
     - It forbids preparing while `sending`.
     - After `unknown`, it requires the late-result caveat and checking Sent or the channel, and forbids an automatic
       prepare. Consumers branch on `SEND_OUTCOME_UNKNOWN`.
     - It carries the exact scheduled no-id wording.
 
-    Mutations: restore "known to reach a person" in a skill; delete the revoke-on-no rule; restore a ten-minute claim
-    in a doc. Each assertion must fail. Then run the full `pnpm verify` and record the result.
+    Mutations, each of which must fail an assertion:
+
+    - restore "known to reach a person" in a skill;
+    - delete the revoke-on-no rule from `contract-gmail.md`, then from `contract-slack.md`, and re-sync. Each must fail
+      the rendered-contract assertion for `gmail-setup` or `slack-setup` respectively;
+    - delete it from the gmail-setup and the slack-setup procedure in turn;
+    - edit a rendered `references/contract.md` without re-syncing (`pnpm verify:skills` must fail);
+    - restore a ten-minute claim in a doc.
+
+    Then run the full `pnpm verify` and record the result.
 
     **Done when.**
 
@@ -1491,7 +1626,7 @@ so ownership can be audited. The labels follow the spec's order within each item
 | R24e | ...and in D9 | 21 |
 | R24f | A v1 record stored pending/approved past its original expiry is `expired` on status, wait and lists with no v2 timestamp | 11 |
 | R24g | ...and in D9 | 21 |
-| R24h | Every claim, execute and approve of a v1 record is refused by the version gate | 1 |
+| R24h | Every claim, execute and approve of a v1 record is refused by the version gate with no write: Gmail, Slack and Resend sends, the core change claim (`approvals.ts:872`), and the download answer and claim (`approvals.ts:979, 1026`) | 1 |
 | R23a | Scheduled Resend send with a sending-only key: "accepted … scheduled for", "current outcome unavailable", never sent, also after its time | 18 |
 | R23b | Full-access key: `scheduled`, `delivered`, `canceled` through the mapping (canceled source-neutral) | 18 |
 | R23c | Provider look-up failure: "current outcome unavailable" | 18 |
