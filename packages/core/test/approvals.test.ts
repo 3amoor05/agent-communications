@@ -32,10 +32,21 @@ import {
   writeV1Record,
 } from './fixtures/approval-v1-0.13.0.ts';
 import { coreHandoffs } from './helpers/handoffs.ts';
+import { type LiveConfigState, liveConfig } from './helpers/live-config.ts';
 import { tempDir } from './helpers/temp.ts';
 
 const INBOX = 'ibx_AAAAAAAAAAAAAAAA';
 const OTHER_INBOX = 'ibx_BBBBBBBBBBBBBBBB';
+const SLACK = 'acc_AAAAAAAAAAAAAAAA';
+
+/** What the store classifies by: `acme/gmail` sending under `policy`, a second mailbox, and a Slack account. */
+function gate(policy: 'chat' | 'confirm' | 'never' = 'chat', extra: LiveConfigState = {}): LiveConfigState {
+  return {
+    inboxes: { 'acme/gmail': { id: INBOX, sendPolicy: policy }, 'acme/gmail-2': { id: OTHER_INBOX } },
+    accounts: { 'acme/slack': { id: SLACK } },
+    ...extra,
+  };
+}
 const EXPECT: Expectation = { to: ['sam@partner.test'], cc: [], bcc: [], subject: 'Re: plan' };
 /** Content digests as a provider's would be: lowercase hex SHA-256, the only encoding a version-2 record holds. */
 const DIGEST_A = 'a'.repeat(64);
@@ -59,7 +70,8 @@ async function setup(policy: 'chat' | 'confirm' = 'chat', escalated = false) {
     secretsDir: dir,
     downloadsDir: dir,
   });
-  const store = new ApprovalStore(dir, { now: time.now, handoffs });
+  const config = liveConfig(dir, gate(policy));
+  const store = new ApprovalStore(dir, { now: time.now, handoffs, loadConfig: config.loadConfig });
   const record = await store.create({
     channel: 'gmail',
     inboxId: INBOX,
@@ -73,14 +85,13 @@ async function setup(policy: 'chat' | 'confirm' = 'chat', escalated = false) {
     riskFlags: escalated ? ['tainted-recipient'] : [],
     expect: EXPECT,
   });
-  return { store, record, time };
+  return { store, record, time, config, dir };
 }
 
 const live = (overrides: Partial<Parameters<ApprovalStore['claimForSend']>[1]> = {}) => ({
   inboxId: INBOX,
   inboxSub: 'sub-1',
   ...LIVE_DRAFT,
-  policy: 'chat' as const,
   expect: EXPECT,
   ...overrides,
 });
@@ -108,17 +119,26 @@ test('a new record is pending, has no challenge until one is issued, and expires
 test('chat: the matching draft is claimed once, then completed; later claims are refused', async () => {
   const { store, record } = await setup();
   assert.equal((await store.claimForSend(record.approvalId, live())).state, 'sending');
-  await assert.rejects(store.claimForSend(record.approvalId, live()), isRefusal(/is sending/));
+  await assert.rejects(
+    store.claimForSend(record.approvalId, live()),
+    isRefusal(/being sent by another call; wait for it/, 'APPROVAL_PENDING'),
+  );
   assert.equal((await store.complete(record.approvalId, { sentMessageId: 'sent-1' })).state, 'used');
-  await assert.rejects(store.claimForSend(record.approvalId, live()), isRefusal(/is used/));
+  await assert.rejects(
+    store.claimForSend(record.approvalId, live()),
+    isRefusal(/used already: it was sent at .+, message id sent-1/, 'APPROVAL_VOID'),
+  );
 });
 
 test('parallel claims from many stores ("processes"): exactly one wins', async () => {
-  const { store, record, time } = await setup();
+  const { store, record, time, config } = await setup();
   const stateDir = store.directory.replace(/[/\\]approvals$/, '');
   const results = await Promise.allSettled(
     Array.from({ length: 10 }, () =>
-      new ApprovalStore(stateDir, { now: time.now }).claimForSend(record.approvalId, live()),
+      new ApprovalStore(stateDir, { now: time.now, loadConfig: config.loadConfig }).claimForSend(
+        record.approvalId,
+        live(),
+      ),
     ),
   );
   assert.equal(results.filter((r) => r.status === 'fulfilled').length, 1);
@@ -138,11 +158,9 @@ test('integrity failures void the record for good; each carries its specific cod
   const cases: [string, Partial<ReturnType<typeof live>>, RegExp, string][] = [
     ['A→B→A swap restores content, not the message id', { draftMessageId: 'msg-v3' }, /edited after/, 'APPROVAL_VOID'],
     ['content changed', { contentDigest: DIGEST_B }, /content changed/, 'APPROVAL_VOID'],
-    ['other inbox', { inboxId: OTHER_INBOX }, /different inbox/, 'APPROVAL_VOID'],
     ['other account', { inboxSub: 'sub-2' }, /different account/, 'APPROVAL_VOID'],
     ['no account named at all', { inboxSub: undefined }, /could not be confirmed/, 'APPROVAL_VOID'],
     ['recipients differ', { expect: { ...EXPECT, bcc: ['x@evil.test'] } }, /do not match/, 'APPROVAL_VOID'],
-    ['policy tightened to never', { policy: 'never' }, /policy: never/, 'POLICY_NEVER'],
   ];
   for (const [name, overrides, message, code] of cases) {
     const { store, record } = await setup();
@@ -150,6 +168,36 @@ test('integrity failures void the record for good; each carries its specific cod
     assert.equal((asV2(await store.get(record.approvalId)) as ApprovalRecord).state, 'revoked', `${name}: voided`);
     await assert.rejects(store.claimForSend(record.approvalId, live()), isRefusal(/voided/, 'APPROVAL_VOID'), name);
   }
+  // The policy is the configuration's, read under the record's lock: tightened to never, the claim revokes.
+  const { store, record, config } = await setup();
+  config.write(gate('never'));
+  await assert.rejects(store.claimForSend(record.approvalId, live()), isRefusal(/policy: never/, 'POLICY_NEVER'));
+  assert.equal(asV2(await store.get(record.approvalId))?.state, 'revoked');
+});
+
+test('a claim for another inbox is the one NOT_FOUND, and leaves the record as it is', async () => {
+  const { store, record } = await setup();
+  const missing = `ap_${'0'.repeat(26)}`;
+  const envelope = async (claim: Promise<unknown>) => {
+    try {
+      await claim;
+    } catch (error) {
+      assert.ok(error instanceof CommsError);
+      return {
+        code: error.code,
+        message: error.message.replace(/ap_\w+/, 'ap_ID'),
+        hint: error.hint,
+        details: error.details,
+      };
+    }
+    assert.fail('the claim should be refused');
+  };
+  const foreign = await envelope(store.claimForSend(record.approvalId, live({ inboxId: OTHER_INBOX })));
+  assert.deepEqual(foreign, await envelope(store.claimForSend(missing, live({ inboxId: OTHER_INBOX }))));
+  assert.equal(foreign.code, 'NOT_FOUND');
+  assert.deepEqual(foreign.details, { approval: null });
+  assert.equal(asV2(await store.get(record.approvalId))?.state, 'pending', 'not voided: it is not the caller’s');
+  assert.equal((await store.claimForSend(record.approvalId, live())).state, 'sending');
 });
 
 test('expect comparison ignores order and case but not content', async () => {
@@ -161,7 +209,7 @@ test('expect comparison ignores order and case but not content', async () => {
 test('confirm: a claim before approval is refused without voiding; after a human approves, it succeeds', async () => {
   const { store, record } = await setup('confirm');
   await assert.rejects(
-    store.claimForSend(record.approvalId, live({ policy: 'confirm' })),
+    store.claimForSend(record.approvalId, live()),
     isRefusal(/outside the chat/, 'APPROVAL_PENDING'),
   );
   assert.equal(asV2(await store.get(record.approvalId))?.state, 'pending', 'still approvable');
@@ -170,7 +218,7 @@ test('confirm: a claim before approval is refused without voiding; after a human
   assert.equal(approved.approvedBindingDigest, approved.bindingDigest, 'the binding the person approved');
   assert.equal(approved.approvedDigest, undefined, 'a send carries the approved binding, not a content digest');
   assert.equal(approved.challengeHash, undefined, 'the challenge is spent');
-  assert.equal((await store.claimForSend(record.approvalId, live({ policy: 'confirm' }))).state, 'sending');
+  assert.equal((await store.claimForSend(record.approvalId, live())).state, 'sending');
 });
 
 test('a claim waiting for a person says what the product making it tells it to, and no product by default', async () => {
@@ -179,7 +227,7 @@ test('a claim waiting for a person says what the product making it tells it to, 
   const { store, record } = await setup('confirm');
   const hint = async (options?: Parameters<ApprovalStore['claimForSend']>[2]) => {
     try {
-      await store.claimForSend(record.approvalId, live({ policy: 'confirm' }), options);
+      await store.claimForSend(record.approvalId, live(), options);
     } catch (error) {
       assert.ok(error instanceof CommsError && error.code === 'APPROVAL_PENDING');
       return error.hint ?? '';
@@ -212,7 +260,8 @@ test('a record that requires "never" is refused, whatever the live policy says',
   // `requiredPolicy: never` — a policy that was tightened after the preview, or an escalation that decided this
   // must not go at all — fell straight through to being claimed from `pending`.
   const time = clock();
-  const store = new ApprovalStore(tempDir(), { now: time.now });
+  const dir = tempDir();
+  const store = new ApprovalStore(dir, { now: time.now, loadConfig: liveConfig(dir, gate()).loadConfig });
   const record = await store.create({
     channel: 'gmail',
     inboxId: INBOX,
@@ -243,8 +292,14 @@ test('a record that requires "never" is refused, whatever the live policy says',
     riskFlags: [],
     expect: EXPECT,
   });
-  await humanApproves(store, second.approvalId);
-  await assert.rejects(store.claimForSend(second.approvalId, live()), isRefusal(/turned off/, 'POLICY_NEVER'));
+  // Nor can a person approve it: the attempt itself revokes it, and nothing is ever written as approved.
+  await assert.rejects(humanApproves(store, second.approvalId), isRefusal(/turned off/, 'POLICY_NEVER'));
+  assert.equal(asV2(await store.get(second.approvalId))?.state, 'revoked');
+  // Revoked by `never`, and said so from then on (D2): voided, with its reason.
+  await assert.rejects(
+    store.claimForSend(second.approvalId, live()),
+    isRefusal(/voided \(sending is turned off/, 'APPROVAL_VOID'),
+  );
 });
 
 test('approving content that changed since prepare voids the record (the human would see something else)', async () => {
@@ -349,10 +404,14 @@ test('a change approval is never spent as a send, nor a send approval as a chang
   assert.equal(change.kind, 'change');
   assert.equal(send.kind, 'send', 'a version-2 send says it is one');
 
+  // Another kind's id is the one NOT_FOUND, as an id that names nothing is: nothing of the record is said.
   const wrongKind = (pattern: RegExp) => (e: unknown) =>
-    e instanceof CommsError && e.code === 'USAGE' && pattern.test(e.message);
-  const asSend = /nothing was sent: approval ap_\w+ is for a configuration change, not a send/;
-  const asChange = /nothing was changed: approval ap_\w+ is for a send, not a configuration change/;
+    e instanceof CommsError &&
+    e.code === 'NOT_FOUND' &&
+    pattern.test(e.message) &&
+    JSON.stringify(e.details) === JSON.stringify({ approval: null });
+  const asSend = /^nothing was sent: no approval ap_\w+$/;
+  const asChange = /^nothing was changed: no approval ap_\w+$/;
 
   // Every door a send uses refuses a change's approval: the challenge, the typed approval and the claim.
   await assert.rejects(store.issueChallenge(change.approvalId), wrongKind(asSend), 'issueChallenge');
@@ -385,7 +444,7 @@ test('a change approval is claimed once, even if its record file were reset', as
   assert.equal((await claim()).state, 'used');
   await assert.rejects(
     claim(),
-    (e: unknown) => e instanceof CommsError && /nothing was changed: the approval is used/.test(e.message),
+    isRefusal(/nothing was changed: the approved change was already claimed at /, 'APPROVAL_VOID'),
   );
   const path = join(store.directory, `${change.approvalId}.json`);
   const { usedAt: _used, ...reset } = JSON.parse(readFileSync(path, 'utf8'));
@@ -474,8 +533,7 @@ function isCancelled(message: RegExp) {
 test('a send claim cancelled while it waits for the lock writes nothing: the record is as it was, for the same call again', async () => {
   const { store, record } = await setup('confirm');
   await humanApproves(store, record.approvalId);
-  const claim = (signal?: AbortSignal) =>
-    store.claimForSend(record.approvalId, live({ policy: 'confirm' }), signal ? { signal } : {});
+  const claim = (signal?: AbortSignal) => store.claimForSend(record.approvalId, live(), signal ? { signal } : {});
 
   await assert.rejects(
     cancelledWhileWaiting(store, record.approvalId, claim),
@@ -501,7 +559,8 @@ test('a change claim cancelled while it waits for the lock writes nothing, and t
 });
 
 test('a download’s question claimed by a call cancelled while it waits for the lock stays open, and the answer unused', async () => {
-  const store = new ApprovalStore(tempDir(), { now: clock().now });
+  const dir = tempDir();
+  const store = new ApprovalStore(dir, { now: clock().now, loadConfig: liveConfig(dir, gate()).loadConfig });
   const request = {
     target: { kind: 'account' as const, name: 'acme/slack', id: 'acc_AAAAAAAAAAAAAAAA' },
     operation: 'files.download',
@@ -628,12 +687,7 @@ test('a version-1 record is refused by the version gate on every claim, approve,
       ['issueChallenge', V1_SEND_ID, bytes.send, () => store.issueChallenge(V1_SEND_ID)],
       ['approve', V1_SEND_ID, bytes.send, () => store.approve(V1_SEND_ID, 'terminal', LIVE_DRAFT, 'ABCD')],
       ['claimForSend (pending)', V1_SEND_ID, bytes.send, () => store.claimForSend(V1_SEND_ID, live())],
-      [
-        'claimForSend (approved)',
-        V1_APPROVED_ID,
-        bytes.approved,
-        () => store.claimForSend(V1_APPROVED_ID, live({ policy: 'confirm' })),
-      ],
+      ['claimForSend (approved)', V1_APPROVED_ID, bytes.approved, () => store.claimForSend(V1_APPROVED_ID, live())],
       ['complete', V1_SEND_ID, bytes.send, () => store.complete(V1_SEND_ID, { sentMessageId: 's1' })],
       ['issueChallenge (change)', V1_CHANGE_ID, bytes.change, () => store.issueChallenge(V1_CHANGE_ID, 'change')],
       [
@@ -846,9 +900,7 @@ test('each send transition writes exactly its fields, and every record it leaves
   assert.equal(approved.after.usableUntil, '2026-09-19T10:01:00.000Z', '24 hours after approval');
   assert.equal(approved.after.approvedBindingDigest, record.bindingDigest);
   time.advance(60_000);
-  const sending = await writes(store, record.approvalId, () =>
-    store.claimForSend(record.approvalId, live({ policy: 'confirm' })),
-  );
+  const sending = await writes(store, record.approvalId, () => store.claimForSend(record.approvalId, live()));
   assert.deepEqual([sending.added, sending.removed, sending.changed], [['sendingAt'], [], ['state']]);
   assert.equal(sending.after.sendingAt, '2026-09-18T10:02:00.000Z');
   // An empty provider id records nothing: the record stays `sending`.
@@ -942,7 +994,8 @@ test('a change claim writes usedAt; one approved at a terminal writes the approv
 });
 
 test('a download’s answer binds the answer to the record, with no approvedAt; its claim writes usedAt', async () => {
-  const store = new ApprovalStore(tempDir(), { now: clock().now });
+  const dir = tempDir();
+  const store = new ApprovalStore(dir, { now: clock().now, loadConfig: liveConfig(dir, gate()).loadConfig });
   const request = {
     target: { kind: 'account' as const, name: 'acme/slack', id: 'acc_AAAAAAAAAAAAAAAA' },
     operation: 'files.download',

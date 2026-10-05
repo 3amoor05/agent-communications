@@ -365,10 +365,14 @@ test("a send's approval offered as a change names every sending channel's approv
   const gmail = registered.of('gmail', ['approve', send.approvalId]);
   assert.ok(isCommand(gmail) && gmail.words.includes(entry), 'Gmail is found where it is registered');
   const config = await core.config.load();
-  for (const attempt of [
-    () => beginChangeApproval(core, send.approvalId, { surface: 'cli' }),
-    () => claimChange(core, send.approvalId, { before: config, after: config, effects: ['x'] }, { surface: 'mcp' }),
-  ]) {
+  // The claim goes to the store, where another kind's id is the one NOT_FOUND (design 2026-10-05 §D2): it names no
+  // record, and so no command.
+  await assert.rejects(
+    claimChange(core, send.approvalId, { before: config, after: config, effects: ['x'] }, { surface: 'mcp' }),
+    (error: unknown) =>
+      error instanceof CommsError && error.code === 'NOT_FOUND' && !/approve/.test(`${error.message} ${error.hint}`),
+  );
+  for (const attempt of [() => beginChangeApproval(core, send.approvalId, { surface: 'cli' })]) {
     await assert.rejects(attempt(), (error: unknown) => {
       assert.ok(error instanceof CommsError && error.code === 'USAGE', String(error));
       assert.match(error.message, /is for a send, not a configuration change/);
@@ -383,7 +387,9 @@ test("a send's approval offered as a change names every sending channel's approv
   }
 });
 
-test("a change's approval offered as a send is approved with this installation's own approve (7d-core)", async () => {
+test("a change's approval offered as a send is the one NOT_FOUND, naming no command (7d-core)", async () => {
+  // It named this installation's own approve; another kind's id is now the one NOT_FOUND (design 2026-10-05 §D2), as
+  // an id that names nothing is, so it says nothing of the record — not even the command that would approve it.
   const { core } = machineWithGmail();
   const change = await core.approvals.createChange({
     channel: 'core',
@@ -391,11 +397,9 @@ test("a change's approval offered as a send is approved with this installation's
     policy: 'chat',
   });
   await assert.rejects(core.approvals.issueChallenge(change.approvalId), (error: unknown) => {
-    assert.ok(error instanceof CommsError);
-    assert.equal(
-      error.hint,
-      `A person approves it with ${coreInline(core.paths, ['approve', change.approvalId])}, and it permits only the change it was prepared for.`,
-    );
+    assert.ok(error instanceof CommsError && error.code === 'NOT_FOUND', String(error));
+    assert.doesNotMatch(`${error.message} ${error.hint}`, / approve /);
+    assert.deepEqual(error.details, { approval: null });
     return true;
   });
 });

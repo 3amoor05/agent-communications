@@ -10,9 +10,18 @@ import {
 } from './approval-binding.ts';
 import { decodeLegacyV1, deriveLegacyV1State, type LegacyApprovalRecord } from './approval-legacy.ts';
 import {
+  type ApprovalOutcome,
+  approvalNotFound,
+  approvalOutcome,
+  type LiveGate,
+  liveGateOf,
+  type OutcomeAction,
+} from './approval-outcome.ts';
+import {
   corruptStubOf,
   decodeStored,
   integrityRefusal,
+  kindOf,
   ownerOf,
   type StoredApproval,
   stateOf,
@@ -580,13 +589,6 @@ export function publicView(record: ApprovalRecord): Omit<ApprovalRecord, 'challe
 type Failure = { code: ErrorCode; reason: string };
 
 /**
- * The refusals of a send's approval offered to a change. They name each sending channel's `approve`; another product's
- * is found only among the registrations read for it, which the store does not read under its lock — so a caller that
- * can read them says it again with them (`sendApprovesHint`).
- */
-const MISDIRECTED_SENDS = new WeakSet<CommsError>();
-
-/**
  * What an agent is told when a change waits for a person at a terminal: the printing package's own `approve` with this
  * id, located, or why there is none here.
  */
@@ -602,11 +604,6 @@ function approvePendingHint(
   );
 }
 
-/** Whether `error` is the refusal of a send's approval offered as a change's. */
-export function isMisdirectedSend(error: unknown): error is CommsError {
-  return error instanceof CommsError && MISDIRECTED_SENDS.has(error);
-}
-
 /**
  * What approves the send `approvalId`: the `approve` of every channel that sends, one of which prepared it — a send
  * record does not say which (D1). Each is a located command, or why it has none here.
@@ -619,16 +616,41 @@ export function sendApprovesHint(maker: CliHandoffs, approvalId: string): string
   )} — and permits only that send.`;
 }
 
+/**
+ * What a caller takes an id to be: an approval of `kind` (any kind when left out), and — on a surface pinned to one
+ * mailbox or account, or a claim made for one — owned by `owner`. Anything else is the one `NOT_FOUND`
+ * (`approvalNotFound`), checked before the record's state is looked at.
+ */
+export interface ApprovalExpectation {
+  readonly kind?: ApprovalKind | undefined;
+  readonly owner?: string | undefined;
+}
+
+/**
+ * Whether the caller may be told of `found`: it is the kind and the owner the caller expects. A record whose kind or
+ * owner cannot be trusted — unreadable, or corrupt with an unverifiable binding — is never shown to a pinned caller, and
+ * reaches an unpinned one only as its stub (the integrity refusal).
+ */
+function matchesExpectation(found: StoredApproval, expect: ApprovalExpectation): boolean {
+  const kind = kindOf(found);
+  const owner = ownerOf(found);
+  if (kind === null || owner === null) return expect.owner === undefined;
+  if (expect.kind !== undefined && kind !== expect.kind) return false;
+  return expect.owner === undefined || owner === expect.owner;
+}
+
 /** How the store is opened. */
 export interface ApprovalStoreOptions {
   now?: () => Date;
   handoffs?: CliHandoffs | undefined;
   /**
    * The configuration, read afresh: the one thing a read of the store consults beyond the files themselves — to
-   * attribute a version-1 record whose owner is an account to that account's platform. Read once per `get`, once per
-   * `list`, and once per locked transition after its lock is held, so one call decodes against one snapshot. Its
-   * errors propagate: a configuration that cannot be read is never taken for none. Resolving `null`, or left out, is
-   * "no configuration", and such a record is then unattributable.
+   * attribute a version-1 record whose owner is an account to that account's platform, and for every locked
+   * transition, the live gate it classifies by (`liveGateOf`): the owner, its policies and its send epoch. Read once
+   * per `get`, once per `list`, and once per locked transition after its lock is held, so one call decodes and
+   * classifies against one snapshot. Its errors propagate: a configuration that cannot be read is never taken for none.
+   * Resolving `null`, or left out, is "no configuration": a version-1 account record is then unattributable, nothing is
+   * ever claimable, and a claim, an approval or an answer is refused with `CONFIG`.
    */
   loadConfig?: (() => Promise<Config | null>) | undefined;
 }
@@ -782,123 +804,93 @@ export class ApprovalStore {
   }
 
   /**
-   * Compare-and-swap under the record's lock. `decide` returns the next record (written) or throws (nothing written).
+   * Compare-and-swap under the record's lock, classified there (design 2026-10-05 §D2).
    *
-   * Only a valid version-2 record reaches `decide`, and it is refused before anything is derived or written otherwise:
-   * a record from an earlier release with the version refusal (0.13.0 persisted `expired` here first); a corrupt or
-   * unreadable one with the integrity refusal, never rewritten; and one whose stored id is not its file's is corrupt
-   * before anything — a write, a claim marker — can touch the id it names.
+   * Under the lock, in this order: the configuration is read once (`loadConfig`), the file is read and decoded against
+   * it, and the record must be what the caller expects — its kind, its owner — or the call gets the one `NOT_FOUND`,
+   * before anything of the record's state is looked at. A record from an earlier release then gets the version
+   * refusal, a corrupt or unreadable one the integrity refusal, and neither is ever rewritten. A version-2 record is
+   * derived (expiry, a dead send) and classified (`approvalOutcome`) against the live gate of that one configuration
+   * read; what it derives is written before `decide` runs — expiry and `unknown` always, a revocation the
+   * classification derived only for an action, never for a look. `decide` gets the record as it now stands, its
+   * outcome and the live gate, and returns the next record (written) or throws (nothing more written).
    */
-  async #transition(approvalId: string, decide: (current: ApprovalRecord) => ApprovalRecord): Promise<ApprovalRecord> {
+  async #transition(
+    approvalId: string,
+    expect: ApprovalExpectation,
+    action: OutcomeAction,
+    decide: (current: ApprovalRecord, outcome: ApprovalOutcome, live: LiveGate | null) => ApprovalRecord,
+  ): Promise<ApprovalRecord> {
     const path = this.#path(approvalId);
     return withFileLock(`${path}.lock`, async () => {
       const config = await this.#config();
       const found = await this.#read(approvalId, config);
-      if (!found) throw refuse('NOT_FOUND', `no approval ${approvalId}`);
-      if (found.form === 'legacy') throw otherVersionRefusal(found.view);
-      if (found.form !== 'v2') throw integrityRefusal(found);
+      if (found === null || !matchesExpectation(found, expect)) throw approvalNotFound(approvalId, expect.kind);
+      const derived = this.#derived(found);
+      const live = config === null || derived.form !== 'v2' ? null : liveGateOf(config, derived.record);
+      const outcome = approvalOutcome(derived, { action, live, now: this.#now() });
+      if (found.form !== 'v2' || derived.form !== 'v2' || outcome.record === null) {
+        throw outcome.error ?? integrityRefusal(found);
+      }
       const stored = found.record;
-      const current = this.#derive(stored);
+      const current = outcome.revokes && action !== 'inspect' && action !== 'wait' ? outcome.record : derived.record;
       if (current.state !== stored.state) await this.#write({ ...current, updatedAt: this.#now().toISOString() });
-      const next = decide(current);
+      const next = decide(current, outcome, live);
       if (next !== current) await this.#write({ ...next, updatedAt: this.#now().toISOString() });
       return next;
     });
   }
 
-  #stateError(record: ApprovalRecord): CommsError {
-    const refusal = refusalFor(record);
-    // A question is answered, not approved, and said so: "the approval is used" sends nobody anywhere useful.
-    if (approvalKind(record) === 'download') {
-      if (record.state === 'expired')
-        return refusal('APPROVAL_EXPIRED', 'the question expired before it was answered', record);
-      if (record.state === 'revoked') {
-        return refusal('APPROVAL_VOID', `the question was voided (${record.reason ?? 'revoked'})`, record);
+  /**
+   * A look at one approval, under its lock: the record as it stands and its classification for `expect` — the same
+   * `NOT_FOUND` as every action for an id that is not what the caller expects. It writes only what reading derives
+   * (an expiry, a dead send's `unknown`), never a revocation: an owner removed or a stale epoch is shown as revoked
+   * here, and written by the next action.
+   */
+  async inspect(
+    approvalId: string,
+    expect: ApprovalExpectation = {},
+  ): Promise<{ stored: StoredApproval; outcome: ApprovalOutcome }> {
+    const path = this.#path(approvalId);
+    return withFileLock(`${path}.lock`, async () => {
+      const config = await this.#config();
+      const found = await this.#read(approvalId, config);
+      if (found === null || !matchesExpectation(found, expect)) throw approvalNotFound(approvalId, expect.kind);
+      const derived = this.#derived(found);
+      if (found.form === 'v2' && derived.form === 'v2' && derived.record.state !== found.record.state) {
+        await this.#write({ ...derived.record, updatedAt: this.#now().toISOString() });
       }
-      return refusal(
-        'APPROVAL_VOID',
-        record.state === 'used'
-          ? 'the question was answered already, and an answer is used once'
-          : `the question is ${record.state}`,
-        record,
-      );
-    }
-    if (record.state === 'expired')
-      return refusal('APPROVAL_EXPIRED', 'the approval expired before it was used', record);
-    if (record.state === 'revoked') {
-      return refusal('APPROVAL_VOID', `the approval was voided (${record.reason ?? 'revoked'})`, record);
-    }
-    return refusal('APPROVAL_REQUIRED', `the approval is ${record.state}`, record);
+      const live = config === null || derived.form !== 'v2' ? null : liveGateOf(config, derived.record);
+      return { stored: derived, outcome: approvalOutcome(derived, { action: 'inspect', live, now: this.#now() }) };
+    });
   }
 
   /**
-   * Refuses a record of the other kind, writing nothing to it.
-   *
-   * Nothing written, because the caller made a mistake about an approval that may be perfectly good: voiding a post
-   * somebody is about to approve, because an agent passed its id to a change, would punish the wrong party.
+   * The refusal of a second approval of a record a person approved already: there is nothing to approve, and the
+   * approval can be used as it is.
    */
-  #requireKind(
-    record: ApprovalRecord,
-    kind: ApprovalKind,
-    platform: NodeJS.Platform,
-    handoffs: CliHandoffs | undefined = this.#handoffs,
-  ): void {
-    // Only the refusals that name a command need the printing package's handoffs; asked for one without them is a
-    // programming error (`requiredHandoffs`).
-    const maker = () => requiredHandoffs(handoffs).on(platform);
-    const actual = approvalKind(record);
-    if (actual === kind) return;
-    const id = record.approvalId;
-    // A question about where to save files, and anything claimed as one, in words of their own: neither the send's
-    // refusal nor the change's describes it, and each would send the caller to a command that cannot help.
-    if (actual === 'download') {
-      throw (kind === 'change' ? refuseChange : refuse)(
-        'USAGE',
-        `${id} is a question about where to save files, not ${kind === 'send' ? 'a send' : 'a configuration change'}`,
-        record,
-        DOWNLOAD_ANSWER_HINT,
-      );
-    }
-    if (kind === 'download') {
-      throw refuseDownload(
-        'USAGE',
-        `${id} is ${actual === 'change' ? 'a configuration change' : 'a send'}, not a question about where to save files`,
-        record,
-        'Pass the choice id the download’s question came with, and the person’s answer beside it.',
-      );
-    }
-    if (kind === 'send') {
-      throw refuse(
-        'USAGE',
-        `approval ${id} is for a configuration change, not a send`,
-        record,
-        // A change is approved by any of the suite's `approve` commands, so the printing package's own does it.
-        handoffSentence(
-          maker().own(['approve', id]),
-          (command) => `A person approves it with ${command}, and it permits only the change it was prepared for.`,
-        ),
-      );
-    }
-    const misdirected = refuseChange(
+  #alreadyApproved(record: ApprovalRecord, outcome: ApprovalOutcome): CommsError {
+    return new CommsError(
       'USAGE',
-      `approval ${id} is for a send, not a configuration change`,
-      record,
-      sendApprovesHint(maker(), id),
+      `${record.kind === 'change' ? 'nothing was changed' : 'nothing was sent'}: it is approved already, and a person approves it once`,
+      {
+        hint: 'Nothing more is needed from the person: try the same call again with the same approval.',
+        details: { approvalId: record.approvalId, state: record.state, approval: outcome.approval },
+      },
     );
-    MISDIRECTED_SENDS.add(misdirected);
-    throw misdirected;
   }
 
   /** Issues a new challenge to show a human; only its hash is kept. */
   async issueChallenge(
     approvalId: string,
     kind: ApprovalKind = 'send',
-    platform: NodeJS.Platform = process.platform,
+    // Kept for callers that pass it: a refusal here names no command since another kind's id became `NOT_FOUND`.
+    _platform: NodeJS.Platform = process.platform,
   ): Promise<string> {
     const challenge = newChallenge();
-    await this.#transition(approvalId, (current) => {
-      this.#requireKind(current, kind, platform);
-      if (current.state !== 'pending') throw this.#stateError(current);
+    await this.#transition(approvalId, { kind }, 'approve', (current, outcome) => {
+      if (outcome.error) throw outcome.error;
+      if (current.state !== 'pending') throw this.#alreadyApproved(current, outcome);
       return { ...current, challengeHash: hashChallenge(challenge) };
     });
     return challenge;
@@ -918,12 +910,12 @@ export class ApprovalStore {
     live: LiveDraft,
     answer: string,
     kind: ApprovalKind = 'send',
-    platform: NodeJS.Platform = process.platform,
+    _platform: NodeJS.Platform = process.platform,
   ): Promise<ApprovalRecord> {
     let failure: Failure | null = null;
-    const result = await this.#transition(approvalId, (current) => {
-      this.#requireKind(current, kind, platform);
-      if (current.state !== 'pending') throw this.#stateError(current);
+    const result = await this.#transition(approvalId, { kind }, 'approve', (current, outcome) => {
+      if (outcome.error) throw outcome.error;
+      if (current.state !== 'pending') throw this.#alreadyApproved(current, outcome);
       if (!current.challengeHash)
         throw refusalFor(current)('APPROVAL_REQUIRED', 'no challenge was issued for this approval', current);
       const at = this.#now();
@@ -977,81 +969,73 @@ export class ApprovalStore {
 
   /**
    * Claims the record for sending, once. Non-consuming refusals (not yet approved) leave the record untouched so the
-   * human can still approve it; integrity failures (other inbox or account, edited or changed draft, different
-   * recipients or subject) void it. Success creates the O_EXCL claim marker.
+   * human can still approve it; integrity failures (another account, an edited or changed draft, different recipients
+   * or subject) void it. Success creates the O_EXCL claim marker.
+   *
+   * `live.inboxId` is the owner the caller claims for: a record of another owner is the one `NOT_FOUND`, and left as it
+   * is. The policy is the live gate's, from the configuration read under the record's lock (decision 4): a value the
+   * caller read before the lock is exactly what a `never` change can land between.
    */
   async claimForSend(
     approvalId: string,
-    live: LiveDraft & { inboxId: string; inboxSub?: string | undefined; policy: SendPolicy; expect: Expectation },
+    live: LiveDraft & { inboxId: string; inboxSub?: string | undefined; expect: Expectation },
     options: ClaimOptions = {},
   ): Promise<ApprovalRecord> {
     let failure: Failure | null = null;
-    const result = await this.#transition(approvalId, (current) => {
-      // Before anything else: a change approval names an account in the same field, and a send claimed against it
-      // would otherwise be judged — and voided — as a send that went wrong.
-      this.#requireKind(current, 'send', options.platform ?? process.platform, options.handoffs ?? this.#handoffs);
-      if (current.state !== 'pending' && current.state !== 'approved') throw this.#stateError(current);
-      /*
-       * Cancelled while the claim waited for the lock: nothing written, the record as it was. Here, before every branch
-       * below that writes, and with nothing awaited between this look and the write that changes the record — so no
-       * cancellation can land in between.
-       */
-      if (options.signal?.aborted) throw cancelledClaim(current);
-      const at = this.#now().toISOString();
-      const voidWith = (code: ErrorCode, reason: string): ApprovalRecord => {
-        failure = { code, reason };
-        return { ...current, state: 'revoked', reason, revokedAt: at };
-      };
-      if (live.inboxId !== current.inboxId)
-        return voidWith('APPROVAL_VOID', 'the approval belongs to a different inbox');
-      // Fail closed: an approval prepared against a known account may only be claimed by a caller that names the same
-      // account. A caller that passes none is refused rather than trusted, whatever the reason it has none.
-      if (current.inboxSub && current.inboxSub !== live.inboxSub) {
-        return voidWith(
-          'APPROVAL_VOID',
-          live.inboxSub
-            ? 'the inbox is now connected to a different account'
-            : 'the account this was prepared for could not be confirmed',
-        );
-      }
-      if (live.policy === 'never')
-        return voidWith('POLICY_NEVER', 'sending is turned off for this inbox (policy: never)');
-      if (live.draftMessageId !== current.draftMessageId) {
-        return voidWith('APPROVAL_VOID', 'the draft was edited after the preview');
-      }
-      if (live.contentDigest !== current.contentDigest)
-        return voidWith('APPROVAL_VOID', 'the draft content changed after the preview');
-      if (!sameExpectation(live.expect, current.expect)) {
-        return voidWith('APPROVAL_VOID', 'the recipients or subject given do not match the prepared draft');
-      }
-      // A switch over the effective policy, so a policy value nobody thought about here cannot fall through to
-      // "send it". `never` reached this way is not only the live setting: a record can carry
-      // `requiredPolicy: never`, and reading only for `confirm` let that one straight through.
-      const effective = stricterPolicy(live.policy, current.requiredPolicy);
-      switch (effective) {
-        case 'never':
-          return voidWith('POLICY_NEVER', 'sending is turned off for this approval (policy: never)');
-        case 'confirm': {
-          if (current.state !== 'approved') {
-            throw refuse(
-              'APPROVAL_PENDING',
-              'this send needs approval outside the chat first',
-              current,
-              options.pendingHint ??
-                'Ask the user to approve it outside the chat, then try again with the same approval.',
-            );
-          }
-          // The binding the person approved must be the record's own: content, route and identity alike.
-          if (current.approvedBindingDigest !== current.bindingDigest) {
-            return voidWith('APPROVAL_VOID', 'the approved content is not the content now in the draft');
-          }
-          break;
+    const result = await this.#transition(
+      approvalId,
+      { kind: 'send', owner: live.inboxId },
+      'claim',
+      (current, outcome) => {
+        // The record's state, its owner and the live policy first: used, expired, voided — or revoked just now, because
+        // its owner is gone, its epoch is behind, or sending is turned off — is refused before anything is compared.
+        if (outcome.error) throw outcome.error;
+        /*
+         * Cancelled while the claim waited for the lock: nothing written, the record as it was. Here, before every branch
+         * below that writes, and with nothing awaited between this look and the write that changes the record — so no
+         * cancellation can land in between.
+         */
+        if (options.signal?.aborted) throw cancelledClaim(current);
+        const at = this.#now().toISOString();
+        const voidWith = (code: ErrorCode, reason: string): ApprovalRecord => {
+          failure = { code, reason };
+          return { ...current, state: 'revoked', reason, revokedAt: at, challengeHash: undefined };
+        };
+        // Fail closed: an approval prepared against a known account may only be claimed by a caller that names the same
+        // account. A caller that passes none is refused rather than trusted, whatever the reason it has none.
+        if (current.inboxSub && current.inboxSub !== live.inboxSub) {
+          return voidWith(
+            'APPROVAL_VOID',
+            live.inboxSub
+              ? 'the inbox is now connected to a different account'
+              : 'the account this was prepared for could not be confirmed',
+          );
         }
-        case 'chat':
-          break;
-      }
-      return { ...current, state: 'sending', sendingAt: at };
-    });
+        if (live.draftMessageId !== current.draftMessageId) {
+          return voidWith('APPROVAL_VOID', 'the draft was edited after the preview');
+        }
+        if (live.contentDigest !== current.contentDigest)
+          return voidWith('APPROVAL_VOID', 'the draft content changed after the preview');
+        if (!sameExpectation(live.expect, current.expect)) {
+          return voidWith('APPROVAL_VOID', 'the recipients or subject given do not match the prepared draft');
+        }
+        // Waiting for a person: a confirm route, or a chat route the live policy has tightened. Left as it is.
+        if (!outcome.claimable) {
+          throw refuse(
+            'APPROVAL_PENDING',
+            'this send needs approval outside the chat first',
+            current,
+            options.pendingHint ??
+              'Ask the user to approve it outside the chat, then try again with the same approval.',
+          );
+        }
+        // The binding the person approved must be the record's own: content, route and identity alike.
+        if (current.state === 'approved' && current.approvedBindingDigest !== current.bindingDigest) {
+          return voidWith('APPROVAL_VOID', 'the approved content is not the content now in the draft');
+        }
+        return { ...current, state: 'sending', sendingAt: at };
+      },
+    );
     const failed = failure as Failure | null;
     if (failed) throw refuse(failed.code, failed.reason, result);
     await this.#markClaimed(result);
@@ -1144,9 +1128,8 @@ export class ApprovalStore {
   async claimForChange(approvalId: string, live: LiveChange, options: ClaimOptions = {}): Promise<ApprovalRecord> {
     const digest = changeDigest(live.change);
     let failure: Failure | null = null;
-    const result = await this.#transition(approvalId, (current) => {
-      this.#requireKind(current, 'change', options.platform ?? process.platform, options.handoffs ?? this.#handoffs);
-      if (current.state !== 'pending' && current.state !== 'approved') throw this.#stateError(current);
+    const result = await this.#transition(approvalId, { kind: 'change' }, 'claim', (current, outcome, gate) => {
+      if (outcome.error) throw outcome.error;
       // As for a send: a cancellation that landed while this waited for the lock writes nothing.
       if (options.signal?.aborted) throw cancelledClaim(current);
       const at = this.#now().toISOString();
@@ -1159,7 +1142,9 @@ export class ApprovalStore {
           current.change ? changeDrift(current.change, live.change) : 'the change is not the one that was approved',
         );
       }
-      if (stricterPolicy(live.policy, current.requiredPolicy) !== 'chat') {
+      // The stricter of the caller's policy and the live gate's, from the configuration read under this lock.
+      const governing = stricterPolicy(live.policy, gate?.changePolicy ?? 'confirm');
+      if (!outcome.claimable || stricterPolicy(governing, current.requiredPolicy) !== 'chat') {
         if (current.state !== 'approved') {
           throw refuseChange(
             'APPROVAL_PENDING',
@@ -1267,16 +1252,15 @@ export class ApprovalStore {
     approvalId: string,
     via: ApprovalChannel,
     answer: RecordedSaveAnswer,
-    platform: NodeJS.Platform = process.platform,
+    _platform: NodeJS.Platform = process.platform,
   ): Promise<ApprovalRecord & { download: DownloadBinding }> {
     const recorded: RecordedSaveAnswer =
       answer.choice === 'other' ? { choice: 'other', folder: answer.folder } : { choice: answer.choice };
-    const result = await this.#transition(approvalId, (current) => {
-      this.#requireKind(current, 'download', platform);
+    const result = await this.#transition(approvalId, { kind: 'download' }, 'approve', (current, outcome) => {
+      if (outcome.error) throw outcome.error;
       if (current.state === 'approved') {
         throw refuseDownload('APPROVAL_VOID', 'the question was answered already, and it is answered once', current);
       }
-      if (current.state !== 'pending') throw this.#stateError(current);
       if (!current.download || downloadDigest(current.download) !== current.contentDigest) {
         throw refuseDownload('APPROVAL_VOID', 'the question does not describe the download it is bound to', current);
       }
@@ -1324,9 +1308,8 @@ export class ApprovalStore {
   ): Promise<ApprovalRecord & { download: DownloadBinding }> {
     const digest = downloadDigest(live);
     let failure: Failure | null = null;
-    const result = await this.#transition(approvalId, (current) => {
-      this.#requireKind(current, 'download', options.platform ?? process.platform, options.handoffs ?? this.#handoffs);
-      if (current.state !== 'pending' && current.state !== 'approved') throw this.#stateError(current);
+    const result = await this.#transition(approvalId, { kind: 'download' }, 'claim', (current, outcome, gate) => {
+      if (outcome.error) throw outcome.error;
       if (options.signal?.aborted) throw cancelledClaim(current);
       const at = this.#now().toISOString();
       const voidWith = (reason: string): ApprovalRecord => {
@@ -1345,7 +1328,9 @@ export class ApprovalStore {
           'Call again with the same arguments the question was asked with, and its choice id. If the files themselves changed, make the download again without an answer, and show the person the new question.',
         );
       }
-      const refusal = downloadClaimRefusal(current, options.policy ?? 'chat', options.pendingHint);
+      // The stricter of the caller's policy and the live gate's, from the configuration read under this lock.
+      const policy = stricterPolicy(options.policy ?? 'chat', gate?.changePolicy ?? 'confirm') as ChangePolicy;
+      const refusal = downloadClaimRefusal(current, policy, options.pendingHint);
       if (refusal !== null) throw refusal;
       return { ...current, state: 'used', usedAt: at };
     });
@@ -1370,8 +1355,13 @@ export class ApprovalStore {
         details: { approvalId },
       });
     }
-    return this.#transition(approvalId, (current) => {
-      if (current.state !== 'sending' && current.state !== 'unknown') throw this.#stateError(current);
+    return this.#transition(approvalId, { kind: 'send' }, 'claim', (current, classified) => {
+      if (current.state !== 'sending' && current.state !== 'unknown') {
+        throw (
+          classified.error ??
+          refuse('APPROVAL_VOID', 'the approval is not being sent, so it has no outcome to record', current)
+        );
+      }
       const at = this.#now().toISOString();
       // `usedAt` is the moment the provider accepted it, and so equal to `sentAt`.
       return 'sentMessageId' in outcome
@@ -1392,20 +1382,21 @@ export class ApprovalStore {
   async revoke(
     approvalId: string,
     reason: string,
-    options: { disposition: RevokeDisposition },
+    options: { disposition: RevokeDisposition; expect?: ApprovalExpectation | undefined },
   ): Promise<StoredApproval> {
+    const expect = options.expect ?? {};
     const config = await this.#config();
     const found = await this.#read(approvalId, config);
-    if (found === null) throw refuse('NOT_FOUND', `no approval ${approvalId}`);
+    if (found === null || !matchesExpectation(found, expect)) throw approvalNotFound(approvalId, expect.kind);
     if (found.form === 'legacy') {
       if (options.disposition === 'integrity') throw otherVersionRefusal(found.view);
       const retired = await this.revokeLegacy(approvalId, reason);
       return { form: 'legacy', view: decodeLegacyV1(retired, config, this.#now()), record: retired };
     }
     if (found.form !== 'v2') throw integrityRefusal(found);
-    const record = await this.#transition(approvalId, (current) =>
+    const record = await this.#transition(approvalId, expect, 'revoke', (current) =>
       current.state === 'pending' || current.state === 'approved'
-        ? { ...current, state: 'revoked', reason, revokedAt: this.#now().toISOString() }
+        ? { ...current, state: 'revoked', reason, revokedAt: this.#now().toISOString(), challengeHash: undefined }
         : current,
     );
     return { form: 'v2', record };

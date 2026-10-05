@@ -559,6 +559,31 @@ async function preparedFor<T>(m: Machine, change: GatedChange<T>): Promise<strin
  * waiting: none of them is a claim to a change now. Made through the store's own transitions, before the update is
  * found; "used" snoozes the check on its way, so the caller seeds the file after.
  */
+const SEND_OWNER = 'ibx_AAAAAAAAAAAAAAAA';
+
+/** `acme/gmail`, the mailbox the sends and questions here are for, so the store finds their owner as it classifies. */
+async function addMailbox(m: Machine): Promise<void> {
+  await m.core.config.update((config) => ({
+    ...config,
+    inboxes: {
+      ...config.inboxes,
+      'acme/gmail': {
+        id: SEND_OWNER,
+        provider: 'gmail',
+        email: 'jo@acme.test',
+        identity: 'oidc',
+        client: 'desktop',
+        tier: 'send',
+        contacts: false,
+        grantedScopes: [],
+        secretRef: `gmail:refresh:${SEND_OWNER}`,
+        internalDomains: ['acme.test'],
+        createdAt: '2026-09-01T00:00:00.000Z',
+      },
+    },
+  }));
+}
+
 async function spentApprovals(m: Machine): Promise<Record<'revoked' | 'used' | 'expired' | 'a send', string>> {
   const revoked = await preparedFor(m, updateLaterChange(m.core));
   await m.core.approvals.revoke(revoked, 'the person said no', { disposition: 'person' });
@@ -569,7 +594,10 @@ async function spentApprovals(m: Machine): Promise<Record<'revoked' | 'used' | '
     approvalId: used,
   });
   assert.equal(claimed.status, 'applied');
-  const anHourAgo = new ApprovalStore(m.stateDir, { now: () => new Date(Date.now() - 3_600_000) });
+  const anHourAgo = new ApprovalStore(m.stateDir, {
+    now: () => new Date(Date.now() - 3_600_000),
+    loadConfig: () => m.core.config.load(),
+  });
   const expired = (
     await anHourAgo.createChange({
       channel: 'core',
@@ -577,9 +605,10 @@ async function spentApprovals(m: Machine): Promise<Record<'revoked' | 'used' | '
       policy: 'chat',
     })
   ).approvalId;
+  await addMailbox(m);
   const send = (
     await m.core.approvals.create({
-      inboxId: 'inbox_one',
+      inboxId: SEND_OWNER,
       draftId: 'draft_one',
       draftMessageId: 'revision_one',
       channel: 'gmail',
@@ -644,10 +673,9 @@ test("a look-up of a send goes past the stop by the approval it went under, used
   const later = await preparedFor(m, updateLaterChange(m.core));
   // The store's own path for a send that went: claimed, then completed.
   await m.core.approvals.claimForSend(send, {
-    inboxId: 'inbox_one',
+    inboxId: SEND_OWNER,
     draftMessageId: 'revision_one',
     contentDigest: 'a'.repeat(64),
-    policy: 'chat',
     expect: { to: ['someone@example.test'], cc: [], bcc: [], subject: 'Hello' },
   });
   await m.core.approvals.complete(send, { sentMessageId: 'email_one' });
@@ -675,6 +703,7 @@ test("a look-up of a send goes past the stop by the approval it went under, used
 
 test('a download’s answer goes past the stop by its question’s choiceId; the answer alone, or another kind’s id, does not', async () => {
   const m = machine();
+  await addMailbox(m);
   const question = await m.core.approvals.createDownload({
     channel: 'core',
     download: {

@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { claimChange, prepareChange } from '../src/changes.ts';
+import { beginChangeApproval, claimChange, prepareChange } from '../src/changes.ts';
 import { type Config, parseConfig } from '../src/config.ts';
 import { type Core, openCore } from '../src/core.ts';
 import { CORE_CALLER } from '../src/handoffs.ts';
@@ -378,9 +378,10 @@ async function collect(): Promise<Record<string, string>> {
       riskFlags: [],
       expect: { to: ['someone@example.test'], cc: [], bcc: [], subject: 'hello' },
     });
+    // At a terminal, where the person is shown what approves it; the store itself says only NOT_FOUND (D2).
     out['hint send approval used for a change'] = normalise(
       m,
-      (await refusalAsync(() => m.core.approvals.issueChallenge(send.approvalId, 'change'))).replace(
+      (await refusalAsync(() => beginChangeApproval(m.core, send.approvalId, { surface: 'cli' }))).replace(
         /ap_[A-Z0-9]+/g,
         'ap_ID',
       ),

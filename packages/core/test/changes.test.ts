@@ -10,7 +10,6 @@ import {
   type ChangeSpec,
   claimChange,
   finishChangeApproval,
-  governingChangePolicy,
   prepareChange,
 } from '../src/changes.ts';
 import { inlineCommand, type Streams } from '../src/cli-runtime.ts';
@@ -21,6 +20,7 @@ import {
   classifyChange,
   effectiveChangePolicy,
   emptyConfig,
+  governingChangePolicy,
   type InboxConfig,
   parseConfig,
 } from '../src/config.ts';
@@ -307,7 +307,7 @@ test('under chat, a prepared change shows before → after in words, and is clai
   // Single use.
   await assert.rejects(
     claimChange(core, prepared.approvalId, spec, { surface: 'mcp' }),
-    refusedWith('APPROVAL_REQUIRED', /nothing was changed: the approval is used/),
+    refusedWith('APPROVAL_VOID', /nothing was changed: the approved change was already claimed at /),
   );
 });
 
@@ -437,11 +437,12 @@ test('an account replaced under the same name between preview and apply is not t
     { ...spec, summary: 'Let acme/slack post' },
     { channel: 'core', surface: 'mcp' },
   );
-  // Somebody removed acme/slack and connected a different workspace under the name.
+  // Somebody removed acme/slack and connected a different workspace under the name: the account the approval was
+  // for is gone (D2), whatever holds its name now.
   write({ accounts: { 'acme/slack': account(OTHER, { workspace: 'T_ELSEWHERE' }) } });
   await assert.rejects(
     claimChange(core, prepared.approvalId, await widening(core), { surface: 'mcp' }),
-    refusedWith('APPROVAL_VOID', /"acme\/slack" is not the account it was when this was approved/),
+    refusedWith('APPROVAL_VOID', /the approval was voided \(its mailbox or account was removed\)/),
   );
 });
 
@@ -693,9 +694,10 @@ test('an act that cannot be taken back is bound to the mailbox or workspace it w
       { channel: 'core', surface: 'cli' },
     );
     write(now);
+    // The one it was shown for is gone (D2), whatever holds its name now.
     await assert.rejects(
       claimChange(core, prepared.approvalId, await removal(), { surface: 'cli' }),
-      refusedWith('APPROVAL_VOID', new RegExp(`"${name}" is not the ${kind} it was when this was approved`)),
+      refusedWith('APPROVAL_VOID', /the approval was voided \(its mailbox or account was removed\)/),
       kind,
     );
   }

@@ -5,7 +5,6 @@ import {
   type ChangeTarget,
   changeDigest,
   DOWNLOAD_ANSWER_HINT,
-  isMisdirectedSend,
   otherVersionRefusal,
   type RevokeDisposition,
   sendApprovesHint,
@@ -17,7 +16,7 @@ import {
   type Config,
   changedSettings,
   classifyChange,
-  defaultChangePolicy,
+  governingChangePolicy,
   type Loosening,
   type LooseningConsent,
   type SettingValue,
@@ -107,35 +106,6 @@ export interface ChangeApprovalPrompt {
   preview: string;
   /** The code to type back. Never stored; only its hash is. */
   challenge: string;
-}
-
-/**
- * The change policy that governs a change, as `config` stands: the strictest of the policies over everything the change
- * touches.
- *
- * The inbox or account it is about, and every inbox or account whose setting it loosens, each by its own policy or
- * the default — and the default itself for a setting of the whole configuration, or for an account the change
- * connects, which has no policy of its own until it exists. The strictest, because a change that loosens two things
- * is approved the way the more careful of them asks.
- *
- * Accounts are found by id, the one measured on the before side, so a rename in the same change cannot move a
- * loosening out from under the policy that was meant to govern it.
- */
-export function governingChangePolicy(
-  config: Config,
-  change: Pick<ChangeBinding, 'target' | 'loosened'>,
-): ChangePolicy {
-  const byId = (id: string | undefined): ChangePolicy => {
-    const entry =
-      id === undefined
-        ? undefined
-        : (Object.values(config.inboxes).find((inbox) => inbox.id === id) ??
-          Object.values(config.accounts).find((account) => account.id === id));
-    return entry?.changePolicy ?? defaultChangePolicy(config);
-  };
-  // A setting of the whole configuration carries no id, and so is governed by the default — as is a new account.
-  const governing = [byId(change.target?.id), ...change.loosened.map((loosening) => byId(loosening.id))];
-  return governing.includes('confirm') ? 'confirm' : 'chat';
 }
 
 /**
@@ -295,14 +265,7 @@ export async function claimChange(
       paths: binding.loosened.map((loosening) => loosening.path),
       changes: binding.loosened,
     };
-  } catch (caught) {
-    // A send's approval offered here: said again with every sending channel's `approve` found where it is registered.
-    const error = isMisdirectedSend(caught)
-      ? new CommsError(caught.code, caught.message, {
-          hint: sendApprovesHint(await requireHandoffs(core, options.platform).registered(), approvalId),
-          ...(caught.details === undefined ? {} : { details: caught.details }),
-        })
-      : caught;
+  } catch (error) {
     await auditRefusal(core, 'change.claim', error, {
       surface: options.surface,
       approvalId,

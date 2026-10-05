@@ -3,6 +3,7 @@ import { chmod, open, readFile, stat } from 'node:fs/promises';
 import { homedir, platform } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { z } from 'zod';
+import type { ChangeBinding } from './approvals.ts';
 import { CHANNEL_SNAPSHOT } from './channels.generated.ts';
 import { CONVERSION_HOOKS, type ConversionHooks } from './config-hooks.ts';
 import { type ConfigVersion, NEW_CONFIG_VERSION } from './config-version.ts';
@@ -887,6 +888,35 @@ export function effectiveAccountSendPolicy(config: Config, account: string): Sen
 /** The change policy that applies where nothing overrides it: the default, and `chat` when none is set. */
 export function defaultChangePolicy(config: Config): ChangePolicy {
   return config.defaults.changePolicy ?? 'chat';
+}
+
+/**
+ * The change policy that governs a change, as `config` stands: the strictest of the policies over everything the change
+ * touches.
+ *
+ * The inbox or account it is about, and every inbox or account whose setting it loosens, each by its own policy or
+ * the default — and the default itself for a setting of the whole configuration, or for an account the change
+ * connects, which has no policy of its own until it exists. The strictest, because a change that loosens two things
+ * is approved the way the more careful of them asks.
+ *
+ * Accounts are found by id, the one measured on the before side, so a rename in the same change cannot move a
+ * loosening out from under the policy that was meant to govern it.
+ */
+export function governingChangePolicy(
+  config: Config,
+  change: Pick<ChangeBinding, 'target' | 'loosened'>,
+): ChangePolicy {
+  const byId = (id: string | undefined): ChangePolicy => {
+    const entry =
+      id === undefined
+        ? undefined
+        : (Object.values(config.inboxes).find((inbox) => inbox.id === id) ??
+          Object.values(config.accounts).find((account) => account.id === id));
+    return entry?.changePolicy ?? defaultChangePolicy(config);
+  };
+  // A setting of the whole configuration carries no id, and so is governed by the default — as is a new account.
+  const governing = [byId(change.target?.id), ...change.loosened.map((loosening) => byId(loosening.id))];
+  return governing.includes('confirm') ? 'confirm' : 'chat';
 }
 
 /** Whether this machine's daily update check is on: `defaults.updateCheck`, absent reading as `on`. */

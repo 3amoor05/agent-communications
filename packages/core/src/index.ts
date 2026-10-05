@@ -1,6 +1,7 @@
 export * from './addresses.ts';
 export * from './approval-binding.ts';
 export * from './approval-legacy.ts';
+export * from './approval-outcome.ts';
 export * from './approval-stored.ts';
 export * from './approval-validate.ts';
 export * from './approvals.ts';

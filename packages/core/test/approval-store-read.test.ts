@@ -224,10 +224,10 @@ test('file name A holding stored id B is corrupt, with B there and without it; n
         inboxSub: 'sub-1',
         draftMessageId: 'msg-v1',
         contentDigest: 'a'.repeat(64),
-        policy: 'chat',
         expect: b.expect,
       }),
-      (e: unknown) => e instanceof CommsError && /is corrupt \(file-name-mismatch\)/.test(e.message),
+      // A claim is made for an owner, and this file's owner cannot be known: the one NOT_FOUND (D2).
+      (e: unknown) => e instanceof CommsError && e.code === 'NOT_FOUND',
     );
     await assert.rejects(store.revoke(id('A'), 'no', { disposition: 'person' }), /file-name-mismatch/);
     assert.equal(existsSync(join(dir, 'approvals', `${id('A')}.claim`)), false, 'no claim marker for A');

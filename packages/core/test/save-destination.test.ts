@@ -53,6 +53,7 @@ import {
   settleDestination,
 } from '../src/save-destination.ts';
 import { coreInline } from './helpers/handoffs.ts';
+import { liveConfig } from './helpers/live-config.ts';
 import { tempDir } from './helpers/temp.ts';
 
 /*
@@ -67,6 +68,15 @@ import { tempDir } from './helpers/temp.ts';
  */
 
 const INBOX = 'ibx_AAAAAAAAAAAAAAAA';
+
+/** A store whose questions are classified against a configuration holding their mailbox, `acme/gmail`. */
+function questionStore(now: () => Date): ApprovalStore {
+  const dir = tempDir();
+  return new ApprovalStore(dir, {
+    now,
+    loadConfig: liveConfig(dir, { inboxes: { 'acme/gmail': { id: INBOX } } }).loadConfig,
+  });
+}
 
 function clock(start = Date.parse('2026-09-29T10:00:00.000Z')) {
   let t = start;
@@ -98,6 +108,8 @@ function refusal(pattern: RegExp, code: string) {
 /** A home and a core of their own, the home under both names core reads it by. */
 function machine(): { home: string; env: NodeJS.ProcessEnv; core: Core } {
   const home = realpathSync.native(tempDir('comms-save-'));
+  // The mailbox the questions are about, so the store finds their owner when it classifies them.
+  liveConfig(home, { inboxes: { 'acme/gmail': { id: INBOX } } });
   const env: NodeJS.ProcessEnv = {
     HOME: home,
     USERPROFILE: home,
@@ -112,7 +124,7 @@ function machine(): { home: string; env: NodeJS.ProcessEnv; core: Core } {
 
 test('a download’s question is kept pending, bound to a digest the store computes, and expires after thirty minutes', async () => {
   const time = clock();
-  const store = new ApprovalStore(tempDir(), { now: time.now });
+  const store = questionStore(time.now);
   const record = await store.createDownload({ channel: 'gmail', download: binding(), policy: 'chat' });
   assert.equal(record.kind, 'download');
   assert.equal(record.state, 'pending');
@@ -135,7 +147,7 @@ test('a download’s question is kept pending, bound to a digest the store compu
 });
 
 test('a question is claimed once, for the request and the files it listed, and returns the folders it offered', async () => {
-  const store = new ApprovalStore(tempDir(), { now: clock().now });
+  const store = questionStore(clock().now);
   const { approvalId } = await store.createDownload({ channel: 'gmail', download: binding(), policy: 'chat' });
   const claimed = await store.claimForDownload(approvalId, REQUEST);
   assert.equal(claimed.state, 'used');
@@ -161,7 +173,7 @@ test('a question claimed for another account, request, set of files or names is 
   ];
   for (const [what, live, reason] of cases) {
     const time = clock();
-    const store = new ApprovalStore(tempDir(), { now: time.now });
+    const store = questionStore(time.now);
     const { approvalId } = await store.createDownload({ channel: 'gmail', download: binding(), policy: 'chat' });
     await assert.rejects(store.claimForDownload(approvalId, live), refusal(reason, 'USAGE'), what);
     await assert.rejects(
@@ -180,35 +192,37 @@ test('a question claimed for another account, request, set of files or names is 
 });
 
 test('a question is never spent as a send or a change, nor either of those as a question — and trying harms none', async () => {
-  const store = new ApprovalStore(tempDir(), { now: clock().now });
+  const store = questionStore(clock().now);
   const question = await store.createDownload({ channel: 'gmail', download: binding(), policy: 'chat' });
   const change = await store.createChange({
     channel: 'gmail',
     change: { summary: 'Let it post', target: null, loosened: [], effects: ['removes a thing'] },
     policy: 'chat',
   });
+  // Another kind's id is the one NOT_FOUND, as an id that names nothing is.
+  const notFound = (e: unknown) =>
+    e instanceof CommsError &&
+    e.code === 'NOT_FOUND' &&
+    /no approval ap_/.test(e.message) &&
+    JSON.stringify(e.details) === JSON.stringify({ approval: null });
   await assert.rejects(
     store.claimForSend(question.approvalId, {
       inboxId: INBOX,
       draftMessageId: question.contentDigest,
       contentDigest: question.contentDigest,
-      policy: 'chat',
       expect: { to: [], cc: [], bcc: [], subject: '' },
     }),
-    refusal(/is a question about where to save files, not a send/, 'USAGE'),
+    notFound,
   );
   await assert.rejects(
     store.claimForChange(question.approvalId, {
       change: { summary: '', target: null, loosened: [], effects: [] },
       policy: 'chat',
     }),
-    refusal(/is a question about where to save files, not a configuration change/, 'USAGE'),
+    notFound,
   );
-  await assert.rejects(store.issueChallenge(question.approvalId), refusal(/question about where to save/, 'USAGE'));
-  await assert.rejects(
-    store.claimForDownload(change.approvalId, REQUEST),
-    refusal(/is a configuration change, not a question about where to save files/, 'USAGE'),
-  );
+  await assert.rejects(store.issueChallenge(question.approvalId), notFound);
+  await assert.rejects(store.claimForDownload(change.approvalId, REQUEST), notFound);
   assert.equal(asV2(await store.get(question.approvalId))?.state, 'pending');
   assert.equal(asV2(await store.get(change.approvalId))?.state, 'pending');
 });
@@ -224,7 +238,7 @@ test('a question is never approved at a terminal: `approve` says what it is, and
 });
 
 test('a question whose record no longer describes what its digest binds is refused as corrupt, never believed or rewritten', async () => {
-  const store = new ApprovalStore(tempDir(), { now: clock().now });
+  const store = questionStore(clock().now);
   const record = await store.createDownload({ channel: 'gmail', download: binding(), policy: 'chat' });
   const path = join(store.directory, `${record.approvalId}.json`);
   const stored = JSON.parse(readFileSync(path, 'utf8'));
