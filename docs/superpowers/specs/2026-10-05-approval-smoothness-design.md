@@ -19,6 +19,15 @@ printed command runnable. **Acceptance:** one internal email that triggers `conf
 re-prepare, no second preview, the agent learning of the approval itself, and no error asking for an approval already
 given.
 
+**The outcome, recorded on the ticket 2026-10-05:** the email was never sent. The first approval was approved at the
+terminal at 22:48:22 and expired unused at 22:52:46 — ten minutes after it was *created*, four and a half after it was
+approved — because the agent did not know it had been approved. The second expired pending. The draft stayed in
+Drafts, and the owner, unable to see his approval's state from the chat, ended by asking whether it had gone. Three
+acceptance criteria were added (D8–D10): **every send and status call returns the approval's real state** (pending,
+approved, expired before or after approval, used and sent with its message id); **a draft whose approvals all expired
+is reported as unsent**, not left silently in Drafts; **re-preparing an identical digest does not require showing the
+full preview again**.
+
 ## 2. What is true, and was checked
 
 | Fact | Source |
@@ -168,6 +177,60 @@ Changes follow D1 (version 2, 30 minutes pending, 24 hours once approved), D2 (t
 Every command these messages print goes through CUE-403's terminal-command locator and `shellCommand`. This release
 requires 0.13.1 (CUE-403).
 
+### D8. Every send and status call says where the approval stands
+
+An approval record already keeps `sentMessageId` when used (`approvals.ts:330, 1069`) and records are never pruned
+(`approvals.ts` deletes none), so the state is always known; it is just not said.
+
+- Every send-path result — success and refusal, on every surface D2 lists — carries `approval: { id, state, … }`:
+  `pending` (with `expiresAt` and what is needed: the person's yes in chat, or the terminal command and the wait
+  tool), `approved` (`approvedAt`, `usableUntil`), `expired` (`expiredAt` and `approvedAt` if it had been approved —
+  "expired after approval" is said in those words), `used` (`sentAt`, `sentMessageId`), `failed`, `unknown` (with
+  where to check), `revoked` (reason). A success says "sent, message id …".
+- **Status at any time:** the wait tools (D3) with `waitSeconds: 0` answer at once with the same object; that is the
+  status call, on every surface, as a CLI and MCP pair. `send list` / `gmail_send_list` (and each channel's list) give
+  the same object per approval, with the drafts it belongs to.
+- The skills tell the agent to call the status or wait tool before telling the person anything about a send it did
+  not just complete, and never to say "sent" without a `sentMessageId`.
+
+### D9. A draft whose approvals all expired is reported as unsent
+
+A draft is **unsent** when it has at least one send approval, none `approved`, `sending`, `used` or `unknown`, and its
+newest one is `expired` (or `revoked` for an expired-unused reason). This is derived from the records, keyed by
+mailbox and draft id; nothing new is stored.
+
+- `send list` / `gmail_send_list` gain an `unsent` section: each such draft with its recipients, subject (as the
+  existing untrusted fields), when it was last prepared, how its last approval ended, and the one call that prepares
+  it again (D10). `draft get` / `draft list` mark the draft "prepared to send, not sent — approval expired at …".
+- Every expiry the server reports — a refusal, a wait that ends `expired` — says "not sent; the draft is still in
+  Drafts" and gives the same one call. `doctor` counts unsent drafts from the last seven days, per mailbox, with the
+  list command.
+- Nothing is sent, re-prepared or deleted on the person's behalf; reporting is all this does.
+- Resend and Slack have no drafts in this sense; their prepared sends whose approvals expired are listed the same way
+  by their `send list` (their prepared-message store), and Slack drafts by `slack_draft_list`.
+
+### D10. Preparing an identical digest again shows a short preview, and why it may
+
+When `send prepare` produces a digest that equals the digest of an earlier approval **for the same mailbox and draft,
+prepared in the last 24 hours, never used and never `sending`/`unknown`**, the new approval is created as always (its
+own id, its own lifetimes, the policy and every risk check computed afresh — an escalation that now applies still
+applies), and the result adds `unchangedSince: { approvalId, preparedAt }` and a **short preview**: recipients, subject
+(untrusted fields as usual), attachment names and sizes, the digest's first 12 characters, and "the same content you
+were shown at <time>". The full preview stays in the result.
+
+Why this is safe: the preview protects the person's decision, and the digest binds the new approval to exactly the
+content the earlier preview showed — any change in recipients, subject, body, attachments or headers gives a different
+digest and the full preview. Under `chat` the software never could force an agent to display anything; the short form
+changes what the agent is told it may show, not what is bound. Under `confirm`, the terminal approval prints the full
+content regardless — the short form is for the chat only. Exclusions, each shown in full with the reason:
+
+- an earlier identical digest that was **used**: the result says "this exact message was already sent at … (message id
+  …)", `duplicateOf` is set, and it is never presented as a routine re-prepare;
+- an earlier one that is `sending` or `unknown`: refused as today until its outcome is known;
+- older than 24 hours, another draft, or another mailbox: full preview.
+
+The skill says: show the short preview, say it is unchanged since the earlier preview, and offer the full one.
+
 ## 4. Tests owed
 
 Each guard is watched failing under a mutation, then restored.
@@ -192,11 +255,28 @@ Each guard is watched failing under a mutation, then restored.
   lookalike and attachment flags unchanged.
 - **D5:** the untrusted refusal names the resolved terminal command and the wait tool, and does not mention the trust
   list; no surface says "known to reach a person".
+- **D8:** every send-path result, success and each refusal of D2, carries the approval object with the fields for its
+  state; "expired after approval" when `approvedAt` is set; a success carries `sentMessageId`; a wait with
+  `waitSeconds: 0` returns at once and equals the list's object for that id; CLI/MCP parity on the status pairs.
+- **D9:** a draft whose only approval expired pending is unsent; expired after approval is unsent; one with a later
+  approved, sending, used or unknown approval is not; listed in `send list` with the one re-prepare call; `draft get`
+  marks it; every expiry message says "not sent; the draft is still in Drafts"; `doctor` counts them; nothing is
+  created, sent or deleted by reporting; Resend prepared sends and Slack drafts the same way.
+- **D10:** an identical digest within 24 hours → `unchangedSince` and the short preview, with a new approval whose
+  policy and risk flags are recomputed (a recipient tainted since the first preview escalates); a one-character body
+  change, an added Bcc, a renamed or changed attachment → full preview; an earlier identical digest that was used →
+  `duplicateOf`, the full preview, and the already-sent wording; `sending`/`unknown` → refused; 24 hours and one
+  second → full preview; another draft or mailbox with the same content → full preview; the terminal `approve` prints
+  the full content whatever the chat was shown.
 - **Acceptance, end to end with the fake Gmail:** an internal colleague whose address was read in another mailbox,
   from an untrusted client → `recipient-tainted` with its explanation, one terminal approval, the agent's
   `gmail_send_wait` returns `approved`, the send goes out with no second prepare or preview, and the count of person
   decisions is one; the same with the approval given 25 minutes after the preview and the claim 2 hours after the
   approval; an internal recipient matched only by domain → no `recipient-tainted`, a `chat` send on the person's yes.
+  **The ticket's own timeline replayed** (prepare 22:42:46, terminal approval 22:48:22, the agent learning of it only
+  minutes later): the send goes out and its result carries `sentMessageId`; with no claim at all, the draft is listed
+  unsent after the approval's 24 hours, with "expired after approval"; a second prepare of the same draft gives
+  `unchangedSince` and the short preview.
 
 ## 5. Out of scope
 
