@@ -3,7 +3,7 @@ import { constants, readFileSync } from 'node:fs';
 import { access, type FileHandle, lstat, mkdir, open, realpath, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { approveAndWaitSentence } from './approval-handoffs.ts';
-import { downloadExpiredWords } from './approval-outcome.ts';
+import { downloadExpiredWords, withApproval } from './approval-outcome.ts';
 import { asV2, integrityRefusal, kindOf } from './approval-stored.ts';
 import { validateV2 } from './approval-validate.ts';
 import {
@@ -907,7 +907,8 @@ export async function settleDestination(core: Core, input: SettleInput): Promise
     (asked.state === 'pending' || asked.state === 'approved')
   ) {
     const refusal = downloadClaimRefusal(asked, input.policy, pendingHint);
-    if (refusal !== null) throw refusal;
+    // Refused before the claim, and so before the store could say where the question stands: said here (§D8).
+    if (refusal !== null) throw withApproval(refusal, await core.approvals.approvalOf(asked));
     const recorded = asked.download.answer;
     if (recorded !== undefined && answer.answer !== null && !sameAnswer(recorded, answer.answer, env, platform)) {
       throw new CommsError(

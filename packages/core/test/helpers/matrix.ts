@@ -182,20 +182,14 @@ async function list(w: World, approvalId: string): Promise<Observation> {
 }
 
 /**
- * The change, applied with its approval: the claim. `sends` counts what it applied — the change made, here — and an
- * applied result, which carries no approval object of its own, is reported with the record's as it stands after.
+ * The change, applied with its approval: the claim. `sends` counts what it applied — the change made, here — and the
+ * approval is the one the applied result carries: where the approval it spent stands now (D8).
  */
 async function claim(w: World, approvalId: string): Promise<Observation> {
   const result = await w.call('comms_attach', { rootsAdd: w.folder, approvalId });
   if (result.isError) return observeTool(result, 0);
   const applied = result.structuredContent?.applied === true;
-  const record = asV2(await w.core.approvals.get(approvalId));
-  return {
-    ok: true,
-    approval: record ? { ...(await w.core.approvals.approvalOf(record)) } : null,
-    sends: applied ? 1 : 0,
-    extra: { applied },
-  };
+  return { ...observeTool(result, applied ? 1 : 0), extra: { applied } };
 }
 
 /** `agentcomms approve`: its begin, then its finish with the code it showed — or a wrong one, as the row says. */

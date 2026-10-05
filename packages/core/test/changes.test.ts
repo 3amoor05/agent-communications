@@ -1136,8 +1136,9 @@ test('a global or prospective change is never owner-removed: prepared pending, c
       surface: 'mcp',
       approvalId: prepared.approvalId,
     });
-    assert.deepEqual(second, { status: 'applied', result: 'applied' }, label);
     const used = (await core.approvals.inspect(prepared.approvalId, { kind: 'change' })).outcome.approval;
+    // Applied, saying where the approval it spent stands: used, as a look at it says (§D8; CUE-404).
+    assert.deepEqual(second, { status: 'applied', result: 'applied', approval: used }, label);
     assert.equal(used.state, 'used', label);
     assert.equal(used.ownerRemoved, undefined, label);
   }

@@ -636,8 +636,8 @@ const DOWNLOAD = {
       if (o.asked !== undefined) assert.equal(o.asked, 0, 'the provider was asked nothing');
       assert.match(o.hint ?? '', /approve ap_\w+/, 'the person’s command');
       assert.match(o.hint ?? '', /_wait/, 'and the wait');
-      // A question's refusal names it in its words; an approval object, when one is given, is the pending question.
-      if (o.approval !== undefined) assert.deepEqual([o.approval.state, o.approval.claimable], ['pending', false]);
+      // A question's refusal names it in its words, and says where it stands (D8): pending, and not claimable here.
+      assert.deepEqual([o.approval?.state, o.approval?.claimable], ['pending', false], 'the pending question');
     },
   },
   answered: { look: shows('answered', true), claim: saved },

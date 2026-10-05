@@ -231,6 +231,19 @@ export async function claimChange(
   expect: ChangeSpec,
   options: ChangeOptions,
 ): Promise<LooseningConsent> {
+  return (await claimChangeApproval(core, approvalId, expect, options)).consent;
+}
+
+/**
+ * `claimChange`, and where the claimed approval stands (design 2026-10-05 §D8): the object of the record as the claim
+ * left it — used, with when — for the result of the change it was claimed for to carry.
+ */
+export async function claimChangeApproval(
+  core: Core,
+  approvalId: string,
+  expect: ChangeSpec,
+  options: ChangeOptions,
+): Promise<{ consent: LooseningConsent; approval: ApprovalObject }> {
   let binding: ChangeBinding | undefined;
   let policy: ChangePolicy | undefined;
   try {
@@ -261,9 +274,12 @@ export async function claimChange(
     // `binding.loosened` digests to what the record holds — the claim refused otherwise — so these are exactly the
     // loosenings the person approved.
     return {
-      kind: 'loosening-consent',
-      paths: binding.loosened.map((loosening) => loosening.path),
-      changes: binding.loosened,
+      consent: {
+        kind: 'loosening-consent',
+        paths: binding.loosened.map((loosening) => loosening.path),
+        changes: binding.loosened,
+      },
+      approval: await core.approvals.approvalOf(record),
     };
   } catch (error) {
     await auditRefusal(core, 'change.claim', error, {

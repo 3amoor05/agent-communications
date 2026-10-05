@@ -1,9 +1,10 @@
 import { approvalWaitOf, approveAndWaitSentence } from './approval-handoffs.ts';
+import type { ApprovalObject } from './approval-outcome.ts';
 import {
   beginChangeApproval,
   type ChangeRequest,
   type ChangeSurface,
-  claimChange,
+  claimChangeApproval,
   finishChangeApproval,
   type PreparedChange,
   prepareChange,
@@ -54,7 +55,15 @@ export interface GatedChange<T> {
 }
 
 export type GatedOutcome<T> =
-  | { status: 'applied'; result: T }
+  | {
+      status: 'applied';
+      result: T;
+      /**
+       * Where the approval it was applied with stands — used, and when (design 2026-10-05 §D8) — or absent for a
+       * change applied at once, which had none.
+       */
+      approval?: ApprovalObject | undefined;
+    }
   | { status: 'approval-required'; prepared: PreparedChange };
 
 /**
@@ -107,11 +116,11 @@ export async function gatedChange<T>(
       }),
     };
   }
-  const consent = await claimChange(core, options.approvalId, request, {
+  const { consent, approval } = await claimChangeApproval(core, options.approvalId, request, {
     surface: options.surface,
     platform: options.platform,
   });
-  return { status: 'applied', result: await change.apply(consent, request) };
+  return { status: 'applied', result: await change.apply(consent, request), approval };
 }
 
 /**
@@ -140,7 +149,14 @@ export function refuseUnclaimedApproval(approvalId: unknown, refusal: { message:
  * them the command and calls again after they have run it.
  */
 export function changeToolResult<T>(outcome: GatedOutcome<T>): Record<string, unknown> {
-  if (outcome.status === 'applied') return { applied: true, result: outcome.result as unknown };
+  // Applied with an approval: where it stands now — used — as every result that spends one says (§D8).
+  if (outcome.status === 'applied') {
+    return {
+      applied: true,
+      result: outcome.result as unknown,
+      ...(outcome.approval === undefined ? {} : { approval: outcome.approval }),
+    };
+  }
   const { prepared } = outcome;
   return {
     applied: false,

@@ -6,7 +6,7 @@ import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
 import { stateOf } from '../src/approval-stored.ts';
-import { type GatedChange, gatedChange, gatedChangeAtTerminal } from '../src/change-flow.ts';
+import { changeToolResult, type GatedChange, gatedChange, gatedChangeAtTerminal } from '../src/change-flow.ts';
 import { inlineCommand, type Streams } from '../src/cli-runtime.ts';
 import type { AccountConfig, SendPolicy } from '../src/config.ts';
 import { openCore } from '../src/core.ts';
@@ -75,6 +75,7 @@ test('a change that loosens nothing is applied at once, with no approval made', 
   const core = coreWith('chat');
   const outcome = await gatedChange(core, setSendPolicy(core, 'never'), { channel: 'core', surface: 'mcp' });
   assert.deepEqual(outcome, { status: 'applied', result: 'never' });
+  assert.deepEqual(changeToolResult(outcome), { applied: true, result: 'never' }, 'no approval, so none to say');
   assert.equal(await policyNow(core), 'never');
   assert.deepEqual(await core.approvals.list(), [], 'tightening asked nobody');
 });
@@ -94,8 +95,19 @@ test('a loosening is prepared the first time and applied once on the second, wit
     surface: 'mcp',
     approvalId: first.prepared.approvalId,
   });
-  assert.deepEqual(second, { status: 'applied', result: 'chat' });
+  assert.equal(second.status, 'applied');
+  if (second.status !== 'applied') return;
+  assert.equal(second.result, 'chat');
   assert.equal(await policyNow(core), 'chat');
+  // Where the approval it spent stands (design 2026-10-05 §D8): used, when, and never claimable again — and the tool's
+  // result carries it, as every result that spends an approval does (CUE-404).
+  assert.equal(second.approval?.id, first.prepared.approvalId);
+  assert.equal(second.approval?.kind, 'change');
+  assert.equal(second.approval?.state, 'used');
+  assert.equal(second.approval?.claimable, false);
+  assert.ok(second.approval?.usedAt, 'when it was used');
+  const tool = changeToolResult(second);
+  assert.deepEqual(tool, { applied: true, result: 'chat', approval: second.approval });
 
   // Single use. Replayed as is, the change now loosens nothing and needs no approval, so it is replayed with an effect
   // — something that always needs one — and the spent approval must not carry it.
