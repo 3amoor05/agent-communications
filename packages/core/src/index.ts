@@ -4,6 +4,11 @@ export * from './approval-legacy.ts';
 export * from './approval-outcome.ts';
 export * from './approval-stored.ts';
 export * from './approval-validate.ts';
+/*
+ * Waiting for an approval (design 2026-10-05 §D3): the one operation behind every surface's wait — `agentcomms approval
+ * wait`, `agent-gmail send wait`, `agent-slack approval wait`, `agent-resend send wait` and their tools.
+ */
+export { renderApprovalWait, type WaitCallContext, waitCallOptions } from './approval-wait-surface.ts';
 export * from './approvals.ts';
 export * from './audit.ts';
 export * from './change-flow.ts';
@@ -72,6 +77,17 @@ export * from './name-grammar.ts';
 export * from './names.ts';
 export * from './numbers.ts';
 export * from './oauth-client-records.ts';
+export {
+  type ApprovalWait,
+  DEFAULT_WAIT_SECONDS,
+  MAX_WAIT_SECONDS,
+  MAX_WAITS,
+  type WaitClock,
+  type WaitEnd,
+  type WaitOptions,
+  type WaitProgress,
+  waitForApproval,
+} from './operations/approval-wait.ts';
 export {
   type OrgAddRequest,
   type OrgChangeResult,

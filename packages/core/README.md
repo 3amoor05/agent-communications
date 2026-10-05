@@ -63,6 +63,7 @@ is the one registration that cannot come from chat. After a restart of the clien
 | `comms_secrets_migrate` | move every credential between the keychain and files |
 | `comms_paths`, `comms_doctor`, `comms_audit_tail` | as `paths`, `doctor` and `audit tail` |
 | `comms_approvals_list`, `comms_approval_revoke` | as `approvals list` and `approvals revoke` |
+| `comms_approval_wait` | as `approval wait`: where an approval stands, now or once it changes — it only looks |
 
 Every change is shown to a person before it happens: the first call returns a preview and an approval id, and the
 same tool called again with that id applies it — after the person's yes in the conversation under the `chat` change

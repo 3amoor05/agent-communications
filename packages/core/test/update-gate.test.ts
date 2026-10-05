@@ -835,6 +835,30 @@ test('old-server calls end closed on the digest version: the stop holds an earli
   assert.equal(await gate('gmail_draft_send', { approvalId: current }), null);
 });
 
+test('a wait goes past the stop as a look-up, for any approval this machine can read — and an id nobody prepared does not (decision 7)', async () => {
+  const m = machine();
+  const spent = await spentApprovals(m);
+  await seed(m, { latest: LATEST, behind: true });
+  const { call, close } = await connect(m);
+  try {
+    // A used change and a waiting send alike: status answers while an update is out.
+    for (const approvalId of [spent.used, spent['a send']]) {
+      const seen = await call('comms_approval_wait', { approvalId, waitSeconds: 0 });
+      assert.ok(!stopped(seen), JSON.stringify(seen.structuredContent));
+      assert.notEqual(seen.isError, true, JSON.stringify(seen.structuredContent));
+    }
+    assert.ok(stopped(await call('comms_approval_wait', { approvalId: `ap_${'7'.repeat(26)}`, waitSeconds: 0 })));
+  } finally {
+    await close();
+  }
+  const run = (args: string[]) =>
+    spawnSync(process.execPath, [...NODE_FLAGS, CLI, ...args], { encoding: 'utf8', env: m.env });
+  const held = run(['approval', 'wait', spent.used, '--wait-seconds', '0', '--json']);
+  assert.equal(held.status, 0, held.stdout + held.stderr);
+  const unknown = run(['approval', 'wait', `ap_${'7'.repeat(26)}`, '--wait-seconds', '0', '--json']);
+  assert.equal(unknown.status, 11, unknown.stdout + unknown.stderr);
+});
+
 test('a download’s answer goes past the stop by its question’s choiceId; the answer alone, or another kind’s id, does not', async () => {
   const m = machine();
   await addMailbox(m);

@@ -1,5 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
+import { waitCallOptions } from '../approval-wait-surface.ts';
 import { changeToolResult, type GatedChange, gatedChange, refuseUnclaimedApproval } from '../change-flow.ts';
 import { CHANNELS } from '../channel-servers.ts';
 import { accountChannels, listed, narrowingOwner } from '../channel-words.ts';
@@ -7,6 +8,7 @@ import { type Core, openCore } from '../core.ts';
 import { CommsError, toCommsError } from '../errors.ts';
 import { CORE_CALLER, requireHandoffs } from '../handoffs.ts';
 import { installFailure, SERVER_NAME_MESSAGE, SERVER_NAME_PATTERN } from '../mcp-install.ts';
+import { MAX_WAIT_SECONDS, waitForApproval } from '../operations/approval-wait.ts';
 import { ATTACH_CHANGE_KINDS, attachChange, attachReport } from '../operations/attach-settings.ts';
 import {
   CHANGE_POLICIES,
@@ -103,7 +105,7 @@ async function buildInstructions(core: Core): Promise<string> {
   return [
     `agent-communications core: install and manage the ${listed(CHANNEL_LABELS_LISTED, 'and')} servers, and look after this machine.`,
     '',
-    'Reading needs nobody: comms_paths, comms_doctor, comms_audit_tail, comms_approvals_list,',
+    'Reading needs nobody: comms_paths, comms_doctor, comms_audit_tail, comms_approvals_list, comms_approval_wait,',
     'comms_channels_available, comms_orgs_list, comms_org_show, comms_attach and comms_change_policy with no change,',
     'and comms_update with `check`.',
     '',
@@ -113,7 +115,8 @@ async function buildInstructions(core: Core): Promise<string> {
     'returns `approvalRequired` with a `preview` and an `approvalId`: show the preview in full and ask. Then call the',
     'same tool again, with the same arguments and the `approvalId`. Under the `chat` change policy the person’s yes in',
     'this conversation is the approval; under `confirm` they first run the approve command the result gives, in their',
-    'own terminal — you cannot approve it for them, so say so and wait. If they say no, call comms_approval_revoke.',
+    'own terminal — you cannot approve it for them, so say so, and learn when they have with comms_approval_wait. If',
+    'they say no, call comms_approval_revoke.',
     'Tightening applies at once — even beside a change that waits: comms_org_update with forOtherAddresses "off"',
     'turns that off before its preview is returned, and the preview marks it done.',
     '',
@@ -192,6 +195,8 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
         comms_org_add: CHANGE_CLAIM,
         comms_org_update: CHANGE_CLAIM,
         comms_org_remove: CHANGE_CLAIM,
+        // A wait only looks: it answers while an update is out, for any approval this machine can read (decision 7).
+        comms_approval_wait: { lookup: true },
       },
       refresh: () => checkForUpdates(core, env, { deps: updateDeps, now: updateDeps.now }),
       now: updateDeps.now,
@@ -300,6 +305,33 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async (args) => read(() => revokeApproval(core, args.approvalId, 'mcp')),
+  );
+
+  server.registerTool(
+    'comms_approval_wait',
+    {
+      title: 'Wait for an approval',
+      description: `Wait for an approval — a send, a post, a change or a download’s question — to be usable or finished, and say where it stands: pending (with \`claimable\` true when a yes in the chat can use it), approved, being sent, used, failed, unknown, expired, revoked, corrupt, or answered for a question. \`waitSeconds\` is 30 when left out, ${MAX_WAIT_SECONDS} at most, and 0 for its status now. It only looks: it never approves, claims or sends. Ended still waiting, wait again — never prepare it again while it is pending or being sent.`,
+      inputSchema: {
+        approvalId: z.string().describe('the approval to wait for'),
+        waitSeconds: z
+          .number()
+          .int()
+          .min(0)
+          .max(MAX_WAIT_SECONDS)
+          .optional()
+          .describe(`how long to wait: 30 when left out, ${MAX_WAIT_SECONDS} at most, 0 for the status now`),
+      },
+      annotations: readsLocal,
+    },
+    async (args, ctx) =>
+      read(() =>
+        waitForApproval(core, args.approvalId, {
+          waitSeconds: args.waitSeconds,
+          channel: null,
+          ...waitCallOptions(ctx),
+        }),
+      ),
   );
 
   server.registerTool(

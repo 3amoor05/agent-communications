@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
 import type { PublicApproval } from './approval-stored.ts';
+import { renderApprovalWait } from './approval-wait-surface.ts';
 import { approveChangeAtTerminal, gatedChangeAtTerminal, refuseUnclaimedApproval } from './change-flow.ts';
 import type { PreparedChange } from './changes.ts';
 import {
@@ -26,6 +27,7 @@ import {
 import { installExitStatus, type Launcher, type SupportedClient } from './mcp-install.ts';
 import type { NamesMigrationRow, NotApplicableRename } from './names.ts';
 import { wholeNumber } from './numbers.ts';
+import { MAX_WAIT_SECONDS, waitForApproval } from './operations/approval-wait.ts';
 import {
   type AttachChangeKind,
   type AttachChangeResult,
@@ -96,6 +98,9 @@ Usage — run these with this CLI, each as the words after its program:
   audit tail [--inbox <alias>] [--since <ISO time>] [--limit <n>]
   approvals list [--inbox <alias>] [--state <state>]
   approvals revoke <approvalId>
+  approval wait <approvalId> [--wait-seconds <n>]
+                                wait for an approval to be usable or finished, and say where it stands:
+                                30 seconds when left out, 300 at most, 0 for its status now
   approve <approvalId>          approve a configuration change at this terminal: read it, type the code
   policy [--account <name> | --inbox <name>] [chat|confirm] [--approval <id>]
                                 report or set the change policy: how a loosening is approved;
@@ -201,6 +206,7 @@ function parse(argv: string[]) {
       since: { type: 'string' },
       limit: { type: 'string' },
       state: { type: 'string' },
+      'wait-seconds': { type: 'string' },
       to: { type: 'string' },
       rename: { type: 'string', multiple: true },
       'dry-run': { type: 'boolean', default: false },
@@ -258,6 +264,11 @@ const CLIENT_NAMES = ['claude-code', 'claude-desktop', 'codex', 'cursor', 'gemin
  * `mcp install`, `mcp prune`, `names migrate`, `secrets migrate` and `update` — where it is how the second run claims
  * that change. Every one of them is a change, so what it claims is a change approval.
  */
+/** Whether a command is a wait for an approval: `approval wait <approvalId>`, a look-up past the update's stop. */
+function waitsFor(command: string | undefined, sub: string | undefined): boolean {
+  return command === 'approval' && sub === 'wait';
+}
+
 function takesApproval(command: string | undefined, sub: string | undefined): boolean {
   switch (command) {
     case 'policy':
@@ -415,8 +426,9 @@ export async function main(
         running: VERSION,
         output,
         streams: defaultStreams,
-        approvals: takesApproval(command, sub) ? [values.approval] : [],
-        approvalClaim: CHANGE_CLAIM,
+        // A wait only looks: it answers while an update is out, for any approval this machine can read (decision 7).
+        approvals: takesApproval(command, sub) ? [values.approval] : waitsFor(command, sub) ? [arg] : [],
+        approvalClaim: waitsFor(command, sub) ? { lookup: true } : CHANGE_CLAIM,
         ...terminalUpdateHooks(core, env, { channel: 'core', output, streams: defaultStreams }),
       });
     });
@@ -470,6 +482,17 @@ export async function main(
           return;
         }
         throw usage('usage: approvals list|revoke');
+      }
+      case 'approval': {
+        if (sub !== 'wait' || !arg || positionals.length > 3) {
+          throw usage('usage: approval wait <approvalId> [--wait-seconds <n>]');
+        }
+        const result = await waitForApproval(core, arg, {
+          waitSeconds: wholeNumber(values['wait-seconds'], { name: '--wait-seconds', min: 0, max: MAX_WAIT_SECONDS }),
+          channel: null,
+        });
+        writeResult(result, output, renderApprovalWait);
+        return;
       }
       case 'approve': {
         if (!sub || arg !== undefined) throw usage('usage: approve <approvalId>');

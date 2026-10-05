@@ -43,6 +43,16 @@
       "argv": ["ap_00000000000000000000000000"]
     },
     {
+      "id": "core.approval.wait",
+      "package": "core",
+      "cli": "approval wait",
+      "mcp": "comms_approval_wait",
+      "status": "both",
+      "operation": "waitForApproval",
+      "argv": ["ap_00000000000000000000000000"],
+      "expect": { "options.channel": null }
+    },
+    {
       "id": "core.secrets.migrate",
       "package": "core",
       "cli": "secrets migrate",

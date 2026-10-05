@@ -222,6 +222,7 @@ const READING = [
   'comms_doctor',
   'comms_audit_tail',
   'comms_approvals_list',
+  'comms_approval_wait',
   'comms_channels_available',
   'comms_orgs_list',
   'comms_org_show',
@@ -911,6 +912,110 @@ test('a change from chat says where its approval stands — prepared, refused, a
   } finally {
     await close();
   }
+});
+
+test('comms_approval_wait and `approval wait` say the same of an approval, now or after a wait, and only look (D3-a, D8o-c)', async () => {
+  const m = machine({ defaults: { changePolicy: 'confirm' }, accounts: { 'acme/slack': account() } });
+  const { ok, call, close } = await connect(m);
+  try {
+    const prepared = await ok('comms_change_policy', { set: 'chat' });
+    const approvalId = String(prepared.approvalId);
+    const before = readFileSync(join(m.core.approvals.directory, `${approvalId}.json`), 'utf8');
+    const tool = await ok('comms_approval_wait', { approvalId, waitSeconds: 0 });
+    assert.deepEqual([tool.state, tool.claimable, tool.ended], ['pending', false, 'now']);
+    assert.deepEqual(tool.approval, prepared.approval, 'the object the preparation gave');
+    const command = cli(m, ['approval', 'wait', approvalId, '--wait-seconds', '0', '--json']);
+    assert.equal(command.status, 0, command.stderr);
+    assert.deepEqual(command.json().data, tool, 'the command and the tool agree');
+    // Waited for: a second's wait, still pending, says how to wait again and never to prepare again.
+    const waited = await ok('comms_approval_wait', { approvalId, waitSeconds: 1 });
+    assert.deepEqual([waited.state, waited.ended], ['pending', 'timeout']);
+    assert.match(String(waited.hint), /comms_approval_wait/);
+    assert.doesNotMatch(String(waited.hint), /prepare/i);
+    assert.equal(
+      readFileSync(join(m.core.approvals.directory, `${approvalId}.json`), 'utf8'),
+      before,
+      'nothing written',
+    );
+    // Nobody's id: the one NOT_FOUND, with approval null; and a wait out of range is refused before anything is read.
+    const missing = await call('comms_approval_wait', { approvalId: `ap_${'7'.repeat(26)}`, waitSeconds: 0 });
+    assert.deepEqual((missing.structuredContent as { error: { code: string; details: unknown } }).error.details, {
+      approval: null,
+    });
+    const outOfRange = await call('comms_approval_wait', { approvalId, waitSeconds: 301 });
+    assert.equal((outOfRange.structuredContent as { error: { code: string } }).error.code, 'USAGE');
+    const usage = cli(m, ['approval', 'wait', '--json']);
+    assert.equal(usage.status, EXIT_CODES.USAGE, usage.stdout);
+  } finally {
+    await close();
+  }
+});
+
+test('a client that goes away mid-wait frees the wait’s place (D3r-b, D3r-c)', async () => {
+  const { MAX_WAITS, waitForApproval } = await import('../src/operations/approval-wait.ts');
+  const m = machine({ defaults: { changePolicy: 'confirm' }, accounts: { 'acme/slack': account() } });
+  const { ok, client, close } = await connect(m);
+  const prepared = await ok('comms_change_policy', { set: 'chat' });
+  const approvalId = String(prepared.approvalId);
+  const before = readFileSync(join(m.core.approvals.directory, `${approvalId}.json`), 'utf8');
+  // A five-minute wait, and the client gone a moment into it: no result is expected to reach it.
+  const waiting = client.callTool({ name: 'comms_approval_wait', arguments: { approvalId, waitSeconds: 300 } });
+  waiting.catch(() => undefined);
+  await new Promise((settle) => setTimeout(settle, 300));
+  await close();
+  // Seven more held open: with the disconnected one still running, an eighth would be refused. It is admitted once
+  // the server has let the gone client's wait end — which it does, freeing its place.
+  let release!: () => void;
+  const released = new Promise<void>((settle) => {
+    release = settle;
+  });
+  let now = Date.now();
+  const held = {
+    now: () => now,
+    sleep: async (ms: number) => {
+      await released;
+      now += ms;
+    },
+  };
+  const seven = Array.from({ length: MAX_WAITS - 1 }, () =>
+    waitForApproval(m.core, approvalId, { waitSeconds: 2, clock: held }),
+  );
+  const until = Date.now() + 5000;
+  let admitted = false;
+  while (!admitted && Date.now() < until) {
+    admitted = await waitForApproval(m.core, approvalId, { waitSeconds: 0 }).then(
+      () => true,
+      async (error: unknown) => {
+        assert.equal((error as CommsError).code, 'TRANSIENT', String(error));
+        await new Promise((settle) => setTimeout(settle, 50));
+        return false;
+      },
+    );
+  }
+  release();
+  await Promise.all(seven);
+  assert.ok(admitted, 'the gone client’s wait never let its place go');
+  assert.equal(readFileSync(join(m.core.approvals.directory, `${approvalId}.json`), 'utf8'), before, 'untouched');
+});
+
+test('progress goes to a wait tool’s caller only when the call carried a progress token (D3r-d)', async () => {
+  const { waitCallOptions } = await import('../src/approval-wait-surface.ts');
+  const sent: unknown[] = [];
+  const signal = new AbortController().signal;
+  const notify = async (notification: unknown) => {
+    sent.push(notification);
+  };
+  const without = waitCallOptions({ mcpReq: { signal, notify } });
+  assert.equal(without.onProgress, undefined, 'no token, no progress');
+  assert.equal(without.signal, signal, 'the request’s own cancellation');
+  const withToken = waitCallOptions({ mcpReq: { signal, _meta: { progressToken: 'tok-1' }, notify } });
+  await withToken.onProgress?.({ approvalId: 'ap_1', waitedSeconds: 15, state: 'pending' });
+  assert.deepEqual(sent, [
+    {
+      method: 'notifications/progress',
+      params: { progressToken: 'tok-1', progress: 15, message: 'still pending after 15 seconds' },
+    },
+  ]);
 });
 
 test('an approval is good only for the change the tool that prepared it plans: no tool claims another’s', async () => {
