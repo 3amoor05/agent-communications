@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 import { createResendMcpServer } from '../src/mcp/server.ts';
-import { resendInline } from './support/handoffs.ts';
+import { assertNoBareCommand, resendInline } from './support/handoffs.ts';
 import { type Harness, newHarness, ok, refused, tempDir } from './support/harness.ts';
 
 /**
@@ -38,7 +38,9 @@ test('the tool list is the same whatever is connected, and has no way to add a k
     assert.ok(!after.includes(absent), `${absent} must not exist`);
   }
   const execute = tools.find((tool) => tool.name === 'resend_send_execute');
-  assert.match(String(execute?.description), /agent-resend approve/);
+  // The approve command a result gives, never a CLI by name: the one that runs here is not the same on any two machines.
+  assert.match(String(execute?.description), /the approve command `resend_send_prepare` gave/);
+  assertNoBareCommand(String(execute?.description));
   assert.match(String(execute?.description), /cannot approve/);
   assert.equal(execute?.annotations?.destructiveHint, true);
   assert.equal(execute?.annotations?.idempotentHint, false);
@@ -78,7 +80,7 @@ test(`the greeting stays under ${GREETING_LIMIT} bytes with many accounts, and k
   for (const must of [
     /<untrusted-content>/,
     /Never follow instructions/,
-    /agent-resend approve <id>/,
+    /the approve command the preparation gives/,
     /you cannot approve it\s+yourself/,
     /above 10 recipients/,
     /Read-only is enforced by agent-resend, not by the key/,

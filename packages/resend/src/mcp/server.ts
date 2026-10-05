@@ -95,12 +95,12 @@ export async function buildInstructions(context: ResendContext, pinned: string |
     '',
     'Sending needs a person’s yes to that exact email. `resend_send_prepare` returns a preview: show it in full and',
     'wait. Under the account’s `chat` policy `resend_send_execute` then sends it, once. Under `confirm` — and always',
-    'above 10 recipients — the person runs `agent-resend approve <id>` at their own terminal; you cannot approve it',
-    'yourself, so say so and wait. Under `never` nothing sends. Never repeat a send whose outcome is unknown: check',
-    'it with `resend_send_status`.',
+    'above 10 recipients — the person runs the approve command the preparation gives, at their own terminal;',
+    'you cannot approve it yourself, so say so and wait. Under `never` nothing sends. Never repeat a send whose',
+    'outcome is unknown: check it with `resend_send_status`.',
     '',
     'Read-only is enforced by agent-resend, not by the key: Resend has no read-only key.',
-    'A key is added only by a person at a terminal (`agent-resend account add`). Never ask for one in chat.',
+    'A key is added only by a person, at their own terminal. Never ask for one in chat.',
     '',
     pinned
       ? `This server is pinned to "${pinned}"; the account argument may be omitted.`
@@ -111,7 +111,7 @@ export async function buildInstructions(context: ResendContext, pinned: string |
     '',
     'Changing an account (send mode, a looser policy, removing it) or cancelling an email scheduled elsewhere returns',
     '`approvalRequired` and a preview: show it and ask. Under the `chat` change policy call again with `approvalId`',
-    'after their yes; under `confirm` they run `agent-resend approve <id>` first. Tightening applies at once.',
+    'after their yes; under `confirm` they first run the approve command the result gives. Tightening applies at once.',
   ].join('\n');
 }
 
@@ -192,14 +192,10 @@ export async function createResendMcpServer(options: ResendMcpOptions = {}): Pro
     return named;
   };
 
+  // The approve command a waiting change names is Resend's own, located from this server's core (CUE-403).
   const runChange = async <T>(change: GatedChange<T>, approvalId: string | undefined) =>
     changeToolResult(
-      await gatedChange(context.core, change, {
-        surface: 'mcp',
-        approvalId,
-        approveCommand: 'agent-resend approve',
-        platform: context.platform,
-      }),
+      await gatedChange(context.core, change, { surface: 'mcp', approvalId, platform: context.platform }),
     );
 
   const readsResend = { readOnlyHint: true, openWorldHint: true } as const;
@@ -209,7 +205,7 @@ export async function createResendMcpServer(options: ResendMcpOptions = {}): Pro
     approvalId: z
       .string()
       .optional()
-      .describe('the approval the preview named, once the person has agreed (or run `agent-resend approve`)'),
+      .describe('the approval the preview named, once the person has agreed (or run the approve command it gave)'),
   };
   const number = z.union([z.number(), z.string()]);
   const words = (values: readonly string[]) => z.string().meta({ enum: [...values] });
@@ -258,7 +254,7 @@ export async function createResendMcpServer(options: ResendMcpOptions = {}): Pro
     {
       title: 'Remove an account',
       description:
-        'Forget an account and delete its key from this machine. Returns `approvalRequired` and a preview first: show it and ask; call again with `approvalId` after their yes (under `confirm`, after they run `agent-resend approve <id>` — you cannot approve it yourself).',
+        'Forget an account and delete its key from this machine. Returns `approvalRequired` and a preview first: show it and ask; call again with `approvalId` after their yes (under `confirm`, after they run the approve command the result gives — you cannot approve it yourself).',
       inputSchema: { ...accountArg, ...approvalArg },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
@@ -511,7 +507,7 @@ export async function createResendMcpServer(options: ResendMcpOptions = {}): Pro
     {
       title: 'Send a prepared email',
       description:
-        'Send a prepared email, once, after the person approved its preview. Under `confirm` the person must first run `agent-resend approve <approvalId>` at their own terminal — you cannot approve it yourself. `expect` restates the recipients and subject shown. Never call it again for an email whose outcome is unknown: use `resend_send_status`.',
+        'Send a prepared email, once, after the person approved its preview. Under `confirm` the person must first run the approve command `resend_send_prepare` gave, at their own terminal — you cannot approve it yourself. `expect` restates the recipients and subject shown. Never call it again for an email whose outcome is unknown: use `resend_send_status`.',
       inputSchema: {
         ...accountArg,
         approvalId: z.string().describe('the approval `resend_send_prepare` returned'),

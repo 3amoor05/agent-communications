@@ -56,14 +56,14 @@ One account: its key’s permission (full access or sending only), mode, send po
 
 ### `resend_account_remove`
 
-Forget an account and delete its key from this machine. Returns `approvalRequired` and a preview first: show it and ask; call again with `approvalId` after their yes (under `confirm`, after they run `agent-resend approve <id>` — you cannot approve it yourself).
+Forget an account and delete its key from this machine. Returns `approvalRequired` and a preview first: show it and ask; call again with `approvalId` after their yes (under `confirm`, after they run the approve command the result gives — you cannot approve it yourself).
 
 *writes · destructive*
 
 | Argument | Type | Required | What it is |
 |---|---|---|---|
 | `account` | string | no | which account, as `organisation/resend` |
-| `approvalId` | string | no | the approval the preview named, once the person has agreed (or run `agent-resend approve`) |
+| `approvalId` | string | no | the approval the preview named, once the person has agreed (or run the approve command it gave) |
 
 ### `resend_account_policy`
 
@@ -77,7 +77,7 @@ Report how an account’s sends and changes are approved, or set `sendPolicy` (c
 | `sendPolicy` | `chat` \\| `confirm` \\| `never` | no | chat, confirm or never |
 | `mode` | `read` \\| `send` | no | read or send |
 | `changePolicy` | `chat` \\| `confirm` | no | chat or confirm: how a loosening of it is approved |
-| `approvalId` | string | no | the approval the preview named, once the person has agreed (or run `agent-resend approve`) |
+| `approvalId` | string | no | the approval the preview named, once the person has agreed (or run the approve command it gave) |
 
 ### `resend_doctor`
 
@@ -209,7 +209,7 @@ Build an email and return the exact preview — every recipient, BCC included, t
 
 ### `resend_send_execute`
 
-Send a prepared email, once, after the person approved its preview. Under `confirm` the person must first run `agent-resend approve <approvalId>` at their own terminal — you cannot approve it yourself. `expect` restates the recipients and subject shown. Never call it again for an email whose outcome is unknown: use `resend_send_status`.
+Send a prepared email, once, after the person approved its preview. Under `confirm` the person must first run the approve command `resend_send_prepare` gave, at their own terminal — you cannot approve it yourself. `expect` restates the recipients and subject shown. Never call it again for an email whose outcome is unknown: use `resend_send_status`.
 
 *writes · destructive*
 
@@ -250,4 +250,4 @@ Cancel a scheduled email. It cannot be rescheduled afterwards. One this machine 
 |---|---|---|---|
 | `account` | string | no | which account, as `organisation/resend` |
 | `id` | string | **yes** | the scheduled email id |
-| `approvalId` | string | no | the approval the preview named, once the person has agreed (or run `agent-resend approve`) |
+| `approvalId` | string | no | the approval the preview named, once the person has agreed (or run the approve command it gave) |

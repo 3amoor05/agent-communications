@@ -415,6 +415,24 @@ test('a change asked for at the command line is run again as this installation�
 
 // ── The greeting and the tools name no CLI ──────────────────────────────────────────────────────────────────────
 
+test('the greeting and every tool say to run the command a result gives, and name no CLI (7d-resend)', async () => {
+  harness = await newHarness();
+  await harness.addAccount({ name: 'acme/resend', mode: 'send' });
+  const { client, close } = await harness.mcp();
+  try {
+    const greeting = client.getInstructions() ?? '';
+    assertNoBareCommand(greeting, 'the greeting');
+    assert.match(greeting, /the approve command the preparation gives/);
+    const { tools } = await client.listTools();
+    for (const tool of tools) {
+      assertNoBareCommand(tool.description ?? '', `${tool.name}'s description`);
+      assertNoBareCommand(JSON.stringify(tool.inputSchema), `${tool.name}'s arguments`);
+    }
+  } finally {
+    await close();
+  }
+});
+
 // ── A misdirected approval, and a Windows registration in another case ─────────────────────────────────────────
 
 test('a send’s approval offered to a change is corrected with Resend’s own approve, located (7d-resend)', async () => {
