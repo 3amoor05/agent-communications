@@ -1,6 +1,6 @@
 # CUE-404 — approving a send without fighting the clock — design
 
-Status: **revised after round 10 (2 P2, 1 P3, all addressed)**, 2026-10-05, from Linear CUE-404 (High; the
+Status: **revised after round 11 (3 P2, all addressed)**, 2026-10-05, from Linear CUE-404 (High; the
 owner: "this is very not smooth") and a cited research pass over this repository, the MCP specification and the
 clients' documentation. Depends on CUE-403 (the CLIs on PATH,
 [its spec](2026-10-04-cli-path-shims-design.md)) for every printed terminal command to work; ships after it.
@@ -110,6 +110,13 @@ under different routes or profiles is still one outward post. A legacy record's 
 `contentDigest` with no `bindingDigest`; such records are refused for claims by the digest-version gate and are only
 ever read for reporting.
 
+**Digest integrity.** Both fields are required on every version-2 record, each a lowercase hex SHA-256 (64
+characters). `bindingDigest` is the SHA-256 of the canonical JSON (the existing `canonicalJson`) of
+`{ "contentDigest", "route", "pendingMs", "approvedMs" }` (downloads: `{ "contentDigest", "profile" }`), and every read
+recomputes it from the record's own fields before classifying: a missing, malformed, non-canonical or mismatching value
+makes the record `corrupt` (never claimable, never grouped by D9). Claims compare the recomputed `bindingDigest`; D9
+groups only records whose recomputation succeeded.
+
 Released 0.13.0 code already refuses any record whose `digestVersion` differs from its own constant, with “the approval
 was prepared by a different version of agent-communications” (`packages/core/src/approvals.ts:292-293, 570-588`). An
 old binary therefore fails closed on v2, and new code refuses v1, an absent version and every unknown future version by
@@ -163,7 +170,13 @@ mixed-process casualty.
   `heartbeat(approvalId, claimToken)` and `complete(approvalId, claimToken, outcome)` validate that token against the
   private claim marker under the record lock. A matching holder may complete `sending` **or `unknown`** to `used` or
   `failed` when the provider result arrives, preserving the current recovery that accepts `unknown`
-  (`packages/core/src/approvals.ts:1068-1075`). A missing or different token cannot complete it; approve, claim,
+  (`packages/core/src/approvals.ts:1068-1075`). Before its **first provider mutation** (Gmail `sendDraft`, Resend's send,
+  Slack's first upload or post or reaction — each after any ledger reservation and draft re-read, e.g.
+  `packages/gmail/src/operations/send.ts:596-652`) the claimant runs a token-checked `fence(approvalId, claimToken)`
+  under the record lock: if the record is still `sending` with its token, the heartbeat is refreshed and the request may
+  start; if it already reads `unknown` (the claimant was suspended past the lease before sending anything), the claimant
+  aborts without contacting the provider and completes the record `failed` with reason `lease-lost-before-send`, which
+  it may do because nothing was sent. A missing or different token cannot complete it; approve, claim,
   revoke, expiry, status, wait, maintenance and every other path leave `unknown` final. Heartbeat never changes
   `unknown` back to `sending`. Late completion clears the stale-lease reason: `used` carries the provider id and no
   failure reason, while `failed` carries the known provider failure;
@@ -494,8 +507,12 @@ inventing a state:
   The no-id path writes an audit outcome that says the provider accepted without an id and omits that id field; it
   also skips every readback that would require the id. A non-empty id is validated before the `used` transition,
   durable audit data or readback arguments are built.
-- Every sender-controlled string in an approval, status or list object uses the channel's untrusted-field envelope.
-  In Gmail that means `wrapField` for prose, `addressField` for strict addresses and `filenameField` for attachment
+- Every sender-controlled string in an approval, status or list object is enveloped. Channel surfaces use the
+  channel's untrusted-field helpers; **core's own surfaces** (the core approvals list, status and wait, which must not
+  import channel packages — cite the channel-plugins design) apply core's channel-neutral `wrapUntrusted`
+  (`packages/core/src/untrusted.ts:108-120`) to every string field of a record's public view that a sender could
+  control (subjects, addresses, display names, file names, previews), identified by a fixed core list of field paths
+  that covers removed-account and legacy records too. In Gmail that means `wrapField` for prose, `addressField` for strict addresses and `filenameField` for attachment
   names; escaping or truncation alone is not enough (`packages/gmail/src/domain/untrusted-fields.ts:3-15, 39-62`).
 - **Status at any time** is the matching D3 wait pair with `waitSeconds: 0`; it returns the same approval object and
   never calls a provider. The existing Resend `send status` remains its send-record lookup, not the approval-status
@@ -536,7 +553,7 @@ the strongest permitted draft-level claim: records at or beyond the 90-day reten
 pruned, and the retained audit row does not carry the Gmail or Slack grouping key. The report therefore never makes an
 all-time claim from the approval directory. It is also still a local claim: approval records cannot prove what
 another Gmail client did. When the directory holds more approval files than the scan reads, **every returned candidate
-row instead says “not sent with any of the 500 most recently changed approval records”**. Reading or deriving a status rewrites a record and so changes its modification time; the wording therefore names
+row instead says “not sent with any of the 500 most recently changed approval records”**. Persisting a derived transition (to `expired` or `unknown`) rewrites a record and so changes its modification time; the wording therefore names
 what was scanned — the 500 most recently *changed* records, not the 500 newest approvals — and makes no claim about
 older ones. A matching `used`, `sending`, `unknown` or
 `approved` record inside the window still blocks the candidate; one outside it is exactly why the remaining wording
@@ -767,6 +784,11 @@ lookup failures stay attached to their draft and do not raise the concurrency or
 
 ## 5. Tests owed
 
+- **Round-11 cases:** missing, malformed, non-canonical and recomputation-mismatched `contentDigest`/`bindingDigest`
+  across claim, approve, status, wait and D9 → `corrupt`; a claimant suspended after claim and before each channel's
+  first provider mutation, with another caller persisting `unknown`, makes no provider request and records
+  `lease-lost-before-send`; hostile subjects, addresses and file names through core list, status and wait — including
+  removed-account and legacy records — stay inside the envelope.
 - **Round-10 cases:** more than 500 old records rewritten by `list`/`status` just before a report, displacing a newer
   used blocker — the report's wording names the 500 most recently changed records and claims nothing more; identical Slack
   content and revision prepared under `chat` and `confirm` groups as one by `contentDigest` while each claim checks its own
