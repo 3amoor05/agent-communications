@@ -1,6 +1,6 @@
 # CUE-403 — runnable CLI handoffs from the running installation — design
 
-Status: **proposed for 0.13.1; revised after round 13 (1 P2), 2026-10-05. No implementation is in
+Status: **proposed for 0.13.1; revised after round 14 (1 P2), 2026-10-05. No implementation is in
 this change.**
 
 ## 1. What is being fixed
@@ -63,10 +63,13 @@ provenance (`packages/core/src/mcp-clients.ts:30`, `packages/core/src/operations
 trusted to run. `process.execPath` must satisfy the **target** package's `engines.node` range, checked against
 `process.version`; outside the range the result has no command and the reason names the required Node range. Lockstep packages do not share one floor — core accepts Node `>=22.12.0` while WhatsApp needs
 `>=22.16.0` and checks it before every action (`packages/core/package.json:8-10`, `packages/whatsapp/package.json:8-10`,
-`packages/whatsapp/src/cli/program.ts:200, 477`). The only retained `process.execArgv` flags are `--experimental-strip-types`, and
-`--experimental-transform-types` when the running source invocation used it. Debug, test, eval, preload/loader,
-condition, warning, source-map, title and memory flags are not CLI requirements. The existing local launcher shows why
-source needs type stripping (`packages/core/src/mcp-install.ts:546-556`).
+`packages/whatsapp/src/cli/program.ts:200, 477`). The Node flags are decided by the **selected entry**, not inherited: any `.ts` entry (a checkout's `src/cli.ts`, for
+the running package or a cross-product `local` registration alike) always gets `--experimental-strip-types`, as the
+existing local launcher already does for a `.ts` entry (`packages/core/src/mcp-install.ts:546-556`) — Node 22.12–22.17
+needs it, and later versions accept it; `--experimental-transform-types` is added only when the running source
+invocation used it and the entry is `.ts`. A built `.mjs` entry gets no flags. No other `process.execArgv` flag is ever
+copied: debug, test, eval, preload/loader, condition, warning, source-map, title and memory flags are not CLI
+requirements.
 
 Resolution is directional:
 
@@ -425,6 +428,8 @@ authoritative data roots, and CLI-MCP parity for the preference.
 
 ## 4. Tests
 
+0000. **Round-14 case:** a built `.mjs` caller on Node 22.12–22.17 resolving a cross-product `local` registration with
+      only `src/cli.ts` prints a command with `--experimental-strip-types`, and that command runs.
 000. **Round-12/13 cases:** same-version npx registrations (including an absolute `npx.cmd`) are never cross-product
      candidates, cache present or absent; a managed Gmail registration whose pinned directories end in
      `@agentcomms/slack`, in both spaced and `--x=value` forms (POSIX and Windows), is recognised as Gmail; a
