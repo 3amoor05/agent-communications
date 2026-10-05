@@ -1,6 +1,6 @@
 # CUE-404 — approving a send without fighting the clock — design
 
-Status: **revised after round 6 (1 P1, 3 P2, all addressed)**, 2026-10-05, from Linear CUE-404 (High; the
+Status: **revised after round 7 (2 P2, 1 P3, all addressed)**, 2026-10-05, from Linear CUE-404 (High; the
 owner: "this is very not smooth") and a cited research pass over this repository, the MCP specification and the
 clients' documentation. Depends on CUE-403 (the CLIs on PATH,
 [its spec](2026-10-04-cli-path-shims-design.md)) for every printed terminal command to work; ships after it.
@@ -59,7 +59,9 @@ implement the first two. The short repeat preview is dropped for this release an
 | Every successful claim creates `<approvalId>.claim` with `O_EXCL` beside the JSON record; the marker is the cross-process single-use guarantee. | `packages/core/src/approvals.ts:797-813` |
 | Recipient analysis separately calls `correspondentDomains`, which lists up to 200 sent messages and reads their metadata before the per-address `hasWrittenTo` checks. Terminal approval runs recipient analysis again. | `packages/gmail/src/operations/send.ts:175-200, 240-265, 471-495` |
 | Core's current `list()` reads every approval file sequentially and catches a failed `get()` as `null`, silently omitting that record. | `packages/core/src/approvals.ts:1085-1103` |
-| The audit append API accepts a `durable` option, and its filesystem helper fsyncs the file and its directory before returning when that option is true. | `packages/core/src/audit.ts:75-85`; `packages/core/src/fs.ts:107-130` |
+| `openCore` constructs one `ApprovalStore`, and each Gmail, Slack and Resend MCP server constructs one context when the server starts. Maintenance tied only to store construction therefore does not recur in a long-lived server. | `packages/core/src/core.ts:29-42`; `packages/gmail/src/mcp/server.ts:200-207`; `packages/slack/src/mcp/server.ts:187-194`; `packages/resend/src/mcp/server.ts:118-121` |
+| The audit append API accepts a `durable` option. Its filesystem helper fsyncs the file everywhere; on POSIX it then fsyncs the containing directory and its parent, while on Windows directory sync is skipped and NTFS metadata journaling is relied on. | `packages/core/src/audit.ts:75-85`; `packages/core/src/fs.ts:107-145`, especially `fs.ts:129` |
+| The existing taint cache physically removes expired entries and caps retained entries, because an unbounded shared-state rewrite would become growing work on every read and send. | `packages/core/src/taint.ts:253-270` |
 | Gmail draft edits and message organisation already use `APPROVAL_PENDING` with “being sent right now” and “wait for the send to finish” when a send is in flight. | `packages/gmail/src/operations/drafts.ts:561-567`; `packages/gmail/src/operations/organise.ts:128-141` |
 | Slack gives every saved draft a revision, binds an approval to that revision as `draftMessageId`, and also binds the composed post digest. | `packages/slack/src/operations/drafts.ts:151-190`; `packages/slack/src/operations/send.ts:446-469, 728-746` |
 | The existing list surfaces are core `agentcomms approvals list` / `comms_approvals_list` → `listApprovals`, and Gmail `agent-gmail send list` / `gmail_send_list` → its `listApprovals`. Resend has `send status`, not a list; Slack has `draft list`, not an approval list. | `capabilities.json:29-34, 550-555, 897-902, 1199-1204` |
@@ -347,6 +349,13 @@ misses; for an unchanged draft, prepare followed by terminal approval within the
 most 200 `hasWrittenTo` history requests in total. At ten minutes a cache entry is stale at equality and the next
 operation may check again.
 
+This per-address cache is capped at **5,000 entries per state directory**. Every locked mutation first discards all
+entries whose expiry is at or before the current time, applies the current observations, then evicts the oldest
+remaining observations (observation time, with the canonical key as the stable tie-breaker) until at most 5,000 remain
+before the atomic write. A malformed file is read as an empty cache and is replaced only by a valid locked write; for
+that operation its affected history answers are conservatively `not-written` with `historyCheck: cache-malformed`,
+never `written`, so corruption cannot suppress escalation.
+
 The correspondent-domain scan used for lookalikes is separate from that budget and keeps its existing cap: one
 `listMessages({ query: "in:sent", maxResults: 200 })` call and metadata reads for at most those 200 messages
 (`packages/gmail/src/operations/send.ts:175-200, 240-252`). Its domain set, observation time and expiry get a distinct
@@ -358,6 +367,13 @@ and terminal approval of one unchanged draft can make at most 401 combined `list
 `getMessageMetadata` calls for these two history checks: at most 200 for all `hasWrittenTo` work plus at most 201 for
 the one correspondent-domain scan. The 500-recipient test counts every one of those calls across both passes rather
 than counting metadata alone, and proves a lookalike found through the cached domain set still escalates.
+
+The correspondent-domain cache is independently capped at **5,000 mailbox entries per state directory** and uses the
+same locked-write order: remove expired entries first, apply the current observation, then evict the oldest by
+observation time and immutable mailbox id until the file is at the cap. A malformed file reads as empty and forces a
+fresh correspondent scan rather than treating an empty domain set as authoritative. If that recovery scan fails, the
+result carries `correspondentHistory: cache-malformed` and conservatively keeps the confirm escalation instead of
+silently concluding that there is no lookalike. Thus malformed state in either cache never suppresses escalation.
 
 The 50-hit cap deliberately accepts one false negative: if 50 fuzzy hits contain no exact address and the exact hit
 would be 51st, the result is `not-written` and the send keeps the warning. That is conservative; provider errors,
@@ -513,9 +529,28 @@ annotation of the current exact revision. The existing `agent-slack draft list` 
 revision; Resend and every historical Slack approval remain visible through core `approvals list`. No Resend or Slack
 list surface is added (`capabilities.json:29-34, 1199-1204`).
 
-**Retention before enumeration.** At approval-store open, at most once per 24 hours, the store takes its prune lock,
-records that attempt durably, and performs a locked prune. It re-reads and classifies each record under its record
-lock. Valid finished records in `used`, `failed`, `unknown`, `revoked` or `expired` are deleted at
+**Rate-limited retention before enumeration.** `ApprovalStore.ensurePruned()` is awaited before every approval
+creation and before every approval list, D3 status/wait operation, and D9 report, doctor or draft-annotation operation.
+It is deliberately a store-use hook, not constructor work: one MCP context and its one `ApprovalStore` can remain
+alive across any number of daily boundaries and still run maintenance. Calls in several processes coordinate per
+state directory. Under the approval store's maintenance lock, the method reads persisted prune state containing
+`lastAttemptAt` and a continuation cursor. When fewer than 24 hours have elapsed it returns `attempted: false`.
+Otherwise it durably writes the new attempt timestamp under that lock **before** processing records, so a crash or a
+failed batch cannot cause a retry storm and no state directory attempts pruning more than once in any 24-hour window.
+
+One attempt enumerates the approval JSON and claim-marker directory once, stats each retained candidate, pairs
+artifacts by approval id into one record slot, and orders the slots by oldest modification time with approval id as the
+stable tie-breaker. It processes at most **200 record slots**. The persisted cursor resumes strictly after the last
+slot processed; reaching the end clears it so the next maintenance cycle starts another oldest-first pass. Each slot
+counts against the 200 before work begins. Under that record's lock the pruner opens its JSON at most once, classifies
+it and applies the protocol below; a stray claim marker with no JSON also consumes one slot. A run that selects 200
+stops, returns `complete: false`, and leaves the next run to continue from the cursor rather than reopening the same
+oldest active or corrupt records forever. The advanced cursor is atomically persisted under the same maintenance lock
+after the bounded batch; a crash before that write may safely repeat work after the daily interval but never deletes
+without the protocol below. Per-record failures are reported in maintenance status, leave uncertain artifacts in
+place and do not extend the batch.
+
+Valid finished records in `used`, `failed`, `unknown`, `revoked` or `expired` are deleted at
 `now >= finishedAt + 90 days`, where `finishedAt` is the validated state-specific terminal time (`usedAt`, `failedAt`,
 derived `unknownAt`, `revokedAt` or `expiredAt`). For a used send, `usedAt == sentAt`; changes and downloads set
 `usedAt` when their claim enters `used`. A structurally valid legacy used record without `usedAt` uses its finite
@@ -530,8 +565,9 @@ Before deleting a finished record, the pruner follows this exact crash-safe orde
 
 1. append an `approval.retained` audit row with the approval id, kind, owner, final state, terminal time and any
    validated non-empty provider id, but no body or full recipient address, using
-   `AuditLog.append(row, { durable: true })` (`packages/core/src/audit.ts:75-85`); durability fsyncs the line and its
-   directory before returning (`packages/core/src/fs.ts:107-130`);
+   `AuditLog.append(row, { durable: true })` (`packages/core/src/audit.ts:75-85`); durability fsyncs the file on every
+   platform and the containing directories on POSIX. Windows skips directory sync and relies on NTFS metadata
+   journaling (`packages/core/src/fs.ts:107-145`, especially `fs.ts:129`);
 2. unlink `<approvalId>.claim` if it exists, treating `ENOENT` as success; this is the single-use marker currently
    created for every successful claim at `packages/core/src/approvals.ts:801-813`;
 3. unlink `<approvalId>.json`.
@@ -539,18 +575,43 @@ Before deleting a finished record, the pruner follows this exact crash-safe orde
 No unlink starts until the durable append completes. An append failure leaves both artifacts. A claim-unlink failure
 leaves the JSON record. A crash or JSON-unlink failure after the claim marker was removed leaves the JSON record for a
 later retry; that retry may append a duplicate retention row before treating the already-absent marker as success and
-removing the JSON. Duplicate audit rows are preferable to deleting the only durable terminal history. The prune also
-enumerates claim markers: a stray `<approvalId>.claim` whose JSON record is absent is unlinked by the next prune,
-while a marker beside any extant JSON record is handled only through the locked record protocol above. Thus neither
-artifact grows for the installation's lifetime. The audit log remains durable terminal history, but D9 deliberately
-does not use its keyless retention rows to make draft-level claims beyond 90 days.
+removing the JSON. Duplicate audit rows are preferable to deleting the only durable terminal history. A stray
+`<approvalId>.claim` whose JSON record is absent is unlinked when its record slot reaches a batch; a marker beside any
+extant JSON record is handled only through the locked record protocol above. Eligible artifacts are therefore drained
+in bounded daily batches rather than promised to disappear at store construction. Active records, preserved corrupt
+or unreadable records, and a backlog when more than 200 slots per day age into eligibility are explicit retained
+exceptions. The audit log remains durable terminal history, but D9 deliberately does not use its keyless retention
+rows to make draft-level claims beyond 90 days.
 
-**Bounded scan, with no index or migration.** After the prune, the report enumerates the retained approval filenames
-and filesystem metadata, sorts them by modification time descending with approval id as the stable tie-breaker, and
-opens at most the **500 most recently modified approval files**. Retention bounds normal valid finished history to 90
-days instead of allowing metadata enumeration and sorting to grow over the lifetime of the installation; active
-records and deliberately preserved corrupt stubs are stated exceptions. A `complete-90-days` scan means complete only
-for that retained horizon, never for the installation's lifetime. The operation then validates/classifies the
+`ensurePruned()` is bounded housekeeping, not an availability gate. Approval creation continues after its awaited
+attempt. Lists, status and reports proceed whether the attempt skipped, completed, hit 200 or encountered a
+maintenance error; reporting returns `{ attempted, processed, complete, errors }` maintenance status instead of
+waiting for the whole backlog. The ordinary list/report read can still fail on its own storage error. The evidence
+wording below remains governed by the files the report actually selected and read, never by a claim that maintenance
+finished.
+
+**Bounded content scan, with no index or migration.** After the awaited bounded prune attempt, the report separately
+enumerates the retained approval filenames and filesystem metadata, sorts them by modification time descending with
+approval id as the stable tie-breaker, and opens at most the **500 most recently modified approval files**. That
+500-file cap bounds only the report's record-content reads; it does not bound the preceding prune batch or either
+pass's directory enumeration and `stat` work. Enumeration/stat cost is bounded by the retained directory size: one
+`readdir` and at most one `stat` per retained artifact on each pass, or two such passes when daily maintenance is due.
+The 90-day rule bounds normal valid finished history only after the 200-per-day drain catches up. Active records,
+preserved corrupt/unreadable files and an over-capacity maintenance backlog are explicit exceptions, so this design
+does not claim a fixed metadata-work bound or lifetime-constant directory size.
+
+For one report on which maintenance is due, the semantic I/O ceilings are two approval-directory `readdir` calls;
+at most `entries-before + entries-after` metadata stats; at most 200 prune record-content opens plus 500 report
+record-content opens; one maintenance/store lock plus at most 700 record locks; at most 200 durable retention appends;
+and at most 400 approval-artifact unlink attempts (claim marker plus JSON per processed slot). Lock-file cleanup adds
+at most 701 unlink attempts, for at most 1,101 total unlink attempts in an uncontended run. When maintenance is not
+due, the report has one enumeration/stat pass, at most 500 record-content opens and locks, and no retention append or
+artifact unlink. These are logical filesystem-operation bounds; the test file adapter counts every directory read,
+record open, lock acquisition, durable append and unlink, including lock-file unlinks, so none is hidden behind a
+helper.
+
+A `complete-90-days` scan means complete only
+for the retained horizon, never for the installation's lifetime. The operation then validates/classifies the
 selected files and groups the requested mailbox/account's matching records by draft so repeated approvals produce one
 result. The last-seven-days rule selects candidate expiries; it does **not** discard an older matching `approved`,
 `sending`, `used`, `unknown` or corrupt blocker from the opened retained history. Gmail's group key is mailbox id plus
@@ -688,7 +749,12 @@ Each guard is watched failing under a mutation, then restored.
   its work to one list plus at most 200 metadata reads across both passes. A provider spy counts **all** of those
   calls, asserts the combined maximum of 401 rather than counting metadata alone, and proves a cached correspondent
   domain still causes lookalike escalation. After either cache expires, each new operation independently obeys the
-  applicable cap.
+  applicable cap. More than 5,000 distinct address keys and more than 5,000 mailbox-domain keys prove each cache stays
+  at its independent cap; after the clock reaches the ten-minute expiry, the next locked write physically removes the
+  stale entries before applying updates and evicting the oldest live entries. Malformed JSON and schema-invalid cache
+  files both read as empty: address history becomes conservative `not-written/cache-malformed`, while correspondent
+  domains are scanned again; a failed recovery scan keeps escalation. Neither corruption case can produce a cached
+  `written` answer or silently suppress a lookalike warning.
 - **D4 — provenance and gaps:** same-mailbox internal addresses are omitted; another mailbox can record the same
   address; widening `internalDomains` leaves an already-recorded exact address until day seven. An old header in
   mailbox A plus a recent body sighting in mailbox B is described only as separate aggregate facts, never one
@@ -735,8 +801,8 @@ Each guard is watched failing under a mutation, then restored.
   both directions because Slack requires exact revision **and** digest. A used Slack record for exact revision/digest
   R is pruned at its 90-day boundary, then an unchanged R gets a newer expired approval; even with a complete readable
   retained directory, the row says only “not sent with any approval in the last 90 days”, never an all-time claim.
-- **D9 — capped and unreadable evidence:** fixtures exceed 500 approval files across several mailboxes with controlled
-  mtimes and repeated records per draft. A same-key `used`, `sending` and `unknown` record is placed at file 501 in
+- **D9 — capped, bounded and unreadable evidence:** fixtures contain far more than 500 approval files across several
+  mailboxes with controlled mtimes and repeated records per draft. A same-key `used`, `sending` and `unknown` record is placed at file 501 in
   turn while a newer matching expiry remains inside the window; every row says only “not sent with any of the last
   500 approvals”, never an all-time claim or the unqualified “its approvals expired”. An unreadable file at each
   position inside the selected window makes every candidate row for the scan exactly “indeterminate (an
@@ -746,8 +812,18 @@ Each guard is watched failing under a mutation, then restored.
   revision/digest once, orders newest groups first, returns at most 20, performs at most 20 live lookups with observed
   concurrency never above two, and reports every applicable evidence scope and cut-short reason. Existing on-disk v1
   records are found through the read-only historical decoder without an index or migration, remain unclaimable and
-  support only the same evidence-scoped wording.
-- **D9 — retention:** fake-clock store opens prove the prune attempts at most once per 24 hours. Each valid `used`,
+  support only the same evidence-scoped wording. With maintenance due, an instrumented filesystem counts every
+  `readdir`, retained-artifact `stat`, approval-record content open, maintenance/record lock, durable audit append and
+  unlink across prune plus report. It enforces the stated two-enumeration, `entries-before + entries-after` stat,
+  700-content-open, one-maintenance-plus-700-record-lock, 200-append, 400-artifact-unlink and 1,101-total-unlink
+  ceilings; the 500 cap is asserted only for the report half. The same fixture with maintenance not due enforces the
+  one-pass/500-open bounds.
+- **D9 — retention:** one fake-clock MCP context and its one store stay alive across several 24-hour boundaries;
+  approval creation and list/report/status calls trigger `ensurePruned()` without reconstructing either object. The
+  persisted timestamp and concurrent callers prove each state directory attempts at most one batch per 24 hours.
+  More than 200 oldest slots prove the first run stops exactly at 200, reporting still completes with
+  `complete: false`, and later daily runs resume after the persisted `(mtime, approvalId)` cursor until a full pass
+  clears it. Old active/corrupt records do not starve later slots. Each valid `used`,
   `failed`, `unknown`, `revoked` and `expired` record survives before 90 days and is deleted at equality after a
   locked re-read; pending, approved and fresh sending records are never deleted, while sending made stale by the
   locked classification becomes `unknown` before eligibility is judged. Safe corrupt stubs and unreadable files are
@@ -760,8 +836,9 @@ Each guard is watched failing under a mutation, then restored.
   immediately before and after each of those three steps: no unlink precedes a completed durable append, every surviving
   JSON record is safely retried, an already-removed marker is tolerated, and duplicate audit rows are allowed. Separate
   fixtures cover append/fsync failure, claim-unlink failure, JSON-unlink failure, and a stray `.claim` without its
-  `.json`, which the next prune removes. Reopening after an attempted prune does not start another within the daily
-  interval.
+  `.json`, which is removed when its bounded record slot is reached. A maintenance failure is surfaced while the
+  report still returns evidence-scoped results. Repeated operations, including reopening, do not start another batch
+  within the daily interval.
 - **Acceptance, end to end with fake Gmail:** an internal colleague recorded in another mailbox, from an untrusted
   client, produces `recipient-tainted`, one chat prepare/preview, one standard terminal rendering and **one person
   decision**. The agent's `gmail_send_wait` returns `{state: approved, claimable: true}`; execute uses that record,
@@ -799,10 +876,11 @@ approvals to the preparing process.
 7. **`requiresUserInteraction` stays policy-derived** — a chat mailbox's escalated send reaches a person through the
    confirm route; making it unconditional would prompt every chat send
    (`packages/gmail/src/mcp/server.ts:2366-2374`).
-8. **The draft-history report is deliberately evidence-scoped at scale** — the 90-day locked prune prevents normal
-   valid finished history from making metadata enumeration and sorting grow for the lifetime of the installation;
-   active records and preserved corrupt stubs are exceptions, reported rather than silently destroyed. The 500-file
-   cap bounds opened record contents and the 20-row cap bounds provider reads, but a busy retained window can still
-   push a mailbox's record outside the scan. Even an uncapped readable scan says only “not sent with any approval in
+8. **The draft-history report is deliberately evidence-scoped at scale** — retention drains at most 200 oldest record
+   slots per daily attempt. Directory enumeration and `stat` therefore remain linear in the retained artifacts: normal
+   finished history is bounded by 90 days only when that drain keeps pace, while active records, preserved corrupt
+   stubs and maintenance backlog are explicit exceptions. The report's 500-file cap bounds only its own opened record
+   contents; a due prune can open 200 more first. The 20-row cap bounds provider reads, but a busy retained window can
+   still push a mailbox's record outside the scan. Even an uncapped readable scan says only “not sent with any approval in
    the last 90 days”; every capped row says “not sent with any of the last 500 approvals”. An unreadable selected
    record makes the affected scan indeterminate, and doctor never presents either count as complete.
