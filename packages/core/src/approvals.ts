@@ -631,7 +631,10 @@ function notTheClaim(approvalId: string): CommsError {
   );
 }
 
-/** The record as it may be shown to anyone, agents included: never the challenge hash. */
+/**
+ * The record without its challenge hash, every other field as stored — what a sender wrote included, outside any
+ * envelope. Not for a result: a result shows an approval through `publicApproval` (design 2026-10-05 §D8).
+ */
 export function publicView(record: ApprovalRecord): Omit<ApprovalRecord, 'challengeHash'> {
   const { challengeHash: _hidden, ...rest } = record;
   return rest;
