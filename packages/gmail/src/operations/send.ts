@@ -20,6 +20,7 @@ import {
   type StoredApproval,
   sendEpochOf,
   stricterPolicy,
+  withSendingLease,
 } from '@agentcomms/core';
 import type { GmailContext, ResolvedInbox } from '../context.ts';
 import { analyseDraft, type DraftAnalysis, type Unsendable, unsendable } from '../domain/outbound.ts';
@@ -144,6 +145,8 @@ function noSendError(error: unknown, unrecorded: readonly string[]): CommsError 
 async function recordNoSend(
   context: GmailContext,
   options: { alias: string; inboxId: string; approvalId: string; draftId: string },
+  // The claim's own token, kept apart from what is audited: only the call that claimed records the outcome.
+  claimToken: string,
   error: unknown,
 ): Promise<CommsError> {
   const unrecorded: string[] = [];
@@ -154,7 +157,7 @@ async function recordNoSend(
     unrecorded.push(`the capacity slot could not be released (${messageOf(failure)})`);
   }
   try {
-    await context.core.approvals.complete(options.approvalId, { error: said });
+    await context.core.approvals.complete(options.approvalId, claimToken, { error: said });
   } catch (failure) {
     unrecorded.push(`the approval could not be marked failed (${messageOf(failure)})`);
   }
@@ -630,7 +633,7 @@ export async function executeSend(
       }
     : options.expect;
 
-  const claimed = await context.core.approvals.claimForSend(
+  const { record: claimed, claimToken } = await context.core.approvals.claimForSend(
     options.approvalId,
     {
       draftMessageId: before.draftMessageId,
@@ -656,132 +659,135 @@ export async function executeSend(
     approvalId: options.approvalId,
     draftId: options.draftId,
   };
-  if (claimed.draftId !== options.draftId) {
-    const error = new CommsError(
-      'APPROVAL_VOID',
-      'nothing was sent: this approval was prepared for a different draft',
-      {
-        hint: 'Prepare the send again for the draft you mean.',
-      },
-    );
-    throw await recordNoSend(context, bookkeeping, error);
-  }
-
-  const caps = capsFor(config.defaults);
-  try {
-    await context.core.ledger.reserve(resolved.inbox.id, options.approvalId, caps);
-  } catch (error) {
-    throw await recordNoSend(context, bookkeeping, error);
-  }
-
-  // The last look. Between the claim and here, nothing of ours can have changed the draft — `draft update` and
-  // `draft delete` refuse while an approval is sending — but a person in Gmail web still can.
-  let now: Awaited<ReturnType<typeof readDraft>>;
-  try {
-    now = await readDraft(context, alias, options.draftId);
-  } catch (error) {
-    throw await recordNoSend(context, bookkeeping, error);
-  }
-  if (now.draftMessageId !== claimed.draftMessageId || now.analysis.digest !== claimed.contentDigest) {
-    const error = new CommsError('APPROVAL_VOID', 'nothing was sent: the draft changed while it was being sent', {
-      hint: 'Prepare the send again to see what it says now.',
-    });
-    throw await recordNoSend(context, bookkeeping, error);
-  }
-
-  let sent: { id: string; threadId: string | undefined };
-  try {
-    sent = await transport.sendDraft(options.draftId);
-  } catch (error) {
-    const said = error instanceof Error ? error.message : String(error);
-    const ids = { approvalIds: [options.approvalId], draftIds: [options.draftId] };
-    if (sendCertainlyRefused(error)) {
-      throw await recordNoSend(context, bookkeeping, error);
+  // Claimed: from here until its outcome is recorded, the claim's lease is renewed while Gmail's work is outstanding.
+  return withSendingLease(context.core.approvals, options.approvalId, claimToken, async () => {
+    if (claimed.draftId !== options.draftId) {
+      const error = new CommsError(
+        'APPROVAL_VOID',
+        'nothing was sent: this approval was prepared for a different draft',
+        {
+          hint: 'Prepare the send again for the draft you mean.',
+        },
+      );
+      throw await recordNoSend(context, bookkeeping, claimToken, error);
     }
 
-    let unaudited = '';
+    const caps = capsFor(config.defaults);
+    try {
+      await context.core.ledger.reserve(resolved.inbox.id, options.approvalId, caps);
+    } catch (error) {
+      throw await recordNoSend(context, bookkeeping, claimToken, error);
+    }
+
+    // The last look. Between the claim and here, nothing of ours can have changed the draft — `draft update` and
+    // `draft delete` refuse while an approval is sending — but a person in Gmail web still can.
+    let now: Awaited<ReturnType<typeof readDraft>>;
+    try {
+      now = await readDraft(context, alias, options.draftId);
+    } catch (error) {
+      throw await recordNoSend(context, bookkeeping, claimToken, error);
+    }
+    if (now.draftMessageId !== claimed.draftMessageId || now.analysis.digest !== claimed.contentDigest) {
+      const error = new CommsError('APPROVAL_VOID', 'nothing was sent: the draft changed while it was being sent', {
+        hint: 'Prepare the send again to see what it says now.',
+      });
+      throw await recordNoSend(context, bookkeeping, claimToken, error);
+    }
+
+    let sent: { id: string; threadId: string | undefined };
+    try {
+      sent = await transport.sendDraft(options.draftId);
+    } catch (error) {
+      const said = error instanceof Error ? error.message : String(error);
+      const ids = { approvalIds: [options.approvalId], draftIds: [options.draftId] };
+      if (sendCertainlyRefused(error)) {
+        throw await recordNoSend(context, bookkeeping, claimToken, error);
+      }
+
+      let unaudited = '';
+      try {
+        await context.core.audit.append({
+          inboxId: resolved.inbox.id,
+          alias,
+          operation: 'send.execute',
+          outcome: 'failed',
+          surface: context.surface,
+          ids,
+          reason: `outcome unknown: ${said}`,
+        });
+      } catch (failure) {
+        unaudited = ` The audit log could not record this either (${failure instanceof Error ? failure.message : String(failure)}).`;
+      }
+      throw new CommsError(
+        error instanceof CommsError ? error.code : 'TRANSIENT',
+        `whether the email was sent is not known: ${said}`,
+        {
+          hint: `Check the Sent folder before anything else: Gmail may have sent it. Prepare the draft again only if it is not there — this approval is not used again.${unaudited}`,
+          details: {
+            ...(error instanceof CommsError ? error.details : {}),
+            approvalId: options.approvalId,
+            outcome: 'unknown',
+          },
+          cause: error,
+        },
+      );
+    }
+
+    const sentMessageId = sent.id;
+    const unrecorded: string[] = [];
+    try {
+      await context.core.approvals.complete(options.approvalId, claimToken, { sentMessageId });
+    } catch (error) {
+      unrecorded.push(
+        `the approval could not be marked used (${error instanceof Error ? error.message : String(error)}), so it will read as unknown`,
+      );
+    }
+
+    // Read the sent message back: it is the only evidence that what went out is what was approved, and the only way to
+    // catch a reply that Gmail filed outside the conversation it was meant for.
+    let verified: SendResult['verified'] = null;
+    try {
+      const message = await transport.getMessageMetadata(sentMessageId);
+      verified = { threadId: message.threadId ?? undefined, labelIds: message.labelIds ?? [] };
+    } catch {
+      // The mail has gone either way; not being able to read it back is worth reporting, not worth failing.
+    }
+
     try {
       await context.core.audit.append({
         inboxId: resolved.inbox.id,
         alias,
         operation: 'send.execute',
-        outcome: 'failed',
+        outcome: 'ok',
         surface: context.surface,
-        ids,
-        reason: `outcome unknown: ${said}`,
+        ids: { approvalIds: [options.approvalId], draftIds: [options.draftId], messageIds: [sentMessageId] },
+        // From the record, not from what the caller claimed: the two are checked to be equal, but the record is the
+        // one a person approved, and an audit line is worth having only if it says what actually happened.
+        recipients: [...claimed.expect.to, ...claimed.expect.cc, ...claimed.expect.bcc].map(canonicalAddress),
+        reason: [
+          `digest ${claimed.contentDigest.slice(0, 12)} · policy ${livePolicy} · ${claimed.approvedVia ?? 'chat'}`,
+          ...unrecorded,
+        ].join(' · '),
       });
-    } catch (failure) {
-      unaudited = ` The audit log could not record this either (${failure instanceof Error ? failure.message : String(failure)}).`;
+    } catch (error) {
+      unrecorded.push(`the audit log could not record it (${error instanceof Error ? error.message : String(error)})`);
     }
-    throw new CommsError(
-      error instanceof CommsError ? error.code : 'TRANSIENT',
-      `whether the email was sent is not known: ${said}`,
-      {
-        hint: `Check the Sent folder before anything else: Gmail may have sent it. Prepare the draft again only if it is not there — this approval is not used again.${unaudited}`,
-        details: {
-          ...(error instanceof CommsError ? error.details : {}),
-          approvalId: options.approvalId,
-          outcome: 'unknown',
-        },
-        cause: error,
-      },
-    );
-  }
 
-  const sentMessageId = sent.id;
-  const unrecorded: string[] = [];
-  try {
-    await context.core.approvals.complete(options.approvalId, { sentMessageId });
-  } catch (error) {
-    unrecorded.push(
-      `the approval could not be marked used (${error instanceof Error ? error.message : String(error)}), so it will read as unknown`,
-    );
-  }
-
-  // Read the sent message back: it is the only evidence that what went out is what was approved, and the only way to
-  // catch a reply that Gmail filed outside the conversation it was meant for.
-  let verified: SendResult['verified'] = null;
-  try {
-    const message = await transport.getMessageMetadata(sentMessageId);
-    verified = { threadId: message.threadId ?? undefined, labelIds: message.labelIds ?? [] };
-  } catch {
-    // The mail has gone either way; not being able to read it back is worth reporting, not worth failing.
-  }
-
-  try {
-    await context.core.audit.append({
-      inboxId: resolved.inbox.id,
-      alias,
-      operation: 'send.execute',
-      outcome: 'ok',
-      surface: context.surface,
-      ids: { approvalIds: [options.approvalId], draftIds: [options.draftId], messageIds: [sentMessageId] },
-      // From the record, not from what the caller claimed: the two are checked to be equal, but the record is the
-      // one a person approved, and an audit line is worth having only if it says what actually happened.
-      recipients: [...claimed.expect.to, ...claimed.expect.cc, ...claimed.expect.bcc].map(canonicalAddress),
-      reason: [
-        `digest ${claimed.contentDigest.slice(0, 12)} · policy ${livePolicy} · ${claimed.approvedVia ?? 'chat'}`,
-        ...unrecorded,
-      ].join(' · '),
-    });
-  } catch (error) {
-    unrecorded.push(`the audit log could not record it (${error instanceof Error ? error.message : String(error)})`);
-  }
-
-  return {
-    inbox: alias,
-    approvalId: options.approvalId,
-    draftId: options.draftId,
-    sentMessageId,
-    threadId: sent.threadId,
-    to: claimed.expect.to,
-    cc: claimed.expect.cc,
-    bcc: claimed.expect.bcc,
-    subject: claimed.expect.subject,
-    verified,
-    ...(unrecorded.length > 0 ? { note: unrecorded.join('; ') } : {}),
-    ...(legacyDrain === undefined ? {} : { legacyDrain }),
-  };
+    return {
+      inbox: alias,
+      approvalId: options.approvalId,
+      draftId: options.draftId,
+      sentMessageId,
+      threadId: sent.threadId,
+      to: claimed.expect.to,
+      cc: claimed.expect.cc,
+      bcc: claimed.expect.bcc,
+      subject: claimed.expect.subject,
+      verified,
+      ...(unrecorded.length > 0 ? { note: unrecorded.join('; ') } : {}),
+      ...(legacyDrain === undefined ? {} : { legacyDrain }),
+    };
+  });
 }
 
 /**

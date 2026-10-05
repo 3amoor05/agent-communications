@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
-import { ApprovalStore, asV2, CommsError, SENDING_STALE_MS } from '@agentcomms/core';
+import { ApprovalStore, asV2, CommsError, SENDING_LEASE_MS } from '@agentcomms/core';
 import { writeOutcomeOf } from '../src/api/client.ts';
 import { renderSent } from '../src/cli/render.ts';
 import { SendRecords } from '../src/compose/store.ts';
@@ -59,7 +59,7 @@ test('Resend acting before its answer is lost leaves the approval sending and te
       assert.equal(error.details?.outcome, 'unknown');
       assert.equal(await state(), 'sending');
       const later = new ApprovalStore(harness.core.paths.stateDir, {
-        now: () => new Date(Date.now() + SENDING_STALE_MS),
+        now: () => new Date(Date.now() + SENDING_LEASE_MS),
         loadConfig: () => harness.core.config.load(),
       });
       assert.equal(asV2(await later.get(approval.approvalId))?.state, 'unknown');
@@ -186,10 +186,10 @@ test('every certain no-send path attempts release, approval, local record and au
           }
           return record.call(this, id, line);
         };
-        harness.core.approvals.complete = async (approvalId, outcome) => {
+        harness.core.approvals.complete = async (approvalId, claimToken, outcome) => {
           calls.push('approval');
           if (failures.includes('approval')) throw new Error('approval disk is read-only');
-          return complete(approvalId, outcome);
+          return complete(approvalId, claimToken, outcome);
         };
         harness.core.audit.append = async (audit, ...rest) => {
           if (audit.operation !== 'resend.send.execute') return append(audit, ...rest);
@@ -365,9 +365,9 @@ test('Resend success is never rewritten when its approval, send record or audit 
     const { send, state } = await prepared();
     const store = harness.core.approvals;
     const complete = store.complete.bind(store);
-    store.complete = async (approvalId, outcome) => {
+    store.complete = async (approvalId, claimToken, outcome) => {
       if ('sentMessageId' in outcome) throw new Error('approval disk is read-only');
-      return complete(approvalId, outcome);
+      return complete(approvalId, claimToken, outcome);
     };
 
     const result = await send();

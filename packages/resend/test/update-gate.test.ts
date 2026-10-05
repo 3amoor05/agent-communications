@@ -61,12 +61,12 @@ async function sendApproval(harness: Harness, accountId: string, used = false): 
     expect,
   });
   if (used) {
-    await harness.core.approvals.claimForSend(record.approvalId, {
+    const { claimToken } = await harness.core.approvals.claimForSend(record.approvalId, {
       inboxId: accountId,
       ...draft,
       expect,
     });
-    await harness.core.approvals.complete(record.approvalId, { sentMessageId: 'email_one' });
+    await harness.core.approvals.complete(record.approvalId, claimToken, { sentMessageId: 'email_one' });
     assert.equal(asV2(await harness.core.approvals.get(record.approvalId))?.state, 'used');
   }
   return record.approvalId;

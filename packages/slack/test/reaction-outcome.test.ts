@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { ApprovalStore, type AuditRecord, asV2, CommsError, SENDING_STALE_MS } from '@agentcomms/core';
+import { ApprovalStore, type AuditRecord, asV2, CommsError, SENDING_LEASE_MS } from '@agentcomms/core';
 import { certainlyRefused } from '../src/api/call.ts';
 import { SlackContext } from '../src/context.ts';
 import { gateDepsFor } from '../src/operations/gate.ts';
@@ -67,9 +67,9 @@ function recordedOutcomes(harness: Harness): string[] {
   const seen: string[] = [];
   const store = harness.core.approvals;
   const complete = store.complete.bind(store);
-  store.complete = (approvalId, outcome) => {
+  store.complete = (approvalId, claimToken, outcome) => {
     seen.push('error' in outcome ? 'failed' : 'used');
-    return complete(approvalId, outcome);
+    return complete(approvalId, claimToken, outcome);
   };
   return seen;
 }
@@ -209,7 +209,7 @@ test('a reaction Slack took whose answer was lost is left to read unknown, never
   assert.deepEqual(outcomes, [], 'an outcome nobody knows was recorded');
   assert.equal(await state(), 'sending');
   const later = new ApprovalStore(harness.core.paths.stateDir, {
-    now: () => new Date(Date.now() + SENDING_STALE_MS),
+    now: () => new Date(Date.now() + SENDING_LEASE_MS),
     loadConfig: () => harness.core.config.load(),
   });
   assert.equal(asV2(await later.get(approvalId))?.state, 'unknown');
@@ -346,9 +346,9 @@ test('no_reaction remains success when recording that result is incomplete', asy
     fake.script['reactions.remove'] = () => ({ ok: false, error: 'no_reaction' });
     const store = harness.core.approvals;
     const complete = store.complete.bind(store);
-    store.complete = async (approvalId, outcome) => {
+    store.complete = async (approvalId, claimToken, outcome) => {
       if ('sentMessageId' in outcome) throw new Error('approval ledger is read-only');
-      return complete(approvalId, outcome);
+      return complete(approvalId, claimToken, outcome);
     };
 
     const result = await change();
@@ -381,12 +381,12 @@ test('a reaction Slack accepted whose approval cannot be marked used is never fa
   const store = harness.core.approvals;
   const complete = store.complete.bind(store);
   const asked: string[] = [];
-  store.complete = async (approvalId, outcome) => {
+  store.complete = async (approvalId, claimToken, outcome) => {
     asked.push('error' in outcome ? 'failed' : 'used');
     if ('sentMessageId' in outcome) {
       throw new CommsError('LOCK_TIMEOUT', 'another agent-communications process is holding the approval');
     }
-    return complete(approvalId, outcome);
+    return complete(approvalId, claimToken, outcome);
   };
 
   const result = await change();
@@ -422,11 +422,11 @@ test('a bookkeeping failure while recording a refusal cannot hide what Slack ref
   fake.script['reactions.add'] = () => ({ ok: false, error: 'channel_not_found' });
   const store = harness.core.approvals;
   const complete = store.complete.bind(store);
-  store.complete = async (approvalId, outcome) => {
+  store.complete = async (approvalId, claimToken, outcome) => {
     if ('error' in outcome) {
       throw new CommsError('LOCK_TIMEOUT', 'another agent-communications process is holding the approval');
     }
-    return complete(approvalId, outcome);
+    return complete(approvalId, claimToken, outcome);
   };
 
   const error = await change().then(

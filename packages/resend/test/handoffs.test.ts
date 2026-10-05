@@ -11,7 +11,7 @@ import {
   lineWithWordsToFill,
   openCore,
   type RegisteredServer,
-  SENDING_STALE_MS,
+  SENDING_LEASE_MS,
   sendApprovesHint,
 } from '@agentcomms/core';
 import { RESEND_CALLER } from '../src/caller.ts';
@@ -244,7 +244,7 @@ test('a send whose outcome is not known is checked with Resend’s own send stat
   );
   // Later, when the approval reads as unknown: the same command, before anything else — and no second send.
   const later = new ResendContext({
-    core: openCore({ env: harness.env, caller: RESEND_CALLER, now: () => new Date(Date.now() + SENDING_STALE_MS) }),
+    core: openCore({ env: harness.env, caller: RESEND_CALLER, now: () => new Date(Date.now() + SENDING_LEASE_MS) }),
     env: harness.env,
     fetch: harness.fake.fetch,
     throttle: { intervalMs: 0 },

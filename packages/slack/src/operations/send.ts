@@ -14,10 +14,13 @@ import {
   handoffSentence,
   handoffSentenceToFill,
   messageDigest,
+  type SendClaim,
+  type SendOutcome,
   type SendPolicy,
   sha256Hex,
   stricterPolicy,
   truncateDisplay,
+  withSendingLease,
 } from '@agentcomms/core';
 import { callSlack, certainlyRefused, type PostingMethod, type SlackCall, type SlackResponse } from '../api/call.ts';
 import { spendOn, type WritePermit } from '../api/guard.ts';
@@ -535,8 +538,9 @@ export interface PostDeps extends PrepareDeps {
         expect: Expectation;
       },
       options?: ClaimOptions,
-    ): Promise<ApprovalRecord>;
-    complete(approvalId: string, outcome: { sentMessageId: string } | { error: string }): Promise<ApprovalRecord>;
+    ): Promise<SendClaim>;
+    complete(approvalId: string, claimToken: string, outcome: SendOutcome): Promise<ApprovalRecord>;
+    heartbeat(approvalId: string, claimToken: string): Promise<'renewed' | 'lost'>;
   };
   /**
    * The call's cancellation: the MCP request's signal, which the SDK aborts when the client cancels the call. The
@@ -672,16 +676,19 @@ async function claimOrHandOver(
   approvalId: string,
   live: Parameters<PostDeps['approvals']['claimForSend']>[1],
   pendingHint: string,
-): Promise<void> {
+): Promise<string> {
   try {
-    await deps.approvals.claimForSend(approvalId, live, {
+    const { claimToken } = await deps.approvals.claimForSend(approvalId, live, {
       pendingHint,
       signal: deps.signal,
       platform: deps.handoffs.platform,
     });
+    return claimToken;
   } catch (error) {
     if (isCancelledPost(error)) throw cancelledPost(NOT_USED);
     if (!(error instanceof CommsError) || error.code !== 'APPROVAL_PENDING') throw error;
+    // Another call's send under way is not waiting for a person: no approve command for it.
+    if (error.details?.state === 'sending') throw error;
     throw new CommsError(error.code, error.message, {
       ...(error.hint === undefined ? {} : { hint: error.hint }),
       details: { ...error.details, command: approveCommand(approvalId, deps.handoffs) },
@@ -747,7 +754,7 @@ export async function postPrepared(
 
   // Cancelled while the room was looked up: the claim is next, and is not made. The store asks again as it claims.
   if (deps.signal?.aborted) throw cancelledPost(NOT_USED);
-  await claimOrHandOver(
+  const claimToken = await claimOrHandOver(
     deps,
     approvalId,
     {
@@ -760,35 +767,39 @@ export async function postPrepared(
     },
     waitingHint('post', deps.surface, approvalId, deps.handoffs),
   );
+  // Claimed: from here until its outcome is recorded, the claim's lease is renewed while Slack's work is outstanding.
+  return withSendingLease(deps.approvals, approvalId, claimToken, async () => {
+    if (policy !== undefined) return postFiles(deps, approvalId, claimToken, draft.draftId, payload, files, policy);
 
-  if (policy !== undefined) return postFiles(deps, approvalId, draft.draftId, payload, files, policy);
+    const where = { channel: payload.channel };
+    // Claimed, and nothing sent yet: the approval is spent on a post that did not happen, and recorded as failed.
+    if (deps.signal?.aborted)
+      throw await recordNotPosted(deps, approvalId, claimToken, where, cancelledPost(SPENT_BY_CANCEL));
+    let response: SlackResponse;
+    try {
+      // Without the signal, deliberately: this is the request that posts, and it is never abandoned once it is out.
+      response = await spendOn(deps.permit, approvalId, 'chat.postMessage', () =>
+        callSlack({ ...deps.call, permit: deps.permit }, 'chat.postMessage', {
+          channel: payload.channel,
+          text: payload.text,
+          blocks: JSON.stringify(payload.blocks),
+          thread_ts: payload.thread_ts,
+          unfurl_links: payload.unfurl_links,
+          unfurl_media: payload.unfurl_media,
+        }),
+      );
+    } catch (error) {
+      if (certainlyRefused(error, 'chat.postMessage'))
+        throw await recordNotPosted(deps, approvalId, claimToken, where, error);
+      throw await recordMaybePosted(deps, approvalId, where, error, 'it was posted');
+    }
 
-  const where = { channel: payload.channel };
-  // Claimed, and nothing sent yet: the approval is spent on a post that did not happen, and recorded as failed.
-  if (deps.signal?.aborted) throw await recordNotPosted(deps, approvalId, where, cancelledPost(SPENT_BY_CANCEL));
-  let response: SlackResponse;
-  try {
-    // Without the signal, deliberately: this is the request that posts, and it is never abandoned once it is out.
-    response = await spendOn(deps.permit, approvalId, 'chat.postMessage', () =>
-      callSlack({ ...deps.call, permit: deps.permit }, 'chat.postMessage', {
-        channel: payload.channel,
-        text: payload.text,
-        blocks: JSON.stringify(payload.blocks),
-        thread_ts: payload.thread_ts,
-        unfurl_links: payload.unfurl_links,
-        unfurl_media: payload.unfurl_media,
-      }),
-    );
-  } catch (error) {
-    if (certainlyRefused(error, 'chat.postMessage')) throw await recordNotPosted(deps, approvalId, where, error);
-    throw await recordMaybePosted(deps, approvalId, where, error, 'it was posted');
-  }
-
-  // Posted. Nothing from here records the approval as failed, or throws: see `recordPosted`.
-  const ts = typeof response.ts === 'string' ? response.ts : '';
-  const { late, unrecorded } = await recordPosted(deps, approvalId, ts, { channel: payload.channel, ts });
-  const note = noteOf([late, ...unrecorded]);
-  return { approvalId, channel: payload.channel, ts, ...(note === undefined ? {} : { note }) };
+    // Posted. Nothing from here records the approval as failed, or throws: see `recordPosted`.
+    const ts = typeof response.ts === 'string' ? response.ts : '';
+    const { late, unrecorded } = await recordPosted(deps, approvalId, claimToken, ts, { channel: payload.channel, ts });
+    const note = noteOf([late, ...unrecorded]);
+    return { approvalId, channel: payload.channel, ts, ...(note === undefined ? {} : { note }) };
+  });
 }
 
 /** A failure's message, whatever was thrown. */
@@ -811,12 +822,13 @@ function noteOf(said: readonly (string | undefined)[]): string | undefined {
 async function recordNotPosted(
   deps: PostDeps,
   approvalId: string,
+  claimToken: string,
   ids: Record<string, string | string[]>,
   error: unknown,
   outcome: 'failed' | 'refused' = 'failed',
 ): Promise<unknown> {
   const reason = messageOf(error);
-  await deps.approvals.complete(approvalId, { error: reason });
+  await deps.approvals.complete(approvalId, claimToken, { error: reason });
   await deps.audit?.append({
     inboxId: deps.accountId,
     alias: deps.workspaceName,
@@ -837,7 +849,7 @@ async function recordNotPosted(
  * A connection that dropped, a 5xx, an answer that could not be read, Slack's own "some of it may have succeeded" —
  * after any of them the post may be in the channel. Recording it as failed would say something nobody knows, in the one
  * direction that invites the post again. So the approval's outcome is not recorded at all: it stays in `sending`, which
- * the store reads as `unknown` once the attempt is plainly over (`SENDING_STALE_MS`) — the state it has for exactly
+ * the store reads as `unknown` once the attempt is plainly over (`SENDING_LEASE_MS`) — the state it has for exactly
  * this, and the one a send whose process died mid-request is left in. It is not used again either way.
  *
  * The audit record says so in its reason, as Resend's does for the same case; and the error says it in its message,
@@ -899,12 +911,13 @@ async function recordMaybePosted(
 async function recordPosted(
   deps: PostDeps,
   approvalId: string,
+  claimToken: string,
   sentMessageId: string,
   ids: Record<string, string | string[]>,
 ): Promise<{ late: string | undefined; unrecorded: string[] }> {
   const unrecorded: string[] = [];
   try {
-    await deps.approvals.complete(approvalId, { sentMessageId });
+    await deps.approvals.complete(approvalId, claimToken, { sentMessageId });
   } catch (error) {
     unrecorded.push(`the approval could not be marked used (${messageOf(error)}), so it will read as unknown`);
   }
@@ -1048,6 +1061,7 @@ async function messageTsOf(
 async function postFiles(
   deps: PostDeps,
   approvalId: string,
+  claimToken: string,
   draftId: string,
   payload: ComposedPayload,
   files: readonly SlackDraftFile[],
@@ -1132,7 +1146,7 @@ async function postFiles(
       });
     }
     const reported = reportFailure(error, stage, uploaded, possiblyUploaded);
-    throw await recordNotPosted(deps, approvalId, ids, reported, stage === 'check' ? 'refused' : 'failed');
+    throw await recordNotPosted(deps, approvalId, claimToken, ids, reported, stage === 'check' ? 'refused' : 'failed');
   }
 
   // Posted. Nothing from here records the approval as failed, or throws: see `recordPosted`.
@@ -1142,6 +1156,7 @@ async function postFiles(
   const { late, unrecorded } = await recordPosted(
     deps,
     approvalId,
+    claimToken,
     ts ?? posted.map((file) => file.id).join(','),
     // What was posted, by what it is: ids, names, sizes and hashes. Never a byte of it.
     {
@@ -1345,13 +1360,14 @@ function refusalWithBookkeeping(error: CommsError, unrecorded: readonly string[]
 async function recordReactionRefused(
   deps: PostDeps,
   approvalId: string,
+  claimToken: string,
   options: ReactionOptions,
   error: CommsError,
 ): Promise<CommsError> {
   const unrecorded: string[] = [];
   const reason = messageOf(error);
   try {
-    await deps.approvals.complete(approvalId, { error: reason });
+    await deps.approvals.complete(approvalId, claimToken, { error: reason });
   } catch (failure) {
     unrecorded.push(`the approval could not be marked failed (${messageOf(failure)})`);
   }
@@ -1414,12 +1430,13 @@ async function recordReactionUnknown(
 async function recordReactionChanged(
   deps: PostDeps,
   approvalId: string,
+  claimToken: string,
   options: ReactionOptions,
   known?: string | undefined,
 ): Promise<ReactionResult> {
   const unrecorded: string[] = [];
   try {
-    await deps.approvals.complete(approvalId, { sentMessageId: options.ts });
+    await deps.approvals.complete(approvalId, claimToken, { sentMessageId: options.ts });
   } catch (error) {
     unrecorded.push(`the approval could not be marked used (${messageOf(error)}), so it will read as unknown`);
   }
@@ -1449,7 +1466,7 @@ export async function reactPrepared(
   options: ReactionOptions,
 ): Promise<ReactionResult> {
   const digest = reactionDigest(deps, options);
-  await claimOrHandOver(
+  const claimToken = await claimOrHandOver(
     deps,
     approvalId,
     {
@@ -1461,39 +1478,53 @@ export async function reactPrepared(
     },
     waitingHint('reaction', deps.surface, approvalId, deps.handoffs),
   );
-  const method: PostingMethod = options.remove ? 'reactions.remove' : 'reactions.add';
-  try {
-    await spendOn(deps.permit, approvalId, method, () =>
-      callSlack({ ...deps.call, permit: deps.permit }, method, {
-        channel: options.channel,
-        timestamp: options.ts,
-        name: options.name,
-      }),
-    );
-  } catch (error) {
-    /*
-     * `already_reacted` means the state this approval asked for already holds. Recording it as failed would tell a
-     * caller to try the same outward act again, so it is used and audited as success, with Slack's answer in the note.
-     */
-    if (method === 'reactions.add' && error instanceof CommsError && error.details?.slackError === 'already_reacted') {
-      return recordReactionChanged(deps, approvalId, options, 'Slack says this account had already added the reaction');
-    }
-    /*
-     * `no_reaction` means this account already has the state the removal asked for. Other people's reactions remain,
-     * which the result says explicitly so success cannot be mistaken for removing the emoji from the message.
-     */
-    if (method === 'reactions.remove' && error instanceof CommsError && error.details?.slackError === 'no_reaction') {
-      return recordReactionChanged(
-        deps,
-        approvalId,
-        options,
-        'Slack says this account had no such reaction on the message, so there was nothing of yours to remove; reactions other people added are not affected.',
+  // Claimed: the lease is renewed while Slack's answer is outstanding.
+  return withSendingLease(deps.approvals, approvalId, claimToken, async () => {
+    const method: PostingMethod = options.remove ? 'reactions.remove' : 'reactions.add';
+    try {
+      await spendOn(deps.permit, approvalId, method, () =>
+        callSlack({ ...deps.call, permit: deps.permit }, method, {
+          channel: options.channel,
+          timestamp: options.ts,
+          name: options.name,
+        }),
       );
+    } catch (error) {
+      /*
+       * `already_reacted` means the state this approval asked for already holds. Recording it as failed would tell a
+       * caller to try the same outward act again, so it is used and audited as success, with Slack's answer in the note.
+       */
+      if (
+        method === 'reactions.add' &&
+        error instanceof CommsError &&
+        error.details?.slackError === 'already_reacted'
+      ) {
+        return recordReactionChanged(
+          deps,
+          approvalId,
+          claimToken,
+          options,
+          'Slack says this account had already added the reaction',
+        );
+      }
+      /*
+       * `no_reaction` means this account already has the state the removal asked for. Other people's reactions remain,
+       * which the result says explicitly so success cannot be mistaken for removing the emoji from the message.
+       */
+      if (method === 'reactions.remove' && error instanceof CommsError && error.details?.slackError === 'no_reaction') {
+        return recordReactionChanged(
+          deps,
+          approvalId,
+          claimToken,
+          options,
+          'Slack says this account had no such reaction on the message, so there was nothing of yours to remove; reactions other people added are not affected.',
+        );
+      }
+      if (error instanceof CommsError && certainlyRefused(error, method)) {
+        throw await recordReactionRefused(deps, approvalId, claimToken, options, error);
+      }
+      throw await recordReactionUnknown(deps, approvalId, options, error);
     }
-    if (error instanceof CommsError && certainlyRefused(error, method)) {
-      throw await recordReactionRefused(deps, approvalId, options, error);
-    }
-    throw await recordReactionUnknown(deps, approvalId, options, error);
-  }
-  return recordReactionChanged(deps, approvalId, options);
+    return recordReactionChanged(deps, approvalId, claimToken, options);
+  });
 }

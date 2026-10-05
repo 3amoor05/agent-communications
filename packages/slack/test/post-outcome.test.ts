@@ -3,7 +3,7 @@ import { realpathSync, writeFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { type TestContext, test } from 'node:test';
-import { ApprovalStore, type AuditRecord, asV2, CommsError, SENDING_STALE_MS } from '@agentcomms/core';
+import { ApprovalStore, type AuditRecord, asV2, CommsError, SENDING_LEASE_MS } from '@agentcomms/core';
 import { SlackContext } from '../src/context.ts';
 import { prepareDraftPost, sendPost } from '../src/operations/post.ts';
 import { DROP, type FakeSlack, startFakeSlack } from './support/fake-slack.ts';
@@ -74,9 +74,9 @@ function recordedOutcomes(harness: Harness): string[] {
   const seen: string[] = [];
   const store = harness.core.approvals;
   const complete = store.complete.bind(store);
-  store.complete = (approvalId, outcome) => {
+  store.complete = (approvalId, claimToken, outcome) => {
     seen.push('error' in outcome ? 'failed' : 'used');
-    return complete(approvalId, outcome);
+    return complete(approvalId, claimToken, outcome);
   };
   return seen;
 }
@@ -104,7 +104,7 @@ test('a post Slack took whose answer was lost on the way back is left to read un
   assert.deepEqual(outcomes, [], 'an outcome nobody knows was recorded');
   assert.equal(await state(), 'sending');
   const later = new ApprovalStore(harness.core.paths.stateDir, {
-    now: () => new Date(Date.now() + SENDING_STALE_MS),
+    now: () => new Date(Date.now() + SENDING_LEASE_MS),
     loadConfig: () => harness.core.config.load(),
   });
   assert.equal(asV2(await later.get(draft.approvalId))?.state, 'unknown');
@@ -242,12 +242,12 @@ test('a post Slack accepted whose approval then cannot be marked used is a post:
     const store = harness.core.approvals;
     const complete = store.complete.bind(store);
     const asked: string[] = [];
-    store.complete = async (approvalId, outcome) => {
+    store.complete = async (approvalId, claimToken, outcome) => {
       asked.push('error' in outcome ? 'failed' : 'used');
       if ('sentMessageId' in outcome) {
         throw new CommsError('LOCK_TIMEOUT', 'another agent-communications process is holding the approval');
       }
-      return complete(approvalId, outcome);
+      return complete(approvalId, claimToken, outcome);
     };
 
     const result = await send();

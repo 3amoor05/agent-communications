@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { ApprovalStore, asV2, CommsError, SENDING_STALE_MS } from '@agentcomms/core';
+import { ApprovalStore, asV2, CommsError, SENDING_LEASE_MS } from '@agentcomms/core';
 import { renderSent } from '../src/cli/render.ts';
 import { GmailContext } from '../src/context.ts';
 import { mapGoogleError, sendCertainlyRefused } from '../src/gmail-api/errors.ts';
@@ -78,7 +78,7 @@ test('Gmail acting before its answer is lost leaves the approval sending and tel
   assert.equal(error.details?.outcome, 'unknown');
   assert.equal(await state(), 'sending');
   const later = new ApprovalStore(setup.harness.core.paths.stateDir, {
-    now: () => new Date(Date.now() + SENDING_STALE_MS),
+    now: () => new Date(Date.now() + SENDING_LEASE_MS),
     loadConfig: () => setup.harness.core.config.load(),
   });
   assert.equal(asV2(await later.get(approval.approvalId))?.state, 'unknown');
@@ -207,10 +207,10 @@ test('every certain no-send path attempts each bookkeeping step independently', 
         const reserve = setup.harness.core.ledger.reserve.bind(setup.harness.core.ledger);
         if (trigger === 'claimed draft mismatch') {
           const claimForSend = setup.harness.core.approvals.claimForSend.bind(setup.harness.core.approvals);
-          setup.harness.core.approvals.claimForSend = async (...args) => ({
-            ...(await claimForSend(...args)),
-            draftId: 'dr_another_draft',
-          });
+          setup.harness.core.approvals.claimForSend = async (...args) => {
+            const claim = await claimForSend(...args);
+            return { ...claim, record: { ...claim.record, draftId: 'dr_another_draft' } };
+          };
         } else if (trigger === 'reservation failure') {
           setup.harness.core.ledger.reserve = async (...args) => {
             await reserve(...args);
@@ -244,10 +244,10 @@ test('every certain no-send path attempts each bookkeeping step independently', 
           return release(inboxId, approvalId);
         };
         const complete = setup.harness.core.approvals.complete.bind(setup.harness.core.approvals);
-        setup.harness.core.approvals.complete = async (approvalId, outcome) => {
+        setup.harness.core.approvals.complete = async (approvalId, claimToken, outcome) => {
           calls.push('approval');
           if (failures.includes('approval')) throw new Error('approval disk is read-only');
-          return complete(approvalId, outcome);
+          return complete(approvalId, claimToken, outcome);
         };
         const append = setup.harness.core.audit.append.bind(setup.harness.core.audit);
         setup.harness.core.audit.append = async (record, ...rest) => {
@@ -390,9 +390,9 @@ test('Gmail success is never rewritten when its approval or audit bookkeeping fa
     const { send, state } = await prepared(setup);
     const store = setup.harness.core.approvals;
     const complete = store.complete.bind(store);
-    store.complete = async (approvalId, outcome) => {
+    store.complete = async (approvalId, claimToken, outcome) => {
       if ('sentMessageId' in outcome) throw new Error('approval disk is read-only');
-      return complete(approvalId, outcome);
+      return complete(approvalId, claimToken, outcome);
     };
 
     const result = await send();

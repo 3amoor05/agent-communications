@@ -101,6 +101,48 @@ test('a send goes through, once, and is read back from Sent', async () => {
   assert.deepEqual(executed?.recipients, ['sam@partner.test'], 'who it went to, not just the domain');
 });
 
+test('the claim token never reaches an audit row, a result or an error, sent or refused', async () => {
+  const { context, harness } = await connected({ riskEscalation: false });
+  const tokens: string[] = [];
+  const claim = harness.core.approvals.claimForSend.bind(harness.core.approvals);
+  harness.core.approvals.claimForSend = async (...args) => {
+    const claimed = await claim(...args);
+    tokens.push(claimed.claimToken);
+    return claimed;
+  };
+  const shown: string[] = [];
+  const sentDraft = await draftTo(context, ['sam@partner.test']);
+  const sent = await prepareSend(context, 'work', sentDraft);
+  shown.push(
+    JSON.stringify(
+      await executeSend(context, 'work', { draftId: sentDraft, approvalId: sent.approvalId, expect: sent.expect }),
+    ),
+  );
+  // And a send refused after its claim, which records its failure with the token.
+  const refusedDraft = await draftTo(context, ['sam@partner.test']);
+  const refused = await prepareSend(context, 'work', refusedDraft);
+  harness.core.ledger.reserve = async () => {
+    throw new CommsError('RATE_CAPPED', 'the hourly cap is reached');
+  };
+  try {
+    await executeSend(context, 'work', {
+      draftId: refusedDraft,
+      approvalId: refused.approvalId,
+      expect: refused.expect,
+    });
+    assert.fail('the cap should refuse it');
+  } catch (error) {
+    assert.ok(error instanceof CommsError);
+    shown.push(JSON.stringify({ message: error.message, hint: error.hint, details: error.details }));
+  }
+  assert.equal(asV2(await harness.core.approvals.get(refused.approvalId))?.state, 'failed', 'recorded by its claimant');
+  shown.push(JSON.stringify(await harness.core.audit.tail({ inbox: 'work' })));
+  assert.equal(tokens.length, 2);
+  for (const token of tokens) {
+    for (const text of shown) assert.ok(!text.includes(token), `the claim token shows in ${text.slice(0, 120)}`);
+  }
+});
+
 test('editing the draft after the preview voids the approval, and nothing is sent', async () => {
   const { context, google } = await connected({ riskEscalation: false });
   const draftId = await draftTo(context, ['sam@partner.test']);
