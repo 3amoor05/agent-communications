@@ -1,6 +1,6 @@
 # CUE-403 — runnable CLI handoffs from the running installation — design
 
-Status: **proposed for 0.13.1; revised after round 8 (1 P1, 2 P2, 1 P3), 2026-10-05. No implementation is in
+Status: **proposed for 0.13.1; revised after round 9 (1 P1, 3 P2), 2026-10-05. No implementation is in
 this change.**
 
 ## 1. What is being fixed
@@ -85,19 +85,26 @@ Resolution is directional:
    resolves the registration's version. It may print that product's command **only when that version equals the
    printing package's own version**. A different or unknown version is unusable: in particular 0.13.0 rejects the new
    path options in core's strict parser and Gmail's program (`packages/core/src/cli.ts:157-168`,
-   `packages/gmail/src/cli/program.ts:159-173`). Among matching registrations the priority is managed, then global,
-   then npx; within a class sort by client, config path, server name, command and arguments.
+   `packages/gmail/src/cli/program.ts:159-173`). Among matching registrations the priority is a managed runtime entry,
+   then another checked file entry, then npx; within a class sort by client, config path, server name, command and
+   arguments.
 
-   A managed registration supplies its checked runtime CLI entry; a global registration supplies the checked package
-   CLI entry resolved from its absolute launcher; both drop server-only `mcp` and narrowing arguments. An npx
-   registration supplies the registered absolute npx executable and the target CLI package pinned to the same version
-   (`@agentcomms/gmail`, not its server-only wrapper). An absent entry, unpinned spec, unreadable command, unrecognised
-   launcher or version mismatch is never used. When no same-version registration resolves, the result contains **no
+   A managed registration supplies its checked runtime CLI entry; another file-backed registration supplies the
+   checked package CLI entry resolved from its absolute command or entry. This includes an installer-written `local`
+   registration and a separately installed global package; `global` is not an installer launcher. Both drop server-only
+   `mcp` and narrowing arguments. An npx registration supplies the registered absolute npx executable and the target
+   CLI package pinned to the same version (`@agentcomms/gmail`, not its server-only wrapper). An absent entry, unpinned
+   spec, unreadable command, unrecognised launcher or version mismatch is never used. When no same-version registration
+   resolves, the result contains **no
    command**. It names the product and the printing package's exact version and says that version is not locatable
    here; install or update it through the person's usual route, then retry. It does not guess which client, package
    manager or installation owns the product, and does not print `update`, `server install`, an MCP tool or any other
    repair. Managed and npx registrations already expose the version evidence used to accept or reject them
    (`packages/core/src/mcp-install.ts:338-350`, `packages/core/src/operations/servers.ts:575-612`).
+
+   On Windows, the registration scanner compares executable stems and every candidate package-entry path segment
+   case-insensitively; POSIX remains case-sensitive. The existing recogniser currently compares both exactly
+   (`packages/core/src/mcp-install.ts:371-372`, `packages/core/src/mcp-install.ts:382-388`).
 
 Before any file entry is returned, the locator `realpath`s both package root and entry, requires a readable regular
 file, and checks containment by path segments after realpath. A missing manifest binary, a mismatch between
@@ -139,18 +146,25 @@ platform application-data variables — exactly as when the person types the com
 (`packages/core/src/mcp-clients.ts:68-95`). A handoff which scans, installs, updates or removes client registrations
 therefore acts on that person's own clients by design.
 
-The locator does not reproduce the printing environment. Between the entry/package word and the subcommand it inserts
-the printing process's already-resolved absolute option for every **agent-communications** directory the target
-command uses: config, state, data, secrets and, for a handoff which reads or writes downloads, downloads. It omits only
-suite directories that the target does not use. Those independent pins override conflicting variables and defaults in
-the target shell for the named suite directories; they intentionally do not reproduce or override the environment
-used to find the person's MCP clients. No environment assignment is printed on any platform.
+The locator does not reproduce the printing environment. It first removes every existing path option from supplied or
+registered argument words, at any position: both `--x value` and `--x=value` forms for all five names. It then inserts,
+between the entry/package word and the subcommand, exactly one canonical absolute option for every
+**agent-communications** directory the target command uses: config, state, data, secrets and, for a handoff which reads
+or writes downloads, downloads. It emits none for a suite directory the target does not use. Thus caller ordering,
+duplicate or relative values, and the cwd where a registered or retry command is later run cannot override the pins.
+Gmail's raw-argv retry builder goes through this same normalization after removing approval flags
+(`packages/gmail/src/cli/program.ts:369-388`). The independent pins override conflicting variables and defaults in the
+target shell for the named suite directories; they intentionally do not reproduce or override the environment used to
+find the person's MCP clients. No environment assignment is printed on any platform.
 
 Registrations preserve the same identity. The installer writes resolved absolute `--config-dir`, `--state-dir`,
-`--data-dir` and `--secrets-dir` values into every managed, global and npx server argv; it no longer relies on only
-`AGENT_COMMS_CONFIG_DIR` (`packages/core/src/mcp-install.ts:266-280`). This also fixes the existing Windows split-root
-file-secret bug: an explicit config directory currently changes `localRoot`, so a server registered from split
-`APPDATA`/`LOCALAPPDATA` can look for secrets under a different root from the installer
+`--data-dir` and `--secrets-dir` values into every supported installer launcher: `managed`, `npx` and `local`
+(`packages/core/src/mcp-install.ts:101`, `packages/core/src/operations/servers.ts:78`). `buildEntry` gives all three the
+same pinned argument construction before its launcher branches, including `local`; it no longer relies on only
+`AGENT_COMMS_CONFIG_DIR`
+(`packages/core/src/mcp-install.ts:266-280`, `packages/core/src/mcp-install.ts:532-546`). This also fixes the existing
+Windows split-root file-secret bug: an explicit config directory currently changes `localRoot`, so a server registered
+from split `APPDATA`/`LOCALAPPDATA` can look for secrets under a different root from the installer
 (`packages/core/src/paths.ts:50-56`). Downloads remain a per-handoff pin when the operation uses them, not a server
 registration pin.
 
@@ -166,6 +180,12 @@ These options are flags, not capabilities. They add no row to `capabilities.json
 MCP tool and shared operation (`capabilities.json:1-2`). The parity check continues to enumerate command paths and
 tool names, not global flags (`scripts/parity.mjs:317-333`); its CLI driver must exercise every row once with the path
 flags to prove parsing precedes operation dispatch.
+
+The detached update-check re-exec is another CLI handoff. The parent appends its already-resolved canonical directory
+options to the hidden command's arguments, and the child applies them before resolving a context, state, configuration
+or any other path. It does not reconstruct them from the inherited environment: the current entry retains only Node
+flags and the script, and the spawn otherwise passes only the hidden command and claim time
+(`packages/core/src/update-check.ts:191-203`, `packages/core/src/update-check.ts:333-345`).
 
 ### D3. Keep the existing tested Windows rendering contract
 
@@ -232,7 +252,8 @@ as the completeness mechanism. The audited groups are:
   `packages/core/src/approvals.ts:635-655`, `packages/core/src/approvals.ts:889-897`,
   `packages/core/src/change-flow.ts:272-302`, `packages/core/src/save-destination.ts:648-676`,
   `packages/core/src/save-destination.ts:744-756`, `packages/core/src/update-state.ts:305-347`,
-  `packages/core/src/update-gate.ts:340-414`, `packages/core/src/update-check.ts:382-445`,
+  `packages/core/src/update-gate.ts:340-414`, `packages/core/src/update-check.ts:191-203`,
+  `packages/core/src/update-check.ts:333-445`,
   `packages/core/src/operations/update.ts:843-900`, `packages/core/src/render.ts:432-479`,
   `packages/core/src/config.ts:722-1074`,
   `packages/core/src/organisations.ts:243-244`, `packages/core/src/organisations.ts:506`,
@@ -385,9 +406,10 @@ authoritative data roots, and CLI-MCP parity for the preference.
 
 ## 4. Tests
 
-1. **Own locator matrix:** managed, npx, global and checkout installations on POSIX and Windows; only the two allowed
-   Node flags survive. Checkout fixtures have no `dist`, then a stale `dist`, and both select `src/cli.ts`. Gmail's
-   wrapper resolves Gmail. Manifest/bin mismatch, missing, unreadable and non-file targets fail with no bare fallback.
+1. **Own locator matrix:** installer-written managed, npx and local registrations, plus global and direct-checkout
+   installations, on POSIX and Windows; only the two allowed Node flags survive. Checkout fixtures have no `dist`, then
+   a stale `dist`, and both select `src/cli.ts`. Gmail's wrapper resolves Gmail. Manifest/bin mismatch, missing,
+   unreadable and non-file targets fail with no bare fallback.
 2. **Direction, source and version matrix:** channel→core asserts the decision inputs — caller module suffix, real
    caller and core roots, workspace membership, same-checkout identity and versions — as well as the selected path.
    A source caller with sibling workspace core selects `src/cli.ts` with core `dist` absent and stale; a built caller,
@@ -397,6 +419,8 @@ authoritative data roots, and CLI-MCP parity for the preference.
    unreadable package/version entries. Only the same-version entries yield commands. Older-only, unknown-version,
    unreadable and absent registrations yield no command and name the target product and required exact version as
    “not locatable here”, with the usual-route install/update instruction and no repair or MCP approval route.
+   Through D1's scanner, Windows fixtures accept mixed-case executable stems and package-entry path segments; the same
+   POSIX fixtures remain case-sensitive.
 3. **Paths:** every CLI accepts all five independent global options before dispatch. Execute a handoff in a fresh shell
    with conflicting `AGENT_COMMS_*`, XDG, home/AppData values and another cwd; it reports every printing-process
    **agent-communications** directory the target uses and no other path option. Relative option values become resolved
@@ -406,7 +430,11 @@ authoritative data roots, and CLI-MCP parity for the preference.
    channels and setup handoffs have explicit suite-directory-use fixtures. Separate client-registration fixtures vary
    `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `HOME` and `APPDATA` at execution time and assert that the CLI targets the
    executing person's client files while all five pinned suite directories stay unchanged. No output contains an
-   environment assignment. In addition, launch installer-written managed and npx registrations with custom state and
+   environment assignment. Locator normalization covers duplicate path options in spaced and `=` forms, reversed
+   ordering, relative values and a changed cwd, through both registered argv and Gmail's raw retry argv; each used
+   directory appears exactly once with its canonical absolute value. A due detached update check started by a
+   flag-pinned command under conflicting ambient paths reads and writes only the parent's pinned directories. An
+   end-to-end registration test launches installer-written managed, npx and local registrations with custom state and
    data roots and, on Windows, split `APPDATA`/`LOCALAPPDATA` plus the file secret store. Through each running server,
    prepare a harmless change and execute its terminal approval; the server and CLI must use the identical registered
    config, state, data and secrets roots. Every server entry, including `agent-gmail-mcp`, has an option/apply-order
