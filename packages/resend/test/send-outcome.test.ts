@@ -7,6 +7,13 @@ import { SendRecords } from '../src/compose/store.ts';
 import { executeSend, prepareSend } from '../src/operations/send.ts';
 import { type Harness, newHarness } from './support/harness.ts';
 
+/** A refusal's details apart from where its approval stands, which each test checks on its own (decision 8). */
+function apartFromApproval(details: Record<string, unknown> | undefined): Record<string, unknown> {
+  const { approval: _approval, ...rest } = details ?? {};
+  return rest;
+}
+const approvalState = (error: CommsError) => (error.details?.approval as { state?: string } | undefined)?.state;
+
 /**
  * A response says a send was refused only when Resend documents it as a pre-action answer. Everything else may be an
  * email the provider has already accepted, and local bookkeeping after a confirmed acceptance cannot change that.
@@ -96,8 +103,10 @@ test('only Resend responses documented as pre-action refusals mark the approval 
         (thrown: unknown) => thrown,
       );
       assert.ok(retry instanceof CommsError);
-      assert.match(retry.message, /the send under this approval was refused; nothing was sent/);
-      assert.equal(retry.hint, 'Prepare the send again if it should still go.');
+      // The record's own state, classified before Resend is asked anything: refused for what it is.
+      assert.match(retry.message, /^nothing was sent: the send it was claimed for failed/);
+      assert.equal(retry.hint, 'Prepare the send again and show the new preview to the user.');
+      assert.equal(approvalState(retry), 'failed');
     });
   }
 
@@ -218,15 +227,17 @@ test('every certain no-send path attempts release, approval, local record and au
             const cause = error.cause as CommsError;
             assert.equal(error.code, cause.code);
             assert.equal(error.message, cause.message);
-            assert.deepEqual(error.details, cause.details);
+            assert.deepEqual(apartFromApproval(error.details), apartFromApproval(cause.details));
             if (trigger !== 'Resend refusal') assert.equal(cause, original);
             if (cause.hint !== undefined) assert.ok(error.hint?.startsWith(cause.hint));
           } else {
             assert.equal(error.code, 'UNEXPECTED');
             assert.equal(error.message, original.message);
-            assert.equal(error.details, undefined);
+            assert.deepEqual(apartFromApproval(error.details), {});
             assert.equal(error.cause, original);
           }
+          // Where the approval stands once settled: failed — or still sending, when that could not be recorded.
+          assert.equal(approvalState(error), failures.includes('approval') ? 'sending' : 'failed');
           for (const step of failures) {
             const needle = step === 'record' ? 'send record' : step;
             assert.match(error.hint ?? '', new RegExp(`${needle} .*read-only`));

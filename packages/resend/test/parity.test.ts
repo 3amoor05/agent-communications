@@ -36,7 +36,7 @@ function normalise(value: unknown): unknown {
       .replace(/"bindingDigest":"[0-9a-f]{64}"/g, '"bindingDigest":"B"')
       .replace(/"expiresAt":"[^"]+"/g, '"expiresAt":"T"')
       .replace(
-        /"(createdAt|updatedAt|attemptedAt|finishedAt|at|approvedAt|usableUntil|sendingAt|sendingHeartbeatAt|usedAt|sentAt|failedAt|revokedAt|expiredAt)":"[^"]+"/g,
+        /"(createdAt|updatedAt|attemptedAt|finishedAt|at|approvedAt|usableUntil|sendingAt|sendingHeartbeatAt|unknownAt|usedAt|sentAt|failedAt|revokedAt|expiredAt)":"[^"]+"/g,
         '"$1":"T"',
       ),
   );
@@ -256,8 +256,18 @@ test('sending: the same preview, the same execute, the same status from both sur
         expect: fromTool.expect,
       }),
     );
-    const strip = (value: unknown) => ({ ...(value as Record<string, unknown>), resendId: 'R', approvalId: 'A' });
+    // Resend's own id, and the approval's, differ between two sends as they should — in the approval object too.
+    const strip = (value: unknown) => {
+      const sent = value as Record<string, unknown> & { approval?: Record<string, unknown> };
+      return normalise({
+        ...sent,
+        resendId: 'R',
+        approvalId: 'A',
+        ...(sent.approval === undefined ? {} : { approval: { ...sent.approval, sentMessageId: 'R' } }),
+      });
+    };
     assert.deepEqual(strip(cliSent.data), strip(toolSent));
+    assert.equal((toolSent as { approval?: { state?: string } }).approval?.state, 'used');
     assert.equal(harness.fake.sends().length, 2);
 
     const cliStatus = (await cliData(['send', 'status', String(fromCli.approvalId), '--account', 'acme/resend'])).data;

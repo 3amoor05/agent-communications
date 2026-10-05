@@ -361,9 +361,15 @@ test('an outcome that cannot be known is never retried: it is recorded, reported
   );
   assert.equal(harness.fake.sends().length, 1, 'one request, never a second');
   assert.equal(asV2(await harness.core.approvals.get(prepared.approvalId))?.state, 'sending');
+  // Still in its lease: being sent by another call, a wait — never a second request, and never "prepare again".
   await assert.rejects(
     executeSend(context, 'acme/resend', { approvalId: prepared.approvalId, expect: prepared.expect }),
-    refusal('APPROVAL_VOID'),
+    (error: unknown) => {
+      refusal('APPROVAL_PENDING')(error);
+      assert.match((error as CommsError).message, /being sent by another call since .*; wait for it/);
+      assert.equal(((error as CommsError).details?.approval as { state?: string } | undefined)?.state, 'sending');
+      return true;
+    },
   );
   assert.equal(harness.fake.sends().length, 1);
   const status = await sendStatus(context, 'acme/resend', prepared.approvalId);
@@ -678,4 +684,102 @@ test('the terminal approval narrows to a valid version-2 send; its cancel takes 
   await assert.rejects(finishSendApproval(context, formId('S'), 'ABCD'), /prepared by a different version/);
   await revokeSendApproval(context, formId('S'));
   assert.equal(stateOf((await harness.core.approvals.get(formId('S'))) as never), 'revoked');
+});
+
+// ── Classified before Resend is asked anything, and where the approval stands (CUE-404 Task 9; §D2, §D8) ───────────
+
+test('execute and status find an id nobody prepared, another account’s — expired or not — and another kind’s as the one NOT_FOUND, before Resend is asked anything (D2-b)', async () => {
+  harness = await newHarness();
+  await sendMode();
+  await harness.addAccount({ name: 'zeta/resend', mode: 'send' });
+  const context = harness.context();
+  const theirs = await prepareSend(context, 'zeta/resend', message());
+  const old = await prepareSend(context, 'zeta/resend', message({ subject: 'Old' }));
+  // An hour old: classified, it would be refused as expired — so a NOT_FOUND is given before it is classified.
+  const file = join(harness.core.approvals.directory, `${old.approvalId}.json`);
+  const record = JSON.parse(readFileSync(file, 'utf8')) as Record<string, string>;
+  for (const key of ['createdAt', 'expiresAt', 'updatedAt'] as const) {
+    record[key] = new Date(Date.parse(record[key] as string) - 60 * 60_000).toISOString();
+  }
+  writeFileSync(file, JSON.stringify(record));
+  const change = await harness.core.approvals.createChange({
+    channel: 'resend',
+    change: { summary: 'x', target: null, loosened: [], effects: ['does a thing'] },
+    policy: 'chat',
+  });
+  const ids = [theirs.approvalId, old.approvalId, change.approvalId];
+  const files = ids.map((id) => readFileSync(join(harness.core.approvals.directory, `${id}.json`), 'utf8'));
+  const asked = harness.fake.requests.length;
+  for (const [what, attempt] of [
+    ['execute', (id: string) => executeSend(context, 'acme/resend', { approvalId: id, expect: theirs.expect })],
+    ['status', (id: string) => sendStatus(context, 'acme/resend', id)],
+  ] as const) {
+    const envelopes = [];
+    for (const id of [`ap_${'7'.repeat(26)}`, ...ids]) {
+      const error = await (attempt(id) as Promise<unknown>).then(
+        () => assert.fail(`${what} ${id} answered`),
+        (refused: unknown) => refused as CommsError,
+      );
+      assert.equal(error.code, 'NOT_FOUND', `${what}: ${error.message}`);
+      assert.deepEqual(error.details, { approval: null }, what);
+      envelopes.push(JSON.stringify({ m: error.message, h: error.hint, d: error.details }).replaceAll(id, 'ID'));
+    }
+    assert.equal(new Set(envelopes).size, 1, `${what}: one envelope, byte for byte`);
+  }
+  assert.equal(harness.fake.requests.length, asked, 'Resend was asked nothing');
+  assert.deepEqual(
+    ids.map((id) => readFileSync(join(harness.core.approvals.directory, `${id}.json`), 'utf8')),
+    files,
+    'no record was written: none was classified',
+  );
+});
+
+test('every Resend send result and refusal says where its approval stands; one refused before it exists says nothing (D8o-a, D8o-d, D2-c)', async () => {
+  harness = await newHarness();
+  await sendMode();
+  const context = harness.context();
+  const prepared = await prepareSend(context, 'acme/resend', message());
+  assert.equal(prepared.approval.id, prepared.approvalId);
+  assert.equal(prepared.approval.channel, 'resend');
+  assert.equal(prepared.approval.state, 'pending');
+  assert.equal(prepared.approval.claimable, true, 'a yes in the chat sends it');
+  const sent = await executeSend(context, 'acme/resend', { approvalId: prepared.approvalId, expect: prepared.expect });
+  assert.equal(sent.approval.state, 'used');
+  assert.equal(sent.approval.sentMessageId, sent.resendId);
+  const again = await executeSend(context, 'acme/resend', {
+    approvalId: prepared.approvalId,
+    expect: prepared.expect,
+  }).then(
+    () => assert.fail('sent twice'),
+    (error: unknown) => error as CommsError,
+  );
+  assert.equal(again.code, 'APPROVAL_VOID');
+  assert.equal((again.details?.approval as { state?: string } | undefined)?.state, 'used');
+
+  // Waiting for a person: refused, with the record as it stands.
+  await harness.cli(['account', 'policy', 'acme/resend', '--send', 'confirm'], { env: { CLAUDECODE: '1' } });
+  const confirm = await prepareSend(context, 'acme/resend', message({ subject: 'Confirm me' }));
+  assert.equal(confirm.approval.claimable, false);
+  assert.equal(confirm.approval.route, 'confirm');
+  const pending = await executeSend(context, 'acme/resend', {
+    approvalId: confirm.approvalId,
+    expect: confirm.expect,
+  }).then(
+    () => assert.fail('sent without a person'),
+    (error: unknown) => error as CommsError,
+  );
+  assert.equal(pending.code, 'APPROVAL_PENDING');
+  assert.equal((pending.details?.approval as { state?: string } | undefined)?.state, 'pending');
+
+  // Refused before an approval exists: nothing to say of one.
+  const html = await prepareSend(
+    context,
+    'acme/resend',
+    message({ text: 'Hi Sam', html: '<p>Hi Sam</p><img src="https://tracker.test/pixel.gif">' }),
+  ).then(
+    () => assert.fail('an unsendable HTML part was prepared'),
+    (error: unknown) => error as CommsError,
+  );
+  assert.equal(html.code, 'UNSENDABLE_HTML');
+  assert.equal(html.details?.approval, undefined);
 });

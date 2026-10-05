@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import {
+  type ApprovalObject,
   type ApprovalRecord,
   type CliHandoffs,
   CommsError,
@@ -9,20 +10,18 @@ import {
   handoffSentence,
   handoffSentenceToFill,
   integrityRefusal,
-  kindOf,
   type LegacyDrainReport,
   type MessagePreview,
-  otherVersionRefusal,
   ownerOf,
   type PublicApproval,
   publicStored,
   renderMessagePreview,
   type SendPolicy,
-  type StoredApproval,
   sendEpochOf,
   sha256Hex,
   stateOf,
   stricterPolicy,
+  withApproval,
   withSendingLease,
 } from '@agentcomms/core';
 import { keyPermissionOf, type NamedAccount } from '../accounts.ts';
@@ -76,6 +75,8 @@ export interface SendPreparation {
   expect: Expectation;
   expiresAt: string;
   nextStep: string;
+  /** Where its approval stands (design 2026-10-05 §D8): pending, and whether a yes in the chat sends it. */
+  approval: ApprovalObject;
   /**
    * What became of the approvals an earlier release prepared, by id, when this call was one that retired them
    * (`ensureSendEpochConfig`). Absent otherwise.
@@ -97,6 +98,11 @@ export interface SendResult {
   /** Bookkeeping that could not be written after Resend confirmed the send. */
   note?: string | undefined;
   /**
+   * Where the approval stands now that Resend has the email (design 2026-10-05 §D8): `used`, with Resend's id — or
+   * still `sending` when that could not be recorded, which later reads as `unknown`. Never a `used` invented.
+   */
+  approval: ApprovalObject;
+  /**
    * What became of the approvals an earlier release prepared, by id, when this call was one that retired them
    * (`ensureSendEpochConfig`). Absent otherwise.
    */
@@ -104,23 +110,27 @@ export interface SendResult {
 }
 
 /**
- * A send's approval as the one account that may use it, or a refusal that does not touch it.
+ * A send's approval as the one account that may use it, classified under its lock as the claim would classify it
+ * (design 2026-10-05 §D2), or a refusal that does not touch it.
  *
- * Whose it is comes from a record that can be trusted to say (`ownerOf`): any other — an unreadable file, a corrupt
- * record whose binding does not verify — is not this account's, and is not found, as an id nobody prepared is not.
- * Then only a valid version-2 send is used: this account's corrupt record is refused as that, and one an earlier
- * release prepared by its version.
+ * Whose and what first: another account's, another kind's, one whose owner cannot be trusted — an unreadable file, a
+ * corrupt record whose binding does not verify — or one nobody prepared is the one NOT_FOUND. Then anything that cannot
+ * be sent is refused for what it is, with where it stands: this account's corrupt record, one an earlier release
+ * prepared, or one used, expired, revoked — now, because sending was turned off since — or under way.
  */
-async function ownRecord(context: ResendContext, named: NamedAccount, approvalId: string): Promise<ApprovalRecord> {
-  const stored = await context.core.approvals.get(approvalId);
-  if (stored === null || ownerOf(stored) !== named.account.id || kindOf(stored) !== 'send') {
-    throw new CommsError('NOT_FOUND', `there is no send approval ${approvalId} for "${named.name}"`, {
-      hint: 'Approvals last ten minutes. Prepare the send again.',
-    });
-  }
-  if (stored.form === 'legacy') throw otherVersionRefusal(stored.view);
-  if (stored.form !== 'v2') throw integrityRefusal(stored);
-  return stored.record;
+async function ownRecord(
+  context: ResendContext,
+  named: NamedAccount,
+  approvalId: string,
+): Promise<{ record: ApprovalRecord; approval: ApprovalObject }> {
+  const { outcome } = await context.core.approvals.inspect(
+    approvalId,
+    { kind: 'send', owner: named.account.id },
+    { action: 'claim' },
+  );
+  if (outcome.error) throw outcome.error;
+  if (outcome.record === null) throw new CommsError('UNEXPECTED', 'a send approval read as no record');
+  return { record: outcome.record, approval: outcome.approval };
 }
 
 function requireSendMode(named: NamedAccount, handoffs: CliHandoffs): void {
@@ -438,6 +448,7 @@ export async function prepareSend(context: ResendContext, name: string, input: S
             { instead: 'Show the preview to the user; they approve it at their own terminal.' },
           )} You cannot approve this yourself. Then execute it with the same approval id and the recipients and subject shown.`
         : 'Show the preview to the user verbatim and wait for an explicit yes. Then execute it with the same approval id and the recipients and subject shown above.',
+    approval: await context.core.approvals.approvalOf(record),
     ...(legacyDrain === undefined ? {} : { legacyDrain }),
   };
 }
@@ -502,39 +513,40 @@ function payloadOf(
   };
 }
 
-function describeState(state: ApprovalRecord['state']): string {
-  switch (state) {
-    case 'used':
-      return 'this approval has already been used — the email was sent once, and is not sent again';
-    case 'sending':
-      return 'this approval is being sent by another process right now';
-    case 'failed':
-      return 'the send under this approval was refused; nothing was sent';
-    case 'unknown':
-      return 'a process stopped mid-send under this approval; whether the email went is not known';
-    case 'expired':
-      return 'this approval has expired';
-    case 'revoked':
-      return 'this approval was cancelled or voided';
-    default:
-      return `this approval is ${state}`;
-  }
-}
-
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** Keeps the failure that stopped the send visible, adding only what could not be settled afterwards. */
-function noSendError(error: unknown, unrecorded: readonly string[]): CommsError {
+/**
+ * Keeps the failure that stopped the send visible, adding only what could not be settled afterwards — and where the
+ * approval stands now that it is settled (decision 8), whatever the failure said of it before.
+ */
+function noSendError(error: unknown, unrecorded: readonly string[], approval: ApprovalObject): CommsError {
   const original =
     error instanceof CommsError ? error : new CommsError('UNEXPECTED', messageOf(error), { cause: error });
   const hint = [original.hint, ...unrecorded].filter((part) => part !== undefined);
   return new CommsError(original.code, original.message, {
     ...(hint.length === 0 ? {} : { hint: hint.join(' ') }),
-    ...(original.details === undefined ? {} : { details: original.details }),
+    details: { ...original.details, approval },
     cause: error,
   });
+}
+
+/**
+ * Where a claimed send's approval stands now, read under its lock — or, when that read fails, what `fallback` said: a
+ * report never turns into a failure of the send it reports on.
+ */
+async function approvalNow(
+  context: ResendContext,
+  approvalId: string,
+  owner: string,
+  fallback: ApprovalObject,
+): Promise<ApprovalObject> {
+  try {
+    return (await context.core.approvals.inspect(approvalId, { kind: 'send', owner })).outcome.approval;
+  } catch {
+    return fallback;
+  }
 }
 
 /** Settles a failure known to have happened before Resend sent anything, without one failed write skipping another. */
@@ -544,17 +556,22 @@ async function recordNoSend(
   options: { name: string; accountId: string; approvalId: string },
   // The claim's own token, kept apart from what is recorded: only the call that claimed records the outcome.
   claimToken: string,
+  // Where the approval stood when it was claimed: what the refusal says if its failure cannot be recorded.
+  claimed: ApprovalObject,
   error: unknown,
 ): Promise<CommsError> {
   const unrecorded: string[] = [];
   const said = messageOf(error);
+  let settled = claimed;
   try {
     await records.release(options.accountId, options.approvalId);
   } catch (failure) {
     unrecorded.push(`the capacity slot could not be released (${messageOf(failure)})`);
   }
   try {
-    await context.core.approvals.complete(options.approvalId, claimToken, { error: said });
+    settled = await context.core.approvals.approvalOf(
+      await context.core.approvals.complete(options.approvalId, claimToken, { error: said }),
+    );
   } catch (failure) {
     unrecorded.push(`the approval could not be marked failed (${messageOf(failure)})`);
   }
@@ -580,7 +597,7 @@ async function recordNoSend(
   } catch (failure) {
     unrecorded.push(`the audit log could not record the failure (${messageOf(failure)})`);
   }
-  return noSendError(error, unrecorded);
+  return noSendError(error, unrecorded, settled);
 }
 
 /**
@@ -598,21 +615,39 @@ export async function executeSend(
   const { legacyDrain } = await ensureSendEpochConfig(context.core, { now: context.now });
   const named = await context.accounts.require(name);
   requireSendMode(named, context.handoffs);
-  // Before anything else, as the claim would: only a valid version-2 record is ever claimed here.
-  const known = await ownRecord(context, named, options.approvalId);
-  if (known.state !== 'pending' && known.state !== 'approved') {
-    throw new CommsError('APPROVAL_VOID', `nothing was sent: ${describeState(known.state)}`, {
-      hint:
-        known.state === 'unknown'
-          ? handoffSentence(
-              statusCommand(context.handoffs, options.approvalId, name),
-              (command) => `Check what happened with ${command} before anything else.`,
-              { instead: 'Check what happened with resend_send_status before anything else.' },
-            )
-          : 'Prepare the send again if it should still go.',
-      details: { approvalId: options.approvalId, state: known.state },
-    });
-  }
+  // Before anything else, as the claim would: this account's send, classified under its lock (design 2026-10-05 §D2).
+  // An outcome nobody knows says so with its own code, and where to look: `send status`.
+  const { record: known, approval: seen } = await ownRecord(context, named, options.approvalId).catch(
+    (error: unknown) => {
+      if (error instanceof CommsError && error.code === 'SEND_OUTCOME_UNKNOWN') {
+        throw new CommsError(error.code, error.message, {
+          hint: handoffSentence(
+            statusCommand(context.handoffs, options.approvalId, name),
+            (command) => `${error.hint ?? ''} Check what happened with ${command} before anything else.`.trim(),
+            { instead: `${error.hint ?? ''} Check what happened with resend_send_status before anything else.`.trim() },
+          ),
+          ...(error.details === undefined ? {} : { details: error.details }),
+        });
+      }
+      throw error;
+    },
+  );
+  // Until the claim, a refusal says where the approval stands, as it was classified.
+  return claimAndSend(context, named, name, options, known, seen, legacyDrain).catch((error: unknown) => {
+    throw withApproval(error, seen);
+  });
+}
+
+/** {@link executeSend}, once the approval is classified: from the message's reload to the one request that sends. */
+async function claimAndSend(
+  context: ResendContext,
+  named: NamedAccount,
+  name: string,
+  options: { approvalId: string; expect: Expectation },
+  known: ApprovalRecord,
+  _seen: ApprovalObject,
+  legacyDrain: LegacyDrainReport | undefined,
+): Promise<SendResult> {
   const config = await context.config();
   const livePolicy = named.account.sendPolicy ?? config.defaults.sendPolicy;
   const { prepared, digest, contents } = await reload(context, known);
@@ -627,7 +662,11 @@ export async function executeSend(
     });
   }
 
-  const { record: claimed, claimToken } = await context.core.approvals.claimForSend(
+  const {
+    record: claimed,
+    claimToken,
+    approval: claimedApproval,
+  } = await context.core.approvals.claimForSend(
     options.approvalId,
     {
       draftMessageId: digest,
@@ -660,7 +699,7 @@ export async function executeSend(
     try {
       await records.reserve(named.account.id, options.approvalId, config.defaults.sendCaps);
     } catch (error) {
-      throw await recordNoSend(context, records, bookkeeping, claimToken, error);
+      throw await recordNoSend(context, records, bookkeeping, claimToken, claimedApproval, error);
     }
     try {
       await records.record(named.account.id, {
@@ -683,7 +722,7 @@ export async function executeSend(
         { durable: true },
       );
     } catch (error) {
-      throw await recordNoSend(context, records, bookkeeping, claimToken, error);
+      throw await recordNoSend(context, records, bookkeeping, claimToken, claimedApproval, error);
     }
 
     let resendId: string;
@@ -712,7 +751,7 @@ export async function executeSend(
       resendId = response.id;
     } catch (error) {
       if (!requestIssued) {
-        throw await recordNoSend(context, records, bookkeeping, claimToken, error);
+        throw await recordNoSend(context, records, bookkeeping, claimToken, claimedApproval, error);
       }
       const outcome: WriteOutcome =
         error instanceof CommsError && error.details?.outcome === 'not-sent'
@@ -722,7 +761,7 @@ export async function executeSend(
             : 'unknown';
       const said = error instanceof Error ? error.message : String(error);
       if (outcome === 'not-sent') {
-        throw await recordNoSend(context, records, bookkeeping, claimToken, error);
+        throw await recordNoSend(context, records, bookkeeping, claimToken, claimedApproval, error);
       }
       const unrecorded: string[] = [];
       try {
@@ -768,14 +807,20 @@ export async function executeSend(
           ...(error instanceof CommsError ? error.details : {}),
           approvalId: options.approvalId,
           outcome: 'unknown',
+          // Still `sending`: nothing is recorded of a send whose outcome is not known.
+          approval: await approvalNow(context, options.approvalId, named.account.id, claimedApproval),
         },
         cause: error,
       });
     }
 
     const unrecorded: string[] = [];
+    // `used` only once it is written; until then — and for good, if it cannot be — the record as it stands.
+    let approval: ApprovalObject | null = null;
     try {
-      await context.core.approvals.complete(options.approvalId, claimToken, { sentMessageId: resendId });
+      approval = await context.core.approvals.approvalOf(
+        await context.core.approvals.complete(options.approvalId, claimToken, { sentMessageId: resendId }),
+      );
     } catch (error) {
       unrecorded.push(
         `the approval could not be marked used (${error instanceof Error ? error.message : String(error)}), so it will read as unknown`,
@@ -818,6 +863,7 @@ export async function executeSend(
       bcc: claimed.expect.bcc,
       subject: claimed.expect.subject,
       ...(unrecorded.length > 0 ? { note: unrecorded.join('; ') } : {}),
+      approval: approval ?? (await approvalNow(context, options.approvalId, named.account.id, claimedApproval)),
       ...(legacyDrain === undefined ? {} : { legacyDrain }),
     };
   });
@@ -843,12 +889,19 @@ export interface SendStatus {
  */
 export async function sendStatus(context: ResendContext, name: string, approvalId: string): Promise<SendStatus> {
   const named = await context.accounts.require(name);
-  // Held, and not this account's send — or whose it is cannot be trusted: not found, as an id nobody prepared.
-  const stored = await context.core.approvals.get(approvalId);
-  if (stored !== null && (kindOf(stored) !== 'send' || ownerOf(stored) !== named.account.id)) {
-    throw new CommsError('NOT_FOUND', `there is no send approval ${approvalId} for "${name}"`);
-  }
   const local = await new SendRecords(context.core.paths.stateDir, context.now).summary(named.account.id, approvalId);
+  /*
+   * Looked at under its lock, this account's send or the one NOT_FOUND (design 2026-10-05 §D2): another account's,
+   * another kind's, one whose owner cannot be trusted and one nobody prepared alike — unless this account's own send
+   * record knows the id, when its approval is simply gone.
+   */
+  const stored = await context.core.approvals
+    .inspect(approvalId, { kind: 'send', owner: named.account.id })
+    .then(({ stored: seen }) => seen)
+    .catch((error: unknown) => {
+      if (error instanceof CommsError && error.code === 'NOT_FOUND' && local !== null) return null;
+      throw error;
+    });
   const base = { account: name, approvalId, approval: stored ? publicStored(stored) : null, local };
   if (!local) {
     return {
@@ -940,25 +993,24 @@ export interface SendApprovalPrompt {
 async function recordAndAccount(
   context: ResendContext,
   approvalId: string,
-): Promise<{ stored: StoredApproval; named: NamedAccount }> {
-  const stored = await context.core.approvals.get(approvalId);
-  if (stored !== null && (stored.form === 'corrupt' || stored.form === 'unreadable')) throw integrityRefusal(stored);
-  const owner = ownerOf(stored);
-  if (stored === null || owner === null || kindOf(stored) !== 'send') {
-    throw new CommsError('NOT_FOUND', `there is no send approval ${approvalId}`, {
-      hint: 'Approvals last ten minutes. Prepare the send again.',
-    });
+): Promise<{ record: ApprovalRecord; named: NamedAccount }> {
+  /*
+   * Classified under its lock for the approval a person is about to give (design 2026-10-05 §D2): a send's, or the one
+   * NOT_FOUND. One that cannot be approved is refused for what it is, with where it stands — corrupt, an earlier
+   * release's, expired, used, revoked (now, if its account was removed or sending turned off) — before the message is
+   * read again.
+   */
+  const { outcome } = await context.core.approvals.inspect(approvalId, { kind: 'send' }, { action: 'approve' });
+  if (outcome.error) throw outcome.error;
+  const record = outcome.record;
+  if (record === null) throw new CommsError('UNEXPECTED', 'a send approval read as no record');
+  const named = await context.accounts.findById(record.inboxId);
+  if (!named) {
+    throw (
+      outcome.error ?? new CommsError('NOT_FOUND', 'the Resend account this approval belongs to is no longer connected')
+    );
   }
-  const named = await context.accounts.findById(owner);
-  if (!named) throw new CommsError('NOT_FOUND', 'the Resend account this approval belongs to is no longer connected');
-  return { stored, named };
-}
-
-/** Only a valid version-2 send is approved at the terminal: one an earlier release prepared, by its version. */
-function sendRecordOf(stored: StoredApproval): ApprovalRecord {
-  if (stored.form === 'legacy') throw otherVersionRefusal(stored.view);
-  if (stored.form !== 'v2') throw integrityRefusal(stored);
-  return stored.record;
+  return { record, named };
 }
 
 /**
@@ -967,17 +1019,24 @@ function sendRecordOf(stored: StoredApproval): ApprovalRecord {
  * the record does not describe.
  */
 export async function beginSendApproval(context: ResendContext, approvalId: string): Promise<SendApprovalPrompt> {
-  const { stored, named } = await recordAndAccount(context, approvalId);
-  // Refused before the message is read again: the integrity check below would judge any other form by rules it was
+  // Classified before the message is read again: the integrity check below would judge any other form by rules it was
   // not written under.
-  const record = sendRecordOf(stored);
-  const { prepared, digest } = await reload(context, record);
+  const { record, named } = await recordAndAccount(context, approvalId);
+  const { prepared, digest } = await reload(context, record).catch(async (error: unknown) => {
+    throw withApproval(error, await context.core.approvals.approvalOf(record));
+  });
   if (digest !== record.contentDigest) {
-    await context.core.approvals.revoke(approvalId, 'the message or an attachment changed after the preview', {
-      disposition: 'integrity',
-    });
+    const voided = await context.core.approvals.revoke(
+      approvalId,
+      'the message or an attachment changed after the preview',
+      { disposition: 'integrity', expect: { kind: 'send' } },
+    );
     throw new CommsError('APPROVAL_VOID', 'nothing was sent: the message or an attachment changed after the preview', {
       hint: 'Prepare the send again to see what it says now.',
+      details: {
+        approvalId,
+        approval: voided.form === 'v2' ? await context.core.approvals.approvalOf(voided.record) : null,
+      },
     });
   }
   const config = await context.config();
@@ -1009,9 +1068,10 @@ export async function finishSendApproval(
 ): Promise<ApprovalRecord> {
   // First, as every approval does: version 3, and an earlier release's records retired.
   await ensureSendEpochConfig(context.core, { now: context.now });
-  const { stored, named } = await recordAndAccount(context, approvalId);
-  const record = sendRecordOf(stored);
-  const { digest } = await reload(context, record);
+  const { record, named } = await recordAndAccount(context, approvalId);
+  const { digest } = await reload(context, record).catch(async (error: unknown) => {
+    throw withApproval(error, await context.core.approvals.approvalOf(record));
+  });
   const approved = await context.core.approvals.approve(
     approvalId,
     'terminal',
@@ -1034,7 +1094,16 @@ export async function finishSendApproval(
 
 /** Cancels an approval. Anyone may: refusing to send is never the dangerous direction. */
 export async function revokeSendApproval(context: ResendContext, approvalId: string): Promise<void> {
-  const { named } = await recordAndAccount(context, approvalId);
+  /*
+   * A send's, looked at under its lock, or the one NOT_FOUND; one that cannot be read is refused with only its stub. A
+   * person's no reaches any other — an earlier release's is retired in its own shape — and a finished one is left as
+   * it is, by the store.
+   */
+  const { stored, outcome } = await context.core.approvals.inspect(approvalId, { kind: 'send' });
+  if (stored.form === 'corrupt' || stored.form === 'unreadable') throw outcome.error ?? integrityRefusal(stored);
+  const owner = ownerOf(stored);
+  const named = owner === null ? undefined : await context.accounts.findById(owner);
+  if (!named) throw new CommsError('NOT_FOUND', 'the Resend account this approval belongs to is no longer connected');
   await context.core.approvals.revoke(approvalId, 'cancelled at the terminal', { disposition: 'person' });
   await context.core.audit.append({
     inboxId: named.account.id,

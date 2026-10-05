@@ -176,6 +176,10 @@ test('under confirm the tool hands over the command a person runs, and sends not
       }),
     );
     assert.equal(prepared.effectivePolicy, 'confirm');
+    // Where the approval stands (design 2026-10-05 §D8): pending on the confirm route, not claimable from here.
+    const approval = (prepared as unknown as { approval: { state: string; route: string; claimable: boolean } })
+      .approval;
+    assert.deepEqual([approval.state, approval.route, approval.claimable], ['pending', 'confirm', false]);
     const waiting = refused(
       await call('resend_send_execute', {
         account: 'acme/resend',
@@ -184,6 +188,7 @@ test('under confirm the tool hands over the command a person runs, and sends not
       }),
     );
     assert.equal(waiting.code, 'APPROVAL_PENDING');
+    assert.equal((waiting.details?.approval as { state?: string } | undefined)?.state, 'pending');
     assert.equal(
       waiting.hint,
       `Ask the user to run ${resendInline(harness.core, ['approve', prepared.approvalId])} in their own terminal, then execute it again with the same approval. You cannot approve it yourself.`,

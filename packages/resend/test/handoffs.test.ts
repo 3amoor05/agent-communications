@@ -250,11 +250,13 @@ test('a send whose outcome is not known is checked with Resend’s own send stat
     throttle: { intervalMs: 0 },
     platform: 'darwin',
   });
+  // Its own code (design 2026-10-05 §D2): the outcome is unknown, never a void — and the status command after it.
   const unknown = await hintOf(
     executeSend(later, 'acme/resend', { approvalId: prepared.approvalId, expect: prepared.expect }),
-    'APPROVAL_VOID',
+    'SEND_OUTCOME_UNKNOWN',
   );
-  assert.equal(unknown, `Check what happened with ${status} before anything else.`);
+  assert.ok(unknown.endsWith(` Check what happened with ${status} before anything else.`), unknown);
+  assert.match(unknown, /^Check Sent, or the channel, before anything else/);
   assertNoBareCommand(`${lost} ${unknown}`);
   assert.equal(harness.fake.sends().length, 1, 'the one approved send, and no other');
 });
