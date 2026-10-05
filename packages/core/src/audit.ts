@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import type { RetainedApproval } from './approval-maintenance.ts';
 import type { SendPolicy } from './config.ts';
 import { appendPrivateLine } from './fs.ts';
 
@@ -33,6 +34,12 @@ export interface AuditRecord {
    * the configuration, and only this line tells them apart.
    */
   policy?: SendPolicy;
+  /**
+   * What daily retention deleted (`operation: 'approval.retained'`, design 2026-10-05 §D9): the approval's kind, its
+   * final state, when it finished and any provider id — never its content or a recipient. Appended durably before the
+   * record is unlinked, so the audit log keeps the terminal history the approval directory no longer does.
+   */
+  retained?: RetainedApproval;
 }
 
 /** Large id lists are condensed so every audit line stays small enough to be appended atomically. */

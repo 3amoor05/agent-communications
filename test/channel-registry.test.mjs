@@ -273,6 +273,28 @@ test('a new channel that borrows Gmail’s or Slack’s shapes, or a command out
   assert.match(await snapshotSource(root), /channel: 'newcomer'/);
 });
 
+test('a new channel chooses how the unsent report groups its approvals in its own manifest, with no edit to core (R15f)', async () => {
+  // Design 2026-10-05 §D9: the rule is data, read from the snapshot core is built with.
+  const { root, version } = await treeWithNewcomer();
+  const path = join(root, 'packages', 'newcomer', 'package.json');
+  const manifest = newcomerManifest(version);
+  const declare = (agentcomms) => writeFile(path, JSON.stringify({ ...manifest, agentcomms }));
+  const entryOf = (snapshot) => {
+    const start = snapshot.indexOf("packageName: '@agentcomms/newcomer'");
+    const next = snapshot.indexOf('packageName:', start + 1);
+    return snapshot.slice(start, next === -1 ? undefined : next);
+  };
+
+  for (const rule of ['draft', 'draft-revision-digest']) {
+    await declare({ ...manifest.agentcomms, approvalGrouping: rule });
+    assert.match(entryOf(await snapshotSource(root)), new RegExp(`approvalGrouping: '${rule}'`), rule);
+  }
+  await declare(manifest.agentcomms);
+  assert.doesNotMatch(entryOf(await snapshotSource(root)), /approvalGrouping/, 'none declared, none snapshotted');
+  await declare({ ...manifest.agentcomms, approvalGrouping: 'per-thread' });
+  await assert.rejects(snapshotSource(root), /@agentcomms\/newcomer: agentcomms\.approvalGrouping: /);
+});
+
 /**
  * Every channel carries the core it was released with (design 2026-10-04, D4).
  *

@@ -10,7 +10,16 @@ import {
   requireKnownChannel,
   SENDING_LEASE_MS,
 } from './approval-binding.ts';
+import { registerStoreInternals } from './approval-internals.ts';
+import { type ApprovalIo, NODE_APPROVAL_IO } from './approval-io.ts';
 import { decodeLegacyV1, deriveLegacyV1State, type LegacyApprovalRecord } from './approval-legacy.ts';
+import {
+  ensurePruned,
+  MAINTENANCE_RENEW_MS,
+  MAINTENANCE_STALE_MS,
+  type MaintenanceOptions,
+  type MaintenanceStatus,
+} from './approval-maintenance.ts';
 import {
   type ApprovalObject,
   type ApprovalOutcome,
@@ -33,6 +42,7 @@ import {
   stateOf,
 } from './approval-stored.ts';
 import { CLOCK_ANOMALY } from './approval-validate.ts';
+import { AuditLog } from './audit.ts';
 import { accountChannels } from './channel-words.ts';
 import {
   type ChangePolicy,
@@ -693,6 +703,16 @@ export interface ApprovalStoreOptions {
    * ever claimable, and a claim, an approval or an answer is refused with `CONFIG`.
    */
   loadConfig?: (() => Promise<Config | null>) | undefined;
+  /**
+   * The audit log daily retention records each deletion in (`approval.retained`, design 2026-10-05 §D9): the state
+   * directory's own when left out. `openCore` passes the one it opens.
+   */
+  audit?: Pick<AuditLog, 'append'> | undefined;
+  /**
+   * The file operations daily maintenance and the unsent report go through — the real ones when left out; a test's to
+   * count and interrupt every step. Every other read and write of the store is unaffected.
+   */
+  io?: ApprovalIo | undefined;
 }
 
 export class ApprovalStore {
@@ -706,6 +726,25 @@ export class ApprovalStore {
     this.#handoffs = options.handoffs;
     this.#now = options.now ?? (() => new Date());
     this.#loadConfig = options.loadConfig;
+    registerStoreInternals(this, {
+      directory: this.directory,
+      now: () => this.#now(),
+      loadConfig: () => this.#config(),
+      derive: (record) => this.#derive(record),
+      io: options.io ?? NODE_APPROVAL_IO,
+      audit: options.audit ?? new AuditLog(stateDir, () => this.#now()),
+      timings: { staleMs: MAINTENANCE_STALE_MS, renewMs: MAINTENANCE_RENEW_MS, recordStaleMs: 30_000 },
+    });
+  }
+
+  /**
+   * Daily retention (design 2026-10-05 §D9): once a day per state directory, a bounded batch deletes valid finished
+   * records ninety days past their finish. Awaited before every creation, list, status and wait — with its own
+   * five-second budget — and before a report, on the report's shared deadline. Never a gate: whatever it finds, it
+   * returns its status and the caller goes on.
+   */
+  ensurePruned(options: MaintenanceOptions = {}): Promise<MaintenanceStatus> {
+    return ensurePruned(this, options);
   }
 
   #path(approvalId: string, suffix = '.json'): string {
@@ -803,6 +842,9 @@ export class ApprovalStore {
         hint: 'This is a bug — please report it.',
       });
     }
+    requireKnownChannel(input.channel);
+    // The day's retention first, bounded: a creation goes on whatever it finds.
+    await this.ensurePruned();
     const now = this.#now();
     const requiredPolicy = stricterPolicy(input.policy, input.requiredPolicy);
     // The route is fixed here, and never moves: a person outside the chat when the policy or an escalation says so.
@@ -1219,6 +1261,8 @@ export class ApprovalStore {
    * same value means the same change.
    */
   async createChange(input: CreateChangeApprovalInput): Promise<ApprovalRecord> {
+    requireKnownChannel(input.channel);
+    await this.ensurePruned();
     const now = this.#now();
     const change: ChangeBinding = {
       summary: input.change.summary,
@@ -1335,7 +1379,6 @@ export class ApprovalStore {
     download: DownloadBinding;
     policy: ChangePolicy;
   }): Promise<ApprovalRecord & { download: DownloadBinding }> {
-    const now = this.#now();
     const download: DownloadBinding = {
       summary: input.download.summary,
       target: { ...input.download.target },
@@ -1365,6 +1408,9 @@ export class ApprovalStore {
         hint: 'This is a bug — please report it.',
       });
     }
+    requireKnownChannel(input.channel);
+    await this.ensurePruned();
+    const now = this.#now();
     const digest = downloadDigest(download);
     // Anything but `chat` is `confirm`: a policy word this release does not know is not a reason to ask less.
     const policy: ChangePolicy = input.policy === 'chat' ? 'chat' : 'confirm';
@@ -1626,6 +1672,8 @@ export class ApprovalStore {
   async inspectAll(
     filter: { inboxId?: string; states?: (ApprovalState | 'corrupt')[] } = {},
   ): Promise<Array<{ stored: StoredApproval; outcome: ApprovalOutcome }>> {
+    // The day's retention first, bounded: the list goes on whatever it finds (design 2026-10-05 §D9).
+    await this.ensurePruned();
     let names: string[];
     try {
       names = (await readdir(this.directory)).filter((name) => APPROVAL_ID_PATTERN.test(name.replace(/\.json$/, '')));

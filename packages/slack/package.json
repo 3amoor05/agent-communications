@@ -91,6 +91,7 @@
       "files.slack.com"
     ],
     "approve": "agent-slack approve",
+    "approvalGrouping": "draft-revision-digest",
     "skills": {
       "prefix": "slack-",
       "contract": "skills/_shared/contract-slack.md"

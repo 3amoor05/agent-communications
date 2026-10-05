@@ -178,6 +178,9 @@ async function waitHeld(
   options: WaitOptions,
 ): Promise<ApprovalWait> {
   const clock = options.clock ?? REAL_CLOCK;
+  // The day's approval retention first, on its own bounded budget: the status or wait goes on whatever it finds
+  // (design 2026-10-05 §D9), and the wait's own time starts after it.
+  await core.approvals.ensurePruned();
   const started = clock.now();
   const deadline = started + waitSeconds * 1000;
   const expect = options.owner === undefined ? {} : { owner: options.owner };

@@ -124,6 +124,7 @@
       "people.googleapis.com"
     ],
     "approve": "agent-gmail approve",
+    "approvalGrouping": "draft",
     "skills": {
       "prefix": "gmail-",
       "contract": "skills/_shared/contract-gmail.md"

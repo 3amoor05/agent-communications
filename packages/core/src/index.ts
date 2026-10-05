@@ -1,6 +1,32 @@
 export * from './addresses.ts';
 export * from './approval-binding.ts';
+export * from './approval-io.ts';
 export * from './approval-legacy.ts';
+/*
+ * Daily approval retention (design 2026-10-05 §D9): `ApprovalStore.ensurePruned()` and what it reports. The batch's
+ * own runner takes the store's internals, which are core's alone, and is not here.
+ */
+export {
+  ensurePruned,
+  MAINTENANCE_BUDGET_MS,
+  MAINTENANCE_FUTURE_SKEW_MS,
+  MAINTENANCE_INTERVAL_MS,
+  MAINTENANCE_LOCK_FILE,
+  MAINTENANCE_RENEW_MS,
+  MAINTENANCE_SLOTS,
+  MAINTENANCE_STALE_MS,
+  type MaintenanceError,
+  type MaintenanceOptions,
+  type MaintenanceStatus,
+  type MaintenanceStep,
+  PRUNE_STATE_FILE,
+  type PruneCursor,
+  type PruneState,
+  parsePruneState,
+  RETENTION_MS,
+  type ReadPruneState,
+  type RetainedApproval,
+} from './approval-maintenance.ts';
 export * from './approval-outcome.ts';
 export * from './approval-stored.ts';
 export * from './approval-validate.ts';
@@ -155,6 +181,11 @@ export * from './state.ts';
 export * from './system-programs.ts';
 export * from './taint.ts';
 export * from './tool-arguments.ts';
+/*
+ * The unsent report (design 2026-10-05 §D9): drafts grouped by each channel's declared rule, worded to the evidence the
+ * scan read. A channel's own surfaces show it.
+ */
+export * from './unsent-report.ts';
 export * from './untrusted.ts';
 /*
  * The daily update check (design 2026-09-28). The reader and the gate carry no network code, and are all WhatsApp

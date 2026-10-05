@@ -75,9 +75,50 @@ interface LockBody {
   token: string;
 }
 
-async function readLock(path: string): Promise<LockBody | null> {
+/**
+ * The file operations a lock is made of, one method each, so a test can count and interrupt every one of them: the
+ * create that is the attempt, the read that checks a holder, the touch that renews, the unlink that releases.
+ * `withFileLock` uses the real ones; `tryFileLock` takes another for a caller whose every step is counted.
+ */
+export interface LockIo {
+  /** Creates `path` exclusively (`wx`, 0600) holding `body`: the one attempt to take the lock. */
+  create(path: string, body: string): Promise<void>;
+  /** The lock file's text: a holder's body. */
+  read(path: string): Promise<string>;
+  /** The lock file's modification time, in milliseconds: where a renewal shows. */
+  mtime(path: string): Promise<number>;
+  /** Sets the lock file's times to now: a renewal. */
+  touch(path: string): Promise<void>;
+  rename(from: string, to: string): Promise<void>;
+  link(from: string, to: string): Promise<void>;
+  /** Removes a lock file, or one moved aside; a missing one is no error. */
+  remove(path: string): Promise<void>;
+}
+
+/** The real file system's lock operations. */
+export const NODE_LOCK_IO: LockIo = Object.freeze({
+  async create(path: string, body: string): Promise<void> {
+    const handle = await open(path, 'wx', 0o600);
+    try {
+      await handle.writeFile(body);
+    } finally {
+      await handle.close();
+    }
+  },
+  read: (path: string) => readFile(path, 'utf8'),
+  mtime: async (path: string) => (await stat(path)).mtimeMs,
+  touch: (path: string) => {
+    const now = new Date();
+    return utimes(path, now, now);
+  },
+  rename: (from: string, to: string) => rename(from, to),
+  link: (from: string, to: string) => link(from, to),
+  remove: (path: string) => rm(path, { force: true }),
+});
+
+async function readLock(path: string, io: LockIo = NODE_LOCK_IO): Promise<LockBody | null> {
   try {
-    return JSON.parse(await readFile(path, 'utf8')) as LockBody;
+    return JSON.parse(await io.read(path)) as LockBody;
   } catch {
     return null;
   }
@@ -93,10 +134,15 @@ async function readLock(path: string): Promise<LockBody | null> {
  * way out but finding and deleting it by hand. A corrupt timestamp inside an otherwise readable body is the same
  * trap wearing a different hat: `Date.now() - NaN > staleMs` is false, forever.
  */
-async function isStale(path: string, body: LockBody | null, staleMs: number): Promise<boolean> {
+async function isStale(
+  path: string,
+  body: LockBody | null,
+  staleMs: number,
+  io: LockIo = NODE_LOCK_IO,
+): Promise<boolean> {
   let touched: number;
   try {
-    touched = (await stat(path)).mtimeMs;
+    touched = await io.mtime(path);
   } catch {
     // The lock is gone; whoever is waiting will simply create their own.
     return false;
@@ -118,34 +164,32 @@ async function isStale(path: string, body: LockBody | null, staleMs: number): Pr
  * Takes over an abandoned lock safely: move it aside atomically (only one waiter's rename can succeed), re-check that
  * what was moved really is stale, and if it was someone's live lock after all, put it back.
  */
-async function takeOverStale(lockPath: string, staleMs: number): Promise<void> {
+async function takeOverStale(lockPath: string, staleMs: number, io: LockIo = NODE_LOCK_IO): Promise<void> {
   const aside = `${lockPath}.stale-${randomBytes(6).toString('hex')}`;
   try {
-    await rename(lockPath, aside);
+    await io.rename(lockPath, aside);
   } catch {
     return; // someone else moved it first
   }
-  const moved = await readLock(aside);
-  if (!(await isStale(aside, moved, staleMs))) {
+  const moved = await readLock(aside, io);
+  if (!(await isStale(aside, moved, staleMs, io))) {
     // Not stale after all: put it back. `link` leaves the copy in place to clean up, but some file systems (overlay
     // mounts in containers) have no hard links, so fall back to renaming it back — losing the holder's lock would
     // leave no mutual exclusion at all.
     try {
-      await link(aside, lockPath);
+      await io.link(aside, lockPath);
     } catch {
       // Write the holder's lock back by hand rather than leaving the path unlocked. `wx`, never a rename: a rename
       // replaces whatever is there, and between the move and now another waiter may have taken the lock legitimately.
       // Overwriting that would hand the same lock to two holders, which is worse than the case this is repairing.
       try {
-        const handle = await open(lockPath, 'wx', 0o600);
-        await handle.writeFile(JSON.stringify(moved));
-        await handle.close();
+        await io.create(lockPath, JSON.stringify(moved));
       } catch {
         // A new holder exists, or the path is unusable; either way there is nothing left to restore.
       }
     }
   }
-  await rm(aside, { force: true });
+  await io.remove(aside);
 }
 
 /**
@@ -230,6 +274,86 @@ export async function withFileLock<T>(lockPath: string, fn: () => Promise<T>, op
     // Only remove the lock if it is still ours (a very slow holder could have been taken over as stale).
     const current = await readLock(lockPath);
     if (current?.token === token) await rm(lockPath, { force: true });
+  }
+}
+
+/** A lock `tryFileLock` took: its holder's token, and a look at whether the lock file still names it. */
+export interface HeldFileLock {
+  /** This holder's token, as written in the lock file. */
+  readonly token: string;
+  /**
+   * Re-reads the lock file: true while it still holds this holder's token. A look, not a fence — ownership can change
+   * the moment after it answers — so a holder asks it before each step it must not start once the lock is lost.
+   */
+  stillHeld(): Promise<boolean>;
+}
+
+/** What a single try at a lock came to: not taken — someone holds it — or taken, and what `fn` returned. */
+export type TryLockResult<T> = { readonly acquired: false } | { readonly acquired: true; readonly value: T };
+
+export interface TryLockOptions {
+  /** A lock whose recorded time and modification time are both older than this is abandoned. 30 s by default. */
+  staleMs?: number | undefined;
+  /** Renew the lock this often while `fn` runs, as `withFileLock`'s `renewMs`. Opt-in. */
+  renewMs?: number | undefined;
+  /** The lock's file operations: the real ones by default. */
+  io?: LockIo | undefined;
+}
+
+/**
+ * Runs `fn` holding an exclusive lock file — if the lock can be had now — and otherwise does nothing at all.
+ *
+ * One attempt, with `withFileLock`'s stale-lock and token rules: a lock held by a live holder is busy, and this returns
+ * `{ acquired: false }` at once, without polling or sleeping; an abandoned one (older than `staleMs`) is taken over
+ * exactly as `withFileLock` takes it over, and tried once more. For work that must never queue behind another holder —
+ * daily approval maintenance, the unsent report — where a busy record is counted and left, not waited for.
+ *
+ * `fn` is given the holder's token and `stillHeld()`, so a long holder can check, before each step, that it was not
+ * judged abandoned and taken over. The directory must exist: this creates nothing but the lock file.
+ */
+export async function tryFileLock<T>(
+  lockPath: string,
+  fn: (held: HeldFileLock) => Promise<T>,
+  options: TryLockOptions = {},
+): Promise<TryLockResult<T>> {
+  const io = options.io ?? NODE_LOCK_IO;
+  const staleMs = options.staleMs ?? 30_000;
+  const token = randomBytes(12).toString('hex');
+  const body = () => JSON.stringify({ pid: process.pid, at: new Date().toISOString(), token });
+  let taken = false;
+  // At most two creates: the attempt, and — only after an abandoned lock was moved aside — the one after it.
+  for (let attempt = 0; attempt < 2 && !taken; attempt += 1) {
+    try {
+      await io.create(lockPath, body());
+      taken = true;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (!CONTENDED.has(code ?? '')) throw error;
+      // Only EEXIST says the file is there to be read; under the Windows codes it is busy, and is left.
+      if (code !== 'EEXIST' || attempt > 0) return { acquired: false };
+      const holder = await readLock(lockPath, io);
+      if (!(await isStale(lockPath, holder, staleMs, io))) return { acquired: false };
+      await takeOverStale(lockPath, staleMs, io);
+    }
+  }
+  if (!taken) return { acquired: false };
+  const renewal = options.renewMs
+    ? setInterval(() => {
+        void io.touch(lockPath).catch(() => undefined);
+      }, options.renewMs)
+    : undefined;
+  renewal?.unref?.();
+  const held: HeldFileLock = {
+    token,
+    stillHeld: async () => (await readLock(lockPath, io))?.token === token,
+  };
+  try {
+    return { acquired: true, value: await fn(held) };
+  } finally {
+    if (renewal) clearInterval(renewal);
+    // Only remove the lock if it is still ours: a holder judged abandoned may have been taken over.
+    const current = await readLock(lockPath, io);
+    if (current?.token === token) await io.remove(lockPath).catch(() => undefined);
   }
 }
 

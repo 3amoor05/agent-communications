@@ -619,6 +619,42 @@ test('a channel that reaches no host says so with an empty list, and must still 
   );
 });
 
+test('a channel says how the unsent report groups its approvals with one of two rules, or not at all; the core says nothing (R16d)', () => {
+  // Design 2026-10-05 §D9: `draft` (mailbox or account, and draft) or `draft-revision-digest` (and the exact revision
+  // and content digest). Anything else is refused by the schema, never read as no rule.
+  for (const value of ['thread', '', 'Draft', 'draft revision digest', 'draft-revision', 3, null, ['draft'], {}]) {
+    assert.match(
+      problemsAfter((e) => {
+        at(e, 'gmail').approvalGrouping = value;
+      }),
+      /@agentcomms\/gmail: agentcomms\.approvalGrouping: /,
+      JSON.stringify(value),
+    );
+  }
+  assert.match(
+    problemsAfter((e) => {
+      at(e, 'core').approvalGrouping = 'draft';
+    }),
+    /@agentcomms\/core: agentcomms\.approvalGrouping: the core sends nothing, so it groups no approvals/,
+  );
+  for (const value of ['draft', 'draft-revision-digest']) {
+    assert.equal(
+      problemsAfter((e) => {
+        at(e, 'whatsapp').approvalGrouping = value;
+      }),
+      '',
+      value,
+    );
+  }
+  assert.equal(
+    problemsAfter((e) => {
+      delete at(e, 'slack').approvalGrouping;
+    }),
+    '',
+    'a channel may declare none',
+  );
+});
+
 test("a registration's pinned folders never make it another server for that service (CUE-403)", () => {
   /*
    * Every registration the installer writes carries its four suite folders, and a folder may be named anything: a

@@ -83,6 +83,7 @@ export const CHANNEL_SNAPSHOT: readonly ChannelEntry[] = [
         prefix: 'gmail-',
         contract: 'skills/_shared/contract-gmail.md',
       },
+      approvalGrouping: 'draft',
     },
   },
   {
@@ -124,6 +125,7 @@ export const CHANNEL_SNAPSHOT: readonly ChannelEntry[] = [
         prefix: 'resend-',
         contract: 'skills/_shared/contract-resend.md',
       },
+      approvalGrouping: 'draft',
     },
   },
   {
@@ -165,6 +167,7 @@ export const CHANNEL_SNAPSHOT: readonly ChannelEntry[] = [
         prefix: 'slack-',
         contract: 'skills/_shared/contract-slack.md',
       },
+      approvalGrouping: 'draft-revision-digest',
     },
   },
   {
