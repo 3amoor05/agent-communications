@@ -535,3 +535,47 @@ test('the hint after a timeout names how to wait again on the surface that asked
   assert.match(gmail.hint ?? '', /the Gmail server’s wait/);
   assert.doesNotMatch(gmail.hint ?? '', /comms_approval_wait/);
 });
+
+test('a question’s wait follows the live change policy: one asked in the chat waits while the policy is tightened and stops as it is loosened again; one asked for the terminal waits however loose it is made (R21b)', async () => {
+  const question = (w: World, policy: 'chat' | 'confirm') =>
+    w.core.approvals.createDownload({
+      channel: 'gmail',
+      download: {
+        summary: 'where to save 1 file from acme/gmail',
+        target: { kind: 'inbox', name: 'acme/gmail', id: OWNER },
+        operation: 'attachments.download',
+        request: { selection: { kind: 'messages', ids: ['m1'] } },
+        files: ['m1/1'],
+        names: ['invoice.pdf'],
+        folders: { downloads: '/srv/sam/Downloads', current: '/srv/sam/work' },
+      },
+      policy,
+    });
+
+  // Asked in the chat, then the policy tightened: it waits for the terminal — until the policy is loosened mid-wait.
+  const chat = world(owners({ changePolicy: 'chat' }));
+  const asked = await question(chat, 'chat');
+  chat.config.write(owners({ changePolicy: 'confirm' }));
+  chat.between = (read) => {
+    if (read === 3) chat.config.write(owners({ changePolicy: 'chat' }));
+  };
+  const loosened = await wait(chat, asked.approvalId, { waitSeconds: 30 });
+  assert.deepEqual([loosened.state, loosened.claimable, loosened.ended], ['pending', true, 'claimable']);
+  assert.equal(chat.reads.length, 4, 'it stopped at the first look after the policy was loosened');
+  // Tightened again before it is used: a wait waits for a person once more, and times out still waiting.
+  chat.between = null;
+  chat.config.write(owners({ changePolicy: 'confirm' }));
+  const tightened = await wait(chat, asked.approvalId, { waitSeconds: 5 });
+  assert.deepEqual([tightened.state, tightened.claimable, tightened.ended], ['pending', false, 'timeout']);
+
+  // Asked for the terminal: loosening the policy mid-wait changes nothing; only the person's answer ends it.
+  const terminal = world(owners({ changePolicy: 'confirm' }));
+  const held = await question(terminal, 'confirm');
+  terminal.between = async (read) => {
+    if (read === 2) terminal.config.write(owners({ changePolicy: 'chat' }));
+    if (read === 6) await terminal.core.approvals.answerDownload(held.approvalId, 'terminal', { choice: 'downloads' });
+  };
+  const answered = await wait(terminal, held.approvalId, { waitSeconds: 30 });
+  assert.deepEqual([answered.state, answered.claimable, answered.ended], ['answered', true, 'claimable']);
+  assert.equal(terminal.reads.length, 7, 'it went on waiting after the policy was loosened');
+});

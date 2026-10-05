@@ -15,13 +15,25 @@ import {
 import { join, parse, posix, win32 } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
+import { bindingDigestOf } from '../src/approval-binding.ts';
+import type { PublicApprovalView } from '../src/approval-outcome.ts';
 import { asV2, stateOf } from '../src/approval-stored.ts';
-import { ApprovalStore, type DownloadBinding, type DownloadRequest, downloadDigest } from '../src/approvals.ts';
+import {
+  type ApprovalRecord,
+  ApprovalStore,
+  type DownloadBinding,
+  type DownloadRequest,
+  downloadDigest,
+  type ListedFile,
+} from '../src/approvals.ts';
 import { beginChangeApproval } from '../src/changes.ts';
 import type { Streams } from '../src/cli-runtime.ts';
 import { type Core, openCore } from '../src/core.ts';
+import { canonicalJson, sha256Hex } from '../src/digest.ts';
 import { CommsError } from '../src/errors.ts';
 import { CORE_CALLER } from '../src/handoffs.ts';
+import { type WaitClock, waitForApproval } from '../src/operations/approval-wait.ts';
+import { listApprovals } from '../src/operations/maintenance.ts';
 import {
   checkSaveFolder,
   parseMounts,
@@ -32,6 +44,7 @@ import {
 } from '../src/save-deny.ts';
 import {
   answerDownloadAtTerminal,
+  answerDownloadInForm,
   askWhereToSave,
   checkDownloadAnswer,
   checkFolder,
@@ -41,9 +54,11 @@ import {
   type DownloadAnswer,
   denyInputOf,
   downloadAtTerminal,
+  downloadQuestionForm,
   downloadsFolder,
   fileSystemReason,
   folderFor,
+  isDestinationQuestion,
   openFolder,
   parseSaveAnswer,
   refuseRetiredOut,
@@ -53,7 +68,7 @@ import {
   settleDestination,
 } from '../src/save-destination.ts';
 import { coreInline } from './helpers/handoffs.ts';
-import { liveConfig } from './helpers/live-config.ts';
+import { type LiveConfig, liveConfig } from './helpers/live-config.ts';
 import { tempDir } from './helpers/temp.ts';
 
 /*
@@ -105,11 +120,14 @@ function refusal(pattern: RegExp, code: string) {
   return (error: unknown) => error instanceof CommsError && error.code === code && pattern.test(error.message);
 }
 
-/** A home and a core of their own, the home under both names core reads it by. */
-function machine(): { home: string; env: NodeJS.ProcessEnv; core: Core } {
+/**
+ * A home and a core of their own, the home under both names core reads it by — on the real clock, or on `now` — and the
+ * configuration the store classifies by, for a test that changes a policy.
+ */
+function machine(now?: () => Date): { home: string; env: NodeJS.ProcessEnv; core: Core; config: LiveConfig } {
   const home = realpathSync.native(tempDir('comms-save-'));
   // The mailbox the questions are about, so the store finds their owner when it classifies them.
-  liveConfig(home, { inboxes: { 'acme/gmail': { id: INBOX } } });
+  const config = liveConfig(home, { inboxes: { 'acme/gmail': { id: INBOX } } });
   const env: NodeJS.ProcessEnv = {
     HOME: home,
     USERPROFILE: home,
@@ -117,7 +135,7 @@ function machine(): { home: string; env: NodeJS.ProcessEnv; core: Core } {
     AGENT_COMMS_UPDATE_CHECK: 'off',
     NO_COLOR: '1',
   };
-  return { home, env, core: openCore({ env, caller: CORE_CALLER }) };
+  return { home, env, core: openCore({ env, caller: CORE_CALLER, ...(now === undefined ? {} : { now }) }), config };
 }
 
 // ── The question in the approval store ─────────────────────────────────────────────────────────────────────────
@@ -1664,10 +1682,7 @@ test('under confirm, an answer in the arguments is refused with the terminal com
   assert.equal(asV2(await core.approvals.get(approvalId))?.state, 'pending');
   assert.equal(existsSync(offered.downloads), false, 'a folder was made');
   // The store refuses it on its own too, whoever calls it.
-  await assert.rejects(
-    core.approvals.claimForDownload(approvalId, REQUEST, { policy: 'chat' }),
-    refusal(/confirm/, 'APPROVAL_PENDING'),
-  );
+  await assert.rejects(core.approvals.claimForDownload(approvalId, REQUEST), refusal(/confirm/, 'APPROVAL_PENDING'));
   assert.equal(asV2(await core.approvals.get(approvalId))?.state, 'pending');
 });
 
@@ -1971,4 +1986,539 @@ test('each file is proved, once created, to be in the folder that was checked; o
     refusal(/it is no longer the folder that was checked/, 'BAD_DATA'),
   );
   assert.deepEqual(readdirSync(replaced.folder), []);
+});
+
+// ── What the person was shown, and what is saved (CUE-404 Task 19) ─────────────────────────────────────────────
+
+/*
+ * A question binds what it showed the person — the two folders it offered and the listing of the files — and, once they
+ * answered at their terminal or in a form, the answer itself (design 2026-10-05 §D1, "Digest integrity"). A record
+ * that no longer is what it binds is corrupt: refused before it is shown or claimed, and nothing is saved by it. A chat
+ * answer is never kept: the question claimed with it says it was answered in the chat, and where is nobody's to read.
+ */
+
+/** A question's record as the store keeps it, for a test to edit as another program could. */
+type Kept = ApprovalRecord & { download: DownloadBinding & { listing: ListedFile[] } };
+
+/** A question's record, as the bytes the store keeps. */
+function keptBytes(core: Core, approvalId: string): string {
+  return readFileSync(join(core.approvals.directory, `${approvalId}.json`), 'utf8');
+}
+
+/** Edits a question's record where it is kept, as a person's edit or another program would; its bytes after. */
+function tamper(core: Core, approvalId: string, edit: (kept: Kept) => void): string {
+  const kept = JSON.parse(keptBytes(core, approvalId)) as Kept;
+  edit(kept);
+  const text = `${JSON.stringify(kept, null, 2)}\n`;
+  writeFileSync(join(core.approvals.directory, `${approvalId}.json`), text);
+  return text;
+}
+
+/** Every digest made again over an edit, as a program that knew how to would: the binding then verifies. */
+function resigned(kept: Kept): void {
+  kept.contentDigest = downloadDigest(kept.download);
+  kept.draftMessageId = kept.contentDigest;
+  kept.bindingDigest = bindingDigestOf(kept);
+  if (kept.download.answer !== undefined) {
+    kept.approvedDigest = sha256Hex(canonicalJson({ bindingDigest: kept.bindingDigest, answer: kept.download.answer }));
+  }
+}
+
+/** A wait's clock that moves with `time`: a look that waits advances it, as the real one would. */
+function waitClock(time: { now: () => Date; advance: (ms: number) => number }): WaitClock {
+  return {
+    now: () => time.now().getTime(),
+    sleep: async (ms, signal) => {
+      if (signal?.aborted) return;
+      time.advance(Math.max(0, ms));
+      await new Promise((settle) => setImmediate(settle));
+    },
+  };
+}
+
+/** Where a question stands, as each surface says it: status (a wait of none), a wait, and the list. */
+async function views(
+  core: Core,
+  approvalId: string,
+  time: { now: () => Date; advance: (ms: number) => number },
+): Promise<Array<[string, PublicApprovalView]>> {
+  const status = await waitForApproval(core, approvalId, { waitSeconds: 0 });
+  const waited = await waitForApproval(core, approvalId, { waitSeconds: 30, clock: waitClock(time) });
+  const listed = (await listApprovals(core)).find((entry) => entry.approvalId === approvalId);
+  assert.ok(listed !== undefined, 'the question is listed');
+  return [
+    ['status', status.approval],
+    ['wait', waited.approval],
+    ['list', listed],
+  ];
+}
+
+/** The two listed files every question here shows: one plain, one renamed and flagged. */
+const LISTED: ListedFile[] = [
+  { name: 'invoice.pdf', size: 1024 },
+  { name: 'setup.exe.download', size: 2048, renamed: 'type', flags: ['saved-as-download'] },
+];
+
+test('a question answered in the chat is claimed straight from pending, keeps no answer, and says “answered (in chat)” with no destination in status, a wait and the list (R15a, R18a)', async () => {
+  const time = clock();
+  const { core, env, home } = machine(time.now);
+  const offered = { downloads: join(home, 'Downloads'), current: join(home, 'work') };
+  const { approvalId, expiresAt } = await core.approvals.createDownload({
+    channel: 'gmail',
+    download: binding(offered),
+    policy: 'chat',
+  });
+  time.advance(60_000);
+  const settled = await settling(core, env, home, {
+    kind: 'choice',
+    answer: { choice: 'downloads' },
+    choiceId: approvalId,
+  });
+  assert.equal(settled.answeredVia, 'chat');
+  // Nothing of the answer is kept: neither the answer, nor evidence of one, nor a time of its own beside the claim's.
+  const kept = JSON.parse(keptBytes(core, approvalId)) as Kept;
+  assert.equal(kept.state, 'used');
+  for (const field of ['approvedVia', 'approvedDigest', 'approvedAt', 'usableUntil'] as const) {
+    assert.equal(kept[field], undefined, `${field} was kept`);
+  }
+  assert.equal(kept.download.answer, undefined, 'the chat answer was kept');
+  for (const [surface, view] of await views(core, approvalId, time)) {
+    // Valid, and shown as what it is: a question answered, not an approval with a window of its own.
+    assert.equal(view.state, 'answered', surface);
+    assert.equal(view.claimable, false, surface);
+    assert.equal(view.said, 'answered (in chat)', surface);
+    assert.equal(view.expiresAt, expiresAt, `${surface}: its own expiry, thirty minutes from the question`);
+    for (const key of ['approvedAt', 'usableUntil', 'reason']) assert.equal(key in view, false, `${surface}: ${key}`);
+    const text = JSON.stringify(view);
+    assert.ok(!text.includes(offered.downloads), `${surface}: a destination is shown`);
+    assert.ok(!text.includes(offered.current), `${surface}: a destination is shown`);
+  }
+});
+
+test('a question answered at the terminal or in a form says so, and where, until it is used', async () => {
+  for (const via of ['terminal', 'elicitation'] as const) {
+    const time = clock();
+    const { core, env, home } = machine(time.now);
+    const folders = { downloads: join(home, 'Downloads'), current: join(home, 'work') };
+    const asked = await asking(core, env, { folders, policy: 'confirm', listing: LISTED });
+    if (via === 'terminal') {
+      await answerDownloadAtTerminal(core, asked.choiceId, { env, color: false, streams: terminal(['2']).streams });
+    } else {
+      await answerDownloadInForm(core, asked.choiceId, { choice: 'current' }, env);
+    }
+    const where = via === 'terminal' ? 'at the terminal' : 'in a form';
+    for (const [surface, view] of await views(core, asked.choiceId, time)) {
+      assert.deepEqual([view.state, view.claimable], ['answered', true], `${via} ${surface}`);
+      assert.equal(view.said, `answered ${where}: save to current (${folders.current})`, `${via} ${surface}`);
+      assert.equal('usableUntil' in view, false, `${via} ${surface}`);
+    }
+  }
+});
+
+test('a question answered at the terminal or in a form that then runs out says it was answered and expired before it was used — after a restart too, and with no answer time (R19d, R20a)', async () => {
+  for (const via of ['terminal', 'elicitation'] as const) {
+    const time = clock();
+    const { core, env, home } = machine(time.now);
+    const folders = { downloads: join(home, 'Downloads'), current: join(home, 'work') };
+    const asked = await asking(core, env, { folders, policy: 'confirm', listing: LISTED });
+    // Answered five minutes in; its deadline is thirty minutes from the question; it is first looked at after forty-five,
+    // by a process started anew.
+    time.advance(5 * 60_000);
+    const answeredAt = time.now().toISOString();
+    if (via === 'terminal') {
+      await answerDownloadAtTerminal(core, asked.choiceId, { env, color: false, streams: terminal(['1']).streams });
+    } else {
+      await answerDownloadInForm(core, asked.choiceId, { choice: 'downloads' }, env);
+    }
+    time.advance(40 * 60_000);
+    const restarted = openCore({ env, now: time.now, caller: CORE_CALLER });
+    for (const [surface, view] of await views(restarted, asked.choiceId, time)) {
+      assert.deepEqual([view.state, view.claimable], ['expired', false], `${via} ${surface}`);
+      assert.equal(view.said, 'the question was answered and expired before it was used', `${via} ${surface}`);
+      assert.equal(view.expiredAt, asked.expiresAt, `${via} ${surface}: the deadline, not the moment it was seen`);
+      assert.equal('approvedAt' in view, false, `${via} ${surface}`);
+      const text = JSON.stringify(view);
+      assert.ok(!text.includes(answeredAt), `${via} ${surface}: an answer time is reported`);
+      assert.doesNotMatch(text, /before it was answered/, `${via} ${surface}`);
+    }
+    // The download and the terminal are refused in the same words, with no answer time either.
+    for (const attempt of [
+      () => settling(restarted, env, home, { kind: 'choice', answer: null, choiceId: asked.choiceId }, 'confirm'),
+      () =>
+        answerDownloadAtTerminal(restarted, asked.choiceId, { env, color: false, streams: terminal(['1']).streams }),
+    ]) {
+      const error = await attempt().then(
+        () => assert.fail('it was not refused'),
+        (refused: unknown) => refused as CommsError,
+      );
+      assert.equal(error.code, 'APPROVAL_EXPIRED', `${via}: ${error.message}`);
+      assert.equal(error.message, 'nothing was saved: the question was answered and expired before it was used');
+      assert.ok(!JSON.stringify(error.details).includes(answeredAt), `${via}: an answer time is reported`);
+    }
+    assert.equal(existsSync(folders.downloads), false, `${via}: a folder was made`);
+  }
+  // A question nobody answered says that instead, everywhere.
+  const time = clock();
+  const { core, env, home } = machine(time.now);
+  const unanswered = await asking(core, env, { policy: 'confirm', listing: LISTED });
+  time.advance(31 * 60_000);
+  for (const [surface, view] of await views(core, unanswered.choiceId, time)) {
+    assert.equal(view.said, 'the question expired before it was answered', surface);
+  }
+  await assert.rejects(
+    settling(core, env, home, { kind: 'choice', answer: null, choiceId: unanswered.choiceId }, 'confirm'),
+    refusal(/^nothing was saved: the question expired before it was answered$/, 'APPROVAL_EXPIRED'),
+  );
+});
+
+test('a confirm question whose recorded answer or offered folders are changed after it was answered saves nothing, and reads as corrupt (R16b)', async () => {
+  const { core, env, home } = machine();
+  const offered = { downloads: join(home, 'Downloads'), current: join(home, 'work') };
+  const elsewhere = join(home, 'elsewhere');
+  const cases: Array<[string, (kept: Kept) => void, string]> = [
+    [
+      'the answer, to another folder',
+      (kept) => {
+        kept.download.answer = { choice: 'other', folder: elsewhere };
+      },
+      'evidence-contradictory',
+    ],
+    [
+      'the answer, to the other folder offered',
+      (kept) => {
+        kept.download.answer = { choice: 'current' };
+      },
+      'evidence-contradictory',
+    ],
+    [
+      'the Downloads folder offered',
+      (kept) => {
+        kept.download.folders.downloads = elsewhere;
+      },
+      'binding-mismatch',
+    ],
+    [
+      'the current folder offered',
+      (kept) => {
+        kept.download.folders.current = elsewhere;
+      },
+      'binding-mismatch',
+    ],
+  ];
+  for (const [what, edit, reason] of cases) {
+    const { approvalId } = await core.approvals.createDownload({
+      channel: 'gmail',
+      download: binding(offered),
+      policy: 'confirm',
+    });
+    await core.approvals.answerDownload(approvalId, 'terminal', { choice: 'downloads' });
+    const tampered = tamper(core, approvalId, edit);
+    await assert.rejects(
+      settling(core, env, home, { kind: 'choice', answer: null, choiceId: approvalId }, 'confirm'),
+      refusal(new RegExp(`is corrupt \\(${reason}\\)`), 'APPROVAL_VOID'),
+      what,
+    );
+    for (const folder of [offered.downloads, offered.current, elsewhere]) {
+      assert.equal(existsSync(folder), false, `${what}: ${folder} was made`);
+    }
+    assert.equal(keptBytes(core, approvalId), tampered, `${what}: a corrupt record was rewritten`);
+    const status = await waitForApproval(core, approvalId, { waitSeconds: 0 });
+    assert.deepEqual([status.state, status.claimable, status.approval.reason], ['corrupt', false, reason], what);
+  }
+});
+
+test('a question that carries an answer nobody recorded — pending, or claimed in the chat — is corrupt, and saves nothing (R17b)', async () => {
+  const { core, env, home } = machine();
+  const offered = { downloads: join(home, 'Downloads'), current: join(home, 'work') };
+  const injected = join(home, 'injected');
+  const cases: Array<[string, (kept: Kept) => void, string]> = [
+    [
+      'an answer alone',
+      (kept) => {
+        kept.download.answer = { choice: 'other', folder: injected };
+      },
+      'evidence-missing',
+    ],
+    [
+      'an answer with evidence made for it',
+      (kept) => {
+        kept.download.answer = { choice: 'other', folder: injected };
+        kept.approvedVia = 'terminal';
+        kept.approvedDigest = sha256Hex(
+          canonicalJson({ bindingDigest: kept.bindingDigest, answer: kept.download.answer }),
+        );
+      },
+      'evidence-contradictory',
+    ],
+  ];
+  for (const policy of ['chat', 'confirm'] as const) {
+    for (const [what, edit, reason] of cases) {
+      const { approvalId } = await core.approvals.createDownload({
+        channel: 'gmail',
+        download: binding(offered),
+        policy,
+      });
+      tamper(core, approvalId, edit);
+      for (const answer of [{ choice: 'downloads' } as const, null]) {
+        await assert.rejects(
+          settling(core, env, home, { kind: 'choice', answer, choiceId: approvalId }, policy),
+          refusal(new RegExp(`is corrupt \\(${reason}\\)`), 'APPROVAL_VOID'),
+          `${policy}, ${what}`,
+        );
+      }
+      for (const folder of [offered.downloads, offered.current, injected]) {
+        assert.equal(existsSync(folder), false, `${policy}, ${what}: ${folder} was made`);
+      }
+      const status = await waitForApproval(core, approvalId, { waitSeconds: 0 });
+      assert.deepEqual([status.state, status.approval.reason], ['corrupt', reason], `${policy}, ${what}`);
+    }
+  }
+  // Claimed in the chat, then given an answer it never had: corrupt wherever it is read.
+  const { approvalId } = await core.approvals.createDownload({
+    channel: 'gmail',
+    download: binding(offered),
+    policy: 'chat',
+  });
+  await settling(core, env, home, { kind: 'choice', answer: { choice: 'downloads' }, choiceId: approvalId });
+  tamper(core, approvalId, (kept) => {
+    kept.download.answer = { choice: 'other', folder: injected };
+  });
+  const listed = (await listApprovals(core)).find((entry) => entry.approvalId === approvalId);
+  assert.deepEqual([listed?.state, listed?.reason], ['corrupt', 'evidence-missing']);
+});
+
+test('a listing changed in any field, or one that no longer names the files it is bound to, is corrupt before the terminal or a form shows it (R18b)', async () => {
+  const { core, env } = machine();
+  /** The listed file at `index`, to change in place. */
+  const file = (kept: Kept, index: number) => kept.download.listing[index] as ListedFile;
+  const cases: Array<[string, (kept: Kept) => void, string]> = [
+    ['a name', (kept) => Object.assign(file(kept, 0), { name: 'invoice.pdf.exe' }), 'binding-mismatch'],
+    ['a size', (kept) => Object.assign(file(kept, 0), { size: 1 }), 'binding-mismatch'],
+    ['a size made unknown', (kept) => Object.assign(file(kept, 0), { size: null }), 'binding-mismatch'],
+    ['a rename reason changed', (kept) => Object.assign(file(kept, 1), { renamed: 'auto-read' }), 'binding-mismatch'],
+    [
+      'a rename reason removed',
+      (kept) => {
+        delete file(kept, 1).renamed;
+      },
+      'binding-mismatch',
+    ],
+    ['a rename reason added', (kept) => Object.assign(file(kept, 0), { renamed: 'no-extension' }), 'binding-mismatch'],
+    ['a flag changed', (kept) => Object.assign(file(kept, 1), { flags: ['macro-capable'] }), 'binding-mismatch'],
+    [
+      'the flags removed',
+      (kept) => {
+        delete file(kept, 1).flags;
+      },
+      'binding-mismatch',
+    ],
+    ['a flag added', (kept) => Object.assign(file(kept, 0), { flags: ['auto-read'] }), 'binding-mismatch'],
+    ['the order', (kept) => kept.download.listing.reverse(), 'binding-mismatch'],
+    ['a file left out', (kept) => kept.download.listing.pop(), 'binding-mismatch'],
+    [
+      'a name the files are not bound to, every digest made again',
+      (kept) => {
+        Object.assign(file(kept, 1), { name: 'setup.exe' });
+        resigned(kept);
+      },
+      'listing-mismatch',
+    ],
+  ];
+  for (const [what, edit, reason] of cases) {
+    const asked = await asking(core, env, { policy: 'confirm', listing: LISTED });
+    const tampered = tamper(core, asked.choiceId, edit);
+    const corrupt = refusal(new RegExp(`is corrupt \\(${reason}\\)`), 'APPROVAL_VOID');
+    const term = terminal(['1']);
+    await assert.rejects(
+      answerDownloadAtTerminal(core, asked.choiceId, { env, color: false, streams: term.streams }),
+      corrupt,
+      `${what}: the terminal`,
+    );
+    assert.equal(term.out(), '', `${what}: the terminal showed it`);
+    await assert.rejects(downloadQuestionForm(core, asked.choiceId, env), corrupt, `${what}: the form`);
+    await assert.rejects(
+      answerDownloadInForm(core, asked.choiceId, { choice: 'downloads' }, env),
+      corrupt,
+      `${what}: the form’s answer`,
+    );
+    assert.equal(keptBytes(core, asked.choiceId), tampered, `${what}: a corrupt record was rewritten`);
+  }
+});
+
+test('a question whose record is no longer the one asked is refused before the command shows it, to a person or to an agent (R18b)', async () => {
+  const { core, env, home } = machine();
+  for (const [label, extraEnv] of [
+    ['a person at a terminal', {}],
+    ['an agent', { CLAUDECODE: '1' }],
+  ] as const) {
+    const { calls, download: ask } = recorder(core, env, home);
+    // The question as the download asked it, its record changed before the command could show it.
+    const download = async (answer: DownloadAnswer): Promise<unknown> => {
+      const asked = await ask(answer);
+      if (isDestinationQuestion(asked)) {
+        tamper(core, asked.choiceId, (kept) => {
+          (kept.download.listing[1] as ListedFile).flags = [];
+        });
+      }
+      return asked;
+    };
+    const term = terminal(['1']);
+    await assert.rejects(
+      downloadAtTerminal({
+        core,
+        download,
+        env: { ...env, ...extraEnv },
+        output: { color: false },
+        rerun: ['attachments', 'download', 'm1', '--inbox', 'acme/gmail'],
+        render,
+        streams: term.streams,
+      }),
+      refusal(/is corrupt \(binding-mismatch\)/, 'APPROVAL_VOID'),
+      label,
+    );
+    assert.equal(term.out(), '', `${label}: the question was shown`);
+    assert.equal(calls.length, 1, `${label}: the download was made again`);
+  }
+});
+
+test('a listing changed before a chat answer is claimed, or before an answered question is saved, saves nothing (R19b)', async () => {
+  const { core, env, home } = machine();
+  const folders = { downloads: join(home, 'Downloads'), current: join(home, 'work') };
+  // Answered in the chat: the listing changed before the claim.
+  const chat = await asking(core, env, { folders, policy: 'chat', listing: LISTED });
+  tamper(core, chat.choiceId, (kept) => {
+    (kept.download.listing[0] as ListedFile).size = 999;
+  });
+  await assert.rejects(
+    settleDestination(core, {
+      answer: { kind: 'choice', answer: { choice: 'downloads' }, choiceId: chat.choiceId },
+      request: { ...REQUEST, files: ['m1/1', 'm1/2'], names: LISTED.map((file) => file.name) },
+      folders: () => folders,
+      policy: 'chat',
+      surface: 'mcp',
+      env,
+    }),
+    refusal(/is corrupt \(binding-mismatch\)/, 'APPROVAL_VOID'),
+  );
+  // Answered at the terminal: the listing changed before the save.
+  const confirm = await asking(core, env, { folders, policy: 'confirm', listing: LISTED });
+  await answerDownloadAtTerminal(core, confirm.choiceId, { env, color: false, streams: terminal(['1']).streams });
+  tamper(core, confirm.choiceId, (kept) => {
+    (kept.download.listing[1] as ListedFile).renamed = 'auto-read';
+  });
+  await assert.rejects(
+    settleDestination(core, {
+      answer: { kind: 'choice', answer: null, choiceId: confirm.choiceId },
+      request: { ...REQUEST, files: ['m1/1', 'm1/2'], names: LISTED.map((file) => file.name) },
+      folders: () => folders,
+      policy: 'confirm',
+      surface: 'mcp',
+      env,
+    }),
+    refusal(/is corrupt \(binding-mismatch\)/, 'APPROVAL_VOID'),
+  );
+  assert.equal(existsSync(folders.downloads), false, 'a folder was made');
+  assert.equal(existsSync(folders.current), false, 'a folder was made');
+});
+
+test('a question asked under confirm stays confirm when the live policy is loosened, and a stored policy changed to the other valid word is corrupt (R19c)', async () => {
+  const { core, env, home, config } = machine();
+  const offered = { downloads: join(home, 'Downloads'), current: join(home, 'work') };
+  config.write({ changePolicy: 'confirm', inboxes: { 'acme/gmail': { id: INBOX } } });
+  const { approvalId } = await core.approvals.createDownload({
+    channel: 'gmail',
+    download: binding(offered),
+    policy: 'confirm',
+  });
+  config.write({ changePolicy: 'chat', inboxes: { 'acme/gmail': { id: INBOX } } });
+  await assert.rejects(
+    settling(core, env, home, { kind: 'choice', answer: { choice: 'downloads' }, choiceId: approvalId }, 'chat'),
+    refusal(/change policy here is confirm/, 'APPROVAL_PENDING'),
+  );
+  await assert.rejects(core.approvals.claimForDownload(approvalId, REQUEST), refusal(/confirm/, 'APPROVAL_PENDING'));
+  const status = await waitForApproval(core, approvalId, { waitSeconds: 0 });
+  assert.deepEqual([status.state, status.claimable], ['pending', false]);
+  assert.equal(existsSync(offered.downloads), false, 'a folder was made');
+
+  const edits: Array<[string, (kept: Kept) => void]> = [
+    ['policy', (kept) => Object.assign(kept, { policy: 'chat' })],
+    ['requiredPolicy', (kept) => Object.assign(kept, { requiredPolicy: 'chat' })],
+    ['both', (kept) => Object.assign(kept, { policy: 'chat', requiredPolicy: 'chat' })],
+  ];
+  for (const [what, edit] of edits) {
+    const question = await core.approvals.createDownload({
+      channel: 'gmail',
+      download: binding(offered),
+      policy: 'confirm',
+    });
+    tamper(core, question.approvalId, edit);
+    await assert.rejects(
+      settling(core, env, home, { kind: 'choice', answer: { choice: 'downloads' }, choiceId: question.approvalId }),
+      refusal(/is corrupt \(binding-mismatch\)/, 'APPROVAL_VOID'),
+      what,
+    );
+    const shown = await waitForApproval(core, question.approvalId, { waitSeconds: 0 });
+    assert.deepEqual(shown.approval, { approvalId: question.approvalId, state: 'corrupt', reason: 'binding-mismatch' });
+    assert.equal(existsSync(offered.downloads), false, `${what}: a folder was made`);
+  }
+});
+
+test('the save path is checked again against the claimed question itself: an answer or a folder it does not bind saves nothing, and makes no folder', async () => {
+  const { core, env, home } = machine();
+  const offered = { downloads: join(home, 'Downloads'), current: join(home, 'work') };
+  const elsewhere = join(home, 'elsewhere');
+  // What a claim hands back, changed between the store's check under its lock and the save.
+  const claim = core.approvals.claimForDownload.bind(core.approvals);
+  let change: ((claimed: Kept) => Kept) | null = null;
+  core.approvals.claimForDownload = async (...args: Parameters<typeof claim>) => {
+    const claimed = (await claim(...args)) as Kept;
+    return change === null ? claimed : change(claimed);
+  };
+  const cases: Array<['chat' | 'confirm', string, (claimed: Kept) => Kept, string]> = [
+    [
+      'confirm',
+      'the answer, its digest left as it was',
+      (claimed) => ({ ...claimed, download: { ...claimed.download, answer: { choice: 'other', folder: elsewhere } } }),
+      'evidence-contradictory',
+    ],
+    [
+      'confirm',
+      'the folder the answer names',
+      (claimed) => ({
+        ...claimed,
+        download: { ...claimed.download, folders: { ...claimed.download.folders, downloads: elsewhere } },
+      }),
+      'binding-mismatch',
+    ],
+    [
+      'chat',
+      'an answer nobody recorded',
+      (claimed) => ({ ...claimed, download: { ...claimed.download, answer: { choice: 'other', folder: elsewhere } } }),
+      'evidence-missing',
+    ],
+  ];
+  for (const [policy, what, edit, reason] of cases) {
+    const { approvalId } = await core.approvals.createDownload({
+      channel: 'gmail',
+      download: binding(offered),
+      policy,
+    });
+    if (policy === 'confirm') await core.approvals.answerDownload(approvalId, 'terminal', { choice: 'downloads' });
+    change = edit;
+    await assert.rejects(
+      settling(
+        core,
+        env,
+        home,
+        { kind: 'choice', answer: policy === 'chat' ? { choice: 'downloads' } : null, choiceId: approvalId },
+        policy,
+      ),
+      refusal(new RegExp(`is corrupt \\(${reason}\\)`), 'APPROVAL_VOID'),
+      what,
+    );
+    change = null;
+    for (const folder of [offered.downloads, elsewhere]) {
+      assert.equal(existsSync(folder), false, `${what}: ${folder} was made`);
+    }
+  }
 });

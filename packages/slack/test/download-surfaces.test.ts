@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readdir } from 'node:fs/promises';
+import { readdir, readFile, writeFile } from 'node:fs/promises';
 import { join, relative, sep } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
@@ -186,7 +186,10 @@ async function connect(
   await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
   const call = async (args: Record<string, unknown>) =>
     (await client.callTool({ name: 'slack_file_download', arguments: args })) as ToolResult;
-  return { call, close: () => Promise.all([client.close(), server.close()]) };
+  // The workspace's wait, which a download waiting for the person names.
+  const wait = async (args: Record<string, unknown>) =>
+    (await client.callTool({ name: 'slack_approval_wait', arguments: args })) as ToolResult;
+  return { call, wait, close: () => Promise.all([client.close(), server.close()]) };
 }
 
 function ok<T>(result: ToolResult): T {
@@ -693,6 +696,96 @@ test('a document that can hold macros keeps its name, and the question, `next` a
     assert.deepEqual(saved.warnings, [warning]);
   } finally {
     delete RECORDS.F0XLS;
+    await tool.close();
+  }
+});
+
+// ── What the person was shown, and what is saved (CUE-404 Task 19) ─────────────────────────────────────────────
+
+test('under confirm, a download waiting for the person names slack_approval_wait, which sees the question waiting, answered, then used', async () => {
+  const harness = await newHarness();
+  await harness.addWorkspace({ alias: 'acme' });
+  await confirmPolicy(harness);
+  const cwd = tempDir('agent-slack-cwd-');
+  const bytes = transport(BYTES);
+  const tool = await connect(harness, { fetch: slackApi(script()).fetch, download: bytes.download, cwd });
+  try {
+    const asked = ok<FileDownloadQuestion>(await tool.call({ workspace: 'acme', fileIds: ['F0AAA2'] }));
+    const refused = failed(await tool.call({ workspace: 'acme', fileIds: ['F0AAA2'], choiceId: asked.choiceId }));
+    assert.equal(refused.code, 'APPROVAL_PENDING');
+    assert.match(refused.hint ?? '', /wait for their answer with slack_approval_wait/);
+    type Waited = { state: string; claimable: boolean; approval: { said?: string } };
+    const waiting = ok<Waited>(await tool.wait({ approvalId: asked.choiceId, waitSeconds: 0 }));
+    assert.deepEqual([waiting.state, waiting.claimable], ['pending', false]);
+
+    const person = await cli(harness, ['approve', asked.choiceId], { json: false, agent: false, tty: ['2'] });
+    assert.equal(person.code, EXIT_CODES.OK, person.stderr);
+    const answered = ok<Waited>(await tool.wait({ approvalId: asked.choiceId, waitSeconds: 0 }));
+    assert.deepEqual([answered.state, answered.claimable], ['answered', true]);
+    assert.equal(answered.approval.said, `answered at the terminal: save to current (${asked.options[1]?.path})`);
+
+    const saved = ok<FileDownloadResult>(
+      await tool.call({ workspace: 'acme', fileIds: ['F0AAA2'], choiceId: asked.choiceId }),
+    );
+    assert.equal(saved.folder, cwd);
+    const used = ok<Waited>(await tool.wait({ approvalId: asked.choiceId, waitSeconds: 0 }));
+    assert.deepEqual([used.state, used.claimable], ['answered', false]);
+  } finally {
+    await tool.close();
+  }
+});
+
+test('a question changed after it was asked or answered saves nothing, by the tool or the command, and no file is fetched (R16b, R19b)', async () => {
+  const harness = await newHarness();
+  await harness.addWorkspace({ alias: 'acme' });
+  const cwd = tempDir('agent-slack-cwd-');
+  const elsewhere = join(tempDir('agent-slack-other-'), 'elsewhere');
+  const bytes = transport(BYTES);
+  const tool = await connect(harness, { fetch: slackApi(script()).fetch, download: bytes.download, cwd });
+  const tamper = async (choiceId: string, edit: (download: Record<string, unknown>) => void) => {
+    const path = join(harness.core.approvals.directory, `${choiceId}.json`);
+    const kept = JSON.parse(await readFile(path, 'utf8')) as { download: Record<string, unknown> };
+    edit(kept.download);
+    await writeFile(path, JSON.stringify(kept, null, 2));
+  };
+  try {
+    // Under chat: the listing the person was shown, changed before their answer is claimed — by either surface.
+    const chat = ok<FileDownloadQuestion>(await tool.call({ workspace: 'acme', fileIds: ['F0AAA2'] }));
+    await tamper(chat.choiceId, (download) => {
+      const listing = download.listing as Array<Record<string, unknown>>;
+      listing[0] = { ...listing[0], flags: [] };
+    });
+    const byTool = failed(
+      await tool.call({ workspace: 'acme', fileIds: ['F0AAA2'], saveTo: 'current', choiceId: chat.choiceId }),
+    );
+    const byCommand = await cliError(
+      harness,
+      ['files', 'download', '--workspace', 'acme', '--file', 'F0AAA2', '--to', 'current', '--choice', chat.choiceId],
+      { read: slackApi(script()).fetch, download: bytes.download, cwd },
+    );
+    for (const refused of [byTool, byCommand]) {
+      assert.equal(refused.code, 'APPROVAL_VOID');
+      assert.match(refused.message, /is corrupt \(binding-mismatch\)/);
+    }
+
+    // Under confirm: the person's answer, changed after they gave it.
+    await confirmPolicy(harness);
+    const asked = ok<FileDownloadQuestion>(await tool.call({ workspace: 'acme', fileIds: ['F0AAA2'] }));
+    const person = await cli(harness, ['approve', asked.choiceId], { json: false, agent: false, tty: ['1'] });
+    assert.equal(person.code, EXIT_CODES.OK, person.stderr);
+    await tamper(asked.choiceId, (download) => {
+      download.answer = { choice: 'other', folder: elsewhere };
+    });
+    const answerChanged = failed(await tool.call({ workspace: 'acme', fileIds: ['F0AAA2'], choiceId: asked.choiceId }));
+    assert.equal(answerChanged.code, 'APPROVAL_VOID');
+    assert.match(answerChanged.message, /is corrupt \(evidence-contradictory\)/);
+    const status = ok<{ state: string }>(await tool.wait({ approvalId: asked.choiceId, waitSeconds: 0 }));
+    assert.equal(status.state, 'corrupt');
+
+    assert.deepEqual(bytes.asked, [], 'a file was fetched');
+    assert.deepEqual(await readdir(cwd), []);
+    await assert.rejects(readdir(elsewhere), { code: 'ENOENT' });
+  } finally {
     await tool.close();
   }
 });

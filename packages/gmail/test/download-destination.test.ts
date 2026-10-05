@@ -890,3 +890,157 @@ test('a question an earlier release asked is never put in a form, and the downlo
     await form.close();
   }
 });
+
+// ── What the person was shown, and what is saved (CUE-404 Task 19) ─────────────────────────────────────────────
+
+/** Edits a question's record where the store keeps it, as another program could. */
+async function tamper(
+  harness: Harness,
+  choiceId: string,
+  edit: (kept: Record<string, unknown>) => void,
+): Promise<void> {
+  const path = join(harness.core.approvals.directory, `${choiceId}.json`);
+  const kept = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
+  edit(kept);
+  writeFileSync(path, JSON.stringify(kept, null, 2));
+}
+
+/** Whether Gmail was asked for any attachment's bytes since `from`, its count of requests then. */
+const fetchedSince = (harness: Harness, from: number) =>
+  harness.google.requests.slice(from).some((request) => request.path.includes('/attachments/'));
+
+test('under confirm, a download waiting for the person names gmail_send_wait, which sees the question waiting, answered, then used', async () => {
+  const { harness, cwd } = await mailbox();
+  await confirmPolicy(harness);
+  const { call, close } = await connect({ core: harness.core, env: harness.env, cwd });
+  try {
+    const asked = wire(await call('gmail_attachment_download', { inbox: 'work', messageIds: ['m1'] }));
+    const choiceId = String(asked.choiceId);
+    const current = String((asked.options as Array<{ path?: string }>)[1]?.path);
+    const refused = toolError(await call('gmail_attachment_download', { inbox: 'work', messageIds: ['m1'], choiceId }));
+    assert.equal(refused.code, 'APPROVAL_PENDING');
+    assert.match(refused.hint ?? '', /wait for their answer with gmail_send_wait/);
+    const waiting = wire(await call('gmail_send_wait', { approvalId: choiceId, waitSeconds: 0 }));
+    assert.deepEqual([waiting.state, waiting.claimable], ['pending', false]);
+
+    const person = await cli(harness, ['approve', choiceId], { tty: true, replies: [[/Save them to/, '2']] });
+    assert.equal(person.code, 0, person.stderr);
+    const answered = wire(await call('gmail_send_wait', { approvalId: choiceId, waitSeconds: 0 }));
+    assert.deepEqual([answered.state, answered.claimable], ['answered', true]);
+    assert.equal(
+      (answered.approval as { said?: string }).said,
+      `answered at the terminal: save to current (${current})`,
+    );
+
+    const saved = wire(await call('gmail_attachment_download', { inbox: 'work', messageIds: ['m1'], choiceId }));
+    assert.equal(saved.folder, cwd);
+    const used = wire(await call('gmail_send_wait', { approvalId: choiceId, waitSeconds: 0 }));
+    assert.deepEqual([used.state, used.claimable], ['answered', false]);
+  } finally {
+    await close();
+  }
+});
+
+test('under chat, the question the tool saved with says it was answered in the chat, and nothing of where', async () => {
+  const { harness, cwd } = await mailbox();
+  const { call, close } = await connect({ core: harness.core, env: harness.env, cwd });
+  try {
+    const asked = wire(await call('gmail_attachment_download', { inbox: 'work', messageIds: ['m1'] }));
+    const choiceId = String(asked.choiceId);
+    wire(await call('gmail_attachment_download', { inbox: 'work', messageIds: ['m1'], saveTo: 'current', choiceId }));
+    const status = wire(await call('gmail_send_wait', { approvalId: choiceId, waitSeconds: 0 }));
+    const listed = (
+      wire(await call('gmail_send_list', { inbox: 'work' })).approvals as Array<Record<string, unknown>>
+    ).find((entry) => entry.approvalId === choiceId);
+    for (const [surface, view] of [
+      ['status', status.approval],
+      ['list', listed],
+    ] as const) {
+      const shown = view as { state?: string; said?: string };
+      assert.deepEqual([shown.state, shown.said], ['answered', 'answered (in chat)'], surface);
+      assert.ok(!JSON.stringify(view).includes(cwd), `${surface}: where it was saved is shown`);
+    }
+    assert.equal(
+      asV2(await harness.core.approvals.get(choiceId))?.download?.answer,
+      undefined,
+      'the chat answer was kept',
+    );
+  } finally {
+    await close();
+  }
+});
+
+test('a question changed after it was asked or answered saves nothing over MCP, and Gmail is never asked for the attachment (R16b, R19b)', async () => {
+  const { harness, downloads, cwd, home } = await mailbox();
+  const elsewhere = join(home, 'elsewhere');
+  const { call, close } = await connect({ core: harness.core, env: harness.env, cwd });
+  try {
+    // Under chat: the listing the person was shown, changed before their answer is claimed.
+    const chat = wire(await call('gmail_attachment_download', { inbox: 'work', messageIds: ['m1'] }));
+    await tamper(harness, String(chat.choiceId), (kept) => {
+      const download = kept.download as { listing: Array<{ size: number }> };
+      download.listing[0] = { ...download.listing[0], size: 1 } as { size: number };
+    });
+    const from = harness.google.requests.length;
+    const listingChanged = toolError(
+      await call('gmail_attachment_download', {
+        inbox: 'work',
+        messageIds: ['m1'],
+        saveTo: 'current',
+        choiceId: chat.choiceId,
+      }),
+    );
+    assert.equal(listingChanged.code, 'APPROVAL_VOID');
+    assert.match(listingChanged.message, /is corrupt \(binding-mismatch\)/);
+    assert.equal(fetchedSince(harness, from), false, 'Gmail was asked for the attachment');
+
+    // Under confirm: the person's answer, changed after they gave it.
+    await confirmPolicy(harness);
+    const asked = wire(await call('gmail_attachment_download', { inbox: 'work', messageIds: ['m1'] }));
+    const choiceId = String(asked.choiceId);
+    const person = await cli(harness, ['approve', choiceId], { tty: true, replies: [[/Save them to/, '1']] });
+    assert.equal(person.code, 0, person.stderr);
+    await tamper(harness, choiceId, (kept) => {
+      (kept.download as Record<string, unknown>).answer = { choice: 'other', folder: elsewhere };
+    });
+    const before = harness.google.requests.length;
+    const answerChanged = toolError(
+      await call('gmail_attachment_download', { inbox: 'work', messageIds: ['m1'], choiceId }),
+    );
+    assert.equal(answerChanged.code, 'APPROVAL_VOID');
+    assert.match(answerChanged.message, /is corrupt \(evidence-contradictory\)/);
+    assert.equal(fetchedSince(harness, before), false, 'Gmail was asked for the attachment');
+    const status = wire(await call('gmail_send_wait', { approvalId: choiceId, waitSeconds: 0 }));
+    assert.equal(status.state, 'corrupt');
+
+    assert.deepEqual(await listing(downloads), []);
+    assert.deepEqual(await listing(cwd), []);
+    assert.deepEqual(await listing(elsewhere), []);
+  } finally {
+    await close();
+  }
+});
+
+test('under confirm, a question whose listing was changed is never put in a form, even to a trusted client, and saves nothing (R18b)', async () => {
+  const { harness, downloads, cwd } = await mailbox();
+  await confirmPolicy(harness);
+  await trustForms(harness, 'form-client');
+  const form = await formClient(harness, cwd, 'form-client', () => ({ choice: 'downloads' }));
+  try {
+    const asked = wire(await form.call({ inbox: 'work', messageIds: ['m1'] }));
+    await tamper(harness, String(asked.choiceId), (kept) => {
+      const download = kept.download as { listing: Array<Record<string, unknown>> };
+      download.listing[0] = { ...download.listing[0], flags: ['macro-capable'] };
+    });
+    const before = harness.google.requests.length;
+    const refused = toolError(await form.call({ inbox: 'work', messageIds: ['m1'], choiceId: asked.choiceId }));
+    assert.equal(form.asked.length, 0, 'a form showed a corrupt question');
+    assert.equal(refused.code, 'APPROVAL_VOID');
+    assert.match(refused.message, /is corrupt \(binding-mismatch\)/);
+    assert.equal(fetchedSince(harness, before), false, 'Gmail was asked for the attachment');
+    assert.deepEqual(await listing(downloads), []);
+    assert.deepEqual(await listing(cwd), []);
+  } finally {
+    await form.close();
+  }
+});

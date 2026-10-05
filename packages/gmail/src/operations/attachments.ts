@@ -555,6 +555,8 @@ export async function downloadAttachments(
     surface: context.surface,
     env: context.env,
     signal: options.signal,
+    // An agent left waiting for the person's own answer learns of it with the mailbox's wait.
+    waitTool: 'gmail_send_wait',
   });
   const files: DownloadedFile[] = [];
   // The same file twice — the same name and the same bytes — is written once. The same bytes under another name are

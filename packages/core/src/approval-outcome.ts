@@ -268,7 +268,10 @@ export interface PublicApprovalObject extends ApprovalObject {
   readonly expect?: { readonly to: string[]; readonly cc: string[]; readonly bcc: string[]; readonly subject: string };
   /** A download's question: the names its files would be saved under, as listed, enveloped. */
   readonly files?: { readonly names: string[]; readonly listing?: string[] | undefined } | undefined;
-  /** Where it stands, in words, for the states that have their own: expired, used, an earlier release's. */
+  /**
+   * Where it stands, in words, for the states that have their own: expired, used, an earlier release's, and a
+   * download's question answered — where and to which folder, or `answered (in chat)` with no folder at all.
+   */
   readonly said?: string | undefined;
 }
 
@@ -293,10 +296,34 @@ function labelOf(channel: string): string {
   return isChannel(channel) ? channelLabel(channel) : channel;
 }
 
+/**
+ * A download's question that expired, in words (D2): whether the person had answered it — at the terminal or in a
+ * form, which the question records — and never when, since no answer time is kept.
+ */
+export function downloadExpiredWords(answered: boolean): string {
+  return answered
+    ? 'the question was answered and expired before it was used'
+    : 'the question expired before it was answered';
+}
+
+/**
+ * A download's answered question, in words (D2): where the person answered it and the folder they chose, when they
+ * answered at the terminal or in a form, which the question records — or `answered (in chat)`, with no folder at all,
+ * when it was claimed with an answer from the chat: that answer is never kept, so there is nothing to say it named.
+ */
+export function downloadAnsweredWords(record: Pick<ApprovalRecord, 'approvedVia' | 'download'>): string {
+  const answer = record.download?.answer;
+  if (record.approvedVia === undefined || answer === undefined) return 'answered (in chat)';
+  const where = record.approvedVia === 'terminal' ? 'at the terminal' : 'in a form';
+  const folder =
+    answer.choice === 'other' ? answer.folder : `${answer.choice} (${record.download?.folders[answer.choice]})`;
+  return `answered ${where}: save to ${folder}`;
+}
+
 /** Where a record stands, in words, for the states that have their own (D2): or nothing. */
 function saidOf(
   approval: ApprovalObject,
-  facts: { kind: ApprovalKind | null; answered: boolean },
+  facts: { kind: ApprovalKind | null; answered: boolean; answeredWords: string | undefined },
   options: PublicApprovalOptions,
 ): string | undefined {
   if (approval.legacy === true) {
@@ -304,12 +331,9 @@ function saidOf(
       ? 'an earlier release’s approval: shown, and never used here'
       : `an earlier release’s ${labelOf(approval.channel)} approval: shown, and never used here`;
   }
+  if (approval.state === 'answered') return facts.answeredWords;
   if (approval.state === 'expired') {
-    if (facts.kind === 'download') {
-      return facts.answered
-        ? 'the question was answered and expired before it was used'
-        : 'the question expired before it was answered';
-    }
+    if (facts.kind === 'download') return downloadExpiredWords(facts.answered);
     const nothing = `nothing was ${facts.kind === 'change' ? 'changed' : 'sent'} with it`;
     return approval.reason === CLOCK_ANOMALY
       ? `the clock moved backwards; this approval was expired safely at ${approval.expiredAt}; ${nothing}`
@@ -351,6 +375,7 @@ export function publicApproval(
           expect: stored.record.expect,
           download: stored.record.download,
           answered: stored.record.approvedVia !== undefined,
+          answeredWords: stored.record.kind === 'download' ? downloadAnsweredWords(stored.record) : undefined,
         }
       : stored.form === 'legacy'
         ? {
@@ -359,6 +384,7 @@ export function publicApproval(
             expect: stored.view.expect,
             download: stored.record.download,
             answered: stored.record.approvedVia !== undefined,
+            answeredWords: undefined,
           }
         : stored.form === 'corrupt' && stored.safe !== null
           ? {
@@ -367,6 +393,7 @@ export function publicApproval(
               expect: stored.safe.expect,
               download: undefined,
               answered: false,
+              answeredWords: undefined,
             }
           : null;
   const kind = approval.kind;
@@ -389,7 +416,11 @@ export function publicApproval(
             ? {}
             : { listing: download.listing.map((file) => wrap(file.name, 'filename')) }),
         };
-  const said = saidOf(approval, { kind, answered: source?.answered ?? false }, options);
+  const said = saidOf(
+    approval,
+    { kind, answered: source?.answered ?? false, answeredWords: source?.answeredWords },
+    options,
+  );
   return {
     approvalId: approval.id,
     ...approval,
@@ -439,8 +470,8 @@ export function withApproval(error: unknown, approval: ApprovalObject | null): u
  * - otherwise, a `pending` or `approved` send whose stored epoch is not the live one reads `revoked`
  *   (`SEND_EPOCH_REASON`), whatever the policy is by then: a record prepared before a `never` never sends.
  * - a pending send or change is claimable only on the `chat` route while the live policy is still `chat`; an approved
- *   one until its window closes. A download's question: pending, while both its own and the live change policy are
- *   `chat`; answered, until it expires.
+ *   one until its window closes. A download's question by its own matrix (`downloadClaimable`): pending, while both
+ *   its own and the live change policy are `chat`; answered, until it expires.
  *
  * A store opened without a configuration (`live: null`) never makes anything claimable, and refuses a claim or an
  * approval with `CONFIG`. A record from an earlier release, or one that failed its integrity check, is never claimable
@@ -554,8 +585,29 @@ function isClaimable(record: ApprovalRecord, live: LiveGate): boolean {
     case 'change':
       return record.state === 'approved' || (record.route === 'chat' && live.changePolicy === 'chat');
     case 'download':
-      return record.state === 'approved' || (record.requiredPolicy === 'chat' && live.changePolicy === 'chat');
+      return downloadClaimable(record, live.changePolicy);
   }
+}
+
+/**
+ * Whether a download's question can be claimed now — the download `claimable` matrix (design 2026-10-05 §D2):
+ *
+ * - pending, while both the policy it was asked under (`requiredPolicy`) and the live change policy are `chat`: it can
+ *   be answered in the chat now;
+ * - pending otherwise: it waits for the person, at their terminal or in a form — loosening the live policy does not
+ *   move a question asked under `confirm`;
+ * - answered at the terminal or in a form (`approved`), and so unexpired — the store derives expiry first: the save may
+ *   proceed;
+ * - used, expired, revoked — and corrupt, which never reaches here as a record: never.
+ *
+ * The one rule a wait, a status and the claim all decide by.
+ */
+export function downloadClaimable(
+  record: Pick<ApprovalRecord, 'state' | 'requiredPolicy'>,
+  liveChangePolicy: ChangePolicy | undefined,
+): boolean {
+  if (record.state === 'approved') return true;
+  return record.state === 'pending' && record.requiredPolicy === 'chat' && liveChangePolicy === 'chat';
 }
 
 /**
@@ -594,7 +646,10 @@ function errorOf(
         approval,
       );
     case 'expired': {
-      if (download) return refuse('APPROVAL_EXPIRED', 'the question expired before it was answered', record, approval);
+      // A question says whether the person had answered it, and never when (D2).
+      if (download) {
+        return refuse('APPROVAL_EXPIRED', downloadExpiredWords(record.approvedVia !== undefined), record, approval);
+      }
       // Said as it happened (D2): before a person approved it, after — or because the clock moved backwards.
       const nothing = `nothing was ${record.kind === 'change' ? 'changed' : 'sent'} with it`;
       const message =
