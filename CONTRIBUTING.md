@@ -239,6 +239,15 @@ Tests build the expected command the same way rather than by hand: `packages/cor
 `packages/core/test/fixtures/cli-command/`. A channel's tests import core from its build, so run
 `pnpm --filter @agentcomms/core build` after changing core.
 
+**And paste one.** A command that looks right can still miss the folders it needs once it leaves the process that
+printed it. `test/helpers/real-shell.mjs` is the person who pastes it: a fresh shell with no suite command on its PATH,
+every `AGENT_COMMS_*`, XDG, home and AppData folder a decoy, another working folder, a seal that refuses the keychain
+and every connection off the machine (`seal-process.mjs`), and a terminal for a person's own `approve`, its code typed
+back (`terminal.py`). `test/real-shell-handoffs.test.mjs` runs core's and Gmail's built CLIs that way, and each
+sending channel's `test/real-shell.test.ts` its own approval; a new channel's approval belongs beside them. `approve`
+needs a terminal no test can give on Windows, so there the refusal it gives for want of one is checked against the
+printing process's store instead.
+
 ## Adding a channel
 
 A channel is a package that says what it is; nothing in the core or the tooling is edited to add one
