@@ -637,7 +637,6 @@ export async function executeSend(
       contentDigest: before.analysis.digest,
       inboxId: resolved.inbox.id,
       inboxSub: resolved.inbox.sub,
-      policy: livePolicy,
       expect,
     },
     {

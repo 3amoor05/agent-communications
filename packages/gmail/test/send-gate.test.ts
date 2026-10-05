@@ -328,7 +328,6 @@ test('while a send is in flight, nothing else may touch the draft it is standing
     contentDigest: record.contentDigest,
     inboxId: record.inboxId,
     inboxSub: record.inboxSub,
-    policy: 'chat',
     expect: record.expect,
   });
 

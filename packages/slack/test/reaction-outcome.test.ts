@@ -208,7 +208,10 @@ test('a reaction Slack took whose answer was lost is left to read unknown, never
   assert.equal(changed(), 1, 'Slack was not asked to react');
   assert.deepEqual(outcomes, [], 'an outcome nobody knows was recorded');
   assert.equal(await state(), 'sending');
-  const later = new ApprovalStore(harness.core.paths.stateDir, { now: () => new Date(Date.now() + SENDING_STALE_MS) });
+  const later = new ApprovalStore(harness.core.paths.stateDir, {
+    now: () => new Date(Date.now() + SENDING_STALE_MS),
+    loadConfig: () => harness.core.config.load(),
+  });
   assert.equal(asV2(await later.get(approvalId))?.state, 'unknown');
   const [record] = await audited(harness);
   assert.equal(record?.outcome, 'failed');

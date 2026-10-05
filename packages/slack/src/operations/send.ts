@@ -532,7 +532,6 @@ export interface PostDeps extends PrepareDeps {
         contentDigest: string;
         inboxId: string;
         inboxSub?: string | undefined;
-        policy: SendPolicy;
         expect: Expectation;
       },
       options?: ClaimOptions,
@@ -756,7 +755,6 @@ export async function postPrepared(
       contentDigest: digest,
       inboxId: deps.accountId,
       inboxSub: deps.postingAs,
-      policy: deps.policy,
       // Built from the live values, the same way `preparePost` built the stored one — one source, so they agree.
       expect: expectationFor(payload, preview.notifies),
     },
@@ -1459,7 +1457,6 @@ export async function reactPrepared(
       contentDigest: digest,
       inboxId: deps.accountId,
       inboxSub: deps.postingAs,
-      policy: deps.policy,
       expect: reactionExpectation(options),
     },
     waitingHint('reaction', deps.surface, approvalId, deps.handoffs),

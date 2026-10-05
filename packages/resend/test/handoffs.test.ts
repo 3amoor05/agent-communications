@@ -435,7 +435,7 @@ test('the greeting and every tool say to run the command a result gives, and nam
 
 // ── A misdirected approval, and a Windows registration in another case ─────────────────────────────────────────
 
-test('a send’s approval offered to a change is corrected with Resend’s own approve, located (7d-resend)', async () => {
+test('a send’s approval offered to a change is the one NOT_FOUND, naming no command (7d-resend)', async () => {
   harness = await newHarness();
   await harness.addAccount({ name: 'acme/resend', mode: 'send' });
   await harness.addAccount({ name: 'zeta/resend', mode: 'read' });
@@ -447,16 +447,11 @@ test('a send’s approval offered to a change is corrected with Resend’s own a
     const misdirected = refused(
       await call('resend_account_policy', { account: 'zeta/resend', mode: 'send', approvalId: prepared.approvalId }),
     );
-    assert.equal(misdirected.code, 'USAGE');
+    // Another kind's id is the one NOT_FOUND (design 2026-10-05 §D2): it says nothing of the record, not even the
+    // command that would approve it.
+    assert.equal(misdirected.code, 'NOT_FOUND');
     const hint = misdirected.hint ?? '';
-    assert.ok(
-      hint.startsWith(
-        `It is approved with the command that prepared it — ${resendInline(harness.core, ['approve', prepared.approvalId])} (`,
-      ),
-      hint,
-    );
-    for (const label of ['Gmail', 'Slack'])
-      assert.match(hint, new RegExp(`${label} \\S+ \\(@agentcomms/\\w+\\) is not locatable here`));
+    assert.doesNotMatch(hint, / approve /);
     assertNoBareCommand(hint);
   } finally {
     await close();

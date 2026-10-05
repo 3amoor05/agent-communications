@@ -631,7 +631,6 @@ export async function executeSend(
       contentDigest: digest,
       inboxId: named.account.id,
       inboxSub: named.account.userId,
-      policy: livePolicy,
       expect: options.expect,
     },
     {

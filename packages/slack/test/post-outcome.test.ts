@@ -103,7 +103,10 @@ test('a post Slack took whose answer was lost on the way back is left to read un
   // Before the change this was `failed`: a post that is in the channel, recorded as one that is not.
   assert.deepEqual(outcomes, [], 'an outcome nobody knows was recorded');
   assert.equal(await state(), 'sending');
-  const later = new ApprovalStore(harness.core.paths.stateDir, { now: () => new Date(Date.now() + SENDING_STALE_MS) });
+  const later = new ApprovalStore(harness.core.paths.stateDir, {
+    now: () => new Date(Date.now() + SENDING_STALE_MS),
+    loadConfig: () => harness.core.config.load(),
+  });
   assert.equal(asV2(await later.get(draft.approvalId))?.state, 'unknown');
   const [record] = await audited(harness);
   assert.equal(record?.outcome, 'failed');

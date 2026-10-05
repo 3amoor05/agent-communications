@@ -64,7 +64,6 @@ async function sendApproval(harness: Harness, accountId: string, used = false): 
     await harness.core.approvals.claimForSend(record.approvalId, {
       inboxId: accountId,
       ...draft,
-      policy: 'chat',
       expect,
     });
     await harness.core.approvals.complete(record.approvalId, { sentMessageId: 'email_one' });

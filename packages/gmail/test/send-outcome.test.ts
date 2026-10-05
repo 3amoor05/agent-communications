@@ -79,6 +79,7 @@ test('Gmail acting before its answer is lost leaves the approval sending and tel
   assert.equal(await state(), 'sending');
   const later = new ApprovalStore(setup.harness.core.paths.stateDir, {
     now: () => new Date(Date.now() + SENDING_STALE_MS),
+    loadConfig: () => setup.harness.core.config.load(),
   });
   assert.equal(asV2(await later.get(approval.approvalId))?.state, 'unknown');
   assert.equal(setup.harness.google.requests.filter((request) => request.path.endsWith('/send')).length, 1);

@@ -60,6 +60,7 @@ test('Resend acting before its answer is lost leaves the approval sending and te
       assert.equal(await state(), 'sending');
       const later = new ApprovalStore(harness.core.paths.stateDir, {
         now: () => new Date(Date.now() + SENDING_STALE_MS),
+        loadConfig: () => harness.core.config.load(),
       });
       assert.equal(asV2(await later.get(approval.approvalId))?.state, 'unknown');
       assert.equal(harness.fake.sent.length, 1, 'Resend accepted one email');

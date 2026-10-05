@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { ApprovalStore, asV2, CommsError } from '@agentcomms/core';
+import { liveConfig } from '../../core/test/helpers/live-config.ts';
 import type { SlackCall } from '../src/api/call.ts';
 import { closedPermit } from '../src/api/guard.ts';
 import { compose } from '../src/compose/blocks.ts';
@@ -28,6 +29,14 @@ import { slackHandoffs } from './support/handoffs.ts';
  */
 
 const NOW = () => new Date('2026-09-23T12:00:00.000Z');
+/** The workspace these posts are made from, as the approval store finds it in the configuration it classifies by. */
+const ACCOUNT = 'acc_AAAAAAAAAAAAAAAA';
+
+/** A store over `state` that classifies by a configuration holding the workspace, sending under `policy`. */
+function storeFor(state: string, policy: 'chat' | 'confirm' | 'never' = 'chat') {
+  const config = liveConfig(state, { accounts: { 'acme/slack': { id: ACCOUNT, sendPolicy: policy } } });
+  return { config, approvals: new ApprovalStore(state, { now: NOW, loadConfig: config.loadConfig }) };
+}
 
 function temp(): string {
   return mkdtempSync(join(tmpdir(), 'slack-send-'));
@@ -70,9 +79,9 @@ async function setUp(
 ) {
   const state = temp();
   const drafts = openDraftStore(state, NOW, slackHandoffs());
-  const approvals = new ApprovalStore(state, { now: NOW });
+  const { approvals, config } = storeFor(state, options.policy);
   const draft = await drafts.create(
-    'acc_1',
+    ACCOUNT,
     compose({ channel: options.channel ?? 'C1', text: options.text ?? 'shipping in ten minutes' }),
     options.text ?? 'shipping in ten minutes',
   );
@@ -81,7 +90,7 @@ async function setUp(
   const { call, sent } = fakeSlack(script);
   const deps = {
     call,
-    accountId: 'acc_1',
+    accountId: ACCOUNT,
     workspaceId: 'T0001',
     workspaceName: 'acme/slack',
     postingAs: 'U0',
@@ -91,7 +100,7 @@ async function setUp(
     approvals,
     permit: closedPermit(),
   };
-  return { drafts, approvals, draft, deps, sent, script, book: new NameBook() };
+  return { drafts, approvals, draft, deps, sent, script, book: new NameBook(), config };
 }
 
 // ── Preparing ──────────────────────────────────────────────────────────────────────────────────────────────────
@@ -195,7 +204,7 @@ test('a room whose size cannot be read says so rather than reporting a small one
   const state = temp();
   const drafts = openDraftStore(state, NOW, slackHandoffs());
   const draft = await drafts.create(
-    'acc_1',
+    ACCOUNT,
     compose({ channel: 'C1', text: 'hi', mentions: [{ kind: 'broadcast', who: 'channel' }] }),
     'hi',
   );
@@ -203,14 +212,14 @@ test('a room whose size cannot be read says so rather than reporting a small one
   const prepared = await preparePost(
     {
       call,
-      accountId: 'acc_1',
+      accountId: ACCOUNT,
       workspaceId: 'T0001',
       workspaceName: 'acme/slack',
       postingAs: 'U0',
       handoffs: slackHandoffs(),
       policy: 'chat',
       sendEpoch: 0,
-      approvals: new ApprovalStore(state, { now: NOW }),
+      approvals: storeFor(state).approvals,
     },
     draft,
     new NameBook(),
@@ -466,9 +475,9 @@ test('a room that grew between the preview and the post voids the approval', asy
    */
   const state = temp();
   const drafts = openDraftStore(state, NOW, slackHandoffs());
-  const approvals = new ApprovalStore(state, { now: NOW });
+  const { approvals } = storeFor(state);
   const draft = await drafts.create(
-    'acc_1',
+    ACCOUNT,
     compose({ channel: 'C1', text: 'heads up', mentions: [{ kind: 'broadcast', who: 'here' }] }),
     'heads up',
   );
@@ -488,7 +497,7 @@ test('a room that grew between the preview and the post voids the approval', asy
   };
   const deps = {
     call,
-    accountId: 'acc_1',
+    accountId: ACCOUNT,
     workspaceId: 'T0001',
     workspaceName: 'acme/slack',
     postingAs: 'U0',
