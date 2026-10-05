@@ -1,4 +1,4 @@
-import { asLegacy, asV2, CommsError, recipientDomains } from '@agentcomms/core';
+import { approvalOutcome, asLegacy, asV2, CommsError, recipientDomains } from '@agentcomms/core';
 import type { GmailContext } from '../context.ts';
 
 /**
@@ -133,12 +133,17 @@ async function refuseWhileSending(
   if (messageIds.length === 0) return;
   // A send under way here, or one an earlier release has under way: either stands on the draft's message.
   const sending = await context.core.approvals.list({ inboxId, states: ['sending'] });
-  const held = new Set(sending.map((stored) => (asV2(stored) ?? asLegacy(stored))?.draftMessageId));
-  const clash = messageIds.find((id) => held.has(id));
-  if (clash) {
+  const holding = (id: string) => sending.find((stored) => (asV2(stored) ?? asLegacy(stored))?.draftMessageId === id);
+  const clash = messageIds.find((id) => holding(id) !== undefined);
+  const send = clash === undefined ? undefined : holding(clash);
+  if (clash !== undefined && send !== undefined) {
     throw new CommsError('APPROVAL_PENDING', 'that message is a draft being sent right now, so it cannot be changed', {
       hint: 'Wait for the send to finish, then look at the message in Sent.',
-      details: { messageId: clash },
+      details: {
+        messageId: clash,
+        // Where the send standing on it is: `sending`, and when its lease runs out (design 2026-10-05 §D8).
+        approval: approvalOutcome(send, { action: 'inspect', live: null, now: context.now() }).approval,
+      },
     });
   }
 }

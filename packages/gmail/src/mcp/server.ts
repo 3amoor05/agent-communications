@@ -1,5 +1,8 @@
 import {
+  type ApprovalKind,
+  type ApprovalOutcome,
   answerDownloadInForm,
+  approvalNotFound,
   asV2,
   type CliHandoffs,
   CommsError,
@@ -13,8 +16,8 @@ import {
   gatedChange,
   handoffSentence,
   lookupName,
+  NEVER_NOTICE,
   orgAddChange,
-  ownerOf,
   profileSourcePath,
   retiredOutHint,
   shownPath,
@@ -251,8 +254,16 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
     error: unknown,
   ): { isError: true; structuredContent: Record<string, unknown>; content: Array<{ type: 'text'; text: string }> } => {
     const commsError: CommsError = toCommsError(error);
+    /*
+     * Where the refused call's approval stands goes with the refusal (design 2026-10-05 §D8, plan decision 8): the
+     * object, or `null` for one not found — and nothing else of `details`, which this server has never sent.
+     */
+    const approval =
+      commsError.details !== undefined && Object.hasOwn(commsError.details, 'approval')
+        ? { details: { approval: JSON.parse(JSON.stringify(commsError.details.approval ?? null)) as unknown } }
+        : {};
     const structured = {
-      error: { code: commsError.code, message: commsError.message, hint: commsError.hint ?? null },
+      error: { code: commsError.code, message: commsError.message, hint: commsError.hint ?? null, ...approval },
     };
     return {
       isError: true,
@@ -276,11 +287,16 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
    * operation refuses it for what it is.
    */
   const downloadNeedsPerson = async (choiceId: string, alias: string): Promise<boolean> => {
-    // Only a valid version-2 question is ever put to a person: any other form is refused by the operation for what it is.
-    const record = asV2(await context.core.approvals.get(choiceId).catch(() => null));
-    if (!record || record.kind !== 'download' || record.state !== 'pending') return false;
+    // Whose and what first, under its lock (design 2026-10-05 §D2): only this mailbox's question, and only a valid
+    // version-2 one, is ever put to a person; any other id is refused by the operation for what it is.
     const { inbox } = await context.inbox(alias);
-    if (inbox.id !== record.inboxId) return false;
+    const record = asV2(
+      await context.core.approvals
+        .inspect(choiceId, { kind: 'download', owner: inbox.id })
+        .then(({ stored }) => stored)
+        .catch(() => null),
+    );
+    if (record?.state !== 'pending') return false;
     const config = await context.config();
     const live = findById(config, 'inbox', record.inboxId)?.inbox.changePolicy ?? defaultChangePolicy(config);
     return stricterPolicy(live, record.requiredPolicy) !== 'chat';
@@ -315,6 +331,41 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
   );
 
   /**
+   * Where an approval stands (design 2026-10-05 §D8), as every send-path result and refusal says it: its state, whether
+   * the next call can use it now, its route, and the times its state carries. Loose: a state carries its own times.
+   */
+  const approvalSchema = z.looseObject({
+    id: z.string(),
+    kind: z.string().nullable().describe('"send", "change" or "download"'),
+    channel: z.string().nullable(),
+    state: z
+      .string()
+      .describe(
+        'pending, approved, sending, used, failed, unknown, expired, revoked or corrupt; a download’s answered question is `answered`',
+      ),
+    claimable: z
+      .boolean()
+      .describe('true when the next call can use it now: a yes in the chat on the chat route, or approved'),
+    route: z.enum(['chat', 'confirm']).optional().describe('chat: a yes in the chat; confirm: a person outside it'),
+    ownerRemoved: z.boolean().optional(),
+    legacy: z.boolean().optional(),
+    reason: z.string().optional(),
+    createdAt: z.string().optional(),
+    expiresAt: z.string().optional(),
+    approvedAt: z.string().optional(),
+    usableUntil: z.string().optional(),
+    sendingAt: z.string().optional(),
+    sendingHeartbeatAt: z.string().optional(),
+    unknownAt: z.string().optional(),
+    usedAt: z.string().optional(),
+    sentAt: z.string().optional(),
+    sentMessageId: z.string().optional(),
+    failedAt: z.string().optional(),
+    revokedAt: z.string().optional(),
+    expiredAt: z.string().optional(),
+  });
+
+  /**
    * What every tool that changes an account returns: the result once the change is made, or the approval it waits for.
    *
    * One shape for all of them — core's `changeToolResult` — so an agent that has handled one approval handles every
@@ -337,6 +388,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
       preview: z.string().optional().describe('show this to the user exactly as it is, before asking'),
       expiresAt: z.string().optional(),
       next: z.string().optional().describe('what to do next'),
+      approval: approvalSchema.optional().describe('where the approval stands, while it waits'),
     });
 
   const approvalArgument = z
@@ -395,16 +447,22 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
    * and shown home's preview in a form here. An id that is not this mailbox's is answered as one that does not exist,
    * in the words `gmail_send_cancel` has always used.
    */
-  const checkApprovalPin = async (approvalId: string | undefined): Promise<void> => {
+  const checkApprovalPin = async (approvalId: string | undefined, kind?: ApprovalKind): Promise<void> => {
     if (!pinned || !pinnedId || approvalId === undefined) return;
-    // A malformed id is not this mailbox's either; the store refuses to read one, and that is the same answer.
-    // The owner only from a record it can be trusted of (`ownerOf`): an unreadable file, or a corrupt record whose
-    // binding does not verify, is not this mailbox's — answered exactly as an id that does not exist.
-    const stored = await context.core.approvals.get(approvalId).catch(() => null);
-    if (ownerOf(stored) === pinnedId) return;
-    throw new CommsError('NOT_FOUND', `no approval "${approvalId}" for the "${pinned}" mailbox`, {
-      hint: `This server only serves "${pinned}".`,
-    });
+    /*
+     * One look under the record's lock, by whose it is and — where the tool says — what it is, before anything of its
+     * state (design 2026-10-05 §D2): the store's own NOT_FOUND, byte for byte the one for an id nobody prepared, for
+     * another mailbox's, another kind's, or one whose owner cannot be trusted — an unreadable file, or a corrupt record
+     * whose binding does not verify. A malformed id is not this mailbox's either: the same answer.
+     */
+    try {
+      await context.core.approvals.inspect(approvalId, { owner: pinnedId, ...(kind === undefined ? {} : { kind }) });
+    } catch (error) {
+      if (error instanceof CommsError && (error.code === 'NOT_FOUND' || error.code === 'USAGE')) {
+        throw approvalNotFound(approvalId, kind);
+      }
+      throw error;
+    }
   };
 
   /** Runs a change through core's one flow, from this surface, and answers in the shape above. */
@@ -412,7 +470,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
     change: GatedChange<T>,
     approvalId: string | undefined,
   ): Promise<ReturnType<typeof reply>> => {
-    await checkApprovalPin(approvalId);
+    await checkApprovalPin(approvalId, 'change');
     return reply(
       changeToolResult(
         await gatedChange(context.core, change, {
@@ -1825,7 +1883,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
               hostedDomain: hd,
               detached: true,
             });
-            await checkApprovalPin(approvalId);
+            await checkApprovalPin(approvalId, 'change');
             const outcome = await gatedChange(context.core, change, {
               channel: 'gmail',
               surface: 'mcp',
@@ -2303,17 +2361,13 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
   /** Probe codes in flight, per client. Held here rather than on disk: a probe is one exchange, in one process. */
   const probes = new Map<string, { probeId: string; code: string }>();
 
-  /** Whether this approval must be approved outside the chat, read from config now rather than at prepare time. */
-  const needsConfirmation = async (approvalId: string): Promise<boolean> => {
-    // Only a valid version-2 record: any other form is no form to show, and the execute that follows refuses it.
-    const record = asV2(await context.core.approvals.get(approvalId));
-    if (!record || record.state === 'approved') return false;
-    const config = await context.config();
-    // By the approval's own inbox id, not the name the call used: the approval is for that mailbox, whatever it is
-    // called now.
-    const live = findById(config, 'inbox', record.inboxId)?.inbox.sendPolicy ?? config.defaults.sendPolicy;
-    return stricterPolicy(live, record.requiredPolicy) === 'confirm';
-  };
+  /**
+   * Whether this send must be approved outside the chat, from its classification under its lock (design 2026-10-05
+   * §D2): still pending, and not claimable on a yes in the chat — a `confirm` route, or a chat route the live policy has
+   * tightened. Under a live `never` it is no form to show: the claim that follows revokes it, with POLICY_NEVER.
+   */
+  const needsConfirmation = (outcome: ApprovalOutcome): boolean =>
+    outcome.state === 'pending' && !outcome.claimable && outcome.reason !== NEVER_NOTICE;
 
   const isAllowlisted = async (client: string): Promise<boolean> => {
     if (!client) return false;
@@ -2361,6 +2415,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
           digest: z.string(),
           expiresAt: z.string(),
           nextStep: z.string(),
+          approval: approvalSchema.describe('where the approval stands: pending, and whether a yes here sends it'),
           legacyDrain: legacyDrainSchema,
         }),
         annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
@@ -2401,6 +2456,9 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
             .nullable()
             .describe('what the mailbox says about the message it filed, read back after the send'),
           note: z.string().optional().describe('bookkeeping that could not be written after Gmail sent the message'),
+          approval: approvalSchema.describe(
+            'where the approval stands: used, or still sending if that was not recorded',
+          ),
           legacyDrain: legacyDrainSchema,
         }),
         annotations: {
@@ -2416,13 +2474,19 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
       async ({ inbox, draftId, approvalId, expect }, ctx) => {
         try {
           const alias = targetInbox(inbox);
-          // Before the approval is read for its policy: on a pinned server, another mailbox's is not this one's to
-          // show in a form, to count a wrong code against, or to void by claiming it for the wrong draft.
-          await checkApprovalPin(approvalId);
+          /*
+           * Whose and what before anything of its state, and before a route is chosen (design 2026-10-05 §D2): this
+           * mailbox's send, or the one NOT_FOUND — another mailbox's is not this call's to show in a form, to count a
+           * wrong code against, or to void by claiming it for the wrong draft; nor is another kind's. Then its state, as
+           * the claim would classify it: anything that cannot be sent is refused for what it is, with where it stands.
+           */
+          const { inbox: owner } = await context.inbox(alias);
+          const { outcome } = await context.core.approvals.inspect(approvalId, { kind: 'send', owner: owner.id });
+          if (outcome.error) throw outcome.error;
           // Channel (a): a form the model cannot answer, but only from a client that has proved its forms reach a
           // person. An un-allowlisted client is told to use the terminal or Gmail — and the approval is left alone,
           // because being asked from the wrong client is not evidence that anything is wrong with the message.
-          if (await needsConfirmation(approvalId)) {
+          if (needsConfirmation(outcome)) {
             const answered = inputResponse(ctx.mcpReq.inputResponses, APPROVAL_KEY);
             if (answered.kind === 'missing') {
               const client = server.server.getClientVersion()?.name ?? '';
@@ -2437,7 +2501,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
                         'Ask the user to send the draft from Gmail: this client is not on the list of clients whose approval forms are known to reach a person.',
                     },
                   ),
-                  details: { approvalId, client },
+                  details: { approvalId, client, approval: outcome.approval },
                 });
               }
               const prompt = await beginApproval(context, approvalId);
@@ -2462,6 +2526,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
                 `nothing was sent: the approval was ${answered.kind === 'elicit' ? `${answered.action}ed` : 'not given'}`,
                 {
                   hint: 'Prepare the send again if it should still go.',
+                  details: { approvalId, approval: outcome.approval },
                 },
               );
             }

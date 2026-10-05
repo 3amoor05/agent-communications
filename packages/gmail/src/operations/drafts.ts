@@ -2,6 +2,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
 import {
   type AttachPolicy,
+  approvalOutcome,
   asLegacy,
   asV2,
   CommsError,
@@ -565,10 +566,15 @@ export async function deleteDraft(context: GmailContext, alias: string, draftId:
 async function refuseWhileSending(context: GmailContext, inboxId: string, draftId: string): Promise<void> {
   // A send under way here, or one an earlier release has under way: either stands on the draft.
   const sending = await context.core.approvals.list({ inboxId, states: ['sending'] });
-  if (sending.some((stored) => (asV2(stored) ?? asLegacy(stored))?.draftId === draftId)) {
+  const send = sending.find((stored) => (asV2(stored) ?? asLegacy(stored))?.draftId === draftId);
+  if (send !== undefined) {
     throw new CommsError('APPROVAL_PENDING', 'this draft is being sent right now, so it cannot be changed', {
       hint: 'Wait for the send to finish, then look at the message in Sent.',
-      details: { draftId },
+      details: {
+        draftId,
+        // Where the send standing on it is: `sending`, and when its lease runs out (design 2026-10-05 §D8).
+        approval: approvalOutcome(send, { action: 'inspect', live: null, now: context.now() }).approval,
+      },
     });
   }
 }

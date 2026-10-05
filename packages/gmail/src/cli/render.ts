@@ -720,8 +720,14 @@ export function renderSendPreparation(result: SendPreparation, color: boolean, h
   if (result.riskFlags.length > 0) {
     lines.push(paint(color, 'yellow', `! raised to "confirm": ${result.riskFlags.join(', ')}`));
   }
+  // Where the approval stands (design 2026-10-05 §D8): its state, and whether a yes in the chat sends it.
+  const waiting = result.approval.claimable ? 'a yes in the chat sends it' : 'it waits for a person outside the chat';
   lines.push(
-    paint(color, 'dim', `Approval ${result.approvalId}, good until ${result.expiresAt.slice(11, 16)} UTC.`),
+    paint(
+      color,
+      'dim',
+      `Approval ${result.approvalId} is ${result.approval.state}: ${waiting}. Good until ${result.expiresAt.slice(11, 16)} UTC.`,
+    ),
     result.nextStep,
     paint(color, 'dim', `Then: ${handoffText(handoffs.own(sendExecuteWords(result)))}`),
   );
@@ -753,7 +759,11 @@ function sendExecuteWords(result: SendPreparation): string[] {
 export function renderSent(result: SendResult, color: boolean): string {
   const lines = [
     `Sent to ${result.to.join(', ') || '(nobody in To)'}${result.cc.length > 0 ? ` · cc ${result.cc.join(', ')}` : ''}.`,
-    paint(color, 'dim', `Message ${result.sentMessageId} in ${result.inbox}, approval ${result.approvalId}.`),
+    paint(
+      color,
+      'dim',
+      `Message ${result.sentMessageId} in ${result.inbox}, approval ${result.approvalId} (${result.approval.state}).`,
+    ),
   ];
   if (result.verified) {
     lines.push(

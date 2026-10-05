@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { dirname, join } from 'node:path';
@@ -886,7 +887,15 @@ test('a pinned server refuses another mailbox’s change approval before it touc
       await pinned.call('gmail_inbox_policy', { sendPolicy: 'chat', approvalId: forHome.approvalId }),
     );
     assert.equal(refused.code, 'NOT_FOUND');
-    assert.match(refused.message, /for the "work" mailbox/);
+    // The one NOT_FOUND (design 2026-10-05 §D2): byte for byte an id nobody prepared, naming neither mailbox.
+    const nobody = toolError(
+      await pinned.call('gmail_inbox_policy', { sendPolicy: 'chat', approvalId: `ap_${'7'.repeat(26)}` }),
+    );
+    assert.equal(
+      refused.message.replace(forHome.approvalId, 'ID'),
+      nobody.message.replace(`ap_${'7'.repeat(26)}`, 'ID'),
+    );
+    assert.equal(refused.hint, nobody.hint);
     assert.equal(
       asV2(await harness.core.approvals.get(forHome.approvalId))?.state,
       'pending',
@@ -955,6 +964,58 @@ test('a pinned server refuses another mailbox’s send approval rather than void
     assert.equal(cancel.code, refused.code);
     assert.equal(cancel.message, refused.message);
     assert.equal(asV2(await harness.core.approvals.get(forHome.approvalId))?.state, 'pending');
+  } finally {
+    await pinned.close();
+  }
+});
+
+test('a pinned server never classifies another mailbox’s record: expired or not, it is the one NOT_FOUND, byte for byte (D2-b)', async () => {
+  const harness = await workAndHome();
+  const home = (await harness.core.config.load()).inboxes.home;
+  assert.ok(home);
+  const record = (subject: string) =>
+    harness.core.approvals.create({
+      inboxId: home.id,
+      inboxSub: 'sub-2',
+      draftId: 'r-home',
+      draftMessageId: 'm-home',
+      channel: 'gmail',
+      sendEpoch: 0,
+      contentDigest: 'e'.repeat(64),
+      policy: 'chat',
+      requiredPolicy: 'chat',
+      riskFlags: [],
+      expect: { to: ['kim@partner.test'], cc: [], bcc: [], subject },
+    });
+  const live = await record('Home');
+  // Expired: classified, it would be refused as expired, so NOT_FOUND here was given before it was classified.
+  const expired = await record('Old');
+  const file = join(harness.core.approvals.directory, `${expired.approvalId}.json`);
+  const stored = JSON.parse(readFileSync(file, 'utf8')) as Record<string, string>;
+  for (const key of ['createdAt', 'expiresAt', 'updatedAt'] as const) {
+    stored[key] = new Date(Date.parse(stored[key] as string) - 60 * 60_000).toISOString();
+  }
+  writeFileSync(file, JSON.stringify(stored));
+  const bytes = readFileSync(file, 'utf8');
+  const nobody = `ap_${'7'.repeat(26)}`;
+  const pinned = await connect({ core: harness.core, env: harness.env, inbox: 'work' });
+  try {
+    for (const tool of ['gmail_draft_send', 'gmail_send_cancel'] as const) {
+      const envelope = async (approvalId: string) => {
+        const args =
+          tool === 'gmail_draft_send'
+            ? { draftId: 'r-home', approvalId, expect: { to: ['kim@partner.test'], cc: [], bcc: [], subject: 'Home' } }
+            : { approvalId };
+        const refused = toolError(await pinned.call(tool, args));
+        assert.equal(refused.code, 'NOT_FOUND', `${tool}: ${refused.message}`);
+        return JSON.stringify(refused).replaceAll(approvalId, 'ID');
+      };
+      const expected = await envelope(nobody);
+      assert.equal(await envelope(live.approvalId), expected, `${tool}: home's live approval`);
+      assert.equal(await envelope(expired.approvalId), expected, `${tool}: home's expired approval`);
+    }
+    assert.equal(readFileSync(file, 'utf8'), bytes, 'the expired record was not even written back');
+    assert.equal(asV2(await harness.core.approvals.get(live.approvalId))?.state, 'pending');
   } finally {
     await pinned.close();
   }

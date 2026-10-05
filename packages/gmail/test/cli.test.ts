@@ -108,6 +108,14 @@ async function cli(
               bcc: request.expect.bcc,
               subject: request.expect.subject,
               verified: null,
+              approval: {
+                id: request.approvalId,
+                kind: 'send',
+                channel: 'gmail',
+                state: 'used',
+                claimable: false,
+                sentMessageId: 'm_parser',
+              },
             };
           },
         }
@@ -954,6 +962,15 @@ test('send execute rendering preserves every subject and every recipient list on
           digest: 'digest',
           expiresAt: '2026-10-04T12:00:00.000Z',
           nextStep: 'Wait for approval.',
+          approval: {
+            id: 'ap_AAAAAAAAAAAAAAAAAAAAAA',
+            kind: 'send',
+            channel: 'gmail',
+            state: 'pending',
+            claimable: true,
+            route: 'chat',
+            expiresAt: '2026-10-04T12:00:00.000Z',
+          },
         };
         const list = (flag: string, values: readonly string[]) => [flag, ...(values.length > 0 ? values : ['none'])];
         const words = [

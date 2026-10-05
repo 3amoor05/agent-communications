@@ -1,4 +1,5 @@
 import {
+  type ApprovalObject,
   type ApprovalRecord,
   type Caps,
   CommsError,
@@ -7,10 +8,8 @@ import {
   type Expectation,
   ensureSendEpochConfig,
   handoffSentence,
-  integrityRefusal,
   type LegacyDrainReport,
   type MessagePreview,
-  otherVersionRefusal,
   ownerOf,
   type PublicApproval,
   publicStored,
@@ -20,6 +19,7 @@ import {
   type StoredApproval,
   sendEpochOf,
   stricterPolicy,
+  withApproval,
   withSendingLease,
 } from '@agentcomms/core';
 import type { GmailContext, ResolvedInbox } from '../context.ts';
@@ -58,6 +58,11 @@ export interface SendPreparation {
   /** What has to happen next, in the words to repeat to the user. */
   nextStep: string;
   /**
+   * Where the approval stands (design 2026-10-05 §D8): pending, on its route, and whether a yes in the chat sends it
+   * (`claimable`) or it waits for a person outside the chat.
+   */
+  approval: ApprovalObject;
+  /**
    * What became of the approvals an earlier release prepared, by id, when this call was one that retired them
    * (`ensureSendEpochConfig`). Absent otherwise.
    */
@@ -78,6 +83,11 @@ export interface SendResult {
   verified: { threadId: string | undefined; labelIds: string[] } | null;
   /** Bookkeeping that could not be written after Gmail confirmed the send. */
   note?: string | undefined;
+  /**
+   * Where the approval stands now that Gmail has the message (design 2026-10-05 §D8): `used`, with the message id —
+   * or still `sending`, when that could not be recorded, which later reads as `unknown`. Never a `used` invented.
+   */
+  approval: ApprovalObject;
   /**
    * What became of the approvals an earlier release prepared, by id, when this call was one that retired them
    * (`ensureSendEpochConfig`). Absent otherwise.
@@ -105,40 +115,40 @@ function distance(a: string, b: string): number {
   return previous[b.length] ?? LOOKALIKE_DISTANCE + 1;
 }
 
-/** A record state in the words a person would use, for the message they read when a send does not happen. */
-function describeState(state: ApprovalRecord['state']): string {
-  switch (state) {
-    case 'used':
-      return 'this approval has already been used — the message was sent once';
-    case 'sending':
-      return 'this approval is being sent by another process right now';
-    case 'failed':
-      return 'the send under this approval was refused; nothing was sent';
-    case 'unknown':
-      return 'a process died mid-send under this approval; whether the message went is not known';
-    case 'expired':
-      return 'this approval has expired';
-    case 'revoked':
-      return 'this approval was cancelled or voided';
-    default:
-      return `this approval is ${state}`;
-  }
-}
-
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** Keeps the failure that stopped the send visible, adding only what could not be settled afterwards. */
-function noSendError(error: unknown, unrecorded: readonly string[]): CommsError {
+/**
+ * Keeps the failure that stopped the send visible, adding only what could not be settled afterwards — and where the
+ * approval stands now that it is settled (decision 8), whatever the failure said of it before.
+ */
+function noSendError(error: unknown, unrecorded: readonly string[], approval: ApprovalObject): CommsError {
   const original =
     error instanceof CommsError ? error : new CommsError('UNEXPECTED', messageOf(error), { cause: error });
   const hint = [original.hint, ...unrecorded].filter((part) => part !== undefined);
   return new CommsError(original.code, original.message, {
     ...(hint.length === 0 ? {} : { hint: hint.join(' ') }),
-    ...(original.details === undefined ? {} : { details: original.details }),
+    details: { ...original.details, approval },
     cause: error,
   });
+}
+
+/**
+ * Where a claimed send's approval stands now, read under its lock — or, when that read fails, what `fallback` said: a
+ * report never turns into a failure of the send it reports on.
+ */
+async function approvalNow(
+  context: GmailContext,
+  approvalId: string,
+  owner: string,
+  fallback: ApprovalObject,
+): Promise<ApprovalObject> {
+  try {
+    return (await context.core.approvals.inspect(approvalId, { kind: 'send', owner })).outcome.approval;
+  } catch {
+    return fallback;
+  }
 }
 
 /** Settles a failure known to have happened before Gmail sent anything, without one failed write skipping another. */
@@ -147,17 +157,22 @@ async function recordNoSend(
   options: { alias: string; inboxId: string; approvalId: string; draftId: string },
   // The claim's own token, kept apart from what is audited: only the call that claimed records the outcome.
   claimToken: string,
+  // Where the approval stood when it was claimed: what the refusal says if its failure cannot be recorded.
+  claimed: ApprovalObject,
   error: unknown,
 ): Promise<CommsError> {
   const unrecorded: string[] = [];
   const said = messageOf(error);
+  let settled = claimed;
   try {
     await context.core.ledger.release(options.inboxId, options.approvalId);
   } catch (failure) {
     unrecorded.push(`the capacity slot could not be released (${messageOf(failure)})`);
   }
   try {
-    await context.core.approvals.complete(options.approvalId, claimToken, { error: said });
+    settled = await context.core.approvals.approvalOf(
+      await context.core.approvals.complete(options.approvalId, claimToken, { error: said }),
+    );
   } catch (failure) {
     unrecorded.push(`the approval could not be marked failed (${messageOf(failure)})`);
   }
@@ -174,7 +189,7 @@ async function recordNoSend(
   } catch (failure) {
     unrecorded.push(`the audit log could not record the failure (${messageOf(failure)})`);
   }
-  return noSendError(error, unrecorded);
+  return noSendError(error, unrecorded, settled);
 }
 
 function capsFor(defaults: { sendCaps: { perHour: number; perDay: number } }): Caps {
@@ -485,6 +500,7 @@ export async function prepareSend(context: GmailContext, alias: string, draftId:
             { instead: 'Show the preview to the user; they can send it from Gmail. You cannot approve this yourself.' },
           )
         : 'Show the preview to the user verbatim and wait for an explicit yes. Then send it with the same approval id and the recipients and subject shown above.',
+    approval: await context.core.approvals.approvalOf(record),
     ...(legacyDrain === undefined ? {} : { legacyDrain }),
   };
 }
@@ -503,13 +519,9 @@ export interface ApprovalPrompt {
  * Re-reading is the point — an approval must be for what is in the draft now, not for what was there at prepare.
  */
 export async function beginApproval(context: GmailContext, approvalId: string): Promise<ApprovalPrompt> {
-  // Before the draft is read: only a valid version-2 record is approved here, and an integrity check of any other
-  // would judge it by rules it was not written under.
-  const record = sendRecordOf(
-    await context.core.approvals.get(approvalId),
-    approvalId,
-    'Approvals last ten minutes. Prepare the send again.',
-  );
+  // Before the draft is read: a send, classified for the approval under its lock — anything it cannot be approved as
+  // is refused for what it is, with where it stands, and nothing of it is shown.
+  const record = await sendToApprove(context, approvalId);
   const config = await context.config();
   const entry = Object.entries(config.inboxes).find(([, inbox]) => inbox.id === record.inboxId);
   if (!entry) {
@@ -517,13 +529,20 @@ export async function beginApproval(context: GmailContext, approvalId: string): 
   }
   const [alias, inbox] = entry;
   const livePolicy: SendPolicy = inbox.sendPolicy ?? config.defaults.sendPolicy;
-  const { analysis, draftMessageId } = await readDraft(context, alias, record.draftId);
+  const { analysis, draftMessageId } = await readDraft(context, alias, record.draftId).catch(async (error: unknown) => {
+    throw withApproval(error, await context.core.approvals.approvalOf(record));
+  });
   if (draftMessageId !== record.draftMessageId || analysis.digest !== record.contentDigest) {
-    await context.core.approvals.revoke(approvalId, 'the draft changed after the preview was prepared', {
+    const voided = await context.core.approvals.revoke(approvalId, 'the draft changed after the preview was prepared', {
       disposition: 'integrity',
+      expect: { kind: 'send' },
     });
     throw new CommsError('APPROVAL_VOID', 'nothing was sent: the draft changed after the preview was prepared', {
       hint: 'Prepare the send again to see what it says now.',
+      details: {
+        approvalId,
+        approval: voided.form === 'v2' ? await context.core.approvals.approvalOf(voided.record) : null,
+      },
     });
   }
   const transport = await context.transport(alias);
@@ -554,12 +573,14 @@ export async function finishApproval(
 ): Promise<ApprovalRecord> {
   // First, as every approval does: version 3, and an earlier release's records retired.
   await ensureSendEpochConfig(context.core, { now: context.now });
-  const record = sendRecordOf(await context.core.approvals.get(approvalId), approvalId);
+  const record = await sendToApprove(context, approvalId);
   const config = await context.config();
   const entry = Object.entries(config.inboxes).find(([, inbox]) => inbox.id === record.inboxId);
   if (!entry) throw new CommsError('NOT_FOUND', 'the mailbox this approval belongs to is no longer connected');
   const [alias] = entry;
-  const { analysis, draftMessageId } = await readDraft(context, alias, record.draftId);
+  const { analysis, draftMessageId } = await readDraft(context, alias, record.draftId).catch(async (error: unknown) => {
+    throw withApproval(error, await context.core.approvals.approvalOf(record));
+  });
   const approved = await context.core.approvals.approve(
     approvalId,
     via,
@@ -606,25 +627,26 @@ export async function executeSend(
   const livePolicy: SendPolicy = resolved.inbox.sendPolicy ?? config.defaults.sendPolicy;
   const transport = await context.transport(alias);
 
-  // The record's own state first, before Google is called at all. A used approval means the draft has gone from
-  // Drafts, and reading it would report a missing draft — true, but the wrong answer to "why did this not send".
-  // Before anything else, as the claim would: only a valid version-2 record is ever claimed here.
-  const known = sendRecordOf(
-    await context.core.approvals.get(options.approvalId),
+  /*
+   * The record first, before Google is called at all — this mailbox's send, classified under its lock as the claim
+   * would classify it (design 2026-10-05 §D2). Another mailbox's, another kind's or one nobody prepared is the one
+   * NOT_FOUND; a used one, an expired one, one revoked — now, because sending was turned off since — or one being sent
+   * by another call is refused for what it is, with where it stands. A used approval means the draft has gone from
+   * Drafts, and reading it would report a missing draft: true, but the wrong answer to "why did this not send".
+   */
+  const { outcome } = await context.core.approvals.inspect(
     options.approvalId,
-    'Approvals last ten minutes. Prepare the send again and show the new preview.',
+    { kind: 'send', owner: resolved.inbox.id },
+    { action: 'claim' },
   );
-  if (known.state !== 'pending' && known.state !== 'approved') {
-    throw new CommsError('APPROVAL_VOID', `nothing was sent: ${describeState(known.state)}`, {
-      hint: 'Prepare the send again if it should still go.',
-      details: { approvalId: options.approvalId, state: known.state },
-    });
-  }
+  if (outcome.error) throw outcome.error;
 
   // Read first, claim second: the claim is single-use, and burning it on a draft that has since changed would cost
-  // the user a fresh approval for no reason.
-  const before = await readDraft(context, alias, options.draftId);
-  if (before.refusals.length > 0) throw unsendable(before.refusals);
+  // the user a fresh approval for no reason. Refused here, the approval is as it was, and says so.
+  const before = await readDraft(context, alias, options.draftId).catch((error: unknown) => {
+    throw withApproval(error, outcome.approval);
+  });
+  if (before.refusals.length > 0) throw withApproval(unsendable(before.refusals), outcome.approval);
   const liveSubject = before.analysis.subject;
   const expect = options.expectSubjectNone
     ? {
@@ -633,7 +655,11 @@ export async function executeSend(
       }
     : options.expect;
 
-  const { record: claimed, claimToken } = await context.core.approvals.claimForSend(
+  const {
+    record: claimed,
+    claimToken,
+    approval: claimedApproval,
+  } = await context.core.approvals.claimForSend(
     options.approvalId,
     {
       draftMessageId: before.draftMessageId,
@@ -669,14 +695,14 @@ export async function executeSend(
           hint: 'Prepare the send again for the draft you mean.',
         },
       );
-      throw await recordNoSend(context, bookkeeping, claimToken, error);
+      throw await recordNoSend(context, bookkeeping, claimToken, claimedApproval, error);
     }
 
     const caps = capsFor(config.defaults);
     try {
       await context.core.ledger.reserve(resolved.inbox.id, options.approvalId, caps);
     } catch (error) {
-      throw await recordNoSend(context, bookkeeping, claimToken, error);
+      throw await recordNoSend(context, bookkeeping, claimToken, claimedApproval, error);
     }
 
     // The last look. Between the claim and here, nothing of ours can have changed the draft — `draft update` and
@@ -685,13 +711,13 @@ export async function executeSend(
     try {
       now = await readDraft(context, alias, options.draftId);
     } catch (error) {
-      throw await recordNoSend(context, bookkeeping, claimToken, error);
+      throw await recordNoSend(context, bookkeeping, claimToken, claimedApproval, error);
     }
     if (now.draftMessageId !== claimed.draftMessageId || now.analysis.digest !== claimed.contentDigest) {
       const error = new CommsError('APPROVAL_VOID', 'nothing was sent: the draft changed while it was being sent', {
         hint: 'Prepare the send again to see what it says now.',
       });
-      throw await recordNoSend(context, bookkeeping, claimToken, error);
+      throw await recordNoSend(context, bookkeeping, claimToken, claimedApproval, error);
     }
 
     let sent: { id: string; threadId: string | undefined };
@@ -701,7 +727,7 @@ export async function executeSend(
       const said = error instanceof Error ? error.message : String(error);
       const ids = { approvalIds: [options.approvalId], draftIds: [options.draftId] };
       if (sendCertainlyRefused(error)) {
-        throw await recordNoSend(context, bookkeeping, claimToken, error);
+        throw await recordNoSend(context, bookkeeping, claimToken, claimedApproval, error);
       }
 
       let unaudited = '';
@@ -727,6 +753,8 @@ export async function executeSend(
             ...(error instanceof CommsError ? error.details : {}),
             approvalId: options.approvalId,
             outcome: 'unknown',
+            // Still `sending`: nothing is recorded of a send whose outcome is not known.
+            approval: await approvalNow(context, options.approvalId, resolved.inbox.id, claimedApproval),
           },
           cause: error,
         },
@@ -735,8 +763,12 @@ export async function executeSend(
 
     const sentMessageId = sent.id;
     const unrecorded: string[] = [];
+    // `used` only once it is written; until then — and for good, if it cannot be — the record as it stands.
+    let approval: ApprovalObject | null = null;
     try {
-      await context.core.approvals.complete(options.approvalId, claimToken, { sentMessageId });
+      approval = await context.core.approvals.approvalOf(
+        await context.core.approvals.complete(options.approvalId, claimToken, { sentMessageId }),
+      );
     } catch (error) {
       unrecorded.push(
         `the approval could not be marked used (${error instanceof Error ? error.message : String(error)}), so it will read as unknown`,
@@ -785,6 +817,7 @@ export async function executeSend(
       subject: claimed.expect.subject,
       verified,
       ...(unrecorded.length > 0 ? { note: unrecorded.join('; ') } : {}),
+      approval: approval ?? (await approvalNow(context, options.approvalId, resolved.inbox.id, claimedApproval)),
       ...(legacyDrain === undefined ? {} : { legacyDrain }),
     };
   });
@@ -832,15 +865,15 @@ export async function revokeApproval(context: GmailContext, approvalId: string):
 }
 
 /**
- * A send's approval as only a valid version-2 record may be acted on: none is `NOT_FOUND`; a corrupt or unreadable
- * record is refused with only its stub (a pinned server has already answered `NOT_FOUND` for it); one an earlier
- * release prepared gets the version refusal. Before any draft is read.
+ * A send's approval as a person may be shown it to approve, classified under its lock for that approval (design
+ * 2026-10-05 §D2): another kind's id or one nobody prepared is the one `NOT_FOUND`; a corrupt or unreadable record is
+ * refused with only its stub; one an earlier release prepared by its version; one expired, used, revoked — now, because
+ * its mailbox was removed or sending was turned off — or under way is refused for what it is, with where it stands.
+ * Before any draft is read.
  */
-function sendRecordOf(stored: StoredApproval | null, approvalId: string, hint?: string): ApprovalRecord {
-  if (stored === null) {
-    throw new CommsError('NOT_FOUND', `there is no approval ${approvalId}`, hint === undefined ? {} : { hint });
-  }
-  if (stored.form === 'corrupt' || stored.form === 'unreadable') throw integrityRefusal(stored);
-  if (stored.form === 'legacy') throw otherVersionRefusal(stored.view);
-  return stored.record;
+async function sendToApprove(context: GmailContext, approvalId: string): Promise<ApprovalRecord> {
+  const { outcome } = await context.core.approvals.inspect(approvalId, { kind: 'send' }, { action: 'approve' });
+  if (outcome.error) throw outcome.error;
+  if (outcome.record === null) throw new CommsError('UNEXPECTED', 'a send approval read as no record');
+  return outcome.record;
 }

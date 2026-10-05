@@ -199,3 +199,115 @@ test('adding a client to the list needs a probe a person answered', async () => 
   await startProbe(context, 'half-probed');
   await assert.rejects(addConfirmClient(context, 'half-probed', consent), /has not shown/);
 });
+
+// ── Whose and what before a route, and where the approval stands (CUE-404 Task 9; §D2, §D8) ──────────────────────
+
+test('gmail_draft_send finds another mailbox’s or another kind’s approval as the one NOT_FOUND before choosing a route: no form is raised (D2-b)', async () => {
+  const harness = await newHarness({
+    accounts: [
+      { sub: 'sub-1', email: 'jo@example.test' },
+      { sub: 'sub-2', email: 'sam@example.test' },
+    ],
+  });
+  await harness.connectInbox({ alias: 'work', email: 'jo@example.test', sub: 'sub-1', sendPolicy: 'confirm' });
+  await harness.connectInbox({ alias: 'home', email: 'sam@example.test', sub: 'sub-2', sendPolicy: 'confirm' });
+  await harness.core.config.update(
+    (config) => ({
+      ...config,
+      defaults: {
+        ...config.defaults,
+        riskEscalation: false,
+        confirm: { ...config.defaults.confirm, elicitationClients: ['trusted-client'] },
+      },
+    }),
+    {
+      consent: { kind: 'loosening-consent', paths: ['defaults.riskEscalation', 'defaults.confirm.elicitationClients'] },
+    },
+  );
+  const context = new GmailContext({ core: harness.core, env: harness.env });
+  const homeDraft = await createDraft(context, 'home', { to: ['kim@partner.test'], subject: 'Home', text: 'Hi.' });
+  const workDraft = await createDraft(context, 'work', { to: ['sam@partner.test'], subject: 'Tue', text: 'Tue.' });
+  let forms = 0;
+  const { client, close } = await connect(harness, {
+    clientName: 'trusted-client',
+    answer: () => {
+      forms += 1;
+      return null;
+    },
+  });
+  try {
+    const home = (
+      await client.callTool({ name: 'gmail_send_prepare', arguments: { inbox: 'home', draftId: homeDraft.draftId } })
+    ).structuredContent as { approvalId: string; expect: unknown };
+    const change = await harness.core.approvals.createChange({
+      channel: 'gmail',
+      change: { summary: 'x', target: null, loosened: [], effects: ['does a thing'] },
+      policy: 'chat',
+    });
+    const envelopes = [];
+    for (const approvalId of [`ap_${'7'.repeat(26)}`, home.approvalId, change.approvalId]) {
+      const refused = (await client.callTool({
+        name: 'gmail_draft_send',
+        arguments: { inbox: 'work', draftId: workDraft.draftId, approvalId, expect: home.expect },
+      })) as ToolResult;
+      const error = (
+        refused.structuredContent as { error: { code: string; message: string; hint: string; details: unknown } }
+      ).error;
+      assert.equal(error.code, 'NOT_FOUND', JSON.stringify(error));
+      assert.deepEqual(error.details, { approval: null });
+      envelopes.push(JSON.stringify(error).replaceAll(approvalId, 'ID'));
+    }
+    assert.equal(new Set(envelopes).size, 1, 'one envelope, byte for byte');
+    assert.equal(forms, 0, 'no form was raised for another mailbox’s send');
+    assert.equal(harness.google.requests.filter((request) => request.path.endsWith('/send')).length, 0);
+  } finally {
+    await close();
+  }
+});
+
+test('the send tools say where the approval stands: prepared, refused for a person outside the chat, and sent (D8o-a)', async () => {
+  const harness = await mailbox('confirm');
+  const id = await draftId(harness);
+  const { client, close } = await connect(harness);
+  try {
+    const prepared = (await client.callTool({ name: 'gmail_send_prepare', arguments: { inbox: 'work', draftId: id } }))
+      .structuredContent as { approvalId: string; expect: unknown; approval: Record<string, unknown> };
+    assert.equal(prepared.approval.id, prepared.approvalId);
+    assert.equal(prepared.approval.state, 'pending');
+    assert.equal(prepared.approval.route, 'confirm');
+    assert.equal(prepared.approval.claimable, false);
+    // An untrusted client: refused, with the approval as it stands — still pending, and left alone.
+    const refused = (await client.callTool({
+      name: 'gmail_draft_send',
+      arguments: { inbox: 'work', draftId: id, approvalId: prepared.approvalId, expect: prepared.expect },
+    })) as ToolResult;
+    const error = (
+      refused.structuredContent as { error: { code: string; details: { approval: Record<string, unknown> } } }
+    ).error;
+    assert.equal(error.code, 'APPROVAL_REQUIRED');
+    assert.equal(error.details.approval.state, 'pending');
+    assert.equal(error.details.approval.claimable, false);
+  } finally {
+    await close();
+  }
+
+  const chat = await mailbox('chat');
+  const chatDraft = await draftId(chat);
+  const chatClient = await connect(chat);
+  try {
+    const prepared = (
+      await chatClient.client.callTool({ name: 'gmail_send_prepare', arguments: { inbox: 'work', draftId: chatDraft } })
+    ).structuredContent as { approvalId: string; expect: unknown; approval: Record<string, unknown> };
+    assert.equal(prepared.approval.claimable, true);
+    const sent = (
+      await chatClient.client.callTool({
+        name: 'gmail_draft_send',
+        arguments: { inbox: 'work', draftId: chatDraft, approvalId: prepared.approvalId, expect: prepared.expect },
+      })
+    ).structuredContent as { sentMessageId: string; approval: Record<string, unknown> };
+    assert.equal(sent.approval.state, 'used');
+    assert.equal(sent.approval.sentMessageId, sent.sentMessageId);
+  } finally {
+    await chatClient.close();
+  }
+});

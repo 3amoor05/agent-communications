@@ -9,6 +9,13 @@ import { executeSend, prepareSend } from '../src/operations/send.ts';
 import { DRAFT_SEND_PATH } from './support/fake-google.ts';
 import { type Harness, newHarness } from './support/harness.ts';
 
+/** A refusal's details apart from where its approval stands, which each test checks on its own (decision 8). */
+function apartFromApproval(details: Record<string, unknown> | undefined): Record<string, unknown> {
+  const { approval: _approval, ...rest } = details ?? {};
+  return rest;
+}
+const approvalState = (error: CommsError) => (error.details?.approval as { state?: string } | undefined)?.state;
+
 /**
  * Once the request has left, a failed answer and a failed send are different facts. These tests keep the approval on
  * the honest side of that difference: failed only when Gmail certainly refused, sending when the outcome is unknown,
@@ -117,7 +124,9 @@ test('only Gmail responses documented as pre-action refusals mark the approval f
         (thrown: unknown) => thrown,
       );
       assert.ok(retry instanceof CommsError);
-      assert.match(retry.message, /the send under this approval was refused; nothing was sent/);
+      // The record's own state, classified before Google is asked anything: refused for what it is.
+      assert.match(retry.message, /^nothing was sent: the send it was claimed for failed/);
+      assert.equal(approvalState(retry), 'failed');
     });
   }
 
@@ -160,7 +169,8 @@ test('a final draft read failure is a certain no-send whose slot, approval and a
   assert.equal(error.code, original.code);
   assert.equal(error.message, original.message);
   assert.equal(error.hint, original.hint);
-  assert.deepEqual(error.details, original.details);
+  assert.deepEqual(apartFromApproval(error.details), original.details);
+  assert.equal(approvalState(error), 'failed', 'and says where the approval stands now');
   assert.equal(error.cause, original);
   assert.equal(await state(), 'failed');
   const inbox = (await setup.harness.core.config.load()).inboxes.work;
@@ -276,9 +286,11 @@ test('every certain no-send path attempts each bookkeeping step independently', 
         } else {
           assert.equal(error.code, original.code);
           assert.equal(error.message, original.message);
-          assert.deepEqual(error.details, original.details);
+          assert.deepEqual(apartFromApproval(error.details), original.details);
           assert.equal(error.cause, original);
         }
+        // Where the approval stands once settled: failed — or still sending, when that could not be recorded.
+        assert.equal(approvalState(error), failures.includes('approval') ? 'sending' : 'failed');
         assert.match(error.hint ?? '', /^Keep the first hint\.|^Prepare the send again/);
         for (const step of failures) assert.match(error.hint ?? '', new RegExp(`${step} .*read-only`));
         assert.equal(await state(), failures.includes('approval') ? 'sending' : 'failed');
@@ -372,11 +384,12 @@ test('an unknown Gmail outcome keeps its slot and approval when its audit also f
   assert.match(error.message, /^whether the email was sent is not known:/);
   assert.match(error.hint ?? '', /^Check the Sent folder/);
   assert.match(error.hint ?? '', /audit log could not record this either \(audit disk is read-only\)/);
-  assert.deepEqual(error.details, {
+  assert.deepEqual(apartFromApproval(error.details), {
     providerRequest: 'gmail-send-1',
     approvalId: approval.approvalId,
     outcome: 'unknown',
   });
+  assert.equal(approvalState(error), 'sending', 'nothing is recorded of a send whose outcome is not known');
   assert.equal(error.cause, original);
   assert.equal(await state(), 'sending');
   const inbox = (await setup.harness.core.config.load()).inboxes.work;
