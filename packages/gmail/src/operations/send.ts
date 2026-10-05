@@ -1230,13 +1230,17 @@ export async function revokeApproval(context: GmailContext, approvalId: string):
 
 /**
  * A send's approval as a person may be shown it to approve, classified under its lock for that approval (design
- * 2026-10-05 §D2): another kind's id or one nobody prepared is the one `NOT_FOUND`; a corrupt or unreadable record is
- * refused with only its stub; one an earlier release prepared by its version; one expired, used, revoked — now, because
- * its mailbox was removed or sending was turned off — or under way is refused for what it is, with where it stands.
- * Before any draft is read.
+ * 2026-10-05 §D2): Gmail's own — another channel's id, another kind's or one nobody prepared is the one `NOT_FOUND`; a
+ * corrupt or unreadable record is refused with only its stub; one an earlier release prepared by its version; one
+ * expired, used, revoked — now, because its mailbox was removed or sending was turned off — or under way is refused for
+ * what it is, with where it stands. Before any draft is read.
  */
 async function sendToApprove(context: GmailContext, approvalId: string): Promise<ApprovalRecord> {
-  const { outcome } = await context.core.approvals.inspect(approvalId, { kind: 'send' }, { action: 'approve' });
+  const { outcome } = await context.core.approvals.inspect(
+    approvalId,
+    { kind: 'send', channel: 'gmail' },
+    { action: 'approve' },
+  );
   if (outcome.error) throw outcome.error;
   if (outcome.record === null) throw new CommsError('UNEXPECTED', 'a send approval read as no record');
   return outcome.record;

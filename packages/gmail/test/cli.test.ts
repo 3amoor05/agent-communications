@@ -10,6 +10,7 @@ import {
   EXIT_CODES,
   externalCommand,
   isCommand,
+  newAccountId,
   openCore,
   remedy,
   truncateDisplay,
@@ -1123,6 +1124,63 @@ test('approving a send refuses an agent, and refuses a pipe', async () => {
   const piped = await cli(harness, ['approve', 'ap_whatever', '--json']);
   assert.equal(piped.code, EXIT_CODES.APPROVAL);
   assert.match(piped.json<Envelope<never>>().error?.message ?? '', /interactive terminal/);
+});
+
+test('another channel’s send given to `agent-gmail approve` is the one NOT_FOUND, byte for byte an id nobody prepared’s, with nothing written and Google asked nothing (D2, CUE-404)', async () => {
+  const harness = await newHarness({ accounts: [{ sub: 'sub-1', email: 'jo@example.test' }] });
+  await harness.connectInbox({ alias: 'work', email: 'jo@example.test', sub: 'sub-1' });
+  // A Slack post waiting for a person, as Slack's prepare writes one for a workspace on this machine: not Gmail's.
+  const accountId = newAccountId();
+  await harness.core.config.update(
+    (config) => ({
+      ...config,
+      accounts: {
+        ...config.accounts,
+        team: {
+          id: accountId,
+          platform: 'slack',
+          workspace: 'T_TEAM',
+          userId: 'U_TEAM',
+          tier: 'send',
+          mode: 'send',
+          grantedScopes: [],
+          secretRef: `slack:token:${accountId}`,
+          createdAt: '2026-09-26T10:00:00.000Z',
+        },
+      },
+    }),
+    { consent: { kind: 'loosening-consent', paths: ['accounts.team.mode'] } },
+  );
+  const slack = await harness.core.approvals.create({
+    channel: 'slack',
+    inboxId: accountId,
+    inboxSub: 'U_TEAM',
+    draftId: 'sd_other',
+    draftMessageId: 'r-1',
+    contentDigest: 'b'.repeat(64),
+    sendEpoch: 0,
+    policy: 'chat',
+    requiredPolicy: 'confirm',
+    riskFlags: [],
+    expect: { to: ['#eng'], cc: [], bcc: [], subject: 'reaches 4' },
+  });
+  const file = join(harness.core.approvals.directory, `${slack.approvalId}.json`);
+  const before = await readFile(file, 'utf8');
+  const nobody = `ap_${'7'.repeat(26)}`;
+  const asked = harness.google.requests.length;
+
+  const unknown = await cli(harness, ['approve', nobody], { tty: true });
+  const foreign = await cli(harness, ['approve', slack.approvalId], { tty: true });
+  assert.equal(unknown.code, EXIT_CODES.NOT_FOUND, unknown.stdout + unknown.stderr);
+  assert.match(unknown.stderr, new RegExp(`nothing was sent: no approval ${nobody}`));
+  assert.deepEqual(
+    { code: foreign.code, stdout: foreign.stdout, stderr: foreign.stderr.replaceAll(slack.approvalId, nobody) },
+    { code: unknown.code, stdout: unknown.stdout, stderr: unknown.stderr },
+    'the same refusal, but its id',
+  );
+  assert.doesNotMatch(foreign.stderr, /no longer connected/);
+  assert.equal(await readFile(file, 'utf8'), before, 'not classified, so nothing of it was written');
+  assert.equal(harness.google.requests.length, asked, 'Google was asked nothing');
 });
 
 test('the terminal shows the shared preview once, as the approval — truncated and escaped where a sender wrote it — and approving sends nothing (D5-b, D5-c)', async () => {
