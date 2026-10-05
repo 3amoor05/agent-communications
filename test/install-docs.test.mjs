@@ -203,3 +203,43 @@ test('troubleshooting gives 0.13.0’s bare commands a best-effort way to run, a
   assert.match(prose, /PATH shims/);
   assert.match(prose, /follow-up/);
 });
+
+test('no guide hands a person a bare approve command: they run the one the result gives (CUE-403)', async () => {
+  /*
+   * Every channel's approve, from its manifest (`agent-gmail approve`), in any case and with a Windows extension, and
+   * any approve through npx. A person approving runs the command the result gives — this installation's Node and CLI
+   * file, its folders pinned — so prose never names one of these as what they run. A CLI's own listing (a code block,
+   * a reference table's row) may show its approve, and then says so on the same line. The troubleshooting section on
+   * what 0.13.0 printed names its bare commands on purpose.
+   */
+  const approves = [
+    ...REGISTRY.channels.map(({ manifest }) => {
+      const [binary, ...words] = manifest.approve.split(' ');
+      return new RegExp(
+        `(?<![\\w@/-])${escapeRegExp(binary)}(?:\\.(?:cmd|exe|ps1|bat))?\\s+${words.map(escapeRegExp).join('\\s+')}\\b`,
+        'i',
+      );
+    }),
+    /\b(?:npx|pnpx|bunx|npm exec|pnpm dlx|yarn dlx)\b[^`\n]*@agentcomms\/[a-z-]+(?:@\S+)?\s+approve\b/i,
+  ];
+  const wrong = [];
+  let seen = 0;
+  for (const { path, text } of await documents()) {
+    let fenced = false;
+    let fallback = false;
+    for (const line of text.split('\n')) {
+      if (/^\s*(?:```|~~~)/.test(line)) {
+        fenced = !fenced;
+        continue;
+      }
+      if (!fenced && /^#{1,6} /.test(line)) fallback = /A command a result gave you is not found/.test(line);
+      if (fallback || !approves.some((pattern) => pattern.test(line))) continue;
+      seen += 1;
+      const listing = fenced || /^\s*\|/.test(line);
+      if (listing && /the command the result gives/i.test(line)) continue;
+      wrong.push(`${path}: ${line.trim()}`);
+    }
+  }
+  assert.ok(seen > 0, 'the CLI listings that show an approve are read');
+  assert.deepEqual(wrong, [], `a bare approve handed to a person:\n${wrong.join('\n')}`);
+});

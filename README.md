@@ -98,17 +98,21 @@ a server it registers appears only once the client is restarted.
 
 **It keeps itself up to date.** Once a day the machine asks npm whether a newer release is out; when one is, every
 server and command stops first — "Hang on a minute, there's an update. Let's update first." — and your agent asks
-whether to update now (`comms_update`) or not until tomorrow (`comms_update` with `later`, which you approve). At a
-terminal: `agentcomms update`, or `agentcomms update --later` (`npx -y @agentcomms/core@latest update --later` where
-`agentcomms` is not installed). A server this machine does not register itself — the Claude Code plugin's, the
-Gemini extension's — is updated where it was installed. `agentcomms update --auto off` turns the check off for one
+whether to update now (`comms_update`) or not until tomorrow (`comms_update` with `later`, which you approve). A
+command at a terminal asks you there; anywhere else the stop names this installation's own `update` and
+`update --later` commands, to run exactly as given (with core installed globally, `agentcomms update` and
+`agentcomms update --later` are the same). A server this machine does not register itself — the Claude Code plugin's,
+the Gemini extension's — is updated where it was installed. `agentcomms update --auto off` turns the check off for one
 machine; `CI`, and `AGENT_COMMS_UPDATE_CHECK=off`, skip it. [Upgrading](docs/upgrading.md#the-daily-check) has the
 details.
 
 **Every change is shown to you before it happens.** The tool returns a preview and an approval id. Under the default
-`chat` change policy your yes in the conversation approves it; under `confirm` you run `agentcomms approve <id>` in
-your own terminal (`npx -y @agentcomms/core approve <id>` if `agentcomms` is not installed) and type the code it shows (`agentcomms policy confirm` sets that, and moving back to `chat` needs
-the code too). No tool approves a change, and none applies a change it did not plan itself.
+`chat` change policy your yes in the conversation approves it; under `confirm` you run, in your own terminal, the
+approve command the result gives, and type the code it shows. Run it exactly as given: it names this installation's
+own Node and CLI file, with its folders pinned, so it needs nothing on your PATH — and on Windows with Node under
+`C:\Program Files` it comes as words to type, each quoted for your shell. `agentcomms policy confirm` (core installed
+globally) sets that policy, and moving back to `chat` needs the code too. No tool approves a change, and none applies
+a change it did not plan itself.
 [Core MCP tool reference](docs/reference/core-mcp-tools.md).
 
 ### Or package by package
@@ -191,15 +195,15 @@ single mailbox. [Why adding a mailbox from chat is safe](docs/superpowers/specs/
 
 **So does managing one — everything the CLI does to an account.** Showing, renaming, re-authorising
 (`gmail_inbox_reauth`), importing from another Gmail server (`gmail_inbox_import`), removing (`gmail_inbox_remove`),
-setting how sends and changes are approved (`gmail_inbox_policy`), removing an OAuth client
-(`gmail_client_remove`), and trusting or no longer trusting a client's approval forms (`gmail_confirm_client_add`,
-`gmail_confirm_client_remove`). Each calls the same operation as its command. Anything that loosens a safety
-setting or cannot be taken back is a **change approval**, on both surfaces: the tool returns a preview and an
-approval id instead of acting, the agent shows you the preview, and the change is made only when it calls again
-with that id after your yes. At a terminal you type `yes` to the same preview; an agent running the command gets
-it with exit 10 and runs it again with `--approval <id>`. Under the `confirm` change policy
-(`inbox policy <alias> --change confirm`) you approve with `agentcomms approve <id>` and a code instead, and
-moving a mailbox off `confirm` is itself approved that way ([the design](docs/superpowers/specs/2026-09-25-cli-mcp-parity-design.md)).
+setting how sends and changes are approved (`gmail_inbox_policy`), removing an OAuth client (`gmail_client_remove`),
+and trusting or no longer trusting a client's approval forms (`gmail_confirm_client_add`,
+`gmail_confirm_client_remove`). Each calls the same operation as its command. Anything that loosens a safety setting
+or cannot be taken back is a **change approval**, on both surfaces: the tool returns a preview and an approval id
+instead of acting, the agent shows you the preview, and the change is made only when it calls again with that id after
+your yes. At a terminal you type `yes` to the same preview; an agent running the command gets it with exit 10 and runs
+it again with `--approval <id>`. Under the `confirm` change policy (`inbox policy <alias> --change confirm`) you
+approve with the approve command the result gives, and a code, instead, and moving a mailbox off `confirm` is itself
+approved that way ([the design](docs/superpowers/specs/2026-09-25-cli-mcp-parity-design.md)).
 
 ### Slack
 

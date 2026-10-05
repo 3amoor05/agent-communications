@@ -108,9 +108,10 @@ the question stays open for the right one.
 
 **Your answer follows the mailbox's change policy.** Under `chat` (the default), the agent passes your answer back —
 `saveTo` with the `choiceId`, or `--to <answer> --choice <id>`. Under `confirm` you answer it yourself, where an agent
-cannot: at your own terminal with `agent-gmail approve <choiceId>`, which shows the question again and asks `1`, `2`
-or `3`, or in the form a client you trusted with `confirm-clients add` shows you. The agent then calls again with the
-`choiceId` alone; an answer it passes in the arguments is refused, and the question is left open for you.
+cannot: at your own terminal with the approve command the result gives, exactly as given, which shows the question
+again and asks `1`, `2` or `3`, or in the form a client you trusted with `confirm-clients add` shows you. The agent
+then calls again with the `choiceId` alone; an answer it passes in the arguments is refused, and the question is left
+open for you.
 
 **Some folders are never saved into, whoever answers.** A hidden folder anywhere, at any depth and on any disk —
 `~/.ssh`, `~/.config`, a project's `.git`, `.github`, `.husky`, `.vscode` or `.claude` — except a checkout under
@@ -172,13 +173,13 @@ marked is still saved, and `warnings` says so.
 
 ### Changes that need your approval
 
-`client add` and `client remove`, `inbox import` and `inbox remove`, `confirm-clients add`, a looser
-`inbox policy`, an `inbox reauth` that asks for more access than the mailbox has, `mcp install` (it hands a client
-a new set of tools) and `mcp prune` (a deleted runtime cannot be taken back) each loosen something or cannot be
-undone, so each is approved before it happens. At a terminal the command shows exactly what will
-change and asks you to type `yes` — or, under the `confirm` change policy, the code `agentcomms approve` shows.
-Run by an agent, or with no terminal, it prints the same preview with an approval id and exits `10`; once you have
-said yes, the same command with `--approval <id>` makes the change. Tightening a policy never asks.
+`client add` and `client remove`, `inbox import` and `inbox remove`, `confirm-clients add`, a looser `inbox policy`,
+an `inbox reauth` that asks for more access than the mailbox has, `mcp install` (it hands a client a new set of tools)
+and `mcp prune` (a deleted runtime cannot be taken back) each loosen something or cannot be undone, so each is
+approved before it happens. At a terminal the command shows exactly what will change and asks you to type `yes` — or,
+under the `confirm` change policy, the code shown by the approve command the result gives. Run by an agent, or with no
+terminal, it prints the same preview with an approval id and exits `10`; once you have said yes, the same command with
+`--approval <id>` makes the change. Tightening a policy never asks.
 
 The MCP server offers each of these as a tool that asks the same way, and an approval prepared on one surface can be
 claimed on the other: it is one change. Registering and pruning are the core server's `comms_server_install` and

@@ -115,7 +115,7 @@ from Slack: every way of putting something in front of people (`chat.postMessage
 reaction) is behind the one permit, and the approval covers how many people the post reaches, so a room that grew
 after the preview voids it. Both surfaces post through that one gate: `slack_post_prepare` returns the preview, and
 `slack_post_send` (or `agent-slack post send`) posts it once the approval allows — a yes in the conversation under
-`chat`, `agent-slack approve` at the person's own terminal under `confirm`, which no tool can run.
+`chat`, the approve command the result gives, at the person's own terminal under `confirm`, which no tool can run.
 
 A post can carry local files, chosen by the attachment jail Gmail uses (under the home folder, never from its hidden
 folders). The draft records each by real path, name, size, type and SHA-256; the preview lists them and the digest

@@ -68,7 +68,7 @@ agent-whatsapp mcp install --client claude-code --account personal/whatsapp
 `mcp install` registers the server with your client, pinned to that account, as a change you approve: at a terminal
 you type `yes` to what it shows; run by an agent it exits `10` with a preview and an approval id, and the same command
 with `--approval <id>` registers it after your yes. Under the `confirm` change policy you approve with
-`agent-whatsapp approve <id>` and a code instead. Restart the client afterwards. From a chat, the core server's
+the approve command the result gives, and a code, instead. Restart the client afterwards. From a chat, the core server's
 `comms_server_install` with `channel: "whatsapp"` and `account` is the same change.
 
 For WhatsApp Business, add its store with
