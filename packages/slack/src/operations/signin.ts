@@ -13,6 +13,7 @@ import {
   configCommittedBeforeAbort,
   findById,
   handoffSentence,
+  hasNames,
   type LooseningConsent,
   learnProfileSlackAppId,
   newAccountId,
@@ -600,7 +601,7 @@ export async function finishSignIn(context: SlackContext, options: FinishOptions
     if (!(error instanceof CommsError) || error.code !== 'NOT_FOUND' || !options.expectAlias) throw error;
     const config = await context.config();
     const organisation = options.expectAlias.split('/')[0] ?? '';
-    const record = config.version === 2 ? config.organisations?.[organisation] : undefined;
+    const record = hasNames(config) ? config.organisations?.[organisation] : undefined;
     if (!record?.slack) throw error;
     const identity = `${displaySlackFailureText(record.label)}; workspace ${displaySlackFailureText(record.slack.workspaceName)} (${displaySlackFailureText(record.slack.workspace)})`;
     throw new CommsError(error.code, error.message, {

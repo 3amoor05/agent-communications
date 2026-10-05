@@ -5,8 +5,10 @@ import {
   canonicalAddress,
   domainOf,
   type Expectation,
+  ensureSendEpochConfig,
   handoffSentence,
   integrityRefusal,
+  type LegacyDrainReport,
   type MessagePreview,
   otherVersionRefusal,
   ownerOf,
@@ -54,6 +56,11 @@ export interface SendPreparation {
   expiresAt: string;
   /** What has to happen next, in the words to repeat to the user. */
   nextStep: string;
+  /**
+   * What became of the approvals an earlier release prepared, by id, when this call was one that retired them
+   * (`ensureSendEpochConfig`). Absent otherwise.
+   */
+  legacyDrain?: LegacyDrainReport | undefined;
 }
 
 export interface SendResult {
@@ -70,6 +77,11 @@ export interface SendResult {
   verified: { threadId: string | undefined; labelIds: string[] } | null;
   /** Bookkeeping that could not be written after Gmail confirmed the send. */
   note?: string | undefined;
+  /**
+   * What became of the approvals an earlier release prepared, by id, when this call was one that retired them
+   * (`ensureSendEpochConfig`). Absent otherwise.
+   */
+  legacyDrain?: LegacyDrainReport | undefined;
 }
 
 const LOOKALIKE_DISTANCE = 2;
@@ -396,6 +408,8 @@ function previewFor(options: {
  * exact content. Nothing is sent, and preparing twice is free: each prepare is its own record.
  */
 export async function prepareSend(context: GmailContext, alias: string, draftId: string): Promise<SendPreparation> {
+  // First: the configuration this send's epoch is read from is version 3, and an earlier release's records are retired.
+  const { legacyDrain } = await ensureSendEpochConfig(context.core, { now: context.now });
   const resolved = await context.inbox(alias);
   await context.requireCapability(resolved, 'draft');
   const config = await context.config();
@@ -468,6 +482,7 @@ export async function prepareSend(context: GmailContext, alias: string, draftId:
             { instead: 'Show the preview to the user; they can send it from Gmail. You cannot approve this yourself.' },
           )
         : 'Show the preview to the user verbatim and wait for an explicit yes. Then send it with the same approval id and the recipients and subject shown above.',
+    ...(legacyDrain === undefined ? {} : { legacyDrain }),
   };
 }
 
@@ -534,6 +549,8 @@ export async function finishApproval(
   answer: string,
   via: 'terminal' | 'elicitation' = 'terminal',
 ): Promise<ApprovalRecord> {
+  // First, as every approval does: version 3, and an earlier release's records retired.
+  await ensureSendEpochConfig(context.core, { now: context.now });
   const record = sendRecordOf(await context.core.approvals.get(approvalId), approvalId);
   const config = await context.config();
   const entry = Object.entries(config.inboxes).find(([, inbox]) => inbox.id === record.inboxId);
@@ -578,6 +595,8 @@ export async function executeSend(
     expectSubjectNone?: boolean | undefined;
   },
 ): Promise<SendResult> {
+  // First, as every claim does: version 3, and an earlier release's records retired.
+  const { legacyDrain } = await ensureSendEpochConfig(context.core, { now: context.now });
   const resolved = await context.inbox(alias);
   await context.requireCapability(resolved, 'draft');
   const config = await context.config();
@@ -762,6 +781,7 @@ export async function executeSend(
     subject: claimed.expect.subject,
     verified,
     ...(unrecorded.length > 0 ? { note: unrecorded.join('; ') } : {}),
+    ...(legacyDrain === undefined ? {} : { legacyDrain }),
   };
 }
 

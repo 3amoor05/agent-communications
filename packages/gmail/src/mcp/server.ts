@@ -2316,6 +2316,11 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
   // exactly that. A model that has read the preview to the user can complete the second; a model that has not cannot,
   // because it does not have the approval id, the recipients or the subject the first call returned.
   if (!options.readOnly) {
+    /** What became of the approvals an earlier release prepared, when the call retired them; ids only. */
+    const legacyDrainSchema = z
+      .object({ couldNotRevoke: z.array(z.string()), inFlight: z.array(z.string()) })
+      .optional()
+      .describe('approvals an earlier release prepared, still being retired (ids only): present only while some are');
     const expectationSchema = z.object({
       to: mcpStringArray().describe('who you believe this goes to; an empty list means nobody'),
       cc: mcpStringArray().describe('who you believe is copied; an empty list means nobody'),
@@ -2345,6 +2350,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
           digest: z.string(),
           expiresAt: z.string(),
           nextStep: z.string(),
+          legacyDrain: legacyDrainSchema,
         }),
         annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
       },
@@ -2384,6 +2390,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
             .nullable()
             .describe('what the mailbox says about the message it filed, read back after the send'),
           note: z.string().optional().describe('bookkeeping that could not be written after Gmail sent the message'),
+          legacyDrain: legacyDrainSchema,
         }),
         annotations: {
           readOnlyHint: false,

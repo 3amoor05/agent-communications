@@ -6,6 +6,7 @@ import {
   type Config,
   type Core,
   handoffSentence,
+  hasNames,
   nameAvailable,
   nameShapeProblem,
   withFileLock,
@@ -114,7 +115,7 @@ export async function migrateSpikeAccounts(context: MigrationContext): Promise<S
       return { ...result, deferred: `${SPIKE_CONFIG_FILE} is not a spike configuration this release reads` };
     }
     const config = await context.core.config.load();
-    if (config.version !== 2) {
+    if (!hasNames(config)) {
       return {
         ...result,
         deferred: `the configuration still has the old flat names; ${handoffSentence(

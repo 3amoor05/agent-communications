@@ -11,6 +11,7 @@ import {
   formerNameRefusal,
   handoffSentence,
   handoffTextToFill,
+  hasNames,
   homeDirectory,
   type InboxConfig,
   isGroupOrWorldAccessible,
@@ -496,7 +497,7 @@ async function orphanedSecretsCheck(context: GmailContext, scope: Scope | undefi
  * exists. Nothing here moves a file: they are a person's downloads, and where they belong is theirs to decide.
  */
 async function formerFoldersCheck(context: GmailContext, config: Config, onlyId?: string): Promise<Check | null> {
-  if (config.version !== 2) return null;
+  if (!hasNames(config)) return null;
   const configured = config.defaults.downloadsDir;
   const root = configured ? expandHome(configured, homeDirectory(context.env)) : context.core.paths.downloadsDir;
   const found: string[] = [];

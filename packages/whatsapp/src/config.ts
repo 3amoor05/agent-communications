@@ -7,6 +7,7 @@ import {
   type Config,
   handoffSentence,
   handoffSentenceToFill,
+  hasNames,
   newAccountId,
   resolveName,
 } from '@agentcomms/core';
@@ -108,7 +109,7 @@ export function newWhatsAppAccount(options: {
  * core's command as `handoffs` find it: the core this package installs.
  */
 export function requireNamedConfig(config: Config, handoffs: CliHandoffs): void {
-  if (config.version !== 2) {
+  if (!hasNames(config)) {
     throw new CommsError(
       'CONFIG',
       'WhatsApp accounts need the organisation/platform names, and this configuration still has the old flat ones',

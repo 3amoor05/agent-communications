@@ -3,6 +3,7 @@ import {
   CommsError,
   type Config,
   type Core,
+  hasNames,
   openCore,
   type PathOverrides,
   requireHandoffs,
@@ -165,7 +166,7 @@ export class WhatsAppContext {
     const config = await this.config();
     if (this.pinned !== undefined) return [(await this.#nameFor(config, undefined)) as string];
     // A version-1 file holds no WhatsApp account — none can be added to one, and the spike's wait — so: none.
-    return config.version === 2 ? whatsappAccountNames(config) : [];
+    return hasNames(config) ? whatsappAccountNames(config) : [];
   }
 
   /** Where an account's store is, and whether that is the WhatsApp for Mac default. */

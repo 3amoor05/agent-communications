@@ -1,4 +1,4 @@
-import { CommsError } from '@agentcomms/core';
+import { CommsError, ensureSendEpochConfig, type LegacyDrainReport } from '@agentcomms/core';
 import { openDraftStore } from '../compose/drafts.ts';
 import { checkFileCount, recordFiles } from '../compose/files.ts';
 import type { SlackContext } from '../context.ts';
@@ -87,6 +87,16 @@ function draftToWrite(request: PrepareRequest): DraftInput | undefined {
   };
 }
 
+/** What became of the approvals an earlier release prepared, when the call retired them (`ensureSendEpochConfig`). */
+export interface LegacyDrainNote {
+  readonly legacyDrain?: LegacyDrainReport | undefined;
+}
+
+/** `result`, and the drain's report beside it when there is one. */
+function noting<T extends object>(result: T, legacyDrain: LegacyDrainReport | undefined): T & LegacyDrainNote {
+  return legacyDrain === undefined ? result : { ...result, legacyDrain };
+}
+
 /**
  * Prepares a post and returns the preview a person must approve: `agent-slack post prepare` and `slack_post_prepare`.
  *
@@ -101,13 +111,15 @@ export async function prepareDraftPost(
   alias: string,
   request: PrepareRequest,
   slack: SessionDeps = {},
-): Promise<PreparedPost> {
+): Promise<PreparedPost & LegacyDrainNote> {
   const writing = draftToWrite(request);
   if (writing !== undefined) requireConversation(writing.channel, alias, context.handoffs);
   const composed = writing === undefined ? undefined : { payload: draftPayload(writing), source: writing.text ?? '' };
   const paths = writing?.files ?? [];
   checkFileCount(paths.length);
   const files = paths.length === 0 ? [] : await recordFiles(paths, await attachPolicyOf(context));
+  // Before the epoch is read for the approval: version 3, and an earlier release's records retired.
+  const { legacyDrain } = await ensureSendEpochConfig(context.core, { now: context.now });
   const gate = await gateDepsFor(context, alias, slack);
   const store = openDraftStore(context.core.paths.stateDir, context.now, context.handoffs);
   const draft =
@@ -115,7 +127,7 @@ export async function prepareDraftPost(
       ? // Another workspace's draft is absent here: drafts share one directory, and the id alone proves nothing.
         await ownDraft(store, gate.accountId, request.draftId as string)
       : await store.create(gate.accountId, composed.payload, composed.source, files);
-  return preparePost(gate, draft, new NameBook());
+  return noting(await preparePost(gate, draft, new NameBook()), legacyDrain);
 }
 
 export interface SendPostInput {
@@ -141,12 +153,17 @@ export async function sendPost(
   alias: string,
   input: SendPostInput,
   slack: SessionDeps = {},
-): Promise<PostedMessage | PostedFiles> {
+): Promise<(PostedMessage | PostedFiles) & LegacyDrainNote> {
+  // First, as every claim does: version 3, and an earlier release's records retired.
+  const { legacyDrain } = await ensureSendEpochConfig(context.core, { now: context.now });
   const gate = await gateDepsFor(context, alias, slack);
   const store = openDraftStore(context.core.paths.stateDir, context.now, context.handoffs);
   // Another workspace's draft is absent here: drafts share one directory, and the id alone proves nothing.
   const draft = await ownDraft(store, gate.accountId, input.draftId);
-  return postPrepared({ ...gate, signal: input.signal }, draft, input.approvalId, input.expectChannel, new NameBook());
+  return noting(
+    await postPrepared({ ...gate, signal: input.signal }, draft, input.approvalId, input.expectChannel, new NameBook()),
+    legacyDrain,
+  );
 }
 
 /**
@@ -163,8 +180,10 @@ export async function react(
   wanted: ReactionOptions,
   approvalId: string | undefined,
   slack: SessionDeps = {},
-): Promise<ReactionResult> {
+): Promise<ReactionResult & LegacyDrainNote> {
+  // First — it prepares, or claims, or both: version 3, and an earlier release's records retired.
+  const { legacyDrain } = await ensureSendEpochConfig(context.core, { now: context.now });
   const gate = await gateDepsFor(context, alias, slack);
   const claiming = approvalId ?? (await prepareReaction(gate, wanted)).approvalId;
-  return reactPrepared(gate, claiming, wanted);
+  return noting(await reactPrepared(gate, claiming, wanted), legacyDrain);
 }

@@ -6,10 +6,13 @@ import {
   CommsError,
   type Config,
   defaultChangePolicy,
+  ensureSendEpochConfig,
   findById,
   type GatedChange,
   type Handoff,
   handoffSentence,
+  hasNames,
+  type LegacyDrainReport,
   neutralise,
   type ProfileSlackTarget,
   parseName,
@@ -169,7 +172,7 @@ export function connectWorkspace(context: SlackContext, input: ConnectInput): Ga
       if (!input.clientId) throw createTheApp();
       return { clientId: input.clientId, port: checkedPort(input.port) };
     }
-    if (config.version !== 2) throw createTheApp();
+    if (!hasNames(config)) throw createTheApp();
     if (input.port !== undefined) {
       throw new CommsError('USAGE', 'a profile sign-in uses the profile port; --port needs an explicit --client-id', {
         hint: 'Leave out --port to use the organisation app, or pass --client-id and --port for your own app.',
@@ -601,6 +604,8 @@ export interface PolicyResult extends WorkspacePolicies {
   readonly changed: boolean;
   /** The policies in force before, whether set on the workspace or inherited. */
   readonly previous: { readonly sendPolicy: SendPolicy; readonly changePolicy: ChangePolicy };
+  /** What became of the approvals an earlier release prepared, when this write retired them. Absent otherwise. */
+  readonly legacyDrain?: LegacyDrainReport | undefined;
 }
 
 export interface PolicyWanted {
@@ -683,6 +688,11 @@ export function policyChange(context: SlackContext, alias: string, wanted: Polic
       return { account: found.alias, before: config, after, summary: `${found.alias}: ${said}` };
     },
     apply: async (consent, request) => {
+      // A send policy moves only with its send epoch, on version 3: converted first, an earlier release's retired.
+      const legacyDrain =
+        wanted.send === undefined
+          ? undefined
+          : (await ensureSendEpochConfig(context.core, { now: context.now })).legacyDrain;
       const { alias: name, account } = requireWorkspace(request.before, alias, context.handoffs);
       const previous = policiesOf(request.before, name, account);
       // The account as it was written, and the name it was written under: set inside the write, which is the one
@@ -714,6 +724,7 @@ export function policyChange(context: SlackContext, alias: string, wanted: Polic
         ...policiesOf(config, written.alias, now),
         changed: now.sendPolicy !== account.sendPolicy || now.changePolicy !== account.changePolicy,
         previous: { sendPolicy: previous.sendPolicy, changePolicy: previous.changePolicy },
+        ...(legacyDrain === undefined ? {} : { legacyDrain }),
       };
     },
   };

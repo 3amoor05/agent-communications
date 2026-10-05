@@ -5,10 +5,12 @@ import {
   CommsError,
   canonicalAddress,
   type Expectation,
+  ensureSendEpochConfig,
   handoffSentence,
   handoffSentenceToFill,
   integrityRefusal,
   kindOf,
+  type LegacyDrainReport,
   type MessagePreview,
   otherVersionRefusal,
   ownerOf,
@@ -73,6 +75,11 @@ export interface SendPreparation {
   expect: Expectation;
   expiresAt: string;
   nextStep: string;
+  /**
+   * What became of the approvals an earlier release prepared, by id, when this call was one that retired them
+   * (`ensureSendEpochConfig`). Absent otherwise.
+   */
+  legacyDrain?: LegacyDrainReport | undefined;
 }
 
 export interface SendResult {
@@ -88,6 +95,11 @@ export interface SendResult {
   subject: string;
   /** Bookkeeping that could not be written after Resend confirmed the send. */
   note?: string | undefined;
+  /**
+   * What became of the approvals an earlier release prepared, by id, when this call was one that retired them
+   * (`ensureSendEpochConfig`). Absent otherwise.
+   */
+  legacyDrain?: LegacyDrainReport | undefined;
 }
 
 /**
@@ -341,6 +353,8 @@ async function attachPolicy(context: ResendContext) {
  * this exact content. Nothing is sent; preparing twice is free.
  */
 export async function prepareSend(context: ResendContext, name: string, input: SendInput): Promise<SendPreparation> {
+  // First: the configuration this send's epoch is read from is version 3, and an earlier release's records are retired.
+  const { legacyDrain } = await ensureSendEpochConfig(context.core, { now: context.now });
   const named = await context.accounts.require(name);
   requireSendMode(named, context.handoffs);
   const config = await context.config();
@@ -423,6 +437,7 @@ export async function prepareSend(context: ResendContext, name: string, input: S
             { instead: 'Show the preview to the user; they approve it at their own terminal.' },
           )} You cannot approve this yourself. Then execute it with the same approval id and the recipients and subject shown.`
         : 'Show the preview to the user verbatim and wait for an explicit yes. Then execute it with the same approval id and the recipients and subject shown above.',
+    ...(legacyDrain === undefined ? {} : { legacyDrain }),
   };
 }
 
@@ -576,6 +591,8 @@ export async function executeSend(
   name: string,
   options: { approvalId: string; expect: Expectation },
 ): Promise<SendResult> {
+  // First, as every claim does: version 3, and an earlier release's records retired.
+  const { legacyDrain } = await ensureSendEpochConfig(context.core, { now: context.now });
   const named = await context.accounts.require(name);
   requireSendMode(named, context.handoffs);
   // Before anything else, as the claim would: only a valid version-2 record is ever claimed here.
@@ -795,6 +812,7 @@ export async function executeSend(
     bcc: claimed.expect.bcc,
     subject: claimed.expect.subject,
     ...(unrecorded.length > 0 ? { note: unrecorded.join('; ') } : {}),
+    ...(legacyDrain === undefined ? {} : { legacyDrain }),
   };
 }
 
@@ -982,6 +1000,8 @@ export async function finishSendApproval(
   approvalId: string,
   answer: string,
 ): Promise<ApprovalRecord> {
+  // First, as every approval does: version 3, and an earlier release's records retired.
+  await ensureSendEpochConfig(context.core, { now: context.now });
   const { stored, named } = await recordAndAccount(context, approvalId);
   const record = sendRecordOf(stored);
   const { digest } = await reload(context, record);

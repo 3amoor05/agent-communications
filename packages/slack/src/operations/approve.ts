@@ -1,6 +1,7 @@
 import {
   type ApprovalRecord,
   CommsError,
+  ensureSendEpochConfig,
   integrityRefusal,
   otherVersionRefusal,
   ownerOf,
@@ -204,6 +205,8 @@ export async function finishApproval(
   answer: string,
   deps: SessionDeps = {},
 ): Promise<void> {
+  // First, as every approval does: version 3, and an earlier release's records retired.
+  await ensureSendEpochConfig(context.core, { now: context.now });
   const { record, name, account } = await approvalAndWorkspace(context, approvalId);
   /*
    * A reaction binds the record's own digest, checked again here as `beginApproval` checked it: there is no draft

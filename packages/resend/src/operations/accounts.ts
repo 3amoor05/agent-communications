@@ -7,8 +7,10 @@ import {
   CommsError,
   type Config,
   classifyChange,
+  ensureSendEpochConfig,
   type GatedChange,
   handoffSentence,
+  type LegacyDrainReport,
   type SendPolicy,
   secretsStoreFor,
   secretsStoreOf,
@@ -411,6 +413,8 @@ export interface PolicyReport {
   changePolicyFrom: 'account' | 'default';
   /** Reach above which a send needs a person at a terminal whatever the send policy says. */
   confirmAboveRecipients: number;
+  /** What became of the approvals an earlier release prepared, when this write retired them. Absent otherwise. */
+  legacyDrain?: LegacyDrainReport | undefined;
 }
 
 function reportOf(named: NamedAccount, config: Config): PolicyReport {
@@ -487,6 +491,11 @@ export function policyChange(context: ResendContext, name: string, wanted: Polic
       };
     },
     apply: async (consent, request) => {
+      // A send policy moves only with its send epoch, on version 3: converted first, an earlier release's retired.
+      const legacyDrain =
+        wanted.send === undefined
+          ? undefined
+          : (await ensureSendEpochConfig(context.core, { now: context.now })).legacyDrain;
       const approved = requireAccount(request.before, name, context.handoffs).account;
       let written: NamedAccount | undefined;
       /*
@@ -518,7 +527,8 @@ export function policyChange(context: ResendContext, name: string, wanted: Polic
         surface: context.surface,
         reason: said,
       });
-      return reportOf(now, config);
+      const report = reportOf(now, config);
+      return legacyDrain === undefined ? report : { ...report, legacyDrain };
     },
   };
 }

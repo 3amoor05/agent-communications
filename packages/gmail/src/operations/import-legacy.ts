@@ -12,6 +12,7 @@ import {
   findUngatedGmailServers,
   type GatedChange,
   handoffSentenceToFill,
+  hasNames,
   homeDirectory,
   type InboxConfig,
   isValidAlias,
@@ -601,8 +602,8 @@ export function importNames(config: Config, files: readonly string[], renames: r
       else if (taken.has(override)) problems.push(`"${override}" is given to more than one mailbox`);
       name = override;
     } else {
-      const base = config.version === 2 ? `${from}/gmail` : from;
-      const variant = (n: number) => (config.version === 2 ? `${from}/gmail-${n}` : `${from}-${n}`);
+      const base = hasNames(config) ? `${from}/gmail` : from;
+      const variant = (n: number) => (hasNames(config) ? `${from}/gmail-${n}` : `${from}-${n}`);
       name = base;
       for (let n = 2; !free(name) && n < 50; n++) name = variant(n);
       if (!free(name)) problems.push(`${from}: no free name near "${base}" — choose one with --rename ${from}=<name>`);

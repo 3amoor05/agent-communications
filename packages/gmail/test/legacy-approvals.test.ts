@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { test } from 'node:test';
-import { CommsError, deriveLegacyV1State, stateOf } from '@agentcomms/core';
+import { CommsError, deriveLegacyV1State, ensureSendEpochConfig, stateOf } from '@agentcomms/core';
 import {
   readV1Record,
   v1RecordPath,
@@ -42,6 +42,9 @@ async function withLegacy(ageMs: number) {
   });
   const context = new GmailContext({ core: harness.core, env: harness.env });
   const draft = await createDraft(context, 'work', { to: EXPECT.to, subject: EXPECT.subject, text: 'Tuesday works.' });
+  // Version 3 first, with nothing to retire: these records arrive after it, as one a paused earlier-release prepare
+  // writes would, so what refuses them below is the version gate alone — not the drain, which has its own tests.
+  await ensureSendEpochConfig(harness.core);
   const createdAt = new Date(Date.now() - ageMs).toISOString();
   const stateDir = harness.core.paths.stateDir;
   const fields = {

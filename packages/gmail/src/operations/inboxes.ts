@@ -5,10 +5,12 @@ import {
   CommsError,
   defaultChangePolicy,
   effectiveSendPolicy,
+  ensureSendEpochConfig,
   findById,
   type GatedChange,
   type InboxRuntimeState,
   keepAndReport,
+  type LegacyDrainReport,
   type LooseningConsent,
   RESERVED_ALIASES,
   renameEntry,
@@ -163,6 +165,8 @@ export interface InboxPolicyResult {
   changePolicy: ChangePolicy;
   /** …and before this call. */
   previousChangePolicy: ChangePolicy;
+  /** What became of the approvals an earlier release prepared, when this write retired them. Absent otherwise. */
+  legacyDrain?: LegacyDrainReport | undefined;
 }
 
 /**
@@ -224,6 +228,11 @@ export async function inboxPolicy(
   wanted: InboxPolicies,
   consent?: LooseningConsent,
 ): Promise<InboxPolicyResult> {
+  // A send policy moves only with its send epoch, on version 3: converted first, an earlier release's records retired.
+  const legacyDrain =
+    wanted.sendPolicy === undefined
+      ? undefined
+      : (await ensureSendEpochConfig(context.core, { now: context.now })).legacyDrain;
   const { inbox } = await context.inbox(alias);
   let result: InboxPolicyResult | undefined;
   await context.core.config.update(
@@ -245,6 +254,7 @@ export async function inboxPolicy(
     consent ? { consent } : {},
   );
   if (!result) throw new CommsError('UNEXPECTED', 'the policy was written without being measured');
+  if (legacyDrain !== undefined) result = { ...result, legacyDrain };
   await context.core.audit.append({
     inboxId: inbox.id,
     alias: result.alias,
