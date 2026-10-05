@@ -7,11 +7,14 @@ import {
   DOWNLOAD_CLAIM,
   type GatedChange,
   gatedChange,
+  MAX_WAIT_SECONDS as MAX_APPROVAL_WAIT_SECONDS,
   refuseUnclaimedApproval,
   retiredOutHint,
   strictToolArguments,
   toCommsError,
   updateToolGate,
+  waitCallOptions,
+  waitForApproval,
 } from '@agentcomms/core';
 import { McpServer, type Transport } from '@modelcontextprotocol/server';
 import { z } from 'zod';
@@ -160,8 +163,8 @@ async function buildInstructions(context: SlackContext, pinned: string | undefin
     'Posting or reacting needs a person’s yes to that exact content. `slack_post_prepare` returns a preview: show it',
     'in full and wait. Under the workspace’s `chat` policy `slack_post_send` then posts it. Under `confirm` — and',
     'always for @channel, @here or a room of 50 or more — the person runs the approve command the result gives, at',
-    'their own terminal; you cannot approve it yourself, so say so and wait. Under `never` nothing posts. A workspace',
-    'in `read` mode cannot post at all; Slack enforces that.',
+    'their own terminal; you cannot approve it yourself: say so, then slack_approval_wait.',
+    'Under `never` nothing posts. A workspace in `read` mode cannot post at all; Slack enforces that.',
     'Files post the same way: name local files by path, and the preview lists each with its SHA-256. The approval is',
     'bound to those bytes, and every file is read and checked again at send.',
     '',
@@ -251,7 +254,8 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
       channel: 'slack',
       running: VERSION,
       exempt: ['slack_doctor'],
-      approvals: { slack_file_download: DOWNLOAD_CLAIM },
+      // A wait only looks: it answers while an update is out, for any approval this machine can read (decision 7).
+      approvals: { slack_file_download: DOWNLOAD_CLAIM, slack_approval_wait: { lookup: true } },
       refresh: () => checkForUpdates(context.core, context.env),
     }),
     { slack_file_download: { out: retiredOutHint('mcp') } },
@@ -1000,6 +1004,40 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
         const name = await resolve(args.workspace);
         await ownApproval(args.approvalId, 'send');
         return reply(await react(context, name, reactionOf(args), args.approvalId, slackDeps));
+      } catch (error) {
+        return fail(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'slack_approval_wait',
+    {
+      title: 'Wait for an approval',
+      description: `Wait for an approval — a post, a reaction, a change or a download’s question — to be usable or finished, and say where it stands: pending (with \`claimable\` true when a yes in the chat can use it), approved, being posted, used, failed, unknown, expired, revoked, corrupt, or answered for a question. \`waitSeconds\` is 30 when left out, ${MAX_APPROVAL_WAIT_SECONDS} at most, and 0 for its status now. It only looks: it never approves, claims or posts. Ended still waiting, wait again — never prepare it again while it is pending or being posted. The same as \`approval wait\` in the Slack CLI.`,
+      inputSchema: {
+        approvalId: z.string().describe('the approval to wait for'),
+        waitSeconds: z
+          .number()
+          .int()
+          .min(0)
+          .max(MAX_APPROVAL_WAIT_SECONDS)
+          .optional()
+          .describe(`how long to wait: 30 when left out, ${MAX_APPROVAL_WAIT_SECONDS} at most, 0 for the status now`),
+      },
+      annotations: readsLocal,
+    },
+    async (args, ctx) => {
+      try {
+        // Pinned means pinned: on a server pinned to one workspace, only its approvals are found (D2).
+        return reply(
+          await waitForApproval(context.core, args.approvalId, {
+            waitSeconds: args.waitSeconds,
+            channel: 'slack',
+            ...(pinnedId === undefined ? {} : { owner: pinnedId }),
+            ...waitCallOptions(ctx),
+          }),
+        );
       } catch (error) {
         return fail(error);
       }

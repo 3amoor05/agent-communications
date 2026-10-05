@@ -226,3 +226,45 @@ test('changing an account from chat is a change approval: the preview first, the
     await close();
   }
 });
+
+// ── Waiting for an approval (CUE-404 Task 10; design 2026-10-05 §D3) ─────────────────────────────────────────────────
+
+test('resend_send_wait and `send wait` say the same of an approval, only look, and on a pinned server find only its own (D3r-e, D3r-f, D8o-c)', async () => {
+  harness = await newHarness();
+  await harness.addAccount({ name: 'acme/resend', mode: 'send' });
+  await harness.addAccount({ name: 'zeta/resend', mode: 'send' });
+  const whole = await harness.mcp();
+  const pinned = await harness.mcp({ account: 'acme/resend' });
+  try {
+    const prepare = (account: string) =>
+      whole.call('resend_send_prepare', {
+        account,
+        from: 'hello@acme.test',
+        to: ['sam@partner.test'],
+        subject: 'Hi',
+        text: 'Hi',
+      });
+    const ours = ok<{ approvalId: string; approval: Record<string, unknown> }>(await prepare('acme/resend'));
+    const theirs = ok<{ approvalId: string }>(await prepare('zeta/resend'));
+    const asked = harness.fake.requests.length;
+    const tool = ok<Record<string, unknown>>(
+      await whole.call('resend_send_wait', { approvalId: ours.approvalId, waitSeconds: 0 }),
+    );
+    assert.deepEqual([tool.state, tool.claimable, tool.ended], ['pending', true, 'now']);
+    assert.deepEqual(tool.approval, ours.approval, 'the object the preparation gave');
+    const command = await harness.cli(['--json', 'send', 'wait', ours.approvalId, '--wait-seconds', '0']);
+    assert.equal(command.code, 0, command.stdout + command.stderr);
+    assert.deepEqual(command.json<{ data: unknown }>().data, tool, 'the command and the tool agree');
+    const envelope = async (approvalId: string) => {
+      const refusal = refused(await pinned.call('resend_send_wait', { approvalId, waitSeconds: 0 }));
+      assert.equal(refusal.code, 'NOT_FOUND');
+      assert.deepEqual(refusal.details, { approval: null });
+      return JSON.stringify(refusal).replaceAll(approvalId, 'ID');
+    };
+    assert.equal(await envelope(theirs.approvalId), await envelope(`ap_${'7'.repeat(26)}`));
+    assert.equal(harness.fake.requests.length, asked, 'a wait never asks Resend anything');
+  } finally {
+    await whole.close();
+    await pinned.close();
+  }
+});

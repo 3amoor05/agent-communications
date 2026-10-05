@@ -16,6 +16,7 @@ import {
   gatedChange,
   handoffSentence,
   lookupName,
+  MAX_WAIT_SECONDS as MAX_APPROVAL_WAIT_SECONDS,
   NEVER_NOTICE,
   orgAddChange,
   profileSourcePath,
@@ -26,6 +27,8 @@ import {
   strictToolArguments,
   toCommsError,
   updateToolGate,
+  waitCallOptions,
+  waitForApproval,
 } from '@agentcomms/core';
 import { acceptedContent, inputRequired, inputResponse, McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
@@ -135,7 +138,8 @@ export async function buildInstructions(context: GmailContext, pinned: string | 
     'Changing an account: a call that loosens a safety setting or removes something returns `approvalRequired` and a',
     'preview instead. Show the preview in full and ask; call again with its `approvalId` only after the user says yes.',
     'Under `confirm` — a mailbox’s send policy, or the change policy — the user approves outside this chat, at their',
-    'own terminal, with the approve command the result gives; you cannot approve it yourself.',
+    'own terminal, with the approve command the result gives; you cannot approve it yourself. Learn when they have',
+    'with gmail_send_wait, which only looks.',
     '',
     pinned
       ? `This server is pinned to the "${pinned}" mailbox; the inbox argument may be omitted.`
@@ -329,7 +333,8 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
       channel: 'gmail',
       running: VERSION,
       exempt: ['gmail_doctor'],
-      approvals: { gmail_attachment_download: DOWNLOAD_CLAIM },
+      // A wait only looks: it answers while an update is out, for any approval this machine can read (decision 7).
+      approvals: { gmail_attachment_download: DOWNLOAD_CLAIM, gmail_send_wait: { lookup: true } },
       refresh: () => checkForUpdates(context.core, context.env),
     }),
     { gmail_attachment_download: { out: retiredOutHint('mcp') } },
@@ -2710,6 +2715,45 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
       },
     );
   }
+
+  server.registerTool(
+    'gmail_send_wait',
+    {
+      title: 'Wait for an approval',
+      description: `Wait for an approval — a send, a change or a download’s question — to be usable or finished, and say where it stands: pending (with \`claimable\` true when a yes in the chat can use it), approved, being sent, used, failed, unknown, expired, revoked, corrupt, or answered for a question. \`waitSeconds\` is 30 when left out, ${MAX_APPROVAL_WAIT_SECONDS} at most, and 0 for its status now. It only looks: it never approves, claims or sends. Ended still waiting, wait again — never prepare it again while it is pending or being sent. The same as \`send wait\` in the Gmail CLI.`,
+      inputSchema: z.object({
+        approvalId: z.string().min(1).describe('the approval to wait for'),
+        waitSeconds: mcpInteger()
+          .optional()
+          .describe(`how long to wait: 30 when left out, ${MAX_APPROVAL_WAIT_SECONDS} at most, 0 for the status now`),
+      }),
+      outputSchema: z.object({
+        approvalId: z.string(),
+        state: z.string().describe('where it stands, or `cancelled` when the wait was cancelled'),
+        claimable: z.boolean().describe('true when the next call can use it now'),
+        approval: approvalSchema,
+        ended: z.string().describe('now, claimable, blocked, final, timeout or cancelled'),
+        waitedSeconds: z.number(),
+        hint: z.string().optional().describe('what to do next, when it ended still waiting'),
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ approvalId, waitSeconds }, ctx) => {
+      try {
+        // Pinned means pinned: on a server pinned to one mailbox, only that mailbox's approvals are found (D2).
+        return reply(
+          await waitForApproval(context.core, approvalId, {
+            waitSeconds,
+            channel: 'gmail',
+            ...(pinnedId === undefined ? {} : { owner: pinnedId }),
+            ...waitCallOptions(ctx),
+          }),
+        );
+      } catch (error) {
+        return fail(error);
+      }
+    },
+  );
 
   server.registerTool(
     'gmail_confirm_clients',

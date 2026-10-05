@@ -107,6 +107,7 @@ test('the tool list is the same whatever is configured, and every tool says what
     'gmail_send_cancel',
     'gmail_send_list',
     'gmail_send_prepare',
+    'gmail_send_wait',
     'gmail_sendas_list',
     'gmail_setup',
     'gmail_thread_get',
@@ -118,11 +119,13 @@ test('the tool list is the same whatever is configured, and every tool says what
 
   // Exactly one tool sends, and it is registered whatever the policy is: registration has never been the gate, and a
   // tool list that changed with the config would tell an agent which mailboxes are worth trying.
+  // The wait only looks (design 2026-10-05 §D3), and is named for the send it waits on.
   assert.deepEqual(withoutInboxes.filter((name) => name.includes('send')).sort(), [
     'gmail_draft_send',
     'gmail_send_cancel',
     'gmail_send_list',
     'gmail_send_prepare',
+    'gmail_send_wait',
     'gmail_sendas_list',
   ]);
 });

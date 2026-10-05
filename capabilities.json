@@ -573,6 +573,15 @@
       "operation": "revokeApproval"
     },
     {
+      "id": "gmail.send.wait",
+      "package": "gmail",
+      "cli": "send wait",
+      "mcp": "gmail_send_wait",
+      "status": "both",
+      "operation": "waitForApproval",
+      "expect": { "options.channel": "gmail" }
+    },
+    {
       "id": "gmail.approve",
       "package": "gmail",
       "cli": "approve",
@@ -910,6 +919,15 @@
       "mcp": "resend_send_status",
       "status": "both",
       "operation": "sendStatus"
+    },
+    {
+      "id": "resend.send.wait",
+      "package": "resend",
+      "cli": "send wait",
+      "mcp": "resend_send_wait",
+      "status": "both",
+      "operation": "waitForApproval",
+      "expect": { "options.channel": "resend" }
     },
     {
       "id": "resend.scheduled.list",
@@ -1272,6 +1290,15 @@
       "mcp": null,
       "status": "exception",
       "reason": "Approving under the `confirm` policy means a person at a terminal typing the code shown (design §6.3). A tool that approved would make `confirm` mean nothing; over MCP the answer is the command to run."
+    },
+    {
+      "id": "slack.approval.wait",
+      "package": "slack",
+      "cli": "approval wait",
+      "mcp": "slack_approval_wait",
+      "status": "both",
+      "operation": "waitForApproval",
+      "expect": { "options.channel": "slack" }
     },
     {
       "id": "slack.mcp.serve",

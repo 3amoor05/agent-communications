@@ -2224,3 +2224,73 @@ test('v2-only helpers: a legacy confirm send is never put in a form, and gmail_d
     await whole.close();
   }
 });
+
+// ── Waiting for an approval (CUE-404 Task 10; design 2026-10-05 §D3) ─────────────────────────────────────────────────
+
+/** A send recorded for `home` directly: only its mailbox matters, and `home` has no token Google would refresh. */
+async function homeSend(harness: Harness) {
+  const home = (await harness.core.config.load()).inboxes.home;
+  assert.ok(home);
+  return harness.core.approvals.create({
+    inboxId: home.id,
+    inboxSub: 'sub-2',
+    draftId: 'r-home',
+    draftMessageId: 'm-home',
+    channel: 'gmail',
+    sendEpoch: 0,
+    contentDigest: 'e'.repeat(64),
+    policy: 'chat',
+    requiredPolicy: 'chat',
+    riskFlags: [],
+    expect: { to: ['kim@partner.test'], cc: [], bcc: [], subject: 'Home' },
+  });
+}
+
+test('gmail_send_wait and `send wait` say the same of an approval, only look, and on a pinned server find only its own (D3r-e, D3r-f, D8o-c)', async () => {
+  const harness = await workAndHome();
+  const context = new GmailContext({ core: harness.core, env: harness.env });
+  const workDraft = await createDraft(context, 'work', { to: ['sam@partner.test'], subject: 'Tue', text: 'Tuesday.' });
+  const work = await prepareSend(context, 'work', workDraft.draftId);
+  const home = await homeSend(harness);
+  const asked = harness.google.requests.length;
+  const whole = await connect({ core: harness.core, env: harness.env });
+  const pinned = await connect({ core: harness.core, env: harness.env, inbox: 'work' });
+  try {
+    const tool = wire(await whole.call('gmail_send_wait', { approvalId: work.approvalId, waitSeconds: 0 }));
+    assert.deepEqual([tool.state, tool.claimable, tool.ended], ['pending', true, 'now']);
+    assert.deepEqual(tool.approval, JSON.parse(JSON.stringify(work.approval)), 'the object the preparation gave');
+    const command = await cli(harness, ['send', 'wait', work.approvalId, '--wait-seconds', '0', '--json']);
+    assert.equal(command.code, 0, command.stdout + command.stderr);
+    assert.deepEqual(command.envelope().data, tool, 'the command and the tool agree');
+    // Pinned to work: its own approval is found; home's is the one NOT_FOUND, as an id nobody prepared is.
+    const own = wire(await pinned.call('gmail_send_wait', { approvalId: work.approvalId, waitSeconds: 0 }));
+    assert.equal(own.state, 'pending');
+    const envelope = async (approvalId: string) => {
+      const refused = toolError(await pinned.call('gmail_send_wait', { approvalId, waitSeconds: 0 }));
+      assert.equal(refused.code, 'NOT_FOUND');
+      return JSON.stringify(refused).replaceAll(approvalId, 'ID');
+    };
+    assert.equal(await envelope(home.approvalId), await envelope(`ap_${'7'.repeat(26)}`));
+    assert.equal(harness.google.requests.length, asked, 'a wait never asks Gmail anything');
+  } finally {
+    await whole.close();
+    await pinned.close();
+  }
+});
+
+test('on a server pinned to a mailbox since removed, its approvals are waited on by nobody: NOT_FOUND (R33e)', async () => {
+  const harness = await workAndHome();
+  const home = await homeSend(harness);
+  const pinned = await connect({ core: harness.core, env: harness.env, inbox: 'home' });
+  try {
+    await harness.core.config.update((config) => {
+      const { home: _home, ...inboxes } = config.inboxes;
+      return { ...config, inboxes };
+    });
+    const refused = toolError(await pinned.call('gmail_send_wait', { approvalId: home.approvalId, waitSeconds: 0 }));
+    assert.equal(refused.code, 'NOT_FOUND');
+    assert.doesNotMatch(JSON.stringify(refused), /revoked|pending|ownerRemoved/, 'nothing of the record is told');
+  } finally {
+    await pinned.close();
+  }
+});

@@ -310,6 +310,18 @@ agent-resend send status [options] <approvalId>
 |---|---|---|
 | `--account <name>` | which account, as `organisation/resend` | — |
 
+### `agent-resend send wait`
+
+wait for an approval to be usable or finished, and say where it stands — it only looks, and never sends
+
+```
+agent-resend send wait [options] <approvalId>
+```
+
+| Option | What it does | Default |
+|---|---|---|
+| `--wait-seconds <n>` | how long to wait: 30 when left out, 300 at most, 0 for the status now | — |
+
 ### `agent-resend scheduled`
 
 emails waiting to be sent at a later time

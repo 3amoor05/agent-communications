@@ -508,7 +508,11 @@ test('no tool approves, and the only tools that change a workspace are the named
   const harness = await newHarness();
   const { client, close } = await connect(harness);
   try {
-    const names = (await client.listTools()).tools.map((tool) => tool.name);
+    const tools = (await client.listTools()).tools;
+    // The wait is named for the approval it waits on, and only looks (design 2026-10-05 §D3): it approves nothing.
+    const wait = tools.find((tool) => tool.name === 'slack_approval_wait');
+    assert.equal(wait?.annotations?.readOnlyHint, true, 'the wait only looks');
+    const names = tools.map((tool) => tool.name).filter((name) => name !== 'slack_approval_wait');
     const forbidden = names.filter((name) =>
       /approv|^slack_(post_(?!prepare$|send$)|send|react_(?!send$)|reaction|app_|workspace_(?!add$|finish$|reauth$|remove$|policy$|show$)|mode_(?!narrow$|request_send$|set$))/.test(
         name,

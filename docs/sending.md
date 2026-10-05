@@ -103,8 +103,14 @@ Stated plainly, because a security claim that overstates itself is worse than on
 
 ```bash
 agent-gmail send list --inbox acme/gmail        # prepared, not yet used
+agent-gmail send wait <approvalId>        # where one stands, now or once it changes: it only looks
 agent-gmail send cancel <approvalId>      # void one
 agent-gmail approve <approvalId>          # approve at this terminal, under `confirm`
 ```
+
+An agent learns that a person approved by waiting, not by being told: `gmail_send_wait` (`agent-gmail send wait`),
+`slack_approval_wait` (`agent-slack approval wait`), `resend_send_wait` (`agent-resend send wait`) and
+`comms_approval_wait` (`agentcomms approval wait`) each say where an approval stands — 30 seconds by default, 300 at
+most, and `--wait-seconds 0` for the status now — and never approve, claim or send.
 
 Approvals expire. An approval left lying around is one somebody can still act on, so cancelling is never refused.

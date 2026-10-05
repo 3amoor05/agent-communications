@@ -25,6 +25,7 @@ import {
   insertWordsBeforeSentinel,
   installExitStatus,
   kindOf,
+  MAX_WAIT_SECONDS as MAX_APPROVAL_WAIT_SECONDS,
   type OutputOptions,
   openCore,
   orgAddChange,
@@ -35,6 +36,7 @@ import {
   publicStored,
   refuseRetiredOut,
   refuseUnclaimedApproval,
+  renderApprovalWait,
   resolvePaths,
   runCommand,
   runUpdateCheckChild,
@@ -46,6 +48,8 @@ import {
   toCommsError,
   UPDATE_CHECK_CHILD_COMMAND,
   updateGateAtTerminal,
+  waitForApproval,
+  wholeNumber,
   withoutOptionsBeforeSentinel,
   writeResult,
 } from '@agentcomms/core';
@@ -277,7 +281,13 @@ update first, or put it off (the stop names both commands) · 64 usage · 65 bad
           streams,
           approvals: approvalsOf(command),
           // A download's `--choice` is the question the person just answered: held to that kind, as the tool's is.
-          approvalClaim: path.join(' ') === 'attachments download' ? DOWNLOAD_CLAIM : undefined,
+          // A wait only looks: it answers while an update is out, for any approval this machine can read (decision 7).
+          approvalClaim:
+            path.join(' ') === 'attachments download'
+              ? DOWNLOAD_CLAIM
+              : path.join(' ') === 'send wait'
+                ? { lookup: true }
+                : undefined,
           ...terminalUpdateHooks(core, env, { channel: 'gmail', output: output(), streams }),
         });
       },
@@ -1313,6 +1323,29 @@ update first, or put it off (the stop names both commands) · 64 usage · 65 bad
       act(async (context, globalOptions, options: Options) => {
         const result = await listApprovals(context, { inbox: options.inbox ? String(options.inbox) : undefined });
         writeResult(result, output(), (data) => renderApprovals(data, globalOptions.color), streams);
+      }),
+    );
+
+  send
+    .command('wait <approvalId>')
+    .description(
+      'wait for an approval to be usable or finished, and say where it stands — it only looks, and never sends',
+    )
+    .option(
+      '--wait-seconds <n>',
+      `how long to wait: 30 when left out, ${MAX_APPROVAL_WAIT_SECONDS} at most, 0 for the status now`,
+    )
+    .action(
+      act(async (context, _globalOptions, approvalId: string, options: Options) => {
+        const result = await waitForApproval(context.core, approvalId, {
+          waitSeconds: wholeNumber(options.waitSeconds, {
+            name: '--wait-seconds',
+            min: 0,
+            max: MAX_APPROVAL_WAIT_SECONDS,
+          }),
+          channel: 'gmail',
+        });
+        writeResult(result, output(), renderApprovalWait, streams);
       }),
     );
 

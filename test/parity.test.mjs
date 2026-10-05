@@ -141,6 +141,29 @@ test('Slack profile capability rows keep their shared operations and reject a de
   assert.match(checkParity(changed, registries).join('\n'), /unknown field "description"/);
 });
 
+test('the four waits are one operation, each row its own surface by the channel it passes, and each passes parity (D3r-g)', () => {
+  const waits = {
+    'core.approval.wait': null,
+    'gmail.send.wait': 'gmail',
+    'resend.send.wait': 'resend',
+    'slack.approval.wait': 'slack',
+  };
+  for (const [id, channel] of Object.entries(waits)) {
+    const row = table.capabilities.find((entry) => entry.id === id);
+    assert.equal(row?.operation, 'waitForApproval', id);
+    assert.equal(row?.status, 'both', id);
+    assert.deepEqual(row?.expect, { 'options.channel': channel }, id);
+    for (const side of ['cli', 'mcp']) {
+      const calls = driven.reports[id]?.[side]?.calls ?? [];
+      assert.deepEqual(calls, ['core:waitForApproval'], `${id}: the ${side} side reaches the wait, and only it`);
+    }
+  }
+  // Without its `expect`, a row that shares the operation with three others cannot be told from them: refused.
+  const changed = structuredClone(table);
+  delete changed.capabilities.find((entry) => entry.id === 'gmail.send.wait').expect;
+  assertNamed(checkOperations(changed, registries, driven), 'gmail.send.wait');
+});
+
 test('`pnpm verify:parity --strict` exits non-zero exactly while a row is pending', async () => {
   // The release reads this exit code, so a script that printed its problems and exited 0 would be a gate that never
   // shut. Checked against the table as it stands: failing while anything is pending, passing once nothing is.

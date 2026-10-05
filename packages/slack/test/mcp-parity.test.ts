@@ -1534,3 +1534,59 @@ test('kind dispatch at `agent-slack approve`: a stub gets the integrity refusal,
   assert.equal(legacy.code, 10, legacy.said);
   assert.match(legacy.said, /prepared by a different version of agent-communications/);
 });
+
+// ── Waiting for an approval (CUE-404 Task 10; design 2026-10-05 §D3) ─────────────────────────────────────────────────
+
+test('slack_approval_wait and `approval wait` say the same of an approval, only look, and on a pinned server find only its own (D3r-e, D3r-f, D8o-c)', async () => {
+  const harness = await newHarness();
+  await harness.addWorkspace({ alias: 'acme', mode: 'send', sendPolicy: 'chat' });
+  await harness.addWorkspace({ alias: 'zeta', mode: 'send', sendPolicy: 'chat', workspaceId: 'T0002' });
+  const accounts = (await harness.core.config.load()).accounts;
+  const post = (inboxId: string) =>
+    harness.core.approvals.create({
+      channel: 'slack',
+      inboxId,
+      inboxSub: 'U0',
+      draftId: 'dr_one',
+      draftMessageId: 'rev-1',
+      contentDigest: 'c'.repeat(64),
+      sendEpoch: 0,
+      policy: 'chat',
+      requiredPolicy: 'chat',
+      riskFlags: [],
+      expect: { to: ['C1'], cc: [], bcc: [], subject: 'reaches 4' },
+    });
+  const ours = await post(accounts.acme?.id ?? '');
+  const theirs = await post(accounts.zeta?.id ?? '');
+  let asked = 0;
+  const counted: FakeFetch = async (input, init) => {
+    asked += 1;
+    return slack()(input, init);
+  };
+  const whole = await connect(harness, { fetch: counted });
+  const pinned = await connect(harness, { workspace: 'acme', fetch: counted });
+  try {
+    const tool = ok<Record<string, unknown>>(
+      await whole.call('slack_approval_wait', { approvalId: ours.approvalId, waitSeconds: 0 }),
+    );
+    assert.deepEqual([tool.state, tool.claimable, tool.ended], ['pending', true, 'now']);
+    const command = await cli(harness, ['approval', 'wait', ours.approvalId, '--wait-seconds', '0'], counted);
+    assert.equal(command.code, 0, JSON.stringify(command.envelope));
+    assert.deepEqual(command.envelope.data, tool, 'the command and the tool agree');
+    assert.equal(
+      ok<{ state: string }>(await pinned.call('slack_approval_wait', { approvalId: ours.approvalId, waitSeconds: 0 }))
+        .state,
+      'pending',
+    );
+    const envelope = async (approvalId: string) => {
+      const refused = failed(await pinned.call('slack_approval_wait', { approvalId, waitSeconds: 0 }));
+      assert.equal(refused.code, 'NOT_FOUND');
+      assert.deepEqual(refused.details, { approval: null });
+      return JSON.stringify(refused).replaceAll(approvalId, 'ID');
+    };
+    assert.equal(await envelope(theirs.approvalId), await envelope(`ap_${'7'.repeat(26)}`));
+    assert.equal(asked, 0, 'a wait never asks Slack anything');
+  } finally {
+    await Promise.all([whole.close(), pinned.close()]);
+  }
+});

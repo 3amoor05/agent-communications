@@ -297,6 +297,7 @@ on stdio directly.
 | `slack_post_prepare` | compose a draft, with local files if given, and return the preview a person must approve — posts nothing |
 | `slack_post_send` | post a prepared draft once its approval allows it, reading every file again first — the operation `agent-slack post send` runs |
 | `slack_react`, `slack_react_send` | add or remove a reaction through the same gate — `agent-slack react` |
+| `slack_approval_wait` | where an approval stands, now or once a person approves it — only looks; `agent-slack approval wait` |
 | `slack_draft_create`, `slack_draft_update` | write a draft, or change one — words, channel, thread, mentions or files — without preparing it |
 | `slack_draft_list`, `slack_draft_get`, `slack_draft_delete` | the drafts prepares leave behind |
 | `slack_mode_request_send`, `slack_mode_narrow` | the steps to change a workspace's mode, as text — changes nothing |

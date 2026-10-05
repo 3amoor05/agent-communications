@@ -96,6 +96,7 @@ terminal), `approve` (under `confirm`, a person at a terminal) and `mcp` (it sta
 | `agent-resend send prepare` | `resend_send_prepare` |
 | `agent-resend send execute <approvalId>` | `resend_send_execute` |
 | `agent-resend send status <approvalId>` | `resend_send_status` |
+| `agent-resend send wait <approvalId>` | `resend_send_wait` |
 | `agent-resend scheduled list` | `resend_scheduled_list` |
 | `agent-resend scheduled cancel <id>` | `resend_scheduled_cancel` |
 | `agent-resend approve <approvalId>` | — a person at a terminal |

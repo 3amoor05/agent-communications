@@ -4,11 +4,14 @@ import {
   checkForUpdates,
   type GatedChange,
   gatedChange,
+  MAX_WAIT_SECONDS,
   refuseUnclaimedApproval,
   SEND_LOOKUP,
   strictToolArguments,
   toCommsError,
   updateToolGate,
+  waitCallOptions,
+  waitForApproval,
 } from '@agentcomms/core';
 import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
@@ -96,8 +99,8 @@ export async function buildInstructions(context: ResendContext, pinned: string |
     'Sending needs a person’s yes to that exact email. `resend_send_prepare` returns a preview: show it in full and',
     'wait. Under the account’s `chat` policy `resend_send_execute` then sends it, once. Under `confirm` — and always',
     'above 10 recipients — the person runs the approve command the preparation gives, at their own terminal;',
-    'you cannot approve it yourself, so say so and wait. Under `never` nothing sends. Never repeat a send whose',
-    'outcome is unknown: check it with `resend_send_status`.',
+    'you cannot approve it yourself, so say so; resend_send_wait tells you when they have. Under `never` nothing',
+    'sends. Never repeat a send whose outcome is unknown: check it with `resend_send_status`.',
     '',
     'Read-only is enforced by this package’s own code, not by the key: Resend has no read-only key.',
     'A key is added only by a person, at their own terminal. Never ask for one in chat.',
@@ -169,7 +172,8 @@ export async function createResendMcpServer(options: ResendMcpOptions = {}): Pro
       exempt: ['resend_doctor'],
       // The status of a send is asked by the approval it went under, used or failed as it may be: a look-up of that
       // send, which goes past the stop as the send itself did — and only with a send's approval.
-      approvals: { resend_send_status: SEND_LOOKUP },
+      // A wait only looks: it answers while an update is out, for any approval this machine can read (decision 7).
+      approvals: { resend_send_status: SEND_LOOKUP, resend_send_wait: { lookup: true } },
       refresh: () => checkForUpdates(context.core, context.env),
     }),
   );
@@ -560,6 +564,40 @@ export async function createResendMcpServer(options: ResendMcpOptions = {}): Pro
       const name = await resolve(args.account);
       return sendStatus(context, name, args.approvalId);
     }),
+  );
+
+  server.registerTool(
+    'resend_send_wait',
+    {
+      title: 'Wait for an approval',
+      description: `Wait for an approval — a send or a change — to be usable or finished, and say where it stands: pending (with \`claimable\` true when a yes in the chat can use it), approved, being sent, used, failed, unknown, expired, revoked or corrupt. \`waitSeconds\` is 30 when left out, ${MAX_WAIT_SECONDS} at most, and 0 for its status now. It only looks: it never approves, claims or sends, and never asks Resend. Ended still waiting, wait again — never prepare it again while it is pending or being sent. The same as \`send wait\` in the Resend CLI.`,
+      inputSchema: {
+        approvalId: z.string().describe('the approval to wait for'),
+        waitSeconds: z
+          .number()
+          .int()
+          .min(0)
+          .max(MAX_WAIT_SECONDS)
+          .optional()
+          .describe(`how long to wait: 30 when left out, ${MAX_WAIT_SECONDS} at most, 0 for the status now`),
+      },
+      annotations: readsLocal,
+    },
+    async (args, ctx) => {
+      try {
+        // Pinned means pinned: on a server pinned to one account, only its approvals are found (D2).
+        return reply(
+          await waitForApproval(context.core, args.approvalId, {
+            waitSeconds: args.waitSeconds,
+            channel: 'resend',
+            ...(pinnedId === undefined ? {} : { owner: pinnedId }),
+            ...waitCallOptions(ctx),
+          }),
+        );
+      } catch (error) {
+        return fail(error);
+      }
+    },
   );
 
   server.registerTool(

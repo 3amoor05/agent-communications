@@ -18,6 +18,7 @@ import {
   installExitStatus,
   integrityRefusal,
   kindOf,
+  MAX_WAIT_SECONDS,
   type OutputOptions,
   openCore,
   PATH_OPTIONS,
@@ -26,6 +27,7 @@ import {
   personAtTerminal,
   refuseRetiredOut,
   refuseUnclaimedApproval,
+  renderApprovalWait,
   renderChannelPreview,
   renderPrune,
   resolvePaths,
@@ -37,6 +39,7 @@ import {
   terminalUpdateHooks,
   UPDATE_CHECK_CHILD_COMMAND,
   updateGateAtTerminal,
+  waitForApproval,
   wholeNumber,
   writeError,
   writeResult,
@@ -321,7 +324,13 @@ temporary (retry later) · 77 sign-in or permission needed · 78 configuration p
           streams,
           approvals: approvalsOf(command),
           // A download's `--choice` is the question the person just answered: held to that kind, as the tool's is.
-          approvalClaim: path.join(' ') === 'files download' ? DOWNLOAD_CLAIM : undefined,
+          // A wait only looks: it answers while an update is out, for any approval this machine can read (decision 7).
+          approvalClaim:
+            path.join(' ') === 'files download'
+              ? DOWNLOAD_CLAIM
+              : path.join(' ') === 'approval wait'
+                ? { lookup: true }
+                : undefined,
           ...terminalUpdateHooks(core, env, { channel: 'slack', output: output(), streams }),
         });
       },
@@ -1309,6 +1318,27 @@ temporary (retry later) · 77 sign-in or permission needed · 78 configuration p
             }`,
           streams,
         );
+      }),
+    );
+
+  // Where an approval stands, waited for: the one look an agent makes to learn that a person approved (§D3).
+  const approval = program.command('approval').description('where an approval stands');
+  approval
+    .command('wait <approvalId>')
+    .description(
+      'wait for an approval to be usable or finished, and say where it stands — it only looks, and never posts',
+    )
+    .option(
+      '--wait-seconds <n>',
+      `how long to wait: 30 when left out, ${MAX_WAIT_SECONDS} at most, 0 for the status now`,
+    )
+    .action(
+      act(async (context, _globalOptions, approvalId: string, flags: Options) => {
+        const result = await waitForApproval(context.core, approvalId, {
+          waitSeconds: wholeNumber(flags.waitSeconds, { name: '--wait-seconds', min: 0, max: MAX_WAIT_SECONDS }),
+          channel: 'slack',
+        });
+        writeResult(result, output(), renderApprovalWait, streams);
       }),
     );
 

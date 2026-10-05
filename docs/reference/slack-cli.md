@@ -48,6 +48,7 @@ Scripts should read these rather than parse output.
 | [`draft`](#agent-slack-draft) | compose and keep messages locally; nothing reaches Slack |
 | [`post`](#agent-slack-post) | take a draft through the approval gate |
 | [`react`](#agent-slack-react) | add a reaction or remove your reaction. Behind the same gate, at lower ceremony |
+| [`approval`](#agent-slack-approval) | where an approval stands |
 | [`approve`](#agent-slack-approve) | approve a post, a reaction or a change at this terminal: read it, then type the code back — or answer where a download is saved |
 | [`mcp`](#agent-slack-mcp) | run the MCP server on stdio, for a coding agent to connect to |
 
@@ -456,6 +457,26 @@ agent-slack react [options]
 | `--emoji <name>` | the emoji name, without colons | — |
 | `--remove` | remove your reaction instead | `false` |
 | `--approval <approvalId>` | the approval a person gave with `approve`, under `confirm` | — |
+
+### `agent-slack approval`
+
+where an approval stands
+
+```
+agent-slack approval [options] [command]
+```
+
+### `agent-slack approval wait`
+
+wait for an approval to be usable or finished, and say where it stands — it only looks, and never posts
+
+```
+agent-slack approval wait [options] <approvalId>
+```
+
+| Option | What it does | Default |
+|---|---|---|
+| `--wait-seconds <n>` | how long to wait: 30 when left out, 300 at most, 0 for the status now | — |
 
 ### `agent-slack approve`
 

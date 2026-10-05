@@ -15,12 +15,14 @@ import {
   handoffSentence,
   installExitStatus,
   kindOf,
+  MAX_WAIT_SECONDS,
   type OutputOptions,
   openCore,
   PATH_OPTIONS,
   paint,
   pathOverridesFromCliOptions,
   refuseUnclaimedApproval,
+  renderApprovalWait,
   renderInstall,
   renderPrune,
   resolvePaths,
@@ -34,6 +36,8 @@ import {
   terminalUpdateHooks,
   UPDATE_CHECK_CHILD_COMMAND,
   updateGateAtTerminal,
+  waitForApproval,
+  wholeNumber,
   writeResult,
 } from '@agentcomms/core';
 import { Command, CommanderError, InvalidArgumentError, Option } from 'commander';
@@ -256,7 +260,13 @@ is out: update first, or put it off (the stop names both commands) Â· 64 usage Â
           streams,
           approvals: approvalsOf(command),
           // `send status` looks a send up by its approval, as `resend_send_status` does over MCP.
-          approvalClaim: path.join(' ') === 'send status' ? SEND_LOOKUP : undefined,
+          // A wait only looks too: it answers while an update is out, for any approval this machine can read (decision 7).
+          approvalClaim:
+            path.join(' ') === 'send status'
+              ? SEND_LOOKUP
+              : path.join(' ') === 'send wait'
+                ? { lookup: true }
+                : undefined,
           ...terminalUpdateHooks(core, env, { channel: 'resend', output: output(), streams }),
         });
       },
@@ -609,6 +619,25 @@ is out: update first, or put it off (the stop names both commands) Â· 64 usage Â
       act(async (context, _options, approvalId: string, flags: Options) => {
         const status = await sendStatus(context, String(flags.account), approvalId);
         writeResult(status, output(), renderStatus, streams);
+      }),
+    );
+
+  send
+    .command('wait <approvalId>')
+    .description(
+      'wait for an approval to be usable or finished, and say where it stands â€” it only looks, and never sends',
+    )
+    .option(
+      '--wait-seconds <n>',
+      `how long to wait: 30 when left out, ${MAX_WAIT_SECONDS} at most, 0 for the status now`,
+    )
+    .action(
+      act(async (context, _options, approvalId: string, flags: Options) => {
+        const result = await waitForApproval(context.core, approvalId, {
+          waitSeconds: wholeNumber(flags.waitSeconds, { name: '--wait-seconds', min: 0, max: MAX_WAIT_SECONDS }),
+          channel: 'resend',
+        });
+        writeResult(result, output(), renderApprovalWait, streams);
       }),
     );
 
