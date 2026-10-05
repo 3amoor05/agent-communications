@@ -514,7 +514,9 @@ const DAY = /^\d{4}-\d{2}-\d{2}/;
 /** The downloads root: `~/Downloads/agent-communications` unless core's config says otherwise. */
 export async function downloadsRoot(context: ResendContext): Promise<string> {
   const configured = (await context.config()).defaults.downloadsDir;
-  const root = configured ? expandHome(configured, homeDirectory(context.env)) : context.core.paths.downloadsDir;
+  const root =
+    context.core.pathOverrides.downloadsDir ??
+    (configured ? expandHome(configured, homeDirectory(context.env)) : context.core.paths.downloadsDir);
   await ensurePrivateDir(root);
   return root;
 }

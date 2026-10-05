@@ -748,7 +748,13 @@ export async function downloadFiles(
     names: names.map((name) => name.name),
   };
   const config = await context.config();
-  const folders = () => saveFolders({ configured: config.defaults.downloadsDir, env: context.env, cwd: context.cwd });
+  const folders = () =>
+    saveFolders({
+      configured: config.defaults.downloadsDir,
+      pinnedDownloads: context.core.pathOverrides.downloadsDir,
+      env: context.env,
+      cwd: context.cwd,
+    });
   // Where a stranger's files land is a change to this machine, answered as this workspace's other changes are approved.
   const policy = effectiveChangePolicy(config, { account: workspace });
   const { answer } = plan;
@@ -759,7 +765,7 @@ export async function downloadFiles(
     const question = await askWhereToSave(context.core, {
       request: binding,
       folders: folders(),
-      configured: Boolean(config.defaults.downloadsDir),
+      configured: context.core.pathOverrides.downloadsDir !== undefined || Boolean(config.defaults.downloadsDir),
       count: planned.length,
       bytes: declared,
       listing: planned.map((_, index) => ({

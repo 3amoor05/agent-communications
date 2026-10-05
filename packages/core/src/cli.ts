@@ -8,6 +8,7 @@ import {
   defaultStreams,
   inlineCommand,
   type OutputOptions,
+  pathOverridesFromCliOptions,
   runCommand,
   shellCommand,
   writeError,
@@ -140,6 +141,11 @@ it exits 11 and names \`agentcomms update\` and \`agentcomms update --later\`. P
 check off (--auto off) are changes a person approves. CI, and AGENT_COMMS_UPDATE_CHECK=off, skip it.
 
 Options:
+  --config-dir <dir>     use this configuration directory for this run
+  --state-dir <dir>      use this state directory for this run
+  --data-dir <dir>       use this managed-runtime data directory for this run
+  --secrets-dir <dir>    use this file-secret directory for this run
+  --downloads-dir <dir>  use this downloads root for this run
   --json        print the versioned JSON envelope
   --no-color    disable colour (also NO_COLOR, TERM=dumb)
   -h, --help    show this help
@@ -192,6 +198,11 @@ function parse(argv: string[]) {
       adopt: { type: 'string' },
       store: { type: 'string' },
       source: { type: 'string' },
+      'config-dir': { type: 'string' },
+      'state-dir': { type: 'string' },
+      'data-dir': { type: 'string' },
+      'secrets-dir': { type: 'string' },
+      'downloads-dir': { type: 'string' },
     },
   });
 }
@@ -321,6 +332,12 @@ export async function main(
     color: colorEnabled(env, process.stdout, values['no-color'] ? false : undefined),
     platform,
   };
+  let pathOverrides: ReturnType<typeof pathOverridesFromCliOptions>;
+  try {
+    pathOverrides = pathOverridesFromCliOptions(values);
+  } catch (error) {
+    return writeError(error, output);
+  }
   if (values.version) {
     process.stdout.write(`${VERSION}\n`);
     return 0;
@@ -336,7 +353,7 @@ export async function main(
   } catch (error) {
     return writeError(error as CommsError, output);
   }
-  const core = openCore({ env });
+  const core = openCore({ env, platform, pathOverrides });
   const approval = { approvalId: values.approval, env, output };
   /** An exit status for a command that printed its result and still did not do what was asked. */
   let softExit: number = EXIT_CODES.OK;

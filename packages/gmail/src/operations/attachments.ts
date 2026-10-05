@@ -353,7 +353,9 @@ export function dayOf(at: number | null | undefined): string {
 export async function downloadsRoot(context: GmailContext): Promise<string> {
   const config = await context.config();
   const configured = config.defaults.downloadsDir;
-  const root = configured ? expandHome(configured, homeDirectory(context.env)) : context.core.paths.downloadsDir;
+  const root =
+    context.core.pathOverrides.downloadsDir ??
+    (configured ? expandHome(configured, homeDirectory(context.env)) : context.core.paths.downloadsDir);
   await ensurePrivateDir(root);
   return root;
 }
@@ -506,7 +508,13 @@ export async function downloadAttachments(
   };
 
   const config = await context.config();
-  const folders = () => saveFolders({ configured: config.defaults.downloadsDir, env: context.env, cwd: context.cwd });
+  const folders = () =>
+    saveFolders({
+      configured: config.defaults.downloadsDir,
+      pinnedDownloads: context.core.pathOverrides.downloadsDir,
+      env: context.env,
+      cwd: context.cwd,
+    });
   // Where a stranger's files land is a change to this machine, answered as this mailbox's other changes are approved.
   const policy = effectiveChangePolicy(config, { inbox: alias });
 
@@ -516,7 +524,7 @@ export async function downloadAttachments(
     const question = await askWhereToSave(context.core, {
       request,
       folders: folders(),
-      configured: Boolean(config.defaults.downloadsDir),
+      configured: context.core.pathOverrides.downloadsDir !== undefined || Boolean(config.defaults.downloadsDir),
       count: planned.length,
       bytes: planned.reduce((sum, entry) => sum + entry.part.size, 0),
       listing: planned.map((entry) => ({

@@ -15,6 +15,7 @@ import {
   type DownloadResult,
   dayOf,
   downloadAttachments,
+  downloadsRoot,
   findAttachments,
 } from '../src/operations/attachments.ts';
 import { exportMail } from '../src/operations/export.ts';
@@ -361,6 +362,24 @@ test('the Downloads option is the folder a person set as defaults.downloadsDir, 
     choiceId: question.choiceId,
   });
   assert.equal((result as DownloadResult).files[0]?.path, join(theirs, 'invoice.pdf'));
+});
+
+test('an explicit downloads pin beats defaults.downloadsDir without changing the stored default', async () => {
+  const { harness, home, cwd } = await connected(INVOICE, { a1: 'invoice bytes' });
+  const configured = tempDir('agent-gmail-configured-downloads-');
+  const pinned = tempDir('agent-gmail-pinned-downloads-');
+  await harness.core.config.update(
+    (config) => ({ ...config, defaults: { ...config.defaults, downloadsDir: configured } }),
+    { consent: { kind: 'loosening-consent', paths: ['defaults.downloadsDir'] } },
+  );
+
+  const unpinned = new GmailContext({ core: harness.core, env: { ...harness.env, HOME: home }, cwd });
+  assert.equal(await downloadsRoot(unpinned), configured);
+
+  const core = openCore({ env: harness.env, pathOverrides: { downloadsDir: pinned } });
+  const context = new GmailContext({ core, env: { ...harness.env, HOME: home }, cwd });
+  assert.equal(await downloadsRoot(context), pinned);
+  assert.equal((await core.config.load()).defaults.downloadsDir, configured);
 });
 
 test('an answer without the question it answers is refused, and nothing is read or saved', async () => {

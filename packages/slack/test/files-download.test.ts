@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { chmod, lstat, mkdir, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, sep } from 'node:path';
 import { test } from 'node:test';
-import { CommsError, downloadRecordPath } from '@agentcomms/core';
+import { CommsError, downloadRecordPath, openCore } from '@agentcomms/core';
 import type { SlackFileRequest } from '../src/api/download.ts';
 import { SlackContext } from '../src/context.ts';
 import {
@@ -457,6 +457,35 @@ test('the first call saves nothing: it lists each file by name, size and uploade
   assert.deepEqual(await listing(downloads), []);
   assert.deepEqual(await listing(cwd), []);
   assert.deepEqual(await audited(harness), [], 'a question saved nothing, so nothing is audited');
+});
+
+test('an explicit downloads pin beats defaults.downloadsDir while an unpinned question keeps the configured folder', async () => {
+  const records = { F0AAA1: fileRecord('F0AAA1', { name: 'numbers.pdf', size: 4 }) };
+  const ready = await setup({ 'files.info': filesInfo(records) }, 'mcp');
+  const configured = tempDir('agent-slack-configured-downloads-');
+  const pinned = tempDir('agent-slack-pinned-downloads-');
+  await ready.harness.core.config.update(
+    (config) => ({ ...config, defaults: { ...config.defaults, downloadsDir: configured } }),
+    { consent: { kind: 'loosening-consent', paths: ['defaults.downloadsDir'] } },
+  );
+  const bytes = transport({ F0AAA1: 'four' });
+  const unpinned = question(await ready.call({ fileIds: ['F0AAA1'] }, { download: bytes.download }));
+  assert.equal(unpinned.options[0]?.path, configured);
+
+  const core = openCore({ env: ready.harness.env, pathOverrides: { downloadsDir: pinned } });
+  const context = new SlackContext({
+    core,
+    env: ready.harness.env,
+    surface: 'mcp',
+    cwd: ready.cwd,
+    now: () => NOW,
+  });
+  const session = await openWorkspace(context, 'acme', { fetch: ready.slack.fetch });
+  const pinnedQuestion = question(
+    await downloadFiles(context, session, { fileIds: ['F0AAA1'] }, { download: bytes.download }),
+  );
+  assert.equal(pinnedQuestion.options[0]?.path, pinned);
+  assert.equal((await core.config.load()).defaults.downloadsDir, configured);
 });
 
 test('each answer saves where it says: Downloads, the current folder, a folder made when missing, one from ~', async () => {

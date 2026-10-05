@@ -65,6 +65,47 @@ test('mcp carries the selected command platform into the stdio server', async ()
   assert.equal(received, 'win32');
 });
 
+test('mcp applies all five path pins before it hands the opened core to the server', async () => {
+  const { env } = cliEnv({
+    AGENT_COMMS_CONFIG_DIR: join(tempDir(), 'ambient-config'),
+    AGENT_COMMS_STATE_DIR: join(tempDir(), 'ambient-state'),
+    AGENT_COMMS_DATA_DIR: join(tempDir(), 'ambient-data'),
+  });
+  const wanted = {
+    configDir: join(tempDir(), 'config'),
+    stateDir: join(tempDir(), 'state'),
+    dataDir: join(tempDir(), 'data'),
+    secretsDir: join(tempDir(), 'secrets'),
+    downloadsDir: join(tempDir(), 'downloads'),
+  };
+  let received: ReturnType<typeof resolvePaths> | undefined;
+  const code = await main(
+    [
+      '--config-dir',
+      wanted.configDir,
+      '--state-dir',
+      wanted.stateDir,
+      '--data-dir',
+      wanted.dataDir,
+      '--secrets-dir',
+      wanted.secretsDir,
+      '--downloads-dir',
+      wanted.downloadsDir,
+      'mcp',
+    ],
+    env,
+    process.platform,
+    {
+      startMcp: async ({ core }) => {
+        received = core.paths;
+        assert.deepEqual(core.pathOverrides, wanted);
+      },
+    },
+  );
+  assert.equal(code, 0);
+  assert.deepEqual(received, wanted);
+});
+
 test('every path a command here resolves is inside the test’s own directories, on macOS, Linux and Windows', () => {
   /*
    * Asked of core for each platform, so a gap that only Windows would read — a home under `HOME` alone — fails on a
@@ -105,6 +146,32 @@ test('paths --json prints the versioned envelope with the overridden config dir'
   assert.equal(envelope.schemaVersion, 1);
   assert.equal(envelope.data.configDir, config);
   assert.equal(envelope.data.stateDir, join(config, 'state'));
+});
+
+test('paths accepts all five global pins before dispatch and reports each independently', () => {
+  const wanted = {
+    configDir: join(tempDir(), 'config'),
+    stateDir: join(tempDir(), 'state'),
+    dataDir: join(tempDir(), 'data'),
+    secretsDir: join(tempDir(), 'secrets'),
+    downloadsDir: join(tempDir(), 'downloads'),
+  };
+  const result = run([
+    '--config-dir',
+    wanted.configDir,
+    '--state-dir',
+    wanted.stateDir,
+    '--data-dir',
+    wanted.dataDir,
+    '--secrets-dir',
+    wanted.secretsDir,
+    '--downloads-dir',
+    wanted.downloadsDir,
+    'paths',
+    '--json',
+  ]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout).data, wanted);
 });
 
 test('unknown commands and flags are usage errors (64), in the envelope when --json is given', () => {

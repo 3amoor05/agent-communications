@@ -47,6 +47,54 @@ test('Windows uses APPDATA and LOCALAPPDATA', () => {
   assert.equal(explicit.secretsDir, resolve('/o/cfg', 'secrets'));
 });
 
+test('the five path overrides are absolute, independent pins over the environment-derived directories', () => {
+  const cwd = process.cwd();
+  const paths = resolvePaths({
+    env: {
+      AGENT_COMMS_CONFIG_DIR: '/environment/config',
+      AGENT_COMMS_STATE_DIR: '/environment/state',
+      AGENT_COMMS_DATA_DIR: '/environment/data',
+      XDG_CONFIG_HOME: '/xdg/config',
+      XDG_DATA_HOME: '/xdg/data',
+      HOME: '/environment/home',
+    },
+    platform: 'linux',
+    pathOverrides: {
+      configDir: './pinned/config/',
+      stateDir: './pinned/state///',
+      dataDir: './pinned/data/',
+      secretsDir: './pinned/secrets/',
+      downloadsDir: './pinned/downloads/',
+    },
+  });
+
+  assert.deepEqual(paths, {
+    configDir: resolve(cwd, 'pinned/config'),
+    stateDir: resolve(cwd, 'pinned/state'),
+    dataDir: resolve(cwd, 'pinned/data'),
+    secretsDir: resolve(cwd, 'pinned/secrets'),
+    downloadsDir: resolve(cwd, 'pinned/downloads'),
+  });
+});
+
+test('one path override pins only its own directory, including split Windows roaming and local roots', () => {
+  const paths = resolvePaths({
+    env: {
+      APPDATA: '/windows/roaming',
+      LOCALAPPDATA: '/windows/local',
+      USERPROFILE: '/windows/profile',
+    },
+    platform: 'win32',
+    pathOverrides: { configDir: '/pinned/config' },
+  });
+
+  assert.equal(paths.configDir, resolve('/pinned/config'));
+  assert.equal(paths.stateDir, resolve('/windows/local', 'agent-communications', 'state'));
+  assert.equal(paths.secretsDir, resolve('/windows/local', 'agent-communications', 'secrets'));
+  assert.equal(paths.dataDir, resolve('/windows/local', 'agent-communications'));
+  assert.equal(paths.downloadsDir, resolve('/windows/profile', 'Downloads', 'agent-communications'));
+});
+
 test('elsewhere, state and secrets sit beside the configuration', () => {
   for (const platform of ['darwin', 'linux'] as const) {
     const paths = resolvePaths({ env: {}, platform, home });

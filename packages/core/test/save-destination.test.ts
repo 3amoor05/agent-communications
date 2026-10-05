@@ -247,6 +247,15 @@ test('the two folders are the person’s own Downloads — or the one they set �
     platform: 'linux',
   });
   assert.equal(configured.downloads, posix.join('/srv/sam', 'Inbox files'));
+
+  const pinned = saveFolders({
+    configured: '~/Inbox files',
+    pinnedDownloads: '/pinned/downloads/',
+    env: { HOME: '/srv/sam' },
+    cwd: '/work/project',
+    platform: 'linux',
+  });
+  assert.equal(pinned.downloads, '/pinned/downloads');
 });
 
 test('on Windows the Downloads folder is under USERPROFILE, whatever a Unix-style shell set HOME to', () => {

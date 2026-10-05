@@ -2,10 +2,11 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { basename, dirname } from 'node:path';
 import { afterEach, test } from 'node:test';
-import { CommsError, gatedChange, UNTRUSTED_NOTICE } from '@agentcomms/core';
+import { CommsError, gatedChange, openCore, UNTRUSTED_NOTICE } from '@agentcomms/core';
 import { ResendContext } from '../src/context.ts';
 import {
   downloadReceived,
+  downloadsRoot,
   getMetrics,
   listDomains,
   listReceived,
@@ -182,6 +183,27 @@ test('an attachment is downloaded only on request, into the downloads jail, with
       out,
     );
   }
+});
+
+test('an explicit downloads pin beats defaults.downloadsDir while an unpinned read keeps the configured root', async () => {
+  harness = await newHarness();
+  const configured = `${harness.dir}/configured-downloads`;
+  const pinned = `${harness.dir}/pinned-downloads`;
+  await harness.core.config.update(
+    (config) => ({ ...config, defaults: { ...config.defaults, downloadsDir: configured } }),
+    { consent: { kind: 'loosening-consent', paths: ['defaults.downloadsDir'] } },
+  );
+  assert.equal(await downloadsRoot(harness.context()), configured);
+
+  const core = openCore({ env: harness.env, pathOverrides: { downloadsDir: pinned } });
+  const context = new ResendContext({
+    core,
+    env: harness.env,
+    fetch: harness.fake.fetch,
+    throttle: { intervalMs: 0 },
+  });
+  assert.equal(await downloadsRoot(context), pinned);
+  assert.equal((await core.config.load()).defaults.downloadsDir, configured);
 });
 
 // ── What counts as the team's own comes from Resend, never from the mail ────────────────────────────────────────

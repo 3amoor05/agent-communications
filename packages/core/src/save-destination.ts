@@ -131,6 +131,8 @@ function pathsFor(platform: NodeJS.Platform): path.PlatformPath {
 export interface SaveFoldersInput {
   /** `defaults.downloadsDir`, when the person set it. */
   configured?: string | undefined;
+  /** The resolved `--downloads-dir`, which wins without changing `defaults.downloadsDir`. */
+  pinnedDownloads?: string | undefined;
   env: NodeJS.ProcessEnv;
   /** The working directory of the process: a server's, a command's. */
   cwd: string;
@@ -155,13 +157,14 @@ export function saveFolders(input: SaveFoldersInput): OfferedFolders {
   const paths = pathsFor(platform);
   const home = homeOf(input.env, platform);
   const unusable: Partial<Record<'downloads' | 'current', string>> = {};
+  const selected = input.pinnedDownloads ?? input.configured;
   if (platform === 'win32') {
-    const configured = input.configured === undefined ? null : windowsPathProblem(input.configured);
+    const configured = selected === undefined ? null : windowsPathProblem(selected);
     if (configured !== null) unusable.downloads = configured;
   }
   const folders: OfferedFolders = {
-    downloads: input.configured
-      ? paths.resolve(expandHome(input.configured, home, paths.join))
+    downloads: selected
+      ? paths.resolve(expandHome(selected, home, paths.join))
       : downloadsFolder(input.env, platform, input.knownDownloads),
     current: paths.resolve(input.cwd),
   };

@@ -2,7 +2,7 @@ import { ApprovalStore } from './approvals.ts';
 import { AuditLog } from './audit.ts';
 import { ConfigStore, secretsStoreOf } from './config.ts';
 import { SendLedger } from './ledger.ts';
-import { type PathEnvironment, type ResolvedPaths, resolvePaths } from './paths.ts';
+import { type PathEnvironment, type PathOverrides, type ResolvedPaths, resolvePathIdentity } from './paths.ts';
 import { PlanStore } from './plans.ts';
 import { keychainNamespace, openSecretStore, type SecretStore, type SecretStoreKind } from './secrets.ts';
 import { InboxStateStore } from './state.ts';
@@ -11,6 +11,8 @@ import { TaintStore } from './taint.ts';
 /** Everything a provider package needs from the core, wired to one config directory. */
 export interface Core {
   paths: ResolvedPaths;
+  /** The subset of `paths` explicitly pinned by global CLI options. */
+  pathOverrides: Readonly<PathOverrides>;
   config: ConfigStore;
   states: InboxStateStore;
   approvals: ApprovalStore;
@@ -27,12 +29,13 @@ export interface OpenCoreOptions extends PathEnvironment {
 }
 
 export function openCore(options: OpenCoreOptions = {}): Core {
-  const paths = resolvePaths(options);
+  const { paths, pathOverrides } = resolvePathIdentity(options);
   const now = options.now ?? (() => new Date());
   const config = new ConfigStore(paths.configDir);
   let cached: { kind: SecretStoreKind; store: SecretStore } | null = null;
   return {
     paths,
+    pathOverrides,
     config,
     states: new InboxStateStore(paths.stateDir),
     approvals: new ApprovalStore(paths.stateDir, { now }),

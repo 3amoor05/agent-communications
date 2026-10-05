@@ -321,6 +321,25 @@ test('paths, the audit log and the approvals list return what their commands pri
   }
 });
 
+test('a core server opened with path pins reports the already-resolved directory identity', async () => {
+  const m = machine();
+  const wanted = {
+    configDir: join(m.home, 'pinned-config'),
+    stateDir: join(m.home, 'pinned-state'),
+    dataDir: join(m.home, 'pinned-data'),
+    secretsDir: join(m.home, 'pinned-secrets'),
+    downloadsDir: join(m.home, 'pinned-downloads'),
+  };
+  const core = openCore({ env: m.env, pathOverrides: wanted });
+  const linked = await connect({ ...m, core });
+  try {
+    assert.deepEqual(await linked.ok('comms_paths'), wanted);
+    assert.deepEqual(core.pathOverrides, wanted);
+  } finally {
+    await linked.close();
+  }
+});
+
 test('revoking a change approval from chat voids it, and the audit log says which surface did', async () => {
   const m = machine({ defaults: { changePolicy: 'confirm' }, accounts: { 'acme/slack': account() } });
   const { ok, close } = await connect(m);

@@ -3,6 +3,7 @@ import { styleText } from 'node:util';
 import { CommsError, EXIT_CODES, toCommsError } from './errors.ts';
 import { challengeMatches, hashChallenge, newChallenge } from './ids.ts';
 import { errorEnvelope, okEnvelope } from './output.ts';
+import { PATH_OPTIONS, type PathOptionName, type PathOverrides } from './paths.ts';
 
 /**
  * Output rules shared by every agent-communications CLI, so humans and agents get the same behaviour everywhere:
@@ -24,6 +25,20 @@ export interface Streams {
 }
 
 export const defaultStreams: Streams = { stdout: process.stdout, stderr: process.stderr, stdin: process.stdin };
+
+/** Converts the shared parser's five global option values into independently applied core path pins. */
+export function pathOverridesFromCliOptions(
+  values: Partial<Record<PathOptionName, string | undefined>>,
+): PathOverrides {
+  const overrides: PathOverrides = {};
+  for (const { key, option, flag } of PATH_OPTIONS) {
+    const value = values[option];
+    if (value === undefined) continue;
+    if (value.length === 0) throw new CommsError('USAGE', `${flag} needs a non-empty directory`);
+    overrides[key] = value;
+  }
+  return overrides;
+}
 
 export function colorEnabled(env: NodeJS.ProcessEnv, stream: { isTTY?: boolean }, flag?: boolean): boolean {
   if (flag === false) return false;

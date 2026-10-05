@@ -3,10 +3,31 @@ import { join, resolve } from 'node:path';
 
 export const APP_DIR_NAME = 'agent-communications';
 
+/** The five suite directories a CLI can pin independently. */
+export const PATH_OPTIONS = [
+  { key: 'configDir', option: 'config-dir', flag: '--config-dir' },
+  { key: 'stateDir', option: 'state-dir', flag: '--state-dir' },
+  { key: 'dataDir', option: 'data-dir', flag: '--data-dir' },
+  { key: 'secretsDir', option: 'secrets-dir', flag: '--secrets-dir' },
+  { key: 'downloadsDir', option: 'downloads-dir', flag: '--downloads-dir' },
+] as const;
+
+export type PathName = (typeof PATH_OPTIONS)[number]['key'];
+export type PathOptionName = (typeof PATH_OPTIONS)[number]['option'];
+export type PathOverrides = Partial<Record<PathName, string>>;
+
 export interface PathEnvironment {
   env?: NodeJS.ProcessEnv;
   platform?: NodeJS.Platform;
   home?: string;
+  /** Explicit CLI pins. Each replaces only the directory it names, after defaults and environment are resolved. */
+  pathOverrides?: PathOverrides;
+}
+
+export interface ResolvedPathIdentity {
+  paths: ResolvedPaths;
+  /** Only the explicitly pinned directories, with their canonical absolute values. */
+  pathOverrides: Readonly<PathOverrides>;
 }
 
 export interface ResolvedPaths {
@@ -35,6 +56,11 @@ export interface ResolvedPaths {
  * someone who names a directory means that directory.
  */
 export function resolvePaths(options: PathEnvironment = {}): ResolvedPaths {
+  return resolvePathIdentity(options).paths;
+}
+
+/** Resolves the environment/default identity, then overlays each explicit pin without re-deriving any sibling. */
+export function resolvePathIdentity(options: PathEnvironment = {}): ResolvedPathIdentity {
   const env = options.env ?? process.env;
   const platform = options.platform ?? process.platform;
   const home = options.home ?? homeOf(env, platform);
@@ -63,7 +89,19 @@ export function resolvePaths(options: PathEnvironment = {}): ResolvedPaths {
           : join(home, '.local', 'share', APP_DIR_NAME)),
   );
   const downloadsDir = resolve(join(home, 'Downloads', APP_DIR_NAME));
-  return { configDir, stateDir, secretsDir, dataDir, downloadsDir };
+  const derived: ResolvedPaths = { configDir, stateDir, secretsDir, dataDir, downloadsDir };
+  const pathOverrides: PathOverrides = {};
+  for (const { key } of PATH_OPTIONS) {
+    const value = options.pathOverrides?.[key];
+    if (value === undefined) continue;
+    if (value.length === 0) throw new TypeError(`${key} cannot be empty`);
+    // `resolve` makes a relative pin absolute and removes redundant trailing separators while preserving a root.
+    pathOverrides[key] = resolve(value);
+  }
+  return {
+    paths: { ...derived, ...pathOverrides },
+    pathOverrides: Object.freeze(pathOverrides),
+  };
 }
 
 /**
