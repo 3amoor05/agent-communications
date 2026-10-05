@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
+import { changeDigest } from '../src/approvals.ts';
 import {
   beginChangeApproval,
   type ChangeSpec,
@@ -25,6 +26,8 @@ import {
 import { type Core, openCore } from '../src/core.ts';
 import { CommsError } from '../src/errors.ts';
 import { CORE_CALLER, isCommand } from '../src/handoffs.ts';
+import { revokeApproval } from '../src/operations/maintenance.ts';
+import { readV1Record, v1ChangeRecord, v1RecordPath, writeV1Record } from './fixtures/approval-v1-0.13.0.ts';
 import { coreHandoffs } from './helpers/handoffs.ts';
 import { tempDir } from './helpers/temp.ts';
 
@@ -270,7 +273,11 @@ test('a consent carrying approved values lets exactly that change through, and n
 test('under chat, a prepared change shows before → after in words, and is claimed once for exactly that write', async () => {
   const { core } = coreWith({ accounts: { 'acme/slack': account(ACME) } });
   const spec = await widening(core);
-  const prepared = await prepareChange(core, { ...spec, summary: 'Let acme/slack post' }, { surface: 'mcp' });
+  const prepared = await prepareChange(
+    core,
+    { ...spec, summary: 'Let acme/slack post' },
+    { channel: 'core', surface: 'mcp' },
+  );
 
   assert.equal(prepared.policy, 'chat');
   assert.deepEqual(prepared.loosened, [{ path: 'accounts.acme/slack.mode', before: 'read', after: 'send', id: ACME }]);
@@ -334,7 +341,11 @@ test('drift between preview and apply voids the approval, and says what moved', 
   for (const [name, drift, reason] of cases) {
     const { core } = coreWith({ accounts: { 'acme/slack': account(ACME, { sendPolicy: 'never' }) } });
     const spec = withSendPolicy(await widening(core), 'confirm');
-    const prepared = await prepareChange(core, { ...spec, summary: 'Let acme/slack post' }, { surface: 'mcp' });
+    const prepared = await prepareChange(
+      core,
+      { ...spec, summary: 'Let acme/slack post' },
+      { channel: 'core', surface: 'mcp' },
+    );
     await assert.rejects(
       claimChange(core, prepared.approvalId, drift(spec), { surface: 'mcp' }),
       refusedWith('APPROVAL_VOID', new RegExp(`nothing was changed: ${reason.source}`)),
@@ -380,7 +391,7 @@ test('an approval binds every setting the change writes: a claim that drops, add
     const prepared = await prepareChange(
       core,
       { ...shown, summary: 'acme/gmail: sends approved by never; changes approved by chat' },
-      { surface: 'mcp' },
+      { channel: 'core', surface: 'mcp' },
     );
     assert.equal(prepared.policy, 'confirm', name);
     const prompt = await beginChangeApproval(core, prepared.approvalId, { surface: 'cli' });
@@ -405,7 +416,11 @@ test('an approval binds every setting the change writes: a claim that drops, add
   after.inboxes['acme/gmail'] = { ...(after.inboxes['acme/gmail'] as InboxConfig), sendPolicy: 'never' };
   (after.inboxes['acme/gmail'] as InboxConfig).changePolicy = 'chat';
   const spec: ChangeSpec = { inbox: 'acme/gmail', before, after };
-  const prepared = await prepareChange(core, { ...spec, summary: 'acme/gmail: both' }, { surface: 'mcp' });
+  const prepared = await prepareChange(
+    core,
+    { ...spec, summary: 'acme/gmail: both' },
+    { channel: 'core', surface: 'mcp' },
+  );
   const prompt = await beginChangeApproval(core, prepared.approvalId, { surface: 'cli' });
   await finishChangeApproval(core, prepared.approvalId, prompt.challenge, { surface: 'cli' });
   const consent = await claimChange(core, prepared.approvalId, spec, { surface: 'mcp' });
@@ -415,7 +430,11 @@ test('an approval binds every setting the change writes: a claim that drops, add
 test('an account replaced under the same name between preview and apply is not the one approved', async () => {
   const { core, write } = coreWith({ accounts: { 'acme/slack': account(ACME) } });
   const spec = await widening(core);
-  const prepared = await prepareChange(core, { ...spec, summary: 'Let acme/slack post' }, { surface: 'mcp' });
+  const prepared = await prepareChange(
+    core,
+    { ...spec, summary: 'Let acme/slack post' },
+    { channel: 'core', surface: 'mcp' },
+  );
   // Somebody removed acme/slack and connected a different workspace under the name.
   write({ accounts: { 'acme/slack': account(OTHER, { workspace: 'T_ELSEWHERE' }) } });
   await assert.rejects(
@@ -427,7 +446,11 @@ test('an account replaced under the same name between preview and apply is not t
 test('under confirm, a change is not claimable until a person approved it at a terminal — then it is, once', async () => {
   const { core } = coreWith({ defaults: { changePolicy: 'confirm' }, accounts: { 'acme/slack': account(ACME) } });
   const spec = await widening(core);
-  const prepared = await prepareChange(core, { ...spec, summary: 'Let acme/slack post' }, { surface: 'mcp' });
+  const prepared = await prepareChange(
+    core,
+    { ...spec, summary: 'Let acme/slack post' },
+    { channel: 'core', surface: 'mcp' },
+  );
   assert.equal(prepared.policy, 'confirm');
   assert.match(prepared.preview, /approved by a code typed at a terminal/);
   const approve = coreHandoffs(core.paths).own(['approve', prepared.approvalId]);
@@ -454,10 +477,14 @@ test('under confirm, a change is not claimable until a person approved it at a t
 test('under confirm, an approval given anywhere but a terminal does not count', async () => {
   const { core } = coreWith({ defaults: { changePolicy: 'confirm' }, accounts: { 'acme/slack': account(ACME) } });
   const spec = await widening(core);
-  const prepared = await prepareChange(core, { ...spec, summary: 'Let acme/slack post' }, { surface: 'mcp' });
+  const prepared = await prepareChange(
+    core,
+    { ...spec, summary: 'Let acme/slack post' },
+    { channel: 'core', surface: 'mcp' },
+  );
   const record = await core.approvals.get(prepared.approvalId);
   const challenge = await core.approvals.issueChallenge(prepared.approvalId, 'change');
-  const bound = { draftMessageId: record?.digest ?? '', digest: record?.digest ?? '' };
+  const bound = { draftMessageId: record?.contentDigest ?? '', contentDigest: record?.contentDigest ?? '' };
   await core.approvals.approve(prepared.approvalId, 'elicitation', bound, challenge, 'change');
   await assert.rejects(
     claimChange(core, prepared.approvalId, spec, { surface: 'mcp' }),
@@ -473,7 +500,7 @@ test('loosening the change policy itself is approved under the policy in force b
   const prepared = await prepareChange(
     core,
     { before, after, summary: 'Approve changes in chat from now on' },
-    { surface: 'mcp' },
+    { channel: 'core', surface: 'mcp' },
   );
   assert.equal(prepared.policy, 'confirm', 'confirm → chat is asked under confirm, not under the chat it asks for');
   // It said "loosen its settings" here, with no "it" for the default to be: say what the default governs.
@@ -489,7 +516,11 @@ test('loosening the change policy itself is approved under the policy in force b
 
   // And chat → confirm is a tightening, which needs nobody: there is nothing to prepare.
   await assert.rejects(
-    prepareChange(core, { before: after, after: before, summary: 'Back to confirm' }, { surface: 'mcp' }),
+    prepareChange(
+      core,
+      { before: after, after: before, summary: 'Back to confirm' },
+      { channel: 'core', surface: 'mcp' },
+    ),
     refusedWith('USAGE', /nothing to approve/),
   );
 });
@@ -506,7 +537,7 @@ test('a mailbox’s or an account’s own change policy, loosened, names what it
   const prepared = await prepareChange(
     core,
     { before, after, summary: 'Approve changes to both in chat' },
-    { surface: 'cli' },
+    { channel: 'core', surface: 'cli' },
   );
   assert.match(
     prepared.preview,
@@ -548,7 +579,7 @@ test('the strictest policy over everything a change touches governs it', () => {
 test('a policy tightened after prepare governs the claim; one loosened after prepare does not release it', async () => {
   const tightened = coreWith({ accounts: { 'acme/slack': account(ACME) } });
   const spec = await widening(tightened.core);
-  const underChat = await prepareChange(tightened.core, { ...spec, summary: 'x' }, { surface: 'mcp' });
+  const underChat = await prepareChange(tightened.core, { ...spec, summary: 'x' }, { channel: 'core', surface: 'mcp' });
   assert.equal(underChat.policy, 'chat');
   tightened.write({ defaults: { changePolicy: 'confirm' }, accounts: { 'acme/slack': account(ACME) } });
   await assert.rejects(
@@ -558,7 +589,11 @@ test('a policy tightened after prepare governs the claim; one loosened after pre
 
   const loosened = coreWith({ defaults: { changePolicy: 'confirm' }, accounts: { 'acme/slack': account(ACME) } });
   const again = await widening(loosened.core);
-  const underConfirm = await prepareChange(loosened.core, { ...again, summary: 'x' }, { surface: 'mcp' });
+  const underConfirm = await prepareChange(
+    loosened.core,
+    { ...again, summary: 'x' },
+    { channel: 'core', surface: 'mcp' },
+  );
   loosened.write({ accounts: { 'acme/slack': account(ACME) } });
   const live = await widening(loosened.core);
   await assert.rejects(
@@ -570,7 +605,7 @@ test('a policy tightened after prepare governs the claim; one loosened after pre
 test('a change approval expires ten minutes after it is prepared', async () => {
   const { core, time } = coreWith({ accounts: { 'acme/slack': account(ACME) } });
   const spec = await widening(core);
-  const prepared = await prepareChange(core, { ...spec, summary: 'x' }, { surface: 'mcp' });
+  const prepared = await prepareChange(core, { ...spec, summary: 'x' }, { channel: 'core', surface: 'mcp' });
   time.advance(10 * 60 * 1000);
   await assert.rejects(
     claimChange(core, prepared.approvalId, spec, { surface: 'mcp' }),
@@ -587,7 +622,7 @@ test('the policy in force is read from the file, never from the before a caller 
   const after = structuredClone(spec.after);
   after.defaults.changePolicy = 'chat';
   const forged = { ...spec, before: claimsChat, after };
-  const prepared = await prepareChange(core, { ...forged, summary: 'x' }, { surface: 'mcp' });
+  const prepared = await prepareChange(core, { ...forged, summary: 'x' }, { channel: 'core', surface: 'mcp' });
   assert.equal(prepared.policy, 'confirm');
   // And at the claim too: the record's policy aside, the live one alone would refuse it.
   const record = await core.approvals.get(prepared.approvalId);
@@ -602,7 +637,11 @@ test('the policy in force is read from the file, never from the before a caller 
 test('a claimed consent still refuses the write if the account changes between the claim and the write', async () => {
   const { core, write } = coreWith({ accounts: { 'acme/slack': account(ACME) } });
   const spec = await widening(core);
-  const prepared = await prepareChange(core, { ...spec, summary: 'Let acme/slack post' }, { surface: 'mcp' });
+  const prepared = await prepareChange(
+    core,
+    { ...spec, summary: 'Let acme/slack post' },
+    { channel: 'core', surface: 'mcp' },
+  );
   const consent = await claimChange(core, prepared.approvalId, spec, { surface: 'mcp' });
   // A sign-in can take minutes. Meanwhile a different workspace was connected under the name.
   write({ accounts: { 'acme/slack': account(OTHER, { workspace: 'T_ELSEWHERE' }) } });
@@ -641,7 +680,11 @@ test('an act that cannot be taken back is bound to the mailbox or workspace it w
       delete after[kind === 'inbox' ? 'inboxes' : 'accounts'][name];
       return { [kind]: name, before, after, effects: [`deletes the credential stored for ${name}`] };
     };
-    const prepared = await prepareChange(core, { ...(await removal()), summary: `Remove ${name}` }, { surface: 'cli' });
+    const prepared = await prepareChange(
+      core,
+      { ...(await removal()), summary: `Remove ${name}` },
+      { channel: 'core', surface: 'cli' },
+    );
     write(now);
     await assert.rejects(
       claimChange(core, prepared.approvalId, await removal(), { surface: 'cli' }),
@@ -657,7 +700,11 @@ test('an act that cannot be taken back is approved by its effects alone, and its
   const after = structuredClone(before);
   delete after.accounts['acme/slack'];
   const removal = { account: 'acme/slack', before, after, effects: ['deletes the token stored for acme/slack'] };
-  const prepared = await prepareChange(core, { ...removal, summary: 'Remove acme/slack' }, { surface: 'cli' });
+  const prepared = await prepareChange(
+    core,
+    { ...removal, summary: 'Remove acme/slack' },
+    { channel: 'core', surface: 'cli' },
+  );
   assert.deepEqual(prepared.loosened, []);
   assert.match(
     prepared.preview,
@@ -685,14 +732,14 @@ test('prepare refuses a change with nothing to approve, one about nothing connec
   const { core } = coreWith({ accounts: { 'acme/slack': account(ACME) } });
   const config = await core.config.load();
   await assert.rejects(
-    prepareChange(core, { before: config, after: config, summary: 'nothing' }, { surface: 'mcp' }),
+    prepareChange(core, { before: config, after: config, summary: 'nothing' }, { channel: 'core', surface: 'mcp' }),
     refusedWith('USAGE', /nothing to approve/),
   );
   await assert.rejects(
     prepareChange(
       core,
       { account: 'zed/slack', before: config, after: config, effects: ['x'], summary: 's' },
-      { surface: 'mcp' },
+      { channel: 'core', surface: 'mcp' },
     ),
     refusedWith('NOT_FOUND', /zed\/slack/),
   );
@@ -700,12 +747,16 @@ test('prepare refuses a change with nothing to approve, one about nothing connec
     prepareChange(
       core,
       { account: 'acme/slack', inbox: 'acme/gmail', before: config, after: config, effects: ['x'], summary: 's' },
-      { surface: 'mcp' },
+      { channel: 'core', surface: 'mcp' },
     ),
     refusedWith('USAGE', /one inbox or one account, not both/),
   );
   await assert.rejects(
-    prepareChange(core, { before: config, after: config, effects: ['x'], summary: '  ' }, { surface: 'mcp' }),
+    prepareChange(
+      core,
+      { before: config, after: config, effects: ['x'], summary: '  ' },
+      { channel: 'core', surface: 'mcp' },
+    ),
     refusedWith('USAGE', /needs a summary/),
   );
 });
@@ -713,7 +764,11 @@ test('prepare refuses a change with nothing to approve, one about nothing connec
 test('the terminal shows only a change that reproduces its own digest, and only a change', async () => {
   const { core } = coreWith({ accounts: { 'acme/slack': account(ACME) } });
   const spec = await widening(core);
-  const prepared = await prepareChange(core, { ...spec, summary: 'Let acme/slack post' }, { surface: 'mcp' });
+  const prepared = await prepareChange(
+    core,
+    { ...spec, summary: 'Let acme/slack post' },
+    { channel: 'core', surface: 'mcp' },
+  );
   // The record says it widens something else than it is bound to: the screen would lie, so it is never shown.
   const file = join(core.approvals.directory, `${prepared.approvalId}.json`);
   const stored = JSON.parse(readFileSync(file, 'utf8'));
@@ -726,10 +781,12 @@ test('the terminal shows only a change that reproduces its own digest, and only 
 
   // A send's approval is not approved here.
   const send = await core.approvals.create({
+    channel: 'gmail',
     inboxId: MAIL,
     draftId: 'r-1',
     draftMessageId: 'm-1',
-    digest: 'd-1',
+    contentDigest: 'd-1',
+    sendEpoch: 0,
     policy: 'confirm',
     requiredPolicy: 'confirm',
     riskFlags: [],
@@ -745,7 +802,11 @@ test('the terminal shows only a change that reproduces its own digest, and only 
 test('every step is in the audit trail: surface, policy and outcome', async () => {
   const { core } = coreWith({ defaults: { changePolicy: 'confirm' }, accounts: { 'acme/slack': account(ACME) } });
   const spec = await widening(core);
-  const prepared = await prepareChange(core, { ...spec, summary: 'Let acme/slack post' }, { surface: 'mcp' });
+  const prepared = await prepareChange(
+    core,
+    { ...spec, summary: 'Let acme/slack post' },
+    { channel: 'core', surface: 'mcp' },
+  );
   await claimChange(core, prepared.approvalId, spec, { surface: 'mcp' }).catch(() => undefined);
   await assert.rejects(finishChangeApproval(core, prepared.approvalId, 'ZZZZ', { surface: 'cli' }));
   const prompt = await beginChangeApproval(core, prepared.approvalId, { surface: 'cli' });
@@ -802,7 +863,11 @@ test('agentcomms approve: a person reads the change and types the code; Enter ca
   const { core } = coreWith({ defaults: { changePolicy: 'confirm' }, accounts: { 'acme/slack': account(ACME) } });
   const spec = await widening(core);
 
-  const first = await prepareChange(core, { ...spec, summary: 'Let acme/slack post' }, { surface: 'mcp' });
+  const first = await prepareChange(
+    core,
+    { ...spec, summary: 'Let acme/slack post' },
+    { channel: 'core', surface: 'mcp' },
+  );
   const person = terminal((code) => code);
   const approved = await approveChangeAtTerminal(core, first.approvalId, {}, { color: false }, person.streams);
   assert.deepEqual(approved, { approvalId: first.approvalId, state: 'approved' });
@@ -812,7 +877,11 @@ test('agentcomms approve: a person reads the change and types the code; Enter ca
   assert.equal(record?.state, 'approved');
   assert.equal(record?.approvedVia, 'terminal');
 
-  const second = await prepareChange(core, { ...spec, summary: 'Let acme/slack post' }, { surface: 'mcp' });
+  const second = await prepareChange(
+    core,
+    { ...spec, summary: 'Let acme/slack post' },
+    { channel: 'core', surface: 'mcp' },
+  );
   const declines = terminal(() => '');
   const cancelled = await approveChangeAtTerminal(core, second.approvalId, {}, { color: false }, declines.streams);
   assert.equal(cancelled.state, 'cancelled');
@@ -840,7 +909,7 @@ test("change approval handoffs render this installation's own approve for the se
   const prepared = await prepareChange(
     core,
     { ...spec, summary: 'Let acme/slack post' },
-    { surface: 'mcp', platform: 'win32' },
+    { channel: 'core', surface: 'mcp', platform: 'win32' },
   );
   const approve = coreHandoffs(core.paths, 'win32').own(['approve', prepared.approvalId]);
   assert.ok(isCommand(approve));
@@ -853,4 +922,72 @@ test("change approval handoffs render this installation's own approve for the se
       return true;
     },
   );
+});
+
+// ── A change an earlier release prepared (version 1) ─────────────────────────────────────────────────────────────
+
+test('a person’s revoke of a v1 change writes a v1-shaped revoked', async () => {
+  const { core, dir } = coreWith({ accounts: { 'acme/slack': account(ACME) } });
+  void dir;
+  const change = {
+    summary: 'Let acme/slack post',
+    target: { kind: 'account', name: 'acme/slack', id: ACME },
+    loosened: [{ path: 'accounts.acme/slack.mode', before: 'read', after: 'send', id: ACME }],
+    effects: ['signs in to Slack again'],
+  };
+  const approvalId = `ap_${'0'.repeat(25)}5`;
+  const original = v1ChangeRecord({
+    approvalId,
+    digest: changeDigest(change as never),
+    change,
+    createdAt: '2026-09-25T09:59:00.000Z',
+  });
+  writeV1Record(core.paths.stateDir, original);
+  // Through what `agentcomms approvals revoke <id>` and `comms_approval_revoke` call.
+  const view = await revokeApproval(core, approvalId, 'cli');
+  assert.equal(view.state, 'revoked');
+  const after = JSON.parse(readV1Record(core.paths.stateDir, approvalId)) as Record<string, unknown>;
+  assert.equal(after.digestVersion, 1);
+  assert.deepStrictEqual(after, {
+    ...original,
+    state: 'revoked',
+    reason: 'revoked by the user',
+    updatedAt: '2026-09-25T10:00:00.000Z',
+  });
+  assert.equal(existsSync(v1RecordPath(core.paths.stateDir, approvalId, '.claim')), false, 'no claim marker');
+  const row = (await core.audit.tail({ limit: 10 })).find((line) => line.operation === 'change.revoke');
+  assert.equal(row?.approvalId, approvalId, 'the revoke is audited');
+  assert.equal(row?.outcome, 'ok');
+});
+
+test('a v1 change is never approved at a terminal or claimed here, and nothing is written to it', async () => {
+  const { core } = coreWith({ accounts: { 'acme/slack': account(ACME, { mode: 'read' }) } });
+  const spec = await widening(core);
+  const prepared = await prepareChange(
+    core,
+    { ...spec, summary: 'Let acme/slack post' },
+    { channel: 'core', surface: 'mcp' },
+  );
+  const stored = await core.approvals.get(prepared.approvalId);
+  assert.ok(stored?.change);
+  for (const [moment, createdAt] of [
+    ['fresh', '2026-09-25T09:59:00.000Z'],
+    ['past its original expiry', '2026-09-25T09:40:00.000Z'],
+  ] as const) {
+    const approvalId = `ap_${'0'.repeat(25)}${moment === 'fresh' ? '6' : '7'}`;
+    const bytes = writeV1Record(
+      core.paths.stateDir,
+      v1ChangeRecord({ approvalId, digest: stored.contentDigest, change: { ...stored.change }, createdAt }),
+    );
+    const version = refusedWith('APPROVAL_VOID', /prepared by a different version of agent-communications/);
+    await assert.rejects(beginChangeApproval(core, approvalId, { surface: 'cli' }), version, `begin, ${moment}`);
+    await assert.rejects(
+      finishChangeApproval(core, approvalId, 'ABCD', { surface: 'cli' }),
+      version,
+      `finish, ${moment}`,
+    );
+    await assert.rejects(claimChange(core, approvalId, spec, { surface: 'mcp' }), version, `claim, ${moment}`);
+    assert.equal(readV1Record(core.paths.stateDir, approvalId), bytes, `${moment}: byte-identical`);
+    assert.equal(existsSync(v1RecordPath(core.paths.stateDir, approvalId, '.claim')), false, `${moment}: no marker`);
+  }
 });

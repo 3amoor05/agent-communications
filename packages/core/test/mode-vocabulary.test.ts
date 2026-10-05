@@ -143,7 +143,11 @@ test('a preview says an unknown mode cannot be judged, and keeps the sentence fo
     const after = structuredClone(before);
     after.accounts['acme/slack'] = { ...account('acc_AAAAAAAAAAAAAAAA', { mode, tier: mode }) } as never;
     return (
-      await prepareChange(core, { account: 'acme/slack', before, after, effects: [], summary: 'x' }, { surface: 'mcp' })
+      await prepareChange(
+        core,
+        { account: 'acme/slack', before, after, effects: [], summary: 'x' },
+        { channel: 'core', surface: 'mcp' },
+      )
     ).preview;
   };
   assert.match(

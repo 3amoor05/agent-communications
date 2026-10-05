@@ -516,7 +516,7 @@ export async function revokeApproval(core: Core, approvalId: string, surface: 'c
   const reason = 'revoked by the user';
   const record =
     existing && approvalKind(existing) === 'change'
-      ? await revokeChange(core, approvalId, reason, { surface })
-      : await core.approvals.revoke(approvalId, reason);
+      ? await revokeChange(core, approvalId, reason, { surface, disposition: 'person' })
+      : await core.approvals.revoke(approvalId, reason, { disposition: 'person' });
   return publicView(record);
 }

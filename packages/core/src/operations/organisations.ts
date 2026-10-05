@@ -347,7 +347,7 @@ async function refuseChangedProfile(
   const approved = line === undefined ? undefined : PROFILE_SHA.exec(line)?.[1];
   if (approved === undefined || approved === file.sha256) return;
   const reason = 'the profile changed since it was approved';
-  await revokeChange(core, approvalId, reason, { surface }).catch(() => undefined);
+  await revokeChange(core, approvalId, reason, { surface, disposition: 'integrity' }).catch(() => undefined);
   throw new CommsError('APPROVAL_VOID', `nothing was changed: ${reason}; prepare it again`, {
     hint: 'Run the same command without the approval to see the profile as it is now, and show the new preview.',
     details: { approvalId },

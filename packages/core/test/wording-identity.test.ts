@@ -320,7 +320,7 @@ async function collect(): Promise<Record<string, string>> {
       const prepared = await prepareChange(
         m.core,
         { ...scope, before, after, effects: ['does one thing', 'and another'], summary: `Summary for ${key}` },
-        { surface: 'mcp' },
+        { channel: 'core', surface: 'mcp' },
       );
       out[`preview ${key}`] = normalise(m, prepared.preview.replace(/ap_[A-Z0-9]+/g, 'ap_ID'));
       out[`next ${key}`] = normalise(m, prepared.next.replace(/ap_[A-Z0-9]+/g, 'ap_ID'));
@@ -357,7 +357,7 @@ async function collect(): Promise<Record<string, string>> {
     const change = await prepareChange(
       m.core,
       { before, after, effects: ['does a thing'], summary: 'x' },
-      { surface: 'mcp' },
+      { channel: 'core', surface: 'mcp' },
     );
     out['hint change approval used for a send'] = normalise(
       m,
@@ -370,7 +370,9 @@ async function collect(): Promise<Record<string, string>> {
       inboxId: inbox.id,
       draftId: 'r1',
       draftMessageId: 'm1',
-      digest: 'd'.repeat(64),
+      channel: 'gmail',
+      sendEpoch: 0,
+      contentDigest: 'd'.repeat(64),
       policy: 'chat',
       requiredPolicy: 'chat',
       riskFlags: [],

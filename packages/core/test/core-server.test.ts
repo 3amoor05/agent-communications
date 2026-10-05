@@ -1151,7 +1151,10 @@ test("a channel's own product registers with its own warnings, under the approva
   const request = { channel: 'slack', client: 'cursor', launcher: 'npx', noVerify: true } as const;
   const own = slackOwnProduct('another Slack server posts with its own token');
 
-  const asked = await gatedChange(m.core, serverInstallChange(m.core, m.env, request), { surface: 'mcp' });
+  const asked = await gatedChange(m.core, serverInstallChange(m.core, m.env, request), {
+    channel: 'core',
+    surface: 'mcp',
+  });
   assert.equal(asked.status, 'approval-required');
   if (asked.status !== 'approval-required') return;
   assert.match(asked.prepared.preview, /registers the Slack MCP server with cursor as "slack"/);
@@ -1164,6 +1167,7 @@ test("a channel's own product registers with its own warnings, under the approva
   );
 
   const done = await gatedChange(m.core, serverInstallChange(m.core, m.env, request, own), {
+    channel: 'core',
     surface: 'cli',
     approvalId: asked.prepared.approvalId,
   });
@@ -1423,13 +1427,17 @@ test("a channel's own prune keeps its own release, and removes the rest only onc
   const product = { packageName: '@agentcomms/slack', version: '0.0.2' };
   const request = { channel: 'slack', processes: nobodyRuns } as const;
 
-  const asked = await gatedChange(m.core, serverPruneChange(m.core, m.env, request, product), { surface: 'cli' });
+  const asked = await gatedChange(m.core, serverPruneChange(m.core, m.env, request, product), {
+    channel: 'core',
+    surface: 'cli',
+  });
   assert.equal(asked.status, 'approval-required');
   if (asked.status !== 'approval-required') return;
   assert.deepEqual(asked.prepared.effects, [`deletes the unused Slack runtime 0.0.1 at ${theirs}`]);
   assert.ok(existsSync(theirs), 'asking removed nothing');
 
   const done = await gatedChange(m.core, serverPruneChange(m.core, m.env, request, product), {
+    channel: 'core',
     surface: 'cli',
     approvalId: asked.prepared.approvalId,
   });

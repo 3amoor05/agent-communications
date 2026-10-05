@@ -422,6 +422,8 @@ export function terminalUpdateHooks(
   core: Core,
   env: NodeJS.ProcessEnv,
   options: {
+    /** The command's channel, `gmail`, `core`: recorded on the update's approval when a person says "now". */
+    channel: string;
     output: OutputOptions;
     streams: Streams;
     /** Stand-ins for the registry and `npm ls`, for a test: the check is then asked in this process. */
@@ -445,6 +447,7 @@ export function terminalUpdateHooks(
     },
     update: async () => {
       const result = await gatedChangeAtTerminal(core, updateChange(core, env, {}, options.deps), {
+        channel: options.channel,
         env,
         output: options.output,
         rerun: ['update'],

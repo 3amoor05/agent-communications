@@ -178,7 +178,10 @@ test('an approval asked for with `account` is claimed with the channel’s own p
     launcher: 'npx',
     noVerify: true,
   } as const;
-  const asked = await gatedChange(m.core, serverInstallChange(m.core, m.env, byAccount), { surface: 'mcp' });
+  const asked = await gatedChange(m.core, serverInstallChange(m.core, m.env, byAccount), {
+    channel: 'core',
+    surface: 'mcp',
+  });
   assert.equal(asked.status, 'approval-required');
   const approvalId = asked.status === 'approval-required' ? asked.prepared.approvalId : '';
   const byWorkspace = {
@@ -189,6 +192,7 @@ test('an approval asked for with `account` is claimed with the channel’s own p
     noVerify: true,
   } as const;
   const done = await gatedChange(m.core, serverInstallChange(m.core, m.env, byWorkspace), {
+    channel: 'core',
     surface: 'cli',
     approvalId,
   });
@@ -233,9 +237,16 @@ test('`--force` keeps a pin written as one argument, `--flag=value`, for every c
       `${channel}: ${effects.join(' | ')}`,
     );
     assert.ok(!effects.some((effect) => effect.startsWith('not pinned')), `${channel}: ${effects.join(' | ')}`);
-    const asked = await gatedChange(m.core, serverInstallChange(m.core, m.env, request), { surface: 'mcp' });
+    const asked = await gatedChange(m.core, serverInstallChange(m.core, m.env, request), {
+      channel: 'core',
+      surface: 'mcp',
+    });
     const approvalId = asked.status === 'approval-required' ? asked.prepared.approvalId : '';
-    const done = await gatedChange(m.core, serverInstallChange(m.core, m.env, request), { surface: 'mcp', approvalId });
+    const done = await gatedChange(m.core, serverInstallChange(m.core, m.env, request), {
+      channel: 'core',
+      surface: 'mcp',
+      approvalId,
+    });
     assert.equal(done.status, 'applied', channel);
     const written = JSON.parse(readFileSync(join(m.home, '.cursor', 'mcp.json'), 'utf8')).mcpServers[
       facts.defaultServerName

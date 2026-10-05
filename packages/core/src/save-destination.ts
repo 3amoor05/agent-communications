@@ -563,6 +563,8 @@ export interface DestinationQuestion {
 }
 
 export interface AskInput {
+  /** The manifest channel the files come from, recorded on the question's approval and bound. */
+  channel: string;
   /** The download the question is about, as it will be claimed. */
   request: DownloadRequest;
   folders: OfferedFolders;
@@ -712,7 +714,11 @@ export async function askWhereToSave(core: Core, input: AskInput): Promise<Desti
     folders: { downloads: input.folders.downloads, current: input.folders.current },
     listing: input.listing,
   };
-  const record = await core.approvals.createDownload({ download: binding, policy: input.policy });
+  const record = await core.approvals.createDownload({
+    channel: input.channel,
+    download: binding,
+    policy: input.policy,
+  });
   const choiceId = record.approvalId;
   const options = [downloads, current, other];
   const warnings = listingWarnings(input.listing);
@@ -1078,7 +1084,7 @@ export async function downloadAtTerminal<Q extends DestinationQuestion>(
     answerRefusal(given, question.options, deny, env),
   );
   if (answer === null) {
-    await options.core.approvals.revoke(question.choiceId, 'cancelled at the terminal');
+    await options.core.approvals.revoke(question.choiceId, 'cancelled at the terminal', { disposition: 'person' });
     throw new CommsError('USAGE', 'cancelled: nothing was saved');
   }
   // Given at this terminal, by the person at it: recorded on the question as such, so it holds under `confirm` too.
@@ -1216,7 +1222,7 @@ export async function answerDownloadAtTerminal(
     answerRefusal(given, asked.options, asked.deny, options.env),
   );
   if (answer === null) {
-    await core.approvals.revoke(choiceId, 'cancelled at the terminal');
+    await core.approvals.revoke(choiceId, 'cancelled at the terminal', { disposition: 'person' });
     return { state: 'revoked' };
   }
   const recorded = recordedAnswer(answer, options.env);

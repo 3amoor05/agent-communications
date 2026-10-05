@@ -69,7 +69,7 @@ const policyNow = async (core: ReturnType<typeof openCore>) =>
 
 test('a change that loosens nothing is applied at once, with no approval made', async () => {
   const core = coreWith('chat');
-  const outcome = await gatedChange(core, setSendPolicy(core, 'never'), { surface: 'mcp' });
+  const outcome = await gatedChange(core, setSendPolicy(core, 'never'), { channel: 'core', surface: 'mcp' });
   assert.deepEqual(outcome, { status: 'applied', result: 'never' });
   assert.equal(await policyNow(core), 'never');
   assert.deepEqual(await core.approvals.list(), [], 'tightening asked nobody');
@@ -79,13 +79,17 @@ test('a loosening is prepared the first time and applied once on the second, wit
   const core = coreWith('never');
   const change = setSendPolicy(core, 'chat');
 
-  const first = await gatedChange(core, change, { surface: 'mcp' });
+  const first = await gatedChange(core, change, { channel: 'core', surface: 'mcp' });
   assert.equal(first.status, 'approval-required');
   if (first.status !== 'approval-required') return;
   assert.match(first.prepared.preview, /send policy: never → chat/);
   assert.equal(await policyNow(core), 'never', 'preparing changed nothing');
 
-  const second = await gatedChange(core, change, { surface: 'mcp', approvalId: first.prepared.approvalId });
+  const second = await gatedChange(core, change, {
+    channel: 'core',
+    surface: 'mcp',
+    approvalId: first.prepared.approvalId,
+  });
   assert.deepEqual(second, { status: 'applied', result: 'chat' });
   assert.equal(await policyNow(core), 'chat');
 
@@ -96,14 +100,14 @@ test('a loosening is prepared the first time and applied once on the second, wit
     plan: async (config) => ({ ...(await change.plan(config)), effects: ['signs in to Slack again'] }),
   };
   await assert.rejects(
-    gatedChange(core, withEffect, { surface: 'mcp', approvalId: first.prepared.approvalId }),
+    gatedChange(core, withEffect, { channel: 'core', surface: 'mcp', approvalId: first.prepared.approvalId }),
     (error: unknown) => error instanceof CommsError,
   );
 });
 
 test('a change that is no longer what was approved is refused, and nothing is written', async () => {
   const core = coreWith('never');
-  const first = await gatedChange(core, setSendPolicy(core, 'chat'), { surface: 'mcp' });
+  const first = await gatedChange(core, setSendPolicy(core, 'chat'), { channel: 'core', surface: 'mcp' });
   assert.equal(first.status, 'approval-required');
   if (first.status !== 'approval-required') return;
   // The same approval, claimed for a looser change than the one shown.
@@ -114,7 +118,9 @@ test('a change that is no longer what was approved is refused, and nothing is wr
       return { ...request, effects: ['also removes every other workspace'] };
     },
   };
-  await assert.rejects(gatedChange(core, looser, { surface: 'mcp', approvalId: first.prepared.approvalId }));
+  await assert.rejects(
+    gatedChange(core, looser, { channel: 'core', surface: 'mcp', approvalId: first.prepared.approvalId }),
+  );
   assert.equal(await policyNow(core), 'never');
 });
 
@@ -137,6 +143,7 @@ test('at the CLI an agent gets the preview and the approval id, and exits 10; --
   const core = coreWith('never');
   const change = setSendPolicy(core, 'chat');
   const options = {
+    channel: 'core',
     env: { CLAUDECODE: '1' },
     output: { color: false },
     rerun: ['policy', '--account', 'acme/slack', 'chat'],
@@ -186,6 +193,7 @@ test('a command to run again with a word Windows cannot print is shown as its wo
     const core = coreWith('never', policy);
     await assert.rejects(
       gatedChangeAtTerminal(core, setSendPolicy(core, 'chat'), {
+        channel: 'core',
         env: { CLAUDECODE: '1' },
         output: { json: true, color: false, platform: 'win32' },
         rerun: words,
@@ -209,6 +217,7 @@ test('a command to run again with a word Windows cannot print is shown as its wo
     // Elsewhere the folder goes in single quotes, and the line is there to run.
     await assert.rejects(
       gatedChangeAtTerminal(core, setSendPolicy(core, 'chat'), {
+        channel: 'core',
         env: { CLAUDECODE: '1' },
         output: { json: true, color: false, platform: 'linux' },
         rerun: words,
@@ -233,6 +242,7 @@ test('a terminal change handoff renders its approval command for the selected sh
   const core = coreWith('never', 'confirm');
   await assert.rejects(
     gatedChangeAtTerminal(core, setSendPolicy(core, 'chat'), {
+      channel: 'core',
       env: { CLAUDECODE: '1' },
       output: { json: true, color: false, platform: 'win32' },
       rerun: ['policy', '--account', 'acme/slack', 'chat'],
@@ -263,6 +273,7 @@ test('a command whose --approval is taken by another change names the flag that 
   const core = coreWith('never');
   await assert.rejects(
     gatedChangeAtTerminal(core, setSendPolicy(core, 'chat'), {
+      channel: 'core',
       env: { CLAUDECODE: '1' },
       output: { json: true, color: false },
       rerun: ['setup', '--mcp-client', 'cursor'],
@@ -282,6 +293,7 @@ test('--mcp-approval is generated before an existing sentinel and positional loo
   const core = coreWith('never');
   await assert.rejects(
     gatedChangeAtTerminal(core, setSendPolicy(core, 'chat'), {
+      channel: 'core',
       env: { CLAUDECODE: '1' },
       output: { json: true, color: false },
       rerun: ['setup', '--mcp-client', 'cursor', '--', '--mcp-approval', 'literal', '--approval=x'],
@@ -303,6 +315,7 @@ test('at the CLI a person at a terminal approves there: yes applies, anything el
   const yes = coreWith('never');
   const person = terminal('yes');
   const applied = await gatedChangeAtTerminal(yes, setSendPolicy(yes, 'chat'), {
+    channel: 'core',
     env: {},
     output: { color: false },
     rerun: ['policy', '--account', 'acme/slack', 'chat'],
@@ -314,6 +327,7 @@ test('at the CLI a person at a terminal approves there: yes applies, anything el
   const no = coreWith('never');
   await assert.rejects(
     gatedChangeAtTerminal(no, setSendPolicy(no, 'chat'), {
+      channel: 'core',
       env: {},
       output: { color: false },
       rerun: ['policy', '--account', 'acme/slack', 'chat'],

@@ -164,10 +164,14 @@ test('doctor diagnoses a legacy registration without mutating it, and its approv
     force: true,
     noVerify: true,
   } as const;
-  const asked = await gatedChange(m.core, serverInstallChange(m.core, m.env, request), { surface: 'mcp' });
+  const asked = await gatedChange(m.core, serverInstallChange(m.core, m.env, request), {
+    channel: 'core',
+    surface: 'mcp',
+  });
   assert.equal(asked.status, 'approval-required');
   if (asked.status !== 'approval-required') return;
   const repaired = await gatedChange(m.core, serverInstallChange(m.core, m.env, request), {
+    channel: 'core',
     surface: 'mcp',
     approvalId: asked.prepared.approvalId,
   });
@@ -417,10 +421,14 @@ test(
     const m = machine();
     const calls = fakeClient(m.bin, 'codex', { entry: PINNED });
     const request = { channel: 'gmail', client: 'codex', launcher: 'npx', force: true, noVerify: true } as const;
-    const asked = await gatedChange(m.core, serverInstallChange(m.core, m.env, request), { surface: 'mcp' });
+    const asked = await gatedChange(m.core, serverInstallChange(m.core, m.env, request), {
+      channel: 'core',
+      surface: 'mcp',
+    });
     assert.equal(asked.status, 'approval-required');
     if (asked.status !== 'approval-required') return;
     const done = await gatedChange(m.core, serverInstallChange(m.core, m.env, request), {
+      channel: 'core',
       surface: 'mcp',
       approvalId: asked.prepared.approvalId,
     });

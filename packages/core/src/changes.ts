@@ -5,7 +5,10 @@ import {
   type ChangeTarget,
   changeDigest,
   DOWNLOAD_ANSWER_HINT,
+  isCurrentDigestVersion,
   isMisdirectedSend,
+  otherVersionRefusal,
+  type RevokeDisposition,
   sendApprovesHint,
   stricterPolicy,
 } from './approvals.ts';
@@ -76,7 +79,15 @@ export interface ChangeOptions {
   surface: ChangeSurface;
   /** The shell syntax used when the approval command is shown. */
   platform?: NodeJS.Platform | undefined;
+  /**
+   * The manifest channel of the surface making the call — `core` for core's own — which a change's approval records as
+   * its `channel` and binds. Required where a change is prepared (`PrepareChangeOptions`); no other step reads it.
+   */
+  channel?: string | undefined;
 }
+
+/** What preparing a change needs: the options of every step, and the channel that prepares it. */
+export type PrepareChangeOptions = ChangeOptions & { channel: string };
 
 export interface PreparedChange {
   approvalId: string;
@@ -185,7 +196,7 @@ function bindChange(spec: ChangeSpec, summary: string): ChangeBinding {
 export async function prepareChange(
   core: Core,
   request: ChangeRequest,
-  options: ChangeOptions,
+  options: PrepareChangeOptions,
 ): Promise<PreparedChange> {
   const summary = request.summary.trim();
   let binding: ChangeBinding | undefined;
@@ -201,7 +212,7 @@ export async function prepareChange(
       });
     }
     policy = governingChangePolicy(await core.config.load(), binding);
-    const record = await core.approvals.createChange({ change: binding, policy });
+    const record = await core.approvals.createChange({ channel: options.channel, change: binding, policy });
     await auditChange(core, {
       operation: 'change.prepare',
       outcome: 'ok',
@@ -327,11 +338,13 @@ async function changeRecord(
       hint: sendApprovesHint(await requireHandoffs(core, options.platform).registered(), approvalId),
     });
   }
+  // One an earlier release prepared is never approved here: refused before anything of it is shown or checked.
+  if (!isCurrentDigestVersion(record)) throw otherVersionRefusal(record);
   /*
    * What is shown is rendered from the record, and only believed once it reproduces the record's own digest — so the
    * lines a person reads are the change the approval permits, not a description that happens to sit beside it.
    */
-  if (!record.change || changeDigest(record.change) !== record.digest) {
+  if (!record.change || changeDigest(record.change) !== record.contentDigest) {
     throw new CommsError('BAD_DATA', 'this approval does not describe the change it is bound to', {
       hint: 'Nothing was approved. Prepare the change again.',
       details: { approvalId },
@@ -380,7 +393,7 @@ export async function finishChangeApproval(
     const approved = await core.approvals.approve(
       approvalId,
       'terminal',
-      { draftMessageId: digest, digest },
+      { draftMessageId: digest, contentDigest: digest },
       answer,
       'change',
       options.platform,
@@ -430,14 +443,19 @@ export async function recordChangeApprovalRefused(
   });
 }
 
-/** Cancels a change approval. Refusing a change is never the dangerous direction, so this asks nobody. */
+/**
+ * Cancels a change approval. Refusing a change is never the dangerous direction, so this asks nobody.
+ *
+ * `disposition` is whose decision it is (`RevokeDisposition`), required and passed straight to the store: a person's
+ * cancel retires a change an earlier release prepared, and an integrity void never rewrites one.
+ */
 export async function revokeChange(
   core: Core,
   approvalId: string,
   reason: string,
-  options: ChangeOptions,
+  options: ChangeOptions & { disposition: RevokeDisposition },
 ): Promise<ApprovalRecord> {
-  const record = await core.approvals.revoke(approvalId, reason);
+  const record = await core.approvals.revoke(approvalId, reason, { disposition: options.disposition });
   await auditChange(core, {
     operation: 'change.revoke',
     outcome: 'ok',

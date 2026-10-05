@@ -72,6 +72,8 @@ export async function gatedChange<T>(
   change: GatedChange<T>,
   options: {
     surface: ChangeSurface;
+    /** The manifest channel of the surface making the change — `core` for core's own — recorded on its approval. */
+    channel: string;
     approvalId?: string | undefined;
     platform?: NodeJS.Platform | undefined;
   },
@@ -97,7 +99,11 @@ export async function gatedChange<T>(
   if (!options.approvalId) {
     return {
       status: 'approval-required',
-      prepared: await prepareChange(core, request, { surface: options.surface, platform: options.platform }),
+      prepared: await prepareChange(core, request, {
+        surface: options.surface,
+        channel: options.channel,
+        platform: options.platform,
+      }),
     };
   }
   const consent = await claimChange(core, options.approvalId, request, {
@@ -159,6 +165,8 @@ export async function gatedChangeAtTerminal<T>(
   core: Core,
   change: GatedChange<T>,
   options: {
+    /** The manifest channel of the command — `core` for core's own — recorded on the change's approval. */
+    channel: string;
     approvalId?: string | undefined;
     env: NodeJS.ProcessEnv;
     output: { json?: boolean | undefined; color: boolean; platform?: NodeJS.Platform | undefined };
@@ -189,6 +197,7 @@ export async function gatedChangeAtTerminal<T>(
   const streams = options.streams ?? defaultStreams;
   const first = await gatedChange(core, change, {
     surface: 'cli',
+    channel: options.channel,
     approvalId: options.approvalId,
     platform: options.output.platform,
   });
@@ -229,12 +238,16 @@ export async function gatedChangeAtTerminal<T>(
     streams.stdout.write(`${prepared.preview}\n\n`);
     const answer = await askLine(streams, `Type ${paint(options.output.color, 'bold', 'yes')} to apply this change: `);
     if (answer.trim().toLowerCase() !== 'yes') {
-      await revokeChange(core, prepared.approvalId, 'cancelled at the terminal', { surface: 'cli' });
+      await revokeChange(core, prepared.approvalId, 'cancelled at the terminal', {
+        surface: 'cli',
+        disposition: 'person',
+      });
       throw cancelled();
     }
   }
   const second = await gatedChange(core, change, {
     surface: 'cli',
+    channel: options.channel,
     approvalId: prepared.approvalId,
     platform: options.output.platform,
   });
@@ -312,7 +325,7 @@ export async function approveChangeAtTerminal(
     `Type ${paint(output.color, 'bold', prompt.challenge)} to approve this change, or press Enter to cancel: `,
   );
   if (!answer.trim()) {
-    await revokeChange(core, approvalId, 'cancelled at the terminal', { surface: 'cli' });
+    await revokeChange(core, approvalId, 'cancelled at the terminal', { surface: 'cli', disposition: 'person' });
     return { approvalId, state: 'cancelled' };
   }
   await finishChangeApproval(core, approvalId, answer, { surface: 'cli' });

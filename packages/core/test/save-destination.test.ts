@@ -112,16 +112,16 @@ function machine(): { home: string; env: NodeJS.ProcessEnv; core: Core } {
 test('a download’s question is kept pending, bound to a digest the store computes, and expires after thirty minutes', async () => {
   const time = clock();
   const store = new ApprovalStore(tempDir(), { now: time.now });
-  const record = await store.createDownload({ download: binding(), policy: 'chat' });
+  const record = await store.createDownload({ channel: 'gmail', download: binding(), policy: 'chat' });
   assert.equal(record.kind, 'download');
   assert.equal(record.state, 'pending');
-  assert.equal(record.digest, downloadDigest(REQUEST));
+  assert.equal(record.contentDigest, downloadDigest(REQUEST));
   assert.equal(record.inboxId, INBOX);
   assert.deepEqual(record.download?.folders, { downloads: '/srv/sam/Downloads', current: '/work/project' });
   // The summary and the folders are what the question says and what the answer means; neither is what it is for.
   assert.equal(downloadDigest({ ...REQUEST }), downloadDigest(binding({ downloads: '/x', current: '/y' })));
   // The names the files would be saved under are: a file renamed since is not the file the person was shown.
-  assert.notEqual(downloadDigest({ ...REQUEST, names: ['invoice.pdf', 'other.exe.download'] }), record.digest);
+  assert.notEqual(downloadDigest({ ...REQUEST, names: ['invoice.pdf', 'other.exe.download'] }), record.contentDigest);
   // Longer than an approval's ten minutes: a person deciding where files go may look in a folder first.
   time.advance(10 * 60 * 1000);
   assert.equal((await store.get(record.approvalId))?.state, 'pending');
@@ -135,7 +135,7 @@ test('a download’s question is kept pending, bound to a digest the store compu
 
 test('a question is claimed once, for the request and the files it listed, and returns the folders it offered', async () => {
   const store = new ApprovalStore(tempDir(), { now: clock().now });
-  const { approvalId } = await store.createDownload({ download: binding(), policy: 'chat' });
+  const { approvalId } = await store.createDownload({ channel: 'gmail', download: binding(), policy: 'chat' });
   const claimed = await store.claimForDownload(approvalId, REQUEST);
   assert.equal(claimed.state, 'used');
   assert.deepEqual(claimed.download.folders, { downloads: '/srv/sam/Downloads', current: '/work/project' });
@@ -161,7 +161,7 @@ test('a question claimed for another account, request, set of files or names is 
   for (const [what, live, reason] of cases) {
     const time = clock();
     const store = new ApprovalStore(tempDir(), { now: time.now });
-    const { approvalId } = await store.createDownload({ download: binding(), policy: 'chat' });
+    const { approvalId } = await store.createDownload({ channel: 'gmail', download: binding(), policy: 'chat' });
     await assert.rejects(store.claimForDownload(approvalId, live), refusal(reason, 'USAGE'), what);
     await assert.rejects(
       store.claimForDownload(approvalId, live),
@@ -172,7 +172,7 @@ test('a question claimed for another account, request, set of files or names is 
     assert.equal((await store.get(approvalId))?.state, 'pending', what);
     assert.equal((await store.claimForDownload(approvalId, REQUEST)).state, 'used', what);
     // Open only while it lasts: past thirty minutes it is expired, whatever is claimed.
-    const late = await store.createDownload({ download: binding(), policy: 'chat' });
+    const late = await store.createDownload({ channel: 'gmail', download: binding(), policy: 'chat' });
     time.advance(30 * 60 * 1000);
     await assert.rejects(store.claimForDownload(late.approvalId, live), refusal(/expired/, 'APPROVAL_EXPIRED'), what);
   }
@@ -180,16 +180,17 @@ test('a question claimed for another account, request, set of files or names is 
 
 test('a question is never spent as a send or a change, nor either of those as a question — and trying harms none', async () => {
   const store = new ApprovalStore(tempDir(), { now: clock().now });
-  const question = await store.createDownload({ download: binding(), policy: 'chat' });
+  const question = await store.createDownload({ channel: 'gmail', download: binding(), policy: 'chat' });
   const change = await store.createChange({
+    channel: 'gmail',
     change: { summary: 'Let it post', target: null, loosened: [], effects: ['removes a thing'] },
     policy: 'chat',
   });
   await assert.rejects(
     store.claimForSend(question.approvalId, {
       inboxId: INBOX,
-      draftMessageId: question.digest,
-      digest: question.digest,
+      draftMessageId: question.contentDigest,
+      contentDigest: question.contentDigest,
       policy: 'chat',
       expect: { to: [], cc: [], bcc: [], subject: '' },
     }),
@@ -213,7 +214,7 @@ test('a question is never spent as a send or a change, nor either of those as a 
 
 test('a question is never approved at a terminal: `approve` says what it is, and leaves it waiting', async () => {
   const { core } = machine();
-  const question = await core.approvals.createDownload({ download: binding(), policy: 'chat' });
+  const question = await core.approvals.createDownload({ channel: 'gmail', download: binding(), policy: 'chat' });
   await assert.rejects(
     beginChangeApproval(core, question.approvalId, { surface: 'cli' }),
     refusal(/is a question about where to save files, not a configuration change/, 'USAGE'),
@@ -223,7 +224,7 @@ test('a question is never approved at a terminal: `approve` says what it is, and
 
 test('a question whose record no longer describes what its digest binds is voided, not believed', async () => {
   const store = new ApprovalStore(tempDir(), { now: clock().now });
-  const record = await store.createDownload({ download: binding(), policy: 'chat' });
+  const record = await store.createDownload({ channel: 'gmail', download: binding(), policy: 'chat' });
   const path = join(store.directory, `${record.approvalId}.json`);
   const stored = JSON.parse(readFileSync(path, 'utf8'));
   // The files it describes, changed where it is kept, to the ones a claim then asks for: the digest still binds the old.
@@ -375,6 +376,7 @@ test('a folder is made when missing, private, and resolved through its links; a 
 /** What `askWhereToSave` is asked with, beside the folders: two files, under the `chat` change policy, over MCP. */
 function asking(core: Core, env: NodeJS.ProcessEnv, overrides: Partial<Parameters<typeof askWhereToSave>[1]> = {}) {
   return askWhereToSave(core, {
+    channel: 'gmail',
     request: REQUEST,
     folders: { downloads: '/srv/sam/Downloads', current: '/work/project' },
     configured: false,
@@ -443,7 +445,11 @@ function settling(
 test('an answer is saved where the question said, even when the download is made again from another folder', async () => {
   const { core, env, home } = machine();
   const offered = { downloads: join(home, 'Downloads'), current: join(home, 'where-it-was-asked') };
-  const { approvalId } = await core.approvals.createDownload({ download: binding(offered), policy: 'chat' });
+  const { approvalId } = await core.approvals.createDownload({
+    channel: 'gmail',
+    download: binding(offered),
+    policy: 'chat',
+  });
   const settled = await settling(core, env, home, {
     kind: 'choice',
     answer: { choice: 'current' },
@@ -461,7 +467,7 @@ test('an answer is saved where the question said, even when the download is made
 test('a folder that is a file is refused before the question is spent on it', async () => {
   const { core, env, home } = machine();
   writeFileSync(join(home, 'not-a-folder'), 'x');
-  const { approvalId } = await core.approvals.createDownload({ download: binding(), policy: 'chat' });
+  const { approvalId } = await core.approvals.createDownload({ channel: 'gmail', download: binding(), policy: 'chat' });
   await assert.rejects(
     settling(core, env, home, {
       kind: 'choice',
@@ -1436,7 +1442,11 @@ test('the list’s own folders, and the home, are also held to their real paths:
 test('a refused folder is refused before the question is spent, whoever gave the answer', async () => {
   const { core, env, home } = machine();
   for (const folder of ['~/.ssh', join(home, '.aws'), core.paths.stateDir, join(home, 'app', '.husky')]) {
-    const { approvalId } = await core.approvals.createDownload({ download: binding(), policy: 'chat' });
+    const { approvalId } = await core.approvals.createDownload({
+      channel: 'gmail',
+      download: binding(),
+      policy: 'chat',
+    });
     await assert.rejects(
       settling(core, env, home, { kind: 'choice', answer: { choice: 'other', folder }, choiceId: approvalId }),
       refusal(/^cannot save into /, 'BAD_DATA'),
@@ -1544,7 +1554,11 @@ test('a folder nothing can be written in, or one that cannot be made, is refused
       refusal(/it cannot be made in .*locked: permission denied/, 'BAD_DATA'),
     );
     for (const folder of [locked, join(locked, 'new', 'deeper')]) {
-      const { approvalId } = await core.approvals.createDownload({ download: binding(), policy: 'chat' });
+      const { approvalId } = await core.approvals.createDownload({
+        channel: 'gmail',
+        download: binding(),
+        policy: 'chat',
+      });
       await assert.rejects(
         settling(core, env, home, { kind: 'choice', answer: { choice: 'other', folder }, choiceId: approvalId }),
         refusal(/^cannot save into /, 'BAD_DATA'),
@@ -1581,7 +1595,11 @@ test('a file-system error names the folder and the file’s id, never the name t
 test('under chat, the answer relayed from the conversation claims the question', async () => {
   const { core, env, home } = machine();
   const offered = { downloads: join(home, 'Downloads'), current: join(home, 'work') };
-  const { approvalId } = await core.approvals.createDownload({ download: binding(offered), policy: 'chat' });
+  const { approvalId } = await core.approvals.createDownload({
+    channel: 'gmail',
+    download: binding(offered),
+    policy: 'chat',
+  });
   const settled = await settling(core, env, home, {
     kind: 'choice',
     answer: { choice: 'downloads' },
@@ -1595,7 +1613,11 @@ test('under chat, the answer relayed from the conversation claims the question',
 test('under confirm, an answer in the arguments is refused with the terminal command, and the question left open', async () => {
   const { core, env, home } = machine();
   const offered = { downloads: join(home, 'Downloads'), current: join(home, 'work') };
-  const { approvalId } = await core.approvals.createDownload({ download: binding(offered), policy: 'confirm' });
+  const { approvalId } = await core.approvals.createDownload({
+    channel: 'gmail',
+    download: binding(offered),
+    policy: 'confirm',
+  });
   for (const answer of [{ choice: 'downloads' } as const, null]) {
     const thrown = await settling(core, env, home, { kind: 'choice', answer, choiceId: approvalId }, 'confirm').catch(
       (error: unknown) => error,
@@ -1620,7 +1642,7 @@ test('under confirm, an answer in the arguments is refused with the terminal com
 
 test('a question asked under chat is held to confirm when the account is tightened before it is answered', async () => {
   const { core, env, home } = machine();
-  const { approvalId } = await core.approvals.createDownload({ download: binding(), policy: 'chat' });
+  const { approvalId } = await core.approvals.createDownload({ channel: 'gmail', download: binding(), policy: 'chat' });
   await assert.rejects(
     settling(core, env, home, { kind: 'choice', answer: { choice: 'current' }, choiceId: approvalId }, 'confirm'),
     refusal(/confirm/, 'APPROVAL_PENDING'),
@@ -1629,7 +1651,11 @@ test('a question asked under chat is held to confirm when the account is tighten
 
 test('a question asked under confirm stays confirm when the account is loosened before it is answered', async () => {
   const { core, env, home } = machine();
-  const { approvalId } = await core.approvals.createDownload({ download: binding(), policy: 'confirm' });
+  const { approvalId } = await core.approvals.createDownload({
+    channel: 'gmail',
+    download: binding(),
+    policy: 'confirm',
+  });
   await assert.rejects(
     settling(core, env, home, { kind: 'choice', answer: { choice: 'current' }, choiceId: approvalId }, 'chat'),
     refusal(/confirm/, 'APPROVAL_PENDING'),
@@ -1641,7 +1667,11 @@ test('under confirm, the answer the person gave at their terminal or in a truste
   const { core, env, home } = machine();
   for (const via of ['terminal', 'elicitation'] as const) {
     const offered = { downloads: join(home, `Downloads-${via}`), current: join(home, 'work') };
-    const { approvalId } = await core.approvals.createDownload({ download: binding(offered), policy: 'confirm' });
+    const { approvalId } = await core.approvals.createDownload({
+      channel: 'gmail',
+      download: binding(offered),
+      policy: 'confirm',
+    });
     await core.approvals.answerDownload(approvalId, via, { choice: 'other', folder: join(home, `Invoices-${via}`) });
     // Answered once: a second answer, while the first waits to be used, is refused and changes nothing.
     await assert.rejects(
@@ -1675,7 +1705,7 @@ test('under confirm, the answer the person gave at their terminal or in a truste
 
 test('under chat, an id alone with no recorded answer is refused before the question is spent', async () => {
   const { core, env, home } = machine();
-  const { approvalId } = await core.approvals.createDownload({ download: binding(), policy: 'chat' });
+  const { approvalId } = await core.approvals.createDownload({ channel: 'gmail', download: binding(), policy: 'chat' });
   await assert.rejects(
     settling(core, env, home, { kind: 'choice', answer: null, choiceId: approvalId }),
     refusal(/`choiceId` needs the person’s answer/, 'USAGE'),
@@ -1852,7 +1882,7 @@ test('a folder swapped for a link to a refused one after it was checked is refus
   mkdirSync(join(home, '.ssh'));
   const folder = join(home, 'Invoices');
   mkdirSync(folder);
-  const { approvalId } = await core.approvals.createDownload({ download: binding(), policy: 'chat' });
+  const { approvalId } = await core.approvals.createDownload({ channel: 'gmail', download: binding(), policy: 'chat' });
   // Between the checks and the folder being made — while the question is claimed — the folder becomes a link.
   const claim = core.approvals.claimForDownload.bind(core.approvals);
   core.approvals.claimForDownload = async (...args: Parameters<typeof claim>) => {

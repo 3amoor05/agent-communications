@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { changeDigest } from '../src/approvals.ts';
 import { type GatedChange, gatedChange } from '../src/change-flow.ts';
 import { beginChangeApproval, type PreparedChange } from '../src/changes.ts';
 import type { PrintedCommand } from '../src/cli-command.ts';
@@ -24,6 +25,7 @@ import {
   orgUpdateChange,
 } from '../src/operations/organisations.ts';
 import { readProfileFile, shownPath } from '../src/organisations.ts';
+import { readV1Record, v1ChangeRecord, writeV1Record } from './fixtures/approval-v1-0.13.0.ts';
 import { writeManaged } from './fixtures/cli-command/trees.ts';
 import {
   clientAddReplaceAsReleased0121,
@@ -155,10 +157,10 @@ type Outcome<T> = { prepared: PreparedChange | null; result: T };
 
 /** A change made as an agent makes it: the first call, and — if it asks — the call that brings the approval back. */
 async function approved<T>(m: Machine, build: (approvalId?: string) => GatedChange<T>): Promise<Outcome<T>> {
-  const first = await gatedChange(m.core, build(), { surface: 'mcp' });
+  const first = await gatedChange(m.core, build(), { channel: 'core', surface: 'mcp' });
   if (first.status === 'applied') return { prepared: null, result: first.result };
   const { approvalId } = first.prepared;
-  const second = await gatedChange(m.core, build(approvalId), { surface: 'mcp', approvalId });
+  const second = await gatedChange(m.core, build(approvalId), { channel: 'core', surface: 'mcp', approvalId });
   assert.equal(second.status, 'applied');
   return { prepared: first.prepared, result: (second as { result: T }).result };
 }
@@ -248,7 +250,10 @@ test('org add refuses a version-1 configuration, with `names migrate` as the fix
   const m = machine({ secrets: { store: 'file' } }, 1);
   writeProfile(m, profile());
   await assert.rejects(
-    gatedChange(m.core, orgAddChange(m.core, { file: 'acme.agentcomms.json' }, options(m)), { surface: 'mcp' }),
+    gatedChange(m.core, orgAddChange(m.core, { file: 'acme.agentcomms.json' }, options(m)), {
+      channel: 'core',
+      surface: 'mcp',
+    }),
     is('CONFIG', / names migrate/),
   );
   assert.equal(JSON.parse(readFileSync(join(m.configDir, 'config.json'), 'utf8')).organisations, undefined);
@@ -258,6 +263,7 @@ test('adding a profile is approved first: the preview names every value but the 
   const m = machine();
   const path = writeProfile(m, profile());
   const first = await gatedChange(m.core, orgAddChange(m.core, { file: 'acme.agentcomms.json' }, options(m)), {
+    channel: 'core',
     surface: 'mcp',
   });
   assert.equal(first.status, 'approval-required');
@@ -313,13 +319,17 @@ test('adding a profile is approved first: the preview names every value but the 
 test('a profile that changed between the preview and the claim is refused in those words, and nothing is written', async () => {
   const m = machine();
   const path = writeProfile(m, profile());
-  const first = await gatedChange(m.core, orgAddChange(m.core, { file: path }, options(m)), { surface: 'mcp' });
+  const first = await gatedChange(m.core, orgAddChange(m.core, { file: path }, options(m)), {
+    channel: 'core',
+    surface: 'mcp',
+  });
   assert.equal(first.status, 'approval-required');
   const { approvalId } = (first as { prepared: PreparedChange }).prepared;
   // The same JSON, other bytes: a different SHA-256, and so a different profile.
   writeFileSync(path, `${JSON.stringify(profile())}\n`);
   await assert.rejects(
     gatedChange(m.core, orgAddChange(m.core, { file: path, approvalId }, options(m)), {
+      channel: 'core',
       surface: 'mcp',
       approvalId,
     }),
@@ -330,10 +340,50 @@ test('a profile that changed between the preview and the claim is refused in tho
   assert.equal((await m.core.approvals.get(approvalId))?.state, 'revoked', 'and the approval cannot be used again');
 });
 
+test('profile drift does not rewrite a v1 change', async () => {
+  // An organisation update 0.13.0 prepared (digest version 1) and left pending, bound to the profile as it was then.
+  const m = machine();
+  const path = writeProfile(m, profile());
+  await add(m);
+  writeProfile(m, profile({ gmail: gmail({ clientSecret: SECRET_A2 }) }));
+  const first = await gatedChange(m.core, orgUpdateChange(m.core, { organisation: 'acme' }, options(m)), {
+    channel: 'core',
+    surface: 'mcp',
+  });
+  assert.equal(first.status, 'approval-required');
+  const prepared = await m.core.approvals.get((first as { prepared: PreparedChange }).prepared.approvalId);
+  assert.ok(prepared?.change);
+  const legacyId = `ap_${'0'.repeat(25)}9`;
+  const original = writeV1Record(
+    m.core.paths.stateDir,
+    v1ChangeRecord({
+      approvalId: legacyId,
+      digest: changeDigest(prepared.change),
+      change: { ...prepared.change },
+      createdAt: new Date(Date.now() - 60 * 1000).toISOString(),
+    }),
+  );
+  // The same JSON, other bytes: the profile on disk is not the one the record's effect line names.
+  writeFileSync(path, `${JSON.stringify(profile({ gmail: gmail({ clientSecret: SECRET_A2 }) }))}\n`);
+  await assert.rejects(
+    gatedChange(m.core, orgUpdateChange(m.core, { organisation: 'acme', approvalId: legacyId }, options(m)), {
+      channel: 'core',
+      surface: 'mcp',
+      approvalId: legacyId,
+    }),
+    is('APPROVAL_VOID', /the profile changed since it was approved; prepare it again/),
+  );
+  // The integrity void met the version refusal and wrote nothing: an earlier release's record is not this one's to judge.
+  assert.equal(readV1Record(m.core.paths.stateDir, legacyId), original, 'byte-identical');
+});
+
 test('an org add bound to setup’s loaded profile cannot apply different bytes swapped into its path', async () => {
   const m = machine();
   const path = writeProfile(m, profile());
-  const first = await gatedChange(m.core, orgAddChange(m.core, { file: path }, options(m)), { surface: 'mcp' });
+  const first = await gatedChange(m.core, orgAddChange(m.core, { file: path }, options(m)), {
+    channel: 'core',
+    surface: 'mcp',
+  });
   assert.equal(first.status, 'approval-required');
   const { approvalId } = (first as { prepared: PreparedChange }).prepared;
 
@@ -344,6 +394,7 @@ test('an org add bound to setup’s loaded profile cannot apply different bytes 
 
   await assert.rejects(
     gatedChange(m.core, orgAddChange(m.core, { file: path, approvalId, loadedProfile }, options(m)), {
+      channel: 'core',
       surface: 'mcp',
       approvalId,
     }),
@@ -507,7 +558,7 @@ test('a different --store refusal is rendered with the organisation operation pl
       gatedChange(
         m.core,
         orgAddChange(m.core, { file: 'acme.agentcomms.json', store: 'keychain' }, options(m, { platform })),
-        { surface: 'mcp' },
+        { channel: 'core', surface: 'mcp' },
       ),
       (error: unknown) => {
         assert.ok(error instanceof CommsError);
@@ -552,12 +603,14 @@ test('concurrent adds of one profile: exactly one lands, and the record is whole
   const prepare = async () =>
     (
       (await gatedChange(m.core, orgAddChange(m.core, { file: 'acme.agentcomms.json' }, options(m)), {
+        channel: 'core',
         surface: 'mcp',
       })) as { prepared: PreparedChange }
     ).prepared.approvalId;
   const [one, two] = [await prepare(), await prepare()];
   const claim = (approvalId: string) =>
     gatedChange(m.core, orgAddChange(m.core, { file: 'acme.agentcomms.json', approvalId }, options(m)), {
+      channel: 'core',
       surface: 'mcp',
       approvalId,
     });
@@ -608,12 +661,14 @@ test('a secret already under a new name’s reference is put back when the write
   // A free name in the configuration does not prove its reference is empty: an old removal left this behind.
   await (await m.core.secrets('file')).set(clientSecretRef('acme-1'), 'left-behind-value');
   const first = await gatedChange(m.core, orgAddChange(m.core, { file: 'acme.agentcomms.json' }, options(m)), {
+    channel: 'core',
     surface: 'mcp',
   });
   const { approvalId } = (first as { prepared: PreparedChange }).prepared;
   rejectNextWrite(m);
   await assert.rejects(
     gatedChange(m.core, orgAddChange(m.core, { file: 'acme.agentcomms.json', approvalId }, options(m)), {
+      channel: 'core',
       surface: 'mcp',
       approvalId,
     }),
@@ -628,6 +683,7 @@ test('a secret already under a new name’s reference is put back when the write
     clean.core,
     orgAddChange(clean.core, { file: 'acme.agentcomms.json' }, options(clean)),
     {
+      channel: 'core',
       surface: 'mcp',
     },
   );
@@ -638,6 +694,7 @@ test('a secret already under a new name’s reference is put back when the write
       clean.core,
       orgAddChange(clean.core, { file: 'acme.agentcomms.json', approvalId: id }, options(clean)),
       {
+        channel: 'core',
         surface: 'mcp',
         approvalId: id,
       },
@@ -653,6 +710,7 @@ test('a new secret in the profile is a rotation: approved as "secret changed", a
   await add(m);
   writeProfile(m, profile({ gmail: gmail({ clientSecret: SECRET_A2 }) }));
   const first = await gatedChange(m.core, orgUpdateChange(m.core, { organisation: 'acme' }, options(m)), {
+    channel: 'core',
     surface: 'mcp',
   });
   assert.equal(first.status, 'approval-required');
@@ -673,6 +731,7 @@ test('a new secret in the profile is a rotation: approved as "secret changed", a
   const before = (await record(m))?.sha256;
   await assert.rejects(
     gatedChange(m.core, orgUpdateChange(m.core, { organisation: 'acme', approvalId }, options(m)), {
+      channel: 'core',
       surface: 'mcp',
       approvalId,
     }),
@@ -693,6 +752,7 @@ test('a rotation whose config write cannot be confirmed keeps the new secret and
   await add(m);
   writeProfile(m, profile({ gmail: gmail({ clientSecret: SECRET_A2 }) }));
   const first = await gatedChange(m.core, orgUpdateChange(m.core, { organisation: 'acme' }, options(m)), {
+    channel: 'core',
     surface: 'mcp',
   });
   const { approvalId } = (first as { prepared: PreparedChange }).prepared;
@@ -709,6 +769,7 @@ test('a rotation whose config write cannot be confirmed keeps the new secret and
   }) as typeof m.core.config.load;
   await assert.rejects(
     gatedChange(m.core, orgUpdateChange(m.core, { organisation: 'acme', approvalId }, options(m)), {
+      channel: 'core',
       surface: 'mcp',
       approvalId,
     }),
@@ -726,6 +787,7 @@ test('secret-write recovery advice quotes org show and update for darwin and win
     await add(m, {}, { platform });
     writeProfile(m, profile({ organisation: '7', gmail: gmail({ clientSecret: SECRET_A2 }) }));
     const first = await gatedChange(m.core, orgUpdateChange(m.core, { organisation: '7' }, options(m, { platform })), {
+      channel: 'core',
       surface: 'mcp',
     });
     return (first as { prepared: PreparedChange }).prepared.approvalId;
@@ -754,7 +816,7 @@ test('secret-write recovery advice quotes org show and update for darwin and win
           { organisation: '7', approvalId: uncertainApproval },
           options(uncertain, { platform }),
         ),
-        { surface: 'mcp', approvalId: uncertainApproval },
+        { channel: 'core', surface: 'mcp', approvalId: uncertainApproval },
       ),
       (error: unknown) => error instanceof CommsError && error.hint?.includes(`Run ${show}.`) === true,
       platform,
@@ -782,7 +844,7 @@ test('secret-write recovery advice quotes org show and update for darwin and win
           { organisation: '7', approvalId: unrestoredApproval },
           options(unrestored, { platform }),
         ),
-        { surface: 'mcp', approvalId: unrestoredApproval },
+        { channel: 'core', surface: 'mcp', approvalId: unrestoredApproval },
       ),
       (error: unknown) => error instanceof CommsError && error.hint?.includes(`run ${update} once`) === true,
       platform,
@@ -1541,6 +1603,7 @@ test('an approval to remove a profile is not spent on a configuration that moved
   writeProfile(m, profile());
   await add(m);
   const first = await gatedChange(m.core, orgRemoveChange(m.core, { organisation: 'acme' }, options(m)), {
+    channel: 'core',
     surface: 'mcp',
   });
   const { approvalId } = (first as { prepared: PreparedChange }).prepared;
@@ -1548,7 +1611,11 @@ test('an approval to remove a profile is not spent on a configuration that moved
     raw.inboxes = { 'acme/gmail': mailbox('acme-1') };
   });
   await assert.rejects(
-    gatedChange(m.core, orgRemoveChange(m.core, { organisation: 'acme' }, options(m)), { surface: 'mcp', approvalId }),
+    gatedChange(m.core, orgRemoveChange(m.core, { organisation: 'acme' }, options(m)), {
+      channel: 'core',
+      surface: 'mcp',
+      approvalId,
+    }),
     is('CONFIG', /mailboxes still sign in/),
   );
   assert.ok(await record(m));
@@ -1724,7 +1791,7 @@ test('turning other addresses off applies at once, even when the rest of the upd
   const first = await gatedChange(
     m.core,
     orgUpdateChange(m.core, { organisation: 'acme', forOtherAddresses: 'off' }, options(m)),
-    { surface: 'mcp' },
+    { channel: 'core', surface: 'mcp' },
   );
   assert.equal(first.status, 'approval-required', 'the changed label still asks');
   assert.equal((await record(m))?.forOtherAddresses, false, 'the narrowing did not wait for it');
@@ -1737,7 +1804,7 @@ test('turning other addresses off applies at once, even when the rest of the upd
   );
   assert.match(preview, /label: Acme Test Org → Acme Renamed/);
   // The person says no to the rest: the narrowing stands.
-  await m.core.approvals.revoke(approvalId, 'the person said no');
+  await m.core.approvals.revoke(approvalId, 'the person said no', { disposition: 'person' });
   assert.equal((await record(m))?.forOtherAddresses, false);
   assert.equal((await record(m))?.label, 'Acme Test Org');
   // And yes, on another try: the rest applies, and other addresses stay off.
@@ -1753,7 +1820,7 @@ test('a write that lands only in part is not reported as made: the whole expecte
   const first = await gatedChange(
     m.core,
     orgUpdateChange(m.core, { organisation: 'acme', forOtherAddresses: 'on' }, options(m)),
-    { surface: 'mcp' },
+    { channel: 'core', surface: 'mcp' },
   );
   const { approvalId } = (first as { prepared: PreparedChange }).prepared;
   // The write lands with the record's SHA-256 and read time as planned but `forOtherAddresses` left off — and then
@@ -1773,6 +1840,7 @@ test('a write that lands only in part is not reported as made: the whole expecte
       m.core,
       orgUpdateChange(m.core, { organisation: 'acme', forOtherAddresses: 'on', approvalId }, options(m)),
       {
+        channel: 'core',
         surface: 'mcp',
         approvalId,
       },
@@ -1788,6 +1856,7 @@ test('org remove whose secret store cannot be opened removes nothing, and says w
   writeProfile(m, profile());
   await add(m);
   const first = await gatedChange(m.core, orgRemoveChange(m.core, { organisation: 'acme' }, options(m)), {
+    channel: 'core',
     surface: 'mcp',
   });
   const { approvalId } = (first as { prepared: PreparedChange }).prepared;
@@ -1796,7 +1865,11 @@ test('org remove whose secret store cannot be opened removes nothing, and says w
     throw new CommsError('SECRET_STORE_UNAVAILABLE', 'the keychain module is missing');
   };
   await assert.rejects(
-    gatedChange(m.core, orgRemoveChange(m.core, { organisation: 'acme' }, options(m)), { surface: 'mcp', approvalId }),
+    gatedChange(m.core, orgRemoveChange(m.core, { organisation: 'acme' }, options(m)), {
+      channel: 'core',
+      surface: 'mcp',
+      approvalId,
+    }),
     is('SECRET_STORE_UNAVAILABLE', /could not be opened, so nothing was removed/),
   );
   m.core.secrets = secrets;
@@ -1942,6 +2015,7 @@ test('other addresses off is written before anything is read or planned: an unre
     breakIt(m, path);
     await assert.rejects(
       gatedChange(m.core, orgUpdateChange(m.core, { organisation: 'acme', forOtherAddresses: 'off' }, options(m)), {
+        channel: 'core',
         surface: 'mcp',
       }),
       is(code),
@@ -2063,6 +2137,7 @@ test('values a line takes from the record, not the profile, are shown neutralise
   });
   writeProfile(m, profile({ gmail: gmail({ projectId: 'acme-renamed' }) }));
   const first = await gatedChange(m.core, orgUpdateChange(m.core, { organisation: 'acme' }, options(m)), {
+    channel: 'core',
     surface: 'mcp',
   });
   const { preview } = (first as { prepared: PreparedChange }).prepared;
@@ -2080,7 +2155,7 @@ test('a narrowing done while the approval was prepared is listed in the claimed 
     // From a chat each call builds the change afresh, and the claim learns of the narrowing from the approval; at a
     // terminal the same change is planned twice, and remembers it.
     const terminal = orgUpdateChange(m.core, { organisation: 'acme', forOtherAddresses: 'off' }, options(m));
-    const first = await gatedChange(m.core, terminal, { surface: 'mcp' });
+    const first = await gatedChange(m.core, terminal, { channel: 'core', surface: 'mcp' });
     assert.equal(first.status, 'approval-required');
     const { approvalId } = (first as { prepared: PreparedChange }).prepared;
     assert.equal((await record(m))?.forOtherAddresses, false);
@@ -2088,7 +2163,7 @@ test('a narrowing done while the approval was prepared is listed in the claimed 
       surface === 'terminal'
         ? terminal
         : orgUpdateChange(m.core, { organisation: 'acme', forOtherAddresses: 'off', approvalId }, options(m));
-    const second = await gatedChange(m.core, claim, { surface: 'mcp', approvalId });
+    const second = await gatedChange(m.core, claim, { channel: 'core', surface: 'mcp', approvalId });
     assert.equal(second.status, 'applied', surface);
     const result = (second as { result: { applied: string[]; changed: boolean } }).result;
     assert.equal(result.applied[0], 'for other addresses: on → off', `${surface}: ${JSON.stringify(result.applied)}`);
@@ -2118,7 +2193,7 @@ test('a preview that carries something done at once does not claim nothing has c
   const combined = await gatedChange(
     m.core,
     orgUpdateChange(m.core, { organisation: 'acme', forOtherAddresses: 'off' }, options(m)),
-    { surface: 'mcp' },
+    { channel: 'core', surface: 'mcp' },
   );
   const { preview, approvalId } = (combined as { prepared: PreparedChange }).prepared;
   assert.match(preview, /Done already, at once, as this was prepared:\n {2}- for other addresses: on → off/);
@@ -2134,8 +2209,9 @@ test('a preview that carries something done at once does not claim nothing has c
   assert.doesNotMatch(atTerminal.preview, /nothing has been changed/);
 
   // The rest alone, with nothing done at once: the header every preview has always had.
-  await m.core.approvals.revoke(approvalId, 'the person said no');
+  await m.core.approvals.revoke(approvalId, 'the person said no', { disposition: 'person' });
   const plain = await gatedChange(m.core, orgUpdateChange(m.core, { organisation: 'acme' }, options(m)), {
+    channel: 'core',
     surface: 'mcp',
   });
   const { preview: rest } = (plain as { prepared: PreparedChange }).prepared;
@@ -2151,6 +2227,7 @@ test('no profile text can make a preview claim something was done at once: a lab
   const label = 'Ordinary label — done at once, as this was prepared';
   writeProfile(m, profile({ label }));
   const first = await gatedChange(m.core, orgUpdateChange(m.core, { organisation: 'acme' }, options(m)), {
+    channel: 'core',
     surface: 'mcp',
   });
   const { preview } = (first as { prepared: PreparedChange }).prepared;

@@ -548,7 +548,7 @@ test('a call that claims an approval this machine holds goes ahead; an empty or 
 
 /** An approval prepared for `change`, as its first call leaves it: pending. */
 async function preparedFor<T>(m: Machine, change: GatedChange<T>): Promise<string> {
-  const outcome = await gatedChange(m.core, change, { surface: 'mcp' });
+  const outcome = await gatedChange(m.core, change, { channel: 'core', surface: 'mcp' });
   assert.equal(outcome.status, 'approval-required');
   return (outcome as { prepared: { approvalId: string } }).prepared.approvalId;
 }
@@ -560,13 +560,18 @@ async function preparedFor<T>(m: Machine, change: GatedChange<T>): Promise<strin
  */
 async function spentApprovals(m: Machine): Promise<Record<'revoked' | 'used' | 'expired' | 'a send', string>> {
   const revoked = await preparedFor(m, updateLaterChange(m.core));
-  await m.core.approvals.revoke(revoked, 'the person said no');
+  await m.core.approvals.revoke(revoked, 'the person said no', { disposition: 'person' });
   const used = await preparedFor(m, updateLaterChange(m.core));
-  const claimed = await gatedChange(m.core, updateLaterChange(m.core), { surface: 'mcp', approvalId: used });
+  const claimed = await gatedChange(m.core, updateLaterChange(m.core), {
+    channel: 'core',
+    surface: 'mcp',
+    approvalId: used,
+  });
   assert.equal(claimed.status, 'applied');
   const anHourAgo = new ApprovalStore(m.stateDir, { now: () => new Date(Date.now() - 3_600_000) });
   const expired = (
     await anHourAgo.createChange({
+      channel: 'core',
       change: { summary: 'An hour ago', target: null, loosened: [], effects: ['did something an hour ago'] },
       policy: 'chat',
     })
@@ -576,7 +581,9 @@ async function spentApprovals(m: Machine): Promise<Record<'revoked' | 'used' | '
       inboxId: 'inbox_one',
       draftId: 'draft_one',
       draftMessageId: 'revision_one',
-      digest: 'a'.repeat(64),
+      channel: 'gmail',
+      sendEpoch: 0,
+      contentDigest: 'a'.repeat(64),
       policy: 'chat',
       requiredPolicy: 'chat',
       riskFlags: [],
@@ -634,7 +641,7 @@ test("a look-up of a send goes past the stop by the approval it went under, used
   await m.core.approvals.claimForSend(send, {
     inboxId: 'inbox_one',
     draftMessageId: 'revision_one',
-    digest: 'a'.repeat(64),
+    contentDigest: 'a'.repeat(64),
     policy: 'chat',
     expect: { to: ['someone@example.test'], cc: [], bcc: [], subject: 'Hello' },
   });
@@ -664,6 +671,7 @@ test("a look-up of a send goes past the stop by the approval it went under, used
 test('a download’s answer goes past the stop by its question’s choiceId; the answer alone, or another kind’s id, does not', async () => {
   const m = machine();
   const question = await m.core.approvals.createDownload({
+    channel: 'core',
     download: {
       summary: 'where to save 1 file from acme/gmail',
       target: { kind: 'inbox', name: 'acme/gmail', id: 'ibx_AAAAAAAAAAAAAAAA' },
@@ -1174,7 +1182,7 @@ test('not now and turning the check off each need the person’s approval, and c
   const changes: GatedChange<unknown>[] = [updateLaterChange(fresh.core), updateAutoChange(fresh.core, 'off')];
   for (const change of changes) {
     const request = await change.plan(await fresh.core.config.load());
-    const outcome = await gatedChange(fresh.core, change, { surface: 'mcp' });
+    const outcome = await gatedChange(fresh.core, change, { channel: 'core', surface: 'mcp' });
     assert.equal(outcome.status, 'approval-required', request.summary);
   }
 });
@@ -1340,7 +1348,7 @@ async function gateAt(
     running: VERSION,
     output,
     streams: tty.streams,
-    ...terminalUpdateHooks(m.core, m.env, { output, streams: tty.streams, deps: update }),
+    ...terminalUpdateHooks(m.core, m.env, { channel: 'core', output, streams: tty.streams, deps: update }),
     ...extra,
   }).then(
     (value) => ({ value, error: null as CommsError | null }),
@@ -1475,7 +1483,12 @@ test('a registry slower than the terminal waits is still heard from: the check f
       running: VERSION,
       output,
       streams,
-      ...terminalUpdateHooks(m.core, env, { output, streams, deps: { globalPackages: async () => ({}) } }),
+      ...terminalUpdateHooks(m.core, env, {
+        channel: 'core',
+        output,
+        streams,
+        deps: { globalPackages: async () => ({}) },
+      }),
       waitMs: 200,
     });
     assert.equal(outcome, null, 'the command goes on');
@@ -1579,7 +1592,7 @@ test('a child that cannot be started loses nothing: the command asks in its own 
         running: VERSION,
         output,
         streams,
-        ...terminalUpdateHooks(m.core, env, { output, streams, childEntry }),
+        ...terminalUpdateHooks(m.core, env, { channel: 'core', output, streams, childEntry }),
         // Long enough that only the ask's own end ends the wait: asked in this process, it has, by the time this does.
         waitMs: 30_000,
       }).catch((error: unknown) => error);
@@ -1938,7 +1951,10 @@ test('agentcomms: an approval a command claims is one still waiting, prepared as
   const m = machine();
   const spent = await spentApprovals(m);
   // `confirm`, so that `policy chat` is a loosening, and its approval waits for a person at a terminal.
-  const tightened = await gatedChange(m.core, changePolicyChange(m.core, {}, 'confirm'), { surface: 'cli' });
+  const tightened = await gatedChange(m.core, changePolicyChange(m.core, {}, 'confirm'), {
+    channel: 'core',
+    surface: 'cli',
+  });
   assert.equal(tightened.status, 'applied');
   const forThis = await preparedFor(m, changePolicyChange(m.core, {}, 'chat'));
   await seed(m, { latest: LATEST, behind: true });

@@ -384,6 +384,7 @@ export async function updateGateAtTerminal(options: TerminalGateOptions): Promis
     // The person's answer is the approval, as for `setup`'s "Connect this to an agent?": under `chat` nothing more is
     // asked; under `confirm` the typed code still is, because that is what the policy means.
     const result = await gatedChangeAtTerminal(core, updateLaterChange(core, { now }), {
+      channel: options.channel,
       env,
       output,
       rerun: ['update', '--later'],

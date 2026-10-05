@@ -1,5 +1,14 @@
 import { open, readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import {
+  APPROVAL_LIFETIMES,
+  type ApprovalRoute,
+  bindingDigestOf,
+  type OwnerScope,
+  pendingMsOf,
+  requireKnownChannel,
+} from './approval-binding.ts';
+import { deriveLegacyV1State, LEGACY_DIGEST_VERSION, type LegacyApprovalRecord } from './approval-legacy.ts';
 import { accountChannels } from './channel-words.ts';
 import {
   type ChangePolicy,
@@ -221,8 +230,8 @@ export function downloadClaimRefusal(
   );
 }
 
-/** The kind of a record. Absent is a send: every record written before changes had approvals. */
-export function approvalKind(record: Pick<ApprovalRecord, 'kind'>): ApprovalKind {
+/** The kind of a record. Absent is a send: every version-1 send record was written without one. */
+export function approvalKind(record: { kind?: ApprovalKind | undefined }): ApprovalKind {
   return record.kind ?? 'send';
 }
 
@@ -289,8 +298,13 @@ export function changeDrift(approved: ChangeBinding, now: ChangeBinding): string
   return 'the change is not the one that was approved';
 }
 
-/** Bumped whenever the canonical form of a digest changes; a record prepared under another version is refused. */
-export const DIGEST_VERSION = 1;
+/**
+ * Bumped whenever what an approval binds changes; a record prepared under another version is refused.
+ *
+ * 2 from 0.14: a record binds its route, its lifetimes and its identity as well as its content (`bindingDigest`,
+ * `approval-binding.ts`), so a record an earlier release wrote cannot be claimed here, nor one written here there.
+ */
+export const DIGEST_VERSION = 2;
 
 export interface Expectation {
   to: string[];
@@ -301,16 +315,31 @@ export interface Expectation {
 
 export interface ApprovalRecord {
   approvalId: string;
-  /** Absent on a send, so a send's record is byte for byte what it was before change approvals existed. */
-  kind?: ApprovalKind | undefined;
+  /** What it permits. Every version-2 record says, a send included; only a version-1 send was written without one. */
+  kind: ApprovalKind;
   digestVersion: number;
+  /** The manifest channel that made it (`gmail`, `slack`, `resend`, `whatsapp`, `core`), checked at creation. Bound. */
+  channel: string;
+  /** What `inboxId` names: an owner that existed, one the change creates, or none at all. Bound. */
+  ownerScope: OwnerScope;
+  /** A send's or a change's route, fixed at creation: a yes in the chat, or a person outside it. Bound. */
+  route?: ApprovalRoute | undefined;
+  /** How long it stays pending, from creation. Bound. */
+  pendingMs: number;
+  /** A send's or a change's lifetime once approved. Bound. */
+  approvedMs?: number | undefined;
   /** For a change: the id of the inbox or account it is about, or empty for one to the whole configuration. */
   inboxId: string;
   inboxSub?: string | undefined;
   draftId: string;
   /** Changes on every save of the draft; binding to it detects any edit, even one that restores identical content. */
   draftMessageId: string;
-  digest: string;
+  /** The outward content or change: the message, change or download digest. */
+  contentDigest: string;
+  /** The SHA-256 of everything the record binds (`bindingDigestOf`), recomputed from its own fields on every read. */
+  bindingDigest: string;
+  /** On a send: the owner's send epoch as it was read at prepare. Bound. */
+  sendEpoch?: number | undefined;
   /** The digest the human was actually shown when approving through a confirm channel. */
   approvedDigest?: string | undefined;
   approvedVia?: ApprovalChannel | undefined;
@@ -329,18 +358,22 @@ export interface ApprovalRecord {
   updatedAt: string;
   sentMessageId?: string | undefined;
   reason?: string | undefined;
-  /** For a change: exactly what it permits. `digest` is `changeDigest` of this. */
+  /** For a change: exactly what it permits. `contentDigest` is `changeDigest` of this. */
   change?: ChangeBinding | undefined;
-  /** For a download's question: what it asked about, and the folders it offered. `digest` is `downloadDigest`. */
+  /** For a download's question: what it asked about, and the folders it offered. `contentDigest` is `downloadDigest`. */
   download?: DownloadBinding | undefined;
 }
 
 export interface CreateApprovalInput {
+  /** The manifest channel preparing the send. A channel this release does not know is refused. */
+  channel: string;
   inboxId: string;
   inboxSub?: string | undefined;
   draftId: string;
   draftMessageId: string;
-  digest: string;
+  contentDigest: string;
+  /** The owner's send epoch, read from the configuration at prepare (`sendEpochOf`). */
+  sendEpoch: number;
   policy: SendPolicy;
   requiredPolicy: SendPolicy;
   riskFlags: string[];
@@ -348,6 +381,8 @@ export interface CreateApprovalInput {
 }
 
 export interface CreateChangeApprovalInput {
+  /** The manifest channel of the surface preparing the change: `core` for core's own. */
+  channel: string;
   change: ChangeBinding;
   /** The change policy in force before the change: it decides how the change is approved. */
   policy: ChangePolicy;
@@ -362,7 +397,7 @@ export interface LiveChange {
 /** What the caller observed in the live draft at the moment of a transition. */
 export interface LiveDraft {
   draftMessageId: string;
-  digest: string;
+  contentDigest: string;
 }
 
 /** What the product making a claim tells the store about itself. */
@@ -403,13 +438,14 @@ export interface ClaimOptions {
 export const DOWNLOAD_ANSWER_HINT =
   'It is answered, not approved with a code: the person says where in the chat, or — under a confirm change policy — at their own terminal, with the `approve` command of the channel the files come from and this id. The download that asked is then made again with this id.';
 
-export const APPROVAL_TTL_MS: number = 10 * 60 * 1000;
+/** How long a pending send or change on the `chat` route stays open: the lifetime profile's (`APPROVAL_LIFETIMES`). */
+export const APPROVAL_TTL_MS: number = APPROVAL_LIFETIMES.chat;
 /**
  * How long a download's question stays open: longer than an approval, because it waits on a person to decide where
  * files go — look in a folder, ask somebody — rather than to read a preview and say yes, and a question that has
  * expired is asked again from the start.
  */
-export const DOWNLOAD_QUESTION_TTL_MS: number = 30 * 60 * 1000;
+export const DOWNLOAD_QUESTION_TTL_MS: number = APPROVAL_LIFETIMES.download;
 /** A record left in `sending` this long belongs to a process that died mid-send: the outcome is unknown. */
 export const SENDING_STALE_MS: number = 5 * 60 * 1000;
 export const MAX_CHALLENGE_ATTEMPTS = 3;
@@ -420,7 +456,10 @@ export function stricterPolicy(a: SendPolicy, b: SendPolicy): SendPolicy {
   return POLICY_RANK[a] >= POLICY_RANK[b] ? a : b;
 }
 
-function refuse(code: ErrorCode, reason: string, record?: ApprovalRecord, hint?: string): CommsError {
+/** What a refusal repeats of the record it refuses: its id and its state. */
+type Refused = Pick<ApprovalRecord, 'approvalId' | 'state'>;
+
+function refuse(code: ErrorCode, reason: string, record?: Refused, hint?: string): CommsError {
   return new CommsError(code, `nothing was sent: ${reason}`, {
     hint: hint ?? 'Prepare the send again and show the new preview to the user.',
     details: record ? { approvalId: record.approvalId, state: record.state } : {},
@@ -428,7 +467,7 @@ function refuse(code: ErrorCode, reason: string, record?: ApprovalRecord, hint?:
 }
 
 /** The same refusal for a change, which sends nothing and so must not say that it did not. */
-function refuseChange(code: ErrorCode, reason: string, record?: ApprovalRecord, hint?: string): CommsError {
+function refuseChange(code: ErrorCode, reason: string, record?: Refused, hint?: string): CommsError {
   return new CommsError(code, `nothing was changed: ${reason}`, {
     hint: hint ?? 'Prepare the change again and show the new preview to the user.',
     details: record ? { approvalId: record.approvalId, state: record.state } : {},
@@ -441,7 +480,7 @@ function refuseChange(code: ErrorCode, reason: string, record?: ApprovalRecord, 
  * Its hint says to ask again rather than to prepare anything: what the person is shown again is the question, and it
  * is the download itself that asks it.
  */
-function refuseDownload(code: ErrorCode, reason: string, record?: ApprovalRecord, hint?: string): CommsError {
+function refuseDownload(code: ErrorCode, reason: string, record?: Refused, hint?: string): CommsError {
   return new CommsError(code, `nothing was saved: ${reason}`, {
     hint: hint ?? 'Make the download again without an answer, and show the person the new question.',
     details: record ? { choiceId: record.approvalId, state: record.state } : {},
@@ -449,10 +488,38 @@ function refuseDownload(code: ErrorCode, reason: string, record?: ApprovalRecord
 }
 
 /** The refusal in the words of the record's own kind. */
-function refusalFor(record: ApprovalRecord): typeof refuse {
+function refusalFor(record: { kind?: ApprovalKind | undefined }): typeof refuse {
   const kind = approvalKind(record);
   return kind === 'change' ? refuseChange : kind === 'download' ? refuseDownload : refuse;
 }
+
+/** Whether a record was prepared under this release's digest version: only such a record is ever claimed or approved. */
+export function isCurrentDigestVersion(record: { digestVersion?: unknown }): boolean {
+  return record.digestVersion === DIGEST_VERSION;
+}
+
+/**
+ * The refusal of a record prepared under another digest version, in the words of its own kind: the one every locked
+ * transition gives, for a caller that has to refuse it before it reads anything else — a draft, a room, a message.
+ */
+export function otherVersionRefusal(record: Refused & { kind?: ApprovalKind | undefined }): CommsError {
+  return refusalFor(record)(
+    'APPROVAL_VOID',
+    'the approval was prepared by a different version of agent-communications',
+    record,
+  );
+}
+
+/**
+ * Whose decision a revoke carries, which decides what it may do to a record from an earlier release (version 1).
+ *
+ * `person` — a person cancelled it, from a tool, a command or a terminal. `lifecycle` — the owner it belongs to is being
+ * removed, which a person approved. Either retires a version-1 record in its own shape (`revokeLegacy`), so a running
+ * earlier release can no longer claim it. `integrity` — this release found the record does not match what it binds:
+ * that never rewrites a version-1 record, which this release cannot judge by its own rules, and gets the version
+ * refusal instead. For a version-2 record all three revoke alike.
+ */
+export type RevokeDisposition = 'person' | 'lifecycle' | 'integrity';
 
 /**
  * A claim whose caller was cancelled before it changed anything (`ClaimOptions.signal`).
@@ -526,19 +593,12 @@ export function sendApprovesHint(maker: CliHandoffs, approvalId: string): string
 export class ApprovalStore {
   readonly directory: string;
   readonly #now: () => Date;
-  readonly #ttlMs: number;
-  readonly #downloadTtlMs: number;
   readonly #handoffs: CliHandoffs | undefined;
 
-  constructor(
-    stateDir: string,
-    options: { now?: () => Date; ttlMs?: number; downloadTtlMs?: number; handoffs?: CliHandoffs | undefined } = {},
-  ) {
+  constructor(stateDir: string, options: { now?: () => Date; handoffs?: CliHandoffs | undefined } = {}) {
     this.directory = join(stateDir, 'approvals');
     this.#handoffs = options.handoffs;
     this.#now = options.now ?? (() => new Date());
-    this.#ttlMs = options.ttlMs ?? APPROVAL_TTL_MS;
-    this.#downloadTtlMs = options.downloadTtlMs ?? DOWNLOAD_QUESTION_TTL_MS;
   }
 
   #path(approvalId: string, suffix = '.json'): string {
@@ -555,7 +615,7 @@ export class ApprovalStore {
     }
   }
 
-  async #write(record: ApprovalRecord): Promise<void> {
+  async #write(record: ApprovalRecord | LegacyApprovalRecord): Promise<void> {
     await writeFileAtomic(this.#path(record.approvalId), `${JSON.stringify(record, null, 2)}\n`);
   }
 
@@ -582,19 +642,46 @@ export class ApprovalStore {
     return record;
   }
 
+  /** A version-1 record as its own release derived it: the state only, nothing written (`deriveLegacyV1State`). */
+  #deriveLegacy(record: LegacyApprovalRecord): LegacyApprovalRecord {
+    const derived = deriveLegacyV1State(record, this.#now());
+    if (derived.state === record.state) return record;
+    return { ...record, state: derived.state, ...(derived.reason === undefined ? {} : { reason: derived.reason }) };
+  }
+
+  /**
+   * A record's binding, recomputed from its own fields, written as the last field set — and `kind`, `channel` and the
+   * profile checked first, so nothing is written that names a channel this release does not know.
+   */
+  #bound(record: Omit<ApprovalRecord, 'bindingDigest'>): ApprovalRecord {
+    requireKnownChannel(record.channel);
+    return { ...record, bindingDigest: bindingDigestOf(record) };
+  }
+
   async create(input: CreateApprovalInput): Promise<ApprovalRecord> {
     const now = this.#now();
+    const requiredPolicy = stricterPolicy(input.policy, input.requiredPolicy);
+    // The route is fixed here, and never moves: a person outside the chat when the policy or an escalation says so.
+    const route: ApprovalRoute = requiredPolicy === 'confirm' ? 'confirm' : 'chat';
+    const pendingMs = pendingMsOf(route);
     // Built field by field: nothing a caller passes can set the id, the state or a challenge.
-    const record: ApprovalRecord = {
+    const record = this.#bound({
       approvalId: newApprovalId(),
+      kind: 'send',
       digestVersion: DIGEST_VERSION,
+      channel: input.channel,
+      ownerScope: 'owner',
+      route,
+      pendingMs,
+      approvedMs: APPROVAL_LIFETIMES.approved,
       inboxId: input.inboxId,
       inboxSub: input.inboxSub,
       draftId: input.draftId,
       draftMessageId: input.draftMessageId,
-      digest: input.digest,
+      contentDigest: input.contentDigest,
+      sendEpoch: input.sendEpoch,
       policy: input.policy,
-      requiredPolicy: stricterPolicy(input.policy, input.requiredPolicy),
+      requiredPolicy,
       riskFlags: [...input.riskFlags],
       expect: {
         to: [...input.expect.to],
@@ -605,33 +692,38 @@ export class ApprovalStore {
       challengeAttempts: 0,
       state: 'pending',
       createdAt: now.toISOString(),
-      expiresAt: new Date(now.getTime() + this.#ttlMs).toISOString(),
+      expiresAt: new Date(now.getTime() + pendingMs).toISOString(),
       updatedAt: now.toISOString(),
-    };
+    });
     await this.#write(record);
     return record;
   }
 
   async get(approvalId: string): Promise<ApprovalRecord | null> {
     const record = await this.#read(approvalId);
-    return record ? this.#derive(record) : null;
+    if (record === null) return null;
+    // A record from an earlier release is read by its own release's rules (Task 3 types this read; until then the
+    // shape is the caller's to check, as it always was).
+    if (record.digestVersion === LEGACY_DIGEST_VERSION) {
+      return this.#deriveLegacy(record as unknown as LegacyApprovalRecord) as unknown as ApprovalRecord;
+    }
+    return this.#derive(record);
   }
 
-  /** Compare-and-swap under the record's lock. `decide` returns the next record (written) or throws (nothing written). */
+  /**
+   * Compare-and-swap under the record's lock. `decide` returns the next record (written) or throws (nothing written).
+   *
+   * A record of another digest version is refused before anything is derived or written: the derived state of a record
+   * this release cannot claim is not this release's to persist, and 0.13.0 persisted `expired` here first.
+   */
   async #transition(approvalId: string, decide: (current: ApprovalRecord) => ApprovalRecord): Promise<ApprovalRecord> {
     const path = this.#path(approvalId);
     return withFileLock(`${path}.lock`, async () => {
       const stored = await this.#read(approvalId);
       if (!stored) throw refuse('NOT_FOUND', `no approval ${approvalId}`);
+      if (!isCurrentDigestVersion(stored)) throw otherVersionRefusal(stored);
       const current = this.#derive(stored);
       if (current.state !== stored.state) await this.#write({ ...current, updatedAt: this.#now().toISOString() });
-      if (current.digestVersion !== DIGEST_VERSION) {
-        throw refusalFor(current)(
-          'APPROVAL_VOID',
-          'the approval was prepared by a different version of agent-communications',
-          current,
-        );
-      }
       const next = decide(current);
       if (next !== current) await this.#write({ ...next, updatedAt: this.#now().toISOString() });
       return next;
@@ -758,7 +850,7 @@ export class ApprovalStore {
       if (current.state !== 'pending') throw this.#stateError(current);
       if (!current.challengeHash)
         throw refusalFor(current)('APPROVAL_REQUIRED', 'no challenge was issued for this approval', current);
-      if (live.draftMessageId !== current.draftMessageId || live.digest !== current.digest) {
+      if (live.draftMessageId !== current.draftMessageId || live.contentDigest !== current.contentDigest) {
         const reason =
           kind === 'change'
             ? 'the change shown is not the one the approval was prepared for'
@@ -775,7 +867,13 @@ export class ApprovalStore {
         failure = { code: 'APPROVAL_REQUIRED', reason: 'the challenge did not match' };
         return { ...current, challengeAttempts: attempts };
       }
-      return { ...current, state: 'approved', approvedDigest: live.digest, approvedVia: via, challengeHash: undefined };
+      return {
+        ...current,
+        state: 'approved',
+        approvedDigest: live.contentDigest,
+        approvedVia: via,
+        challengeHash: undefined,
+      };
     });
     const failed = failure as Failure | null;
     if (failed) throw refusalFor(result)(failed.code, failed.reason, result);
@@ -825,7 +923,7 @@ export class ApprovalStore {
       if (live.draftMessageId !== current.draftMessageId) {
         return voidWith('APPROVAL_VOID', 'the draft was edited after the preview');
       }
-      if (live.digest !== current.digest)
+      if (live.contentDigest !== current.contentDigest)
         return voidWith('APPROVAL_VOID', 'the draft content changed after the preview');
       if (!sameExpectation(live.expect, current.expect)) {
         return voidWith('APPROVAL_VOID', 'the recipients or subject given do not match the prepared draft');
@@ -847,7 +945,7 @@ export class ApprovalStore {
                 'Ask the user to approve it outside the chat, then try again with the same approval.',
             );
           }
-          if (current.approvedDigest !== live.digest) {
+          if (current.approvedDigest !== live.contentDigest) {
             return voidWith('APPROVAL_VOID', 'the approved content is not the content now in the draft');
           }
           break;
@@ -898,14 +996,26 @@ export class ApprovalStore {
         : {}),
     };
     const digest = changeDigest(change);
-    const record: ApprovalRecord = {
+    // What `inboxId` names, from the shape `targetOf` gives a change: nothing, an owner this change creates, or one
+    // that exists. Only the last is ever "an owner that was removed".
+    const ownerScope: OwnerScope =
+      change.target === null ? 'global' : change.target.id === undefined ? 'prospective' : 'owner';
+    // The route is the live change policy, fixed now.
+    const route: ApprovalRoute = input.policy === 'confirm' ? 'confirm' : 'chat';
+    const pendingMs = pendingMsOf(route);
+    const record = this.#bound({
       approvalId: newApprovalId(),
       kind: 'change',
       digestVersion: DIGEST_VERSION,
+      channel: input.channel,
+      ownerScope,
+      route,
+      pendingMs,
+      approvedMs: APPROVAL_LIFETIMES.approved,
       inboxId: change.target?.id ?? '',
       draftId: 'change',
       draftMessageId: digest,
-      digest,
+      contentDigest: digest,
       policy: input.policy,
       requiredPolicy: input.policy,
       riskFlags: [],
@@ -914,10 +1024,10 @@ export class ApprovalStore {
       challengeAttempts: 0,
       state: 'pending',
       createdAt: now.toISOString(),
-      expiresAt: new Date(now.getTime() + this.#ttlMs).toISOString(),
+      expiresAt: new Date(now.getTime() + pendingMs).toISOString(),
       updatedAt: now.toISOString(),
       change,
-    };
+    });
     await this.#write(record);
     return record;
   }
@@ -946,7 +1056,7 @@ export class ApprovalStore {
         failure = { code: 'APPROVAL_VOID', reason };
         return { ...current, state: 'revoked', reason };
       };
-      if (digest !== current.digest) {
+      if (digest !== current.contentDigest) {
         return voidWith(
           current.change ? changeDrift(current.change, live.change) : 'the change is not the one that was approved',
         );
@@ -983,6 +1093,8 @@ export class ApprovalStore {
    * other changes are approved. A claim holds the question to the stricter of this and the policy then.
    */
   async createDownload(input: {
+    /** The manifest channel the files come from. */
+    channel: string;
     download: DownloadBinding;
     policy: ChangePolicy;
   }): Promise<ApprovalRecord & { download: DownloadBinding }> {
@@ -1009,28 +1121,31 @@ export class ApprovalStore {
     const digest = downloadDigest(download);
     // Anything but `chat` is `confirm`: a policy word this release does not know is not a reason to ask less.
     const policy: ChangePolicy = input.policy === 'chat' ? 'chat' : 'confirm';
-    const record = {
+    const record = this.#bound({
       approvalId: newApprovalId(),
-      kind: 'download' as const,
+      kind: 'download',
       digestVersion: DIGEST_VERSION,
+      channel: input.channel,
+      ownerScope: 'owner',
+      pendingMs: APPROVAL_LIFETIMES.download,
       inboxId: download.target.id,
       draftId: 'download',
       draftMessageId: digest,
-      digest,
+      contentDigest: digest,
       policy,
       requiredPolicy: policy,
       riskFlags: [],
       // Not an expectation of recipients, as for a change: the field every listing already shows.
       expect: { to: [], cc: [], bcc: [], subject: download.summary },
       challengeAttempts: 0,
-      state: 'pending' as const,
+      state: 'pending',
       createdAt: now.toISOString(),
-      expiresAt: new Date(now.getTime() + this.#downloadTtlMs).toISOString(),
+      expiresAt: new Date(now.getTime() + APPROVAL_LIFETIMES.download).toISOString(),
       updatedAt: now.toISOString(),
       download,
-    };
+    });
     await this.#write(record);
-    return record;
+    return record as ApprovalRecord & { download: DownloadBinding };
   }
 
   /**
@@ -1054,14 +1169,14 @@ export class ApprovalStore {
         throw refuseDownload('APPROVAL_VOID', 'the question was answered already, and it is answered once', current);
       }
       if (current.state !== 'pending') throw this.#stateError(current);
-      if (!current.download || downloadDigest(current.download) !== current.digest) {
+      if (!current.download || downloadDigest(current.download) !== current.contentDigest) {
         throw refuseDownload('APPROVAL_VOID', 'the question does not describe the download it is bound to', current);
       }
       return {
         ...current,
         state: 'approved',
         approvedVia: via,
-        approvedDigest: current.digest,
+        approvedDigest: current.contentDigest,
         download: { ...current.download, answer: recorded },
       };
     });
@@ -1109,10 +1224,10 @@ export class ApprovalStore {
         return { ...current, state: 'revoked', reason };
       };
       // What the record says it asked about has to be what its digest binds, or it describes nothing at all.
-      if (!current.download || downloadDigest(current.download) !== current.digest) {
+      if (!current.download || downloadDigest(current.download) !== current.contentDigest) {
         return voidWith('the question does not describe the download it is bound to');
       }
-      if (digest !== current.digest) {
+      if (digest !== current.contentDigest) {
         throw refuseDownload(
           'USAGE',
           `${downloadDrift(current.download, live)}; the question is still open`,
@@ -1140,11 +1255,62 @@ export class ApprovalStore {
     });
   }
 
-  /** Voids a pending or approved record (user revoked it, or policy tightened). Other records are left as they are. */
-  async revoke(approvalId: string, reason: string): Promise<ApprovalRecord> {
+  /**
+   * Voids a pending or approved record. Other records are left as they are.
+   *
+   * `disposition` says whose decision this is, and has no default: every caller chooses (`RevokeDisposition`). A
+   * version-1 record is retired in its own shape when a person or an owner's removal revokes it (`revokeLegacy`), and
+   * refused with the version refusal, nothing written, when this release's integrity check would have voided it.
+   */
+  async revoke(
+    approvalId: string,
+    reason: string,
+    options: { disposition: RevokeDisposition },
+  ): Promise<ApprovalRecord> {
+    if (options.disposition !== 'integrity') {
+      const raw = await this.#read(approvalId);
+      if (raw !== null && raw.digestVersion === LEGACY_DIGEST_VERSION) {
+        return (await this.revokeLegacy(approvalId, reason)) as unknown as ApprovalRecord;
+      }
+    }
     return this.#transition(approvalId, (current) =>
       current.state === 'pending' || current.state === 'approved' ? { ...current, state: 'revoked', reason } : current,
     );
+  }
+
+  /**
+   * Retires a record from an earlier release (version 1) in that release's own shape, so a process still running it
+   * can no longer claim the record — and nothing more.
+   *
+   * Under the record's own lock, `<id>.json.lock`, the one 0.13.0's transitions take, so the two serialise. The file
+   * is read again there and its state derived by its own release's rules (`deriveLegacyV1State`). Only a `pending` or
+   * `approved` record is rewritten, as itself plus `state: 'revoked'`, the reason and `updatedAt`: its digest version
+   * stays 1, a send stays without a `kind`, and no field of this release's is added — no claim marker either. Any other
+   * derived state is returned as it reads and written nothing: an expired record is never rewritten, as `revoke`
+   * leaves every finished record as it is.
+   *
+   * It reads no configuration and needs no owner, so it works on a record whose account is already gone. Its only
+   * callers are a person's revoke, the removal of the record's owner, and the legacy drain.
+   */
+  async revokeLegacy(approvalId: string, reason: string): Promise<LegacyApprovalRecord> {
+    const path = this.#path(approvalId);
+    return withFileLock(`${path}.lock`, async () => {
+      const stored = await this.#read(approvalId);
+      if (!stored) throw refuse('NOT_FOUND', `no approval ${approvalId}`);
+      if (stored.digestVersion !== LEGACY_DIGEST_VERSION) {
+        throw refusalFor(stored)(
+          'APPROVAL_VOID',
+          'the approval is not one an earlier release prepared, so it is not retired as one',
+          stored,
+        );
+      }
+      const raw = stored as unknown as LegacyApprovalRecord;
+      const derived = this.#deriveLegacy(raw);
+      if (derived.state !== 'pending' && derived.state !== 'approved') return derived;
+      const revoked: LegacyApprovalRecord = { ...raw, state: 'revoked', reason, updatedAt: this.#now().toISOString() };
+      await this.#write(revoked);
+      return revoked;
+    });
   }
 
   async list(filter: { inboxId?: string; states?: ApprovalState[] } = {}): Promise<ApprovalRecord[]> {

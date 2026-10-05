@@ -1,26 +1,40 @@
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { deriveLegacyV1State } from '../src/approval-legacy.ts';
 import {
   type ApprovalRecord,
   ApprovalStore,
   type ChangeBinding,
   changeDigest,
+  downloadDigest,
   type Expectation,
   publicView,
 } from '../src/approvals.ts';
+import { openCore } from '../src/core.ts';
 import { CommsError } from '../src/errors.ts';
+import { CORE_CALLER } from '../src/handoffs.ts';
 import { APPROVAL_ID_PATTERN } from '../src/ids.ts';
 import { withFileLock } from '../src/lock.ts';
+import { revokeApproval } from '../src/operations/maintenance.ts';
+import {
+  readV1Record,
+  V1_CREATED_AT,
+  v1ChangeRecord,
+  v1DownloadRecord,
+  v1RecordPath,
+  v1SendRecord,
+  writeV1Record,
+} from './fixtures/approval-v1-0.13.0.ts';
 import { coreHandoffs } from './helpers/handoffs.ts';
 import { tempDir } from './helpers/temp.ts';
 
 const INBOX = 'ibx_AAAAAAAAAAAAAAAA';
 const OTHER_INBOX = 'ibx_BBBBBBBBBBBBBBBB';
 const EXPECT: Expectation = { to: ['sam@partner.test'], cc: [], bcc: [], subject: 'Re: plan' };
-const LIVE_DRAFT = { draftMessageId: 'msg-v1', digest: 'digest-A' };
+const LIVE_DRAFT = { draftMessageId: 'msg-v1', contentDigest: 'digest-A' };
 
 function clock(start = Date.parse('2026-09-18T10:00:00.000Z')) {
   let t = start;
@@ -40,11 +54,13 @@ async function setup(policy: 'chat' | 'confirm' = 'chat', escalated = false) {
   });
   const store = new ApprovalStore(dir, { now: time.now, handoffs });
   const record = await store.create({
+    channel: 'gmail',
     inboxId: INBOX,
     inboxSub: 'sub-1',
     draftId: 'r-draft-1',
     draftMessageId: 'msg-v1',
-    digest: 'digest-A',
+    contentDigest: 'digest-A',
+    sendEpoch: 0,
     policy,
     requiredPolicy: escalated ? 'confirm' : policy,
     riskFlags: escalated ? ['tainted-recipient'] : [],
@@ -114,7 +130,7 @@ test('a display name around the same address is not a different recipient', asyn
 test('integrity failures void the record for good; each carries its specific code', async () => {
   const cases: [string, Partial<ReturnType<typeof live>>, RegExp, string][] = [
     ['A→B→A swap restores content, not the message id', { draftMessageId: 'msg-v3' }, /edited after/, 'APPROVAL_VOID'],
-    ['content changed', { digest: 'digest-B' }, /content changed/, 'APPROVAL_VOID'],
+    ['content changed', { contentDigest: 'digest-B' }, /content changed/, 'APPROVAL_VOID'],
     ['other inbox', { inboxId: OTHER_INBOX }, /different inbox/, 'APPROVAL_VOID'],
     ['other account', { inboxSub: 'sub-2' }, /different account/, 'APPROVAL_VOID'],
     ['no account named at all', { inboxSub: undefined }, /could not be confirmed/, 'APPROVAL_VOID'],
@@ -190,11 +206,13 @@ test('a record that requires "never" is refused, whatever the live policy says',
   const time = clock();
   const store = new ApprovalStore(tempDir(), { now: time.now });
   const record = await store.create({
+    channel: 'gmail',
     inboxId: INBOX,
     inboxSub: 'sub-1',
     draftId: 'r-draft-1',
     draftMessageId: 'msg-v1',
-    digest: 'digest-A',
+    contentDigest: 'digest-A',
+    sendEpoch: 0,
     policy: 'chat',
     requiredPolicy: 'never',
     riskFlags: ['policy-tightened'],
@@ -205,11 +223,13 @@ test('a record that requires "never" is refused, whatever the live policy says',
 
   // And a human approval does not rescue it either: `never` means never.
   const second = await store.create({
+    channel: 'gmail',
     inboxId: INBOX,
     inboxSub: 'sub-1',
     draftId: 'r-draft-2',
     draftMessageId: 'msg-v1',
-    digest: 'digest-A',
+    contentDigest: 'digest-A',
+    sendEpoch: 0,
     policy: 'chat',
     requiredPolicy: 'never',
     riskFlags: [],
@@ -223,7 +243,12 @@ test('approving content that changed since prepare voids the record (the human w
   const { store, record } = await setup('confirm');
   const challenge = await store.issueChallenge(record.approvalId);
   await assert.rejects(
-    store.approve(record.approvalId, 'terminal', { draftMessageId: 'msg-v2', digest: 'digest-HARMLESS' }, challenge),
+    store.approve(
+      record.approvalId,
+      'terminal',
+      { draftMessageId: 'msg-v2', contentDigest: 'digest-HARMLESS' },
+      challenge,
+    ),
     isRefusal(/changed after the preview/, 'APPROVAL_VOID'),
   );
   assert.equal((await store.get(record.approvalId))?.state, 'revoked');
@@ -273,7 +298,7 @@ test('failed sends are recorded; revoke leaves finished records alone', async ()
   const { store, record } = await setup();
   await store.claimForSend(record.approvalId, live());
   assert.equal((await store.complete(record.approvalId, { error: 'backendError' })).state, 'failed');
-  assert.equal((await store.revoke(record.approvalId, 'user')).state, 'failed');
+  assert.equal((await store.revoke(record.approvalId, 'user', { disposition: 'person' })).state, 'failed');
 });
 
 test('create ignores caller-supplied ids, states and challenges', async () => {
@@ -294,8 +319,8 @@ test('create ignores caller-supplied ids, states and challenges', async () => {
 
 test('list filters by inbox and state; malformed ids are refused before touching the file system', async () => {
   const { store, record } = await setup();
-  const second = await store.create({ ...record, inboxId: OTHER_INBOX });
-  await store.revoke(second.approvalId, 'user');
+  const second = await store.create({ ...record, sendEpoch: 0, inboxId: OTHER_INBOX });
+  await store.revoke(second.approvalId, 'user', { disposition: 'person' });
   assert.deepEqual(
     (await store.list({ inboxId: INBOX })).map((r) => r.approvalId),
     [record.approvalId],
@@ -314,9 +339,9 @@ const CHANGE: ChangeBinding = {
 
 test('a change approval is never spent as a send, nor a send approval as a change — and trying harms neither', async () => {
   const { store, record: send } = await setup();
-  const change = await store.createChange({ change: CHANGE, policy: 'chat' });
+  const change = await store.createChange({ channel: 'slack', change: CHANGE, policy: 'chat' });
   assert.equal(change.kind, 'change');
-  assert.equal(send.kind, undefined, 'a send record is written exactly as it was before changes had approvals');
+  assert.equal(send.kind, 'send', 'a version-2 send says it is one');
 
   const wrongKind = (pattern: RegExp) => (e: unknown) =>
     e instanceof CommsError && e.code === 'USAGE' && pattern.test(e.message);
@@ -349,7 +374,7 @@ test('a change approval is never spent as a send, nor a send approval as a chang
 
 test('a change approval is claimed once, even if its record file were reset', async () => {
   const { store } = await setup();
-  const change = await store.createChange({ change: CHANGE, policy: 'chat' });
+  const change = await store.createChange({ channel: 'slack', change: CHANGE, policy: 'chat' });
   const claim = () => store.claimForChange(change.approvalId, { change: CHANGE, policy: 'chat' });
   assert.equal((await claim()).state, 'used');
   await assert.rejects(
@@ -363,9 +388,13 @@ test('a change approval is claimed once, even if its record file were reset', as
 
 test('a change approval is bound to a digest the store computes, of the change it stores', async () => {
   const { store } = await setup();
-  const change = await store.createChange({ change: CHANGE, policy: 'confirm' });
-  assert.equal(change.digest, changeDigest(CHANGE));
-  assert.equal(change.draftMessageId, change.digest, 'the digest stands in for a draft revision, as a reaction’s does');
+  const change = await store.createChange({ channel: 'slack', change: CHANGE, policy: 'confirm' });
+  assert.equal(change.contentDigest, changeDigest(CHANGE));
+  assert.equal(
+    change.draftMessageId,
+    change.contentDigest,
+    'the digest stands in for a draft revision, as a reaction’s does',
+  );
   assert.equal(change.inboxId, 'acc_AAAAAAAAAAAAAAAA');
   assert.equal(change.requiredPolicy, 'confirm');
   // The order the classifier lists loosenings in does not matter; the values, the account and the effects do.
@@ -452,7 +481,7 @@ test('a send claim cancelled while it waits for the lock writes nothing: the rec
 
 test('a change claim cancelled while it waits for the lock writes nothing, and the approval can still be claimed', async () => {
   const { store } = await setup();
-  const change = await store.createChange({ change: CHANGE, policy: 'chat' });
+  const change = await store.createChange({ channel: 'slack', change: CHANGE, policy: 'chat' });
   const claim = (signal?: AbortSignal) =>
     store.claimForChange(change.approvalId, { change: CHANGE, policy: 'chat' }, signal ? { signal } : {});
 
@@ -474,6 +503,7 @@ test('a download’s question claimed by a call cancelled while it waits for the
     names: ['report.pdf'],
   };
   const question = await store.createDownload({
+    channel: 'slack',
     download: {
       ...request,
       summary: 'where to save 1 file from acme/slack',
@@ -491,4 +521,277 @@ test('a download’s question claimed by a call cancelled while it waits for the
   });
   assert.equal((await store.get(question.approvalId))?.state, 'pending');
   assert.equal((await claim()).state, 'used');
+});
+
+// ── Records from an earlier release (version 1) ─────────────────────────────────────────────────────────────────
+
+/*
+ * 0.13.0 wrote version 1: a send with no `kind`, one `digest`, no binding. This release reads such a record but never
+ * claims, approves, answers or completes it (D1's version gate), and writes it only to retire it — in its own shape,
+ * when a person cancels it or its owner is removed. Each case below checks the bytes on disk, not only the result.
+ */
+
+const V1_SEND_ID = `ap_${'0'.repeat(25)}1`;
+const V1_APPROVED_ID = `ap_${'0'.repeat(25)}2`;
+const V1_CHANGE_ID = `ap_${'0'.repeat(25)}3`;
+const V1_DOWNLOAD_ID = `ap_${'0'.repeat(25)}4`;
+const V1_DOWNLOAD = {
+  summary: 'where to save 1 file from acme/slack',
+  target: { kind: 'account' as const, name: 'acme/slack', id: 'acc_AAAAAAAAAAAAAAAA' },
+  operation: 'files.download',
+  request: { selection: { kind: 'files', fileIds: ['F01'] }, maxFiles: 50 },
+  files: ['F01'],
+  names: ['report.pdf'],
+  folders: { downloads: '/d', current: '/c' },
+};
+
+/** A store over a state directory holding one version-1 record of each kind, as 0.13.0 left them, at 10:00. */
+function legacyStore(state: { send?: string; approved?: string } = {}) {
+  const dir = tempDir();
+  const time = clock(Date.parse(V1_CREATED_AT));
+  const store = new ApprovalStore(dir, {
+    now: time.now,
+    handoffs: coreHandoffs({ configDir: dir, stateDir: dir, dataDir: dir, secretsDir: dir, downloadsDir: dir }),
+  });
+  const bytes = {
+    send: writeV1Record(
+      dir,
+      v1SendRecord({
+        approvalId: V1_SEND_ID,
+        inboxId: INBOX,
+        inboxSub: 'sub-1',
+        draftId: 'r-draft-1',
+        draftMessageId: 'msg-v1',
+        digest: 'digest-A',
+        expect: EXPECT,
+        state: state.send ?? 'pending',
+      }),
+    ),
+    approved: writeV1Record(
+      dir,
+      v1SendRecord({
+        approvalId: V1_APPROVED_ID,
+        inboxId: INBOX,
+        inboxSub: 'sub-1',
+        draftId: 'r-draft-2',
+        draftMessageId: 'msg-v1',
+        digest: 'digest-A',
+        policy: 'confirm',
+        expect: EXPECT,
+        state: state.approved ?? 'approved',
+        approvedDigest: 'digest-A',
+        approvedVia: 'terminal',
+      }),
+    ),
+    change: writeV1Record(
+      dir,
+      v1ChangeRecord({ approvalId: V1_CHANGE_ID, digest: changeDigest(CHANGE), change: { ...CHANGE } }),
+    ),
+    download: writeV1Record(
+      dir,
+      v1DownloadRecord({
+        approvalId: V1_DOWNLOAD_ID,
+        digest: downloadDigest(V1_DOWNLOAD),
+        download: { ...V1_DOWNLOAD },
+      }),
+    ),
+  };
+  return { dir, store, time, bytes };
+}
+
+function isVersionRefusal(e: unknown): boolean {
+  return (
+    e instanceof CommsError &&
+    e.code === 'APPROVAL_VOID' &&
+    /prepared by a different version of agent-communications/.test(e.message)
+  );
+}
+
+/** The record's bytes are what they were, and no claim marker was made beside it. */
+function untouched(dir: string, approvalId: string, before: string, why: string) {
+  assert.equal(readV1Record(dir, approvalId), before, `${why}: the file is byte-identical`);
+  assert.equal(existsSync(v1RecordPath(dir, approvalId, '.claim')), false, `${why}: no claim marker`);
+}
+
+test('a version-1 record is refused by the version gate on every claim, approve, challenge, answer and complete — writing nothing', async () => {
+  for (const moment of ['fresh', 'past its original expiry'] as const) {
+    const { dir, store, time, bytes } = legacyStore();
+    if (moment !== 'fresh') time.advance(31 * 60 * 1000);
+    const attempts: [string, string, string, () => Promise<unknown>][] = [
+      ['issueChallenge', V1_SEND_ID, bytes.send, () => store.issueChallenge(V1_SEND_ID)],
+      ['approve', V1_SEND_ID, bytes.send, () => store.approve(V1_SEND_ID, 'terminal', LIVE_DRAFT, 'ABCD')],
+      ['claimForSend (pending)', V1_SEND_ID, bytes.send, () => store.claimForSend(V1_SEND_ID, live())],
+      [
+        'claimForSend (approved)',
+        V1_APPROVED_ID,
+        bytes.approved,
+        () => store.claimForSend(V1_APPROVED_ID, live({ policy: 'confirm' })),
+      ],
+      ['complete', V1_SEND_ID, bytes.send, () => store.complete(V1_SEND_ID, { sentMessageId: 's1' })],
+      ['issueChallenge (change)', V1_CHANGE_ID, bytes.change, () => store.issueChallenge(V1_CHANGE_ID, 'change')],
+      [
+        'approve (change)',
+        V1_CHANGE_ID,
+        bytes.change,
+        () =>
+          store.approve(
+            V1_CHANGE_ID,
+            'terminal',
+            { draftMessageId: changeDigest(CHANGE), contentDigest: changeDigest(CHANGE) },
+            'ABCD',
+            'change',
+          ),
+      ],
+      [
+        'claimForChange',
+        V1_CHANGE_ID,
+        bytes.change,
+        () => store.claimForChange(V1_CHANGE_ID, { change: CHANGE, policy: 'chat' }),
+      ],
+      [
+        'answerDownload',
+        V1_DOWNLOAD_ID,
+        bytes.download,
+        () => store.answerDownload(V1_DOWNLOAD_ID, 'terminal', { choice: 'downloads' }),
+      ],
+      [
+        'claimForDownload',
+        V1_DOWNLOAD_ID,
+        bytes.download,
+        () =>
+          store.claimForDownload(
+            V1_DOWNLOAD_ID,
+            {
+              target: V1_DOWNLOAD.target,
+              operation: V1_DOWNLOAD.operation,
+              request: V1_DOWNLOAD.request,
+              files: V1_DOWNLOAD.files,
+              names: V1_DOWNLOAD.names,
+            },
+            { policy: 'chat' },
+          ),
+      ],
+    ];
+    for (const [name, approvalId, before, attempt] of attempts) {
+      await assert.rejects(attempt(), isVersionRefusal, `${name}, ${moment}`);
+      untouched(dir, approvalId, before, `${name}, ${moment}`);
+    }
+  }
+});
+
+test('a person’s revoke of a fresh v1 record writes a v1-shaped revoked', async () => {
+  for (const disposition of ['person', 'lifecycle'] as const) {
+    const { dir, store, time, bytes } = legacyStore();
+    time.advance(60 * 1000);
+    for (const [approvalId, before] of [
+      [V1_SEND_ID, bytes.send],
+      [V1_APPROVED_ID, bytes.approved],
+      [V1_CHANGE_ID, bytes.change],
+      [V1_DOWNLOAD_ID, bytes.download],
+    ] as const) {
+      const result = await store.revoke(approvalId, 'revoked by the user', { disposition });
+      assert.equal(result.state, 'revoked', `${disposition} ${approvalId}`);
+      const original = JSON.parse(before) as Record<string, unknown>;
+      const after = JSON.parse(readV1Record(dir, approvalId)) as Record<string, unknown>;
+      assert.equal(after.digestVersion, 1);
+      // The original, plus the state, the reason and `updatedAt` — and nothing else: no field of version 2.
+      assert.deepStrictEqual(after, {
+        ...original,
+        state: 'revoked',
+        reason: 'revoked by the user',
+        updatedAt: '2026-09-18T10:01:00.000Z',
+      });
+      assert.deepStrictEqual(Object.keys(after).sort(), [...new Set([...Object.keys(original), 'reason'])].sort());
+      for (const added of [
+        'contentDigest',
+        'bindingDigest',
+        'channel',
+        'ownerScope',
+        'route',
+        'revokedAt',
+        'expiredAt',
+      ]) {
+        assert.equal(added in after, false, `${approvalId}: no ${added}`);
+      }
+      if (approvalId === V1_SEND_ID || approvalId === V1_APPROVED_ID)
+        assert.equal('kind' in after, false, 'a v1 send stays without a kind');
+      assert.equal(existsSync(v1RecordPath(dir, approvalId, '.claim')), false, 'no claim marker');
+      // And 0.13.0's own rules read it as revoked: a running 0.13 process can no longer claim it.
+      assert.equal(deriveLegacyV1State(after as never, time.now()).state, 'revoked');
+    }
+  }
+});
+
+test('a person’s revoke of an expired v1 record writes nothing', async () => {
+  const { dir, store, time, bytes } = legacyStore();
+  time.advance(10 * 60 * 1000); // exactly the original expiry: expired, as 0.13.0 derived it.
+  for (const [approvalId, before] of [
+    [V1_SEND_ID, bytes.send],
+    [V1_APPROVED_ID, bytes.approved],
+    [V1_CHANGE_ID, bytes.change],
+  ] as const) {
+    const result = await store.revoke(approvalId, 'revoked by the user', { disposition: 'person' });
+    assert.equal(result.state, 'expired', `${approvalId}: returned as it reads, not an error`);
+    untouched(dir, approvalId, before, approvalId);
+  }
+});
+
+test('revoking a v1 record in any other derived state writes nothing', async () => {
+  const states: [string, number, string][] = [
+    ['used', 0, 'used'],
+    ['failed', 0, 'failed'],
+    ['revoked', 0, 'revoked'],
+    ['sending', 60 * 1000, 'sending'],
+    ['sending', 5 * 60 * 1000, 'unknown'],
+  ];
+  for (const [stored, after, derived] of states) {
+    const { dir, store, time, bytes } = legacyStore({ send: stored });
+    time.advance(after);
+    const result = await store.revoke(V1_SEND_ID, 'revoked by the user', { disposition: 'person' });
+    assert.equal(result.state, derived, `${stored} after ${after} ms`);
+    untouched(dir, V1_SEND_ID, bytes.send, `${stored} after ${after} ms`);
+  }
+});
+
+test('an integrity revoke of a fresh v1 record gets the version refusal, and the file is byte-identical', async () => {
+  const { dir, store, bytes } = legacyStore();
+  for (const [approvalId, before] of [
+    [V1_SEND_ID, bytes.send],
+    [V1_APPROVED_ID, bytes.approved],
+    [V1_CHANGE_ID, bytes.change],
+    [V1_DOWNLOAD_ID, bytes.download],
+  ] as const) {
+    await assert.rejects(store.revoke(approvalId, 'the draft changed', { disposition: 'integrity' }), isVersionRefusal);
+    untouched(dir, approvalId, before, approvalId);
+  }
+});
+
+test('a v1 record stays revocable after its owner is gone: agentcomms approvals revoke needs neither the account nor any config', async () => {
+  const dir = tempDir();
+  // A config with no accounts at all: the record's `acc_` owner was removed by another path.
+  writeFileSync(join(dir, 'config.json'), `${JSON.stringify({ version: 2 }, null, 2)}\n`);
+  const core = openCore({
+    env: { AGENT_COMMS_CONFIG_DIR: dir, HOME: dir, USERPROFILE: dir },
+    now: () => new Date(Date.parse(V1_CREATED_AT) + 60 * 1000),
+    caller: CORE_CALLER,
+  });
+  const record = v1SendRecord({
+    approvalId: V1_SEND_ID,
+    inboxId: 'acc_AAAAAAAAAAAAAAAA',
+    inboxSub: 'U0POSTER',
+    draftId: 'sd_post',
+    draftMessageId: 'rev-3',
+    digest: 'digest-A',
+    expect: { to: ['C0ROOM'], cc: [], bcc: [], subject: 'reaches 3' },
+  });
+  writeV1Record(core.paths.stateDir, record);
+  const view = await revokeApproval(core, V1_SEND_ID, 'cli');
+  assert.equal(view.state, 'revoked');
+  const after = JSON.parse(readV1Record(core.paths.stateDir, V1_SEND_ID)) as Record<string, unknown>;
+  assert.deepStrictEqual(after, {
+    ...record,
+    state: 'revoked',
+    reason: 'revoked by the user',
+    updatedAt: '2026-09-18T10:01:00.000Z',
+  });
 });

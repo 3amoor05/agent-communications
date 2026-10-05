@@ -365,7 +365,8 @@ export async function main(
   const core = openCore({ env, platform, pathOverrides, caller: CORE_CALLER });
   // Opened with core's own caller, so these are always there: every command this prints is located from here.
   const handoffs = core.handoffs as CliHandoffs;
-  const approval = { approvalId: values.approval, env, output };
+  // Every change this CLI prepares is core's own: its approval records `core` as its channel.
+  const approval = { channel: 'core', approvalId: values.approval, env, output };
   /** An exit status for a command that printed its result and still did not do what was asked. */
   let softExit: number = EXIT_CODES.OK;
 
@@ -400,7 +401,7 @@ export async function main(
         streams: defaultStreams,
         approvals: takesApproval(command, sub) ? [values.approval] : [],
         approvalClaim: CHANGE_CLAIM,
-        ...terminalUpdateHooks(core, env, { output, streams: defaultStreams }),
+        ...terminalUpdateHooks(core, env, { channel: 'core', output, streams: defaultStreams }),
       });
     });
     if (gated !== EXIT_CODES.OK) return gated;

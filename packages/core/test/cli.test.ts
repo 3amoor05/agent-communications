@@ -1292,7 +1292,7 @@ test('approve is refused to an agent and to anything without a terminal, touches
   const { approvalId } = await prepareChange(
     core,
     { before, after, summary: 'Stop raising risky sends' },
-    { surface: 'mcp' },
+    { channel: 'core', surface: 'mcp' },
   );
 
   const agent = run(['approve', approvalId, '--json'], { AGENT_COMMS_CONFIG_DIR: config, CLAUDECODE: '1' });

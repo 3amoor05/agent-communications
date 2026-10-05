@@ -200,7 +200,9 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
   /** One changing call: the change this tool plans, run through the one flow, returned in its one shape. */
   const change = async <T>(build: () => GatedChange<T>, approvalId: string | undefined) => {
     try {
-      return reply(changeToolResult(await gatedChange(core, build(), { surface: 'mcp', approvalId, platform })));
+      return reply(
+        changeToolResult(await gatedChange(core, build(), { surface: 'mcp', channel: 'core', approvalId, platform })),
+      );
     } catch (error) {
       return fail(error);
     }
@@ -612,6 +614,7 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
         });
         const outcome = await gatedChange(core, install, {
           surface: 'mcp',
+          channel: 'core',
           approvalId: args.approvalId,
           platform,
         });
@@ -767,6 +770,7 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
         });
         const outcome = await gatedChange(core, migration, {
           surface: 'mcp',
+          channel: 'core',
           approvalId: args.approvalId,
           platform,
         });

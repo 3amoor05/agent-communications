@@ -345,10 +345,12 @@ function machineWithGmail() {
 
 async function sendRecord(core: ReturnType<typeof openCore>) {
   return core.approvals.create({
+    channel: 'gmail',
     inboxId: 'ibx_AAAAAAAAAAAAAAAA',
     draftId: 'r-1',
     draftMessageId: 'm-1',
-    digest: 'd-1',
+    contentDigest: 'd-1',
+    sendEpoch: 0,
     policy: 'confirm',
     requiredPolicy: 'confirm',
     riskFlags: [],
@@ -384,6 +386,7 @@ test("a send's approval offered as a change names every sending channel's approv
 test("a change's approval offered as a send is approved with this installation's own approve (7d-core)", async () => {
   const { core } = machineWithGmail();
   const change = await core.approvals.createChange({
+    channel: 'core',
     change: { summary: 'x', target: { kind: 'account', name: 'acme/slack' }, loosened: [], effects: ['x'] },
     policy: 'chat',
   });
