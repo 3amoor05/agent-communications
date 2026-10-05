@@ -37,6 +37,12 @@ function setChangePolicy(harness: Harness, policy: 'chat' | 'confirm'): void {
   );
 }
 
+/** The four folder pins a registration is written with (CUE-403), in the order the installer writes them. */
+function pinWords(paths: { configDir: string; stateDir: string; dataDir: string; secretsDir: string }): string[] {
+  const { configDir, stateDir, dataDir, secretsDir } = paths;
+  return ['--config-dir', configDir, '--state-dir', stateDir, '--data-dir', dataDir, '--secrets-dir', secretsDir];
+}
+
 test('mcp install --account prints an entry that starts this release’s server pinned to the account', async () => {
   const harness = await newHarness();
   await harness.ready(ACCOUNT);
@@ -56,7 +62,14 @@ test('mcp install --account prints an entry that starts this release’s server 
   assert.equal(printed.code, 0, printed.stdout);
   const data = printed.data() as { applied: boolean; entry: { args: string[] } };
   assert.equal(data.applied, false, '--print writes nothing');
-  assert.deepEqual(data.entry.args, ['-y', `@agentcomms/whatsapp@${VERSION}`, 'mcp', '--account', ACCOUNT]);
+  assert.deepEqual(data.entry.args, [
+    '-y',
+    `@agentcomms/whatsapp@${VERSION}`,
+    ...pinWords(openCore({ env: harness.env }).paths),
+    'mcp',
+    '--account',
+    ACCOUNT,
+  ]);
 
   // `mcp --account` before `install` is the same pin: Commander hands a repeated option to the parent.
   const parent = await harness.cli([

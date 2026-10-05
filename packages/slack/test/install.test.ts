@@ -229,6 +229,12 @@ test('a missing client CLI is reported as not registered, not as done', async ()
   assert.match(result.notApplied ?? '', /claude was not found on PATH/);
 });
 
+/** The four folder pins a registration is written with (CUE-403), in the order the installer writes them. */
+function pinWords(paths: { configDir: string; stateDir: string; dataDir: string; secretsDir: string }): string[] {
+  const { configDir, stateDir, dataDir, secretsDir } = paths;
+  return ['--config-dir', configDir, '--state-dir', stateDir, '--data-dir', dataDir, '--secrets-dir', secretsDir];
+}
+
 test('--launcher npx keeps the `mcp` command: @agentcomms/slack is the whole CLI', async () => {
   const { harness, context } = await setUp();
   await harness.addWorkspace({ alias: 'acme' });
@@ -239,7 +245,14 @@ test('--launcher npx keeps the `mcp` command: @agentcomms/slack is the whole CLI
     noVerify: true,
     workspace: 'acme',
   });
-  assert.deepEqual(result.entry.args, ['-y', `@agentcomms/slack@${VERSION}`, 'mcp', '--workspace', 'acme']);
+  assert.deepEqual(result.entry.args, [
+    '-y',
+    `@agentcomms/slack@${VERSION}`,
+    ...pinWords(context.core.paths),
+    'mcp',
+    '--workspace',
+    'acme',
+  ]);
 });
 
 test('VS Code gets the shape its user mcp.json documents, and our older entry moves rather than doubling', async () => {

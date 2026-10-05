@@ -128,8 +128,11 @@ test('doctor diagnoses a legacy registration without mutating it, and its approv
   const before = readFileSync(cursor, 'utf8');
 
   const report = await doctor(m.core, m.env, { keyring: null });
-  const incomplete = report.checks.find((check) => !check.ok && /suite path pins/.test(check.detail));
+  // It still starts, so it is something to look at — a warning, not a failure — with the command that pins it.
+  const incomplete = report.checks.find((check) => /suite path pins/.test(check.detail));
   assert.ok(incomplete, JSON.stringify(report.checks));
+  assert.equal(incomplete.ok, true, JSON.stringify(incomplete));
+  assert.equal(incomplete.warn, true, JSON.stringify(incomplete));
   for (const word of ['--name work', '--inbox acme/gmail', '--launcher npx', '--force']) {
     assert.match(incomplete.fix ?? '', new RegExp(word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }

@@ -133,6 +133,12 @@ async function coreServer(harness: Harness, env: NodeJS.ProcessEnv) {
 
 const body = (preview: string) => preview.split('\n').slice(1).join('\n');
 
+/** The four folder pins a registration is written with (CUE-403), in the order the installer writes them. */
+function pinWords(paths: { configDir: string; stateDir: string; dataDir: string; secretsDir: string }): string[] {
+  const { configDir, stateDir, dataDir, secretsDir } = paths;
+  return ['--config-dir', configDir, '--state-dir', stateDir, '--data-dir', dataDir, '--secrets-dir', secretsDir];
+}
+
 test('an approval from comms_server_install registers from `agent-slack mcp install --approval`, and the other way round', async () => {
   const { harness, home, env } = await machine();
   // Another Slack server already registered with cursor, which only this package's own product warns about.
@@ -188,6 +194,7 @@ test('an approval from comms_server_install registers from `agent-slack mcp inst
     assert.deepEqual(written.mcpServers.slack?.args, [
       '-y',
       `@agentcomms/slack@${VERSION}`,
+      ...pinWords(harness.core.paths),
       'mcp',
       '--workspace',
       'acme',
@@ -220,7 +227,7 @@ test('an approval from comms_server_install registers from `agent-slack mcp inst
     assert.equal(done.isError, undefined, JSON.stringify(done.structuredContent));
     assert.equal(done.structuredContent?.applied, true);
     const settings = JSON.parse(await readFile(gemini, 'utf8')) as { mcpServers: { slack: { args: string[] } } };
-    assert.deepEqual(settings.mcpServers.slack.args, [entry, 'mcp']);
+    assert.deepEqual(settings.mcpServers.slack.args, [entry, ...pinWords(harness.core.paths), 'mcp']);
   } finally {
     await server.close();
   }

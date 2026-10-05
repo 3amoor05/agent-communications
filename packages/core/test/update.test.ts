@@ -104,6 +104,12 @@ interface Machine {
   core: Core;
 }
 
+/** The four folder pins a registration is written with (CUE-403), in the order the installer writes them. */
+function pinWords(m: Machine): string[] {
+  const { configDir, stateDir, dataDir, secretsDir } = m.core.paths;
+  return ['--config-dir', configDir, '--state-dir', stateDir, '--data-dir', dataDir, '--secrets-dir', secretsDir];
+}
+
 /** A home of its own, a config directory in it, and a PATH holding only the stand-ins. */
 function machine(body: Record<string, unknown> = ACCOUNTS): Machine {
   const home = tempDir('comms-update-');
@@ -716,6 +722,7 @@ test('update prepares one approval listing every step, writes nothing before it,
     assert.deepEqual(Object.keys(entries).sort(), ['agentcomms', 'gmail', 'slack-acme']);
     assert.deepEqual(entries.gmail?.args, [
       managedRuntimeEntry(m.dataDir, PACKAGES.gmail, LATEST),
+      ...pinWords(m),
       'mcp',
       '--inbox',
       'acme/gmail',
@@ -723,12 +730,14 @@ test('update prepares one approval listing every step, writes nothing before it,
     ]);
     assert.deepEqual(entries['slack-acme']?.args, [
       managedRuntimeEntry(m.dataDir, PACKAGES.slack, LATEST),
+      ...pinWords(m),
       'mcp',
       '--workspace',
       'acme/slack',
     ]);
-    assert.deepEqual(entries.agentcomms?.args, ['-y', `${PACKAGES.core}@${LATEST}`, 'mcp']);
-    assert.equal(entries.gmail?.env?.AGENT_COMMS_CONFIG_DIR, m.configDir);
+    assert.deepEqual(entries.agentcomms?.args, ['-y', `${PACKAGES.core}@${LATEST}`, ...pinWords(m), 'mcp']);
+    // This machine's folders are pins now, not the environment (CUE-403).
+    assert.equal(entries.gmail?.env?.AGENT_COMMS_CONFIG_DIR, undefined);
 
     assert.match(String(result.next), /Restart cursor to load the new servers/);
     assert.match(String(result.next), /comms_server_prune/);
@@ -762,7 +771,7 @@ test('a registration is started through its new entry, with its pins, and must a
     assert.equal(registration?.outcome, 'registered');
     assert.equal(registration?.verification, 'passed', String(registration?.detail));
     assert.equal(registration?.name, 'gmail-work', 'the name it had');
-    assert.deepEqual(startedWith(m, PACKAGES.gmail, LATEST), [['mcp', '--inbox', 'acme/gmail']]);
+    assert.deepEqual(startedWith(m, PACKAGES.gmail, LATEST), [[...pinWords(m), 'mcp', '--inbox', 'acme/gmail']]);
   } finally {
     await close();
   }
@@ -799,11 +808,12 @@ test('a Resend registration pinned with the generic --account is registered agai
     assert.deepEqual(registration?.narrowing, ['--account', 'acme/resend']);
     assert.deepEqual(cursorEntries(m).resend?.args, [
       managedRuntimeEntry(m.dataDir, PACKAGES.resend, LATEST),
+      ...pinWords(m),
       'mcp',
       '--account',
       'acme/resend',
     ]);
-    assert.deepEqual(startedWith(m, PACKAGES.resend, LATEST), [['mcp', '--account', 'acme/resend']]);
+    assert.deepEqual(startedWith(m, PACKAGES.resend, LATEST), [[...pinWords(m), 'mcp', '--account', 'acme/resend']]);
   } finally {
     await close();
   }
@@ -917,7 +927,11 @@ test('a runtime that cannot be installed leaves its registrations as they were, 
       '--inbox',
       'acme/gmail',
     ]);
-    assert.deepEqual(entries.slack?.args, [managedRuntimeEntry(m.dataDir, PACKAGES.slack, LATEST), 'mcp']);
+    assert.deepEqual(entries.slack?.args, [
+      managedRuntimeEntry(m.dataDir, PACKAGES.slack, LATEST),
+      ...pinWords(m),
+      'mcp',
+    ]);
     assert.match(result.next, /Restart cursor/);
   } finally {
     await close();
@@ -1423,7 +1437,13 @@ test('`agentcomms update` gives the tool’s check and preview, and claims the a
     });
     assert.equal(done.status, 0, done.stdout + done.stderr);
     assert.equal((done.json().data as Record<string, unknown>).status, 'updated');
-    assert.deepEqual(cursorEntries(m).gmail?.args, ['-y', `${PACKAGES.gmailMcp}@${LATEST}`, '--inbox', 'acme/gmail']);
+    assert.deepEqual(cursorEntries(m).gmail?.args, [
+      '-y',
+      `${PACKAGES.gmailMcp}@${LATEST}`,
+      ...pinWords(m),
+      '--inbox',
+      'acme/gmail',
+    ]);
     assert.equal(readFileSync(config, 'utf8').includes(`@${OLD}`), false);
   } finally {
     await close();

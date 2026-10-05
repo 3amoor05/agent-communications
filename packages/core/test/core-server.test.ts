@@ -383,6 +383,12 @@ test('the doctor over MCP is the same report, and the keychain it probes is the 
 });
 
 /** A machine whose every other check passes, with Gmail and Slack accounts, and client configs of its own. */
+/** The four folder pins every registration carries (CUE-403), in the order the installer writes them, before `mcp`. */
+function pinWords(paths: { configDir: string; stateDir: string; dataDir: string; secretsDir: string }): string[] {
+  const { configDir, stateDir, dataDir, secretsDir } = paths;
+  return ['--config-dir', configDir, '--state-dir', stateDir, '--data-dir', dataDir, '--secrets-dir', secretsDir];
+}
+
 function doctorMachine(): Machine {
   const base = machine({
     secrets: { store: 'file' },
@@ -432,19 +438,46 @@ test('the doctor: a channel with accounts that no client starts is something to 
   assert.equal(report.ok, true, 'a warning leaves `ok` alone');
   assert.match(renderDoctor(report), /^warn gmail server {5}acme\/gmail is set up here/m);
 
-  // Registered with Cursor, from a runtime that is there: said, with the client and the file.
+  // Registered with Cursor before 0.13.1, without its folder pins (CUE-403): it starts, so it is something to look at,
+  // in one row, with the command that pins them — and the client's file is left as it was.
   const entry = managedRuntimeEntry(m.core.paths.dataDir, '@agentcomms/gmail', VERSION);
   mkdirSync(dirname(entry), { recursive: true });
   writeFileSync(entry, '');
   const cursor = join(m.home, '.cursor', 'mcp.json');
   mkdirSync(dirname(cursor));
-  writeFileSync(cursor, JSON.stringify({ mcpServers: { gmail: { command: process.execPath, args: [entry, 'mcp'] } } }));
-  const registered = (await doctorChecks(m)).checks.find((check) => check.name === 'gmail server');
-  assert.deepEqual(registered, {
-    name: 'gmail server',
-    ok: true,
-    detail: `registered with cursor as "gmail" in ${cursor}`,
-  });
+  const legacy = JSON.stringify({ mcpServers: { gmail: { command: process.execPath, args: [entry, 'mcp'] } } });
+  writeFileSync(cursor, legacy);
+  const unpinned = await doctorChecks(m);
+  assert.deepEqual(
+    unpinned.checks.filter((check) => check.name === 'gmail server'),
+    [
+      {
+        name: 'gmail server',
+        ok: true,
+        warn: true,
+        detail: `registered with cursor as "gmail" in ${cursor}, but its suite path pins are incomplete (missing --config-dir, --state-dir, --data-dir, --secrets-dir), so it finds its folders from whatever environment cursor starts it with`,
+        fix: 'Register it again: `agent-gmail mcp install --client cursor --force`.',
+      },
+    ],
+  );
+  assert.equal(unpinned.report.ok, true, 'an entry that starts is not a failure');
+  assert.equal(readFileSync(cursor, 'utf8'), legacy);
+
+  // Registered with every pin, from a runtime that is there: said, with the client and the file.
+  writeFileSync(
+    cursor,
+    JSON.stringify({
+      mcpServers: { gmail: { command: process.execPath, args: [entry, ...pinWords(m.core.paths), 'mcp'] } },
+    }),
+  );
+  const registered = (await doctorChecks(m)).checks.filter((check) => check.name === 'gmail server');
+  assert.deepEqual(registered, [
+    {
+      name: 'gmail server',
+      ok: true,
+      detail: `registered with cursor as "gmail" in ${cursor}`,
+    },
+  ]);
 
   // A config that cannot be read is said to be unreadable, and Slack is not said to be registered nowhere.
   const claude = join(m.home, '.claude.json');
@@ -482,7 +515,8 @@ test('the doctor fails a registration whose runtime has gone, and says what regi
     {
       name: 'slack server',
       ok: false,
-      detail: `registered with claude-code as "slack" in ${claude}, but ${gone} is no longer there, so claude-code cannot start it`,
+      // One row for the entry, naming both of its problems: the one command repairs them both.
+      detail: `registered with claude-code as "slack" in ${claude}, but ${gone} is no longer there, so claude-code cannot start it; its suite path pins are incomplete (missing --config-dir, --state-dir, --data-dir, --secrets-dir) too`,
       fix: 'Register it again: `agent-slack mcp install --client claude-code --workspace acme/slack --force`.',
     },
   ]);
@@ -799,11 +833,13 @@ test(
       assert.equal(result.verification, 'passed', String(result.verifyDetail));
       assert.match(String(result.restart), /Restart claude-code to load "agentcomms"/);
       const [added] = readClaude();
-      assert.match(added ?? '', /^mcp add-json agentcomms \{.*"mcp".*\} --scope user$/);
-      assert.ok(
-        (added ?? '').includes(`"AGENT_COMMS_CONFIG_DIR":${JSON.stringify(m.configDir)}`),
-        'this config, named',
-      );
+      const json = /^mcp add-json agentcomms (\{.*"mcp".*\}) --scope user$/.exec(added ?? '')?.[1];
+      assert.ok(json, added);
+      const written = JSON.parse(json) as { args: string[]; env?: Record<string, string> };
+      // This machine's folders, pinned as options before `mcp` — not named by the environment (CUE-403).
+      const mcp = written.args.indexOf('mcp');
+      assert.deepEqual(written.args.slice(mcp - 8, mcp), pinWords(m.core.paths), 'this config, pinned');
+      assert.equal(written.env?.AGENT_COMMS_CONFIG_DIR, undefined, 'the folder is a pin, not the environment');
 
       // Spent: the same approval does not register it again.
       const replayed = await connect(m).then(async (again) => {
@@ -1014,7 +1050,12 @@ test("a channel's own product registers with its own warnings, under the approva
   assert.equal(done.result.applied, true);
   assert.deepEqual(done.result.warnings, ['another Slack server posts with its own token'], 'the channel’s warning');
   const written = JSON.parse(readFileSync(join(m.home, '.cursor', 'mcp.json'), 'utf8'));
-  assert.deepEqual(written.mcpServers.slack.args.slice(0, 3), ['-y', `@agentcomms/slack@${VERSION}`, 'mcp']);
+  assert.deepEqual(written.mcpServers.slack.args.slice(0, 11), [
+    '-y',
+    `@agentcomms/slack@${VERSION}`,
+    ...pinWords(m.core.paths),
+    'mcp',
+  ]);
 });
 
 test('a product that is not the channel’s cannot register or prune that channel', () => {
@@ -1477,6 +1518,8 @@ test('comms_channels_available says what is installed and where each server is r
         launcher: 'managed',
         version: '0.0.9',
         narrowing: ['--inbox', 'acme/gmail'],
+        // Written before CUE-403: no folder pins.
+        pathPins: {},
         missing: gmailEntry,
         // Older than this core: seen without asking the registry.
         behindCore: true,
@@ -1496,6 +1539,7 @@ test('comms_channels_available says what is installed and where each server is r
         launcher: 'npx',
         version: '0.0.8',
         narrowing: ['--account', 'acme/resend'],
+        pathPins: {},
         missing: null,
         behindCore: true,
       },
@@ -1555,7 +1599,14 @@ test('WhatsApp from chat: comms_server_install pins it by `account`, and comms_c
     const done = await ok('comms_server_install', { ...args, approvalId: asked.approvalId });
     assert.equal(done.applied, true);
     const entry = JSON.parse(readFileSync(join(m.home, '.cursor', 'mcp.json'), 'utf8')).mcpServers.whatsapp;
-    assert.deepEqual(entry.args, ['-y', `@agentcomms/whatsapp@${VERSION}`, 'mcp', '--account', 'personal/whatsapp']);
+    assert.deepEqual(entry.args, [
+      '-y',
+      `@agentcomms/whatsapp@${VERSION}`,
+      ...pinWords(m.core.paths),
+      'mcp',
+      '--account',
+      'personal/whatsapp',
+    ]);
 
     // Unpinned, the preview says it reaches every account; another platform's name, or its own pin's name, is refused.
     const open = await ok('comms_server_install', { ...args, account: undefined, name: 'whatsapp-all' });

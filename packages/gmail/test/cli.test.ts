@@ -562,6 +562,12 @@ test('tightening how sending is approved is free; loosening it waits for a chang
   assert.equal(unchanged.json<Envelope<{ sendPolicy: string }>>().data?.sendPolicy, 'never');
 });
 
+/** The four folder pins a registration is written with (CUE-403), in the order the installer writes them. */
+function pinWords(paths: { configDir: string; stateDir: string; dataDir: string; secretsDir: string }): string[] {
+  const { configDir, stateDir, dataDir, secretsDir } = paths;
+  return ['--config-dir', configDir, '--state-dir', stateDir, '--data-dir', dataDir, '--secrets-dir', secretsDir];
+}
+
 test('mcp install writes an entry that really starts the server, once the registration is approved', async () => {
   const harness = await newHarness({ accounts: [{ sub: 'sub-1', email: 'jo@example.test' }] });
   await harness.addInbox({ alias: 'work', email: 'jo@example.test', sub: 'sub-1', refreshToken: 'rt_x' });
@@ -598,7 +604,10 @@ test('mcp install writes an entry that really starts the server, once the regist
   // The entry must not rely on the client's PATH, which is minimal when it starts a server. Tested with
   // `isAbsolute` rather than by looking for a `/`, which is what it meant to ask and is also true on Windows.
   assert.ok(isAbsolute(data.entry.command), `an absolute interpreter path, got ${data.entry.command}`);
-  assert.equal(data.entry.env.AGENT_COMMS_CONFIG_DIR, harness.configDir);
+  // This config, pinned as options before `mcp` rather than named by the environment (CUE-403).
+  assert.equal(data.entry.env.AGENT_COMMS_CONFIG_DIR, undefined);
+  const mcp = data.entry.args.indexOf('mcp');
+  assert.deepEqual(data.entry.args.slice(mcp - 8, mcp), pinWords(harness.core.paths));
   assert.ok((data.entry.env.PATH ?? '').length > 0);
   assert.ok(data.entry.args.includes('mcp'));
   assert.equal(data.verified, true, data.verifyDetail);

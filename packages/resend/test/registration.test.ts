@@ -133,6 +133,12 @@ async function cursorEntry(m: Machine, name = 'resend'): Promise<{ command: stri
   ).mcpServers[name];
 }
 
+/** The four folder pins a registration is written with (CUE-403), in the order the installer writes them. */
+function pinWords(paths: { configDir: string; stateDir: string; dataDir: string; secretsDir: string }): string[] {
+  const { configDir, stateDir, dataDir, secretsDir } = paths;
+  return ['--config-dir', configDir, '--state-dir', stateDir, '--data-dir', dataDir, '--secrets-dir', secretsDir];
+}
+
 test('pinned with `account`: prepared by comms_server_install, written with --account, kept by --force and by update', async () => {
   const m = await machine();
   const npm = await registry();
@@ -172,6 +178,7 @@ test('pinned with `account`: prepared by comms_server_install, written with --ac
     assert.deepEqual((await cursorEntry(m))?.args, [
       '-y',
       `@agentcomms/resend@${VERSION}`,
+      ...pinWords(m.harness.core.paths),
       'mcp',
       '--account',
       'acme/resend',
@@ -208,6 +215,7 @@ test('pinned with `account`: prepared by comms_server_install, written with --ac
     assert.deepEqual((await cursorEntry(m))?.args, [
       '-y',
       `@agentcomms/resend@${LATEST}`,
+      ...pinWords(m.harness.core.paths),
       'mcp',
       '--account',
       'acme/resend',

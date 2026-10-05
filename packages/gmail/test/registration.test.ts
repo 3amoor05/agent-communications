@@ -109,6 +109,12 @@ async function readyRuntime(harness: Harness): Promise<string> {
 
 const envelopeError = (run: CliRun) => run.envelope().error;
 
+/** The four folder pins a registration is written with (CUE-403), in the order the installer writes them. */
+function pinWords(paths: { configDir: string; stateDir: string; dataDir: string; secretsDir: string }): string[] {
+  const { configDir, stateDir, dataDir, secretsDir } = paths;
+  return ['--config-dir', configDir, '--state-dir', stateDir, '--data-dir', dataDir, '--secrets-dir', secretsDir];
+}
+
 test('an approval from comms_server_install registers from `agent-gmail mcp install --approval`, and the other way round', async () => {
   const { harness, home, env } = await machine();
   const server = await coreServer(harness, env);
@@ -167,6 +173,7 @@ test('an approval from comms_server_install registers from `agent-gmail mcp inst
     assert.deepEqual(written.mcpServers.gmail.args, [
       '-y',
       `@agentcomms/gmail-mcp@${VERSION}`,
+      ...pinWords(harness.core.paths),
       '--inbox',
       'work',
       '--read-only',
@@ -188,7 +195,7 @@ test('an approval from comms_server_install registers from `agent-gmail mcp inst
     );
     assert.equal(done.applied, true);
     const settings = JSON.parse(await readFile(gemini, 'utf8')) as { mcpServers: { gmail: { args: string[] } } };
-    assert.deepEqual(settings.mcpServers.gmail.args, [runtime, 'mcp']);
+    assert.deepEqual(settings.mcpServers.gmail.args, [runtime, ...pinWords(harness.core.paths), 'mcp']);
 
     // Spent: the same approval registers nothing a second time, from either surface.
     const again = await cli(

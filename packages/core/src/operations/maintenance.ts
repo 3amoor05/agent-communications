@@ -274,7 +274,9 @@ async function updateCheckLine(core: Core, env: NodeJS.ProcessEnv): Promise<Doct
  * none of the tools, and the doctor said all was well. So every client config is read for every server:
  *
  *  - an entry whose command or script has gone fails, with the command that registers it again — the client starts
- *    it, it exits, and the client says only that it failed;
+ *    it, it exits, and the client says only that it failed — in one row that names every problem with it;
+ *  - an entry without all four folder pins (CUE-403), written before 0.13.1, still starts, so it is something to look
+ *    at, with the same command, which pins them;
  *  - a channel with accounts here that no client starts is something to look at, not a failure: it may be used only
  *    from a terminal, but somebody who connected a mailbox and sees no Gmail tools has usually hit exactly this;
  *  - a client config that cannot be read is said to be unreadable, and nothing is concluded from its silence.
@@ -303,21 +305,31 @@ async function registrationChecks(
     const name = `${channel.channel} server`;
     for (const entry of channel.registered) {
       const missingPins = REGISTRATION_PATH_KEYS.filter((key) => entry.pathPins[key] === undefined);
-      if (missingPins.length > 0) {
+      const unpinned =
+        missingPins.length === 0
+          ? ''
+          : `its suite path pins are incomplete (missing ${missingPins.map((key) => `--${key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`).join(', ')})`;
+      if (entry.missing !== null) {
+        // One row for the entry, naming every problem with it: the one command below repairs them all.
         checks.push({
           name,
           ok: false,
-          detail: `registered with ${where(entry)}, but its suite path pins are incomplete (missing ${missingPins.map((key) => `--${key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`).join(', ')})`,
+          detail: `registered with ${where(entry)}, but ${entry.missing} is no longer there, so ${entry.client} cannot start it${unpinned === '' ? '' : `; ${unpinned} too`}`,
+          fix: registerAgain(channel.channel, entry, platform),
+        });
+        continue;
+      }
+      // Registered before 0.13.1, it still starts, and finds its folders as it always did: something to look at, which
+      // registering it again repairs by pinning them.
+      if (unpinned !== '') {
+        checks.push({
+          name,
+          ok: true,
+          warn: true,
+          detail: `registered with ${where(entry)}, but ${unpinned}, so it finds its folders from whatever environment ${entry.client} starts it with`,
           fix: registerAgain(channel.channel, entry, platform),
         });
       }
-      if (entry.missing === null) continue;
-      checks.push({
-        name,
-        ok: false,
-        detail: `registered with ${where(entry)}, but ${entry.missing} is no longer there, so ${entry.client} cannot start it`,
-        fix: registerAgain(channel.channel, entry, platform),
-      });
     }
     const working = channel.registered.filter(
       (entry) => entry.missing === null && REGISTRATION_PATH_KEYS.every((key) => entry.pathPins[key] !== undefined),
