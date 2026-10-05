@@ -273,8 +273,16 @@ export function filesUnder(dir) {
  */
 export function suiteTraces(shell, expected = []) {
   const allowed = new Set(expected.map((path) => path.split('/').join(sep)));
-  return filesUnder(shell.decoys).filter((path) => !allowed.has(path));
+  return filesUnder(shell.decoys).filter((path) => !allowed.has(path) && !POWERSHELL_STARTUP_CACHE.test(path));
 }
+
+/**
+ * The one file a shell itself leaves in the decoy home: Windows PowerShell's and PowerShell 7's startup-profile cache,
+ * written under the profile's `AppData\Local` by `-NonInteractive` runs. It is the shell's own, not a suite folder, and
+ * nothing else of PowerShell's — or under it — is let through.
+ */
+const POWERSHELL_STARTUP_CACHE =
+  /^home[\\/]AppData[\\/]Local[\\/]Microsoft[\\/](?:Windows[\\/])?PowerShell[\\/]StartupProfileData-NonInteractive$/;
 
 /** Every attempt the seal refused in processes writing to `sealLog`: a keychain, a connection, a lookup. */
 export function sealAttempts(sealLog) {
@@ -390,8 +398,14 @@ function pwshPath() {
 export function windowsShells() {
   const system = process.env.SystemRoot ?? 'C:\\Windows';
   const encoded = (line) => Buffer.from(line, 'utf16le').toString('base64');
+  /*
+   * PowerShell run with `-EncodedCommand` exits 0 or 1 by whether the script failed, not with the code of the program
+   * the line started; a person reads that code from `$LASTEXITCODE`. So the script ends by exiting with it — and with 1
+   * when no program ran at all, which is no success. The line itself is the first statement, unchanged.
+   */
+  const exitWithProgram = '\nexit $(if ($null -eq $LASTEXITCODE) { 1 } else { $LASTEXITCODE })';
   const powershell = (program) => (line, options) =>
-    spawnSync(program, ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded(line)], {
+    spawnSync(program, ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded(`${line}${exitWithProgram}`)], {
       ...RUN,
       ...options,
       input: '',

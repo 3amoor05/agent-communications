@@ -503,13 +503,27 @@ test('every kind of command a handoff names pins exactly the folders it declares
     FOUR_FOLDERS,
   );
 
-  held_ = held(m.print(['mcp', 'prune', '--json']));
-  add(
-    'prune',
-    commandEndingWith(held_.hint, ['mcp', 'prune', '--approval', held_.id], platform),
-    ['mcp', 'prune', '--approval', held_.id],
-    FOUR_FOLDERS,
-  );
+  if (platform === 'win32') {
+    /*
+     * Windows has no `ps`, and prune deletes nothing it cannot show unused: it lists the runtime as not checked, says
+     * why, and changes nothing — so there is no change to approve and no handoff to run (mcp-install.ts,
+     * `runningCommandLines`).
+     */
+    const pruned = m.print(['mcp', 'prune', '--json']);
+    assert.equal(pruned.status, 0, pruned.stdout);
+    const { data } = envelope(pruned);
+    assert.match(data.refused, /running processes on this machine could not be listed/);
+    assert.deepEqual(data.removed, []);
+    assert.deepEqual(commandsIn(pruned.stdout), [], 'no command when nothing is to be approved');
+  } else {
+    held_ = held(m.print(['mcp', 'prune', '--json']));
+    add(
+      'prune',
+      commandEndingWith(held_.hint, ['mcp', 'prune', '--approval', held_.id], platform),
+      ['mcp', 'prune', '--approval', held_.id],
+      FOUR_FOLDERS,
+    );
+  }
 
   held_ = held(m.print(['update', '--later', '--json']));
   add(
@@ -565,13 +579,27 @@ test('every kind of command a handoff names pins exactly the folders it declares
 
   assert.deepEqual(
     rows.map((row) => row.kind),
-    ['install', 'prune', 'update', 'doctor', 'setup', 'secrets', 'help', 'channels', 'approvals'],
+    [
+      'install',
+      ...(platform === 'win32' ? [] : ['prune']),
+      'update',
+      'doctor',
+      'setup',
+      'secrets',
+      'help',
+      'channels',
+      'approvals',
+    ],
   );
   assert.ok(
     JSON.parse(readFileSync(join(m.home, '.cursor', 'mcp.json'), 'utf8')).mcpServers.agentcomms,
     'the registration is in the person’s own client',
   );
-  assert.ok(!existsSync(join(m.folders.dataDir, 'runtime', '0.0.1-core')), 'prune removed the declared data’s runtime');
+  assert.equal(
+    existsSync(join(m.folders.dataDir, 'runtime', '0.0.1-core')),
+    platform === 'win32',
+    'prune removed the declared data’s runtime, where it can list what is running',
+  );
   assert.ok(
     filesUnder(m.folders.stateDir).some((file) => /update/.test(file)),
     `update --later is in the declared state: ${filesUnder(m.folders.stateDir)}`,
