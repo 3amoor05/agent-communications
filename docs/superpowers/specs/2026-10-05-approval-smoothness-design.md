@@ -90,7 +90,8 @@ implement the first two. The short repeat preview is dropped for this release an
 - **`never` revokes; loosening revives nothing.** `never` exists only for sends (`ChangePolicy` has no such value,
   `packages/core/src/config.ts:37, 45`). The guarantee rests on a durable fence, not on a sweep. Config holds a
   per-owner **send epoch**, an integer (absent reads as 0). Every config write that makes an owner's *effective* send
-  policy `never` — its own setting, or an inherited organisation or default change — increments the epoch of every
+  policy `never` — its own setting, or the default for owners without one; effective policy is the owner's own setting
+  or the default and nothing else (`packages/core/src/config.ts:760`) — increments the epoch of every
   owner whose effective policy that write turns to `never`, in the same atomic config write
   (`packages/gmail/src/operations/inboxes.ts:228` is the Gmail case today). A send record stores the owner's epoch as
   read at prepare, bound into `identity`. A claim, execute, or terminal/form approval compares it with the live epoch
@@ -99,6 +100,16 @@ implement the first two. The short repeat preview is dropped for this release an
   its record after a `never` change landed (prepare reads policy and creates the record outside one transaction,
   `packages/resend/src/operations/send.ts:293`), or a record a sweep failed to revoke, can never send after the policy
   is loosened: its epoch is behind for good. Loosening never decrements the epoch.
+
+  **Order between a claim and a `never` change.** The two never hold each other's lock, so they cannot deadlock. A
+  claim (and a terminal/form approval) takes the record lock and then reads the live epoch from config afresh — a
+  config read is an atomic read of the committed file, not a snapshot taken before the lock — and that read is its
+  linearization point. The `never` change commits the new epoch under the config lock, releases it, and only then takes
+  each affected record's lock in turn for the sweep. So every claim or approval that takes a record lock after the
+  commit sees the new epoch and revokes, and no provider call follows it. A claim that read the old epoch before the
+  commit was already admitted: it moves the record to `sending` and its send proceeds, as any send already in flight
+  when the policy changes does — nothing recalls it. That is the stated limit, and it is reported: the `never` change
+  lists every record it found `sending` (“already being sent when sending was turned off”).
 
   The sweep is cleanup on top of the fence: the operation that sets `never` also revokes, under each record's lock,
   every `pending` and `approved` send record of the owners it fenced, so that status and lists say so at once; a record
@@ -286,7 +297,10 @@ the server that prepared the draft.
 
 Core exports `approvalOutcome(record, context)`, where `context` is the action (approve, claim, wait, revoke,
 inspect), the caller's expected kind and ownership (account/workspace/inbox pin), the stored route, the effective live
-policy, whether a send client is trusted, and any challenge. Every surface uses it — Gmail terminal begin/finish,
+policy, the owner's live send epoch, whether a send client is trusted, and any challenge. A `pending` or `approved`
+send record whose stored epoch is behind the live epoch classifies as `revoked` with reason `sending was turned off
+since this was prepared (policy: never)` and `claimable: false` on every surface — status, wait, every list and D9 —
+whatever the live policy is now; an inspection derives this without writing, and the next locked action persists it. Every surface uses it — Gmail terminal begin/finish,
 Gmail execute and both draft rechecks, Gmail MCP routing, Resend, Slack posts/files/reactions, changes, downloads,
 lists and waits. Ownership and kind are checked before state or routing. A nonexistent id and an existing id that is
 foreign, wrong-kind or pinned away all return the identical `NOT_FOUND` code, message and details, with
@@ -901,10 +915,18 @@ lookup failures stay attached to their draft and do not raise the concurrency or
 
 ## 5. Tests owed
 
+- **Round-27 cases:** with barriers, (a) a claim that takes the record lock and reads epoch N, then a `never` change
+  commits N+1 before the claim writes `sending`: the claim proceeds and the change lists that record as already being
+  sent; (b) the `never` change commits N+1 before the claim takes the record lock: the claim revokes and the provider
+  stand-in records no call; (c) the same two orders for a terminal and a trusted-form approval, which never write
+  `approved` in order (b); and a lock-order test showing neither operation holds the other's lock. After a failed sweep
+  and `never → chat`: zero-wait status, a wait, every list and D9 show the stale-epoch record as `revoked`
+  (`claimable: false`) without writing to it, and the next claim persists the revocation. A change of the default send
+  policy to `never` raises the epoch of every owner with no setting of its own and no other's.
 - **Round-26 cases:** a sweep that fails to revoke a `pending` and an `approved` record, followed by `never → chat` and
   `never → confirm`: each record's claim, execute and approval revoke it on the stale epoch; a prepare that read the
   `chat` policy and epoch N, then wrote its record after a completed `never` change (epoch N+1) and that change's sweep,
-  followed by loosening: its claim revokes on the stale epoch; an inherited organisation or default change that turns an
+  followed by loosening: its claim revokes on the stale epoch; a default-policy change that turns an
   owner's effective policy to `never` increments that owner's epoch and no other's; loosening leaves every epoch as it
   is; the epoch is in `identity`, so editing it in a stored record breaks `bindingDigest`.
 - **Round-25 cases:** a `pending` and an `approved` send each taken through `chat → never → chat` and
