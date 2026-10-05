@@ -1,6 +1,6 @@
 # CUE-404 — approving a send without fighting the clock — design
 
-Status: **revised after round 5 (1 P1, 5 P2, all addressed)**, 2026-10-05, from Linear CUE-404 (High; the
+Status: **revised after round 6 (1 P1, 3 P2, all addressed)**, 2026-10-05, from Linear CUE-404 (High; the
 owner: "this is very not smooth") and a cited research pass over this repository, the MCP specification and the
 clients' documentation. Depends on CUE-403 (the CLIs on PATH,
 [its spec](2026-10-04-cli-path-shims-design.md)) for every printed terminal command to work; ships after it.
@@ -55,6 +55,9 @@ implement the first two. The short repeat preview is dropped for this release an
 | Core stores `sentMessageId` only when the `used` transition is written. After a provider succeeds, Gmail, Slack and Resend each preserve the successful outward result if that write fails and say the approval will read as `unknown`; none may invent `used`. Gmail currently converts a missing API id to `""`, and Slack does the same for a missing message `ts`, so provider acceptance does not currently guarantee a reportable id. | `packages/core/src/approvals.ts:1068-1075`; `packages/gmail/src/operations/send.ts:691-728`; `packages/slack/src/operations/send.ts:771-775, 883-910, 1114-1133`; `packages/resend/src/operations/send.ts:685-715`; `packages/gmail/src/gmail-api/transport.ts:533-546`; `packages/slack/src/operations/send.ts:771-775` |
 | Ambiguous provider responses currently leave the approval in `sending` and return retryable `TRANSIENT` (or preserve another retryable provider code): Gmail and Resend do this for email, and Slack does it for messages, file shares and reactions. | `packages/gmail/src/operations/send.ts:652-688`; `packages/resend/src/operations/send.ts:628-675`; `packages/slack/src/operations/send.ts:753-768, 831-862, 1079-1108, 1349-1384, 1468-1472` |
 | Approval records currently have only generic `createdAt`, `expiresAt` and `updatedAt`; stale `sending` is derived from `updatedAt`, so state-specific transition times are not recoverable. | `packages/core/src/approvals.ts:302-330, 512-530` |
+| Current change and download claims enter `used` without a state-specific terminal timestamp; they receive only the transition's generic `updatedAt`. | `packages/core/src/approvals.ts:905, 1060` |
+| Every successful claim creates `<approvalId>.claim` with `O_EXCL` beside the JSON record; the marker is the cross-process single-use guarantee. | `packages/core/src/approvals.ts:797-813` |
+| Recipient analysis separately calls `correspondentDomains`, which lists up to 200 sent messages and reads their metadata before the per-address `hasWrittenTo` checks. Terminal approval runs recipient analysis again. | `packages/gmail/src/operations/send.ts:175-200, 240-265, 471-495` |
 | Core's current `list()` reads every approval file sequentially and catches a failed `get()` as `null`, silently omitting that record. | `packages/core/src/approvals.ts:1085-1103` |
 | The audit append API accepts a `durable` option, and its filesystem helper fsyncs the file and its directory before returning when that option is true. | `packages/core/src/audit.ts:75-85`; `packages/core/src/fs.ts:107-130` |
 | Gmail draft edits and message organisation already use `APPROVAL_PENDING` with “being sent right now” and “wait for the send to finish” when a send is in flight. | `packages/gmail/src/operations/drafts.ts:561-567`; `packages/gmail/src/operations/organise.ts:128-141` |
@@ -118,10 +121,12 @@ mixed-process casualty.
 - for an outward send, entering `sending` persists `sendingAt`. A send claimed directly from pending has
   `createdAt <= sendingAt < expiresAt` and no `approvedAt`; one claimed after approval has
   `approvedAt <= sendingAt < usableUntil`. `sendingAt` remains on `used`, `failed` and `unknown`;
-- for an outward send, entering `used` requires a non-empty provider `sentMessageId` and persists `sentAt`, with
-  `sendingAt <= sentAt`. Entering `failed` persists `failedAt`, with `sendingAt <= failedAt`. `sentAt` exists only on
-  a used send, and `failedAt` only on a failed send. Change and download records may use their existing `used` state
-  without send timestamps or a provider id;
+- entering `used` always persists a finite `usedAt`. For an outward send it also requires a non-empty provider
+  `sentMessageId` and persists `sentAt`, with `sendingAt <= sentAt` and `usedAt == sentAt`. A change claimed directly
+  from pending has `createdAt <= usedAt < expiresAt`; one claimed after approval has
+  `approvedAt <= usedAt < usableUntil`. A download has `createdAt <= usedAt < expiresAt`. `usedAt` exists only on a
+  `used` record. Entering `failed` persists `failedAt`, with `sendingAt <= failedAt`; `sentAt` exists only on a used
+  send, and `failedAt` only on a failed send. Changes and downloads still have no send timestamp or provider id;
 - entering `revoked` persists `revokedAt`, with `createdAt <= revokedAt` and, when the record had been approved,
   `approvedAt <= revokedAt`. The locked transition first derives expiry, so `revokedAt` must be before the pending
   or approved deadline that applied; a revoke at the boundary produces `expired` instead;
@@ -140,9 +145,10 @@ mixed-process casualty.
   Boundary equality is expired everywhere. The final states `used`, `failed`, `unknown`, `revoked` and `expired`
   never change because of the observation clock, so a later clock rollback cannot turn one into `expired` or revive
   it;
-- send-specific timestamps are finite and appear exactly where that state or its retained history requires them:
-  `sendingAt` on `sending`/`used`/`failed`/`unknown`, `sentAt` only on `used`, `failedAt` only on `failed`,
-  while all kinds put `revokedAt` only on `revoked` and `expiredAt` only on `expired`. `reason: "clock-anomaly"`
+- state-specific timestamps are finite and appear exactly where that state or its retained history requires them:
+  every kind has `usedAt` only on `used`; a used send has `usedAt == sentAt`; sends have `sendingAt` on
+  `sending`/`used`/`failed`/`unknown`, `sentAt` only on `used`, and `failedAt` only on `failed`, while all kinds put
+  `revokedAt` only on `revoked` and `expiredAt` only on `expired`. `reason: "clock-anomaly"`
   appears only on the anomaly expiry above. `approvedAt` and `usableUntil` remain together on every later
   send/change state reached from approval. A contradictory field or any violation of the ordering above, other than
   that single stated anomaly exemption, is corrupt;
@@ -212,8 +218,8 @@ be claimed. Downloads retain their public `answered` classification for stored `
 | provider response leaves this call's outcome uncertain | immediately return non-retryable `SEND_OUTCOME_UNKNOWN` with `approval.state: sending`, `claimable: false`, `sendingAt` and derived `unknownAt`; the send may have happened |
 | `sending`, inside the stale limit, observed by another call | retryable `APPROVAL_PENDING`: “being sent by another call since …; wait for it”; never “prepare again” |
 | `unknown` at or after the stale-send limit | `SEND_OUTCOME_UNKNOWN`: final; the send may have happened; check Sent/the channel before doing anything else |
-| used send | `APPROVAL_VOID`: already used at `sentAt`, with its non-empty provider message id |
-| used change | `APPROVAL_VOID`: the approved change was already claimed; no provider-id or “sent” wording |
+| used send | `APPROVAL_VOID`: already used at `usedAt == sentAt`, with its non-empty provider message id |
+| used change | `APPROVAL_VOID`: the approved change was already claimed at `usedAt`; no provider-id or “sent” wording |
 | `failed` | `APPROVAL_VOID` with channel-specific truth. Gmail/Resend certain failures say nothing was sent. A Slack file failure says **“nothing was posted”** and preserves `uploaded` and `possiblyUploaded` ids/names because bytes may already have reached Slack (`packages/slack/src/operations/send.ts:1016-1018, 1032-1035, 1088-1111, 1137-1172`) |
 | `revoked` | `APPROVAL_VOID` with its reason; an explicit decline is “declined”, while cancellation is not a revoke |
 | download pending | `pending` until answered, expired or a wait times out; under `chat` the answer may be relayed, under `confirm` it comes from the terminal or trusted form |
@@ -321,23 +327,37 @@ wrappers regex-stripped before exact canonical-address comparison because Gmail 
 not described as RFC address parsing (`packages/gmail/src/operations/send.ts:209-221`). This replaces the current
 five-hit, unpaginated check.
 
-One recipient-analysis operation has **one budget of 200 Gmail message-metadata reads across all recipients**, not
-200 per recipient. Cached answers cost no budget. On a miss, every `getMessageMetadata` consumes one unit before the
-call; pagination and recipients proceed in deterministic To/Cc/Bcc canonical-address order, and no 201st metadata
-read is started. If the budget runs out part-way through one recipient, that recipient and every still-unchecked
-recipient are conservatively `not written` with `historyCheck: budget-exhausted`; their taint escalation remains and
-the preview says **“prior-send history was not fully checked (the 200-read budget was reached); treated as not
-previously written.”** A search or metadata provider error similarly yields `historyCheck: provider-error`, keeps the
-escalation and says **“prior-send history could not be checked; treated as not previously written.”** It does not
-turn provider doubt into a correspondence exemption.
+The per-address `hasWrittenTo` work in one recipient-analysis operation has **one budget of 200 Gmail history
+requests across all recipients**, not 200 per recipient. The budget includes both kinds of provider work: every
+`listMessages` search/page call and every `getMessageMetadata` read consumes one unit before it starts. Cached answers
+cost no budget. Pagination and recipients proceed in deterministic To/Cc/Bcc canonical-address order, and no 201st
+history request is started. If the budget runs out before either kind of call, the current recipient and every
+still-unchecked recipient are conservatively `not written` with `historyCheck: budget-exhausted`; their taint
+escalation remains and the preview says **“prior-send history was not fully checked (the 200-read budget was reached);
+treated as not previously written.”** A search/list or metadata provider error similarly yields
+`historyCheck: provider-error`, keeps the escalation and says **“prior-send history could not be checked; treated as
+not previously written.”** It does not turn provider doubt into a correspondence exemption.
 
-Results are cached for ten minutes by `(immutable mailbox id, canonical address)` in shared state, under the same
-cross-process locking and atomic-write rules as other runtime state. The value includes `written`, `not-written`,
-`budget-exhausted` or `provider-error`, its observation time and expiry; no sender-controlled prose is stored.
-Prepare populates it, so the separate terminal-approval process reuses the same answers while they are fresh instead
-of repeating the provider reads. Each operation still owns a 200-read budget for cache misses; a prepare followed by
-terminal approval within the cache window therefore performs at most 200 metadata reads in total. At ten minutes a
-cache entry is stale at equality and the next operation may check again.
+Those per-address results are cached for ten minutes by `(immutable mailbox id, canonical address)` in shared state,
+under the same cross-process locking and atomic-write rules as other runtime state. The value includes `written`,
+`not-written`, `budget-exhausted` or `provider-error`, its observation time and expiry; no sender-controlled prose is
+stored. Prepare populates it, so the separate terminal-approval process reuses the same answers while they are fresh
+instead of repeating either searches or metadata reads. Each operation still owns a 200-request budget for cache
+misses; for an unchanged draft, prepare followed by terminal approval within the cache window therefore starts at
+most 200 `hasWrittenTo` history requests in total. At ten minutes a cache entry is stale at equality and the next
+operation may check again.
+
+The correspondent-domain scan used for lookalikes is separate from that budget and keeps its existing cap: one
+`listMessages({ query: "in:sent", maxResults: 200 })` call and metadata reads for at most those 200 messages
+(`packages/gmail/src/operations/send.ts:175-200, 240-252`). Its domain set, observation time and expiry get a distinct
+shared cache keyed only by immutable mailbox id, with the same cross-process lock, atomic write and ten-minute
+stale-at-equality rule. Prepare populates it and terminal approval reuses it, so there is at most one 201-call
+correspondent scan across those two passes while the entry is fresh. The current best-effort provider-error behavior,
+the addition of the mailbox's own and internal domains, and lookalike escalation are unchanged. Therefore a prepare
+and terminal approval of one unchanged draft can make at most 401 combined `listMessages` and
+`getMessageMetadata` calls for these two history checks: at most 200 for all `hasWrittenTo` work plus at most 201 for
+the one correspondent-domain scan. The 500-recipient test counts every one of those calls across both passes rather
+than counting metadata alone, and proves a lookalike found through the cached domain set still escalates.
 
 The 50-hit cap deliberately accepts one false negative: if 50 fuzzy hits contain no exact address and the exact hit
 would be 51st, the result is `not-written` and the send keeps the warning. That is conservative; provider errors,
@@ -392,9 +412,10 @@ inventing a state:
   `approval: { id, state, claimable, route, … }`. `pending` has `expiresAt` and the next step; `approved` has
   `approvedAt` and `usableUntil`; `sending` has `sendingAt` and derived `unknownAt`; `expired` has persisted
   `expiredAt` and `approvedAt` when approval happened first; `used` has `sendingAt`, `sentAt` and a non-empty
-  `sentMessageId`; `failed` has `sendingAt` and `failedAt`; `unknown` has `sendingAt` and derived `unknownAt`; and
-  `revoked` has `revokedAt`. These states carry their honest reasons. `corrupt` carries an integrity reason and is
-  never claimable. A download uses `pending`, `answered`, `expired`, `revoked` and `corrupt`, with no `usableUntil`.
+  `sentMessageId`, with `usedAt == sentAt`; a used change or download has `usedAt`; `failed` has `sendingAt` and
+  `failedAt`; `unknown` has `sendingAt` and derived `unknownAt`; and `revoked` has `revokedAt`. These states carry
+  their honest reasons. `corrupt` carries an integrity reason and is never claimable. A download uses `pending`,
+  `answered`, `expired`, `revoked` and `corrupt`, with no `usableUntil`.
 - `approval` is null (or omitted on a surface whose schema omits nulls) for `NOT_FOUND` and every failure before an
   approval exists: `POLICY_NEVER` at prepare, invalid recipients, unsendable HTML and equivalent validation failures.
   A claim refused because a live policy became `never` carries the existing record's real, non-claimable approval
@@ -449,13 +470,15 @@ matching records that the scan read**, not only the newest one:
 - an attributable `corrupt` record for the same group makes that group indeterminate. Declined, cancelled, otherwise
   revoked and failed records do not masquerade as expiry.
 
-When the complete approval directory fits inside the 500-file read window and every selected record is readable, an
-otherwise eligible group may say **“not sent through agentcomms (its approvals expired)”**. This is still a local
-claim: approval records cannot prove what another Gmail client did. When the directory holds more approval files than
-the scan reads, **every returned candidate row instead says “not sent with any of the last 500 approvals”**. It never
-upgrades that bounded observation to “not sent through agentcomms”, even if every matching record in the window is
-expired. A matching `used`, `sending`, `unknown` or `approved` record inside the window still blocks the candidate;
-one outside it is exactly why the remaining wording is bounded.
+When the complete **retained** approval directory fits inside the 500-file read window and every selected record is
+readable, an otherwise eligible group may say exactly **“not sent with any approval in the last 90 days”**. That is
+the strongest permitted draft-level claim: records at or beyond the 90-day retention boundary may already have been
+pruned, and the retained audit row does not carry the Gmail or Slack grouping key. The report therefore never makes an
+all-time claim from the approval directory. It is also still a local claim: approval records cannot prove what
+another Gmail client did. When the directory holds more approval files than the scan reads, **every returned candidate
+row instead says “not sent with any of the last 500 approvals”**. A matching `used`, `sending`, `unknown` or
+`approved` record inside the window still blocks the candidate; one outside it is exactly why the remaining wording
+is bounded.
 
 If any file selected inside the scan window is unreadable, its ownership and key cannot be proved. Every candidate
 row for every mailbox/account covered by that scan therefore says **“indeterminate (an approval record could not be
@@ -472,8 +495,8 @@ not a repair for incomplete approval history:
 - if the lookup fails, it reports the lookup failure and keeps only the correctly scoped local history wording above.
 
 `agent-gmail send list` / `gmail_send_list` gains the `unsent` section, with recipients, subject and attachment names
-through D8's untrusted-field rules, the last preparation and expiry, the evidence scope (`complete`, `last-500` or
-`indeterminate`), the live Drafts result, and the one prepare call. The existing `agent-gmail draft show` /
+through D8's untrusted-field rules, the last preparation and expiry, the evidence scope (`complete-90-days`,
+`last-500` or `indeterminate`), the live Drafts result, and the one prepare call. The existing `agent-gmail draft show` /
 `gmail_draft_get` → `getDraft` and `agent-gmail draft list` / `gmail_draft_list` → `listDrafts` use the same wording;
 `agent-gmail doctor` / `gmail_doctor` → `doctor` counts the bounded last-seven-days result and points to the list
 (`capabilities.json:501-514, 550-555, 755-760`). A last-500 or 20-row doctor count is a lower bound; a scan with an
@@ -485,33 +508,49 @@ draft id alone and not revision or digest. Both must match. A `used` revision A 
 an expired A never hides a `used` B; different revisions with identical content remain separate. Every saved revision
 is new and the post approval already binds revision plus digest
 (`packages/slack/src/operations/drafts.ts:151-190`; `packages/slack/src/operations/send.ts:446-469, 728-746`). The
-same complete/last-500/indeterminate evidence labels and approved-state blocker apply to Slack's annotation of the
-current exact revision. The existing `agent-slack draft list` / `slack_draft_list` may annotate that revision; Resend
-and every historical Slack approval remain visible through core `approvals list`. No Resend or Slack list surface is
-added (`capabilities.json:29-34, 1199-1204`).
+same `complete-90-days`/`last-500`/`indeterminate` evidence labels and approved-state blocker apply to Slack's
+annotation of the current exact revision. The existing `agent-slack draft list` / `slack_draft_list` may annotate that
+revision; Resend and every historical Slack approval remain visible through core `approvals list`. No Resend or Slack
+list surface is added (`capabilities.json:29-34, 1199-1204`).
 
 **Retention before enumeration.** At approval-store open, at most once per 24 hours, the store takes its prune lock,
 records that attempt durably, and performs a locked prune. It re-reads and classifies each record under its record
 lock. Valid finished records in `used`, `failed`, `unknown`, `revoked` or `expired` are deleted at
-`now >= finishedAt + 90 days`, where `finishedAt` is the validated state-specific terminal time (`sentAt`, `failedAt`,
-derived `unknownAt`, `revokedAt` or `expiredAt`; an existing non-send `used` record uses its validated transition
-time). `pending`, `approved` and `sending` records are never pruned; if locked classification first derives `expired`
-or `unknown`, that now-finished record becomes eligible by its derived terminal time. Safe corrupt stubs and raw
-unreadable files are deliberately excluded from automatic deletion so evidence is not destroyed under uncertainty.
+`now >= finishedAt + 90 days`, where `finishedAt` is the validated state-specific terminal time (`usedAt`, `failedAt`,
+derived `unknownAt`, `revokedAt` or `expiredAt`). For a used send, `usedAt == sentAt`; changes and downloads set
+`usedAt` when their claim enters `used`. A structurally valid legacy used record without `usedAt` uses its finite
+`updatedAt` as `finishedAt` **for retention only** when `createdAt <= updatedAt` and every present `approvedAt`,
+`sendingAt` or `sentAt` is also `<= updatedAt`: the fallback is not surfaced as `usedAt`, does not make the record
+v2-valid and supports no send-time claim. A legacy record with no safe fallback remains unpruned. `pending`,
+`approved` and `sending` records are never pruned; if locked classification first derives `expired` or `unknown`, that
+now-finished record becomes eligible by its derived terminal time. Safe corrupt stubs and raw unreadable files are
+deliberately excluded from automatic deletion so evidence is not destroyed under uncertainty.
 
-Before deleting a finished record, the pruner appends an `approval.retained` audit row with the approval id, kind,
-owner, final state, terminal time and any validated non-empty provider id; it contains no body or full recipient
-address. That append is `AuditLog.append(row, { durable: true })`, using the API at
-`packages/core/src/audit.ts:75-85`; durability fsyncs the line and its directory before returning
-(`packages/core/src/fs.ts:107-130`). Only after that durable append succeeds may unlink occur. If the append or unlink
-fails, the record stays and the error is reported; a retry may create a duplicate retention row, which is preferable
-to deleting the only send history. This makes the audit log, not immortal approval files, the durable send history.
+Before deleting a finished record, the pruner follows this exact crash-safe order while holding the record lock:
+
+1. append an `approval.retained` audit row with the approval id, kind, owner, final state, terminal time and any
+   validated non-empty provider id, but no body or full recipient address, using
+   `AuditLog.append(row, { durable: true })` (`packages/core/src/audit.ts:75-85`); durability fsyncs the line and its
+   directory before returning (`packages/core/src/fs.ts:107-130`);
+2. unlink `<approvalId>.claim` if it exists, treating `ENOENT` as success; this is the single-use marker currently
+   created for every successful claim at `packages/core/src/approvals.ts:801-813`;
+3. unlink `<approvalId>.json`.
+
+No unlink starts until the durable append completes. An append failure leaves both artifacts. A claim-unlink failure
+leaves the JSON record. A crash or JSON-unlink failure after the claim marker was removed leaves the JSON record for a
+later retry; that retry may append a duplicate retention row before treating the already-absent marker as success and
+removing the JSON. Duplicate audit rows are preferable to deleting the only durable terminal history. The prune also
+enumerates claim markers: a stray `<approvalId>.claim` whose JSON record is absent is unlinked by the next prune,
+while a marker beside any extant JSON record is handled only through the locked record protocol above. Thus neither
+artifact grows for the installation's lifetime. The audit log remains durable terminal history, but D9 deliberately
+does not use its keyless retention rows to make draft-level claims beyond 90 days.
 
 **Bounded scan, with no index or migration.** After the prune, the report enumerates the retained approval filenames
 and filesystem metadata, sorts them by modification time descending with approval id as the stable tie-breaker, and
 opens at most the **500 most recently modified approval files**. Retention bounds normal valid finished history to 90
 days instead of allowing metadata enumeration and sorting to grow over the lifetime of the installation; active
-records and deliberately preserved corrupt stubs are stated exceptions. The operation then validates/classifies the
+records and deliberately preserved corrupt stubs are stated exceptions. A `complete-90-days` scan means complete only
+for that retained horizon, never for the installation's lifetime. The operation then validates/classifies the
 selected files and groups the requested mailbox/account's matching records by draft so repeated approvals produce one
 result. The last-seven-days rule selects candidate expiries; it does **not** discard an older matching `approved`,
 `sending`, `used`, `unknown` or corrupt blocker from the opened retained history. Gmail's group key is mailbox id plus
@@ -548,10 +587,12 @@ to their draft and do not raise the concurrency or call limit.
    therefore gets the full ordinary preview. A final `unknown` record does not mechanically block a later explicit
    preparation after the person checks the provider; an active `sending` record instead produces wait guidance, and
    every skill forbids preparing again until it becomes `used`, `failed` or `unknown`.
-5. **“Previously mailed” is bounded to 50 hits per recipient and 200 metadata reads per operation.** Gmail's fuzzy
-   search can put the exact match after 50 false hits, and a large recipient list can exhaust the shared operation
-   budget first. D4 then conservatively keeps the warning and says the check was incomplete rather than claiming the
-   recipient was found. These deliberate false negatives qualify the ticket outcome stated in §1.
+5. **“Previously mailed” is bounded to 50 hits per recipient and 200 history requests per operation.** Both Gmail
+   search/list calls and metadata reads consume that shared `hasWrittenTo` budget. The separate correspondent-domain
+   scan remains capped at 200 sent messages and is cached per mailbox for ten minutes. Gmail's fuzzy search can put
+   the exact match after 50 false hits, and a large recipient list can exhaust the shared operation budget first. D4
+   then conservatively keeps the warning and says the check was incomplete rather than claiming the recipient was
+   found. These deliberate false negatives qualify the ticket outcome stated in §1.
 
 ## 5. Tests owed
 
@@ -578,9 +619,11 @@ Each guard is watched failing under a mutation, then restored.
   unknown versions; non-finite `createdAt`/`expiresAt`; wrong exact pending lifetime; missing/non-finite `approvedAt`;
   approval before creation or at/after pending expiry; and inconsistent `usableUntil` all report `corrupt`. An
   otherwise structurally valid active record observed before `createdAt` or `approvedAt` expires fail-closed.
-  Missing, non-finite, misordered, state-inappropriate or contradictory `sendingAt`, `sentAt`, `failedAt`, `revokedAt`
-  and `expiredAt` are exercised in every applicable state. Tests prove pending and approved deadline expiry persist
-  the exact boundary as `expiredAt`. Separate rollbacks before `createdAt` and before `approvedAt` persist the
+  Missing, non-finite, misordered, state-inappropriate or contradictory `sendingAt`, `usedAt`, `sentAt`, `failedAt`,
+  `revokedAt` and `expiredAt` are exercised in every applicable state. A used send requires `usedAt == sentAt`; a
+  directly claimed change, an approved change and a download each exercise the exact `usedAt` ordering rules. Tests
+  prove pending and approved deadline expiry persist the exact boundary as `expiredAt`. Separate rollbacks before
+  `createdAt` and before `approvedAt` persist the
   observation time as `expiredAt`, persist exactly `reason: clock-anomaly`, use the “clock moved backwards” status
   prose, accept only that reason's ordering exemption, and stay expired after process restart and a corrected clock.
   `unknownAt` is exactly `sendingAt + SENDING_STALE_MS` and is not stored, and equality at every boundary takes the
@@ -636,12 +679,16 @@ Each guard is watched failing under a mutation, then restored.
   public-provider domains never match by domain. `hasWrittenTo` finds an exact address on hit 6 and hit 50 across
   pages, stops at exactly 50, rejects fuzzy hits, and uses To/Cc/Bcc query terms. Fifty fuzzy false hits with the exact
   match at 51 returns “not written”, explicitly locking in the accepted conservative false negative. A 500-recipient
-  draft and mixed multi-recipient fixtures prove one operation starts at most 200 metadata reads total, never 200 per
-  recipient; unchecked recipients are `budget-exhausted`, treated as not written, keep escalation and show the
-  explicit preview qualification. Search and metadata failures produce `provider-error`, keep escalation and show
-  their qualification. A prepare followed by terminal approval within ten minutes reuses the shared per-mailbox,
-  per-canonical-address cache and performs at most 200 metadata reads across both calls; after cache expiry, each
-  operation independently remains capped at 200.
+  draft and mixed multi-recipient fixtures prove one operation starts at most 200 total `hasWrittenTo`
+  `listMessages` plus `getMessageMetadata` calls, never 200 per recipient; unchecked recipients are
+  `budget-exhausted`, treated as not written, keep escalation and show the explicit preview qualification. Search/list
+  and metadata failures produce `provider-error`, keep escalation and show their qualification. Prepare followed by
+  terminal approval within ten minutes reuses both shared caches: the per-mailbox, per-canonical-address cache limits
+  `hasWrittenTo` work to 200 calls across both passes, and the separate per-mailbox correspondent-domain cache limits
+  its work to one list plus at most 200 metadata reads across both passes. A provider spy counts **all** of those
+  calls, asserts the combined maximum of 401 rather than counting metadata alone, and proves a cached correspondent
+  domain still causes lookalike escalation. After either cache expires, each new operation independently obeys the
+  applicable cap.
 - **D4 — provenance and gaps:** same-mailbox internal addresses are omitted; another mailbox can record the same
   address; widening `internalDomains` leaves an already-recorded exact address until day seven. An old header in
   mailbox A plus a recent body sighting in mailbox B is described only as separate aggregate facts, never one
@@ -674,23 +721,25 @@ Each guard is watched failing under a mutation, then restored.
   them, pinned status/wait returns owner-hidden `NOT_FOUND`, and doctor reports the count. Hostile subjects, addresses,
   display prose and attachment filenames remain inside their untrusted envelopes in D8 and D9 list objects.
 - **D9 — evidence:** a directly inspected pending-expired and approved-then-expired record says exactly “this approval
-  expired; nothing was sent with it”. With a complete readable directory, an otherwise eligible draft group may say
-  “not sent through agentcomms (its approvals expired)”. Any matching `approved` record blocks “approvals expired”,
-  whether claimable or not; an approved record plus a newer expired record is exercised, and live policy `never`
-  produces exactly “approved, but the mailbox's policy is now never”. Matching `sending`, `used`, `unknown` and
-  attributable corrupt records also prevent the inference; decline/cancel/revoke/corrupt is never relabelled expiry.
-  A matching used record older than the seven-day candidate window but still inside retained history also blocks it.
-  A live Gmail draft adds “still in Drafts”; an external Gmail-UI send and an external deletion after approval expiry
-  both produce “no longer in Drafts — it may have been sent or deleted elsewhere”, never “unsent” or “still in
-  Drafts”. Provider lookup failure stays local-only. Send list, draft show/list and doctor create, send and delete
-  nothing. Slack revision A `used` plus revision B `expired` still reports B; the inverse still reports A as used.
-  Identical digests at different revisions remain separate in both directions because Slack requires exact revision
-  **and** digest.
+  expired; nothing was sent with it”. With a complete readable retained directory, an otherwise eligible draft group
+  may say exactly “not sent with any approval in the last 90 days” and reports evidence scope `complete-90-days`.
+  Any matching `approved` record blocks “approvals expired”, whether claimable or not; an approved record plus a newer
+  expired record is exercised, and live policy `never` produces exactly “approved, but the mailbox's policy is now
+  never”. Matching `sending`, `used`, `unknown` and attributable corrupt records also prevent the inference;
+  decline/cancel/revoke/corrupt is never relabelled expiry. A matching used record older than the seven-day candidate
+  window but still inside retained history also blocks it. A live Gmail draft adds “still in Drafts”; an external
+  Gmail-UI send and an external deletion after approval expiry both produce “no longer in Drafts — it may have been
+  sent or deleted elsewhere”, never “unsent” or “still in Drafts”. Provider lookup failure stays local-only. Send
+  list, draft show/list and doctor create, send and delete nothing. Slack revision A `used` plus revision B `expired`
+  still reports B; the inverse still reports A as used. Identical digests at different revisions remain separate in
+  both directions because Slack requires exact revision **and** digest. A used Slack record for exact revision/digest
+  R is pruned at its 90-day boundary, then an unchanged R gets a newer expired approval; even with a complete readable
+  retained directory, the row says only “not sent with any approval in the last 90 days”, never an all-time claim.
 - **D9 — capped and unreadable evidence:** fixtures exceed 500 approval files across several mailboxes with controlled
   mtimes and repeated records per draft. A same-key `used`, `sending` and `unknown` record is placed at file 501 in
   turn while a newer matching expiry remains inside the window; every row says only “not sent with any of the last
-  500 approvals”, never “not sent through agentcomms” or the unqualified “its approvals expired”. An unreadable file
-  at each position inside the selected window makes every candidate row for the scan exactly “indeterminate (an
+  500 approvals”, never an all-time claim or the unqualified “its approvals expired”. An unreadable file at each
+  position inside the selected window makes every candidate row for the scan exactly “indeterminate (an
   approval record could not be read)”; its unknown ownership is never guessed. An unreadable file outside a capped
   window retains last-500 wording. An attributable parseable-corrupt record makes only its matching group
   indeterminate. The scan opens only the newest 500, filters after opening, groups each Gmail draft and exact Slack
@@ -702,18 +751,27 @@ Each guard is watched failing under a mutation, then restored.
   `failed`, `unknown`, `revoked` and `expired` record survives before 90 days and is deleted at equality after a
   locked re-read; pending, approved and fresh sending records are never deleted, while sending made stale by the
   locked classification becomes `unknown` before eligibility is judged. Safe corrupt stubs and unreadable files are
-  retained. A spy and a crash-point test prove `AuditLog.append(..., { durable: true })` completes before each unlink,
-  the retained audit row has the final state and only a non-empty provider id, and an append/fsync failure leaves the
-  approval file present. Reopening after an attempted prune does not start another within the daily interval.
+  retained. Used sends persist `usedAt == sentAt`; used changes and downloads persist `usedAt` at their transition and
+  are retained immediately before `usedAt + 90 days` and pruned at equality. A structurally valid legacy used record
+  without `usedAt` gets the same boundary test using finite `updatedAt` with `createdAt` and every present
+  `approvedAt`/`sendingAt`/`sentAt` at or before it, for retention only; an unsafe fallback is retained. A spy proves
+  the exact order durable audit append → `<id>.claim` unlink → `<id>.json` unlink, including
+  the marker created by the current claim path (`packages/core/src/approvals.ts:801-813`). Restart tests inject a crash
+  immediately before and after each of those three steps: no unlink precedes a completed durable append, every surviving
+  JSON record is safely retried, an already-removed marker is tolerated, and duplicate audit rows are allowed. Separate
+  fixtures cover append/fsync failure, claim-unlink failure, JSON-unlink failure, and a stray `.claim` without its
+  `.json`, which the next prune removes. Reopening after an attempted prune does not start another within the daily
+  interval.
 - **Acceptance, end to end with fake Gmail:** an internal colleague recorded in another mailbox, from an untrusted
   client, produces `recipient-tainted`, one chat prepare/preview, one standard terminal rendering and **one person
   decision**. The agent's `gmail_send_wait` returns `{state: approved, claimable: true}`; execute uses that record,
   with no second prepare and no second **chat** preview, and returns `sentMessageId`. Repeat with approval at minute 25
   and claim two hours later. An internal domain-only recipient does not taint and a chat route sends on the person's yes
   inside ten minutes. Replay the ticket's 22:42:46 prepare and 22:48:22 approval: wait learns it, the send succeeds, and
-  no error asks again. With no claim and a complete readable approval scan, it says “not sent through agentcomms” 24
-  hours after approval and “still in Drafts” only after the live lookup. Preparing identical content again gets the
-  full ordinary preview and is not blocked by the expired record or by a prior final `unknown` record.
+  no error asks again. With no claim and a complete readable retained approval scan, it says “not sent with any
+  approval in the last 90 days” 24 hours after approval and “still in Drafts” only after the live lookup. Preparing
+  identical content again gets the full ordinary preview and is not blocked by the expired record or by a prior final
+  `unknown` record.
 
 ## 6. Out of scope
 
@@ -745,6 +803,6 @@ approvals to the preparing process.
    valid finished history from making metadata enumeration and sorting grow for the lifetime of the installation;
    active records and preserved corrupt stubs are exceptions, reported rather than silently destroyed. The 500-file
    cap bounds opened record contents and the 20-row cap bounds provider reads, but a busy retained window can still
-   push a mailbox's record outside the scan. Every such row says “not sent with any of the last 500 approvals”; an
-   unreadable selected record makes the affected scan indeterminate, and doctor never presents either count as
-   complete.
+   push a mailbox's record outside the scan. Even an uncapped readable scan says only “not sent with any approval in
+   the last 90 days”; every capped row says “not sent with any of the last 500 approvals”. An unreadable selected
+   record makes the affected scan indeterminate, and doctor never presents either count as complete.
