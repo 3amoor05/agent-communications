@@ -337,8 +337,12 @@ The ranges below are where the code actually is:
      - `claimForSend` writes `sendingAt`. `claimForChange` and `claimForDownload` write `usedAt`.
      - `complete` (1069-1076) writes `usedAt = sentAt` with a non-empty `sentMessageId`, or `failedAt`. An empty id is
        refused.
-     - Every revoke or void writes `revokedAt`.
-     - `#derive` (513-533) persists `expiredAt` as the boundary that applied.
+     - Every revoke or void of a **version-2** record writes `revokedAt`.
+     - `#derive` (513-533) persists `expiredAt`, as the boundary that applied, on **version-2** records only.
+     - A v1 record never gains a v2 field. `revokeLegacy` writes only `state`, `reason` and `updatedAt`, and
+       nothing derives or persists `expiredAt` on a v1 file. Task 1's test "a person's revoke of a fresh v1 record
+       writes a v1-shaped revoked" re-runs after this task, and adding `revokedAt` or `expiredAt` to any v1 write
+       must fail it.
      - `updatedAt` stays, because the legacy decoder and the retention fallback still use it.
    - **New module `packages/core/src/approval-validate.ts`.** It exports `validateV2(record, fileId)`, which returns
      `ok`, or a fixed integrity reason plus `attribution: 'verified' | 'unverifiable'`. It checks:
@@ -386,8 +390,13 @@ The ranges below are where the code actually is:
        `approvals: new ApprovalStore(paths.stateDir, { now, loadConfig: () => config.load() })`. `config` is the
        `ConfigStore` built at line 32. The arrow keeps `this` bound, because `load` uses private fields and must not
        be passed unbound.
-     - **When it is read.** `get` loads the config once per read, and `list` once per call, so one listing decodes
-       against one snapshot. A loader error propagates out of `get` and `list` unchanged. It is never caught and
+     - **When it is read.**
+       - `get` loads the config once per read, and `list` once per call, so one listing decodes against one
+         snapshot.
+       - A locked transition loads it exactly once, after acquiring the record lock. It passes that snapshot as the
+         `config` parameter of `#read(approvalId, config)`, and Task 5 passes the same `config` to `liveGateOf`.
+         The decoder and the live gate therefore always see one read, which is the linearization point D1 names.
+       - Outside a transition, `get` and `list` keep their own single load. A loader error propagates out of `get` and `list` unchanged. It is never caught and
        read as "no config", so nothing is classified unattributable because the config could not be read. A config
        that cannot be read is already a `CONFIG` error on every surface. A loader that resolves `null` means "no
        config", and is treated as a store without a loader.
@@ -428,8 +437,10 @@ The ranges below are where the code actually is:
        `#markClaimed` (802-814) touch the other id.
    - **`revoke`** keeps routing a legacy record to Task 1's `revokeLegacy`, only under the `person` and `lifecycle`
      dispositions. It now chooses that route from the decoded `StoredApproval`, not from a raw version check. A
-     corrupt record or an unreadable stub is never revoked or rewritten; it is returned as it is. `revoke` now returns
-     `StoredApproval`.
+     corrupt record or an unreadable stub is never revoked or rewritten. `revoke` refuses one by N4: it throws the
+     integrity refusal that names the record as corrupt or unreadable, with the safe stub
+     `{ approvalId, state: 'corrupt', reason }` as `details.approval`, and writes nothing. A pinned surface has
+     already answered `NOT_FOUND` by N1. `revoke` now returns `StoredApproval`.
    - **`list` (1085-1104)** drops `.catch(() => null)`. It returns every file as one of the four forms.
    - **Narrowing helpers**, exported beside `StoredApproval`:
      - `asV2(stored)`: the valid version-2 record, or `null`.
@@ -469,7 +480,7 @@ The ranges below are where the code actually is:
      | G6 | core `operations/organisations.ts:282` | `refuseChangedProfile` | A v2 or legacy `change` in `pending`/`approved`; the effects come from the binding (legacy: its internal fields). Revokes with `integrity` |
      | G7 | core `operations/organisations.ts:987` | `approvalRecordsNarrowing` | `asV2` `change` only; otherwise `false` |
      | G8 | core `operations/update.ts:851` | `nothingToApply` | `whatBecameOf` (873) takes `StoredApproval \| null`. Legacy names its derived state and "prepared by an earlier release"; corrupt or unreadable says "it could not be read safely (<reason>)". `details.state` comes from `stateOf` |
-     | G9 | core `operations/maintenance.ts:431` | `revokeApproval` | `kindOf` is `change` → `revokeChange(…, person)`; otherwise `revoke(…, person)`. An unreadable stub is written nothing and returned |
+     | G9 | core `operations/maintenance.ts:431` | `revokeApproval` | `kindOf` is `change` → `revokeChange(…, person)`; otherwise `revoke(…, person)`. A corrupt record or unreadable stub gets N4's integrity refusal, with the safe stub as `details.approval` and nothing written |
      | G10 | Gmail `cli/program.ts:1309` | `approve` action | Dispatch by `kindOf`: `change` → `approveChangeAtTerminal`, `download` → `answerDownloadAtTerminal`, otherwise `beginApproval`, which applies N4 |
      | G11 | Gmail `mcp/server.ts:273` | `downloadNeedsPerson` | `asV2` pending `download`, with the owner compared on it; otherwise `false` |
      | G12 | Gmail `mcp/server.ts:392` | `checkApprovalPin` | Passes only when `ownerOf(stored) === pinnedId`; otherwise D2's `NOT_FOUND` (N1) |
@@ -488,8 +499,8 @@ The ranges below are where the code actually is:
      | G25 | WhatsApp `cli/program.ts:425` | `approve` action | Absent keeps `NOT_FOUND`; an unreadable stub gets N4. `kindOf` other than `change` keeps its refusal. A legacy change goes to `approveChangeAtTerminal`, which refuses it at G4 |
      | R1 | core `save-destination.ts:1080` | `downloadAtTerminal` cancel | `person`; result ignored |
      | R2 | core `save-destination.ts:1220` | `answerDownloadAtTerminal` cancel | `person`; result ignored |
-     | R3 | core `changes.ts:444` | `revokeChange` | Disposition threaded and required. Audit target and policy from the v2 change or the legacy view's stored change; a stub gets `target: null`. Returns `StoredApproval` |
-     | R4 | core `operations/maintenance.ts:436` | `revokeApproval` | `person`. Returns `publicStored(result)` |
+     | R3 | core `changes.ts:444` | `revokeChange` | Disposition threaded and required. Audit target and policy from the v2 change or the legacy view's stored change. A corrupt or unreadable record throws N4's refusal before any audit. Returns `StoredApproval` |
+     | R4 | core `operations/maintenance.ts:436` | `revokeApproval` | `person`. Returns `publicStored(result)` for a v2 or legacy record. A corrupt or unreadable record never returns: `revoke` throws N4's integrity refusal |
      | R5 | Gmail `mcp/server.ts:1005` | download form decline | `person`; result ignored |
      | R6 | Gmail `operations/send.ts:487` | `beginApproval` integrity void | `integrity`. Unreachable for v1, because G14 refuses first |
      | R7 | Gmail `operations/send.ts:764` | `revokeApproval` | `person`. Audit `inboxId` is `ownerOf(result) ?? ''`; `gmail_send_cancel` returns `{ approvalId, state: stateOf(result) }`. Returns `StoredApproval` |
@@ -559,7 +570,11 @@ The ranges below are where the code actually is:
      - **owner filters** (L1, L4, L5): a stub never matches `--inbox`, a pin or an account removal;
      - **in-flight guards** (L2, L3): a legacy `sending` record blocks a draft edit and a move;
      - **v2-only helpers** (G1, G4, G5, G7, G11, G13): a non-v2 record never reaches one;
-     - **wrapper results** (G8, G9, R3, R4, R7, G19): each returns its named new type.
+     - **wrapper results** (G8, G9, R3, R4, R7, G19): each returns its named new type;
+     - **revoking a corrupt or unreadable record** (G9, R4). `agentcomms approvals revoke` and `comms_approval_revoke`
+       on an attribution-verified corrupt record, an attribution-unverifiable one and an unreadable file each return
+       the integrity refusal. It names the record as corrupt or unreadable and carries the safe stub as
+       `details.approval`, and the file stays byte-identical.
 
      These live in `approval-store-read.test.ts` for core, and in Gmail `tool-parity.test.ts`, Slack
      `mcp-parity.test.ts`, Resend `send-gate.test.ts` and WhatsApp `cli.test.ts` for the channel rows.
@@ -714,7 +729,8 @@ The ranges below are where the code actually is:
      - `approval` is D8's public object, built by `publicApproval(outcome)`.
    - **The store derives a `LiveGate` from Task 3's `loadConfig`**, with no second config dependency.
      `liveGateOf(config, record)` is pure. It returns owner existence, effective send and change policy, and the send
-     epoch, all from one `loadConfig()` call made inside the record lock.
+     epoch. Its `config` parameter is the same snapshot that `#transition` loaded once, inside the record lock, and
+     passed to `#read(approvalId, config)` (Task 3). `liveGateOf` never calls the loader itself.
      - **A store with no loader fails closed.** Inspection never marks a v2 record claimable or `ownerRemoved`.
        Claims, approvals and answers refuse with `CONFIG` "this approval store was opened without a configuration".
      - **Direct constructions that need a loader.** Task 3 left these unchanged. This task gives them
@@ -754,11 +770,13 @@ The ranges below are where the code actually is:
    - **"a store opened without a config loader never makes a record claimable".** On a direct store with no loader, a
      v2 `pending` chat-route send is `claimable: false` and not `ownerRemoved`. Its claim refuses with `CONFIG`, and
      nothing is written.
+   - **"a claim loads the config exactly once".** With a counting loader, one `claimForSend` and one terminal
+     `approve` each call the loader exactly once, after taking the record lock.
 
    Mutations: classify before checking ownership; let an unknown id produce a different envelope; apply the default
    policy to a removed owner; treat `prospective` as removed; read the live gate before taking the lock; treat a
    missing loader as an empty config, which must fail the no-loader test (an empty config would read the owner as
-   removed).
+   removed); "load again in `liveGateOf`", which must fail "a claim loads the config exactly once".
 
    **Done when.** Every transition classifies from one fresh config read under its own lock, and nothing classifies
    before the lock.
