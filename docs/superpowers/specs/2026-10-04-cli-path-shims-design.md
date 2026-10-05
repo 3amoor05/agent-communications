@@ -1,6 +1,6 @@
 # CUE-403 — runnable CLI handoffs from the running installation — design
 
-Status: **proposed for 0.13.1; revised after round 6 (2 P1, 3 P2), 2026-10-05. No implementation is in
+Status: **proposed for 0.13.1; revised after round 7 (2 P1, 2 P2, 1 P3), 2026-10-05. No implementation is in
 this change.**
 
 ## 1. What is being fixed
@@ -14,13 +14,14 @@ A runtime result can require a person to approve or repair something at a termin
 The 0.13.1 acceptance criterion is:
 
 > Every new terminal handoff has one of three accepted outcomes: a pasteable command which does not require an
-> agent-communications binary on `PATH` and pins every resolved directory it uses; no target command, but the product
-> name and an absolute core command which repairs its registration; or, on the rare Windows path which the safe
-> renderer refuses, the exact argv as inert JSON with an instruction to enter those words manually. It never prints a
-> bare suite binary or sends a person to an MCP tool for terminal approval.
+> agent-communications binary on `PATH` and pins every agent-communications directory it uses; on the rare Windows
+> path which the safe renderer refuses, the exact argv as inert JSON with an instruction to enter those words
+> manually; or no command, with the target product and required version and an explanation that it is **not locatable
+> here** and must be installed or updated through the person's usual route. It never prints a bare suite binary,
+> invents a repair command or sends a person to an MCP tool for terminal approval.
 
-This fixes approvals, reruns and repairs. It does not publish shims, edit `PATH` or profiles, or change approval,
-sending or change-policy semantics.
+This fixes approvals and reruns, and makes an unlocatable cross-product handoff honest. It does not publish shims,
+edit `PATH` or profiles, install or update another product, or change approval, sending or change-policy semantics.
 
 ## 2. Facts the design relies on
 
@@ -36,6 +37,9 @@ sending or change-policy semantics.
   `LOCALAPPDATA` while deriving config, state, secrets, data and default downloads directories
   (`packages/core/src/paths.ts:37-66`). A registered server's minimal environment currently fixes only the config
   directory (`packages/core/src/mcp-install.ts:266-280`).
+- MCP-client configuration is a separate path class: Claude, Codex and the other clients are found from the runner's
+  `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, home and platform application-data environment
+  (`packages/core/src/mcp-clients.ts:65-95`).
 - Every channel declares its binary and package facts in `package.json`; the tooling discovers that data rather than
   keeping a channel list (`docs/superpowers/specs/2026-09-26-channel-plugins-design.md:24-52`,
   `scripts/channels.mjs:27-59`, `scripts/channels.mjs:114-150`).
@@ -49,7 +53,8 @@ sending or change-policy semantics.
 
 Core owns `locateCliCommand`. A request supplies the calling package's resolver URL, the target manifest, argument
 words, the resolved-directory uses of the target command, and the output platform. Success is a `PrintedCommand`
-(D5); failure names the reason, product and package. Callers never supply word zero or quote a line.
+(D5); failure contains no command and names the reason, product, package and required version. Callers never supply
+word zero or quote a line.
 
 The interpreter rule is one rule: the running package's own CLI and channel→core use `process.execPath`; a command
 resolved from a registration uses that registration's recorded interpreter when it has one, otherwise
@@ -63,7 +68,7 @@ Resolution is directional:
 1. **The calling product's own CLI.** Walk from the resolver URL to the package manifest and verify its name. If the
    resolver URL itself ends in `.ts`, select exactly `<package-root>/src/cli.ts`; do not inspect `dist`. Otherwise
    select the manifest's `bin[agentcomms.binary]`. This makes a checkout with no build and one with a stale build both
-   run source.
+   run source. A valid running product therefore locates its own CLI from itself and never needs a registration.
 2. **Channel to core.** Resolve the channel's installed `@agentcomms/core` runtime dependency from the caller and
    verify the channel and core versions are equal. Select core's `src/cli.ts` only when **both** the caller's module URL
    ends in `.ts` and the resolved core package root, after `realpath`, is a workspace package inside the same realpath
@@ -87,14 +92,11 @@ Resolution is directional:
    CLI entry resolved from its absolute launcher; both drop server-only `mcp` and narrowing arguments. An npx
    registration supplies the registered absolute npx executable and the target CLI package pinned to the same version
    (`@agentcomms/gmail`, not its server-only wrapper). An absent entry, unpinned spec, unreadable command, unrecognised
-   launcher or version mismatch is never used. When no same-version registration resolves, the result is
-   terminal-only and names the product: if a recognised older registration exists it gives the absolute core
-   `update` command; if none exists it gives the absolute core `server install <product>` command. Both repairs are
-   approved changes, not shortcuts around the change policy. `server install` is the CLI peer of
-   `comms_server_install`, calls the existing `serverInstallChange`, and gets its own parity row
-   (`packages/core/src/operations/servers.ts:50-66`,
-   `docs/superpowers/specs/2026-09-25-cli-mcp-parity-design.md:160-166`). It never suggests that an MCP tool can
-   approve under `confirm`. Managed and npx registrations already expose version shapes
+   launcher or version mismatch is never used. When no same-version registration resolves, the result contains **no
+   command**. It names the product and the printing package's exact version and says that version is not locatable
+   here; install or update it through the person's usual route, then retry. It does not guess which client, package
+   manager or installation owns the product, and does not print `update`, `server install`, an MCP tool or any other
+   repair. Managed and npx registrations already expose the version evidence used to accept or reject them
    (`packages/core/src/mcp-install.ts:338-350`, `packages/core/src/operations/servers.ts:575-612`).
 
 Before any file entry is returned, the locator `realpath`s both package root and entry, requires a readable regular
@@ -104,10 +106,10 @@ version mismatch returns no command. Only the interpreter and a file entry are n
 flags, ids and an npx package spec are ordinary argument words.
 
 The same scan defines channel→another-channel approval-kind corrections. Each channel manifest gets one alternative:
-its absolute approve command when a same-version registration resolves, otherwise its product name and the applicable
-absolute core repair command above. After that approved repair the person retries and receives the target product's
-terminal approve command. The fallback does not claim to know an originating or approving MCP tool: send approval
-records carry no origin channel, and approval under `confirm` is deliberately terminal-only
+its absolute approve command when a same-version registration resolves, otherwise the no-command result naming the
+product and exact version it needs. The fallback does not claim to know an installation route, originating or
+approving MCP tool: send approval records carry no origin channel, and approval under `confirm` is deliberately
+terminal-only
 (`packages/core/src/approvals.ts:302-316`,
 `docs/superpowers/specs/2026-09-25-cli-mcp-parity-design.md:148-152`). The current corrections instead concatenate
 every manifest's bare approve string (`packages/core/src/channel-words.ts:39-52`,
@@ -130,12 +132,19 @@ the configured downloads root without changing `config.json` (`packages/gmail/sr
 `--config-dir` fixes only `configDir` and `--secrets-dir` fixes only `secretsDir`
 (`packages/core/src/paths.ts:42-56`).
 
+Their scope is only agent-communications' own config, state, data, secrets and downloads directories. They do **not**
+pin Claude, Codex, Cursor, Gemini, VS Code or other MCP-client configuration files. `knownClientConfigs` deliberately
+finds those from the environment of whoever runs the CLI — including `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, home and
+platform application-data variables — exactly as when the person types the command directly
+(`packages/core/src/mcp-clients.ts:68-95`). A handoff which scans, installs, updates or removes client registrations
+therefore acts on that person's own clients by design.
+
 The locator does not reproduce the printing environment. Between the entry/package word and the subcommand it inserts
-the printing process's already-resolved absolute option for **every** directory the target command uses: config,
-state, data, secrets and, for a handoff which reads or writes downloads, downloads. It omits only directories that
-the target does not use. Those independent pins override conflicting variables and defaults in the target shell, so a
-different cwd, relative source override, XDG setting, `HOME`, `USERPROFILE`, `APPDATA` or `LOCALAPPDATA` cannot
-redirect a directory the handoff uses. No environment assignment is printed on any platform.
+the printing process's already-resolved absolute option for every **agent-communications** directory the target
+command uses: config, state, data, secrets and, for a handoff which reads or writes downloads, downloads. It omits only
+suite directories that the target does not use. Those independent pins override conflicting variables and defaults in
+the target shell for the named suite directories; they intentionally do not reproduce or override the environment
+used to find the person's MCP clients. No environment assignment is printed on any platform.
 
 These options are flags, not capabilities. They add no row to `capabilities.json`, whose rows describe a CLI command,
 MCP tool and shared operation (`capabilities.json:1-2`). The parity check continues to enumerate command paths and
@@ -160,17 +169,27 @@ the manual-typing instruction, not a partial command
 (`packages/core/src/cli-runtime.ts:136-191`). An npx registration, including an absolute `npx.cmd` on Windows, goes
 through these same rules (`packages/core/src/mcp-install.ts:1017-1024`).
 
-This inert-JSON/manual-entry result is the acceptance criterion's third outcome. It is deliberately preferred to a
+This inert-JSON/manual-entry result is the acceptance criterion's second outcome. It is deliberately preferred to a
 wrong-but-runnable line, which could approve, overwrite or remove the wrong thing. It is rare: only Windows handoffs
 with one of the refused word shapes take it; ordinary paths remain pasteable.
 
 ### D4. Packaging follows the runtime edge
 
-All four channel packages publish exact-lockstep `@agentcomms/core` runtime dependencies. Their bundles may still
-inline core for startup, but comments may no longer claim that installing a channel has no dependency tree; those
-claims exist in every channel bundler config (`packages/gmail/tsdown.config.ts:3-5`,
+Every manifest-discovered channel declares `@agentcomms/core` under `dependencies`, never only
+`devDependencies`, and the packed package pins core to the channel's exact lockstep version. The workspace source may
+use `workspace:*`; the publish/pack result must be the exact version, not a range. Their bundles may still inline core
+for startup, but comments may no longer claim that installing a channel has no dependency tree; those claims exist in
+every channel bundler config (`packages/gmail/tsdown.config.ts:3-5`,
 `packages/slack/tsdown.config.ts:3-5`, `packages/resend/tsdown.config.ts:3-5`,
 `packages/whatsapp/tsdown.config.ts:3-6`).
+
+The code change also amends both instructions a future channel follows: the channel-plugins design's “Adding a
+channel” package rule, which currently says `workspace:*` **dev** dependency
+(`docs/superpowers/specs/2026-09-26-channel-plugins-design.md:203-210`), and `CONTRIBUTING.md`'s matching rule
+(`CONTRIBUTING.md:139-145`), will instead require the exact-lockstep runtime dependency above. A registry/package
+validation test reads every manifest-discovered channel and fails if core is absent from `dependencies`, is also
+declared in an incompatible dependency field, or packs to anything other than the channel's exact version. The same
+test injects a synthetic new channel, so the policy cannot pass only because today's four packages are named in it.
 
 `scripts/verify-package.mjs` recursively packs the candidate's transitive workspace `dependencies` and
 `optionalDependencies`, deduplicates them, and gives every tarball to the isolated npm install in dependency order.
@@ -262,23 +281,33 @@ or words appended to a complete located command; they are never rendered as comm
 
 `PrintedCommand` is an opaque branded type whose constructor and brand stay private to the locator module. The only
 other command type is opaque `ExternalCommand`, made by the reviewed `externalCommand(words, reason)` constructor for
-non-suite programs. Its present sites are `chmod`, `claude mcp` and `codex mcp`
+non-suite programs. Its reviewed sites include `chmod`, the install/read-back `claude mcp` and `codex mcp` calls, and
+the rival-server `claude mcp remove` / `codex mcp remove` commands
 (`packages/gmail/src/operations/doctor.ts:221-227`,
 `packages/core/src/operations/maintenance.ts:82-96`, `packages/core/src/mcp-install.ts:808-817`,
-`packages/core/src/mcp-install.ts:1215-1222`). The required reason records why that external executable is legitimate;
-the constructor refuses every manifest binary, so suite commands can come only from the locator.
+`packages/core/src/mcp-install.ts:1215-1222`, `packages/core/src/other-servers.ts:61-72`). The required reason records
+why that external executable is legitimate. The constructor refuses a word list when any word contains a manifest
+binary, an `@agentcomms/` package specifier, or a path within the realpath of any agent-communications package root.
+That rejects direct launches, `node <suite-entry>`, `npx @agentcomms/<product>` and wrapper payloads rather than
+checking only word zero.
 
 Every output variant which tells a person what to run types its command-bearing field — `hint`, `fix`, `nextStep`,
 `command`, or any other name found during migration — as `PrintedCommand | ExternalCommand`, never `string`. Prose
 around it is a separate prose field or a fixed renderer. `inlineCommand` and `commandText` accept that union. Thus a
-literal, template, argument fragment or command assembled from `manifest.binary` cannot enter such a field.
+typed command-bearing field cannot accept a plain literal, template or argument fragment.
 
-A type-aware syntax-tree test scans all runtime source, resolves those field symbols, and fails on any string or
-template literal assigned to one, including through a newly added result type. It also fails when any `CommsError`
-hint contains a binary word derived from the channel manifests outside a branded command value. The type checker
-catches non-literal strings; negative fixtures prove a new error hint and a new result field cannot bypass either
-guard. This construction is the completeness check; the inventory above documents the migration and helps reviewers,
-but adding a handoff only to the table proves nothing.
+A syntax-tree test derives each product's subcommand words from `capabilities.json` `cli` values, then scans every
+string and template literal in runtime source. A literal containing a manifest binary followed by one of that
+binary's subcommand words fails unless it is the locator's own structured input; a template which interpolates a
+manifest-derived binary beside a literal subcommand fails too. It scans `CommsError` hints, MCP instructions and tool
+descriptions as ordinary runtime source rather than relying on field names. Negative fixtures cover a newly named
+result field, `node <suite-entry>`, `npx @agentcomms/<product>` and a wrapper payload; the reviewed external commands,
+including `other-servers.ts`, are positive fixtures.
+
+This closes literal and constructor-mediated escapes, not arbitrary program semantics. A command assembled entirely
+from variables and routed around both branded constructors has no literal binary/subcommand pair for the scan to
+recognise; repository review and the inventory above are the remaining control. The design therefore does not claim
+that no newly named field can ever bypass the guard.
 
 Protocol identities are outside those types: MCP server names and `package.json` bin names remain ordinary identity
 fields and cannot flow into a command-bearing result field without the brand. There is no file allowlist; identity is
@@ -333,38 +362,46 @@ authoritative data roots, and CLI-MCP parity for the preference.
    an external installed core and a core in another checkout select the manifest bin. Core→channel and
    channel→another-channel cover only an old registration, mixed old/current registrations, every launcher class and
    deterministic tie-breaks. Windows includes an absolute npm `.cmd` global registration with matching, mismatched and
-   unreadable package/version entries. With no same-version target, an older registration yields the absolute core
-   `update`; none yields absolute core `server install <product>`. Both go through change approval, and an unlocatable
-   `confirm` approval names no MCP approval route.
+   unreadable package/version entries. Only the same-version entries yield commands. Older-only, unknown-version,
+   unreadable and absent registrations yield no command and name the target product and required exact version as
+   “not locatable here”, with the usual-route install/update instruction and no repair or MCP approval route.
 3. **Paths:** every CLI accepts all five independent global options before dispatch. Execute a handoff in a fresh shell
    with conflicting `AGENT_COMMS_*`, XDG, home/AppData values and another cwd; it reports every printing-process
-   directory the target uses and no other option. Relative option values become resolved absolutes. On Windows set
-   `APPDATA` and `LOCALAPPDATA` to different roots and use the file secret store; a pasted secret-reading handoff must
-   use exactly the printing process's `secretsDir`, even with `--config-dir` present. Download handoffs preserve
-   `downloadsDir`; non-download handoffs omit it. Runtime/install/prune/update, doctor, channels, setup and repair
-   handoffs have explicit directory-use fixtures. No output contains an environment assignment.
+   **agent-communications** directory the target uses and no other path option. Relative option values become resolved
+   absolutes. On Windows set `APPDATA` and `LOCALAPPDATA` to different roots and use the file secret store; a pasted
+   secret-reading handoff must use exactly the printing process's `secretsDir`, even with `--config-dir` present.
+   Download handoffs preserve `downloadsDir`; non-download handoffs omit it. Runtime/install/prune/update, doctor,
+   channels and setup handoffs have explicit suite-directory-use fixtures. Separate client-registration fixtures vary
+   `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `HOME` and `APPDATA` at execution time and assert that the CLI targets the
+   executing person's client files while all five pinned suite directories stay unchanged. No output contains an
+   environment assignment.
 4. **Rendering:** exercise the existing Windows contract through Windows PowerShell 5.1 and PowerShell 7 against both
    `node.exe` and absolute `npx.cmd`, and through cmd.exe with delayed expansion enabled. Cover empty arguments,
    trailing backslashes, `%`, `!`, directory-separator normalisation and safe lines. A valid Windows path that the
-   renderer refuses must produce the exact inert JSON words and manual-entry instruction and satisfy the third
+   renderer refuses must produce the exact inert JSON words and manual-entry instruction and satisfy the second
    accepted outcome byte for byte. POSIX quoting remains byte-exact. Shell runs leave sentinel parent/session
    environment variables unchanged, including on failure.
 5. **Containment and mutation:** lexical and realpath symlink escapes, root-prefix siblings and post-print replacement.
    Delete an npx cache before execution and assert an exact-version run or clean non-zero failure. Upgrade a fake global
    install in place and assert the newer fixture runs. A hostile test `NODE_OPTIONS` preloader demonstrates the
    documented same-user boundary without changing path selection.
-6. **Packaging:** the verifier's transitive closure is deduplicated and ordered. The packed `gmail-mcp` consumer is
-   installed with local Gmail and core tarballs in an isolated cache and performs its existing handshake without a
-   registry copy of the candidate release.
-7. **Types and construction:** compile-time and syntax-tree fixtures reject a string or template in every
-   command-bearing result/error field, a newly added `CommsError` hint containing a manifest binary outside a brand,
-   option fragments and dynamically manifest-derived bare commands. Positive fixtures preserve reviewed
-   `externalCommand` uses for `chmod 700`, `claude mcp remove` and `codex mcp get/remove`. MCP instructions and tool
-   descriptions are scanned too. Separate fixtures prove MCP server names and package bin names remain legal protocol
-   identities while satisfying neither command brand.
-8. **End to end:** prepare harmless change approvals through CLI and MCP, execute each printed command in a real shell
-   with no suite binary on `PATH`, and observe the same temporary approval store. Run POSIX on POSIX and PowerShell plus
-   the available cmd alternative on Windows. No provider transport is called.
+6. **Packaging and channel policy:** the verifier's transitive closure is deduplicated and ordered. The packed
+   `gmail-mcp` consumer is installed with local Gmail and core tarballs in an isolated cache and performs its existing
+   handshake without a registry copy of the candidate release. Registry validation checks every discovered channel,
+   including a synthetic newcomer: core is in runtime `dependencies`, its source workspace edge resolves to the same
+   version, and its packed manifest pins exactly that version. Missing, dev-only, ranged and mismatched fixtures fail.
+7. **Types and construction:** compile-time fixtures reject strings in the known command-bearing fields.
+   `externalCommand` negative fixtures cover any word containing a manifest binary or `@agentcomms/` specifier, direct
+   and symlinked paths inside a suite package root, `node <suite-entry>`, `npx @agentcomms/<product>` and wrapper
+   payloads. The runtime-source scan rejects literal manifest-binary/subcommand pairs derived from
+   `capabilities.json`, including in a newly named result field, `CommsError` hints, MCP instructions and tool
+   descriptions; it also rejects a manifest-derived binary interpolation beside a literal subcommand. Positive
+   fixtures preserve the locator's own inputs, protocol identities and reviewed external commands: `chmod 700`,
+   install/read-back `claude mcp` / `codex mcp`, and `other-servers.ts`'s `claude mcp remove` / `codex mcp remove`.
+8. **End to end:** prepare harmless change approvals through CLI and MCP, execute each own-product or same-version
+   cross-product command in a real shell with no suite binary on `PATH`, and observe the same temporary approval store.
+   Unlocatable cross-product fixtures assert that no executable words are returned. Run POSIX on POSIX and PowerShell
+   plus the available cmd alternative on Windows. No provider transport is called.
 9. Run full `pnpm verify`. No test sends email, posts to Slack, calls Resend, uses a real key, writes the real home, or
    contains a real address, token or client secret.
 
