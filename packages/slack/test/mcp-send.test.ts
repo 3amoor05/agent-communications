@@ -402,6 +402,123 @@ test('a post held for a person is the same refusal on both surfaces, each naming
   }
 });
 
+// ── Outcomes nobody knows, and posts with no id ───────────────────────────────────────────────────────────────
+
+test('a post or reaction whose outcome Slack left unknown is SEND_OUTCOME_UNKNOWN from both surfaces at once, exit 10, still sending', async () => {
+  /*
+   * Design 2026-10-05 §D2 (§5 D2pt-c): an answer that does not say whether Slack acted is its own code, never
+   * retryable — before this release it was `TRANSIENT`, which a caller may retry, and a retry of a post that happened
+   * is a second post. Its approval object says it is still being sent, and when it will read unknown.
+   */
+  for (const kind of ['post', 'reaction'] as const) {
+    const harness = await newHarness();
+    await harness.addWorkspace({ alias: 'acme', mode: 'send', sendPolicy: 'chat' });
+    const fake = slack();
+    fake.script[kind === 'post' ? 'chat.postMessage' : 'reactions.add'] = { ok: false, error: 'internal_error' };
+    const { call, close } = await connect(harness, fake.read);
+    try {
+      let tool: Failure;
+      let terminal: Awaited<ReturnType<typeof cli>>;
+      if (kind === 'post') {
+        const { draftId, approvalId } = await prepared(call);
+        tool = failure(await call('slack_post_send', { workspace: 'acme', draftId, approvalId, expectChannel: 'C1' }));
+        const again = await prepared(call);
+        terminal = await cli(
+          harness,
+          [
+            '--json',
+            'post',
+            'send',
+            '--workspace',
+            'acme',
+            '--draft',
+            again.draftId,
+            '--approval',
+            again.approvalId,
+            '--expect-channel',
+            'C1',
+          ],
+          { read: fake.read },
+        );
+      } else {
+        tool = failure(await call('slack_react', REACTION));
+        terminal = await cli(
+          harness,
+          ['--json', 'react', '--workspace', 'acme', '--channel', 'C1', '--ts', '1.1', '--emoji', 'tada'],
+          { read: fake.read },
+        );
+      }
+      const error = terminal.json<Envelope<never>>().error;
+      for (const [surface, said] of [
+        ['mcp', tool],
+        ['cli', error],
+      ] as const) {
+        const what = `${kind} over ${surface}`;
+        assert.equal(said?.code, 'SEND_OUTCOME_UNKNOWN', what);
+        assert.match(said?.message ?? '', /is not known: /, what);
+        const approval = said?.details?.approval as { state: string; claimable: boolean; unknownAt?: string };
+        assert.equal(approval?.state, 'sending', what);
+        assert.equal(approval?.claimable, false, what);
+        assert.ok(approval?.unknownAt, `${what}: no unknownAt`);
+      }
+      assert.equal(terminal.code, EXIT_CODES.APPROVAL, terminal.stdout);
+      assert.equal(EXIT_CODES.APPROVAL, 10);
+    } finally {
+      await close();
+    }
+  }
+});
+
+test('a post Slack accepted without a ts says "sent; the provider returned no id" from both surfaces, and gives no ts', async () => {
+  // §5 D8o-f: never a ts made up, never `used`; the approval stays sending.
+  const harness = await newHarness();
+  await harness.addWorkspace({ alias: 'acme', mode: 'send', sendPolicy: 'chat' });
+  const fake = slack();
+  fake.script['chat.postMessage'] = { ok: true };
+  const { call, close } = await connect(harness, fake.read);
+  try {
+    const { draftId, approvalId } = await prepared(call);
+    const posted = await call('slack_post_send', { workspace: 'acme', draftId, approvalId, expectChannel: 'C1' });
+    assert.notEqual(posted.isError, true, JSON.stringify(posted.structuredContent));
+    const { approval, ...result } = posted.structuredContent as { approval: { state: string } };
+    assert.deepEqual(result, { approvalId, channel: 'C1', note: 'sent; the provider returned no id' });
+    assert.equal(approval.state, 'sending');
+
+    const viaJson = await prepared(call);
+    const send = ['post', 'send', '--workspace', 'acme', '--draft', viaJson.draftId, '--approval', viaJson.approvalId];
+    const json = await cli(harness, ['--json', ...send, '--expect-channel', 'C1'], { read: fake.read });
+    assert.equal(json.code, EXIT_CODES.OK, json.stdout + json.stderr);
+    const data = json.json<Envelope<Record<string, unknown>>>().data ?? {};
+    assert.equal(data.note, 'sent; the provider returned no id');
+    assert.equal('ts' in data, false, 'a ts was reported that Slack never gave');
+
+    const viaTerminal = await prepared(call);
+    const human = await cli(
+      harness,
+      [
+        'post',
+        'send',
+        '--workspace',
+        'acme',
+        '--draft',
+        viaTerminal.draftId,
+        '--approval',
+        viaTerminal.approvalId,
+        '--expect-channel',
+        'C1',
+      ],
+      { read: fake.read },
+    );
+    assert.equal(human.code, EXIT_CODES.OK, human.stdout + human.stderr);
+    assert.equal(human.stdout, 'Posted to C1. Sent; the provider returned no id.\n');
+    for (const id of [approvalId, viaJson.approvalId, viaTerminal.approvalId]) {
+      assert.equal(asV2(await harness.core.approvals.get(id))?.state, 'sending', 'never used without an id');
+    }
+  } finally {
+    await close();
+  }
+});
+
 // ── Where a post goes ──────────────────────────────────────────────────────────────────────────────────────────
 
 /** The refusal of a user id as a post's destination, and the step it offers: the DM's own id, and where to find it. */

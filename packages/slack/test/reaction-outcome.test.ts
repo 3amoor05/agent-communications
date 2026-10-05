@@ -1,10 +1,26 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { ApprovalStore, type AuditRecord, asV2, CommsError, SENDING_LEASE_MS } from '@agentcomms/core';
+import {
+  type ApprovalObject,
+  ApprovalStore,
+  type AuditRecord,
+  asV2,
+  CommsError,
+  type Core,
+  SENDING_LEASE_MS,
+  waitForApproval,
+} from '@agentcomms/core';
 import { certainlyRefused } from '../src/api/call.ts';
 import { SlackContext } from '../src/context.ts';
 import { gateDepsFor } from '../src/operations/gate.ts';
 import { prepareReaction, reactPrepared } from '../src/operations/send.ts';
+import {
+  assertStartedOnlyThatStep,
+  assertStoppedBefore,
+  FENCE_CASES,
+  fenceWorld,
+  suspendAt,
+} from './support/fence-sites.ts';
 import { type Harness, newHarness } from './support/harness.ts';
 
 /**
@@ -23,6 +39,7 @@ const NO_REACTION_NOTE =
 interface ReactionResult {
   readonly approvalId: string;
   readonly note?: string | undefined;
+  readonly approval: ApprovalObject;
 }
 
 const DROP: unique symbol = Symbol('drop the connection instead of answering');
@@ -42,13 +59,13 @@ function fakeSlack(script: Record<string, () => unknown>) {
 }
 
 /** A workspace that can react under `chat`, and a Slack that accepts the reaction. */
-async function world(remove = false) {
+async function world(remove = false, wantedTs = WANTED.ts) {
   const harness = await newHarness();
   await harness.addWorkspace({ alias: 'acme', mode: 'send' });
   const method = remove ? 'reactions.remove' : 'reactions.add';
   const fake = fakeSlack({ [method]: () => ({ ok: true }) });
   const context = new SlackContext({ core: harness.core, env: harness.env, surface: 'mcp' });
-  const wanted = { ...WANTED, remove };
+  const wanted = { ...WANTED, ts: wantedTs, remove };
   const gate = await gateDepsFor(context, 'acme', { fetch: fake.fetch });
   const prepared = await prepareReaction(gate, wanted);
   const change = (through: typeof fake.fetch = fake.fetch): Promise<ReactionResult> =>
@@ -72,6 +89,32 @@ function recordedOutcomes(harness: Harness): string[] {
     return complete(approvalId, claimToken, outcome);
   };
   return seen;
+}
+
+/** A store whose clock is a lease later: what any status, list or wait reads once the claimant's lease is out. */
+function aLeaseLater(harness: Harness): ApprovalStore {
+  return new ApprovalStore(harness.core.paths.stateDir, {
+    now: () => new Date(Date.now() + SENDING_LEASE_MS),
+    loadConfig: () => harness.core.config.load(),
+  });
+}
+
+/** Where a zero-wait finds the approval: now, and — through `store` — at another time. */
+async function zeroWait(harness: Harness, approvalId: string, store?: ApprovalStore): Promise<string> {
+  const core: Core = store === undefined ? harness.core : { ...harness.core, approvals: store };
+  return (await waitForApproval(core, approvalId, { waitSeconds: 0, channel: 'slack' })).state;
+}
+
+/** An outcome nobody knows (design 2026-10-05 §D2): `SEND_OUTCOME_UNKNOWN`, never retryable, the approval sending. */
+function assertOutcomeUnknown(error: CommsError, what: string): void {
+  assert.equal(error.code, 'SEND_OUTCOME_UNKNOWN', what);
+  assert.equal(error.retryable, false, what);
+  assert.equal(error.exitCode, 10, what);
+  const approval = error.details?.approval as ApprovalObject | undefined;
+  assert.equal(approval?.state, 'sending', what);
+  assert.equal(approval?.claimable, false, what);
+  assert.ok(approval?.sendingAt, `${what}: no sendingAt`);
+  assert.ok(approval?.unknownAt, `${what}: no unknownAt`);
 }
 
 /** A Slack-named refusal, as `callSlack` presents one to the outcome classifier. */
@@ -203,6 +246,8 @@ test('a reaction Slack took whose answer was lost is left to read unknown, never
   );
   assert.ok(error instanceof CommsError, String(error));
   assert.match(error.message, /^whether the reaction was added is not known: could not reach Slack/);
+  // At once, and never as something to retry (§5 D2pt-c): before this release it was `TRANSIENT`.
+  assertOutcomeUnknown(error, 'a dropped answer');
   assert.equal(error.details?.outcome, 'unknown');
   assert.match(error.hint ?? '', /Look at the message before anything else/);
   assert.equal(changed(), 1, 'Slack was not asked to react');
@@ -270,10 +315,12 @@ test('what Slack answered decides a reaction record: a refusal is failed, anythi
     assert.equal(record?.outcome, 'failed', what);
     if (expected === 'sending') {
       assert.match(error.message, /^whether the reaction was added is not known: /, what);
+      assertOutcomeUnknown(error, what);
       assert.deepEqual(outcomes, [], `${what}: an outcome nobody knows was recorded`);
       assert.match(record?.reason ?? '', /^outcome unknown: /, what);
     } else {
       assert.doesNotMatch(error.message, /not known/, what);
+      assert.notEqual(error.code, 'SEND_OUTCOME_UNKNOWN', what);
       assert.deepEqual(outcomes, ['failed'], what);
       assert.doesNotMatch(record?.reason ?? '', /unknown/, what);
     }
@@ -306,6 +353,7 @@ test('already_reacted from a removal does not claim that the reaction was remove
   );
   assert.ok(error instanceof CommsError, String(error));
   assert.match(error.message, /^whether the reaction was removed is not known: /);
+  assertOutcomeUnknown(error, 'already_reacted from a removal');
   assert.deepEqual(outcomes, []);
   assert.equal(await state(), 'sending');
 });
@@ -397,6 +445,10 @@ test('a reaction Slack accepted whose approval cannot be marked used is never fa
   assert.equal(changed(), 1);
   assert.deepEqual(asked, ['used'], 'a failure was recorded after Slack accepted the reaction');
   assert.equal(await state(), 'sending');
+  // What a status says of it later (§5 D2pt-i): still being sent, and then not known — never `used` invented.
+  assert.equal(result.approval.state, 'sending');
+  assert.equal(await zeroWait(harness, result.approvalId), 'sending');
+  assert.equal(await zeroWait(harness, result.approvalId, aLeaseLater(harness)), 'unknown');
   const [record] = await audited(harness);
   assert.equal(record?.outcome, 'ok');
   assert.match(record?.reason ?? '', /the approval could not be marked used/);
@@ -463,4 +515,51 @@ test('an audit failure while recording a refusal cannot hide what Slack refused'
   assert.equal(error.message, 'no such channel, or this account cannot see it');
   assert.match(error.hint ?? '', /audit log could not record the refusal \(EROFS: read-only file system\)/);
   assert.equal(await state(), 'failed');
+});
+
+test('a reaction on a message with no ts is never recorded by an empty id, in the approval or the audit', async () => {
+  /*
+   * What a reaction is recorded by is the message it is on. With none (§5 D8o-h), the approval is left `sending`
+   * rather than made `used` with an empty id, the result says so, and no audit record holds an empty ts.
+   */
+  const { harness, change, state, approvalId } = await world(false, '');
+  const store = harness.core.approvals;
+  const complete = store.complete.bind(store);
+  const completions: unknown[] = [];
+  store.complete = (id, claimToken, outcome) => {
+    completions.push(outcome);
+    return complete(id, claimToken, outcome);
+  };
+
+  const result = await change();
+  assert.equal(result.note, 'sent; the provider returned no id');
+  assert.deepEqual(completions, [], 'the reaction was completed without an id');
+  assert.equal(await state(), 'sending');
+  assert.equal(await zeroWait(harness, approvalId, aLeaseLater(harness)), 'unknown');
+  const [record] = await audited(harness);
+  assert.equal(record?.outcome, 'ok');
+  assert.deepEqual(record?.ids, { channel: 'C1', emoji: 'tada' }, 'the audit holds an empty ts');
+  assert.match(record?.reason ?? '', /^accepted without an id/);
+});
+
+// ── The fence before each step ─────────────────────────────────────────────────────────────────────────────────
+
+/*
+ * The fence-site table (`support/fence-sites.ts`), for the step a reaction makes — `reactions.add`, and
+ * `reactions.remove` — against the loopback Slack. §5 R11c, R12b and R12c.
+ */
+for (const c of FENCE_CASES.filter((one) => one.flow === 'reaction' || one.flow === 'removal')) {
+  test(`a claimant whose lease ran out just before ${c.label} starts nothing, and says so`, async (t) => {
+    const w = await fenceWorld(t);
+    const log = suspendAt(w, c.step, 'before');
+    await assertStoppedBefore(w, c, await w.run(c.flow), log);
+  });
+}
+
+test('a reaction’s claimant suspended right after its fence said go still makes that one change, and records it', async (t) => {
+  for (const c of FENCE_CASES.filter((one) => one.flow === 'reaction' || one.flow === 'removal')) {
+    const w = await fenceWorld(t);
+    const log = suspendAt(w, c.step, 'after');
+    await assertStartedOnlyThatStep(w, c, await w.run(c.flow), log);
+  }
 });
