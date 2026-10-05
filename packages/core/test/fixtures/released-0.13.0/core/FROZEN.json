@@ -1,0 +1,26 @@
+{
+  "about": "@agentcomms/core@0.13.0 as published to npm: its package.json and dist/, unpacked from the tarball below and never edited. The mixed-version tests of CUE-404 run it. To check it again: npm pack @agentcomms/core@0.13.0, compare the tarball with integrity, unpack it, and compare each file with its sha256 here.",
+  "name": "@agentcomms/core",
+  "version": "0.13.0",
+  "gitHead": "afd195efd8cbdaaab148859867a1170684af6ae3",
+  "tarball": "https://registry.npmjs.org/@agentcomms/core/-/core-0.13.0.tgz",
+  "integrity": "sha512-DkmpeDffTiwjfbqymDb6e00S9uEqL3jYFFjJm+Gwu0XP5u2AoyPpAwoFLR366/LbHofs/Gervl5QrBV76uoPYg==",
+  "shasum": "0af24efcc4ba85e92b3b7715f082c887357c8397",
+  "files": {
+    "dist/change-flow-DxZfblwU.d.mts": "daf49d283d6dd8c96498fa39d25fbb3be9646a1707ea0c83b0c16b0c7c7a1851",
+    "dist/cli.d.mts": "e93c561e226964de4addef7181e1405f72bea02ef7b51a62dbb1d40326716975",
+    "dist/cli.mjs": "768506a5ee89ade1252c52619ab0361f473180174ec6f01831ea3ea657eebb11",
+    "dist/dist-COPefvtq.mjs": "65ebbd0e7b2c4cee4f635f86166994e92ce0a21762f2c24d625536d5a00cfb55",
+    "dist/index.d.mts": "c18520c42b53d20fc54e7376e67456e8895b3c35b19a82493e04d638c81049b4",
+    "dist/index.mjs": "dae123fbe2214ed1efc824fd42c6a17408478b3f902fb78d4b25ab1e0a1cb5aa",
+    "dist/internal-Drg51T9y.mjs": "166162f263ff63e053b174e3ee7b3ef28502bde1728849d96ff5122b4fa8079f",
+    "dist/secrets-migrate-DSFfruvx.mjs": "dc956d2502ec38fcb185aa4302c4dbf32d8497e00ca9cc4caaed480d30947e8b",
+    "dist/server-Csk0qF0q.mjs": "495fc12df5eafc8611ea5b4ed59094922deb18a99a2d0f18ef5ba0140de71bc3",
+    "dist/src-D_zzAWoS-BhK0GFdq.mjs": "547e6d903d0140212cd055e00fa6d3214b7b266c79a924686d83e6e3237be942",
+    "dist/stdio-C8CmVrdG.mjs": "ad90f99b14ceb8ebbc0f5958119c5729490a37202962599f50a6de5c73e6c67c",
+    "dist/stdio-CHZ2WRcx.mjs": "4f8a181b5d6bbb36fbe2c2e9f73d80a84276caab7fc673f292c077d26b65c952",
+    "dist/tool-arguments-JmEBiWPl.mjs": "0c6df7fe2fe08b34c8ca5ba5b993b9a99898f0ad5638e90f948a395e080ee0ab",
+    "dist/update-check-C8sNjCez.mjs": "8b7e33865ed193f1f74d02889479e45749213500e1d8ade8b47bf6ec39f85bad",
+    "package.json": "5338cbedde0d3e0215f67f65a6642993dc5139cb282910431c4e3ade0b099e26"
+  }
+}

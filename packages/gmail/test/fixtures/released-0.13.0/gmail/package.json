@@ -1,0 +1,133 @@
+{
+  "name": "@agentcomms/gmail",
+  "version": "0.13.0",
+  "description": "Gmail for coding agents: the agent-gmail CLI, an MCP server and a library — search, read, analyse and draft across many inboxes, with sending gated by approval.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Criss Moldovan",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/crissmoldovan/agent-communications.git",
+    "directory": "packages/gmail"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs"
+    }
+  },
+  "main": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
+  "bin": {
+    "agent-gmail": "./dist/cli.mjs"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_LICENSES"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "optionalDependencies": {
+    "@napi-rs/keyring": "2.1.0"
+  },
+  "devDependencies": {
+    "@googleapis/gmail": "^22.0.0",
+    "@googleapis/people": "^12.0.0",
+    "@modelcontextprotocol/client": "2.0.0",
+    "@modelcontextprotocol/server": "^2.0.0",
+    "@types/nodemailer": "^8.0.2",
+    "commander": "^15.0.0",
+    "google-auth-library": "^11.1.0",
+    "nodemailer": "10.0.10",
+    "p-retry": "^8.0.1",
+    "zod": "^4.6.5",
+    "@agentcomms/core": "0.13.0"
+  },
+  "dependencies": {
+    "@clack/prompts": "^1.8.1"
+  },
+  "agentcomms": {
+    "contract": 1,
+    "channel": "gmail",
+    "label": "Gmail",
+    "binary": "agent-gmail",
+    "server": {
+      "defaultName": "gmail",
+      "npxPackage": "@agentcomms/gmail-mcp",
+      "entryFiles": [
+        [
+          "node_modules",
+          "@agentcomms",
+          "gmail-mcp",
+          "dist",
+          "server.mjs"
+        ]
+      ],
+      "bins": [
+        "agent-gmail-mcp"
+      ]
+    },
+    "accounts": {
+      "map": "inboxes",
+      "noun": "mailbox",
+      "modes": [
+        "read",
+        "send"
+      ],
+      "guarantee": {
+        "ceiling": "grant",
+        "floor": "grant",
+        "why": "A mailbox connected at the read tier holds only gmail.readonly, which Google will not send with. Every tier that can draft can also send, so above read it is the approval gate, not the grant, that stands between a draft and a sent message."
+      }
+    },
+    "narrowing": [
+      {
+        "option": "inbox",
+        "flag": "--inbox",
+        "kind": "pin"
+      },
+      {
+        "option": "readOnly",
+        "flag": "--read-only",
+        "kind": "switch"
+      }
+    ],
+    "rivals": {
+      "packages": [
+        {
+          "name": "@artymclabin/gmail-mcp"
+        },
+        {
+          "name": "@gongrzhe/server-gmail-autoauth-mcp",
+          "unscoped": true
+        },
+        {
+          "name": "@shinzolabs/gmail-mcp"
+        }
+      ]
+    },
+    "hosts": [
+      "accounts.google.com",
+      "oauth2.googleapis.com",
+      "gmail.googleapis.com",
+      "people.googleapis.com"
+    ],
+    "approve": "agent-gmail approve",
+    "skills": {
+      "prefix": "gmail-",
+      "contract": "skills/_shared/contract-gmail.md"
+    }
+  },
+  "scripts": {
+    "build": "tsdown",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --experimental-strip-types --test \"test/**/*.test.ts\""
+  },
+  "gitHead": "afd195efd8cbdaaab148859867a1170684af6ae3"
+}
