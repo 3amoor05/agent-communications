@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { basename, dirname } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { afterEach, test } from 'node:test';
 import { CommsError, gatedChange, openCore, UNTRUSTED_NOTICE } from '@agentcomms/core';
 import { ResendContext } from '../src/context.ts';
@@ -188,7 +188,8 @@ test('an attachment is downloaded only on request, into the downloads jail, with
 test('an explicit downloads pin beats defaults.downloadsDir while an unpinned read keeps the configured root', async () => {
   harness = await newHarness();
   const configured = `${harness.dir}/configured-downloads`;
-  const pinned = `${harness.dir}/pinned-downloads`;
+  // A pin is resolved, so on Windows it comes back with the platform's separators.
+  const pinned = join(harness.dir, 'pinned-downloads');
   await harness.core.config.update(
     (config) => ({ ...config, defaults: { ...config.defaults, downloadsDir: configured } }),
     { consent: { kind: 'loosening-consent', paths: ['defaults.downloadsDir'] } },
