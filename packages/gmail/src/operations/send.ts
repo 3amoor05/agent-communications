@@ -34,6 +34,7 @@ import { addressField, domainField, type FieldEnvelope, filenameField, wrapField
 import { sendCertainlyRefused } from '../gmail-api/errors.ts';
 import { type GmailTransport, providerId } from '../gmail-api/transport.ts';
 import type { HistoryResult } from './history-cache.ts';
+import { type UnsentSection, unsentSection } from './unsent.ts';
 
 /**
  * The send gate: prepare → approve → execute.
@@ -85,6 +86,12 @@ export interface SendPreparation {
    * (`ensureSendEpochConfig`). Absent otherwise.
    */
   legacyDrain?: LegacyDrainReport | undefined;
+}
+
+/** `send list` and `gmail_send_list`: every approval as its public object, and the unsent section. */
+export interface ApprovalList {
+  approvals: Array<PublicApprovalView & { inbox: string | null }>;
+  unsent: UnsentSection;
 }
 
 /** What a send that Gmail accepted without naming the message says, exactly (design 2026-10-05 §D8). */
@@ -1160,11 +1167,14 @@ export async function executeSend(
  * (`inbox`, or a pinned server's), only that mailbox's own: a record whose owner cannot be trusted — a stub — never
  * matches. What a sender wrote goes through this package's own field helpers: an address bare only while it is a plain
  * address, a subject always wrapped, a file name decoded and wrapped. Never a challenge hash or a claim token.
+ *
+ * Beside them, the unsent section (design 2026-10-05 §D9, `unsentSection`): the drafts whose last preparation expired
+ * in the last seven days, each worded to the records the scan read, with what Drafts says of it now.
  */
 export async function listApprovals(
   context: GmailContext,
   filter: { inbox?: string | undefined } = {},
-): Promise<Array<PublicApprovalView & { inbox: string | null }>> {
+): Promise<ApprovalList> {
   const config = await context.config();
   const byId = new Map(Object.entries(config.inboxes).map(([alias, inbox]) => [inbox.id, alias]));
   const name = filter.inbox;
@@ -1173,7 +1183,7 @@ export async function listApprovals(
         .inbox.id
     : undefined;
   const seen = await context.core.approvals.inspectAll(inboxId ? { inboxId } : {});
-  return seen.map(({ stored, outcome }) => {
+  const approvals = seen.map(({ stored, outcome }) => {
     const owner = ownerOf(stored);
     const alias = owner === null ? null : (byId.get(owner) ?? '(removed)');
     // The envelope names the mailbox by its alias where it still has one, else by the id it was prepared for.
@@ -1197,6 +1207,8 @@ export async function listApprovals(
       inbox: alias,
     };
   });
+  // Then the drafts whose last preparation expired, and what the records read can say of each (design §D9).
+  return { approvals, unsent: await unsentSection(context, inboxId ? { inboxId } : {}) };
 }
 
 /**

@@ -1318,7 +1318,7 @@ update first, or put it off (the stop names both commands) · 64 usage · 65 bad
 
   send
     .command('list')
-    .description('approvals waiting, and what each one is for')
+    .description('approvals waiting, what each one is for, and the drafts whose last preparation expired')
     .option('--inbox <alias>', 'only this mailbox')
     .action(
       act(async (context, globalOptions, options: Options) => {

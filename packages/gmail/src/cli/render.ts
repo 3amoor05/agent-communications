@@ -24,10 +24,11 @@ import type { InboxView, WhoamiResult } from '../operations/inboxes.ts';
 import type { ModifyResult, TrashResult } from '../operations/organise.ts';
 import type { ReadMessageResult, ReadThreadResult } from '../operations/read.ts';
 import type { SearchResult } from '../operations/search.ts';
-import type { listApprovals, SendPreparation, SendResult } from '../operations/send.ts';
+import type { ApprovalList, SendPreparation, SendResult } from '../operations/send.ts';
 import { FINISH_WAIT_SECONDS, type StartedSignIn } from '../operations/signin.ts';
+import type { UnsentDraft, UnsentSection } from '../operations/unsent.ts';
 
-type ApprovalView = Awaited<ReturnType<typeof listApprovals>>[number];
+type ApprovalView = ApprovalList['approvals'][number];
 
 /**
  * Human renderings. `--json` prints the data itself; these exist so a person is not made to read JSON.
@@ -645,20 +646,31 @@ export function renderDraft(result: DraftResult, color: boolean): string {
     paint(color, 'dim', `Saved as a draft in ${result.inbox} (${result.draftId}). Nothing has been sent.`),
     paint(color, 'dim', 'Open it in Gmail to send it, or ask for it to be sent and approve the send when prompted.'),
   );
+  // Its last preparation expired: what the records read say of it, as `send list` says it (design 2026-10-05 §D9).
+  if (result.unsent !== undefined) {
+    lines.push(
+      '',
+      paint(color, 'dim', 'Its last preparation to send expired:'),
+      ...unsentLines(result.unsent, color).slice(1),
+    );
+  }
   if (result.profile) lines.push('', paint(color, 'dim', '— writing profile —'), result.profile);
   return lines.join('\n');
 }
 
 export function renderDrafts(drafts: DraftSummary[], color: boolean): string {
   if (drafts.length === 0) return 'No drafts.';
+  // A last column only when a draft's last preparation expired: what the records read say of it (§D9).
+  const history = drafts.some((draft) => draft.unsent !== undefined);
   return table(
     [
-      ['DRAFT', 'TO', 'SUBJECT', 'UPDATED'],
+      ['DRAFT', 'TO', 'SUBJECT', 'UPDATED', ...(history ? ['LAST PREPARATION EXPIRED'] : [])],
       ...drafts.map((draft) => [
         draft.draftId,
         draft.to.join(', ') || '—',
         draft.subject || '(no subject)',
         draft.updatedAt?.slice(0, 16).replace('T', ' ') ?? '—',
+        ...(history ? [draft.unsent?.said ?? '—'] : []),
       ]),
     ],
     color,
@@ -787,7 +799,13 @@ export function renderSent(result: SendResult, color: boolean): string {
   return lines.join('\n');
 }
 
-export function renderApprovals(records: ApprovalView[], color: boolean): string {
+export function renderApprovals(list: ApprovalList, color: boolean): string {
+  const unsent = renderUnsent(list.unsent, color);
+  const approvals = approvalsTable(list.approvals, color);
+  return unsent === '' ? approvals : `${approvals}\n\n${unsent}`;
+}
+
+function approvalsTable(records: ApprovalView[], color: boolean): string {
   if (records.length === 0) return 'No approvals waiting.';
   // Every form: what a record has of these columns, and a dash for what it has not — a stub has only its id, and
   // `corrupt` with the reason as its state.
@@ -813,6 +831,77 @@ export function renderApprovals(records: ApprovalView[], color: boolean): string
     ],
     color,
   );
+}
+
+/** What the scan behind an unsent finding read, in a person's words. */
+const EVIDENCE_WORDS: Record<string, string> = {
+  'complete-90-days': 'every approval record kept (90 days) was read',
+  'last-500': 'only the 500 most recently changed approval records were read',
+  indeterminate: 'what could be read cannot settle it',
+};
+
+/**
+ * The unsent section of `send list` (design 2026-10-05 §D9): each draft whose last preparation expired, what the records
+ * read say of it — in their exact words — what Drafts says of it now, and the command that prepares it again. Nothing
+ * when there is nothing to say.
+ */
+function renderUnsent(section: UnsentSection, color: boolean): string {
+  const cutShort = section.truncated.includes('deadline');
+  if (section.rows.length === 0) {
+    return cutShort
+      ? paint(color, 'yellow', 'Drafts whose approvals expired could not be checked: the report deadline came first.')
+      : '';
+  }
+  const lines = [
+    paint(
+      color,
+      'bold',
+      `Drafts whose last preparation expired, prepared in the last 7 days (${EVIDENCE_WORDS[section.evidence] ?? section.evidence}):`,
+    ),
+  ];
+  for (const row of section.rows) lines.push(...unsentLines(row, color).map((line) => `  ${line}`));
+  if (section.truncated.includes('rows')) {
+    lines.push(paint(color, 'dim', 'More drafts qualified than are shown: the older ones are left out.'));
+  }
+  if (cutShort) {
+    lines.push(
+      paint(
+        color,
+        'yellow',
+        'The report deadline stopped it early: what it could not read is indeterminate, and a look-up it did not start is not observed.',
+      ),
+    );
+  }
+  return lines.join('\n');
+}
+
+/** One unsent draft: which, to whom, what its history says, what Drafts says, and how to prepare it again. */
+function unsentLines(row: UnsentDraft, color: boolean): string[] {
+  const to = row.to.join(', ') || '(nobody in To)';
+  const lines = [
+    `${row.inbox} ${row.draftId} — to ${to}: ${row.subject || '(no subject)'}`,
+    `  ${paint(color, row.status === 'unsent' ? 'yellow' : 'dim', row.said)}; ${row.drafts.said}.`,
+  ];
+  if (row.attachments !== null && row.attachments.length > 0) {
+    lines.push(`  attached: ${row.attachments.join(', ')}`);
+  }
+  lines.push(
+    paint(
+      color,
+      'dim',
+      `  last prepared ${row.last.createdAt.slice(0, 16).replace('T', ' ')} (${row.last.approvalId})${
+        row.last.expiredAt === undefined ? '' : `, expired ${row.last.expiredAt.slice(0, 16).replace('T', ' ')}`
+      }`,
+    ),
+  );
+  if (row.prepare !== null) {
+    lines.push(
+      `  ${handoffSentence(row.prepare.command, (command) => `Prepare it again with ${command}.`, {
+        instead: 'Prepare it again with gmail_send_prepare from a chat.',
+      })}`,
+    );
+  }
+  return lines;
 }
 
 /**

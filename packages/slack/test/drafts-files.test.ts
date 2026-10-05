@@ -13,12 +13,14 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { type TestContext, test } from 'node:test';
-import { CommsError } from '@agentcomms/core';
+import { ApprovalStore, asV2, CommsError, UNSENT_WORDS } from '@agentcomms/core';
 import { compose } from '../src/compose/blocks.ts';
 import { openDraftStore, type SlackDraft } from '../src/compose/drafts.ts';
 import { MAX_FILE_BYTES, MAX_FILES, TEST_ONLY_HOOKS } from '../src/compose/files.ts';
 import { SlackContext } from '../src/context.ts';
-import { createDraft, updateDraft } from '../src/operations/drafts.ts';
+import { createDraft, type DraftView, listDrafts, updateDraft } from '../src/operations/drafts.ts';
+import { prepareDraftPost, sendPost } from '../src/operations/post.ts';
+import { startFakeSlack } from './support/fake-slack.ts';
 import { assertNoBareCommand, coreInlineToFill, slackHandoffs } from './support/handoffs.ts';
 import { type Harness, newHarness, tempDir } from './support/harness.ts';
 
@@ -525,4 +527,129 @@ test('a stored draft with more files than a post may carry is refused when it is
   // Preparing it, updating it or showing it meets the same refusal; deleting it still works.
   await refusal(updateDraft(context, 'acme', draft.draftId, { text: 'fewer pages' }));
   assert.deepEqual(await store.list(), [], 'a draft that cannot be read was listed');
+});
+
+// ── Where a draft's current revision stands (CUE-404 Task 22; design 2026-10-05 §D9) ──────────────────────────────
+
+const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
+const TS = '1700000000.000100';
+
+/**
+ * A workspace that posts under `chat` to a Slack that takes posts, with the approval store and the drafts on one clock
+ * of the test's own: an approval lapses, and retention comes due, when the test says.
+ */
+async function posting(t: TestContext) {
+  const harness = await newHarness();
+  await harness.addWorkspace({ alias: 'acme', mode: 'send' });
+  const fake = await startFakeSlack({
+    'conversations.info': () => ({ ok: true, channel: { id: 'C1', name: 'eng', num_members: 4, is_member: true } }),
+    'chat.postMessage': () => ({ ok: true, ts: TS }),
+  });
+  t.after(() => fake.close());
+  const clock = { t: Math.floor(Date.now() / 1000) * 1000 };
+  const now = () => new Date(clock.t);
+  harness.core.approvals = new ApprovalStore(harness.core.paths.stateDir, {
+    now,
+    handoffs: harness.core.handoffs,
+    loadConfig: () => harness.core.config.load(),
+    audit: harness.core.audit,
+  });
+  const context = new SlackContext({ core: harness.core, env: harness.env, now, surface: 'mcp' });
+  const prepare = (request: { draftId: string } | { channel: string; text: string }) =>
+    prepareDraftPost(context, 'acme', request, { fetch: fake.fetch });
+  const post = (draftId: string, approvalId: string) =>
+    sendPost(context, 'acme', { draftId, approvalId, expectChannel: 'C1' }, { fetch: fake.fetch });
+  const record = async (approvalId: string) => {
+    const found = asV2(await harness.core.approvals.get(approvalId));
+    assert.ok(found, `approval ${approvalId} is a version-2 record`);
+    return found;
+  };
+  return { harness, context, clock, prepare, post, record };
+}
+
+/** What `draft list` says of each draft's current revision, by draft. */
+async function annotated(context: SlackContext): Promise<Record<string, DraftView['unsent']>> {
+  return Object.fromEntries((await listDrafts(context, 'acme')).map((view) => [view.draftId, view.unsent]));
+}
+
+test('revision A posted, then revision B — identical content — prepared and lapsed: the list reports B, which A never hides (D9e-i)', async (t) => {
+  const { context, clock, prepare, post, record } = await posting(t);
+  const a = await prepare({ channel: 'C1', text: 'the report' });
+  await post(a.draftId, a.approvalId);
+  clock.t += MINUTE;
+  // Saved again with the same words: a new revision, which no approval made before it covers.
+  const saved = await updateDraft(context, 'acme', a.draftId, { text: 'the report' });
+  const b = await prepare({ draftId: a.draftId });
+  clock.t += HOUR;
+  const [first, second] = [await record(a.approvalId), await record(b.approvalId)];
+  assert.equal(first.state, 'used');
+  assert.equal(first.contentDigest, second.contentDigest, 'the two revisions post identical content');
+  assert.notEqual(first.draftMessageId, second.draftMessageId);
+  assert.equal(second.draftMessageId, saved.revision);
+
+  const shown = (await annotated(context))[a.draftId];
+  assert.deepEqual(
+    shown?.map((entry) => [entry.status, entry.said, entry.evidence, entry.last.approvalId]),
+    [['unsent', UNSENT_WORDS.complete, 'complete-90-days', b.approvalId]],
+  );
+  assert.doesNotMatch(JSON.stringify(shown), new RegExp(a.approvalId), 'revision A’s post is not this revision’s');
+});
+
+test('the inverse: revision B prepared and lapsed, then revision A — identical content — posted: the list reports A as used, which B never hides (D9e-i)', async (t) => {
+  const { context, clock, prepare, post } = await posting(t);
+  const b = await prepare({ channel: 'C1', text: 'the report' });
+  clock.t += HOUR;
+  await updateDraft(context, 'acme', b.draftId, { text: 'the report' });
+  const a = await prepare({ draftId: b.draftId });
+  await post(a.draftId, a.approvalId);
+  clock.t += MINUTE;
+
+  const shown = (await annotated(context))[b.draftId];
+  assert.equal(shown?.length, 1);
+  assert.equal(shown?.[0]?.status, 'used');
+  assert.equal(shown?.[0]?.decidedBy, a.approvalId);
+  assert.match(shown?.[0]?.said ?? '', new RegExp(`^used with approval ${a.approvalId}: accepted by Slack at `));
+  assert.doesNotMatch(JSON.stringify(shown), new RegExp(`${b.approvalId}|${UNSENT_WORDS.complete}`));
+  // A draft with nothing prepared says nothing.
+  const quiet = await createDraft(context, 'acme', { channel: 'C1', text: 'not yet' });
+  assert.equal((await annotated(context))[quiet.draftId], undefined);
+});
+
+test('a posted revision pruned at its 90-day boundary, then prepared again unchanged and lapsed: only the 90-day words, never an all-time claim (D9e-j)', async (t) => {
+  const { harness, context, clock, prepare, post, record } = await posting(t);
+  const r = await prepare({ channel: 'C1', text: 'the report' });
+  await post(r.draftId, r.approvalId);
+  const used = await record(r.approvalId);
+  assert.equal(used.state, 'used');
+
+  // Ninety days and more on, the same exact revision and digest is prepared again: the day's retention runs first.
+  clock.t += 91 * DAY;
+  const again = await harness.core.approvals.create({
+    channel: 'slack',
+    inboxId: used.inboxId,
+    inboxSub: used.inboxSub,
+    draftId: used.draftId,
+    draftMessageId: used.draftMessageId,
+    contentDigest: used.contentDigest,
+    sendEpoch: used.sendEpoch ?? 0,
+    policy: 'chat',
+    requiredPolicy: 'chat',
+    riskFlags: [],
+    expect: used.expect,
+  });
+  assert.equal(await harness.core.approvals.get(r.approvalId), null, 'the used record was kept 90 days, then pruned');
+  const retained = (await harness.core.audit.tail({ limit: 50 })).filter(
+    (row) => row.operation === 'approval.retained',
+  );
+  assert.equal(retained.length, 1, 'its terminal history stays in the audit log');
+  clock.t += HOUR;
+
+  const shown = (await annotated(context))[r.draftId];
+  assert.deepEqual(
+    shown?.map((entry) => [entry.status, entry.said, entry.evidence, entry.last.approvalId]),
+    [['unsent', 'not sent with any approval in the last 90 days', 'complete-90-days', again.approvalId]],
+  );
+  assert.doesNotMatch(JSON.stringify(shown), /\bnever\b|\bever\b|all-time/);
 });

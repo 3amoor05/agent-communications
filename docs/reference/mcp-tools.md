@@ -29,7 +29,7 @@ names it `from`. There is no default mailbox.
 | [`gmail_export`](#gmail_export) | Write a message or a whole thread to a file under the downloads folder, as Markdown, JSON or (for one message) the original . |
 | [`gmail_labels_list`](#gmail_labels_list) | The labels in a mailbox, with their ids and message counts. |
 | [`gmail_sendas_list`](#gmail_sendas_list) | The addresses this mailbox can send as, which one is the default, and whether each is verified. |
-| [`gmail_draft_list`](#gmail_draft_list) | The drafts waiting in a mailbox: who each is to, its subject, and when it was last saved. |
+| [`gmail_draft_list`](#gmail_draft_list) | The drafts waiting in a mailbox: who each is to, its subject, and when it was last saved — and, for one whose last preparation to send expired in the last 7 days, `unsent`: what the approval records read say of it, in the words of gmail_send_list. |
 | [`gmail_draft_get`](#gmail_draft_get) | Read a draft back, with the same preview the person would approve. |
 | [`gmail_setup`](#gmail_setup) | Where this machine is in connecting Gmail, and the one thing to do next: the eligible client for a target mailbox, connected mailboxes, registered MCP clients, and any Google Cloud steps still needed. |
 | [`gmail_clients_list`](#gmail_clients_list) | The Google Cloud OAuth clients registered on this machine: the name, the client id, the Cloud project, when each was added, and which mailboxes sign in through it. |
@@ -250,7 +250,7 @@ The addresses this mailbox can send as, which one is the default, and whether ea
 
 ### `gmail_draft_list`
 
-The drafts waiting in a mailbox: who each is to, its subject, and when it was last saved.
+The drafts waiting in a mailbox: who each is to, its subject, and when it was last saved — and, for one whose last preparation to send expired in the last 7 days, `unsent`: what the approval records read say of it, in the words of gmail_send_list.
 
 *read-only*
 
@@ -261,7 +261,7 @@ The drafts waiting in a mailbox: who each is to, its subject, and when it was la
 
 ### `gmail_draft_get`
 
-Read a draft back, with the same preview the person would approve. Show the preview verbatim.
+Read a draft back, with the same preview the person would approve. Show the preview verbatim. When its last preparation to send expired in the last 7 days, `unsent` says what the approval records read say of it, in the words of gmail_send_list.
 
 *read-only*
 
@@ -624,7 +624,7 @@ Takes no arguments.
 
 ### `gmail_send_list`
 
-Approvals that have been prepared, with what each one would send and when it expires: a send’s recipients and subject in `expect`, or — `kind: "change"` — the change to an account a person was asked to approve. The same as `send list` in the Gmail CLI.
+Approvals that have been prepared, with what each one would send and when it expires: a send’s recipients and subject in `expect`, or — `kind: "change"` — the change to an account a person was asked to approve. Beside them, `unsent`: each draft prepared in the last 7 days whose last preparation expired, what the approval records read say of it (`said`, in exact words scoped to `evidence` — never an all-time claim), what Drafts says of it now (`drafts`), and the one call that prepares it again. It sends nothing and changes no draft. The same as `send list` in the Gmail CLI.
 
 *read-only*
 

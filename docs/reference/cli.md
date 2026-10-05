@@ -529,7 +529,7 @@ agent-gmail send execute [options] <draftId>
 
 ### `agent-gmail send list`
 
-approvals waiting, and what each one is for
+approvals waiting, what each one is for, and the drafts whose last preparation expired
 
 ```
 agent-gmail send list [options]

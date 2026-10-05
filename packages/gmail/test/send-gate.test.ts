@@ -344,7 +344,7 @@ test('an approval can be cancelled, and cancelling is never refused', async () =
   const draftId = await draftTo(context, ['sam@partner.test']);
   const prepared = await prepareSend(context, 'work', draftId);
 
-  const open = await listApprovals(context, { inbox: 'work' });
+  const { approvals: open } = await listApprovals(context, { inbox: 'work' });
   assert.equal(open.length, 1);
   assert.equal(open[0]?.state, 'pending');
   assert.ok(!('challengeHash' in (open[0] ?? {})), 'a challenge hash is never handed to a caller');
@@ -650,7 +650,7 @@ test('each identity field changed in turn is corrupt before approval, claim, any
       }
     }
     // A report shows only its stub: nothing it holds, and no mailbox it claims to be.
-    const listed = (await listApprovals(context)).find((entry) => entry.approvalId === prepared.approvalId);
+    const listed = (await listApprovals(context)).approvals.find((entry) => entry.approvalId === prepared.approvalId);
     assert.deepEqual(listed, {
       approvalId: prepared.approvalId,
       state: 'corrupt',

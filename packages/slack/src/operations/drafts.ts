@@ -3,9 +3,13 @@ import {
   type CliHandoffs,
   CommsError,
   defaultAttachDeny,
+  type EvidenceScope,
   expandHome,
   handoffSentenceToFill,
   homeDirectory,
+  type UnsentRow,
+  type UnsentStatus,
+  unsentReport,
 } from '@agentcomms/core';
 import {
   type Broadcast,
@@ -324,6 +328,35 @@ export interface DraftView {
   readonly accountId: string;
   readonly createdAt: string;
   readonly updatedAt: string;
+  /**
+   * A list's row only: what the approval records read say of this exact revision, when a post of it was prepared in
+   * the last seven days and either its last preparation expired or an approval of it was used, is under way or still
+   * stands — one entry for each content digest it was prepared with (design 2026-10-05 §D9). Absent otherwise.
+   */
+  readonly unsent?: readonly DraftSendHistory[] | undefined;
+}
+
+/**
+ * What the approval records read say of one exact revision of a draft, prepared with one content digest (design
+ * 2026-10-05 §D9): keyed by workspace, draft, revision and digest — so a post of another revision, identical or not,
+ * never hides it, and it never hides one.
+ */
+export interface DraftSendHistory {
+  /**
+   * Where it stands by the records read: `unsent` (in the scope's words), `approved`, `sending`, `used`, `unknown` or
+   * `indeterminate`.
+   */
+  readonly status: UnsentStatus;
+  /** The finding, in its exact words. */
+  readonly said: string;
+  /** What the scan behind it read: every retained record, the newest 500, or not enough to say. */
+  readonly evidence: EvidenceScope;
+  /** The content digest this revision was prepared with. */
+  readonly contentDigest: string;
+  /** The last preparation, and when it expired, if it did. */
+  readonly last: UnsentRow['last'];
+  /** The approval that decided a status other than `unsent` or `indeterminate`. */
+  readonly decidedBy?: string | undefined;
 }
 
 /** The part of a view every draft has, whether or not it would post. */
@@ -403,7 +436,7 @@ export async function showDraft(context: SlackContext, alias: string, draftId: s
 export async function listDrafts(context: SlackContext, alias: string): Promise<DraftView[]> {
   const { account } = requireWorkspace(await context.config(), alias, context.handoffs);
   const drafts = await openDraftStore(context.core.paths.stateDir, context.now, context.handoffs).list(account.id);
-  return drafts.map((draft) => {
+  const views = drafts.map((draft): DraftView => {
     try {
       return viewDraft(draft, context.handoffs);
     } catch (error) {
@@ -415,4 +448,33 @@ export async function listDrafts(context: SlackContext, alias: string): Promise<
       };
     }
   });
+  if (views.length === 0) return views;
+  /*
+   * Each draft's current revision, as the approval records read say it stands (design 2026-10-05 §D9): its own exact
+   * revision only, under each digest it was prepared with, and — since a list annotates one exact revision — said
+   * when a used, sending, unknown or standing approval decides it as well as when its last preparation expired.
+   */
+  const report = await unsentReport(context.core, {
+    channel: 'slack',
+    owner: account.id,
+    drafts: views.map((view) => ({ draftId: view.draftId, revision: view.revision })),
+    decided: true,
+  });
+  return views.map((view) => {
+    // The report holds only each draft's current revision: what is left to sort is which draft a row is for.
+    const rows = report.rows.filter((row) => row.key.draftId === view.draftId);
+    return rows.length === 0 ? view : { ...view, unsent: rows.map(historyOf) };
+  });
+}
+
+/** A row of the report as a list's annotation: no sender-written field, only what the records say. */
+function historyOf(row: UnsentRow): DraftSendHistory {
+  return {
+    status: row.status,
+    said: row.said,
+    evidence: row.evidence,
+    contentDigest: row.key.contentDigest ?? '',
+    last: row.last,
+    ...(row.decidedBy === undefined ? {} : { decidedBy: row.decidedBy }),
+  };
 }

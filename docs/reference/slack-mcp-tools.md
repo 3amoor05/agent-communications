@@ -252,7 +252,7 @@ Change a draft on this machine: each field given replaces what it had, and the r
 
 ### `slack_draft_list`
 
-The drafts held on this machine for this workspace, newest first, each as slack_draft_get shows it. Nothing in them has reached Slack. One whose file was changed by hand carries a `problem` (BAD_DATA): `not-composed` means it cannot be prepared or posted, and its row has no `text`; `source-differs` means it would post its `text`, not the words it was typed as. The same as the command line’s `draft list`.
+The drafts held on this machine for this workspace, newest first, each as slack_draft_get shows it. One whose file was changed by hand carries a `problem` (BAD_DATA): `not-composed` means it cannot be prepared or posted, and its row has no `text`; `source-differs` means it would post its `text`, not the words it was typed as. A draft whose current revision was prepared in the last 7 days carries `unsent` when its last preparation expired, or an approval of it was used, is being sent or still stands: for each content digest that exact revision was prepared with, where it stands by the approval records read (`status`), the finding in exact words to repeat (`said`, scoped to `evidence` — never an all-time claim), and the last preparation. Another revision’s post never stands for this one. The same as the command line’s `draft list`.
 
 *read-only*
 

@@ -19,6 +19,7 @@ import {
   UNSENT_WINDOW,
   UNSENT_WORDS,
   type UnsentReport,
+  unsentDeadline,
   unsentReport,
 } from '../src/unsent-report.ts';
 import { v1SendRecord } from './fixtures/approval-v1-0.13.0.ts';
@@ -899,6 +900,170 @@ test('at most 20 rows, newest preparation first, with the cut said; and only the
   assert.ok(result.rows.every((row) => row.key.inboxId === OWNER));
 });
 
+// ── What a surface showing its own drafts asks for (CUE-404 Task 22) ─────────────────────────────────────────────────
+
+test('only the drafts asked for — by id, and for a revision rule by exact revision under each digest — never crowded out of the 20 rows, while the whole scan still counts (drafts)', async () => {
+  const w = world();
+  plant(w, [
+    ...Array.from({ length: 25 }, (_, index) =>
+      send({ n: index + 1, state: 'expired', at: NOW - (30 + index) * MINUTE, draftId: `r-${index}` }),
+    ),
+    // One Slack draft: an older revision, and the current one prepared under two digests — one of them posted.
+    send({
+      n: 50,
+      channel: 'slack',
+      state: 'expired',
+      at: NOW - 40 * MINUTE,
+      draftId: 's-1',
+      draftMessageId: 'rev-old',
+      contentDigest: 'b'.repeat(64),
+    }),
+    send({
+      n: 51,
+      channel: 'slack',
+      state: 'expired',
+      at: NOW - 30 * MINUTE,
+      draftId: 's-1',
+      draftMessageId: 'rev-now',
+      contentDigest: 'c'.repeat(64),
+    }),
+    send({
+      n: 52,
+      channel: 'slack',
+      state: 'used',
+      at: NOW - 35 * MINUTE,
+      draftId: 's-1',
+      draftMessageId: 'rev-now',
+      contentDigest: 'd'.repeat(64),
+    }),
+  ]);
+  // The two oldest, which the 20 rows leave out when nothing is asked for; a draft with no records has no row.
+  assert.ok(!(await report(w)).rows.some((row) => row.key.draftId === 'r-24'));
+  const own = await unsentReport(w.core, {
+    channel: 'gmail',
+    drafts: [{ draftId: 'r-24' }, { draftId: 'r-23' }, { draftId: 'r-none' }],
+  });
+  assert.deepEqual(
+    own.rows.map((row) => row.key.draftId),
+    ['r-23', 'r-24'],
+  );
+  assert.deepEqual(own.truncated, []);
+  assert.equal(own.scanned.opened, 28, 'every record in the window is opened, whichever drafts are asked for');
+  assert.deepEqual((await unsentReport(w.core, { channel: 'gmail', drafts: [] })).rows, []);
+
+  // Slack: the revision asked for, and not the older one; its posted digest has no row unless `decided` asks for it.
+  const exact = await unsentReport(w.core, { channel: 'slack', drafts: [{ draftId: 's-1', revision: 'rev-now' }] });
+  assert.deepEqual(
+    exact.rows.map((row) => [row.key.draftMessageId, row.key.contentDigest, row.status]),
+    [['rev-now', 'c'.repeat(64), 'unsent']],
+  );
+  const every = await unsentReport(w.core, { channel: 'slack', drafts: [{ draftId: 's-1' }] });
+  assert.deepEqual(
+    every.rows.map((row) => row.key.draftMessageId),
+    ['rev-now', 'rev-old'],
+  );
+
+  // A file nobody asked about that cannot be read still taints the drafts that were asked about.
+  put(w, idOf(99), '{"approvalId": "ap_', MTIME + 100_000);
+  const tainted = await unsentReport(w.core, { channel: 'gmail', drafts: [{ draftId: 'r-24' }] });
+  assert.deepEqual(findings(tainted), { [`${OWNER}/r-24`]: `indeterminate: ${UNSENT_WORDS.unreadable}` });
+});
+
+test('decided: a draft whose newest record did not expire has a row only when a used, sending, unknown or approved record decides it — a used revision and an expired one never hide each other (decided)', async () => {
+  const w = world();
+  const slack = (n: number, state: ApprovalRecord['state'], ago: number, draftId: string, revision: string) =>
+    send({
+      n,
+      channel: 'slack',
+      state,
+      at: NOW - ago * MINUTE,
+      draftId,
+      draftMessageId: revision,
+      contentDigest: 'b'.repeat(64),
+    });
+  plant(w, [
+    // Revision A posted, then revision B — identical content — prepared and expired.
+    slack(1, 'used', 50, 's-ab', 'rev-a'),
+    slack(2, 'expired', 30, 's-ab', 'rev-b'),
+    // The inverse: B expired, then A posted.
+    slack(3, 'expired', 50, 's-ba', 'rev-b'),
+    slack(4, 'used', 30, 's-ba', 'rev-a'),
+    // Gmail drafts whose newest record did not expire.
+    send({ n: 5, state: 'approved', via: 'terminal', route: 'confirm', at: NOW - 30 * MINUTE, draftId: 'g-approved' }),
+    send({ n: 6, state: 'pending', at: NOW - 5 * MINUTE, draftId: 'g-pending' }),
+    send({ n: 7, state: 'used', at: NOW - 60 * MINUTE, draftId: 'g-declined' }),
+    { ...send({ n: 8, state: 'revoked', at: NOW - 30 * MINUTE, draftId: 'g-declined' }), reason: 'declined' },
+    send({ n: 9, state: 'expired', at: NOW - 60 * MINUTE, draftId: 'g-cancelled' }),
+    {
+      ...send({ n: 10, state: 'revoked', at: NOW - 30 * MINUTE, draftId: 'g-cancelled' }),
+      reason: 'revoked by the user',
+    },
+    // Only older than seven days: never a row.
+    send({ n: 11, state: 'used', at: NOW - 8 * DAY, draftId: 'g-old' }),
+  ]);
+  const keyed = (result: UnsentReport) =>
+    Object.fromEntries(
+      result.rows.map((row) => [
+        `${row.key.draftId}${row.key.draftMessageId === undefined ? '' : `@${row.key.draftMessageId}`}`,
+        `${row.status}: ${row.said}`,
+      ]),
+    );
+  const at = (n: number) => iso(NOW - n * MINUTE + 90_000);
+
+  // Without it: only the expired revisions.
+  assert.deepEqual(keyed(await unsentReport(w.core, { channel: 'slack' })), {
+    's-ab@rev-b': `unsent: ${UNSENT_WORDS.complete}`,
+    's-ba@rev-b': `unsent: ${UNSENT_WORDS.complete}`,
+  });
+  assert.deepEqual(keyed(await unsentReport(w.core, { channel: 'gmail' })), {});
+
+  // With it: each revision for what it is.
+  assert.deepEqual(keyed(await unsentReport(w.core, { channel: 'slack', decided: true })), {
+    's-ab@rev-a': `used: used with approval ${idOf(1)}: accepted by Slack at ${at(50)}`,
+    's-ab@rev-b': `unsent: ${UNSENT_WORDS.complete}`,
+    's-ba@rev-b': `unsent: ${UNSENT_WORDS.complete}`,
+    's-ba@rev-a': `used: used with approval ${idOf(4)}: accepted by Slack at ${at(30)}`,
+  });
+  // The current revision of each, as a draft list asks: B still reports B; the inverse reports A as used.
+  const current = await unsentReport(w.core, {
+    channel: 'slack',
+    decided: true,
+    drafts: [
+      { draftId: 's-ab', revision: 'rev-b' },
+      { draftId: 's-ba', revision: 'rev-a' },
+    ],
+  });
+  assert.deepEqual(keyed(current), {
+    's-ab@rev-b': `unsent: ${UNSENT_WORDS.complete}`,
+    's-ba@rev-a': `used: used with approval ${idOf(4)}: accepted by Slack at ${at(30)}`,
+  });
+  assert.equal(current.rows.find((row) => row.key.draftId === 's-ba')?.last.expiredAt, undefined);
+
+  // Gmail: an approval standing, and a used one behind a newer decline, decide; a pending one or a cancellation alone
+  // does not, nor does anything older than seven days.
+  assert.deepEqual(keyed(await unsentReport(w.core, { channel: 'gmail', decided: true })), {
+    'g-approved': 'approved: approved and ready to send',
+    'g-declined': `used: used with approval ${idOf(7)}: accepted by Gmail at ${at(60)}`,
+  });
+});
+
+test('a channel’s wrapper is told whose approval each sender-written field is (wrap)', async () => {
+  const w = world();
+  plant(w, [
+    send({ n: 1, state: 'expired', at: NOW - 50 * MINUTE, subject: HOSTILE }),
+    send({ n: 2, state: 'expired', at: NOW - 30 * MINUTE, subject: HOSTILE }),
+  ]);
+  const result = await unsentReport(w.core, {
+    channel: 'gmail',
+    wrap: (text, field, owner) => `[${owner.inboxId} ${owner.approvalId} ${field}: ${text.length}]`,
+  });
+  assert.deepEqual(
+    result.rows[0]?.approvals.map((approval) => approval.expect?.subject),
+    [`[${OWNER} ${idOf(2)} subject: ${HOSTILE.length}]`, `[${OWNER} ${idOf(1)} subject: ${HOSTILE.length}]`],
+  );
+  assert.deepEqual(result.rows[0]?.approvals[1]?.expect?.to, [`[${OWNER} ${idOf(1)} to: 16]`]);
+});
+
 test('with maintenance due, prune plus report stays within every stated maximum: two enumerations, 700 opens, 701 locks, 200 appends, 400 artifact and 701 lock unlinks (D9c-j)', async () => {
   const w = world(everyone(), { due: true });
   // 250 used sends long past retention, the oldest files; 450 recent expiries.
@@ -1000,6 +1165,22 @@ test('the one shared deadline: what it leaves unread is indeterminate, and nothi
   assert.deepEqual(spent.rows, []);
   assert.equal(spent.evidence, 'indeterminate');
   assert.deepEqual(spent.truncated, ['deadline']);
+});
+
+test('one deadline on the store’s own clock, made once, for the report and a channel’s look-ups after it (unsentDeadline)', async () => {
+  const w = world();
+  const deadline = unsentDeadline(w.core);
+  assert.equal(deadline.at, NOW + 5_000);
+  assert.equal(deadline.late(), false);
+  w.clock.t = NOW + 4_999;
+  assert.equal(deadline.late(), false);
+  w.clock.t = NOW + 5_000;
+  assert.equal(deadline.late(), true);
+  // Handed to the report, it is the report's: with nothing left of it, the report starts nothing.
+  plant(w, [send({ n: 1, state: 'expired', at: NOW - 30 * MINUTE })]);
+  const spent = await unsentReport(w.core, { channel: 'gmail', deadline: deadline.at });
+  assert.deepEqual([spent.rows, spent.evidence, spent.truncated], [[], 'indeterminate', ['deadline']]);
+  assert.equal(w.fs.started('readdir').length, 0);
 });
 
 test('a report runs the day’s maintenance too, on one long-lived core across days (D9r-a)', async () => {

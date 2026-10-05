@@ -1791,10 +1791,15 @@ test('gmail_inboxes_list, gmail_send_list and gmail_search answer with everythin
     const inboxes = (await cli(harness, ['inbox', 'list', '--json'])).envelope<unknown[]>().data;
     assert.deepEqual(wire(await call('gmail_inboxes_list')).inboxes, inboxes);
 
-    const approvals = (await cli(harness, ['send', 'list', '--json'])).envelope<Array<{ kind?: string }>>().data;
+    const listed = (await cli(harness, ['send', 'list', '--json'])).envelope<{
+      approvals: Array<{ kind?: string }>;
+      unsent: unknown;
+    }>().data;
+    const approvals = listed?.approvals;
     assert.equal(approvals?.length, 2);
     assert.deepEqual(approvals?.map((approval) => approval.kind ?? 'send').sort(), ['change', 'send']);
-    assert.deepEqual(unbound(wire(await call('gmail_send_list', {})).approvals), unbound(approvals));
+    // The approvals, and the unsent section beside them (design 2026-10-05 §D9).
+    assert.deepEqual(unbound(wire(await call('gmail_send_list', {}))), unbound(listed));
 
     const searched = (await cli(harness, ['search', 'Tuesday', '--json'])).envelope<Record<string, unknown>>().data;
     const found = wire(await call('gmail_search', { query: 'Tuesday' }));
@@ -2367,7 +2372,8 @@ test('gmail_send_list and `send list` show every record as its public object —
       expect?: { to: string[]; subject: string };
       files?: { names: string[] };
     };
-    const listed = wire(await whole.call('gmail_send_list', {})).approvals as Listed[];
+    const sendList = wire(await whole.call('gmail_send_list', {}));
+    const listed = sendList.approvals as Listed[];
     const byId = new Map(listed.map((entry) => [entry.approvalId, entry]));
     const outside = (value: unknown) =>
       JSON.stringify(value).replace(
@@ -2396,7 +2402,11 @@ test('gmail_send_list and `send list` show every record as its public object —
     // The command prints the same, but for each envelope's own boundary.
     const command = await cli(harness, ['send', 'list', '--json']);
     const unbound = (value: unknown) => JSON.parse(JSON.stringify(value).replace(/boundary=\\"[^\\"]+\\"/g, 'B'));
-    assert.deepEqual(unbound(command.envelope().data), unbound(listed));
+    assert.deepEqual(
+      unbound(command.envelope().data),
+      unbound(sendList),
+      'the approvals, and the unsent section beside them',
+    );
     // Pinned to work: its own records, and never a stub, nor home's.
     const own = (wire(await pinned.call('gmail_send_list', {})).approvals as Listed[]).map((entry) => entry.approvalId);
     assert.deepEqual(own.sort(), [ours.approvalId, question.approvalId, badId].sort());
