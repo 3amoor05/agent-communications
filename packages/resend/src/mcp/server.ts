@@ -556,7 +556,7 @@ export async function createResendMcpServer(options: ResendMcpOptions = {}): Pro
     {
       title: 'Send status',
       description:
-        'What happened to a send: the approval, the local record, and Resend’s last event. Read only — it never sends again.',
+        'What happened to a send: the approval, the local record, and its current `outcome` as Resend’s own last event reports it. One event for the whole email, attributed to Resend — never a word about every recipient; an event this version does not interpret comes only inside <untrusted-content>. Read only — it never sends again.',
       inputSchema: { ...accountArg, approvalId: z.string() },
       annotations: readsResend,
     },

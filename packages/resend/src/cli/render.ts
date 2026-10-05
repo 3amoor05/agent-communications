@@ -98,11 +98,21 @@ export function renderPrepared(result: SendPreparation): string {
   return `${result.preview}\n\nNext: ${escapeForDisplay(result.nextStep)}`;
 }
 
+/**
+ * What Resend's acceptance means (`said`), with its id when it gave one: a scheduled send is accepted for its time and
+ * never called sent; one with no id says so, and names none.
+ */
 export function renderSent(result: SendResult): string {
+  const to = truncateDisplay(result.to.join(', '), 200);
+  const said = `${result.said.charAt(0).toUpperCase()}${result.said.slice(1)}`;
   const sent =
-    result.state === 'scheduled'
-      ? `Scheduled for ${result.scheduledAt ?? '?'} as ${result.resendId}, to ${truncateDisplay(result.to.join(', '), 200)}.`
-      : `Sent as ${result.resendId}, to ${truncateDisplay(result.to.join(', '), 200)}.`;
+    result.resendId === undefined
+      ? result.state === 'scheduled'
+        ? `${said} — scheduled for ${result.scheduledAt ?? '?'}, to ${to}.`
+        : `${said} — to ${to}.`
+      : result.state === 'scheduled'
+        ? `${said}, as ${result.resendId}, to ${to}.`
+        : `Sent as ${result.resendId}, to ${to}.`;
   return result.note ? `${sent}\nNote: ${escapeForDisplay(result.note)}.` : sent;
 }
 
@@ -111,5 +121,6 @@ export function renderStatus(result: SendStatus): string {
 }
 
 export function renderCancelled(result: CancelledEmail): string {
-  return `Cancelled ${result.id} (${result.recipients} recipient(s)). It cannot be rescheduled.`;
+  const cancelled = `Cancelled ${result.id} (${result.recipients} recipient(s)). It cannot be rescheduled.`;
+  return result.hint ? `${cancelled}\nNote: ${escapeForDisplay(result.hint)}` : cancelled;
 }

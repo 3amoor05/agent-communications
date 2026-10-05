@@ -32,7 +32,7 @@ has no read-only key. No tool adds a key, and no tool approves.
 | [`resend_suppressions`](#resend_suppressions) | Addresses Resend will not send to, and why (bounce, complaint, manual). |
 | [`resend_send_prepare`](#resend_send_prepare) | Build an email and return the exact preview — every recipient, BCC included, the reach and the From domain — with an approval id. |
 | [`resend_send_execute`](#resend_send_execute) | Send a prepared email, once, after the person approved its preview. |
-| [`resend_send_status`](#resend_send_status) | What happened to a send: the approval, the local record, and Resend’s last event. |
+| [`resend_send_status`](#resend_send_status) | What happened to a send: the approval, the local record, and its current `outcome` as Resend’s own last event reports it. |
 | [`resend_send_wait`](#resend_send_wait) | Wait for an approval — a send or a change — to be usable or finished, and say where it stands: pending (with `claimable` true when a yes in the chat can use it), approved, being sent, used, failed, unknown, expired, revoked or corrupt. |
 | [`resend_scheduled_list`](#resend_scheduled_list) | Emails waiting to be sent later, among the most recent 300 sent, and whether this machine scheduled each. |
 | [`resend_scheduled_cancel`](#resend_scheduled_cancel) | Cancel a scheduled email. |
@@ -222,7 +222,7 @@ Send a prepared email, once, after the person approved its preview. Under `confi
 
 ### `resend_send_status`
 
-What happened to a send: the approval, the local record, and Resend’s last event. Read only — it never sends again.
+What happened to a send: the approval, the local record, and its current `outcome` as Resend’s own last event reports it. One event for the whole email, attributed to Resend — never a word about every recipient; an event this version does not interpret comes only inside <untrusted-content>. Read only — it never sends again.
 
 *read-only*
 

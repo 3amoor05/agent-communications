@@ -234,13 +234,14 @@ test('a send whose outcome is not known is checked with Resend’s own send stat
   const prepared = await prepareSend(context, 'acme/resend', email);
   harness.fake.afterSend = () => ({ status: 0, drop: true });
   const status = resendInline(harness.core, ['send', 'status', prepared.approvalId, '--account', 'acme/resend']);
+  // At once, its own code (design 2026-10-05 §D2): the send may have happened.
   const lost = await hintOf(
     executeSend(context, 'acme/resend', { approvalId: prepared.approvalId, expect: prepared.expect }),
-    'TRANSIENT',
+    'SEND_OUTCOME_UNKNOWN',
   );
   assert.equal(
     lost,
-    `Do not send it again. Check the Resend dashboard or ask the recipient, and check with ${status}; this approval is not used again.`,
+    `Do not send it again, and do not prepare it again until you know it did not go. Check the Resend dashboard or ask the recipient, and check with ${status}; this approval is not used again.`,
   );
   // Later, when the approval reads as unknown: the same command, before anything else — and no second send.
   const later = new ResendContext({

@@ -7,6 +7,7 @@ import {
   canonicalAddress,
   type Expectation,
   ensureSendEpochConfig,
+  fenceOrStop,
   handoffSentence,
   handoffSentenceToFill,
   integrityRefusal,
@@ -39,6 +40,7 @@ import {
 } from '../compose/message.ts';
 import { type PreparedMessage, PreparedStore, SendRecords, type SendSummary } from '../compose/store.ts';
 import type { ResendContext } from '../context.ts';
+import { type CurrentOutcome, outcomeOf, outcomeUnavailable } from './last-event.ts';
 
 /**
  * The send gate: prepare → preview → approval → execute, once.
@@ -57,9 +59,10 @@ import type { ResendContext } from '../context.ts';
  *    this CLI's `approve <id>` and a typed code; under `never` nothing.
  * 3. **Execute** re-reads the stored message and its attachments, claims the approval once (a lock and an O_EXCL
  *    marker), reserves a slot under the rate caps, records the attempt **before** the request leaves, and sends with
- *    `Idempotency-Key` = the approval id and the tag `agentcomms_approval=<id>`. It never retries. An outcome it cannot
- *    know — a dropped connection, a 5xx, a timeout — is recorded as unknown and reported with how to check
- *    (`send status`), never sent again.
+ *    `Idempotency-Key` = the approval id and the tag `agentcomms_approval=<id>` — only while its claim still holds the
+ *    send (the fence, design 2026-10-05 §D1). It never retries. An outcome it cannot know — a dropped connection, a
+ *    5xx, a timeout — is `SEND_OUTCOME_UNKNOWN`, recorded and reported with how to check (`send status`), never sent
+ *    again.
  */
 
 export interface SendPreparation {
@@ -87,10 +90,18 @@ export interface SendPreparation {
 export interface SendResult {
   account: string;
   approvalId: string;
-  /** Resend's id for the email. */
-  resendId: string;
+  /**
+   * Resend's id for the email — absent when Resend accepted it without one, never empty (design 2026-10-05 §D8). The
+   * approval is then not marked used: it reads as sending, then unknown.
+   */
+  resendId?: string | undefined;
   state: 'sent' | 'scheduled';
   scheduledAt: string | null;
+  /**
+   * What happened, in words: "sent"; "accepted by Resend, scheduled for <time>" (the time the request asked for); or,
+   * without an id, "sent; the provider returned no id" and "accepted (scheduled); the provider returned no id".
+   */
+  said: string;
   to: string[];
   cc: string[];
   bcc: string[];
@@ -518,13 +529,17 @@ function messageOf(error: unknown): string {
 }
 
 /**
- * Keeps the failure that stopped the send visible, adding only what could not be settled afterwards — and where the
- * approval stands now that it is settled (decision 8), whatever the failure said of it before.
+ * Keeps the failure that stopped the send visible, adding what it means when it does not say so already — nothing was
+ * sent (design 2026-10-05 §D2, `failed`) — and only what could not be settled afterwards, with where the approval stands
+ * now that it is settled (decision 8), whatever the failure said of it before.
  */
 function noSendError(error: unknown, unrecorded: readonly string[], approval: ApprovalObject): CommsError {
   const original =
     error instanceof CommsError ? error : new CommsError('UNEXPECTED', messageOf(error), { cause: error });
-  const hint = [original.hint, ...unrecorded].filter((part) => part !== undefined);
+  const saysSo = /\bnothing was sent\b/i.test(`${original.message} ${original.hint ?? ''}`);
+  const hint = [original.hint, saysSo ? undefined : 'Nothing was sent.', ...unrecorded].filter(
+    (part) => part !== undefined,
+  );
   return new CommsError(original.code, original.message, {
     ...(hint.length === 0 ? {} : { hint: hint.join(' ') }),
     details: { ...original.details, approval },
@@ -549,7 +564,12 @@ async function approvalNow(
   }
 }
 
-/** Settles a failure known to have happened before Resend sent anything, without one failed write skipping another. */
+/**
+ * Settles a failure known to have happened before Resend sent anything, without one failed write skipping another.
+ *
+ * `approval` is `settled` when the approval was completed already — by the fence, which records why itself — and only
+ * the rest is recorded here.
+ */
 async function recordNoSend(
   context: ResendContext,
   records: SendRecords,
@@ -559,6 +579,7 @@ async function recordNoSend(
   // Where the approval stood when it was claimed: what the refusal says if its failure cannot be recorded.
   claimed: ApprovalObject,
   error: unknown,
+  approval: 'complete' | 'settled' = 'complete',
 ): Promise<CommsError> {
   const unrecorded: string[] = [];
   const said = messageOf(error);
@@ -568,12 +589,16 @@ async function recordNoSend(
   } catch (failure) {
     unrecorded.push(`the capacity slot could not be released (${messageOf(failure)})`);
   }
-  try {
-    settled = await context.core.approvals.approvalOf(
-      await context.core.approvals.complete(options.approvalId, claimToken, { error: said }),
-    );
-  } catch (failure) {
-    unrecorded.push(`the approval could not be marked failed (${messageOf(failure)})`);
+  if (approval === 'settled') {
+    settled = await approvalNow(context, options.approvalId, options.accountId, claimed);
+  } else {
+    try {
+      settled = await context.core.approvals.approvalOf(
+        await context.core.approvals.complete(options.approvalId, claimToken, { error: said }),
+      );
+    } catch (failure) {
+      unrecorded.push(`the approval could not be marked failed (${messageOf(failure)})`);
+    }
   }
   try {
     await records.record(options.accountId, {
@@ -598,6 +623,17 @@ async function recordNoSend(
     unrecorded.push(`the audit log could not record the failure (${messageOf(failure)})`);
   }
   return noSendError(error, unrecorded, settled);
+}
+
+/**
+ * What Resend's acceptance means, in words (design 2026-10-05 §D2, §D8): a send that goes now is sent; a scheduled one is
+ * accepted, for the time the request asked for — never "sent". Without an id, each says so, and nothing more.
+ */
+function acceptedSaid(withId: boolean, scheduledAt: string | null): string {
+  if (!withId) {
+    return scheduledAt ? 'accepted (scheduled); the provider returned no id' : 'sent; the provider returned no id';
+  }
+  return scheduledAt ? `accepted by Resend, scheduled for ${scheduledAt}` : 'sent';
 }
 
 /**
@@ -725,7 +761,20 @@ async function claimAndSend(
       throw await recordNoSend(context, records, bookkeeping, claimToken, claimedApproval, error);
     }
 
-    let resendId: string;
+    /*
+     * The fence (design 2026-10-05 §D1), the last thing before the one request that sends: while this claim still
+     * holds a `sending` record its lease is renewed and the request may leave. Once another caller has found the lease
+     * run out — the record `unknown` — nothing is sent: the fence completes the approval `failed`
+     * (`lease-lost-before-send`), and the rest of the no-send bookkeeping follows.
+     */
+    const fenced = await fenceOrStop(context.core.approvals, options.approvalId, claimToken, { stepsStarted: 0 });
+    if (!fenced.proceed) {
+      const stopped =
+        fenced.error ?? new CommsError('UNEXPECTED', 'the sending lease ran out before anything was sent');
+      throw await recordNoSend(context, records, bookkeeping, claimToken, claimedApproval, stopped, 'settled');
+    }
+
+    let resendId: string | undefined;
     let requestIssued = false;
     const innerFetch = transport.fetch ?? (fetch as FetchLike);
     // Mark the inner fetch, after the throttle and request guard: before this runs, Resend certainly saw nothing.
@@ -743,12 +792,9 @@ async function claimAndSend(
           idempotencyKey: options.approvalId,
         }),
       );
-      if (typeof response.id !== 'string' || response.id === '') {
-        throw new CommsError('PROVIDER_UNAVAILABLE', 'Resend accepted the send but returned no email id', {
-          details: { outcome: 'unknown' },
-        });
-      }
-      resendId = response.id;
+      // Resend's id, when it gave one: no id, null, an empty or blank string, or anything not a string is no id at all —
+      // absent, never '' (design 2026-10-05 §D8). Resend accepted the send either way.
+      resendId = typeof response.id === 'string' && response.id.trim() !== '' ? response.id : undefined;
     } catch (error) {
       if (!requestIssued) {
         throw await recordNoSend(context, records, bookkeeping, claimToken, claimedApproval, error);
@@ -790,9 +836,10 @@ async function claimAndSend(
           `the audit log could not record this (${failure instanceof Error ? failure.message : String(failure)})`,
         );
       }
-      throw new CommsError('TRANSIENT', `whether the email was sent is not known: ${said}`, {
+      // At once, and never retryable: the send may have happened (design 2026-10-05 §D2).
+      throw new CommsError('SEND_OUTCOME_UNKNOWN', `whether the email was sent is not known: ${said}`, {
         hint: [
-          `Do not send it again. ${handoffSentence(
+          `Do not send it again, and do not prepare it again until you know it did not go. ${handoffSentence(
             statusCommand(context.handoffs, options.approvalId, name),
             (command) =>
               `Check the Resend dashboard or ask the recipient, and check with ${command}; this approval is not used again.`,
@@ -815,19 +862,28 @@ async function claimAndSend(
     }
 
     const unrecorded: string[] = [];
-    // `used` only once it is written; until then — and for good, if it cannot be — the record as it stands.
+    // `used` only once it is written, and only with Resend's id; until then — and for good, if it cannot be — the record
+    // as it stands: sending, then unknown.
     let approval: ApprovalObject | null = null;
-    try {
-      approval = await context.core.approvals.approvalOf(
-        await context.core.approvals.complete(options.approvalId, claimToken, { sentMessageId: resendId }),
-      );
-    } catch (error) {
-      unrecorded.push(
-        `the approval could not be marked used (${error instanceof Error ? error.message : String(error)}), so it will read as unknown`,
-      );
+    if (resendId === undefined) {
+      unrecorded.push('Resend returned no id, so the approval is not marked used: it reads as sending, then unknown');
+    } else {
+      try {
+        approval = await context.core.approvals.approvalOf(
+          await context.core.approvals.complete(options.approvalId, claimToken, { sentMessageId: resendId }),
+        );
+      } catch (error) {
+        unrecorded.push(
+          `the approval could not be marked used (${error instanceof Error ? error.message : String(error)}), so it will read as unknown`,
+        );
+      }
     }
     try {
-      await records.record(named.account.id, { approvalId: options.approvalId, event: 'sent', resendId });
+      await records.record(named.account.id, {
+        approvalId: options.approvalId,
+        event: 'sent',
+        ...(resendId === undefined ? {} : { resendId }),
+      });
     } catch (error) {
       unrecorded.push(
         `the send record could not record it (${error instanceof Error ? error.message : String(error)})`,
@@ -841,10 +897,12 @@ async function claimAndSend(
         outcome: 'ok',
         surface: context.surface,
         approvalId: options.approvalId,
-        ids: { resendIds: [resendId] },
+        // No id, no field: an audit row never carries an empty one.
+        ...(resendId === undefined ? {} : { ids: { resendIds: [resendId] } }),
         // From the record a person approved, not from what the caller restated: the two are checked equal.
         recipients: [...claimed.expect.to, ...claimed.expect.cc, ...claimed.expect.bcc].map(canonicalAddress),
         reason: [
+          ...(resendId === undefined ? ['accepted without an id'] : []),
           `digest ${digest.slice(0, 12)} · policy ${livePolicy} · ${claimed.approvedVia ?? 'chat'}`,
           ...unrecorded,
         ].join(' · '),
@@ -855,9 +913,10 @@ async function claimAndSend(
     return {
       account: name,
       approvalId: options.approvalId,
-      resendId,
+      ...(resendId === undefined ? {} : { resendId }),
       state: message.scheduledAt ? 'scheduled' : 'sent',
       scheduledAt: message.scheduledAt,
+      said: acceptedSaid(resendId !== undefined, message.scheduledAt),
       to: claimed.expect.to,
       cc: claimed.expect.cc,
       bcc: claimed.expect.bcc,
@@ -877,15 +936,51 @@ export interface SendStatus {
   /** The approval in its public shape — every form, an earlier release's and a corrupt one's included — or none. */
   approval: PublicApproval | null;
   local: SendSummary | null;
-  /** What Resend says now, when it could be asked. */
+  /**
+   * What Resend says now, when it could be asked: the email's id, its last event — one this version does not interpret
+   * only inside the untrusted-content envelope — its Message-ID and the time it is scheduled for.
+   */
   resend: { id: string; lastEvent: string | null; messageId: string | null; scheduledAt: string | null } | null;
+  /**
+   * The email's current outcome, from Resend's own `last_event` through one fixed mapping and attributed to it — never
+   * a claim about every recipient — or "current outcome unavailable" with why. None when there is no email to ask
+   * about: nothing was attempted, nothing was sent, or Resend has no email by this approval's tag.
+   */
+  outcome: CurrentOutcome | null;
   /** The answer, in words. */
   verdict: string;
 }
 
+const CANNOT_READ = 'this key can only send, so it cannot read what Resend did with the email';
+
 /**
- * What is known about a send: the approval, the local record, and — when the outcome was unknown or the email is
- * scheduled — what Resend says now. Read only. It never sends, and never repeats a send to find out.
+ * What this machine knows Resend accepted, from its own send record: a scheduled send is accepted for the time the
+ * request asked for, never "sent"; one with no id says so (design 2026-10-05 §D2, §D8).
+ */
+function acceptanceOf(local: SendSummary): string {
+  if (local.resendId === undefined) {
+    return local.scheduledAt
+      ? 'accepted (scheduled); the provider returned no id'
+      : 'accepted by Resend; the provider returned no id';
+  }
+  return local.scheduledAt
+    ? `accepted by Resend, scheduled for ${local.scheduledAt}, as ${local.resendId}`
+    : `accepted by Resend as ${local.resendId}`;
+}
+
+/** An outcome in the verdict's words: Resend's, or that it is unavailable and why. */
+function outcomeWords(outcome: CurrentOutcome): string {
+  return outcome.source === 'resend' ? outcome.said : `${outcome.said} (${outcome.why})`;
+}
+
+/**
+ * What is known about a send: the approval, the local record, and — for an email Resend accepted, or one whose outcome
+ * is not known — what Resend's own last event says now (design 2026-10-05 §D2, the `used` send row). Read only. It
+ * never sends, and never repeats a send to find out.
+ *
+ * Nothing here is "sent" because this machine recorded Resend's acceptance, or because a scheduled time has passed:
+ * only Resend's own event, through `outcomeOf`, says that. "Cancelled from this machine before sending" needs this
+ * machine's own record of a cancellation Resend confirmed; without it, a cancellation is as Resend reports it.
  */
 export async function sendStatus(context: ResendContext, name: string, approvalId: string): Promise<SendStatus> {
   const named = await context.accounts.require(name);
@@ -907,72 +1002,144 @@ export async function sendStatus(context: ResendContext, name: string, approvalI
     return {
       ...base,
       resend: null,
+      outcome: null,
       verdict: stored
         ? `not sent: the approval is ${stateOf(stored)} and no send was attempted`
         : 'nothing is known about this approval',
     };
   }
+  if (local.state === 'failed') {
+    // Certain: Resend was never asked, or refused before acting.
+    const why = (local.error ?? 'no reason recorded').replace(/^nothing was sent: /i, '');
+    return { ...base, resend: null, outcome: null, verdict: `nothing was sent: ${why}` };
+  }
+
   const readable = keyPermissionOf(named.account) === 'full_access';
-  const lookUp = async (id: string) => {
-    const email = await resendRequest<{
-      id?: unknown;
-      last_event?: unknown;
-      message_id?: unknown;
-      scheduled_at?: unknown;
-    }>(await context.transport(named), 'GET', `/emails/${id}`);
+  const cancelledHere = local.state === 'cancelled';
+  const facts = { scheduledAt: local.scheduledAt ?? null, cancelledHere };
+  const transport = readable ? await context.transport(named) : null;
+  /** Resend's own word on one email. A look-up that fails is an outcome that is unavailable, never a failed status. */
+  const lookUp = async (id: string): Promise<{ resend: SendStatus['resend']; outcome: CurrentOutcome }> => {
+    if (transport === null) return { resend: null, outcome: outcomeUnavailable(CANNOT_READ) };
+    let email: { last_event?: unknown; message_id?: unknown; scheduled_at?: unknown };
+    try {
+      email = await resendRequest(transport, 'GET', `/emails/${id}`);
+    } catch (error) {
+      if (!(error instanceof CommsError)) throw error;
+      return { resend: null, outcome: outcomeUnavailable(`Resend could not be asked: ${error.message}`) };
+    }
+    const outcome = outcomeOf(email.last_event, facts, { account: name, id });
     return {
-      id,
-      lastEvent: typeof email.last_event === 'string' ? email.last_event : null,
-      messageId: typeof email.message_id === 'string' ? email.message_id : null,
-      scheduledAt: typeof email.scheduled_at === 'string' ? email.scheduled_at : null,
+      resend: {
+        id,
+        // The event as the mapping read it: an uninterpreted one only as its wrapped value.
+        lastEvent:
+          outcome.source !== 'resend'
+            ? null
+            : outcome.lastEvent === 'uninterpreted'
+              ? (outcome.raw ?? null)
+              : outcome.lastEvent,
+        messageId: typeof email.message_id === 'string' ? email.message_id : null,
+        scheduledAt: typeof email.scheduled_at === 'string' ? email.scheduled_at : null,
+      },
+      outcome,
     };
   };
-  if (local.resendId) {
-    if (!readable) {
-      return { ...base, resend: null, verdict: `sent as ${local.resendId}; this key cannot read what happened after` };
+  /**
+   * The email this approval sent, found by its tag among the 100 most recent with its subject — when Resend gave no id,
+   * or the outcome was never known. Bounded, and read only.
+   */
+  const byTag = async (): Promise<string | null> => {
+    if (transport === null) return null;
+    const page = await resendRequest<{ data?: { id?: unknown; subject?: unknown }[] }>(transport, 'GET', '/emails', {
+      query: { limit: 100 },
+    });
+    const candidates = (page.data ?? [])
+      .filter((email) => typeof email.id === 'string' && email.subject === local.subject)
+      .slice(0, 5);
+    for (const candidate of candidates) {
+      const email = await resendRequest<{ tags?: { name?: unknown; value?: unknown }[] }>(
+        transport,
+        'GET',
+        `/emails/${String(candidate.id)}`,
+      );
+      if ((email.tags ?? []).some((tag) => tag.name === APPROVAL_TAG && tag.value === approvalId)) {
+        return String(candidate.id);
+      }
     }
-    const resend = await lookUp(local.resendId);
-    return {
-      ...base,
-      resend,
-      verdict: `sent as ${local.resendId}; Resend's last event: ${resend.lastEvent ?? 'none'}`,
-    };
+    return null;
+  };
+  const searched = async (): Promise<{ id: string | null } | { failed: string }> => {
+    try {
+      return { id: await byTag() };
+    } catch (error) {
+      if (!(error instanceof CommsError)) throw error;
+      return { failed: `Resend could not be asked: ${error.message}` };
+    }
+  };
+
+  if (local.state === 'sent' || local.state === 'cancelled') {
+    // Resend accepted it. What has become of it since is Resend's to say.
+    const accepted = acceptanceOf(local);
+    // This machine's own record of a cancellation Resend confirmed: said whatever Resend can be asked now.
+    const here = cancelledHere ? '; cancelled from this machine before sending' : '';
+    if (transport === null) {
+      const outcome = outcomeUnavailable(CANNOT_READ);
+      return { ...base, resend: null, outcome, verdict: `${accepted}${here}; ${outcomeWords(outcome)}` };
+    }
+    let id = local.resendId;
+    let found = '';
+    if (id === undefined) {
+      const search = await searched();
+      if ('failed' in search || search.id === null) {
+        const outcome = outcomeUnavailable(
+          'failed' in search ? search.failed : 'not found by its approval tag among the 100 most recent sent emails',
+        );
+        return { ...base, resend: null, outcome, verdict: `${accepted}; ${outcomeWords(outcome)}` };
+      }
+      id = search.id;
+      found = `; found by its approval tag as ${id}`;
+    }
+    const { resend, outcome } = await lookUp(id);
+    // Resend's own `canceled` says it was this machine already, when this machine's record proves it; any other word,
+    // or none, is said beside that record.
+    const alsoHere = outcome.source === 'resend' && outcome.lastEvent === 'canceled' ? '' : here;
+    return { ...base, resend, outcome, verdict: `${accepted}${found}${alsoHere}; ${outcomeWords(outcome)}` };
   }
-  if (local.state === 'failed') {
-    return { ...base, resend: null, verdict: `not sent: Resend refused it (${local.error ?? 'no reason recorded'})` };
-  }
-  if (!readable) {
+
+  // The outcome was never known: Resend may have the email or not.
+  if (transport === null) {
     return {
       ...base,
       resend: null,
+      outcome: outcomeUnavailable(CANNOT_READ),
       verdict: `unknown, and this key cannot read sent mail. Look in the Resend dashboard for an email tagged ${APPROVAL_TAG}=${approvalId}; do not send it again`,
     };
   }
-  // Unknown outcome and no id: look for the tag among recent sends with the same subject. Bounded, and read only.
-  const page = await resendRequest<{ data?: { id?: unknown; subject?: unknown; created_at?: unknown }[] }>(
-    await context.transport(named),
-    'GET',
-    '/emails',
-    { query: { limit: 100 } },
-  );
-  const candidates = (page.data ?? [])
-    .filter((email) => typeof email.id === 'string' && email.subject === local.subject)
-    .slice(0, 5);
-  for (const candidate of candidates) {
-    const email = await resendRequest<{ tags?: { name?: unknown; value?: unknown }[] }>(
-      await context.transport(named),
-      'GET',
-      `/emails/${String(candidate.id)}`,
-    );
-    if ((email.tags ?? []).some((tag) => tag.name === APPROVAL_TAG && tag.value === approvalId)) {
-      const resend = await lookUp(String(candidate.id));
-      return { ...base, resend, verdict: `it was sent, as ${String(candidate.id)}: found by its approval tag` };
-    }
+  const search = await searched();
+  if ('failed' in search) {
+    const outcome = outcomeUnavailable(search.failed);
+    return {
+      ...base,
+      resend: null,
+      outcome,
+      verdict: `unknown: ${outcomeWords(outcome)}. Do not send it again under this approval; check again later`,
+    };
   }
+  if (search.id === null) {
+    return {
+      ...base,
+      resend: null,
+      outcome: null,
+      verdict: `not found among the 100 most recent sent emails — probably not sent, but do not send it again under this approval; prepare a new one if it should go`,
+    };
+  }
+  const { resend, outcome } = await lookUp(search.id);
   return {
     ...base,
-    resend: null,
-    verdict: `not found among the 100 most recent sent emails — probably not sent, but do not send it again under this approval; prepare a new one if it should go`,
+    resend,
+    outcome,
+    verdict: `accepted by Resend as ${search.id}: found by its approval tag; ${outcomeWords(outcome)}`,
   };
 }
 
