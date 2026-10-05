@@ -375,7 +375,11 @@ test('an outcome that cannot be known is never retried: it is recorded, reported
   assert.equal(harness.fake.sends().length, 1);
   const status = await sendStatus(context, 'acme/resend', prepared.approvalId);
   assert.equal(status.local?.state, 'unknown');
-  assert.match(status.verdict, /it was sent, as .*: found by its approval tag/);
+  // Found at Resend by its tag: accepted, and what its own last event says now — never "sent" for being found.
+  assert.match(
+    status.verdict,
+    /^accepted by Resend as [0-9a-f-]{36}: found by its approval tag; sent \(Resend reports delivered\)$/,
+  );
   assert.equal(harness.fake.sends().length, 1, 'checking never sends');
 });
 
@@ -411,7 +415,8 @@ test('a refusal Resend is sure of frees the rate-cap slot and says nothing was s
   );
   const status = await sendStatus(context, 'acme/resend', prepared.approvalId);
   assert.equal(status.local?.state, 'failed');
-  assert.match(status.verdict, /not sent: Resend refused it/);
+  assert.equal(status.verdict, 'nothing was sent: Resend refused the request: bad field');
+  assert.equal(status.outcome, null, 'nothing to ask Resend about');
 });
 
 test('HTML an agent could not show a person is refused before an approval exists', async () => {

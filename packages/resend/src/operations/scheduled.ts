@@ -23,6 +23,15 @@ export interface CancelledEmail {
   /** Whether this machine had scheduled it. */
   fromThisMachine: boolean;
   recipients: number;
+  /**
+   * What this machine could not write after Resend confirmed the cancellation — its send record, its audit — when
+   * anything (design 2026-10-05 §D8). The cancellation stands; only its bookkeeping is missing.
+   */
+  hint?: string | undefined;
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export function cancelScheduledChange(context: ResendContext, name: string, id: unknown): GatedChange<CancelledEmail> {
@@ -101,23 +110,49 @@ export function cancelScheduledChange(context: ResendContext, name: string, id: 
           .catch(() => undefined);
         throw error;
       }
+      /*
+       * Resend confirmed it: the cancellation is done, whatever follows (design 2026-10-05 §D8). This machine's send
+       * record and its audit are each attempted, neither skipping the other, and one that cannot be written is a gap in
+       * the bookkeeping, said in the hint of a successful result — never a failed cancellation. Without the send
+       * record, nothing here proves this machine cancelled it, so a later status says only what Resend reports.
+       */
+      const gaps: string[] = [];
       if (ours) {
-        await new SendRecords(context.core.paths.stateDir, context.now).record(named.account.id, {
-          approvalId: ours.approvalId,
-          event: 'cancelled',
-          resendId: emailId,
-        });
+        try {
+          await new SendRecords(context.core.paths.stateDir, context.now).record(named.account.id, {
+            approvalId: ours.approvalId,
+            event: 'cancelled',
+            resendId: emailId,
+          });
+        } catch (error) {
+          gaps.push(
+            `this machine’s send record could not record it (${messageOf(error)}), so its status will say Resend reports it cancelled`,
+          );
+        }
       }
-      await context.core.audit.append({
-        inboxId: named.account.id,
-        alias: name,
-        operation: 'resend.scheduled.cancel',
-        outcome: 'ok',
-        surface: context.surface,
-        ids: { emailIds: [emailId] },
-        reason,
-      });
-      return { account: name, id: emailId, cancelled: true, fromThisMachine: ours !== null, recipients: count };
+      try {
+        await context.core.audit.append({
+          inboxId: named.account.id,
+          alias: name,
+          operation: 'resend.scheduled.cancel',
+          outcome: 'ok',
+          surface: context.surface,
+          ids: { emailIds: [emailId] },
+          reason,
+        });
+      } catch (error) {
+        gaps.push(`the audit log could not record it (${messageOf(error)})`);
+      }
+      return {
+        account: name,
+        id: emailId,
+        cancelled: true,
+        fromThisMachine: ours !== null,
+        recipients: count,
+        ...(gaps.length === 0
+          ? {}
+          : { hint: `Resend confirmed the cancellation; what could not be written here: ${gaps.join('; ')}.` }),
+      };
     },
   };
 }

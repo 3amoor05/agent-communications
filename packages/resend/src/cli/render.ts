@@ -121,5 +121,6 @@ export function renderStatus(result: SendStatus): string {
 }
 
 export function renderCancelled(result: CancelledEmail): string {
-  return `Cancelled ${result.id} (${result.recipients} recipient(s)). It cannot be rescheduled.`;
+  const cancelled = `Cancelled ${result.id} (${result.recipients} recipient(s)). It cannot be rescheduled.`;
+  return result.hint ? `${cancelled}\nNote: ${escapeForDisplay(result.hint)}` : cancelled;
 }
