@@ -667,8 +667,8 @@ test('under confirm, a declined form saves nothing and voids the question; a cli
     assert.equal(refused.code, 'APPROVAL_PENDING');
     assert.match(refused.message, /^nothing was saved: the change policy here is confirm, so the person answers/);
     // And where the question stands (design 2026-10-05 §D8; CUE-404): pending, and not to be claimed from here.
-    const stands = (result.structuredContent?.error as { details?: { approval?: Record<string, unknown> } }).details
-      ?.approval;
+    const error = result.structuredContent?.error as { details?: { approval?: Record<string, unknown> } } | undefined;
+    const stands = error?.details?.approval;
     assert.deepEqual(
       [stands?.id, stands?.kind, stands?.state, stands?.claimable],
       [asked.choiceId, 'download', 'pending', false],
