@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { before, test } from 'node:test';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
@@ -190,6 +190,36 @@ test('every "both" row was run on both sides, unless it says in "unchecked" why 
   }
   // Unchecked rows are few, named, and printed on every run: a way out that stays in view.
   assert.ok(uncheckedRows(table).length <= 5, 'a table of mostly unchecked rows checks nothing');
+});
+
+test('every command was driven with all five path options before its command path (CUE-403)', () => {
+  /*
+   * The five suite folders are flags, not capabilities: no row names them (design 2026-10-04, D2). So the drive gives
+   * every command all five, each a folder of its own, before the words of its row — and a command that read its
+   * folders before it parsed them, or refused one, would not reach its operation, and fail the check above. What each
+   * CLI was actually handed is recorded as `ran`; the row's own words, which the check names it by, stay `argv`.
+   */
+  const flags = ['--config-dir', '--state-dir', '--data-dir', '--secrets-dir', '--downloads-dir'];
+  let count = 0;
+  for (const row of table.capabilities.filter((r) => r.status === 'both' && r.unchecked === undefined)) {
+    const cli = driven.reports[row.id]?.cli;
+    assert.ok(cli, `row "${row.id}": its command was not run`);
+    const { ran, argv } = cli;
+    assert.ok(Array.isArray(ran), `row "${row.id}": what its command was handed is not recorded`);
+    const pins = ran.slice(0, flags.length * 2);
+    assert.deepEqual(
+      pins.filter((_word, index) => index % 2 === 0),
+      flags,
+      `row "${row.id}" was run with ${JSON.stringify(ran)}`,
+    );
+    const values = pins.filter((_word, index) => index % 2 === 1);
+    for (const value of values) assert.ok(isAbsolute(value), `row "${row.id}": ${value} is a folder of its own`);
+    assert.equal(new Set(values).size, flags.length, `row "${row.id}": five folders, one per option`);
+    assert.deepEqual(ran.slice(pins.length), argv, `row "${row.id}": the pins come before its command path`);
+    assert.deepEqual(argv.slice(0, row.cli.split(' ').length), row.cli.split(' '), `row "${row.id}": ${argv}`);
+    count += 1;
+  }
+  assert.ok(count > 100, `every eligible row, not a few: ${count}`);
 });
 
 test('every package with a surface has a driver, so none of its rows goes unrun', () => {
