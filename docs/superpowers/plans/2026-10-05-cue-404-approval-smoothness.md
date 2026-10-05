@@ -153,10 +153,11 @@ The ranges below are where the code actually is:
      - `#transition` (571-589) checks the digest version **before** its derived-state write-back (577), so a record
        of another version is refused with nothing written. Today a v1 record past its expiry is persisted `expired`
        first.
-   - **Only two writers ever touch a v1 record: the legacy drain (Task 4) and a person-directed revoke.** Every other
-     v1 transition stays refused by the version gate: claim, approve, challenge, answer, complete, expiry write-back,
-     and integrity voids. Both writers go through one locked legacy path, which this task introduces because this is
-     the task that makes `#transition` refuse v1 before any write:
+   - **Only three writers ever touch a v1 record**: the legacy drain (Task 4), a person-directed revoke, and one
+     lifecycle revoke, removing the record's owner. Every other v1 transition stays refused by the version gate:
+     claim, approve, challenge, answer, complete, expiry write-back, and integrity voids. All three go through one
+     locked legacy path. This task introduces it, because this is the task that makes `#transition` refuse v1 before
+     any write:
      - **New `revokeLegacy(id, reason)` in `approvals.ts`.**
        - It takes the record's own lock, `<id>.json.lock`. That is the lock 0.13.0's `#transition` takes
          (`approvals.ts:573`), so the two serialise.
@@ -169,26 +170,43 @@ The ranges below are where the code actually is:
          `approved` record past its original expiry, which reads `expired`. This is the choice consistent with the
          spec's legacy decoder: v1's own derivation decides, an expired record is never rewritten, and it matches
          today's `revoke` leaving a finished record as it is (`approvals.ts:1078-1083`).
+       - It needs no config and no owner, so it works for an `acc_` record whose account is gone.
      - **New `packages/core/src/approval-legacy.ts`** holds `deriveLegacyV1State(raw, now)`, the frozen 0.13.0
        `#derive` rules (`approvals.ts:513-533`: creation-relative expiry, and `sending` turning `unknown` after 5
        minutes on `updatedAt`). Task 3 builds its `decodeLegacyV1` on this same function, so there is still one
        decoder.
-     - **`revoke(id, reason)` (1079-1083) is the person-directed entry point.** When the record is v1 it takes the
-       legacy path instead of `#transition`. Its callers are all person-directed:
-       - the revoke tools and commands: core `revokeApproval` (`maintenance.ts:430`) and `revokeChange`
-         (`changes.ts:438`); Gmail `revokeApproval` (`send.ts:763`), which is `gmail_send_cancel` and `send cancel`;
-         Slack `revokeApproval` (`approve.ts:221`); and Resend `revokeSendApproval` (`send.ts:918`). A conversational
-         "no" is the agent calling one of these;
-       - the terminal cancels: Gmail's Enter-to-cancel (`cli/program.ts:1352`), and the download cancels
-         (`save-destination.ts:1080, 1220`);
-       - the form decline (Task 13).
+     - **`revoke(id, reason, options?)` (1079-1083) takes the legacy path only when its caller opts in.**
+       - Callers opt in with `{ legacy: 'person' }` or `{ legacy: 'lifecycle' }`.
+       - Without the option, a v1 record gets the ordinary version refusal and nothing is written. An integrity void,
+         or any future caller, cannot rewrite a v1 record by accident.
+       - The option names why the caller may write a v1 record. The type checker makes every caller choose, and a
+         mutation that drops the option from one caller is caught by that caller's test.
+     - **Every `ApprovalStore.revoke` call site in the tree, classified.** These are all 12 direct calls in
+       `packages/*/src`, plus each wrapper's callers.
 
-       0.14's terminal and form refuse a v1 record before rendering it, so in practice a v1 record is revoked through
-       the tools and commands. A decline path that ever reached one would take the same legacy path.
-     - **The integrity voids stay version-gated.** The integrity voids that call `revoke` today (Gmail
-       `beginApproval`, `send.ts:487`; Resend `beginSendApproval`, `send.ts:863`) refuse a v1 record with the
-       version refusal before reading the draft, so they never write one. The same check goes into Slack
-       `beginApproval` (`approve.ts:159`).
+       | Class | Call site | How it is reached | Legacy |
+       |---|---|---|---|
+       | Person | core `revokeApproval` → `approvals.revoke` (`maintenance.ts:436`), or `revokeChange` (435 → `changes.ts:444`) | `agentcomms approvals revoke` (`cli.ts:427`), `comms_approval_revoke` (`mcp/server.ts:294`); a conversational "no" is the agent calling it | `person` |
+       | Person | core `revokeChange` (`changes.ts:444`) on a terminal cancel | `gatedChangeAtTerminal` and `approveChangeAtTerminal` (`change-flow.ts:244, 317`) | `person` |
+       | Person | Gmail `revokeApproval` (`send.ts:764`) | `gmail_send_cancel` (`mcp/server.ts:2571`), `agent-gmail send cancel` (`cli/program.ts:1271`), Enter-to-cancel at `agent-gmail approve` (1351) | `person` |
+       | Person | Slack `revokeApproval` (`approve.ts:222`) | cancel at `agent-slack approve` (`cli/program.ts:1395`) | `person` |
+       | Person | Resend `revokeSendApproval` (`send.ts:920`) | cancel at `agent-resend approve` (`cli/program.ts:647`) | `person` |
+       | Person | core `downloadAtTerminal` and `answerDownloadAtTerminal` cancels (`save-destination.ts:1080, 1220`) | the download's terminal question | `person` |
+       | Person | Gmail download form (`mcp/server.ts:1005`) | an explicit decline. Task 13 stops a cancel or dismissal from revoking at all, and Task 13's new send-form decline joins this row | `person` |
+       | Lifecycle | Resend `removeAccountChange` (`accounts.ts:353-360`) | `agent-resend account remove` / its tool, after the person approved the removal. Removing an owner is the person's decision to void its approvals, and it voids them after the account is gone | `lifecycle` |
+       | Integrity void | Gmail `beginApproval` (`send.ts:487`) | a draft changed under a terminal approval | none |
+       | Integrity void | Resend `beginSendApproval` (`send.ts:863`) | the message or an attachment changed | none |
+       | Integrity void | Slack `currentPost` (`approve.ts:145`) | called by both `beginApproval` (173) and `finishApproval` (210) | none |
+       | Integrity void | core `refuseChangedProfile` → `revokeChange` (`operations/organisations.ts:291`) | an organisation profile changed since approval | none |
+
+       0.14's terminal and form refuse a v1 record before rendering it, so in practice the person rows reach a v1
+       record through the tools and commands. A decline that ever reached one would take the same path.
+     - **The integrity voids stay version-gated, and fail early.** Gmail `beginApproval`, Resend `beginSendApproval`
+       and Slack `currentPost` refuse a v1 record with the version refusal before reading the draft or the room.
+       `refuseChangedProfile` returns early for a record that is not version 2, and the claim that follows refuses
+       it. If any of them did reach `revoke`, it passes no option, so nothing would be written.
+     - The Task 4 drain calls `revokeLegacy` directly. Task 8's `never` sweep revokes only version-2 records, and
+       never passes the option.
    - **New module `packages/core/src/send-epoch.ts`** with `sendEpochOf(config, ownerId)`, which reads an absent value
      as 0. Version 3 does not exist until Task 4, so every epoch reads 0 until then.
    - **Callers.**
@@ -237,8 +255,20 @@ The ranges below are where the code actually is:
    - **Other derived states.** v1 `used`, `failed`, `revoked`, and `sending` both fresh and stale: nothing is written.
    - **Every other transition stays refused.** Claim, approve, challenge, answer and complete on a v1 record are
      refused by the version gate with no write (above).
-   - **Integrity voids.** A v1 record passed to Gmail `beginApproval`, Resend `beginSendApproval` or Slack
-     `beginApproval` is refused before any draft read, and nothing is written.
+   - **Integrity voids.** A v1 record passed to Gmail `beginApproval`, Resend `beginSendApproval`, or Slack
+     `beginApproval` and `finishApproval` (through `currentPost`) is refused before any draft read, and nothing is
+     written. `refuseChangedProfile` leaves a v1 change record untouched. A direct `revoke(id, reason)` with no option
+     on a fresh v1 record returns the version refusal, and the file is byte-identical.
+   - **"removing a Resend account retires its v1 approvals in v1 shape"** (`packages/resend/test/accounts.test.ts`).
+     The account owns a v1 `pending` and a v1 `approved` send record (`acc_` owner, no `kind`), and the removal runs
+     through `removeAccountChange` with its change approval.
+     - The removal succeeds, and `approvalsVoided` lists both ids.
+     - Each file afterwards is the original plus `state: 'revoked'`, the reason `the account was removed` and
+       `updatedAt`. There is no `.claim` marker and no v2 field.
+     - The audit row lists both ids.
+   - **"a v1 record stays revocable after its owner is gone".** An `acc_` v1 `pending` record whose account was
+     removed from config by another path is revoked by `agentcomms approvals revoke`. It becomes v1-shaped `revoked`.
+     The legacy path needs neither the account nor any config.
    - **The race against a real 0.13 claim** needs the frozen 0.13.0 release and its process harness, so it lives with
      them in Task 24.
 
@@ -252,12 +282,18 @@ The ranges below are where the code actually is:
      past-expiry v1 cases' "byte-identical file" assertions;
    - route a v1 revoke through the ordinary version gate (`#transition`) instead of `revokeLegacy`, which must fail
      "a person's revoke of a fresh v1 record writes a v1-shaped revoked";
+   - drop `{ legacy: 'lifecycle' }` from `removeAccountChange`, so the caller goes through the normal version gate.
+     This must fail "removing a Resend account retires its v1 approvals in v1 shape": the removal throws partway, or
+     the files stay `pending`/`approved`;
+   - drop `{ legacy: 'person' }` from one person-row caller in turn (core `revokeApproval`, Gmail `revokeApproval`),
+     which must fail that caller's fresh-record case;
+   - let `revoke` take the legacy path with no option, which must fail the integrity-void "byte-identical" case;
    - add a v2 field (`revokedAt`) to the legacy revoke's write, which must fail the v1-shape assertion.
 
    **Done when.** Every new record is version 2 with both digests. The binding recomputes from stored fields alone.
    Every caller compiles against `contentDigest`. The existing approval suites pass on version-2 fixtures. A person's
-   revoke still retires a live v1 record, in v1 shape, so a running 0.13 client can no longer claim it, and nothing
-   else writes a v1 record.
+   revoke and an approved account removal still retire a live v1 record, in v1 shape, so a running 0.13 client can no
+   longer claim it. Every `revoke` call site is classified in the table above, and nothing else writes a v1 record.
 
 2. **Risky — State-specific timestamps on every transition, and the version-2 integrity validator.**
 
@@ -312,6 +348,23 @@ The ranges below are where the code actually is:
 
    **Changes.**
 
+   - **A config loader for the store.** `ApprovalStore`'s options (`approvals.ts:487-492`) gain an optional
+     `loadConfig?: () => Promise<Config | null>`. This task adds it, because the legacy decoder below is its first
+     user: attributing an `acc_` owner needs the account's `platform`.
+     - **How `openCore` wires it.** In `packages/core/src/core.ts`, the store is constructed at line 38 as
+       `approvals: new ApprovalStore(paths.stateDir, { now, loadConfig: () => config.load() })`. `config` is the
+       `ConfigStore` built at line 32. The arrow keeps `this` bound, because `load` uses private fields and must not
+       be passed unbound.
+     - **When it is read.** `get` loads the config once per read, and `list` once per call, so one listing decodes
+       against one snapshot. A loader error propagates: a config that cannot be read is already a `CONFIG` error on
+       every surface. `null` means "no config", and is treated as a store without a loader.
+     - **A store without a loader** (the direct-store tests) decodes every `acc_` v1 record as unattributable. `ibx_`
+       needs no config and stays Gmail. Nothing else read in this task needs config.
+     - **Compile adaptations.** None in this task: the option is optional, so every existing direct construction
+       compiles and behaves as before. These are `packages/core/test/approvals.test.ts:31, 88, 181, 458`,
+       `save-destination.test.ts:112, 135, 161, 180, 223`, `update-gate.test.ts:565`, Slack `send.test.ts:72, 208,
+       464`, `reaction-outcome.test.ts:211` and `post-outcome.test.ts:106`, Gmail `send-outcome.test.ts:80`, and
+       Resend `send-outcome.test.ts:61`. Task 5 is where some of them need a loader.
    - **`approvals.ts` `#read` (499-506).** Returns a discriminated `StoredApproval`:
      - **v2**: a validated record.
      - **Corrupt v2**: carries its safe fields and its attribution class.
@@ -327,8 +380,9 @@ The ranges below are where the code actually is:
        uses the same function, so a revoke and a read never disagree about a v1 record's state.
      - No v2 timestamp is ever added.
      - `ownerScope` is `global` when `inboxId` is `''`, else `owner`.
-     - The channel: `ibx_` is Gmail. `acc_` is the stored `platform` of the account while it still exists. Anything
-       else is unattributable.
+     - The channel: `ibx_` is Gmail. `acc_` is the stored `platform` of the account, from the loaded config, while
+       the account still exists. Anything else is unattributable, including every `acc_` record on a store with no
+       loader.
      - The output is `{ approvalId, kind, state, legacy: true, createdAt, expiresAt }` plus the same summary fields a
        v2 record shows.
    - **`get` (565-568)** returns `StoredApproval`.
@@ -337,17 +391,27 @@ The ranges below are where the code actually is:
      - corrupt records and unreadable stubs, which are never rewritten;
      - a stored `approvalId` that differs from the file name. That case is corrupt before `#path`, the lock or
        `#markClaimed` (802-814) touch the other id.
-   - **`revoke`** keeps routing a legacy record to Task 1's `revokeLegacy`. It now chooses that route from the decoded
-     `StoredApproval`, not from a raw version check. A corrupt record or an unreadable stub is never revoked or
-     rewritten. It is reported as it is.
+   - **`revoke`** keeps routing a legacy record to Task 1's `revokeLegacy`, still only when the caller passes Task 1's
+     `legacy` option. It now chooses that route from the decoded `StoredApproval`, not from a raw version check. A
+     corrupt record or an unreadable stub is never revoked or rewritten; it is reported as it is. `revoke` now
+     returns `StoredApproval`.
    - **`list` (1085-1104)** drops `.catch(() => null)`. It returns every file as one of the four forms.
    - **Callers adapt mechanically**, treating anything not v2 as unusable; Task 9 reworks them properly:
      - core: maintenance `listApprovals` (`maintenance.ts:405`) and `revokeApproval` (430); `claimsApproval`
        (`update-gate.ts:82-91`);
      - Gmail: `listApprovals` (`send.ts:747`), `refuseWhileSending` (`drafts.ts:561`, `organise.ts:128`);
-     - Resend: `ownRecord` (`send.ts:86`) and `sendStatus` (748);
+     - Resend: `ownRecord` (`send.ts:86`) and `sendStatus` (748). Also `removeAccountChange`
+       (`accounts.ts:353-360`), the lifecycle caller in Task 1's table. It iterates `list({ inboxId, states:
+       ['pending', 'approved'] })`, which now yields v2 records and legacy views; a stub has state `corrupt`, so the
+       filter never matches one. It reads only `approvalId` from each, so the union needs a narrowing type only. It
+       keeps passing `{ legacy: 'lifecycle' }`, and `approvalsVoided` is unchanged;
      - Slack: `approve.ts`;
-     - `save-destination.ts`.
+     - `save-destination.ts`;
+     - **every other `revoke` call site in Task 1's table accepts the `StoredApproval` result:**
+       - Gmail `revokeApproval` reads `inboxId` for its audit row, which legacy views and v2 records both carry;
+       - core `revokeApproval` returns `publicView`, or the legacy view;
+       - `revokeChange` audits the record's target;
+       - the cancels and `refuseChangedProfile` ignore the result.
 
    **Tests first.** Add `packages/core/test/approval-store-read.test.ts`. Cover §5 R11a, R13e, R17a, R18d, R20c, R23g,
    R25f, R32g, R32j, R34d and D8i-b:
@@ -365,18 +429,26 @@ The ranges below are where the code actually is:
    - A released-shape v1 send with no `kind`.
    - v1 `pending` and `approved` records before and after their original expiry.
    - `ownerScope` derivation.
-   - Attribution: `ibx_`; `acc_` while the account exists; the same `acc_` record unattributable after the account is
-     removed.
+   - Attribution, through `get` and the unpinned store `list`, both on a store given a loader and through `openCore`:
+     `ibx_` is Gmail; an `acc_` record is attributed to its account's platform (Slack, and Resend) while the account
+     exists; the same `acc_` record is unattributable once the account is removed from the config the loader returns.
+   - **"a store opened without a config loader reads acc_ v1 records as unattributable".** A direct `new
+     ApprovalStore(dir, { now })`: `ibx_` is still Gmail, and nothing throws.
+   - Task 1's "removing a Resend account retires its v1 approvals in v1 shape" re-runs through the new `list` and
+     `revoke` and passes.
    - One list mixing v1 and v2 records: the v1 ones are `legacy: true`, never `corrupt`, and the v2 missing-binding
      rule never applies to them.
 
    Mutations: restore the catch-and-skip; put a byte of the file in `reason`; let the decoder write; treat a v1 record
    with no binding as corrupt; drop the filename check. Re-run Task 1's legacy revoke tests through the new read path
    and require them to pass. Then route a legacy `StoredApproval` to `#transition`, which must fail "a person's revoke
-   of a fresh v1 record writes a v1-shaped revoked".
+   of a fresh v1 record writes a v1-shaped revoked". Pass `config.load` unbound in `core.ts`, which must fail the
+   `acc_`-while-the-account-exists case through `openCore`. Fall back to a guessed platform when there is no loader,
+   which must fail the no-loader test.
 
    **Done when.** No read returns a record it has not validated or decoded, and nothing is silently omitted. v1 files
-   are readable for reporting, and written only by Task 1's legacy path (the drain and a person's revoke).
+   are readable for reporting, and written only by Task 1's legacy path (the drain, a person's revoke and an approved
+   owner removal). The store reads config only through its loader, and `openCore` supplies it.
 
 4. **Risky — Config version 3: the send epoch, the conversion door and the legacy drain.**
 
@@ -406,8 +478,8 @@ The ranges below are where the code actually is:
        - Test-only barrier hooks (`beforeLock`, `afterScan`, `beforeWrite`) are injected through the constructor and
          are unreachable from the package's public API, as `enableNamesMigrationForTests` is (`release-gate.ts`).
    - **The drain revokes through Task 1's `revokeLegacy(id, reason)`**, the same locked, v1-shaped path a person's
-     revoke uses, with the reason `prepared by an earlier release; prepare it again`. The drain and a person's revoke
-     remain the only v1 writers. It reports each record's outcome.
+     revoke uses, with the reason `prepared by an earlier release; prepare it again`. The drain, a person's revoke and
+     an approved owner removal remain the only v1 writers (Task 1's table). It reports each record's outcome.
    - **`send-epoch.ts`: `ensureSendEpochConfig(core)`.**
      - **Converting.** It scans v1 send records that are `pending` or `approved` by the legacy decoder and marks
        them `open`; historical `used`, `failed`, `revoked` and `expired` records are never tracked.
@@ -502,8 +574,22 @@ The ranges below are where the code actually is:
        wording.
      - `APPROVAL_REQUIRED` describes only a pending record that needs a person.
      - `approval` is D8's public object, built by `publicApproval(outcome)`.
-   - **`ApprovalStore` takes a `liveGate(record)` reader.** It returns owner existence, effective send and change
-     policy, and the send epoch, all from one `config.load()`. `openCore` (`core.ts:29-42`) wires it from `ConfigStore`.
+   - **The store derives a `LiveGate` from Task 3's `loadConfig`**, with no second config dependency.
+     `liveGateOf(config, record)` is pure. It returns owner existence, effective send and change policy, and the send
+     epoch, all from one `loadConfig()` call made inside the record lock.
+     - **A store with no loader fails closed.** Inspection never marks a v2 record claimable or `ownerRemoved`.
+       Claims, approvals and answers refuse with `CONFIG` "this approval store was opened without a configuration".
+     - **Direct constructions that need a loader.** Task 3 left these unchanged. This task gives them
+       `loadConfig: () => configStore.load()` over a temporary `ConfigStore`, or, for harness stores, over
+       `harness.core.config`:
+       - the ones that claim, approve or answer: `approvals.test.ts:31, 88, 181, 458`,
+         `save-destination.test.ts:112, 135, 161, 180, 223`, and Slack `send.test.ts:72, 208, 464`;
+       - the read-later stores whose outcome reads must match the harness: `update-gate.test.ts:565`, Slack
+         `reaction-outcome.test.ts:211` and `post-outcome.test.ts:106`, Gmail `send-outcome.test.ts:80`, and Resend
+         `send-outcome.test.ts:61`.
+
+       `pnpm typecheck` stays green throughout, because the option is optional. The behaviour change is what forces
+       these edits.
    - **`#transition` (571-589)** reads the file and then the live gate inside the record lock, classifies, and writes.
      - `#stateError` (591-614) gives way to the outcome's error.
      - `#requireKind` (622-657) and ownership move before state. A nonexistent, foreign, wrong-kind or pinned-away id
@@ -527,9 +613,14 @@ The ranges below are where the code actually is:
      `revoked`.
    - Revoke against claim in two processes: one locked winner.
    - A changed draft, changed expected recipients or account, or a drifted plan voids at claim.
+   - **"a store opened without a config loader never makes a record claimable".** On a direct store with no loader, a
+     v2 `pending` chat-route send is `claimable: false` and not `ownerRemoved`. Its claim refuses with `CONFIG`, and
+     nothing is written.
 
    Mutations: classify before checking ownership; let an unknown id produce a different envelope; apply the default
-   policy to a removed owner; treat `prospective` as removed; read the live gate before taking the lock.
+   policy to a removed owner; treat `prospective` as removed; read the live gate before taking the lock; treat a
+   missing loader as an empty config, which must fail the no-loader test (an empty config would read the owner as
+   removed).
 
    **Done when.** Every transition classifies from one fresh config read under its own lock, and nothing classifies
    before the lock.
@@ -878,6 +969,12 @@ The ranges below are where the code actually is:
     - **Legacy records.** A legacy v1 record is shown as legacy in status and lists, while a v2 record with no binding
       is a stub. A released-shape v1 send with no `kind` is a send, and past its original expiry it is `expired` with
       no v2 timestamp.
+    - **"an acc_ v1 record is attributed while its account exists, and not after".** This runs through `openCore`, so
+      Task 3's loader is wired, with a Slack and a Resend v1 `pending` record. While each account exists, core
+      zero-wait status (`agentcomms approval wait --wait-seconds 0`, `comms_approval_wait`) and the unpinned list
+      (`agentcomms approvals list`, `comms_approvals_list`) show it with its channel, `legacy: true`, and wording
+      chosen by that channel. After the account is removed, both show the same record as unattributable, with
+      generic wording and no channel. It is still listed and never hidden.
     - **Derived states.**
       - After a failed sweep and `never → chat`, a stale-epoch record shows as `revoked` without being written, and
         the next claim persists it.
@@ -890,7 +987,8 @@ The ranges below are where the code actually is:
         approval expired; nothing was sent with it".
 
     Mutations: drop a field from the wrap list; put file bytes in a stub; omit corrupt records from the list; show a
-    stub on a pinned list.
+    stub on a pinned list; attribute an `acc_` v1 record from a cached account list instead of the loader's config,
+    which must fail the after-removal half of the `acc_` test.
 
     **Done when.** Every record in the store is either visible with honest state or an explicit stub. None is skipped.
     Nothing a sender wrote escapes the envelope.
@@ -1377,6 +1475,9 @@ The ranges below are where the code actually is:
       - A malformed `approvalGrouping` is refused, and a synthetic channel works without any core edit.
       - Removed-account Slack and Resend records still group by their own rule.
       - A v1 record that cannot be attributed takes part in no group.
+      - An `acc_` v1 Slack record, read through `openCore`'s loader, groups by Slack's rule while its account exists.
+        Once the account is removed, the same record takes part in no group: an expired one no longer produces a row,
+        and a `used` one no longer blocks.
     - **What makes evidence indeterminate.**
       - Every missing, malformed or mismatched digest combination for Gmail and Slack, a changed Slack revision, an
         edited `channel`, and a valid-value mutation of any attribution field make the whole report indeterminate.
@@ -1395,7 +1496,8 @@ The ranges below are where the code actually is:
     - **Maintenance failure** is surfaced, and the report still returns its evidence-scoped results.
 
     Mutations: claim `complete-90-days` with a capped window; guess the owner of an unreadable file; wait on a busy
-    lock; use `contentDigest` in Gmail grouping.
+    lock; use `contentDigest` in Gmail grouping; keep grouping an `acc_` v1 record after its account is removed, which
+    must fail the after-removal half of the `acc_` grouping case.
 
     **Done when.** Each draft-level claim is bounded by the records actually read, and every gap in them is called
     indeterminate.
@@ -1671,8 +1773,8 @@ so ownership can be audited. The labels follow the spec's order within each item
 | R32g | Editing a stored `channel` makes an unpinned stub elsewhere | 3 |
 | R32h | ...and makes the whole D9 report indeterminate | 21 |
 | R32i | A v2 record naming a channel the snapshot does not know is refused at creation | 1 |
-| R32j | v1 `ibx_` → Gmail; `acc_` → platform while the account exists; unattributable after removal | 3 |
-| R32k | An unattributable v1 record takes part in no grouping | 21 |
+| R32j | v1 `ibx_` → Gmail; `acc_` → platform (from the store's config loader) while the account exists; unattributable after removal, and on a store with no loader | 3 |
+| R32k | An unattributable v1 record takes part in no grouping; the same `acc_` record groups by its platform's rule while its account exists | 21 |
 | R29a | Frozen 0.13 `executeSend`/terminal approval held after config read: drain revokes, frozen op refused, no transition, no provider call | 24 |
 | R29b | Same with revocation forced to fail: named, drain pending, `never → chat` refused, retried, then loosening allowed | 24 |
 | R29c | A 0.13 claim already holding the lock completes and is listed | 24 |
