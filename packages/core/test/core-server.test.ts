@@ -770,14 +770,17 @@ test('tightening the default says which mailboxes and workspaces still approve i
     accounts: { 'acme/slack': account({ changePolicy: 'chat' }) },
     inboxes: { 'acme/gmail': inbox() },
   });
-  const { ok, close } = await connect(m);
+  // The server for this machine's own shell, as the command below runs: both surfaces, and the expected commands, quote
+  // for one platform. (`connect` otherwise gives the server darwin's, for the POSIX text other tests compare.)
+  const { ok, close } = await connect(m, { platform: process.platform });
   try {
     // Loosening nothing, it is applied at once — unchanged, and what the design says.
     assert.equal((await ok('comms_change_policy', { inbox: 'acme/gmail', set: 'chat' })).applied, true);
     assert.equal((await ok('comms_change_policy')).looser, undefined, 'a chat default has nothing to warn of');
 
     // At a terminal: the warning, in words, with a command for each — core's own, located (CUE-403).
-    const tighten = (flag: string, name: string) => coreCommand(m.core.paths, ['policy', flag, name, 'confirm']);
+    const tighten = (flag: string, name: string) =>
+      coreCommand(m.core.paths, ['policy', flag, name, 'confirm'], process.platform);
     const byCommand = cli(m, ['policy', 'confirm'], { CLAUDECODE: '1' });
     assert.equal(byCommand.status, 0, byCommand.stderr);
     assert.match(byCommand.stdout, /Default change policy: confirm/);
@@ -833,7 +836,8 @@ test('tightening the default says which mailboxes and workspaces still approve i
 
 test('loosening the change policy from chat needs a code typed at a terminal, whatever surface asks', async () => {
   const m = machine({ defaults: { changePolicy: 'confirm' }, accounts: { 'acme/slack': account() } });
-  const { ok, call, close } = await connect(m);
+  // For this machine's own shell: `locatedCoreLine` reads the line as this Node's path, unquoted, starts it.
+  const { ok, call, close } = await connect(m, { platform: process.platform });
   try {
     const first = await ok('comms_change_policy', { set: 'chat' });
     assert.equal(first.applied, false);

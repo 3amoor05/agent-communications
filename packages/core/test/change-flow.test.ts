@@ -280,20 +280,32 @@ test('a command whose --approval is taken by another change names the flag that 
 
 test('--mcp-approval is generated before an existing sentinel and positional lookalikes stay untouched', async () => {
   const core = coreWith('never');
+  // One shell for the hint and the expected command: Windows quotes `--` and `--approval=x`, POSIX does not.
+  const platform = process.platform;
   await assert.rejects(
     gatedChangeAtTerminal(core, setSendPolicy(core, 'chat'), {
       env: { CLAUDECODE: '1' },
-      output: { json: true, color: false },
+      output: { json: true, color: false, platform },
       rerun: ['setup', '--mcp-client', 'cursor', '--', '--mcp-approval', 'literal', '--approval=x'],
       approvalFlag: '--mcp-approval',
     }),
     (error: unknown) => {
       assert.ok(error instanceof CommsError);
       const approvalId = String((error.details as { approvalId?: string }).approvalId);
-      assert.match(
-        error.hint ?? '',
-        new RegExp(` setup --mcp-client cursor --mcp-approval ${approvalId} -- --mcp-approval literal --approval=x`),
-      );
+      // The generated flag and its id before the sentinel; after it, the lookalikes exactly as they were given.
+      const rerun = coreHandoffs(core.paths, platform).own([
+        'setup',
+        '--mcp-client',
+        'cursor',
+        '--mcp-approval',
+        approvalId,
+        '--',
+        '--mcp-approval',
+        'literal',
+        '--approval=x',
+      ]);
+      assert.ok(isCommand(rerun));
+      assert.ok(error.hint?.includes(inlineCommand(rerun)), error.hint);
       return true;
     },
   );

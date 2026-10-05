@@ -2169,6 +2169,12 @@ test('no profile text can make a preview claim something was done at once: a lab
 
 // ── What a profile names, located (CUE-403) ─────────────────────────────────────────────────────────────────────
 
+/**
+ * The operations below run for this machine's own shell, as `orgShow` and every expected command here do: `options`
+ * otherwise gives them darwin's, for the POSIX text the tests above compare.
+ */
+const HERE: Partial<OrgOptions> = { platform: process.platform };
+
 /** Registers these servers with Claude Code in this machine's home: each run from the entry given. */
 function register(m: Machine, servers: Record<string, string>): void {
   const claude = knownClientConfigs(m.env, process.platform).find((file) => file.client === 'claude-code');
@@ -2178,16 +2184,21 @@ function register(m: Machine, servers: Record<string, string>): void {
 }
 
 /** The command `channel`'s CLI is run with here, as core finds it among this machine's registrations. */
+async function registeredHandoff(m: Machine, channel: string, words: readonly string[], use?: HandoffUse) {
+  const handoffs = await cliHandoffs({ caller: CORE_CALLER, paths: m.core.paths, env: m.env }).registered();
+  const handoff = handoffs.of(channel, words, use);
+  assert.ok(isCommand(handoff), 'message' in handoff ? handoff.message : '');
+  return handoff;
+}
+
+/** The same, as a sentence gives it. */
 async function registeredCommand(
   m: Machine,
   channel: string,
   words: readonly string[],
   use?: HandoffUse,
 ): Promise<string> {
-  const handoffs = await cliHandoffs({ caller: CORE_CALLER, paths: m.core.paths, env: m.env }).registered();
-  const handoff = handoffs.of(channel, words, use);
-  assert.ok(isCommand(handoff), 'message' in handoff ? handoff.message : '');
-  return inlineCommand(handoff);
+  return inlineCommand(await registeredHandoff(m, channel, words, use));
 }
 
 /** A Slack account connected through the profile's send app. */
@@ -2219,8 +2230,8 @@ test("core's own commands in a profile's refusals are located; another product's
     return true;
   });
   const path = writeProfile(m, profile());
-  await add(m);
-  await assert.rejects(add(m), (error: unknown) => {
+  await add(m, {}, HERE);
+  await assert.rejects(add(m, {}, HERE), (error: unknown) => {
     assert.ok(error instanceof CommsError);
     assert.equal(
       error.hint,
@@ -2234,9 +2245,9 @@ test("core's own commands in a profile's refusals are located; another product's
 test("a profile names Gmail's commands only as this machine's registrations find them: a report, a drift, a refusal (7d-core)", async () => {
   const m = machine();
   writeProfile(m, profile());
-  await add(m);
+  await add(m, {}, HERE);
   writeProfile(m, profile({ gmail: gmail({ clientId: CLIENT_B, clientSecret: SECRET_B }) }));
-  await update(m);
+  await update(m, {}, HERE);
   await edit(m, (raw) => {
     delete raw.clients['acme-1'];
     raw.inboxes = { 'acme/gmail': mailbox('acme-1') };
@@ -2244,13 +2255,13 @@ test("a profile names Gmail's commands only as this machine's registrations find
   // A second machine whose mailbox still signs in through the profile's client, so its removal is refused.
   const signedIn = machine();
   writeProfile(signedIn, profile());
-  await add(signedIn);
+  await add(signedIn, {}, HERE);
   await edit(signedIn, (raw) => {
     raw.inboxes = { 'acme/gmail': mailbox('acme-1') };
   });
 
   // Nothing registered: the tool that does it from a chat, and why there is no command — never a bare `agent-gmail`.
-  const unregistered = (await update(m)).result.reported.join('\n');
+  const unregistered = (await update(m, {}, HERE)).result.reported.join('\n');
   assert.match(
     unregistered,
     /move acme\/gmail onto "acme-2" with gmail_inbox_reauth from a chat \(Gmail \S+ \(@agentcomms\/gmail\) is not locatable here: /,
@@ -2259,7 +2270,7 @@ test("a profile names Gmail's commands only as this machine's registrations find
   const drift = (await orgShow(m.core, 'acme', process.platform)).drift.map((entry) => entry.fix).join('\n');
   assert.match(drift, /Move acme\/gmail onto "acme-2" with gmail_inbox_reauth from a chat \(Gmail /);
   assertNoBareCommand(drift);
-  await assert.rejects(remove(signedIn), (error: unknown) => {
+  await assert.rejects(remove(signedIn, 'acme', HERE), (error: unknown) => {
     assert.ok(error instanceof CommsError);
     assert.match(error.hint ?? '', /^Move each onto another client with gmail_inbox_reauth from a chat \(Gmail /);
     assertNoBareCommand(error.hint ?? '');
@@ -2268,10 +2279,15 @@ test("a profile names Gmail's commands only as this machine's registrations find
 
   // Registered with a client here, from a managed runtime: that runtime's CLI, pinned to this machine's folders.
   for (const each of [m, signedIn]) register(each, { gmail: writeManaged(each.core.paths.dataDir, 'gmail').entry });
-  const move = await registeredCommand(m, 'gmail', ['inbox', 'reauth', 'acme/gmail', '--client', 'acme-2']);
-  const entry = join(m.core.paths.dataDir, 'runtime');
-  assert.ok(move.includes(` ${entry}`) || move.includes(` ${realpathSync(entry)}`), move);
-  const registered = (await update(m)).result.reported.join('\n');
+  const moving = await registeredHandoff(m, 'gmail', ['inbox', 'reauth', 'acme/gmail', '--client', 'acme-2']);
+  const move = inlineCommand(moving);
+  // Read from its words, not its line: a shell quotes a path — Windows' `RUNNER~1` — and the line shows it quoted.
+  const runtime = [join(m.core.paths.dataDir, 'runtime'), realpathSync(join(m.core.paths.dataDir, 'runtime'))];
+  assert.ok(
+    moving.words.some((word) => runtime.some((root) => word.startsWith(root))),
+    move,
+  );
+  const registered = (await update(m, {}, HERE)).result.reported.join('\n');
   assert.ok(registered.includes(`move acme/gmail onto "acme-2" with ${move}`), registered);
   assertNoBareCommand(registered);
   const located = (await orgShow(m.core, 'acme', process.platform)).drift.map((entry) => entry.fix).join('\n');
@@ -2279,7 +2295,7 @@ test("a profile names Gmail's commands only as this machine's registrations find
   // `--help` opens no folder, so it is pinned to none.
   const help = await registeredCommand(signedIn, 'gmail', ['inbox', 'reauth', '--help'], { uses: [] });
   assert.doesNotMatch(help, /--config-dir/);
-  await assert.rejects(remove(signedIn), (error: unknown) => {
+  await assert.rejects(remove(signedIn, 'acme', HERE), (error: unknown) => {
     assert.ok(error instanceof CommsError);
     assert.ok(error.hint?.startsWith(`Move each onto another client; see ${help}, or remove it`), error.hint);
     return true;
@@ -2289,7 +2305,7 @@ test("a profile names Gmail's commands only as this machine's registrations find
 test("a profile names Slack's commands only as this machine's registrations find them (7d-core)", async () => {
   const m = machine();
   writeProfile(m, profile());
-  await add(m);
+  await add(m, {}, HERE);
   await edit(m, (raw) => {
     raw.accounts = { 'acme/slack': slackAccount() };
   });
@@ -2306,7 +2322,7 @@ test("a profile names Slack's commands only as this machine's registrations find
   });
 
   writeProfile(m, elsewhere);
-  await assert.rejects(update(m), (error: unknown) => {
+  await assert.rejects(update(m, {}, HERE), (error: unknown) => {
     assert.ok(error instanceof CommsError);
     assert.match(
       error.hint ?? '',
@@ -2316,7 +2332,7 @@ test("a profile names Slack's commands only as this machine's registrations find
     return true;
   });
   writeProfile(m, dropsSend);
-  const unregistered = (await update(m)).result.reported.join('\n');
+  const unregistered = (await update(m, {}, HERE)).result.reported.join('\n');
   assert.match(
     unregistered,
     /move to the other app with slack_mode_set from a chat \(Slack .*\), or remove with slack_workspace_remove from a chat \(Slack /,
@@ -2328,15 +2344,15 @@ test("a profile names Slack's commands only as this machine's registrations find
   const removeIt = await registeredCommand(m, 'slack', ['workspace', 'remove', 'acme/slack']);
   const mode = await registeredCommand(m, 'slack', ['workspace', 'mode', 'acme/slack']);
   writeProfile(m, profile());
-  await update(m);
+  await update(m, {}, HERE);
   writeProfile(m, elsewhere);
-  await assert.rejects(update(m), (error: unknown) => {
+  await assert.rejects(update(m, {}, HERE), (error: unknown) => {
     assert.ok(error instanceof CommsError);
     assert.equal(error.hint, `Remove them with ${removeIt} first, then run the update again.`);
     return true;
   });
   writeProfile(m, dropsSend);
-  const registered = (await update(m)).result.reported.join('\n');
+  const registered = (await update(m, {}, HERE)).result.reported.join('\n');
   assert.ok(registered.includes(`move to the other app with ${mode}, or remove with ${removeIt}`), registered);
   assertNoBareCommand(registered);
 });
