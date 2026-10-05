@@ -1229,3 +1229,56 @@ test('sync-versions bumps every skill, Slack included, and --check catches one l
   assert.equal(check.status, 1);
   assert.match(check.stderr, /skills\/slack-reading\/SKILL\.md: the compatibility line is out of date/);
 });
+
+/** One job of the workflow, from its key to the next job's, or '' when there is none. */
+function jobBlock(workflow, key) {
+  const start = workflow.indexOf(`\n  ${key}:\n`);
+  if (start < 0) return '';
+  const next = /\n {2}[a-z][\w-]*:\n/g;
+  next.lastIndex = start + 1;
+  const end = next.exec(workflow)?.index ?? workflow.length;
+  return workflow.slice(start, end);
+}
+
+test('the publish waits for the Node 22.12.0 leg, which builds on the tooling Node and then runs only its one test', async () => {
+  /*
+   * Case 0000 of the CUE-403 design: a located command for a `.ts` entry runs on the oldest Node the packages claim.
+   * The verify matrix starts at the repository's own tooling floor, 22.18.0, which strips types without being asked,
+   * so it cannot see a missing `--experimental-strip-types`. One job builds there, switches to exactly 22.12.0 and runs
+   * the one built-package test; the publish needs it as well as the matrix.
+   */
+  const workflow = await readFile(join(ROOT, '.github', 'workflows', 'release.yml'), 'utf8');
+  const job = jobBlock(workflow, 'old-node');
+  assert.ok(job, 'there is an old-node job');
+  assert.match(job, /\n {4}runs-on: ubuntu-latest\n/);
+  const at = (marker) => {
+    const index = job.indexOf(marker);
+    assert.ok(index >= 0, `the old-node job has ${marker}`);
+    return index;
+  };
+  const tooling = at('node-version: 22.18.0');
+  const install = at('- run: pnpm install --frozen-lockfile');
+  const build = at('- run: pnpm build');
+  const old = at('node-version: 22.12.0\n');
+  const run = at('- run: node --test packages/core/test/cli-command-old-node.test.mjs\n');
+  assert.ok(tooling < install && install < build && build < old && old < run, 'built on 22.18.0, then run on 22.12.0');
+  assert.equal([...job.matchAll(/node-version: /g)].length, 2, 'two Node versions, and no range');
+  assert.equal(
+    [...job.matchAll(/node --test|pnpm (?:test|verify)\b/g)].length,
+    1,
+    'only the one test runs on the old Node',
+  );
+  // The publish needs it, and the ordinary verify matrix too.
+  const publish = jobBlock(workflow, 'publish');
+  const needs =
+    /\n {4}needs: \[([^\]]*)\]\n/
+      .exec(publish)?.[1]
+      .split(',')
+      .map((need) => need.trim()) ?? [];
+  assert.deepEqual(needs.sort(), ['old-node', 'verify']);
+  assert.match(jobBlock(workflow, 'verify'), /node: \[22\.18\.0, 24\]/, 'the matrix keeps its own Node versions');
+  // The test is there, and the repository's own tooling floor stays where it is.
+  await readFile(join(ROOT, 'packages', 'core', 'test', 'cli-command-old-node.test.mjs'), 'utf8');
+  const root = JSON.parse(await readFile(join(ROOT, 'package.json'), 'utf8'));
+  assert.equal(root.engines.node, '>=22.18.0');
+});

@@ -1,15 +1,18 @@
 import assert from 'node:assert/strict';
+import childProcess from 'node:child_process';
 import {
   chmodSync,
   mkdirSync,
   readdirSync,
   readFileSync,
   realpathSync,
+  rmSync,
   symlinkSync,
   unlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -22,17 +25,24 @@ import {
 } from '../src/cli-command.ts';
 import { commandAsJson, commandText, inlineCommand, shellCommand } from '../src/cli-runtime.ts';
 import { type ExternalCommand, externalCommand } from '../src/command-brands.ts';
+import type { RegisteredServer } from '../src/mcp-clients.ts';
 import { findUngatedGmailServers, otherSlackServerRemoval } from '../src/other-servers.ts';
 import type { PathName, ResolvedPaths } from '../src/paths.ts';
 import { satisfiesRange } from '../src/versions.ts';
 import {
   link,
+  markingProgram,
   moduleUrl,
+  pinArgs,
   realTemp,
+  registration,
+  shortName,
   suiteEntry,
   VERSION,
   writeCheckout,
   writeFile,
+  writeGlobal,
+  writeManaged,
   writePackage,
 } from './fixtures/cli-command/trees.ts';
 
@@ -526,21 +536,538 @@ test('channel and core at different versions, no core at all, or a core that is 
   );
 });
 
-test('another product is not located in this direction yet, and gets no command', () => {
-  const { packages } = writeCheckout(join(realTemp(), 'checkout'), ['gmail', 'slack']);
-  notLocated(
-    locateCliCommand(request(moduleUrl(packages.gmail as string, 'dist', 'cli.mjs'), 'gmail', 'slack'), NODE),
-    'direction',
-    'slack',
+// ── Another product: from what is registered with the person's clients, never trusting or running it ────────────────
+
+/** A built package of `channel` to print from: its own module is what a caller's `import.meta.url` would be. */
+function printer(channel: string, version = VERSION): string {
+  const root = writePackage(join(realTemp('printer-'), shortName(channel)), channel, {
+    version,
+    files: ['dist/cli.mjs'],
+  });
+  return moduleUrl(root, 'dist', 'cli.mjs');
+}
+
+/** Locating `target`'s command from a built `from`, given these registrations. */
+function fromRegistrations(
+  from: string,
+  target: string,
+  registrations: readonly RegisteredServer[] | undefined,
+  overrides: Partial<CliCommandRequest> = {},
+  runtime: NodeRuntime = NODE,
+): CliCommandResult {
+  return locateCliCommand(
+    request(printer(from), from, target, {
+      ...(registrations === undefined ? {} : { registrations }),
+      ...overrides,
+    }),
+    runtime,
   );
-  // Core asking for a channel's command is the same direction: another product, located from registrations.
-  const core = writePackage(join(realTemp(), 'core'), 'core', { files: ['dist/cli.mjs'] });
-  notLocated(
-    locateCliCommand(request(moduleUrl(core, 'dist', 'cli.mjs'), 'core', 'whatsapp'), NODE),
-    'direction',
-    'whatsapp',
+}
+
+/** Why each registration of the product was not used, in the order given. */
+function whyNot(result: CliCommandResult): string[] {
+  assert.equal(result.ok, false);
+  return result.ok ? [] : (result.registrations ?? []).map(({ why }) => why);
+}
+
+test('with no registrations given, another product is not located, and nothing is guessed', () => {
+  // Core asking for a channel's command, and a channel asking for another's: the same direction.
+  const none = notLocated(fromRegistrations('core', 'whatsapp', undefined), 'no-registrations', 'whatsapp');
+  assert.match(none.detail, /nothing registered was given/);
+  notLocated(fromRegistrations('gmail', 'slack', undefined), 'no-registrations', 'slack');
+  // An empty list was looked through: there is nothing registered, and it says so.
+  assert.deepEqual(whyNot(notLocated(fromRegistrations('core', 'slack', []), 'not-registered', 'slack')), []);
+});
+
+test("a built caller runs another product's local source registration with the strip flag (0000)", () => {
+  const { packages } = writeCheckout(join(realTemp(), 'checkout'), ['slack']);
+  const slack = packages.slack as string;
+  rmSyncTree(join(slack, 'dist'));
+  const entry = join(slack, 'src', 'cli.ts');
+  const local = registration({
+    name: 'slack',
+    command: '/opt/elsewhere/node',
+    args: [
+      STRIP,
+      '--disable-warning=ExperimentalWarning',
+      entry,
+      ...pinArgs(PATHS),
+      'mcp',
+      '--workspace',
+      'acme/slack',
+    ],
+  });
+  // The caller was started with transform-types, but it is built: no source run of its own to carry it from.
+  const result = fromRegistrations('gmail', 'slack', [local], {}, { version: 'v22.12.0', execArgv: [TRANSFORM] });
+  const command = located(result);
+  assert.deepEqual(command.words, [process.execPath, STRIP, entry, ...PINS, 'approve', 'abc123']);
+  assert.ok(result.ok);
+  assert.equal(result.basis.direction, 'cross-product');
+  assert.equal(result.basis.entryKind, 'source');
+  assert.deepEqual(result.basis.registration, {
+    client: 'claude-code',
+    path: '/cfg/.claude.json',
+    name: 'slack',
+    launcher: 'local',
+  });
+});
+
+test('an npx registration is never used for another product, its cache there or not (000a)', () => {
+  const home = realTemp('home-');
+  const cache = join(home, '.npm', '_npx', '5f2e1a', 'node_modules', '@agentcomms');
+  const spec = `@agentcomms/slack@${VERSION}`;
+  const npx = [
+    registration({ name: 'slack', command: '/usr/local/bin/npx', args: ['-y', spec, ...pinArgs(PATHS), 'mcp'] }),
+    registration({ name: 'slack-win', command: 'C:\\Program Files\\nodejs\\npx.cmd', args: ['-y', spec, 'mcp'] }),
+    registration({ name: 'slack-bare', command: 'npx', args: ['-y', spec, 'mcp'] }),
+    // npx running another Node over the cached package's own file: a real file, while the cache lasts, and still npx.
+    registration({
+      name: 'slack-cached',
+      command: '/usr/local/bin/npx',
+      args: ['-y', 'node@24', join(cache, 'slack', 'dist', 'cli.mjs'), 'mcp'],
+    }),
+  ];
+  for (const cached of [false, true]) {
+    if (cached) writePackage(join(cache, 'slack'), 'slack', { files: ['dist/cli.mjs'] });
+    for (const platform of ['linux', 'win32'] as const) {
+      const result = notLocated(fromRegistrations('core', 'slack', npx, { platform }), 'not-registered', 'slack');
+      assert.deepEqual(
+        whyNot(result),
+        ['npx', 'npx', 'npx', 'npx'],
+        `cache ${cached ? 'present' : 'evicted'}, ${platform}`,
+      );
+    }
+  }
+  // Gmail's npx launcher starts its wrapper package; that is npx too.
+  const gmail = registration({
+    name: 'gmail',
+    command: '/usr/local/bin/npx',
+    args: ['-y', `@agentcomms/gmail-mcp@${VERSION}`],
+  });
+  assert.deepEqual(whyNot(notLocated(fromRegistrations('core', 'gmail', [gmail]), 'not-registered', 'gmail')), ['npx']);
+});
+
+test("a folder pinned under another package's name never makes a registration that product's (000b)", () => {
+  const temp = realTemp();
+  const { entry } = writeManaged(join(temp, 'data'), 'gmail');
+  const decoy = join(temp, 'pins', '@agentcomms', 'slack');
+  for (const pins of [
+    ['--config-dir', decoy, '--state-dir', join(decoy, 'state'), '--data-dir', decoy, '--secrets-dir', decoy],
+    [
+      `--config-dir=${decoy}`,
+      `--state-dir=${decoy}`,
+      `--data-dir=${decoy}`,
+      `--secrets-dir=${join(decoy, 'packages', 'slack', 'src', 'cli.ts')}`,
+    ],
+  ]) {
+    const gmail = registration({ name: 'gmail', command: '/opt/node/bin/node', args: [entry, ...pins, 'mcp'] });
+    for (const platform of ['darwin', 'win32'] as const) {
+      // Recognised as the Gmail it is, and located…
+      assert.equal(located(fromRegistrations('core', 'gmail', [gmail], { platform })).entry, entry, platform);
+      // …and not as Slack, which it is not: there is no Slack registration at all.
+      assert.deepEqual(
+        whyNot(notLocated(fromRegistrations('core', 'slack', [gmail], { platform }), 'not-registered', 'slack')),
+        [],
+      );
+    }
+  }
+});
+
+test('no registered interpreter is ever run or asked anything, and only this Node runs the command (000c)', () => {
+  const temp = realTemp();
+  const changed = markingProgram(join(temp, 'bin'), 'node');
+  const handMadeInterpreter = markingProgram(join(temp, 'bin'), 'node24');
+  // A genuine managed registration whose interpreter was changed, and a hand-written one in the managed shape.
+  const genuine = writeManaged(join(temp, 'data'), 'slack');
+  const handMade = writeManaged(join(temp, 'elsewhere'), 'resend', { handMade: true });
+  const registrations = [
+    registration({ name: 'slack', command: changed.path, args: [genuine.entry, ...pinArgs(PATHS), 'mcp'] }),
+    registration({ name: 'resend', command: handMadeInterpreter.path, args: [handMade.entry, 'mcp'] }),
+  ];
+  const spawned: string[] = [];
+  const restore = spyOnChildProcesses(spawned);
+  let results: CliCommandResult[];
+  try {
+    results = [fromRegistrations('core', 'slack', registrations), fromRegistrations('gmail', 'resend', registrations)];
+  } finally {
+    restore();
+  }
+  assert.deepEqual(spawned, [], 'nothing was started');
+  assert.equal(changed.ran() || handMadeInterpreter.ran(), false, 'neither registered interpreter ran');
+  const [slack, resend] = results.map(located);
+  assert.deepEqual(slack?.words.slice(0, 2), [process.execPath, genuine.entry]);
+  assert.deepEqual(resend?.words.slice(0, 2), [process.execPath, handMade.entry]);
+  for (const command of [slack, resend]) {
+    assert.ok(!command?.words.includes(changed.path) && !command?.words.includes(handMadeInterpreter.path));
+  }
+});
+
+test("a Node outside the target's range gets no command, whatever the registration's interpreter (000d, 0a)", () => {
+  const temp = realTemp();
+  const newer = markingProgram(join(temp, 'node-24', 'bin'), 'node');
+  const managed = writeManaged(join(temp, 'data'), 'whatsapp', { spec: { engines: '>=22.16.0' } });
+  const global = writeGlobal(join(temp, 'prefix'), 'whatsapp', { spec: { engines: '>=22.16.0' } });
+  for (const [launcher, server] of [
+    ['managed', registration({ name: 'whatsapp', command: newer.path, args: [managed.entry, 'mcp'] })],
+    ['global', registration({ name: 'whatsapp', command: global.command, args: ['mcp'] })],
+  ] as const) {
+    for (const version of ['v22.12.0', 'v22.15.1']) {
+      const result = notLocated(
+        fromRegistrations('core', 'whatsapp', [server], {}, { version, execArgv: [] }),
+        'engine',
+        'whatsapp',
+      );
+      assert.equal(result.nodeRange, '>=22.16.0', launcher);
+      assert.match(result.message, /needs Node >=22\.16\.0/);
+    }
+    located(fromRegistrations('core', 'whatsapp', [server], {}, { version: 'v22.16.0', execArgv: [] }));
+  }
+  assert.equal(newer.ran(), false);
+  // And Gmail's own floor, for a Node below it.
+  const gmail = writeManaged(join(temp, 'data'), 'gmail');
+  const below = registration({ name: 'gmail', command: newer.path, args: [gmail.entry, 'mcp'] });
+  const old = notLocated(
+    fromRegistrations('core', 'gmail', [below], {}, { version: 'v22.11.0', execArgv: [] }),
+    'engine',
+    'gmail',
+  );
+  assert.equal(old.nodeRange, '>=22.12.0');
+});
+
+test('core with only npx registrations of a channel prints nothing, whatever Node each place has (00a)', () => {
+  const home = realTemp('home-');
+  const npx = (channel: string, env: Record<string, string>) =>
+    registration({
+      name: channel,
+      command: '/opt/node-24/bin/npx',
+      args: ['-y', `${suiteEntry(channel).packageName}@${VERSION}`, ...pinArgs(PATHS), 'mcp'],
+      env,
+    });
+  for (const cached of [false, true]) {
+    if (cached) {
+      for (const channel of ['slack', 'whatsapp']) {
+        writePackage(join(home, '.npm', '_npx', channel, 'node_modules', '@agentcomms', channel), channel, {
+          files: ['dist/cli.mjs'],
+        });
+      }
+    }
+    for (const caller of ['v22.12.0', 'v22.18.0', 'v24.1.0']) {
+      for (const registered of [
+        { PATH: '/opt/node-22.12/bin' },
+        { PATH: '/opt/node-24/bin', NODE_OPTIONS: '--max-old-space-size=64' },
+      ]) {
+        for (const channel of ['slack', 'whatsapp']) {
+          const result = fromRegistrations(
+            'core',
+            channel,
+            [npx(channel, registered)],
+            {},
+            { version: caller, execArgv: [] },
+          );
+          assert.deepEqual(
+            whyNot(notLocated(result, 'not-registered', channel)),
+            ['npx'],
+            `${channel} ${caller} ${cached}`,
+          );
+        }
+      }
+    }
+  }
+});
+
+test('only a registration of the same version is used, managed first, then by client, file, name, command and arguments (2b)', () => {
+  const temp = realTemp();
+  const old = writeManaged(join(temp, 'data'), 'slack', { version: '0.12.0' });
+  const current = writeManaged(join(temp, 'data'), 'slack');
+  const global = writeGlobal(join(temp, 'prefix'), 'slack');
+  const { packages } = writeCheckout(join(temp, 'checkout'), ['slack']);
+  const localEntry = join(packages.slack as string, 'src', 'cli.ts');
+  const node = '/opt/node/bin/node';
+  const olderManaged = registration({ name: 'slack-old', command: node, args: [old.entry, 'mcp'] });
+  const globalOne = registration({
+    client: 'codex',
+    path: '/cfg/codex.toml',
+    name: 'slack-global',
+    command: global.command,
+    args: ['mcp'],
+  });
+  const localOne = registration({
+    client: 'cursor',
+    name: 'slack-local',
+    command: node,
+    args: [STRIP, localEntry, 'mcp'],
+  });
+  const other = writeManaged(join(temp, 'data2'), 'slack');
+  const managedAt = (client: string, path: string, name: string, command = node, entry = other.entry) =>
+    registration({ client, path, name, command, args: [entry, 'mcp'] });
+
+  // Older only: nothing.
+  assert.deepEqual(whyNot(notLocated(fromRegistrations('core', 'slack', [olderManaged]), 'not-registered', 'slack')), [
+    'version',
+  ]);
+  // An older managed one and a current global one: the current one, though managed ranks first.
+  const mixed = fromRegistrations('core', 'slack', [olderManaged, globalOne]);
+  assert.equal(located(mixed).entry, join(global.root, 'dist', 'cli.mjs'));
+  // A current managed one beats current file entries of every other launcher.
+  const best = fromRegistrations('core', 'slack', [localOne, globalOne, managedAt('vscode', '/z', 'z')]);
+  assert.ok(best.ok && best.basis.registration?.launcher === 'managed' && best.basis.registration.name === 'z');
+  // Without one, any other checked file entry: a local source checkout or a global install, by client.
+  const files = fromRegistrations('core', 'slack', [localOne, globalOne]);
+  assert.ok(files.ok && files.basis.registration?.name === 'slack-global', 'codex sorts before cursor');
+  // Ties: client, then config file, then server name, then command, then arguments, whatever order they came in. Only
+  // the first runs `current`; each of the others would show itself by running `other`.
+  const ladder = [
+    managedAt('codex', '/a', 'b'),
+    managedAt('claude-code', '/b', 'b'),
+    managedAt('claude-code', '/a', 'c'),
+    managedAt('claude-code', '/a', 'b', '/p'),
+    managedAt('claude-code', '/a', 'b', node, other.entry),
+    managedAt('claude-code', '/a', 'b', node, current.entry),
+  ];
+  assert.ok(current.entry < other.entry, 'the arguments sort as the test means them to');
+  for (const order of [ladder, [...ladder].reverse()]) {
+    assert.equal(located(fromRegistrations('core', 'slack', order)).entry, current.entry);
+  }
+  // The registration's own server words — `mcp`, its pin, its path pins — are never part of the command.
+  const command = located(fromRegistrations('core', 'slack', ladder));
+  assert.deepEqual(command.words.slice(2), [...PINS, 'approve', 'abc123']);
+});
+
+test('a Windows npm .cmd registration is used when its package is this version and can be read (2c)', () => {
+  const temp = realTemp();
+  const windows = { platform: 'win32' as const };
+  const at = (prefix: string, version?: string) =>
+    writeGlobal(join(temp, prefix), 'gmail', { windows: true, ...(version ? { version } : {}) });
+  const matching = at('matching');
+  const server = (command: string) => registration({ name: 'gmail', command, args: ['--inbox', 'work'] });
+  const result = fromRegistrations('core', 'gmail', [server(matching.command)], windows);
+  assert.equal(located(result).entry, join(matching.root, 'dist', 'cli.mjs'));
+  assert.ok(result.ok && result.basis.registration?.launcher === 'other');
+  const older = at('older', '0.12.0');
+  assert.deepEqual(
+    whyNot(notLocated(fromRegistrations('core', 'gmail', [server(older.command)], windows), 'not-registered', 'gmail')),
+    ['version'],
+  );
+  const unreadable = at('unreadable');
+  writeFileSync(join(unreadable.root, 'package.json'), '{ not json');
+  assert.deepEqual(
+    whyNot(
+      notLocated(fromRegistrations('core', 'gmail', [server(unreadable.command)], windows), 'not-registered', 'gmail'),
+    ),
+    ['no-package'],
+  );
+  const gone = at('gone');
+  rmSyncTree(gone.root);
+  assert.deepEqual(
+    whyNot(notLocated(fromRegistrations('core', 'gmail', [server(gone.command)], windows), 'not-registered', 'gmail')),
+    ['no-package'],
   );
 });
+
+test('nothing usable is "not locatable here", named exactly, with the usual route and no repair (2d)', () => {
+  const temp = realTemp();
+  const older = writeManaged(join(temp, 'data'), 'resend', { version: '0.12.0' });
+  const unknown = writeGlobal(join(temp, 'unknown'), 'resend');
+  const manifest = JSON.parse(readFileSync(join(unknown.root, 'package.json'), 'utf8')) as Record<string, unknown>;
+  delete manifest.version;
+  writeFileSync(join(unknown.root, 'package.json'), JSON.stringify(manifest));
+  const missing = writeManaged(join(temp, 'missing'), 'resend');
+  rmSyncTree(join(missing.root, 'dist'));
+  const cases: [string, RegisteredServer[], string[]][] = [
+    ['older only', [registration({ name: 'resend', command: '/n', args: [older.entry, 'mcp'] })], ['version']],
+    ['an unknown version', [registration({ name: 'resend', command: unknown.command, args: ['mcp'] })], ['version']],
+    [
+      'an entry that is gone',
+      [registration({ name: 'resend', command: '/n', args: [missing.entry, 'mcp'] })],
+      ['entry'],
+    ],
+    ['nothing at all', [], []],
+  ];
+  for (const [name, registrations, why] of cases) {
+    const result = notLocated(fromRegistrations('core', 'resend', registrations), 'not-registered', 'resend');
+    assert.deepEqual(whyNot(result), why, name);
+    assert.equal(
+      result.message,
+      `Resend ${VERSION} (@agentcomms/resend) is not locatable here: ${result.detail}. Install or update it through your usual route, then try again.`,
+      name,
+    );
+    // No command, no repair and no route through a chat: nothing to run, install, update or approve with.
+    assert.doesNotMatch(result.message, /`|comms_|mcp install|server install|agentcomms update|approve|--force/, name);
+  }
+});
+
+test('Windows reads a registration without case, POSIX with it (2e)', () => {
+  const temp = realTemp();
+  // A command and package path in another case, as Windows writes and finds them, on disk in that case.
+  const prefix = join(temp, 'prefix');
+  const mixed = writeGlobal(prefix, 'gmail', { windows: true, command: 'Agent-Gmail.CMD' });
+  const root = join(temp, 'data', 'Runtime', `${VERSION}-Gmail`, 'Node_Modules', '@AgentComms', 'Gmail');
+  writePackage(root, 'gmail', { files: ['dist/cli.mjs'] });
+  const shapes = [
+    registration({ name: 'cmd', command: mixed.command, args: ['mcp'] }),
+    registration({ name: 'managed', command: '/n', args: [join(root, 'Dist', 'CLI.mjs'), 'mcp'] }),
+  ];
+  for (const server of shapes) {
+    const windows = located(fromRegistrations('core', 'gmail', [server], { platform: 'win32' }));
+    assert.ok(windows.entry.endsWith(join('dist', 'cli.mjs')), server.name);
+    assert.deepEqual(
+      whyNot(
+        notLocated(fromRegistrations('core', 'gmail', [server], { platform: 'linux' }), 'not-registered', 'gmail'),
+      ),
+      [],
+      server.name,
+    );
+  }
+  // A file-backed candidate that is not a full path depends on where it is run from, and is not used.
+  for (const server of [
+    registration({ name: 'bare', command: 'agent-gmail', args: ['mcp'] }),
+    registration({ name: 'relative', command: '/n', args: ['node_modules/@agentcomms/gmail/dist/cli.mjs', 'mcp'] }),
+  ]) {
+    assert.deepEqual(
+      whyNot(notLocated(fromRegistrations('core', 'gmail', [server]), 'not-registered', 'gmail')),
+      ['no-file'],
+      server.name,
+    );
+  }
+});
+
+test("a registration's own path options, however written, never reach the command, and a broken one is not used (3h-registered)", () => {
+  const temp = realTemp();
+  const { entry } = writeManaged(join(temp, 'data'), 'slack');
+  const messy = registration({
+    name: 'slack',
+    command: '/n',
+    args: [
+      entry,
+      '--secrets-dir=relative/secrets',
+      '--config-dir',
+      'one',
+      `--config-dir=${join(temp, 'two')}`,
+      '--state-dir',
+      './state/',
+      '--data-dir',
+      `${temp}//data//`,
+      'mcp',
+      '--workspace',
+      'acme/slack',
+    ],
+  });
+  const away = realTemp('cwd-');
+  const before = process.cwd();
+  process.chdir(away);
+  try {
+    const command = located(fromRegistrations('core', 'slack', [messy], { uses: ['secretsDir', 'configDir'] }));
+    assert.deepEqual(command.words, [
+      process.execPath,
+      entry,
+      '--config-dir',
+      PATHS.configDir,
+      '--secrets-dir',
+      PATHS.secretsDir,
+      'approve',
+      'abc123',
+    ]);
+  } finally {
+    process.chdir(before);
+  }
+  // A spaced path option with no value before `--` is an installation error: that entry is not used at all.
+  const broken = registration({ name: 'slack', command: '/n', args: [entry, '--state-dir', '--', 'mcp'] });
+  assert.deepEqual(whyNot(notLocated(fromRegistrations('core', 'slack', [broken]), 'not-registered', 'slack')), [
+    'arguments',
+  ]);
+});
+
+test('an entry is checked inside its package by whole segments, as written and through links (5a-containment)', () => {
+  const temp = realTemp();
+  const outside = writeFile(join(temp, 'outside', 'cli.mjs'));
+  writeFile(join(temp, 'p3', 'lib', 'node_modules', '@agentcomms', 'slack-evil', 'dist', 'cli.mjs'));
+  const escapes: [string, (root: string) => Parameters<typeof writePackage>[2]][] = [
+    ['p1', () => ({ bin: { 'agent-slack': '../../../../../outside/cli.mjs' } })],
+    [
+      'p2',
+      (root) => {
+        rmSyncTree(join(root, 'dist'));
+        link(outside, join(root, 'dist', 'cli.mjs'));
+        return {};
+      },
+    ],
+    ['p3', () => ({ bin: { 'agent-slack': '../slack-evil/dist/cli.mjs' } })],
+  ];
+  for (const [prefix, arrange] of escapes) {
+    const { root } = writeGlobal(join(temp, prefix), 'slack');
+    writePackage(root, 'slack', { files: [], ...arrange(root) });
+    const server = registration({ name: prefix, command: join(temp, prefix, 'bin', 'agent-slack'), args: ['mcp'] });
+    assert.deepEqual(
+      whyNot(notLocated(fromRegistrations('core', 'slack', [server]), 'not-registered', 'slack')),
+      ['entry'],
+      prefix,
+    );
+  }
+  // A link into the package is not an escape: a POSIX global command is one, and its real file is checked.
+  const fine = writeGlobal(join(temp, 'fine'), 'slack');
+  const viaLink = registration({ name: 'fine', command: fine.command, args: ['mcp'] });
+  assert.equal(located(fromRegistrations('core', 'slack', [viaLink])).entry, join(fine.root, 'dist', 'cli.mjs'));
+});
+
+test("Gmail's wrapper, installed on its own, locates the Gmail it depends on", () => {
+  const modules = join(realTemp(), 'prefix', 'lib', 'node_modules', '@agentcomms');
+  const wrapper = writePackage(join(modules, 'gmail-mcp'), 'gmail', {
+    name: '@agentcomms/gmail-mcp',
+    binary: null,
+    bin: { 'agent-gmail-mcp': './dist/server.mjs' },
+    files: ['dist/server.mjs'],
+  });
+  const gmail = writePackage(join(wrapper, 'node_modules', '@agentcomms', 'gmail'), 'gmail', {
+    files: ['dist/cli.mjs'],
+  });
+  const server = registration({
+    name: 'gmail',
+    command: '/n',
+    args: [join(wrapper, 'dist', 'server.mjs'), '--inbox', 'work'],
+  });
+  assert.equal(located(fromRegistrations('slack', 'gmail', [server])).entry, join(gmail, 'dist', 'cli.mjs'));
+});
+
+test('own product and channel to core never read the registrations they are given', () => {
+  const temp = realTemp();
+  const decoy = writeManaged(join(temp, 'data'), 'gmail');
+  const registrations = [registration({ name: 'gmail', command: '/n', args: [decoy.entry, 'mcp'] })];
+  const checkout = writeCheckout(join(temp, 'checkout'), ['gmail']);
+  const gmail = checkout.packages.gmail as string;
+  const own = located(
+    locateCliCommand(request(moduleUrl(gmail, 'dist', 'cli.mjs'), 'gmail', 'gmail', { registrations }), NODE),
+  );
+  assert.equal(own.entry, join(gmail, 'dist', 'cli.mjs'));
+  const core = located(
+    locateCliCommand(request(moduleUrl(gmail, 'dist', 'cli.mjs'), 'gmail', 'core', { registrations }), NODE),
+  );
+  assert.equal(core.entry, join(checkout.core, 'dist', 'cli.mjs'));
+});
+
+/** Records every attempt to start a process, through every function `node:child_process` has, until restored. */
+function spyOnChildProcesses(calls: string[]): () => void {
+  const names = ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork'] as const;
+  const module = childProcess as unknown as Record<string, unknown>;
+  const originals = names.map((name) => module[name]);
+  for (const name of names) {
+    module[name] = (...args: unknown[]) => {
+      calls.push(`${name} ${JSON.stringify(args[0])}`);
+      throw new Error(`${name} was called`);
+    };
+  }
+  syncBuiltinESMExports();
+  return () => {
+    names.forEach((name, index) => {
+      module[name] = originals[index];
+    });
+    syncBuiltinESMExports();
+  };
+}
+
+/** Removes a directory tree that a test made. */
+function rmSyncTree(path: string): void {
+  rmSync(path, { recursive: true, force: true });
+}
 
 // ── The words: the caller's, after the entry, with the directories the command uses ────────────────────────────────
 

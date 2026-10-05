@@ -13,7 +13,7 @@ import {
   type RegisteredServer,
   scanRegisteredServers,
 } from './mcp-clients.ts';
-import { homeDirectory, shortenHome } from './paths.ts';
+import { homeDirectory, shortenHome, withoutPathOptions } from './paths.ts';
 import { absoluteSearchPath, childEnvironment } from './system-programs.ts';
 
 /*
@@ -354,12 +354,14 @@ export function managedRuntimeEntry(dataDir: string, packageName: string, versio
  *
  * Both `runtime/0.4.0/…` (every Gmail install before the move) and `runtime/0.4.0-gmail/…` (every install
  * since) are read, and a prerelease keeps its own hyphen: `0.5.0-rc.1-gmail` is `0.5.0-rc.1`. Either separator,
- * and allowed to start the string, so a Windows or a relative path is not missed.
+ * and allowed to start the string, so a Windows or a relative path is not missed. On Windows (`platform`), whose
+ * paths are not case-sensitive, the folder names are read without case; the version keeps the case it has.
  */
-export function managedRuntimeVersion(path: string, packageName: string): string | null {
+export function managedRuntimeVersion(path: string, packageName: string, platform?: NodeJS.Platform): string | null {
   const scope = packageName.split('/').map(escapeRegExp).join('[/\\\\]');
   const pattern = new RegExp(
     `(?:^|[/\\\\])runtime[/\\\\]([^/\\\\]+?)(?:-${escapeRegExp(unscoped(packageName))})?[/\\\\]node_modules[/\\\\]${scope}[/\\\\]`,
+    platform === 'win32' ? 'i' : '',
   );
   return pattern.exec(path)?.[1] ?? null;
 }
@@ -373,10 +375,11 @@ export function managedRuntimeVersion(path: string, packageName: string): string
 export function pinnedVersion(
   argument: string,
   product: Pick<McpProduct, 'packageName' | 'npxPackage'>,
+  platform?: NodeJS.Platform,
 ): string | null {
   const names = [...new Set([product.packageName, product.npxPackage])].map(escapeRegExp).join('|');
-  const spec = new RegExp(`^(?:${names})@(\\d[^\\s]*)$`);
-  return managedRuntimeVersion(argument, product.packageName) ?? spec.exec(argument)?.[1] ?? null;
+  const spec = new RegExp(`^(?:${names})@(\\d[^\\s]*)$`, platform === 'win32' ? 'i' : '');
+  return managedRuntimeVersion(argument, product.packageName, platform) ?? spec.exec(argument)?.[1] ?? null;
 }
 
 /**
@@ -387,20 +390,29 @@ export function pinnedVersion(
  * by, compared as whole runs of segments — `@agentcomms/gmail-evil/dist/cli.mjs`, `@agentcomms/gmail/dist/
  * index.mjs` and `packages/gmail/src/nested/cli.ts` are all near misses, and each was once accepted by a looser
  * match somewhere in this repository.
+ *
+ * Only the entry's own words are read: the suite's path options and their values are taken out first, because a pinned
+ * folder that ends in `packages/slack/src/cli.ts` is a folder, not Slack (`withoutPathOptions`). On Windows
+ * (`platform`), whose file names are not case-sensitive, the command's name and every path segment are compared
+ * without case, as Windows itself finds them; everywhere else exactly. Left out, it compares exactly.
  */
 export function isProductServer(
   server: Pick<RegisteredServer, 'command' | 'args' | 'packageName'>,
   product: Pick<McpProduct, 'packageName' | 'npxPackage' | 'entryFiles' | 'binary' | 'bins'>,
+  platform?: NodeJS.Platform,
 ): boolean {
+  const fold = platform === 'win32' ? (text: string) => text.toLowerCase() : (text: string) => text;
   /*
    * The product's own command, by name or at the end of a path — `agent-slack`, `/usr/local/bin/agent-slack`,
    * `node_modules/.bin/agent-slack`, `agent-slack.cmd` on Windows. Missing it made a hand-written entry that
    * starts our own server "another Slack server with no approval step", with a fix that removed it.
    */
-  const launched = (server.command.split(/[\\/]+/).at(-1) ?? '').replace(/\.(?:cmd|exe|bat|ps1)$/i, '');
-  if (launched && [product.binary, ...(product.bins ?? [])].includes(launched)) return true;
-  if (server.packageName)
-    return server.packageName === product.packageName || server.packageName === product.npxPackage;
+  const launched = fold((server.command.split(/[\\/]+/).at(-1) ?? '').replace(/\.(?:cmd|exe|bat|ps1)$/i, ''));
+  if (launched && [product.binary, ...(product.bins ?? [])].map(fold).includes(launched)) return true;
+  if (server.packageName) {
+    const named = fold(server.packageName);
+    return named === fold(product.packageName) || named === fold(product.npxPackage);
+  }
   const short = unscoped(product.packageName);
   const entries: readonly (readonly string[])[] = [
     ['packages', short, 'src', 'cli.ts'],
@@ -408,12 +420,15 @@ export function isProductServer(
     ['node_modules', ...product.packageName.split('/'), 'dist', 'cli.mjs'],
     ...(product.entryFiles ?? []),
   ];
-  return [server.command, ...server.args].some((part) => {
-    const segments = part.split(/[\\/]+/).filter(Boolean);
+  return [server.command, ...withoutPathOptions(server.args).words].some((part) => {
+    const segments = part
+      .split(/[\\/]+/)
+      .filter(Boolean)
+      .map(fold);
     return entries.some(
       (entry) =>
         segments.length >= entry.length &&
-        entry.every((wanted, index) => segments[segments.length - entry.length + index] === wanted),
+        entry.every((wanted, index) => segments[segments.length - entry.length + index] === fold(wanted)),
     );
   });
 }

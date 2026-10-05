@@ -67,6 +67,68 @@ test('channel registrations retain and classify the four suite path pins', async
   });
 });
 
+test("a folder pinned under another package's name never makes the scanner read a registration as that package (000b)", async () => {
+  /*
+   * The scanner reads the package an entry starts from its words, and the recogniser matches entry paths at the end of
+   * any of them. A pinned folder is neither: `/x/@agentcomms/slack`, or a secrets folder ending in Slack's own source
+   * path, made a Gmail entry read as Slack's. Both now look only at what the path options leave, in both forms.
+   */
+  const home = tempDir();
+  const env = { HOME: home, USERPROFILE: home, AGENT_COMMS_CONFIG_DIR: join(home, 'config'), PATH: '' };
+  const core = openCore({ env });
+  const entry = managedRuntimeEntry(core.paths.dataDir, '@agentcomms/gmail', VERSION);
+  const decoy = join(home, 'pins', '@agentcomms', 'slack');
+  const windowsDecoy = 'C:\\pins\\packages\\slack\\src\\cli.ts';
+  write(
+    fileOf(env, 'cursor'),
+    JSON.stringify({
+      mcpServers: {
+        spaced: {
+          command: process.execPath,
+          args: [
+            entry,
+            '--config-dir',
+            decoy,
+            '--state-dir',
+            decoy,
+            '--data-dir',
+            decoy,
+            '--secrets-dir',
+            windowsDecoy,
+            'mcp',
+          ],
+        },
+        joined: {
+          command: process.execPath,
+          args: [
+            entry,
+            `--config-dir=${decoy}`,
+            `--state-dir=${decoy}`,
+            `--data-dir=${decoy}`,
+            `--secrets-dir=${windowsDecoy}`,
+            'mcp',
+          ],
+        },
+      },
+    }),
+  );
+  const { servers } = await scanRegisteredServers(env);
+  assert.deepEqual(
+    servers.map((server) => [server.name, server.packageName]),
+    [
+      ['spaced', undefined],
+      ['joined', undefined],
+    ],
+  );
+  const { channels } = await channelsAvailable(core, env);
+  const names = (channel: string) =>
+    (channels.find((each) => each.channel === channel)?.registered ?? [])
+      .map((registration) => registration.name)
+      .sort();
+  assert.deepEqual(names('gmail'), ['joined', 'spaced']);
+  assert.deepEqual(names('slack'), []);
+});
+
 test('VS Code and Gemini entries written with comments and trailing commas are read, as those clients read them', async () => {
   const home = tempDir();
   const env = { HOME: home };

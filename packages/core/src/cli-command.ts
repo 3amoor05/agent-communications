@@ -4,8 +4,19 @@ import { fileURLToPath } from 'node:url';
 import type { ChannelEntry } from './channel-manifest.ts';
 import { CHANNEL_SNAPSHOT } from './channels.generated.ts';
 import { normalizePathOptionWords, shellCommand } from './cli-runtime.ts';
-import { isWithin, nearestPackage, readPackageManifest, suiteCommandOf } from './package-roots.ts';
-import type { PathName, PathOverrides, ResolvedPaths } from './paths.ts';
+import type { RegisteredServer } from './mcp-clients.ts';
+import { isWithin, nearestPackage, readPackageManifest, realpathOfExisting, suiteCommandOf } from './package-roots.ts';
+import { type PathName, type PathOverrides, type ResolvedPaths, withoutPathOptions } from './paths.ts';
+import {
+  isNpxRegistration,
+  launcherOf,
+  type RegistrationFacts,
+  type RegistrationLauncher,
+  registrationFactsOf,
+  registrationFiles,
+  registrationVersion,
+  startsProduct,
+} from './registrations.ts';
 import { VERSION } from './version.ts';
 import { satisfiesRange } from './versions.ts';
 
@@ -18,10 +29,13 @@ import { satisfiesRange } from './versions.ts';
  * be checked, there is no command at all, only a sentence saying what is missing. The caller says which package it is
  * and what to run; it never supplies the program or quotes the line.
  *
- * Two directions are located here. A product's own CLI is found from the product itself, walking from one of its own
- * modules to its manifest: no registration is ever asked. A channel's handoff to core is found the way the channel
- * itself finds core, through its installed dependency, and only the same release. Another product's command, found
- * through what is registered with the person's MCP clients, is not located yet (CUE-403 task 7): it gets no command.
+ * Three directions. A product's own CLI is found from the product itself, walking from one of its own modules to its
+ * manifest: no registration is ever asked. A channel's handoff to core is found the way the channel itself finds core,
+ * through its installed dependency, and only the same release. Another product's command is found among the servers
+ * registered with the person's MCP clients, which the caller scanned and passes in: only a file-backed registration of
+ * exactly the printing package's version, checked on disk. Nothing a registration names is run, or asked anything —
+ * not even its interpreter for a version: no installer wrote down where a scanned entry came from, so none is trusted
+ * to run (D1). This module never scans, spawns or probes.
  *
  * What is checked is checked when the command is printed, not for ever (D6): the file it names is real, readable and
  * inside its package then, and a later change to that installation is a later fact.
@@ -80,8 +94,17 @@ export interface CliCommandRequest {
   readonly uses: readonly PathName[];
   /** The printing process's resolved directories. */
   readonly paths: Readonly<ResolvedPaths>;
-  /** The shell the line is quoted for. */
+  /**
+   * The shell the line is quoted for, and the system the registrations were made on: on Windows their names and paths
+   * are read without case.
+   */
   readonly platform?: NodeJS.Platform | undefined;
+  /**
+   * For another product's command: the servers registered with this machine's MCP clients — the `servers` of a
+   * `scanRegisteredServers` the caller has already awaited. Left out, that direction has no command; the other two
+   * never read it.
+   */
+  readonly registrations?: readonly RegisteredServer[] | undefined;
 }
 
 /** The Node a command is located for: this process's, unless a test says otherwise. Its program is always this one's. */
@@ -92,7 +115,7 @@ export interface NodeRuntime {
   readonly execArgv: readonly string[];
 }
 
-export type CliDirection = 'own' | 'channel-to-core';
+export type CliDirection = 'own' | 'channel-to-core' | 'cross-product';
 
 /** What a located command was decided from, so that a test, and a person reading a report, can see why. */
 export interface CliCommandBasis {
@@ -108,10 +131,19 @@ export interface CliCommandBasis {
   /** The real repository checkout each root is a workspace package of, or null; channel to core only. */
   readonly callerWorkspace: string | null;
   readonly targetWorkspace: string | null;
-  /** Both are workspace packages of one checkout — always so for `own`, where they are one package. */
+  /** Both are workspace packages of one checkout: always so for `own`, where they are one package; never for another. */
   readonly sameCheckout: boolean;
   /** `src/cli.ts`, or the manifest's bin. */
   readonly entryKind: 'source' | 'bin';
+  /** For another product: the registration it was found by. Never its command or arguments, which can hold a token. */
+  readonly registration?: RegistrationUsed | undefined;
+}
+
+export interface RegistrationUsed {
+  readonly client: string;
+  readonly path: string;
+  readonly name: string;
+  readonly launcher: RegistrationLauncher;
 }
 
 /** Why there is no command: the step that found nothing it could check. */
@@ -125,7 +157,27 @@ export type CliNotLocatedReason =
   | 'entry'
   | 'interpreter'
   | 'arguments'
-  | 'direction';
+  | 'direction'
+  | 'no-registrations'
+  | 'not-registered';
+
+/** Why one registration of the product was not used. */
+export type RegistrationRejection =
+  | 'npx'
+  | 'arguments'
+  | 'no-file'
+  | 'no-package'
+  | 'version'
+  | 'engine'
+  | 'bin'
+  | 'entry';
+
+export interface RegistrationNotUsed {
+  readonly client: string;
+  readonly path: string;
+  readonly name: string;
+  readonly why: RegistrationRejection;
+}
 
 export interface CliCommandLocated {
   readonly ok: true;
@@ -144,6 +196,8 @@ export interface CliCommandNotLocated {
   readonly version: string;
   /** For `engine`: the Node range the target declares. */
   readonly nodeRange?: string | undefined;
+  /** For another product: each registration of it that was looked at, and why it was not used. */
+  readonly registrations?: readonly RegistrationNotUsed[] | undefined;
   /** What was found, in a clause. */
   readonly detail: string;
   /** The whole sentence to show. */
@@ -155,10 +209,23 @@ export type CliCommandResult = CliCommandLocated | CliCommandNotLocated;
 const STRIP_TYPES = '--experimental-strip-types';
 const TRANSFORM_TYPES = '--experimental-transform-types';
 
-/** The suite's channel packages, which reach core through their own dependency on it. */
+/** The suite's packages, by name, and its channel packages, which reach core through their own dependency on it. */
+const SUITE_PACKAGES: ReadonlySet<string> = new Set(CHANNEL_SNAPSHOT.map(({ packageName }) => packageName));
 const CHANNEL_PACKAGES: ReadonlySet<string> = new Set(
   CHANNEL_SNAPSHOT.filter(({ manifest }) => manifest.channel !== 'core').map(({ packageName }) => packageName),
 );
+
+/** What was found to run: a package's real root, its manifest, and whether its source CLI is the entry. */
+interface Found {
+  readonly root: string;
+  readonly manifest: Record<string, unknown>;
+  readonly source: boolean;
+}
+
+/** What a found package came to: a command, or the step that stopped it. */
+type Built =
+  | { ok: true; command: PrintedCommand; entryKind: 'source' | 'bin' }
+  | { ok: false; reason: 'engine' | 'bin' | 'entry'; detail: string; nodeRange?: string };
 
 /**
  * Locates the command that runs `request.target`'s CLI with `request.words`, or says why there is none.
@@ -170,7 +237,8 @@ const CHANNEL_PACKAGES: ReadonlySet<string> = new Set(
  * CLI needs. The suite directories the command uses go between the entry and its words, one canonical option each,
  * before any `--`.
  *
- * Synchronous, so a hint or a renderer can call it where it builds its sentence.
+ * Synchronous, so a hint or a renderer can call it where it builds its sentence; for another product the caller scans
+ * the registrations first and passes them in (`request.registrations`).
  */
 export function locateCliCommand(
   request: CliCommandRequest,
@@ -181,10 +249,14 @@ export function locateCliCommand(
   if (first !== undefined && (isAbsolute(first) || suiteCommandOf(first) !== null)) {
     throw new TypeError(`the words to run start after the program: ${JSON.stringify(first)} is one`);
   }
+  const platform = request.platform ?? process.platform;
   // The exact version needed is the printing package's: the suite is released together.
   let version = VERSION;
-  const fail = (reason: CliNotLocatedReason, detail: string, nodeRange?: string) =>
-    notLocated(target, version, reason, detail, runtime.version, nodeRange);
+  const fail = (
+    reason: CliNotLocatedReason,
+    detail: string,
+    extra: { nodeRange?: string | undefined; registrations?: readonly RegistrationNotUsed[] } = {},
+  ) => notLocated(target, version, reason, detail, runtime.version, extra);
 
   let callerFile: string;
   try {
@@ -195,97 +267,21 @@ export function locateCliCommand(
   const callerSource = callerFile.endsWith('.ts');
   // The package a module belongs to is the nearest manifest, and it has to be the one the caller says it is: a module
   // of a wrapper, or of a bundle that copied this code, would otherwise locate itself as the product.
-  const found = nearestPackage(dirname(callerFile));
-  const callerManifest = found?.manifest ?? null;
-  if (found === null || callerManifest === null || callerManifest.name !== caller.packageName) {
+  const nearest = nearestPackage(dirname(callerFile));
+  const callerManifest = nearest?.manifest ?? null;
+  if (nearest === null || callerManifest === null || callerManifest.name !== caller.packageName) {
     const name = typeof callerManifest?.name === 'string' ? callerManifest.name : 'no named package';
     return fail('manifest', `the package ${callerFile} belongs to is ${name}, not ${caller.packageName}`);
   }
-  if (typeof callerManifest.version === 'string') version = callerManifest.version;
+  const callerVersion = typeof callerManifest.version === 'string' ? callerManifest.version : null;
+  if (callerVersion !== null) version = callerVersion;
   let callerRoot: string;
   try {
-    callerRoot = realpathSync(found.root);
+    callerRoot = realpathSync(nearest.root);
   } catch {
-    return fail('caller', `${found.root} cannot be resolved`);
+    return fail('caller', `${nearest.root} cannot be resolved`);
   }
-
-  let direction: CliDirection;
-  let targetRoot: string;
-  let targetManifest: Record<string, unknown>;
-  let callerWorkspace: string | null = null;
-  let targetWorkspace: string | null = null;
-  let sameCheckout = true;
-  if (caller.packageName === target.packageName) {
-    direction = 'own';
-    targetRoot = callerRoot;
-    targetManifest = callerManifest;
-  } else if (target.manifest.channel === 'core' && CHANNEL_PACKAGES.has(caller.packageName)) {
-    direction = 'channel-to-core';
-    // Core as the channel itself finds it: its installed dependency, not core's exported module or a sibling folder.
-    const installed = installedPackage(dirname(callerFile), target.packageName);
-    if (installed === null) {
-      return fail('core', `${caller.packageName} has no ${target.packageName} installed where it can find one`);
-    }
-    targetRoot = installed;
-    const manifest = readPackageManifest(targetRoot);
-    if (manifest === null || manifest.name !== target.packageName) {
-      return fail('manifest', `the package found as ${target.packageName}, at ${targetRoot}, is not that package`);
-    }
-    if (manifest.version !== version) {
-      const theirs = typeof manifest.version === 'string' ? manifest.version : 'of no version';
-      return fail(
-        'version',
-        `${caller.packageName} ${version} finds ${target.packageName} ${theirs}, at ${targetRoot}`,
-      );
-    }
-    targetManifest = manifest;
-    // Core's source runs only beside a channel's source, as one checkout: never because a path happens to end in `.ts`.
-    callerWorkspace = workspaceOf(callerRoot);
-    targetWorkspace = workspaceOf(targetRoot);
-    sameCheckout = callerWorkspace !== null && callerWorkspace === targetWorkspace;
-  } else {
-    return fail('direction', `finding it from ${caller.packageName} is not supported in this release yet`);
-  }
-
-  const engines = targetManifest.engines;
-  const range = typeof engines === 'object' && engines !== null ? (engines as Record<string, unknown>).node : undefined;
-  if (typeof range !== 'string') {
-    return fail('engine', `${target.packageName} at ${targetRoot} declares no Node range this can check`);
-  }
-  if (satisfiesRange(runtime.version, range) !== true) {
-    return fail('engine', `it needs Node ${range}, and this is Node ${runtime.version}`, range);
-  }
-
-  const source = callerSource && sameCheckout;
-  let entry: string;
-  if (source) {
-    // Exactly the source CLI, and never a build beside it: a checkout with no build, or a stale one, runs its source.
-    entry = join(targetRoot, 'src', 'cli.ts');
-  } else {
-    const declared = targetManifest.agentcomms;
-    const binary =
-      typeof declared === 'object' && declared !== null ? (declared as Record<string, unknown>).binary : undefined;
-    const bin = targetManifest.bin;
-    const path =
-      binary === target.manifest.binary &&
-      typeof bin === 'object' &&
-      bin !== null &&
-      Object.hasOwn(bin, target.manifest.binary)
-        ? (bin as Record<string, unknown>)[target.manifest.binary]
-        : undefined;
-    if (typeof path !== 'string' || path.length === 0) {
-      return fail('bin', `the bin of ${target.packageName} at ${targetRoot} does not name the command it declares`);
-    }
-    entry = resolve(targetRoot, path);
-  }
-  const checked = checkedEntry(targetRoot, entry);
-  if (checked.ok === false) return fail('entry', checked.why);
-
   if (!isAbsolute(process.execPath)) return fail('interpreter', `this Node, ${process.execPath}, is not a full path`);
-  const typescript = /\.[cm]?ts$/.test(checked.path);
-  const flags = typescript
-    ? [STRIP_TYPES, ...(callerSource && runtime.execArgv.includes(TRANSFORM_TYPES) ? [TRANSFORM_TYPES] : [])]
-    : [];
 
   const pins: PathOverrides = {};
   for (const key of request.uses) pins[key] = request.paths[key];
@@ -295,31 +291,310 @@ export function locateCliCommand(
   } catch (error) {
     return fail('arguments', error instanceof Error ? error.message : String(error));
   }
+  const build = (found: Found) => buildCommand(target, found, words, runtime, callerSource, platform);
+  // What every located command was decided from; each direction adds its own.
+  const located = (
+    built: Built & { ok: true },
+    found: Found,
+    direction: Pick<CliCommandBasis, 'direction' | 'sameCheckout'> &
+      Partial<Pick<CliCommandBasis, 'callerWorkspace' | 'targetWorkspace' | 'registration'>>,
+  ): CliCommandLocated =>
+    Object.freeze({
+      ok: true as const,
+      command: built.command,
+      basis: Object.freeze({
+        callerSource,
+        callerRoot,
+        callerVersion,
+        targetRoot: found.root,
+        targetVersion: typeof found.manifest.version === 'string' ? found.manifest.version : null,
+        callerWorkspace: null,
+        targetWorkspace: null,
+        entryKind: built.entryKind,
+        ...direction,
+      }),
+    });
 
-  const platform = request.platform ?? process.platform;
+  if (caller.packageName === target.packageName) {
+    const found = { root: callerRoot, manifest: callerManifest, source: callerSource };
+    const built = build(found);
+    if (!built.ok) return fail(built.reason, built.detail, { nodeRange: built.nodeRange });
+    return located(built, found, { direction: 'own', sameCheckout: true });
+  }
+
+  if (target.manifest.channel === 'core' && CHANNEL_PACKAGES.has(caller.packageName)) {
+    // Core as the channel itself finds it: its installed dependency, not core's exported module or a sibling folder.
+    const installed = installedPackage(dirname(callerFile), target.packageName);
+    if (installed === null) {
+      return fail('core', `${caller.packageName} has no ${target.packageName} installed where it can find one`);
+    }
+    const manifest = readPackageManifest(installed);
+    if (manifest === null || manifest.name !== target.packageName) {
+      return fail('manifest', `the package found as ${target.packageName}, at ${installed}, is not that package`);
+    }
+    if (manifest.version !== version) {
+      const theirs = typeof manifest.version === 'string' ? manifest.version : 'of no version';
+      return fail('version', `${caller.packageName} ${version} finds ${target.packageName} ${theirs}, at ${installed}`);
+    }
+    // Core's source runs only beside a channel's source, as one checkout: never because a path happens to end in `.ts`.
+    const callerWorkspace = workspaceOf(callerRoot);
+    const targetWorkspace = workspaceOf(installed);
+    const sameCheckout = callerWorkspace !== null && callerWorkspace === targetWorkspace;
+    const found = { root: installed, manifest, source: callerSource && sameCheckout };
+    const built = build(found);
+    if (!built.ok) return fail(built.reason, built.detail, { nodeRange: built.nodeRange });
+    return located(built, found, { direction: 'channel-to-core', callerWorkspace, targetWorkspace, sameCheckout });
+  }
+
+  if (!SUITE_PACKAGES.has(caller.packageName)) {
+    return fail('direction', `${caller.packageName} is not a package of this suite`);
+  }
+  if (request.registrations === undefined) {
+    return fail('no-registrations', "nothing registered was given to look through for another product's command");
+  }
+
+  // Another product: every registration of it, each checked as a file on disk; the best of those that pass.
+  const facts = registrationFactsOf(target);
+  const notUsed: RegistrationNotUsed[] = [];
+  const usable: {
+    server: RegisteredServer;
+    launcher: RegistrationLauncher;
+    built: Built & { ok: true };
+    found: Found;
+  }[] = [];
+  let engineRange: string | undefined;
+  for (const server of request.registrations) {
+    if (!startsProduct(server, facts, platform)) continue;
+    const reject = (why: RegistrationRejection) =>
+      notUsed.push(Object.freeze({ client: server.client, path: server.path, name: server.name, why }));
+    // npx picks its own Node from the person's PATH, and its cache may be gone: neither can be checked now (D1).
+    if (isNpxRegistration(server, facts, platform)) {
+      reject('npx');
+      continue;
+    }
+    if (withoutPathOptions(server.args).dangling) {
+      reject('arguments');
+      continue;
+    }
+    const launcher = launcherOf(server, facts, platform);
+    const files = registrationFiles(server, facts, platform);
+    const absolute = [...files.scripts, ...(files.command === null ? [] : [files.command])].some((file) =>
+      isAbsolute(file),
+    );
+    if (!absolute) {
+      reject('no-file');
+      continue;
+    }
+    const found = registeredPackage(files, target, facts);
+    if (found === null) {
+      reject('no-package');
+      continue;
+    }
+    const managedAt = launcher === 'managed' ? registrationVersion(server, facts, platform) : version;
+    if (found.manifest.version !== version || managedAt !== version) {
+      reject('version');
+      continue;
+    }
+    const built = build(found);
+    if (!built.ok) {
+      reject(built.reason);
+      if (built.reason === 'engine') engineRange ??= built.nodeRange;
+      continue;
+    }
+    usable.push({ server, launcher, built, found });
+  }
+  // A managed runtime first, then any other checked file; within each, by client, config file, name, command, words.
+  const rank = ({ server, launcher }: (typeof usable)[number]) => [
+    launcher === 'managed' ? '0' : '1',
+    server.client,
+    server.path,
+    server.name,
+    server.command,
+    ...server.args,
+  ];
+  const [best] = usable.sort((a, b) => compareWords(rank(a), rank(b)));
+  if (best === undefined) {
+    if (engineRange !== undefined) {
+      return fail('engine', `it needs Node ${engineRange}, and this is Node ${runtime.version}`, {
+        nodeRange: engineRange,
+        registrations: notUsed,
+      });
+    }
+    return fail('not-registered', notRegistered(notUsed, version), { registrations: notUsed });
+  }
+  const { client, path, name } = best.server;
+  return located(best.built, best.found, {
+    direction: 'cross-product',
+    sameCheckout: false,
+    registration: Object.freeze({ client, path, name, launcher: best.launcher }),
+  });
+}
+
+/**
+ * Checks what was found and makes its command: the target's Node range against this Node, then the entry — the source
+ * CLI or the manifest's bin for the command it declares — as a readable file inside its package.
+ */
+function buildCommand(
+  target: ChannelEntry,
+  found: Found,
+  words: readonly string[],
+  runtime: NodeRuntime,
+  callerSource: boolean,
+  platform: NodeJS.Platform,
+): Built {
+  const engines = found.manifest.engines;
+  const range = typeof engines === 'object' && engines !== null ? (engines as Record<string, unknown>).node : undefined;
+  if (typeof range !== 'string') {
+    return {
+      ok: false,
+      reason: 'engine',
+      detail: `${target.packageName} at ${found.root} declares no Node range this can check`,
+    };
+  }
+  if (satisfiesRange(runtime.version, range) !== true) {
+    return {
+      ok: false,
+      reason: 'engine',
+      detail: `it needs Node ${range}, and this is Node ${runtime.version}`,
+      nodeRange: range,
+    };
+  }
+  let entry: string;
+  if (found.source) {
+    // Exactly the source CLI, and never a build beside it: a checkout with no build, or a stale one, runs its source.
+    entry = join(found.root, 'src', 'cli.ts');
+  } else {
+    const declared = found.manifest.agentcomms;
+    const binary =
+      typeof declared === 'object' && declared !== null ? (declared as Record<string, unknown>).binary : undefined;
+    const bin = found.manifest.bin;
+    const path =
+      binary === target.manifest.binary &&
+      typeof bin === 'object' &&
+      bin !== null &&
+      Object.hasOwn(bin, target.manifest.binary)
+        ? (bin as Record<string, unknown>)[target.manifest.binary]
+        : undefined;
+    if (typeof path !== 'string' || path.length === 0) {
+      return {
+        ok: false,
+        reason: 'bin',
+        detail: `the bin of ${target.packageName} at ${found.root} does not name the command it declares`,
+      };
+    }
+    entry = resolve(found.root, path);
+  }
+  const checked = checkedEntry(found.root, entry);
+  if (checked.ok === false) return { ok: false, reason: 'entry', detail: checked.why };
+  const typescript = /\.[cm]?ts$/.test(checked.path);
+  const flags = typescript
+    ? [STRIP_TYPES, ...(callerSource && runtime.execArgv.includes(TRANSFORM_TYPES) ? [TRANSFORM_TYPES] : [])]
+    : [];
   const command = new PrintedCommand(
     GATE,
     [process.execPath, ...flags, checked.path, ...words],
     platform,
     checked.path,
   );
-  const targetVersion = typeof targetManifest.version === 'string' ? targetManifest.version : null;
-  return Object.freeze({
-    ok: true as const,
-    command,
-    basis: Object.freeze({
-      direction,
-      callerSource,
-      callerRoot,
-      callerVersion: typeof callerManifest.version === 'string' ? callerManifest.version : null,
-      targetRoot,
-      targetVersion,
-      callerWorkspace,
-      targetWorkspace,
-      sameCheckout,
-      entryKind: source ? ('source' as const) : ('bin' as const),
-    }),
-  });
+  return { ok: true, command, entryKind: found.source ? 'source' : 'bin' };
+}
+
+/**
+ * The target's package a registration's files lead to, or null: a script it starts, real or as written when it is
+ * gone, inside the package (or inside the product's own server wrapper, which depends on it); or, for the product's
+ * own command, the package that command links into or that npm installed beside it.
+ */
+function registeredPackage(
+  files: { scripts: readonly string[]; command: string | null },
+  target: ChannelEntry,
+  facts: RegistrationFacts,
+): Found | null {
+  for (const script of files.scripts) {
+    if (!isAbsolute(script)) continue;
+    const found = packageAround(script, target, facts);
+    if (found !== null) {
+      const source = join(found.root, 'src', 'cli.ts');
+      const real = realpathOfExisting(script);
+      return { ...found, source: real !== null && sameFile(real, source) };
+    }
+  }
+  const { command } = files;
+  if (command === null || !isAbsolute(command)) return null;
+  const linked = packageAround(command, target, facts);
+  if (linked !== null) return { ...linked, source: false };
+  // npm's own layouts for a global command: beside it on Windows, in `../lib` of its prefix elsewhere.
+  const dir = dirname(command);
+  for (const candidate of [join(dir, 'node_modules'), join(dir, '..', 'lib', 'node_modules')]) {
+    let root: string;
+    try {
+      root = realpathSync(join(candidate, ...target.packageName.split('/')));
+    } catch {
+      continue;
+    }
+    const manifest = readPackageManifest(root);
+    if (manifest?.name === target.packageName) return { root, manifest, source: false };
+  }
+  return null;
+}
+
+/** The target's package that `file` is in — directly, or through the product's server wrapper, which depends on it. */
+function packageAround(
+  file: string,
+  target: ChannelEntry,
+  facts: RegistrationFacts,
+): { root: string; manifest: Record<string, unknown> } | null {
+  const real = realpathOfExisting(file);
+  if (real === null) return null;
+  const nearest = nearestPackage(dirname(real));
+  if (nearest === null || nearest.manifest === null) return null;
+  let root: string;
+  try {
+    root = realpathSync(nearest.root);
+  } catch {
+    return null;
+  }
+  if (nearest.manifest.name === target.packageName) return { root, manifest: nearest.manifest };
+  if (facts.npxPackage === target.packageName || nearest.manifest.name !== facts.npxPackage) return null;
+  const installed = installedPackage(root, target.packageName);
+  const manifest = installed === null ? null : readPackageManifest(installed);
+  return installed !== null && manifest?.name === target.packageName ? { root: installed, manifest } : null;
+}
+
+function sameFile(a: string, b: string): boolean {
+  try {
+    return realpathSync(a) === realpathSync(b);
+  } catch {
+    return false;
+  }
+}
+
+/** Two lists of words in order: the first that differs decides, and a list that runs out first comes first. */
+function compareWords(a: readonly string[], b: readonly string[]): number {
+  for (let index = 0; index < Math.min(a.length, b.length); index += 1) {
+    const [x, y] = [a[index] as string, b[index] as string];
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  return a.length - b.length;
+}
+
+/** Why no registration of another product could be used, in a clause: how many were looked at, and what each was. */
+function notRegistered(notUsed: readonly RegistrationNotUsed[], version: string): string {
+  if (notUsed.length === 0) return 'no MCP client on this machine has it registered';
+  const said: Record<RegistrationRejection, string> = {
+    npx: 'run by npx, which is never used for this',
+    arguments: 'with a path option that has no value',
+    'no-file': 'not started from a file named by its full path',
+    'no-package': 'whose package cannot be found or read',
+    version: 'of another or an unknown version',
+    engine: 'whose Node range this Node is outside, or which declares none',
+    bin: 'whose package does not name its command',
+    entry: 'whose command file is missing, unreadable or outside its package',
+  };
+  const counts = new Map<RegistrationRejection, number>();
+  for (const { why } of notUsed) counts.set(why, (counts.get(why) ?? 0) + 1);
+  const parts = [...counts].map(([why, count]) => `${count} ${said[why]}`);
+  const registered = notUsed.length === 1 ? 'the 1 registration' : `the ${notUsed.length} registrations`;
+  return `none of ${registered} of it is ${version} in a file this can check (${parts.join('; ')})`;
 }
 
 function notLocated(
@@ -328,9 +603,10 @@ function notLocated(
   reason: CliNotLocatedReason,
   detail: string,
   nodeVersion: string,
-  nodeRange: string | undefined,
+  extra: { nodeRange?: string | undefined; registrations?: readonly RegistrationNotUsed[] },
 ): CliCommandNotLocated {
   const named = `${target.manifest.label} ${version} (${target.packageName})`;
+  const { nodeRange, registrations } = extra;
   const message =
     nodeRange === undefined
       ? `${named} is not locatable here: ${detail}. Install or update it through your usual route, then try again.`
@@ -342,6 +618,7 @@ function notLocated(
     package: target.packageName,
     version,
     ...(nodeRange === undefined ? {} : { nodeRange }),
+    ...(registrations === undefined ? {} : { registrations: Object.freeze([...registrations]) }),
     detail,
     message,
   });

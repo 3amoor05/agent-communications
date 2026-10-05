@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 // A relative import, never the package's own name: core importing `@agentcomms/core` only resolved through
 // Node's self-reference to the *built* package, so running core from source loaded its own stale dist.
-import { homeDirectory } from './paths.ts';
+import { homeDirectory, withoutPathOptions } from './paths.ts';
 import { parseToml, TomlError } from './toml.ts';
 
 /**
@@ -451,7 +451,16 @@ export async function listRegisteredServers(
 }
 
 function packageFrom(server: RegisteredServer): string | undefined {
-  const line = [server.command, ...server.args].join(' ');
+  return commandLinePackage(server.command, server.args);
+}
+
+/**
+ * The npm package an entry's command line launches, when one can be read from it: `@scope/name`, or a bare `…-mcp`.
+ * Read from the words left once the suite's path options are taken out (`withoutPathOptions`): a pinned folder such as
+ * `/tmp/@agentcomms/slack` is not a package, and read as one it made a Gmail entry Slack's.
+ */
+export function commandLinePackage(command: string, args: readonly string[]): string | undefined {
+  const line = [command, ...withoutPathOptions(args).words].join(' ');
   const match = /(@[\w.-]+\/[\w.-]+|(?<=\s)[\w.-]+-mcp)(?=@|\s|$)/.exec(line);
   return match?.[1];
 }

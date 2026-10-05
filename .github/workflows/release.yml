@@ -20,8 +20,8 @@ name: Release
 # that is always opened is worse than none — it reports a control nobody is exercising.
 #
 # What remains is real rather than ceremonial: the environment accepts `v*` tags and nothing else, the tag must
-# match the version the repository declares and still name the commit the run started from, six verify legs must pass
-# first, and every published version carries provenance naming the commit and the run. The residual risk is stated in
+# match the version the repository declares and still name the commit the run started from, six verify legs and the
+# Node 22.12.0 leg must pass first, and every published version carries provenance naming the commit and the run. The residual risk is stated in
 # docs/RELEASING.md rather than papered over: anything that can push a tag to this repository can publish.
 
 on:
@@ -66,9 +66,37 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm verify
 
+  # **A located command runs on the oldest Node the packages claim.** A command printed for a TypeScript entry — a
+  # checkout's `src/cli.ts`, registered by the local launcher — carries `--experimental-strip-types`, which Node
+  # 22.12–22.17 needs and 22.18 does not. The matrix above starts at the repository's own tooling floor, 22.18.0, so it
+  # cannot see the flag go missing. This builds there, then runs the one built-package test that runs such a command
+  # under exactly 22.12.0 (case 0000 of docs/superpowers/specs/2026-10-04-cli-path-shims-design.md). Only that test:
+  # the tooling itself needs 22.18. `test/release-packages.test.mjs` holds the job to this shape.
+  old-node:
+    name: located commands on node 22.12.0
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22.18.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22.12.0
+      - run: node --version
+      - run: node --test packages/core/test/cli-command-old-node.test.mjs
+
   publish:
     name: publish to npm
-    needs: verify
+    needs: [verify, old-node]
     if: ${{ inputs.dry-run != true }}
     # Accepts `v*` tags only. It is also one of the claims each package's trusted publisher names, so renaming it
     # fails the OIDC preflight below for every package.

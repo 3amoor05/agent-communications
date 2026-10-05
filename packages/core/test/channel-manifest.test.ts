@@ -618,3 +618,36 @@ test('a channel that reaches no host says so with an empty list, and must still 
     'an empty list is a valid answer',
   );
 });
+
+test("a registration's pinned folders never make it another server for that service (CUE-403)", () => {
+  /*
+   * Every registration the installer writes carries its four suite folders, and a folder may be named anything: a
+   * Gmail entry pinned under `/work/slack-bot` was "another Slack server", and one under a folder named like a rival
+   * package was that rival. The folders are taken out before the service's word or a rival's name is looked for.
+   */
+  const gmail = entry({
+    name: 'gmail',
+    client: 'claude-code',
+    command: '/usr/bin/node',
+    args: [
+      '/data/runtime/0.13.0-gmail/node_modules/@agentcomms/gmail/dist/cli.mjs',
+      '--config-dir',
+      '/work/slack-bot/config',
+      '--state-dir=/work/@shinzolabs/gmail-mcp/state',
+      'mcp',
+    ],
+  });
+  assert.deepEqual(findOtherSlackServers([gmail], CHANNEL_SERVERS.slack), []);
+  assert.deepEqual(findUngatedGmailServers([gmail], 'linux'), []);
+  // The service's word, or a rival's name, in the entry's own words still counts.
+  const helper = entry({ name: 'helper', command: 'node', args: ['/opt/slack-helper.js', '--config-dir', '/x'] });
+  assert.deepEqual(
+    findOtherSlackServers([helper], CHANNEL_SERVERS.slack).map((server) => server.name),
+    ['helper'],
+  );
+  const rival = entry({ name: 'rival', args: ['--config-dir', '/x', '-y', '@shinzolabs/gmail-mcp'] });
+  assert.deepEqual(
+    findUngatedGmailServers([rival], 'linux').map((finding) => finding.name),
+    ['rival'],
+  );
+});

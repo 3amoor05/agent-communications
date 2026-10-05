@@ -4,6 +4,7 @@ import { commandText } from './cli-runtime.ts';
 import { externalCommand } from './command-brands.ts';
 import { displayUrl, type RegisteredServer } from './mcp-clients.ts';
 import { isProductServer, type McpProduct } from './mcp-install.ts';
+import { withoutPathOptions } from './paths.ts';
 
 /**
  * Other MCP servers for the same service, registered on this machine, which send with no approval step.
@@ -105,7 +106,8 @@ export function findRivalPackageServers(
   const patterns = rivalPatterns(packages);
   const findings: LegacyServerFinding[] = [];
   for (const server of servers) {
-    const line = [server.command, ...server.args].join(' ');
+    // The entry's own words: a pinned folder named like a rival package is a folder (`withoutPathOptions`).
+    const line = [server.command, ...withoutPathOptions(server.args).words].join(' ');
     const known = patterns.find((candidate) => candidate.pattern.test(line));
     if (!known) continue;
     findings.push({
@@ -178,7 +180,8 @@ export function findRivalWordServers(
   return servers.filter(
     (server) =>
       !isProductServer(server, product) &&
-      pattern.test([server.name, server.command, ...server.args, server.url ?? ''].join(' ')),
+      // The entry's own words: every registration now pins its folders, and a folder may be called anything.
+      pattern.test([server.name, server.command, ...withoutPathOptions(server.args).words, server.url ?? ''].join(' ')),
   );
 }
 

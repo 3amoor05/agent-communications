@@ -1,7 +1,8 @@
-import { mkdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { CHANNEL_SNAPSHOT } from '../../../src/channels.generated.ts';
+import type { RegisteredServer } from '../../../src/mcp-clients.ts';
 import { tempDir } from '../../helpers/temp.ts';
 
 /*
@@ -94,7 +95,7 @@ export function writeCheckout(
   });
   const packages: Record<string, string> = {};
   for (const channel of channels) {
-    const short = suiteEntry(channel).packageName.split('/')[1] ?? channel;
+    const short = shortName(channel);
     const at = writePackage(join(root, 'packages', short), channel, {
       files: ['src/cli.ts', 'src/mcp/install.ts', 'dist/cli.mjs'],
     });
@@ -102,4 +103,96 @@ export function writeCheckout(
     packages[channel] = at;
   }
   return { root, core, packages };
+}
+
+/** The unscoped name of a channel's package: `gmail`, `core`. */
+export function shortName(channel: string): string {
+  return suiteEntry(channel).packageName.split('/')[1] ?? channel;
+}
+
+/**
+ * A managed runtime as the installer leaves one — `<data>/runtime/<version>-<name>/node_modules/@agentcomms/<name>` —
+ * and the CLI a managed registration starts. `handMade` leaves out the runtime's own manifest: a directory of that
+ * shape somebody made, not the installer.
+ */
+export function writeManaged(
+  dataDir: string,
+  channel: string,
+  options: { version?: string; spec?: PackageSpec; handMade?: boolean } = {},
+): { root: string; entry: string } {
+  const version = options.version ?? VERSION;
+  const short = shortName(channel);
+  const runtime = join(dataDir, 'runtime', `${version}-${short}`);
+  const root = join(runtime, 'node_modules', '@agentcomms', short);
+  writePackage(root, channel, { version, files: ['dist/cli.mjs'], ...options.spec });
+  if (!options.handMade) {
+    writeFileSync(
+      join(runtime, 'package.json'),
+      `${JSON.stringify({ name: `${suiteEntry(channel).manifest.binary}-runtime`, private: true, dependencies: { [suiteEntry(channel).packageName]: version } })}\n`,
+    );
+  }
+  return { root, entry: join(root, 'dist', 'cli.mjs') };
+}
+
+/**
+ * A global npm install under `prefix`: on POSIX the package in `lib/node_modules` and its command in `bin`, a link to
+ * the package's CLI; on Windows (`windows`) the package in `node_modules` and its command a `.cmd` script beside it.
+ */
+export function writeGlobal(
+  prefix: string,
+  channel: string,
+  options: { windows?: boolean; version?: string; spec?: PackageSpec; command?: string } = {},
+): { root: string; command: string } {
+  const short = shortName(channel);
+  const { binary } = suiteEntry(channel).manifest;
+  const root = join(prefix, ...(options.windows ? [] : ['lib']), 'node_modules', '@agentcomms', short);
+  writePackage(root, channel, {
+    files: ['dist/cli.mjs'],
+    ...(options.version ? { version: options.version } : {}),
+    ...options.spec,
+  });
+  if (options.windows) {
+    const command = join(prefix, options.command ?? `${binary}.cmd`);
+    writeFile(
+      command,
+      `@ECHO off\r\n"%~dp0\\node.exe" "%~dp0\\node_modules\\@agentcomms\\${short}\\dist\\cli.mjs" %*\r\n`,
+    );
+    return { root, command };
+  }
+  const command = link(
+    join('..', 'lib', 'node_modules', '@agentcomms', short, 'dist', 'cli.mjs'),
+    join(prefix, 'bin', options.command ?? binary),
+  );
+  return { root, command };
+}
+
+/** A registered server as a client's file holds one: by default a user-scope Claude Code entry. */
+export function registration(
+  over: Partial<RegisteredServer> & Pick<RegisteredServer, 'command' | 'args'>,
+): RegisteredServer {
+  return { client: 'claude-code', path: '/cfg/.claude.json', name: 'server', scope: 'user', ...over };
+}
+
+/** The four registration pins of a set of directories, spaced. */
+export function pinArgs(paths: { configDir: string; stateDir: string; dataDir: string; secretsDir: string }): string[] {
+  return [
+    '--config-dir',
+    paths.configDir,
+    '--state-dir',
+    paths.stateDir,
+    '--data-dir',
+    paths.dataDir,
+    '--secrets-dir',
+    paths.secretsDir,
+  ];
+}
+
+/**
+ * A program at `dir/name` that only leaves a mark when it runs: a registered interpreter that must never be started.
+ */
+export function markingProgram(dir: string, name = 'node'): { path: string; ran: () => boolean } {
+  const marker = join(dir, `${name}.ran`);
+  const path = writeFile(join(dir, name), `#!/bin/sh\necho ran > '${marker}'\n`);
+  chmodSync(path, 0o755);
+  return { path, ran: () => existsSync(marker) };
 }

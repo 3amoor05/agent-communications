@@ -16,6 +16,36 @@ export type PathName = (typeof PATH_OPTIONS)[number]['key'];
 export type PathOptionName = (typeof PATH_OPTIONS)[number]['option'];
 export type PathOverrides = Partial<Record<PathName, string>>;
 
+/**
+ * Words with the five path options and their values taken out where an option parser would read them — before the
+ * first `--`, in both the `--x value` and `--x=value` forms — and every word from `--` on kept as it is.
+ *
+ * What a registered entry is recognised by. A pinned folder is a folder: `/tmp/@agentcomms/slack`, or one ending in
+ * `packages/slack/src/cli.ts`, read as a package or an entry, made a Gmail registration Slack's. `dangling` says a
+ * spaced option had no value before `--` or the end, which is a broken entry rather than one to guess about.
+ */
+export function withoutPathOptions(words: readonly string[]): { words: string[]; dangling: boolean } {
+  const flags: readonly string[] = PATH_OPTIONS.map(({ flag }) => flag);
+  const kept: string[] = [];
+  let dangling = false;
+  for (let index = 0; index < words.length; index += 1) {
+    const word = words[index] as string;
+    if (word === '--') {
+      kept.push(...words.slice(index));
+      break;
+    }
+    if (flags.includes(word)) {
+      const value = words[index + 1];
+      if (value === undefined || value === '--') dangling = true;
+      else index += 1;
+      continue;
+    }
+    if (flags.some((flag) => word.startsWith(`${flag}=`))) continue;
+    kept.push(word);
+  }
+  return { words: kept, dangling };
+}
+
 export interface PathEnvironment {
   env?: NodeJS.ProcessEnv;
   platform?: NodeJS.Platform;
