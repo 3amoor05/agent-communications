@@ -56,7 +56,9 @@ export function openCore(options: OpenCoreOptions = {}): Core {
     pathOverrides,
     config,
     states: new InboxStateStore(paths.stateDir),
-    approvals: new ApprovalStore(paths.stateDir, { now, handoffs }),
+    // The store's one window on the configuration — bound to this `ConfigStore`, whose `load` reads private state and
+    // so must never be passed loose.
+    approvals: new ApprovalStore(paths.stateDir, { now, handoffs, loadConfig: () => config.load() }),
     ledger: new SendLedger(paths.stateDir, now),
     plans: new PlanStore(paths.stateDir, now),
     taint: new TaintStore(paths.stateDir, now),

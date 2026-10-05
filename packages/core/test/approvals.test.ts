@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { deriveLegacyV1State } from '../src/approval-legacy.ts';
+import { asV2, stateOf } from '../src/approval-stored.ts';
 import { validateV2 } from '../src/approval-validate.ts';
 import {
   type ApprovalRecord,
@@ -100,7 +101,7 @@ test('a new record is pending, has no challenge until one is issued, and expires
   assert.equal(record.challengeHash, undefined);
   assert.equal(record.state, 'pending');
   time.advance(10 * 60 * 1000);
-  assert.equal((await store.get(record.approvalId))?.state, 'expired');
+  assert.equal(asV2(await store.get(record.approvalId))?.state, 'expired');
   await assert.rejects(store.claimForSend(record.approvalId, live()), isRefusal(/expired/, 'APPROVAL_EXPIRED'));
 });
 
@@ -146,7 +147,7 @@ test('integrity failures void the record for good; each carries its specific cod
   for (const [name, overrides, message, code] of cases) {
     const { store, record } = await setup();
     await assert.rejects(store.claimForSend(record.approvalId, live(overrides)), isRefusal(message, code), name);
-    assert.equal(((await store.get(record.approvalId)) as ApprovalRecord).state, 'revoked', `${name}: voided`);
+    assert.equal((asV2(await store.get(record.approvalId)) as ApprovalRecord).state, 'revoked', `${name}: voided`);
     await assert.rejects(store.claimForSend(record.approvalId, live()), isRefusal(/voided/, 'APPROVAL_VOID'), name);
   }
 });
@@ -163,7 +164,7 @@ test('confirm: a claim before approval is refused without voiding; after a human
     store.claimForSend(record.approvalId, live({ policy: 'confirm' })),
     isRefusal(/outside the chat/, 'APPROVAL_PENDING'),
   );
-  assert.equal((await store.get(record.approvalId))?.state, 'pending', 'still approvable');
+  assert.equal(asV2(await store.get(record.approvalId))?.state, 'pending', 'still approvable');
   const approved = await humanApproves(store, record.approvalId);
   assert.equal(approved.state, 'approved');
   assert.equal(approved.approvedBindingDigest, approved.bindingDigest, 'the binding the person approved');
@@ -192,7 +193,7 @@ test('a claim waiting for a person says what the product making it tells it to, 
   const neutral = await hint();
   assert.match(neutral, /approve/);
   assert.doesNotMatch(neutral, /gmail|slack/i, 'a default that names a product is wrong for every other one');
-  assert.equal((await store.get(record.approvalId))?.state, 'pending', 'and asking twice changed nothing');
+  assert.equal(asV2(await store.get(record.approvalId))?.state, 'pending', 'and asking twice changed nothing');
 });
 
 test('an escalated chat send needs a human approval; a looser live policy never relaxes it', async () => {
@@ -226,7 +227,7 @@ test('a record that requires "never" is refused, whatever the live policy says',
     expect: EXPECT,
   });
   await assert.rejects(store.claimForSend(record.approvalId, live()), isRefusal(/turned off/, 'POLICY_NEVER'));
-  assert.equal((await store.get(record.approvalId))?.state, 'revoked');
+  assert.equal(asV2(await store.get(record.approvalId))?.state, 'revoked');
 
   // And a human approval does not rescue it either: `never` means never.
   const second = await store.create({
@@ -253,14 +254,14 @@ test('approving content that changed since prepare voids the record (the human w
     store.approve(record.approvalId, 'terminal', { draftMessageId: 'msg-v2', contentDigest: DIGEST_C }, challenge),
     isRefusal(/changed after the preview/, 'APPROVAL_VOID'),
   );
-  assert.equal((await store.get(record.approvalId))?.state, 'revoked');
+  assert.equal(asV2(await store.get(record.approvalId))?.state, 'revoked');
 });
 
 test('challenges: case-insensitive, never exposed, three wrong answers void the record', async () => {
   const { store, record } = await setup('confirm');
   const challenge = await store.issueChallenge(record.approvalId);
   assert.match(challenge, /^[A-Z]{4}$/);
-  const stored = (await store.get(record.approvalId)) as ApprovalRecord;
+  const stored = asV2(await store.get(record.approvalId)) as ApprovalRecord;
   assert.ok(stored.challengeHash && !stored.challengeHash.includes(challenge));
   assert.equal('challengeHash' in publicView(stored), false, 'listings never carry the challenge hash');
   const wrong = challenge === 'AAAA' ? 'BBBB' : 'AAAA';
@@ -268,7 +269,7 @@ test('challenges: case-insensitive, never exposed, three wrong answers void the 
   await assert.rejects(approve(wrong), isRefusal(/did not match/, 'APPROVAL_REQUIRED'));
   await assert.rejects(approve(wrong), isRefusal(/did not match/, 'APPROVAL_REQUIRED'));
   await assert.rejects(approve(wrong), isRefusal(/too many wrong/, 'APPROVAL_VOID'));
-  assert.equal((await store.get(record.approvalId))?.state, 'revoked');
+  assert.equal(asV2(await store.get(record.approvalId))?.state, 'revoked');
   await assert.rejects(approve(challenge), isRefusal(/voided/, 'APPROVAL_VOID'));
 });
 
@@ -284,7 +285,7 @@ test('a send left in "sending" by a dead process reads as unknown and can still 
   const { store, record, time } = await setup();
   await store.claimForSend(record.approvalId, live());
   time.advance(5 * 60 * 1000);
-  assert.equal((await store.get(record.approvalId))?.state, 'unknown');
+  assert.equal(asV2(await store.get(record.approvalId))?.state, 'unknown');
   assert.equal((await store.complete(record.approvalId, { sentMessageId: 's1' })).state, 'used');
 });
 
@@ -292,7 +293,10 @@ test('the O_EXCL claim marker refuses a second claim even if the record file wer
   const { store, record } = await setup();
   await store.claimForSend(record.approvalId, live());
   const path = join(store.directory, `${record.approvalId}.json`);
-  writeFileSync(path, JSON.stringify({ ...JSON.parse(readFileSync(path, 'utf8')), state: 'pending' }));
+  // Reset to exactly what a pending record is — no `sendingAt` left behind, which would read as corrupt — so what
+  // refuses the second claim is the marker alone.
+  const { sendingAt: _claimed, ...reset } = JSON.parse(readFileSync(path, 'utf8'));
+  writeFileSync(path, JSON.stringify({ ...reset, state: 'pending' }));
   await assert.rejects(store.claimForSend(record.approvalId, live()), isRefusal(/already claimed/, 'APPROVAL_VOID'));
 });
 
@@ -300,7 +304,7 @@ test('failed sends are recorded; revoke leaves finished records alone', async ()
   const { store, record } = await setup();
   await store.claimForSend(record.approvalId, live());
   assert.equal((await store.complete(record.approvalId, { error: 'backendError' })).state, 'failed');
-  assert.equal((await store.revoke(record.approvalId, 'user', { disposition: 'person' })).state, 'failed');
+  assert.equal(stateOf(await store.revoke(record.approvalId, 'user', { disposition: 'person' })), 'failed');
 });
 
 test('create ignores caller-supplied ids, states and challenges', async () => {
@@ -316,7 +320,7 @@ test('create ignores caller-supplied ids, states and challenges', async () => {
   assert.equal(created.state, 'pending');
   assert.equal(created.approvedDigest, undefined);
   assert.equal(created.challengeHash, undefined);
-  assert.equal((await store.get(record.approvalId))?.state, 'pending', 'the original is untouched');
+  assert.equal(asV2(await store.get(record.approvalId))?.state, 'pending', 'the original is untouched');
 });
 
 test('list filters by inbox and state; malformed ids are refused before touching the file system', async () => {
@@ -324,7 +328,7 @@ test('list filters by inbox and state; malformed ids are refused before touching
   const second = await store.create({ ...record, sendEpoch: 0, inboxId: OTHER_INBOX });
   await store.revoke(second.approvalId, 'user', { disposition: 'person' });
   assert.deepEqual(
-    (await store.list({ inboxId: INBOX })).map((r) => r.approvalId),
+    (await store.list({ inboxId: INBOX })).map((r) => asV2(r)?.approvalId),
     [record.approvalId],
   );
   assert.equal((await store.list({ states: ['revoked'] })).length, 1);
@@ -368,8 +372,8 @@ test('a change approval is never spent as a send, nor a send approval as a chang
   );
 
   // Neither was voided or consumed by the attempts: each still works for what it is.
-  assert.equal((await store.get(send.approvalId))?.state, 'pending');
-  assert.equal((await store.get(change.approvalId))?.state, 'pending');
+  assert.equal(asV2(await store.get(send.approvalId))?.state, 'pending');
+  assert.equal(asV2(await store.get(change.approvalId))?.state, 'pending');
   assert.equal((await store.claimForSend(send.approvalId, live())).state, 'sending');
   assert.equal((await store.claimForChange(change.approvalId, { change: CHANGE, policy: 'chat' })).state, 'used');
 });
@@ -384,7 +388,8 @@ test('a change approval is claimed once, even if its record file were reset', as
     (e: unknown) => e instanceof CommsError && /nothing was changed: the approval is used/.test(e.message),
   );
   const path = join(store.directory, `${change.approvalId}.json`);
-  writeFileSync(path, JSON.stringify({ ...JSON.parse(readFileSync(path, 'utf8')), state: 'pending' }));
+  const { usedAt: _used, ...reset } = JSON.parse(readFileSync(path, 'utf8'));
+  writeFileSync(path, JSON.stringify({ ...reset, state: 'pending' }));
   await assert.rejects(claim(), isRefusal(/nothing was changed: this approval was already claimed/, 'APPROVAL_VOID'));
 });
 
@@ -477,7 +482,7 @@ test('a send claim cancelled while it waits for the lock writes nothing: the rec
     isCancelled(/^cancelled: nothing was sent$/),
   );
   // Still approved, and with no claim marker: before the change it was `sending`, spent on a call nobody awaited.
-  assert.equal((await store.get(record.approvalId))?.state, 'approved');
+  assert.equal(asV2(await store.get(record.approvalId))?.state, 'approved');
   assert.equal((await claim()).state, 'sending');
 });
 
@@ -491,7 +496,7 @@ test('a change claim cancelled while it waits for the lock writes nothing, and t
     cancelledWhileWaiting(store, change.approvalId, claim),
     isCancelled(/^cancelled: nothing was changed$/),
   );
-  assert.equal((await store.get(change.approvalId))?.state, 'pending');
+  assert.equal(asV2(await store.get(change.approvalId))?.state, 'pending');
   assert.equal((await claim()).state, 'used');
 });
 
@@ -521,7 +526,7 @@ test('a download’s question claimed by a call cancelled while it waits for the
     assert.equal((e as CommsError).details?.choiceId, question.approvalId);
     return true;
   });
-  assert.equal((await store.get(question.approvalId))?.state, 'pending');
+  assert.equal(asV2(await store.get(question.approvalId))?.state, 'pending');
   assert.equal((await claim()).state, 'used');
 });
 
@@ -692,7 +697,7 @@ test('a person’s revoke of a fresh v1 record writes a v1-shaped revoked', asyn
       [V1_DOWNLOAD_ID, bytes.download],
     ] as const) {
       const result = await store.revoke(approvalId, 'revoked by the user', { disposition });
-      assert.equal(result.state, 'revoked', `${disposition} ${approvalId}`);
+      assert.equal(stateOf(result), 'revoked', `${disposition} ${approvalId}`);
       const original = JSON.parse(before) as Record<string, unknown>;
       const after = JSON.parse(readV1Record(dir, approvalId)) as Record<string, unknown>;
       assert.equal(after.digestVersion, 1);
@@ -733,7 +738,7 @@ test('a person’s revoke of an expired v1 record writes nothing', async () => {
     [V1_CHANGE_ID, bytes.change],
   ] as const) {
     const result = await store.revoke(approvalId, 'revoked by the user', { disposition: 'person' });
-    assert.equal(result.state, 'expired', `${approvalId}: returned as it reads, not an error`);
+    assert.equal(stateOf(result), 'expired', `${approvalId}: returned as it reads, not an error`);
     untouched(dir, approvalId, before, approvalId);
   }
 });
@@ -750,7 +755,7 @@ test('revoking a v1 record in any other derived state writes nothing', async () 
     const { dir, store, time, bytes } = legacyStore({ send: stored });
     time.advance(after);
     const result = await store.revoke(V1_SEND_ID, 'revoked by the user', { disposition: 'person' });
-    assert.equal(result.state, derived, `${stored} after ${after} ms`);
+    assert.equal(stateOf(result), derived, `${stored} after ${after} ms`);
     untouched(dir, V1_SEND_ID, bytes.send, `${stored} after ${after} ms`);
   }
 });

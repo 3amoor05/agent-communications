@@ -8,10 +8,19 @@ import {
   pendingMsOf,
   requireKnownChannel,
 } from './approval-binding.ts';
-import { deriveLegacyV1State, LEGACY_DIGEST_VERSION, type LegacyApprovalRecord } from './approval-legacy.ts';
+import { decodeLegacyV1, deriveLegacyV1State, type LegacyApprovalRecord } from './approval-legacy.ts';
+import {
+  corruptStubOf,
+  decodeStored,
+  integrityRefusal,
+  ownerOf,
+  type StoredApproval,
+  stateOf,
+} from './approval-stored.ts';
 import { accountChannels } from './channel-words.ts';
 import {
   type ChangePolicy,
+  type Config,
   canonicalLoosening,
   type Loosening,
   type SendPolicy,
@@ -610,15 +619,31 @@ export function sendApprovesHint(maker: CliHandoffs, approvalId: string): string
   )} — and permits only that send.`;
 }
 
+/** How the store is opened. */
+export interface ApprovalStoreOptions {
+  now?: () => Date;
+  handoffs?: CliHandoffs | undefined;
+  /**
+   * The configuration, read afresh: the one thing a read of the store consults beyond the files themselves — to
+   * attribute a version-1 record whose owner is an account to that account's platform. Read once per `get`, once per
+   * `list`, and once per locked transition after its lock is held, so one call decodes against one snapshot. Its
+   * errors propagate: a configuration that cannot be read is never taken for none. Resolving `null`, or left out, is
+   * "no configuration", and such a record is then unattributable.
+   */
+  loadConfig?: (() => Promise<Config | null>) | undefined;
+}
+
 export class ApprovalStore {
   readonly directory: string;
   readonly #now: () => Date;
   readonly #handoffs: CliHandoffs | undefined;
+  readonly #loadConfig: (() => Promise<Config | null>) | undefined;
 
-  constructor(stateDir: string, options: { now?: () => Date; handoffs?: CliHandoffs | undefined } = {}) {
+  constructor(stateDir: string, options: ApprovalStoreOptions = {}) {
     this.directory = join(stateDir, 'approvals');
     this.#handoffs = options.handoffs;
     this.#now = options.now ?? (() => new Date());
+    this.#loadConfig = options.loadConfig;
   }
 
   #path(approvalId: string, suffix = '.json'): string {
@@ -626,13 +651,21 @@ export class ApprovalStore {
     return join(this.directory, `${approvalId}${suffix}`);
   }
 
-  async #read(approvalId: string): Promise<ApprovalRecord | null> {
+  /** The configuration snapshot one read decodes against, or null without a loader. Its errors propagate. */
+  async #config(): Promise<Config | null> {
+    return this.#loadConfig === undefined ? null : await this.#loadConfig();
+  }
+
+  /** One approval file, decoded into one of its four forms (`decodeStored`), or null when there is none. */
+  async #read(approvalId: string, config: Config | null): Promise<StoredApproval | null> {
+    let text: string;
     try {
-      return JSON.parse(await readFile(this.#path(approvalId), 'utf8')) as ApprovalRecord;
+      text = await readFile(this.#path(approvalId), 'utf8');
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
       throw error;
     }
+    return decodeStored(approvalId, text, config, this.#now());
   }
 
   async #write(record: ApprovalRecord | LegacyApprovalRecord): Promise<void> {
@@ -676,6 +709,11 @@ export class ApprovalStore {
     return { ...record, state: derived.state, ...(derived.reason === undefined ? {} : { reason: derived.reason }) };
   }
 
+  /** A stored record as it reads now: a version-2 record's derived state applied (not written); every other as is. */
+  #derived(stored: StoredApproval): StoredApproval {
+    return stored.form === 'v2' ? { form: 'v2', record: this.#derive(stored.record) } : stored;
+  }
+
   /**
    * A record's binding, recomputed from its own fields, written as the last field set — and `kind`, `channel` and the
    * profile checked first, so nothing is written that names a channel this release does not know.
@@ -686,6 +724,13 @@ export class ApprovalStore {
   }
 
   async create(input: CreateApprovalInput): Promise<ApprovalRecord> {
+    // A provider's digest is lowercase hex SHA-256, the only encoding a version-2 record holds: anything else would be
+    // written as a record that reads back corrupt.
+    if (!/^[0-9a-f]{64}$/.test(input.contentDigest)) {
+      throw new CommsError('UNEXPECTED', 'an approval is bound to a SHA-256 of what it permits, and this is not one', {
+        hint: 'This is a bug — please report it.',
+      });
+    }
     const now = this.#now();
     const requiredPolicy = stricterPolicy(input.policy, input.requiredPolicy);
     // The route is fixed here, and never moves: a person outside the chat when the policy or an escalation says so.
@@ -726,29 +771,33 @@ export class ApprovalStore {
     return record;
   }
 
-  async get(approvalId: string): Promise<ApprovalRecord | null> {
-    const record = await this.#read(approvalId);
-    if (record === null) return null;
-    // A record from an earlier release is read by its own release's rules (Task 3 types this read; until then the
-    // shape is the caller's to check, as it always was).
-    if (record.digestVersion === LEGACY_DIGEST_VERSION) {
-      return this.#deriveLegacy(record as unknown as LegacyApprovalRecord) as unknown as ApprovalRecord;
-    }
-    return this.#derive(record);
+  /**
+   * One approval, in whichever of its four forms it is (`StoredApproval`), read against one configuration snapshot —
+   * or null when there is none. Nothing is written.
+   */
+  async get(approvalId: string): Promise<StoredApproval | null> {
+    const config = await this.#config();
+    const stored = await this.#read(approvalId, config);
+    return stored === null ? null : this.#derived(stored);
   }
 
   /**
    * Compare-and-swap under the record's lock. `decide` returns the next record (written) or throws (nothing written).
    *
-   * A record of another digest version is refused before anything is derived or written: the derived state of a record
-   * this release cannot claim is not this release's to persist, and 0.13.0 persisted `expired` here first.
+   * Only a valid version-2 record reaches `decide`, and it is refused before anything is derived or written otherwise:
+   * a record from an earlier release with the version refusal (0.13.0 persisted `expired` here first); a corrupt or
+   * unreadable one with the integrity refusal, never rewritten; and one whose stored id is not its file's is corrupt
+   * before anything — a write, a claim marker — can touch the id it names.
    */
   async #transition(approvalId: string, decide: (current: ApprovalRecord) => ApprovalRecord): Promise<ApprovalRecord> {
     const path = this.#path(approvalId);
     return withFileLock(`${path}.lock`, async () => {
-      const stored = await this.#read(approvalId);
-      if (!stored) throw refuse('NOT_FOUND', `no approval ${approvalId}`);
-      if (!isCurrentDigestVersion(stored)) throw otherVersionRefusal(stored);
+      const config = await this.#config();
+      const found = await this.#read(approvalId, config);
+      if (!found) throw refuse('NOT_FOUND', `no approval ${approvalId}`);
+      if (found.form === 'legacy') throw otherVersionRefusal(found.view);
+      if (found.form !== 'v2') throw integrityRefusal(found);
+      const stored = found.record;
       const current = this.#derive(stored);
       if (current.state !== stored.state) await this.#write({ ...current, updatedAt: this.#now().toISOString() });
       const next = decide(current);
@@ -878,6 +927,15 @@ export class ApprovalStore {
       if (!current.challengeHash)
         throw refusalFor(current)('APPROVAL_REQUIRED', 'no challenge was issued for this approval', current);
       const at = this.#now();
+      // A change's confirm means a person at a terminal, and nothing else approves one: a form approval is voided
+      // here, before it could be written as approval evidence no change may carry.
+      if (kind === 'change' && via !== 'terminal') {
+        failure = {
+          code: 'APPROVAL_VOID',
+          reason: 'the change policy is confirm, and this was not approved at a terminal',
+        };
+        return { ...current, state: 'revoked', reason: failure.reason, revokedAt: at.toISOString() };
+      }
       if (live.draftMessageId !== current.draftMessageId || live.contentDigest !== current.contentDigest) {
         const reason =
           kind === 'change'
@@ -1158,6 +1216,16 @@ export class ApprovalStore {
             })),
           }),
     };
+    // The names a question lists are the names its files are bound to, in order: one that showed other names would be
+    // written as a record that reads back corrupt.
+    if (
+      download.listing !== undefined &&
+      canonicalJson(download.listing.map((file) => file.name)) !== canonicalJson(download.names)
+    ) {
+      throw new CommsError('UNEXPECTED', 'a question’s listing does not name the files it is bound to', {
+        hint: 'This is a bug — please report it.',
+      });
+    }
     const digest = downloadDigest(download);
     // Anything but `chat` is `confirm`: a policy word this release does not know is not a reason to ask less.
     const policy: ChangePolicy = input.policy === 'chat' ? 'chat' : 'confirm';
@@ -1313,28 +1381,34 @@ export class ApprovalStore {
   }
 
   /**
-   * Voids a pending or approved record. Other records are left as they are.
+   * Voids a pending or approved record. Other records are left as they are, and returned as they read.
    *
    * `disposition` says whose decision this is, and has no default: every caller chooses (`RevokeDisposition`). A
    * version-1 record is retired in its own shape when a person or an owner's removal revokes it (`revokeLegacy`), and
-   * refused with the version refusal, nothing written, when this release's integrity check would have voided it.
+   * refused with the version refusal, nothing written, when this release's integrity check would have voided it. A
+   * corrupt or unreadable record is never revoked or rewritten: it is refused with the integrity refusal, which repeats
+   * only its stub.
    */
   async revoke(
     approvalId: string,
     reason: string,
     options: { disposition: RevokeDisposition },
-  ): Promise<ApprovalRecord> {
-    if (options.disposition !== 'integrity') {
-      const raw = await this.#read(approvalId);
-      if (raw !== null && raw.digestVersion === LEGACY_DIGEST_VERSION) {
-        return (await this.revokeLegacy(approvalId, reason)) as unknown as ApprovalRecord;
-      }
+  ): Promise<StoredApproval> {
+    const config = await this.#config();
+    const found = await this.#read(approvalId, config);
+    if (found === null) throw refuse('NOT_FOUND', `no approval ${approvalId}`);
+    if (found.form === 'legacy') {
+      if (options.disposition === 'integrity') throw otherVersionRefusal(found.view);
+      const retired = await this.revokeLegacy(approvalId, reason);
+      return { form: 'legacy', view: decodeLegacyV1(retired, config, this.#now()), record: retired };
     }
-    return this.#transition(approvalId, (current) =>
+    if (found.form !== 'v2') throw integrityRefusal(found);
+    const record = await this.#transition(approvalId, (current) =>
       current.state === 'pending' || current.state === 'approved'
         ? { ...current, state: 'revoked', reason, revokedAt: this.#now().toISOString() }
         : current,
     );
+    return { form: 'v2', record };
   }
 
   /**
@@ -1342,11 +1416,11 @@ export class ApprovalStore {
    * can no longer claim the record — and nothing more.
    *
    * Under the record's own lock, `<id>.json.lock`, the one 0.13.0's transitions take, so the two serialise. The file
-   * is read again there and its state derived by its own release's rules (`deriveLegacyV1State`). Only a `pending` or
-   * `approved` record is rewritten, as itself plus `state: 'revoked'`, the reason and `updatedAt`: its digest version
-   * stays 1, a send stays without a `kind`, and no field of this release's is added — no claim marker either. Any other
-   * derived state is returned as it reads and written nothing: an expired record is never rewritten, as `revoke`
-   * leaves every finished record as it is.
+   * is read again there, decoded, and its state derived by its own release's rules (`deriveLegacyV1State`). Only a
+   * `pending` or `approved` record is rewritten, as itself plus `state: 'revoked'`, the reason and `updatedAt`: its
+   * digest version stays 1, a send stays without a `kind`, and no field of this release's is added — no claim marker
+   * either. Any other derived state is returned as it reads and written nothing: an expired record is never rewritten,
+   * as `revoke` leaves every finished record as it is.
    *
    * It reads no configuration and needs no owner, so it works on a record whose account is already gone. Its only
    * callers are a person's revoke, the removal of the record's owner, and the legacy drain.
@@ -1354,16 +1428,17 @@ export class ApprovalStore {
   async revokeLegacy(approvalId: string, reason: string): Promise<LegacyApprovalRecord> {
     const path = this.#path(approvalId);
     return withFileLock(`${path}.lock`, async () => {
-      const stored = await this.#read(approvalId);
-      if (!stored) throw refuse('NOT_FOUND', `no approval ${approvalId}`);
-      if (stored.digestVersion !== LEGACY_DIGEST_VERSION) {
-        throw refusalFor(stored)(
+      const found = await this.#read(approvalId, null);
+      if (!found) throw refuse('NOT_FOUND', `no approval ${approvalId}`);
+      if (found.form === 'corrupt' || found.form === 'unreadable') throw integrityRefusal(found);
+      if (found.form !== 'legacy') {
+        throw refusalFor(found.record)(
           'APPROVAL_VOID',
           'the approval is not one an earlier release prepared, so it is not retired as one',
-          stored,
+          found.record,
         );
       }
-      const raw = stored as unknown as LegacyApprovalRecord;
+      const raw = found.record;
       const derived = this.#deriveLegacy(raw);
       if (derived.state !== 'pending' && derived.state !== 'approved') return derived;
       const revoked: LegacyApprovalRecord = { ...raw, state: 'revoked', reason, updatedAt: this.#now().toISOString() };
@@ -1372,7 +1447,14 @@ export class ApprovalStore {
     });
   }
 
-  async list(filter: { inboxId?: string; states?: ApprovalState[] } = {}): Promise<ApprovalRecord[]> {
+  /**
+   * Every approval file, each in one of its four forms — nothing skipped, nothing omitted — read against one
+   * configuration snapshot, loaded once before any file is read: a loader that fails fails the whole list.
+   *
+   * `inboxId` keeps the records whose owner is that id (`ownerOf`), so a file whose owner cannot be trusted never
+   * matches one; `states` keeps those whose state (`stateOf`, `corrupt` for one that cannot be used) is listed.
+   */
+  async list(filter: { inboxId?: string; states?: (ApprovalState | 'corrupt')[] } = {}): Promise<StoredApproval[]> {
     let names: string[];
     try {
       // The same pattern the store validates an id against, so a file this listing shows is a file it can open.
@@ -1382,15 +1464,33 @@ export class ApprovalStore {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
       throw error;
     }
-    const records: ApprovalRecord[] = [];
+    const config = await this.#config();
+    const found: StoredApproval[] = [];
     for (const name of names) {
-      const record = await this.get(name.slice(0, -5)).catch(() => null);
-      if (!record) continue;
-      if (filter.inboxId && record.inboxId !== filter.inboxId) continue;
-      if (filter.states && !filter.states.includes(record.state)) continue;
-      records.push(record);
+      // Gone between the listing and the read: there is nothing to show.
+      const stored = await this.#read(name.slice(0, -5), config);
+      if (stored === null) continue;
+      const current = this.#derived(stored);
+      if (filter.inboxId !== undefined && filter.inboxId !== '' && ownerOf(current) !== filter.inboxId) continue;
+      if (filter.states && !filter.states.includes(stateOf(current))) continue;
+      found.push(current);
     }
-    return records.sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
+    const createdOf = (stored: StoredApproval) =>
+      stored.form === 'v2' ? stored.record.createdAt : stored.form === 'legacy' ? stored.view.createdAt : null;
+    const idOf = (stored: StoredApproval) =>
+      stored.form === 'v2'
+        ? stored.record.approvalId
+        : stored.form === 'legacy'
+          ? stored.view.approvalId
+          : (corruptStubOf(stored)?.approvalId ?? '');
+    // Oldest first; a record that cannot be read has no time to be ordered by, and follows, by id.
+    return found.sort((a, b) => {
+      const [x, y] = [createdOf(a), createdOf(b)];
+      if (x !== null && y !== null) return x < y ? -1 : x > y ? 1 : 0;
+      if (x !== null) return -1;
+      if (y !== null) return 1;
+      return idOf(a) < idOf(b) ? -1 : 1;
+    });
   }
 }
 

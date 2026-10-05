@@ -24,6 +24,7 @@ import { canonicalJson, sha256Hex } from '../../src/digest.ts';
  */
 
 export const T0: number = Date.parse('2026-10-05T09:00:00.000Z');
+const T0_DEFAULT = T0;
 const iso = (ms: number) => new Date(ms).toISOString();
 
 export const OWNER: string = 'ibx_AAAAAAAAAAAAAAAA';
@@ -64,14 +65,19 @@ export interface V2Spec {
   /** For a change: whose it is. */
   scope?: OwnerScope;
   heartbeat?: boolean;
+  /** When it was made, in milliseconds: `T0` unless a test needs a record of now. */
+  start?: number;
+  /** Its id: a fixed one unless a test needs a record under an id of its own. */
+  approvalId?: string;
 }
 
 /** A record of `spec`, valid by every rule in `approval-validate.ts`. */
 export function v2Record(spec: V2Spec): ApprovalRecord {
   const { kind, state } = spec;
+  const T0 = spec.start ?? T0_DEFAULT;
   const route: ApprovalRoute | undefined = kind === 'download' ? undefined : (spec.route ?? 'chat');
   const pendingMs = kind === 'download' ? APPROVAL_LIFETIMES.download : route === 'confirm' ? 1_800_000 : 600_000;
-  const approvalId = `ap_${'0'.repeat(25)}V`;
+  const approvalId = spec.approvalId ?? `ap_${'0'.repeat(25)}V`;
   const scope = spec.scope ?? 'owner';
   const change: ChangeBinding | undefined =
     kind === 'change'

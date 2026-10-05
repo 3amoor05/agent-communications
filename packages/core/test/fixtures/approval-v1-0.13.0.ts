@@ -69,10 +69,12 @@ export function v1SendRecord(fields: {
 }
 
 /** A version-1 change record, as 0.13.0's `createChange` built it: `digest` is `changeDigest(change)`. */
-export function v1ChangeRecord(fields: {
+export function v1ChangeRecord<
+  Change extends { summary: string; target: { kind: string; name: string; id?: string | undefined } | null },
+>(fields: {
   approvalId: string;
   digest: string;
-  change: { summary: string; target: { kind: string; name: string; id?: string | undefined } | null };
+  change: Change;
   policy?: 'chat' | 'confirm';
   state?: string;
   createdAt?: string;
@@ -101,10 +103,12 @@ export function v1ChangeRecord(fields: {
 }
 
 /** A version-1 download question, as 0.13.0's `createDownload` built it: `digest` is `downloadDigest(download)`. */
-export function v1DownloadRecord(fields: {
+export function v1DownloadRecord<
+  Download extends { summary: string; target: { kind: string; name: string; id: string } },
+>(fields: {
   approvalId: string;
   digest: string;
-  download: { summary: string; target: { kind: string; name: string; id: string } };
+  download: Download;
   policy?: 'chat' | 'confirm';
   state?: string;
   createdAt?: string;
