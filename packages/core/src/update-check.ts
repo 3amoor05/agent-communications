@@ -8,6 +8,7 @@ import type { Core } from './core.ts';
 import { CommsError } from './errors.ts';
 import { npmLatestVersion } from './npm.ts';
 import { type UpdateDeps, updateChange, updateCheck } from './operations/update.ts';
+import { PATH_OPTIONS, type ResolvedPaths } from './paths.ts';
 import { renderUpdate } from './render.ts';
 import { childEnvironment } from './system-programs.ts';
 import { TERMINAL_CHECK_WAIT_MS, type TerminalUpdateHooks } from './update-gate.ts';
@@ -319,7 +320,7 @@ async function handUpdateCheckToChild(
     const claimedAt = await claimUpdateCheck(core, { now: options.now });
     if (claimedAt === null) return;
     const entry = options.entry === undefined ? updateCheckChildEntry() : options.entry;
-    const started = entry !== null && (await startUpdateCheckChild(entry, claimedAt, env, deadline));
+    const started = entry !== null && (await startUpdateCheckChild(entry, claimedAt, core.paths, env, deadline));
     if (!started) await askUnderClaim(core, env, claimedAt, { now: options.now });
   } catch {
     // The check never stops anything, a command least of all.
@@ -333,12 +334,14 @@ async function handUpdateCheckToChild(
 async function startUpdateCheckChild(
   entry: UpdateCheckChildEntry,
   claimedAt: string,
+  paths: ResolvedPaths,
   env: NodeJS.ProcessEnv,
   deadline: number,
 ): Promise<boolean> {
   let child: ChildProcess;
   try {
-    child = spawn(entry.command, [...entry.args, UPDATE_CHECK_CHILD_COMMAND, claimedAt], {
+    const pathArgs = PATH_OPTIONS.flatMap(({ key, flag }) => [flag, paths[key]]);
+    child = spawn(entry.command, [...entry.args, ...pathArgs, UPDATE_CHECK_CHILD_COMMAND, claimedAt], {
       detached: true,
       windowsHide: true,
       stdio: ['ignore', 'ignore', 'ignore', 'ipc'],

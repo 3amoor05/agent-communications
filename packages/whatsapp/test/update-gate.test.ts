@@ -119,6 +119,61 @@ test('with the network cut off, an update in the file stops every tool but whats
   assert.equal(record.lastChecked, checked, 'WhatsApp did not check, stale as the file was');
 });
 
+test('a flag-pinned WhatsApp run reads update state from the pinned directory and starts no child', async () => {
+  const harness = await newHarness({ env: { AGENT_COMMS_UPDATE_CHECK: 'on' } });
+  const ambient = tempDir('agent-whatsapp-update-ambient-');
+  const pinned = openCore({ env: harness.env });
+  mkdirSync(pinned.paths.stateDir, { recursive: true });
+  writeFileSync(
+    updateCheckPath(pinned.paths.stateDir),
+    JSON.stringify({ lastChecked: new Date().toISOString(), latest: '99.0.0', behind: true }),
+  );
+  const spawn = childProcess.spawn;
+  const attempts: string[] = [];
+  childProcess.spawn = ((..._args: unknown[]) => {
+    attempts.push('child_process.spawn');
+    throw new Error('WhatsApp must not start an update child');
+  }) as typeof childProcess.spawn;
+  syncBuiltinESMExports();
+  try {
+    const { configDir, stateDir, dataDir, secretsDir, downloadsDir } = pinned.paths;
+    const result = await harness.cli(
+      [
+        '--config-dir',
+        configDir,
+        '--state-dir',
+        stateDir,
+        '--data-dir',
+        dataDir,
+        '--secrets-dir',
+        secretsDir,
+        '--downloads-dir',
+        downloadsDir,
+        'chats',
+        '--account',
+        ACCOUNT,
+        '--json',
+      ],
+      {
+        env: {
+          ...harness.env,
+          AGENT_COMMS_CONFIG_DIR: join(ambient, 'config'),
+          AGENT_COMMS_STATE_DIR: join(ambient, 'state'),
+          AGENT_COMMS_DATA_DIR: join(ambient, 'data'),
+          HOME: join(ambient, 'home'),
+          USERPROFILE: join(ambient, 'home'),
+        },
+      },
+    );
+    assert.equal(result.code, 11, result.stdout + result.stderr);
+    assert.equal((result.json().error as { code?: string }).code, 'UPDATE_REQUIRED');
+  } finally {
+    childProcess.spawn = spawn;
+    syncBuiltinESMExports();
+  }
+  assert.deepEqual(attempts, []);
+});
+
 test('the bundle as it ships carries the update gate’s reader, and none of the checker', async () => {
   const { build } = await import('tsdown');
   const outDir = tempDir('agent-whatsapp-gate-bundle-');

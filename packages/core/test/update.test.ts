@@ -16,6 +16,7 @@ import { type CoreMcpOptions, createCoreMcpServer } from '../src/mcp/server.ts';
 import { managedRuntimeDir, managedRuntimeEntry, whichExecutable } from '../src/mcp-install.ts';
 import { compareVersions, npmLatestVersion } from '../src/npm.ts';
 import type { UpdateDeps } from '../src/operations/update.ts';
+import { readUpdateCheck, updateCheckPath } from '../src/update-state.ts';
 import { VERSION } from '../src/version.ts';
 import { tempDir } from './helpers/temp.ts';
 
@@ -1295,6 +1296,52 @@ function cli(m: Machine, args: string[], extra: Record<string, string>) {
     },
   );
 }
+
+test('a due detached update child uses all five path pins from its parent, not conflicting ambient roots', async () => {
+  const m = machine();
+  const root = tempDir('comms-update-pinned-');
+  const paths = {
+    configDir: join(root, 'config'),
+    stateDir: join(root, 'state'),
+    dataDir: join(root, 'data'),
+    secretsDir: join(root, 'secrets'),
+    downloadsDir: join(root, 'downloads'),
+  };
+  const ambient = tempDir('comms-update-ambient-');
+  const ambientState = join(ambient, 'state');
+  const result = await cli(
+    m,
+    [
+      '--config-dir',
+      paths.configDir,
+      '--state-dir',
+      paths.stateDir,
+      '--data-dir',
+      paths.dataDir,
+      '--secrets-dir',
+      paths.secretsDir,
+      '--downloads-dir',
+      paths.downloadsDir,
+      'channels',
+      '--json',
+    ],
+    {
+      AGENT_COMMS_UPDATE_CHECK: 'on',
+      AGENT_COMMS_CONFIG_DIR: join(ambient, 'config'),
+      AGENT_COMMS_STATE_DIR: ambientState,
+      AGENT_COMMS_DATA_DIR: join(ambient, 'data'),
+      HOME: join(ambient, 'home'),
+      USERPROFILE: join(ambient, 'home'),
+      npm_config_registry: 'http://127.0.0.1:9/',
+    },
+  );
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const record = await readUpdateCheck(paths.stateDir);
+  assert.ok(record.lastChecked !== null, JSON.stringify(record));
+  assert.equal(record.checking, null, JSON.stringify(record));
+  assert.match(String(record.lastError), /could not be reached/);
+  assert.equal(existsSync(updateCheckPath(ambientState)), false, 'the detached child wrote under ambient state');
+});
 
 test('a channel this machine does not use is never asked about, so its absence from the registry stops nothing', async () => {
   // 0.7.0 adds channels whose first publish is by hand: had core asked npm about every channel it knows, every

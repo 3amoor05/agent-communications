@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import {
   claimUpdateCheck,
@@ -10,7 +11,7 @@ import {
   updateCheckPath,
   updateLaterChange,
 } from '@agentcomms/core';
-import { type Harness, newHarness } from './support/harness.ts';
+import { type Harness, newHarness, tempDir } from './support/harness.ts';
 import { cli, connect, type ToolResult } from './support/surfaces.ts';
 
 /*
@@ -155,7 +156,35 @@ test('agent-gmail finishes the update check a command handed on: under its claim
   writeFileSync(updateCheckPath(stateDir), JSON.stringify({ latest: '99.0.0', behind: true }));
   const claimedAt = await claimUpdateCheck(harness.core);
   assert.ok(claimedAt !== null);
-  const child = await cli(harness, [UPDATE_CHECK_CHILD_COMMAND, claimedAt, '--json']);
+  const ambient = tempDir('agent-gmail-update-ambient-');
+  const { configDir, stateDir: pinnedState, dataDir, secretsDir, downloadsDir } = harness.core.paths;
+  const child = await cli(
+    harness,
+    [
+      '--config-dir',
+      configDir,
+      '--state-dir',
+      pinnedState,
+      '--data-dir',
+      dataDir,
+      '--secrets-dir',
+      secretsDir,
+      '--downloads-dir',
+      downloadsDir,
+      UPDATE_CHECK_CHILD_COMMAND,
+      claimedAt,
+      '--json',
+    ],
+    {
+      env: {
+        AGENT_COMMS_CONFIG_DIR: join(ambient, 'config'),
+        AGENT_COMMS_STATE_DIR: join(ambient, 'state'),
+        AGENT_COMMS_DATA_DIR: join(ambient, 'data'),
+        HOME: join(ambient, 'home'),
+        USERPROFILE: join(ambient, 'home'),
+      },
+    },
+  );
   assert.equal(child.code, 0, child.stdout + child.stderr);
   // The registry here refuses at once: the ask is recorded as the day's, with why, and the claim given up.
   const record = await readUpdateCheck(stateDir);

@@ -18,7 +18,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { run } from '../src/cli/program.ts';
 import { createSlackMcpServer } from '../src/mcp/server.ts';
 import type { FileDownloader, FileDownloadQuestion, FileDownloadResult } from '../src/operations/files.ts';
-import { type Harness, newHarness } from './support/harness.ts';
+import { type Harness, newHarness, tempDir } from './support/harness.ts';
 
 /*
  * The daily update check's stop, on Slack's server and command (design 2026-09-28): an update that is out stops every
@@ -600,6 +600,7 @@ test('agent-slack finishes the update check a command handed on: under its claim
   // A day old, so every other command would ask first — and, with an update out, be stopped.
   const stateDir = harness.core.paths.stateDir;
   writeFileSync(updateCheckPath(stateDir), JSON.stringify({ latest: '99.0.0', behind: true }));
+  const ambient = tempDir('agent-slack-update-ambient-');
   const command = async (argv: string[]) => {
     let stdout = '';
     const out = new PassThrough();
@@ -608,7 +609,14 @@ test('agent-slack finishes the update check a command handed on: under its claim
     });
     const exit = await run(argv, {
       core: harness.core,
-      env: harness.env,
+      env: {
+        ...harness.env,
+        AGENT_COMMS_CONFIG_DIR: join(ambient, 'config'),
+        AGENT_COMMS_STATE_DIR: join(ambient, 'state'),
+        AGENT_COMMS_DATA_DIR: join(ambient, 'data'),
+        HOME: join(ambient, 'home'),
+        USERPROFILE: join(ambient, 'home'),
+      },
       streams: { stdout: out, stderr: new PassThrough(), stdin: new PassThrough() },
       read: refuseEverything,
     });
@@ -616,7 +624,22 @@ test('agent-slack finishes the update check a command handed on: under its claim
   };
   const claimedAt = await claimUpdateCheck(harness.core);
   assert.ok(claimedAt !== null);
-  const child = await command([UPDATE_CHECK_CHILD_COMMAND, claimedAt, '--json']);
+  const { configDir, stateDir: pinnedState, dataDir, secretsDir, downloadsDir } = harness.core.paths;
+  const child = await command([
+    '--config-dir',
+    configDir,
+    '--state-dir',
+    pinnedState,
+    '--data-dir',
+    dataDir,
+    '--secrets-dir',
+    secretsDir,
+    '--downloads-dir',
+    downloadsDir,
+    UPDATE_CHECK_CHILD_COMMAND,
+    claimedAt,
+    '--json',
+  ]);
   assert.equal(child.exit, 0, child.stdout);
   // The registry here refuses at once: the ask is recorded as the day's, with why, and the claim given up.
   const record = await readUpdateCheck(stateDir);
