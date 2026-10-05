@@ -46,7 +46,20 @@ export function baseEnvironment(options: {
   sealLog: string;
   platform?: NodeJS.Platform;
 }): NodeJS.ProcessEnv;
-export function freshShell(root: string, options?: { platform?: NodeJS.Platform; extra?: NodeJS.ProcessEnv }): Shell;
+export interface FixtureWrites {
+  mkdir(path: string, options?: unknown): unknown;
+  writeFile(path: string, data: string | Uint8Array, options?: unknown): unknown;
+  open(path: string, flags?: string | number, mode?: number): unknown;
+  rename(from: string, to: string): unknown;
+  rm(path: string, options?: unknown): unknown;
+}
+export function refuseRealHome(path: string, where?: { home?: string; temp?: string }): void;
+export function fixtureWrites(options?: { fs?: FixtureWrites; home?: string; temp?: string }): FixtureWrites;
+export const WRITES: FixtureWrites;
+export function freshShell(
+  root: string,
+  options?: { platform?: NodeJS.Platform; extra?: NodeJS.ProcessEnv; writes?: FixtureWrites },
+): Shell;
 export function filesUnder(dir: string): string[];
 export function suiteTraces(shell: Shell, expected?: readonly string[]): string[];
 export function sealAttempts(sealLog: string): SealAttempt[];

@@ -17,10 +17,23 @@
  *   where installed, PowerShell 7 (`windowsShells`), as core's renderer tests run them.
  *
  * Root tests use it from `.mjs`; package tests import it with its types from `real-shell.d.mts`. Every folder it makes
- * is under the temporary folder a test gives it: nothing here reads or writes the real home.
+ * is under the temporary folder a test gives it, and every write it makes is refused before it happens when its target
+ * is in the real home (`fixtureWrites`): nothing here reads or writes the real home.
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readChannels, SCOPE } from '../../scripts/channels.mjs';
@@ -138,18 +151,75 @@ export function baseEnvironment({ home, tmp, sealLog, platform = process.platfor
   };
 }
 
+// ── The real home is never written ───────────────────────────────────────────────────────────────────────────────
+
+/** Whether `path` is `root` or inside it, by whole segments; without case on Windows, as Windows finds files. */
+function within(path, root) {
+  const fold = (each) => (process.platform === 'win32' ? each.toLowerCase() : each);
+  const from = relative(fold(resolve(root)), fold(resolve(path)));
+  return from === '' || (!from.startsWith('..') && !isAbsolute(from));
+}
+
+/**
+ * Refuses a path a fixture is about to write when it is in the real home: the home itself or anything in it, except the
+ * system's temporary folder — which on Windows is inside the profile, and where every fixture here lives. Checked
+ * before the call reaches the file system, so a refused write leaves nothing behind (design 2026-10-04 §4 item 9).
+ * `home` and `temp` are the machine's own unless a test gives others.
+ */
+export function refuseRealHome(path, { home = homedir(), temp = tmpdir() } = {}) {
+  if (within(path, home) && !within(path, temp)) {
+    throw new Error(
+      `refused before writing: ${path} is in the real home, and a test writes only under its temp folder`,
+    );
+  }
+}
+
+/** Node's own synchronous writes, the ones `fixtureWrites` passes a checked call on to. */
+const NODE_WRITES = Object.freeze({
+  mkdir: mkdirSync,
+  writeFile: writeFileSync,
+  open: openSync,
+  rename: renameSync,
+  rm: rmSync,
+});
+
+/**
+ * The writes every fixture here makes — `mkdir`, `writeFile`, `open`, `rename`, `rm` — each refused before it reaches
+ * `fs` when its target (both, for a rename) is in the real home (`refuseRealHome`). `fs`, `home` and `temp` are for a
+ * test of the guard itself, which gives a spy and a home of its own, and never names the machine's.
+ */
+export function fixtureWrites({ fs = NODE_WRITES, home, temp } = {}) {
+  const where = { ...(home === undefined ? {} : { home }), ...(temp === undefined ? {} : { temp }) };
+  const checked =
+    (name, targets = 1) =>
+    (...args) => {
+      for (const target of args.slice(0, targets)) refuseRealHome(String(target), where);
+      return fs[name](...args);
+    };
+  return Object.freeze({
+    mkdir: checked('mkdir'),
+    writeFile: checked('writeFile'),
+    open: checked('open'),
+    rename: checked('rename', 2),
+    rm: checked('rm'),
+  });
+}
+
+/** The writes the fixtures and the tests that use them make, on this machine. */
+export const WRITES = fixtureWrites();
+
 /**
  * A fresh shell's environment and working folder, under `root`: every suite folder the environment could name points
  * at a decoy, and so does every default those are derived from — `AGENT_COMMS_CONFIG_DIR`, `_STATE_DIR`, `_DATA_DIR`,
  * the XDG folders, the home, and Windows' `APPDATA` and `LOCALAPPDATA`. None is made: a command that used one would
  * make it, and `suiteTraces` finds it. `extra` is laid over the top (a client's own variables, a fake provider).
  */
-export function freshShell(root, { platform = process.platform, extra = {} } = {}) {
+export function freshShell(root, { platform = process.platform, extra = {}, writes = WRITES } = {}) {
   const decoys = join(root, 'decoys');
   const cwd = join(root, 'elsewhere');
   const tmp = join(root, 'tmp');
-  mkdirSync(cwd, { recursive: true });
-  mkdirSync(tmp, { recursive: true });
+  writes.mkdir(cwd, { recursive: true });
+  writes.mkdir(tmp, { recursive: true });
   const env = {
     ...baseEnvironment({ home: join(decoys, 'home'), tmp, sealLog: join(root, 'seal.jsonl'), platform }),
     XDG_CONFIG_HOME: join(decoys, 'xdg-config'),

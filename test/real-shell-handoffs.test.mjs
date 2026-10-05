@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, readdirSync, readFileSync, symlinkSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
 import { test } from 'node:test';
 import { pathToFileURL } from 'node:url';
@@ -28,6 +28,7 @@ import {
   strippedPath,
   suiteCommandsOn,
   suiteTraces,
+  WRITES,
   windowsShells,
   wordsOf,
 } from './helpers/real-shell.mjs';
@@ -49,6 +50,7 @@ import { tempDir } from './helpers/temp-dir.mjs';
  * PowerShell 7, and skip elsewhere — as core's renderer tests do. A person's own command, `approve`, needs a terminal:
  * on POSIX it gets a pseudo-terminal (`helpers/terminal.py`) and its code typed back; Windows has no such thing to give
  * it from a test, so there the approval it refuses for want of one is found recorded in the printing process's store.
+ * Every folder and file a test makes goes through the fixtures' writes (`WRITES`), refused in the real home.
  */
 
 const CORE = builtCli('core');
@@ -67,8 +69,8 @@ async function machine(options = {}) {
   const root = real(await tempDir('agentcomms-real-shell-'));
   const home = join(root, 'print-home');
   const cwd = join(root, 'print-cwd');
-  mkdirSync(home, { recursive: true });
-  mkdirSync(cwd, { recursive: true });
+  WRITES.mkdir(home, { recursive: true });
+  WRITES.mkdir(cwd, { recursive: true });
   // Relative, and one of them not canonical: a printed command carries each resolved, without the `.` or the end `/`.
   const relative = options.relative ?? {
     configDir: join('pins', 'config'),
@@ -80,7 +82,7 @@ async function machine(options = {}) {
   const folders = Object.fromEntries(Object.entries(relative).map(([key, value]) => [key, resolve(cwd, value)]));
   const pinArgs = Object.entries(relative).flatMap(([key, value]) => [PATH_OPTIONS[key], value]);
   const tmp = join(root, 'print-tmp');
-  mkdirSync(tmp);
+  WRITES.mkdir(tmp);
   const env = { ...baseEnvironment({ home, tmp, sealLog: join(root, 'print-seal.jsonl') }), ...(options.env ?? {}) };
   /*
    * This Node on the printing person's PATH, as a person's own would be, and nothing else: an installer registers the
@@ -89,15 +91,15 @@ async function machine(options = {}) {
    */
   const nodeBin = join(root, 'node-bin');
   if (process.platform !== 'win32') {
-    mkdirSync(nodeBin);
+    WRITES.mkdir(nodeBin);
     symlinkSync(process.execPath, join(nodeBin, 'node'));
     env.PATH = [nodeBin, env.PATH].join(':');
   }
   const { configDir } = folders;
   if (configDir !== undefined) {
-    mkdirSync(configDir, { recursive: true, mode: 0o700 });
+    WRITES.mkdir(configDir, { recursive: true, mode: 0o700 });
     chmodSync(configDir, 0o700);
-    writeFileSync(join(configDir, 'config.json'), `${JSON.stringify({ version: 2, secrets: { store: 'file' } })}\n`);
+    WRITES.writeFile(join(configDir, 'config.json'), `${JSON.stringify({ version: 2, secrets: { store: 'file' } })}\n`);
   }
   /** Runs a CLI of this checkout as the printing process: `cli` with the pins, then `args`. */
   const print = (args, cli = CORE) => runNode([cli, ...pinArgs, ...args], { env, cwd });
@@ -204,7 +206,7 @@ test('a change prepared at the CLI is approved at a fresh terminal and run again
   const m = await machine();
   assert.equal(m.print(['policy', 'confirm']).status, 0);
   const allowed = join(m.root, 'allowed');
-  mkdirSync(allowed);
+  WRITES.mkdir(allowed);
 
   // The human form and the JSON form name the same commands, and neither assigns an environment variable.
   const human = m.print(['attach', 'roots', 'add', allowed]);
@@ -250,7 +252,7 @@ test(
     for (const each of windowsShells()) {
       // Under `chat` the agent runs the change again with the approval once the person has said yes in the chat.
       const allowed = join(m.root, `allowed-${runs}`);
-      mkdirSync(allowed);
+      WRITES.mkdir(allowed);
       const { id, hint } = held(m.print(['attach', 'roots', 'add', allowed, '--json']));
       assert.deepEqual(environmentAssignments(hint), []);
       const rerun = commandEndingWith(hint, ['attach', 'roots', 'add', allowed, '--approval', id], 'win32');
@@ -278,7 +280,7 @@ test(
     // refusal is recorded against the approval in the printing process's own store, under its own policy.
     assert.equal(m.print(['policy', 'confirm']).status, 0);
     const allowed = join(m.root, 'allowed-confirm');
-    mkdirSync(allowed);
+    WRITES.mkdir(allowed);
     const { id, hint } = held(m.print(['attach', 'roots', 'add', allowed, '--json']));
     const approve = commandEndingWith(hint, ['approve', id], 'win32');
     inWindowsShells(approve, person, (result, name) => {
@@ -316,7 +318,7 @@ test('a change prepared through the core server is approved at a fresh terminal,
   });
   t.after(() => server.close());
   const allowed = join(m.root, 'allowed-by-mcp');
-  mkdirSync(allowed);
+  WRITES.mkdir(allowed);
 
   const asked = await server.call('comms_attach', { rootsAdd: allowed });
   assert.equal(asked.approvalRequired, true, JSON.stringify(asked));
@@ -341,7 +343,7 @@ test('a change prepared through the core server is approved at a fresh terminal,
 /** An organisation profile with a Google client whose secret goes to the file store: made up, never a real one. */
 function writeProfile(dir) {
   const path = join(dir, 'acme.agentcomms.json');
-  writeFileSync(
+  WRITES.writeFile(
     path,
     `${JSON.stringify({
       agentcomms: 'organisation-profile',
@@ -440,8 +442,11 @@ test(
  */
 function legacyRegistration(home, name, entry, client = 'cursor') {
   const file = client === 'gemini' ? join(home, '.gemini', 'settings.json') : join(home, '.cursor', 'mcp.json');
-  mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, JSON.stringify({ mcpServers: { [name]: { command: process.execPath, args: [entry, 'mcp'] } } }));
+  WRITES.mkdir(dirname(file), { recursive: true });
+  WRITES.writeFile(
+    file,
+    JSON.stringify({ mcpServers: { [name]: { command: process.execPath, args: [entry, 'mcp'] } } }),
+  );
 }
 
 // ── 3e: the folders each kind of command declares ────────────────────────────────────────────────────────────────
@@ -450,13 +455,13 @@ function legacyRegistration(home, name, entry, client = 'cursor') {
 function staleRuntime(dataDir, version) {
   const root = join(dataDir, 'runtime', `${version}-core`);
   const pkg = join(root, 'node_modules', '@agentcomms', 'core');
-  mkdirSync(join(pkg, 'dist'), { recursive: true });
-  writeFileSync(
+  WRITES.mkdir(join(pkg, 'dist'), { recursive: true });
+  WRITES.writeFile(
     join(root, 'package.json'),
     JSON.stringify({ private: true, dependencies: { '@agentcomms/core': version } }),
   );
-  writeFileSync(join(pkg, 'package.json'), JSON.stringify({ name: '@agentcomms/core', version }));
-  writeFileSync(join(pkg, 'dist', 'cli.mjs'), '');
+  WRITES.writeFile(join(pkg, 'package.json'), JSON.stringify({ name: '@agentcomms/core', version }));
+  WRITES.writeFile(join(pkg, 'dist', 'cli.mjs'), '');
   return root;
 }
 
@@ -572,7 +577,7 @@ test('every kind of command a handoff names pins exactly the folders it declares
   // Approvals: a person's `approve`, under `confirm` — set once the changes above, approved in the chat, have run.
   assert.equal(m.print(['policy', 'confirm']).status, 0);
   const allowed = join(m.root, 'allowed');
-  mkdirSync(allowed);
+  WRITES.mkdir(allowed);
   held_ = held(m.print(['attach', 'roots', 'add', allowed, '--json']));
   add('approvals', commandEndingWith(held_.hint, ['approve', held_.id], platform), ['approve', held_.id], FOUR_FOLDERS);
 
@@ -612,18 +617,18 @@ test('a registration pasted into a fresh shell goes to the clients of the person
   const claude = join(root, 'claude');
   const codex = join(root, 'codex');
   const appData = join(root, 'appdata');
-  mkdirSync(claude, { recursive: true });
-  mkdirSync(codex, { recursive: true });
-  mkdirSync(join(appData, 'Code', 'User'), { recursive: true });
-  writeFileSync(
+  WRITES.mkdir(claude, { recursive: true });
+  WRITES.mkdir(codex, { recursive: true });
+  WRITES.mkdir(join(appData, 'Code', 'User'), { recursive: true });
+  WRITES.writeFile(
     join(claude, '.claude.json'),
     JSON.stringify({ mcpServers: { 'claude-gmail': { command: process.execPath, args: [GMAIL, 'mcp'] } } }),
   );
-  writeFileSync(
+  WRITES.writeFile(
     join(codex, 'config.toml'),
     `[mcp_servers.codex-gmail]\ncommand = ${JSON.stringify(process.execPath)}\nargs = [${JSON.stringify(GMAIL)}, "mcp"]\n`,
   );
-  writeFileSync(
+  WRITES.writeFile(
     join(appData, 'Code', 'User', 'mcp.json'),
     JSON.stringify({
       servers: { 'appdata-gmail': { type: 'stdio', command: process.execPath, args: [GMAIL, 'mcp'] } },
@@ -693,8 +698,8 @@ test('a registration pasted into a fresh shell goes to the clients of the person
 /** A managed runtime of this release of core, as `npm install` would leave it: the package linked from the checkout. */
 function managedRuntime(dataDir) {
   const root = join(dataDir, 'runtime', `${VERSION}-core`);
-  mkdirSync(join(root, 'node_modules', '@agentcomms'), { recursive: true });
-  writeFileSync(
+  WRITES.mkdir(join(root, 'node_modules', '@agentcomms'), { recursive: true });
+  WRITES.writeFile(
     join(root, 'package.json'),
     JSON.stringify({ name: 'agentcomms-runtime', private: true, dependencies: { '@agentcomms/core': VERSION } }),
   );
@@ -710,9 +715,9 @@ function managedRuntime(dataDir) {
  * else: the registry is not reached from a test, and what is under test is the entry the installer wrote.
  */
 function fakeNpx(dir) {
-  mkdirSync(dir, { recursive: true });
+  WRITES.mkdir(dir, { recursive: true });
   const script = join(dir, 'fake-npx.mjs');
-  writeFileSync(
+  WRITES.writeFile(
     script,
     [
       "import { spawnSync } from 'node:child_process';",
@@ -728,9 +733,9 @@ function fakeNpx(dir) {
     ].join('\n'),
   );
   if (process.platform === 'win32') {
-    writeFileSync(join(dir, 'npx.cmd'), `@"${process.execPath}" "${script}" %*\r\n`);
+    WRITES.writeFile(join(dir, 'npx.cmd'), `@"${process.execPath}" "${script}" %*\r\n`);
   } else {
-    writeFileSync(join(dir, 'npx'), `#!/bin/sh\nexec '${process.execPath}' '${script}' "$@"\n`, { mode: 0o755 });
+    WRITES.writeFile(join(dir, 'npx'), `#!/bin/sh\nexec '${process.execPath}' '${script}' "$@"\n`, { mode: 0o755 });
   }
 }
 
@@ -786,7 +791,7 @@ for (const launcher of ['managed', 'npx', 'local']) {
     const server = startMcpServer(entry.command, entry.args, { env: { ...client.env, ...entry.env }, cwd: client.cwd });
     t.after(() => server.close());
     const allowed = join(m.root, `allowed-${launcher}`);
-    mkdirSync(allowed);
+    WRITES.mkdir(allowed);
     const asked = await server.call('comms_attach', { rootsAdd: allowed });
     assert.equal(asked.approvalRequired, true, JSON.stringify(asked));
     const approve = commandEndingWith(asked.next, ['approve', asked.approvalId]);
@@ -827,8 +832,8 @@ test(
     const m = await machine({ relative: {}, env: { APPDATA: appData, LOCALAPPDATA: localAppData } });
     const config = join(appData, 'agent-communications');
     const local = join(localAppData, 'agent-communications');
-    mkdirSync(config, { recursive: true });
-    writeFileSync(join(config, 'config.json'), `${JSON.stringify({ version: 2, secrets: { store: 'file' } })}\n`);
+    WRITES.mkdir(config, { recursive: true });
+    WRITES.writeFile(join(config, 'config.json'), `${JSON.stringify({ version: 2, secrets: { store: 'file' } })}\n`);
     const folders = {
       configDir: config,
       stateDir: join(local, 'state'),
@@ -852,7 +857,7 @@ test(
     const server = startMcpServer(entry.command, entry.args, { env: { ...client.env, ...entry.env }, cwd: client.cwd });
     t.after(() => server.close());
     const allowed = join(m.root, 'allowed');
-    mkdirSync(allowed);
+    WRITES.mkdir(allowed);
     const asked = await server.call('comms_attach', { rootsAdd: allowed });
     assert.ok(existsSync(join(folders.stateDir, 'approvals', `${asked.approvalId}.json`)), 'the local state');
     const approve = commandEndingWith(asked.next, ['approve', asked.approvalId], 'win32');
@@ -873,8 +878,8 @@ test(
 test('core hands over Gmail’s own command from a same-version registration, which runs from a fresh shell; Slack’s, run by npx, is not locatable and has no words to run (8a, 8b)', async () => {
   const m = await machine();
   // Gmail registered as a checkout's built CLI, from before the pins; Slack only through npx.
-  mkdirSync(join(m.home, '.cursor'));
-  writeFileSync(
+  WRITES.mkdir(join(m.home, '.cursor'));
+  WRITES.writeFile(
     join(m.home, '.cursor', 'mcp.json'),
     JSON.stringify({
       mcpServers: {
