@@ -3,6 +3,97 @@
 All notable changes to this project are recorded here, newest first. Every package in this repository is released
 together under one version.
 
+## 0.14.0
+
+**Approving a send no longer races the clock.** One email to a colleague, from Claude Code, took four attempts and
+twenty minutes and never went: approved at the terminal, it expired unused four minutes later because nothing told the
+agent, and the send then asked for the approval just given (CUE-404). Now:
+- **An approval lasts as long as its route needs.** A send or change that a yes in the chat approves still waits ten
+  minutes. One that needs you outside the chat — the `confirm` policy, or a send raised to it — waits thirty minutes
+  for you, and once you approve it at your terminal or in a form the agent has 24 hours to use it, once. A download's
+  question keeps its thirty minutes.
+- **The agent learns that you approved by waiting.** `gmail_send_wait`, `slack_approval_wait`, `resend_send_wait` and
+  `comms_approval_wait` — `agent-gmail send wait`, `agent-slack approval wait`, `agent-resend send wait` and
+  `agentcomms approval wait` at a terminal — say where an approval stands: 30 seconds by default, 300 at most,
+  `--wait-seconds 0` for the status now. They never approve, claim or send. Every refusal that sends you to a terminal
+  names the wait beside the command, and the skills wait rather than ask you to say you have approved.
+- **Every send, status and list says where its approval stands.** Results and refusals carry `approval`: its
+  `state`, whether it can be used now (`claimable`), its route and its times. An expired one says "this approval
+  expired; nothing was sent with it", with when it was prepared or approved and when it expired — on the send too,
+  where it used to come back as `APPROVAL_VOID`, or as `APPROVAL_REQUIRED` asking for the approval again.
+- **A send says only what it knows.** When the provider's answer is lost, the send is `SEND_OUTCOME_UNKNOWN` at once:
+  it may have gone, so check Sent or the channel before anything else. A send another call is making is "being sent
+  by another call since …; wait for it". One the provider accepted without an id is "sent; the provider returned no
+  id" — for a scheduled Resend email, "accepted (scheduled); the provider returned no id" — never an empty id. A send
+  holds a two-minute lease, renewed every thirty seconds and checked before each provider step, so a long Slack upload
+  stays `sending` and a sender that lost its lease sends nothing.
+- **"Did it go?" has an answer.** `agent-gmail send list` (`gmail_send_list`) adds `unsent`: drafts whose approval
+  expired in the last seven days, said only as far as the records read prove — "not sent with any approval in the
+  last 90 days", "not sent with any of the 500 most recently changed approval records", or "indeterminate (…)" — with
+  whether Gmail has the draft "still in Drafts". `draft show`, `draft list` and `doctor` say the same, and Slack's
+  `draft list` says it of each draft's current revision. None of them sends anything or touches a draft.
+- **One decision on the confirmation route.** A client you have not trusted with forms gets "This needs your approval
+  outside the chat: run … in a terminal, and I will wait with gmail_send_wait." Declining a form revokes the approval;
+  cancelling one decides nothing and leaves it waiting. The trusted-client tools speak of clients "the person chose to
+  trust", and nothing says a client is known to reach a person.
+- **A colleague on your own domain is not escalated by the domain alone.** An address seen in mail read this week
+  still raises a send to `confirm` unless this mailbox has written to it; a domain seen there now does so only for a
+  recipient outside the mailbox's own domains. "Written to" reads up to 50 matches in Sent (it read five) within 200
+  requests a prepare, kept ten minutes so the terminal approval does not ask Gmail again, and the preview says why an
+  address escalated using only what was recorded.
+
+**Turning sending off is final for what was waiting.** Setting a send policy to `never` revokes every send waiting on
+that mailbox, account or workspace, and setting it back later revives none of them ("sending was turned off since this
+was prepared (policy: never)"); the change lists what it revoked, what was already being sent, and what it could not
+revoke. A terminal or form approval under `never` revokes instead of approving. A removed mailbox's or account's
+approvals read revoked ("its mailbox or account was removed").
+
+**The configuration moves to version 3, which 0.13 cannot read.** That is what holds the rule above against a 0.13
+process still running. The first 0.14 server or command that prepares, approves or sends anything, or changes a send
+policy, converts it; from then on a server still on 0.13 fails every call it starts with "this release reads versions
+1 and 2". **Restart every client after updating.** Sends 0.13 prepared and nobody used are retired ("prepared by an
+earlier release; prepare it again"), and until they are — no sooner than ten minutes after the conversion — no send
+policy can be loosened; `doctor` shows them under "earlier-release approvals". This breaks the usual rule that a
+release reads a configuration version before any release writes it, on purpose: a 0.13 process that kept going could
+still send with an approval prepared before sending was turned off.
+
+**Approval records are kept 90 days.** A finished approval is deleted 90 days after it finished, in one bounded batch
+a day, with an `approval.retained` line in the audit log first. A record that cannot be read, or fails its integrity
+check, is shown as `corrupt` — never skipped, never used — and `doctor` counts them.
+
+What it means for you: a minor release, with changes you will see and some a script will notice.
+- **Restart every client after updating.** Configuration version 3 locks out 0.13: a server still running it fails
+  every call until its client restarts it on 0.14. Approvals prepared before the update are retired — prepare them
+  again — and 0.13 cannot use what 0.14 prepares.
+- `agent-gmail send list --json` and `gmail_send_list` now return `{ approvals, unsent }` instead of an array, and
+  `gmail_send_list` reads Drafts.
+- The entries of `agentcomms approvals list --json`, `comms_approvals_list` and Gmail's list are now each approval's
+  public object — `approvalId`, `state`, `claimable`, `route`, its times and reason, what a sender wrote inside the
+  untrusted-content envelope. The stored fields, `policy`, `requiredPolicy`, `riskFlags` and the rest, are gone.
+  `--state corrupt` lists the records that cannot be used.
+- An approval id of the wrong kind — a send's given to a change, say — now gets the same `NOT_FOUND` as an id nobody
+  prepared, with no hint pointing at another command. Every approval `NOT_FOUND` now reads alike, "nothing was sent:
+  no approval <id>" (or changed, or saved), pinned servers included: "no approval "x" for the "work" mailbox" is gone.
+- An uncertain provider outcome is `SEND_OUTCOME_UNKNOWN` (exit `10`, never retryable) instead of `TRANSIENT` (exit
+  `75`), for Gmail, Slack and Resend alike. An expired approval is `APPROVAL_EXPIRED` everywhere; `APPROVAL_REQUIRED`
+  now means only that a person's approval is missing; a used approval is `APPROVAL_VOID`, and one being sent is a
+  retryable `APPROVAL_PENDING`. Branch on the code.
+- New commands and tools: the four waits above.
+- `sentMessageId` (Gmail), `ts` (Slack) and `resendId` (Resend) are absent when the provider returned no id, and each
+  send result says what happened in `said`.
+- Resend's `send status` says what Resend's own last event reports, attributed to it and about the whole email —
+  "sent (Resend reports delivered)", "Resend reports a bounce", "scheduled for <time>, not yet sent", "Resend reports
+  it cancelled" — in a new `outcome` and its `verdict`. With a sending-only key it says "current outcome unavailable"
+  rather than "sent". A scheduled email is "accepted by Resend, scheduled for <time>", never "sent" because its time
+  has passed. A cancellation Resend confirmed stays a success even when this machine could not record it.
+- Setting a send policy — `agent-gmail inbox policy`, `agent-slack workspace policy`, `agent-resend account policy` and
+  their tools — returns `fenced`: `{ revoked, alreadySending, couldNotRevoke }`, which the CLI prints.
+- A Slack file post that fails says "nothing was posted", naming any file that went up first.
+- Finished approval records are deleted 90 days after they finished. The pruning runs at most once a day, at most 200
+  records, when something next uses approvals: a call may take up to 5 seconds once a day.
+- To get 0.14.0: your servers will say an update is out. Say "update my comms" in a chat, or run the update command
+  the stop gives, then restart every client.
+
 ## 0.13.1
 
 **A command you are told to run now runs where you paste it.** When an approval waits for you at your terminal, a

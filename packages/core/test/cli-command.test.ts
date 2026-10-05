@@ -1148,12 +1148,14 @@ test('a global install upgraded in place: the command printed before runs the ne
   const printed = [...command.words];
   assert.equal(command.entry, join(global.root, 'dist', 'cli.mjs'));
   assert.equal(JSON.parse(runPrinted(command).stdout).fixture, `slack ${VERSION}`);
-  // Upgraded in place by whatever installed it: the same folder, a newer release.
-  writePackage(global.root, 'slack', { version: '0.14.0', files: [] });
-  writeRunnable(join(global.root, 'dist', 'cli.mjs'), 'slack 0.14.0');
+  // Upgraded in place by whatever installed it: the same folder, a newer release than this one.
+  const [major, minor] = VERSION.split('.').map(Number);
+  const newer = `${major}.${(minor ?? 0) + 1}.0`;
+  writePackage(global.root, 'slack', { version: newer, files: [] });
+  writeRunnable(join(global.root, 'dist', 'cli.mjs'), `slack ${newer}`);
   const after = runPrinted(command);
   assert.equal(after.status, 0, after.stderr);
-  assert.equal(JSON.parse(after.stdout).fixture, 'slack 0.14.0', 'the same path runs what is there now');
+  assert.equal(JSON.parse(after.stdout).fixture, `slack ${newer}`, 'the same path runs what is there now');
   assert.deepEqual(command.words, printed);
   assert.deepEqual(
     whyNot(notLocated(fromRegistrations('core', 'slack', [server], { platform }), 'not-registered', 'slack')),
