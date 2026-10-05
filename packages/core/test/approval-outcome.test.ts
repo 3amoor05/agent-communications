@@ -391,7 +391,7 @@ test('a claim loads the config exactly once', async () => {
   assert.equal(loads, 1, 'one claim, one read');
 });
 
-test('a nonexistent, foreign or wrong-kind id is one NOT_FOUND, byte for byte, before anything of the record is classified or written', async () => {
+test('a nonexistent, foreign, wrong-kind or other-channel id is one NOT_FOUND, byte for byte, before anything of the record is classified or written', async () => {
   const { store, record, time, config } = await sendStore();
   const change = await store.createChange({ channel: 'slack', change: CHANGE_BINDING, policy: 'chat' });
   // Past its deadline, and its owner gone: anything that classified it would write `expired` or `revoked`.
@@ -421,6 +421,14 @@ test('a nonexistent, foreign or wrong-kind id is one NOT_FOUND, byte for byte, b
     nothing,
     'pinned away',
   );
+  // A Gmail send, given to another channel's terminal approval — pinned to its channel, not to one owner (CUE-404).
+  for (const action of ['approve', 'inspect'] as const) {
+    assert.equal(
+      await envelope(store.inspect(record.approvalId, { kind: 'send', channel: 'slack' }, { action })),
+      nothing,
+      `another channel, ${action}`,
+    );
+  }
   assert.equal(
     await envelope(
       store.revoke(record.approvalId, 'no', { disposition: 'person', expect: { kind: 'send', owner: SLACK } }),

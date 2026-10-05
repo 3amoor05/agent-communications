@@ -34,6 +34,7 @@ import {
   withApproval,
 } from './approval-outcome.ts';
 import {
+  channelOf,
   corruptStubOf,
   decodeStored,
   integrityRefusal,
@@ -659,25 +660,30 @@ export function sendApprovesHint(maker: CliHandoffs, approvalId: string): string
 }
 
 /**
- * What a caller takes an id to be: an approval of `kind` (any kind when left out), and — on a surface pinned to one
- * mailbox or account, or a claim made for one — owned by `owner`. Anything else is the one `NOT_FOUND`
- * (`approvalNotFound`), checked before the record's state is looked at.
+ * What a caller takes an id to be: an approval of `kind` (any kind when left out); on a channel's own surface that is
+ * no one owner's — its terminal approval — one of `channel`'s, the manifest channel that prepared it; and on a surface
+ * pinned to one mailbox or account, or a claim made for one, owned by `owner`. Anything else is the one `NOT_FOUND`
+ * (`approvalNotFound`), checked before the record's state is looked at: another channel's send given to Gmail's
+ * `approve` is not found there, as one nobody prepared is not (design 2026-10-05 §D2).
  */
 export interface ApprovalExpectation {
   readonly kind?: ApprovalKind | undefined;
+  readonly channel?: string | undefined;
   readonly owner?: string | undefined;
 }
 
 /**
- * Whether the caller may be told of `found`: it is the kind and the owner the caller expects. A record whose kind or
- * owner cannot be trusted — unreadable, or corrupt with an unverifiable binding — is never shown to a pinned caller, and
- * reaches an unpinned one only as its stub (the integrity refusal).
+ * Whether the caller may be told of `found`: it is the kind, the channel and the owner the caller expects. A record
+ * whose kind or owner cannot be trusted — unreadable, or corrupt with an unverifiable binding — is never shown to a
+ * pinned caller, and reaches an unpinned one only as its stub (the integrity refusal). One whose channel cannot be told
+ * — an earlier release's whose account is gone — is no channel's own.
  */
 function matchesExpectation(found: StoredApproval, expect: ApprovalExpectation): boolean {
   const kind = kindOf(found);
   const owner = ownerOf(found);
   if (kind === null || owner === null) return expect.owner === undefined;
   if (expect.kind !== undefined && kind !== expect.kind) return false;
+  if (expect.channel !== undefined && channelOf(found) !== expect.channel) return false;
   return expect.owner === undefined || owner === expect.owner;
 }
 

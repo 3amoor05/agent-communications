@@ -297,6 +297,25 @@ export function kindOf(stored: StoredApproval | null): ApprovalKind | null {
   }
 }
 
+/**
+ * Which channel a record is — the manifest channel that prepared it — from the same trusted sources as `ownerOf`; null
+ * when that cannot be known: an unreadable file, a corrupt record whose binding does not verify, or an earlier
+ * release's record whose owner no channel can be told from (an `acc_` owner whose account is gone).
+ */
+export function channelOf(stored: StoredApproval | null): string | null {
+  if (stored === null) return null;
+  switch (stored.form) {
+    case 'v2':
+      return stored.record.channel;
+    case 'legacy':
+      return stored.view.channel;
+    case 'corrupt':
+      return stored.safe?.channel ?? null;
+    case 'unreadable':
+      return null;
+  }
+}
+
 /** The stored or derived state, or `corrupt`. */
 export function stateOf(stored: StoredApproval): ApprovalState | 'corrupt' {
   switch (stored.form) {
