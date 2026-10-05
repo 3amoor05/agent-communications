@@ -15,7 +15,10 @@ import {
   sealAttempts,
   TERMINAL_PYTHON,
 } from '../../../test/helpers/real-shell.mjs';
-// `agentcomms doctor`, in this process: a child would reach for the keychain, which the seal refuses.
+// `agentcomms doctor`, in this process, over core's own opening of this home: a child would reach for the keychain,
+// which the seal refuses.
+import { openCore as openCoreSource } from '../../core/src/core.ts';
+import { CORE_CALLER } from '../../core/src/handoffs.ts';
 import { doctor } from '../../core/src/operations/maintenance.ts';
 import { GMAIL_CALLER } from '../src/caller.ts';
 import { run } from '../src/cli/program.ts';
@@ -608,7 +611,8 @@ test('a released send past its last config read when 0.14 converts is the docume
     [approvalId]: 'sending',
   });
   assert.equal(JSON.parse(m.bytes(approvalId)).state, 'sending', 'never revoked under it');
-  const shown = (await doctor(m.core, m.harness.env, { keyring: null })).checks.find(
+  const agentcomms = openCoreSource({ env: m.harness.env, caller: CORE_CALLER });
+  const shown = (await doctor(agentcomms, m.harness.env, { keyring: null })).checks.find(
     (check) => check.name === 'earlier-release approvals',
   );
   assert.match(shown?.detail ?? '', new RegExp(`1 reached by an earlier release's send \\(${approvalId}\\)$`));
