@@ -1,6 +1,7 @@
 # Local event emission — design
 
-Status: **revised after round 18; five owner questions open (§8)**. Specification only, not an implementation.
+Status: **frozen after review round 19, pending the owner** — five questions (§8) and two open review items (§9). Rounds
+1–18 are resolved; round 19's two findings are recorded, with their intended direction, rather than designed here. Specification only, not an implementation.
 Written from the cited research pass (§2) and a checked read of this repository at `90463e1`.
 This design adds a new **standing disclosure authorisation**; it does not treat recurring event delivery
 as the existing per-content send gate
@@ -2643,6 +2644,27 @@ are in scope only through the approved
 5. **Defaults** — hosted judges (event fields sent to TypeSafe) are available but every use needs its own standing
    authorisation; should they instead be off unless enabled? And are the default retention values above (24 hours for
    content, 30 days for decision metadata) right for your accounts?
+
+## 9. Open review items (round 19)
+
+The design review was stopped after round 19 so that the owner's answers to §8 can shape what is designed next; both
+items below are real, and phase planning must close them before D4's WhatsApp source and D9's list fence are built.
+
+1. **An unstaged WhatsApp key in a replacement baseline has no durable payload for the old version's drain.** A
+   replacement point records only `{T, baselineGeneration, baselineIdentities}` and snapshot rows hold only raw key
+   tuples, so a post-cut-over message that first appears in the new version's checked baseline, and is then edited,
+   deleted or gone before the old version drains it, cannot be formed from its first representation. Intended
+   direction: acquiring the replacement point durably preserves the first representation and time (encrypted, D8) of
+   every key the old version is still owed, before the checked copy is disposed. Owed tests: that case with a deletion
+   and with each payload mutation between the point and the drain, and across a restart.
+2. **The WhatsApp allow/deny fence is not crash-safe, and SSE replay does not check it.** The lists are a separate file
+   that `allow`, `deny` and `clear` write under their own lock (`packages/whatsapp/src/operations/chat-lists.ts:90`),
+   while only the daemon opens the events database (D12), and the replay and dry-run fences (D7, D8) do not consult
+   visibility. A crash after the list file commits and before the purge leaves a newly hidden item replayable.
+   Intended direction: a recoverable list-change protocol between the file and the daemon (a journal the daemon
+   applies on start), and a live-list check under the visibility gate for `dryrun show` and every replayed SSE frame.
+   Owed tests: a crash after each file, journal and database step, then `dryrun show` and a `Last-Event-ID` replay
+   disclose nothing and recovery purges the stale rows.
 
 ## Appendix A. Version-1 event catalogue (normative)
 
