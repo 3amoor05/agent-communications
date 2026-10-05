@@ -1,287 +1,325 @@
 # CUE-403 — runnable CLI handoffs from the running installation — design
 
-Status: **proposed for 0.13.1; re-scoped 2026-10-05 after adversarial review round 3. No implementation is in this
-change.**
+Status: **proposed for 0.13.1; revised after round 4 (6 P1, 4 P2, 1 P3), 2026-10-05. No implementation is in
+this change.**
 
 ## 1. What is being fixed
 
-CUE-403's harm is not that a bare command is inconvenient. It is that a result can require a person to approve or
-repair something at a terminal, then print `agentcomms` or `agent-*` even though that CLI is not on the person's
-`PATH`. Gmail's send preparation does that for `agent-gmail approve`, for example
-(`packages/gmail/src/operations/send.ts:386-455`), and change approval does the same for the channel's approval
-command (`packages/core/src/changes.ts:73-98`, `packages/core/src/changes.ts:265-283`). Under `confirm`, terminal
-approval is deliberately not an MCP capability (`docs/superpowers/specs/2026-09-25-cli-mcp-parity-design.md:143-151`).
+A runtime result can require a person to approve or repair something at a terminal, then print `agentcomms` or an
+`agent-*` binary which is not on that person's `PATH`. Gmail send preparation and the shared change flow do that now
+(`packages/gmail/src/operations/send.ts:386-455`, `packages/core/src/changes.ts:73-98`,
+`packages/core/src/changes.ts:265-283`). Terminal approval deliberately has no MCP capability under `confirm`
+(`docs/superpowers/specs/2026-09-25-cli-mcp-parity-design.md:148-152`).
 
 The 0.13.1 acceptance criterion is:
 
-> **Every agent-communications CLI command printed for a person to run is runnable without an
-> `agentcomms` or `agent-*` command on `PATH`, and reaches the same installation and paths as the process that
-> printed it.**
+> Every new terminal handoff either prints a pasteable command which does not require an agent-communications binary
+> on `PATH` and fixes the config, state and required data directories to those resolved by the printing process, or
+> prints no command and names the package to install plus the MCP action to use. It never prints a bare suite binary.
 
-This covers approvals, handoffs, reruns and fixes in CLI and MCP results. It does not put commands on `PATH`, edit a
-shell profile or change the approval, send or change-policy models.
+This fixes approvals, reruns and repairs. It does not publish shims, edit `PATH` or profiles, or change approval,
+sending or change-policy semantics.
 
-## 2. What is true now
+## 2. Facts the design relies on
 
-- A managed runtime entry is
-  `<data>/runtime/<version>-<package>/node_modules/<package>/dist/cli.mjs`; the registered server starts an absolute
-  Node with that absolute entry (`packages/core/src/mcp-install.ts:299-321`,
-  `packages/core/src/mcp-install.ts:566-580`). Nothing there publishes a terminal command.
-- Local registrations already find the package's own `src/cli.ts` or built `dist/cli.mjs` and add
-  `--experimental-strip-types --disable-warning=ExperimentalWarning` for a TypeScript entry
-  (`packages/core/src/mcp-install.ts:523-559`, `packages/core/src/mcp-install.ts:583-603`). The hidden update-check
-  child likewise restarts the running CLI with `process.execPath`, `process.execArgv` and the real CLI entry rather
-  than an npm shim (`packages/core/src/update-check.ts:174-209`).
-- The path overrides this design must preserve are exactly `AGENT_COMMS_CONFIG_DIR`, `AGENT_COMMS_STATE_DIR`,
-  `AGENT_COMMS_DATA_DIR`, `XDG_CONFIG_HOME` and `XDG_DATA_HOME`; `resolvePaths` reads them when selecting config,
-  state and data (`packages/core/src/paths.ts:37-66`).
-- `shellCommand` renders argument words with POSIX single-quote escaping, or the subset that cmd.exe, Windows
-  PowerShell and PowerShell 7 pass alike; for an unsafe Windows word it emits no line, and `inlineCommand` /
-  `commandText` show inert JSON words instead (`packages/core/src/cli-runtime.ts:67-129`,
-  `packages/core/src/cli-runtime.ts:136-191`). It does not locate the first word or carry an environment.
-- Core and every channel declare their terminal binary in `package.json` (`packages/core/package.json:24-25`,
-  `packages/gmail/package.json:24-25`, `packages/slack/package.json:24-25`,
-  `packages/resend/package.json:24-25`, `packages/whatsapp/package.json:24-25`). Each channel currently names
-  `@agentcomms/core` as a workspace development dependency (`packages/gmail/package.json:44-45`,
-  `packages/slack/package.json:41-42`, `packages/resend/package.json:41-42`,
-  `packages/whatsapp/package.json:41-42`); the Gmail server-only package reaches Gmail through its own runtime
-  dependency (`packages/gmail-mcp/package.json:41-43`).
-- The present printed-command lint finds direct interpolation and concatenation but deliberately accepts a bare CLI
-  passed to `shellCommand` (`test/printed-command-construction.test.mjs:7-16`,
-  `test/printed-command-construction.test.mjs:61-99`). The channel registry already derives package and binary facts
-  from each package's `agentcomms` manifest (`scripts/channels.mjs:27-59`, `scripts/channels.mjs:114-150`).
+- Managed registrations use an absolute Node command and a versioned runtime entry
+  (`packages/core/src/mcp-install.ts:299-320`, `packages/core/src/mcp-install.ts:566-580`). Registered-server scans
+  retain command, arguments, package and environment, and distinguish unreadable client configs
+  (`packages/core/src/mcp-clients.ts:30-63`, `packages/core/src/mcp-clients.ts:376-450`). Product and pinned-version
+  recognition already derive from package, binary and entry facts (`packages/core/src/mcp-install.ts:338-390`).
+- A checkout launcher currently searches source and built entries, which permits a stale `dist` fallback
+  (`packages/core/src/mcp-install.ts:523-559`, `packages/core/src/mcp-install.ts:583-603`). Each published manifest maps
+  its primary binary to `dist/cli.mjs`, for example Gmail (`packages/gmail/package.json:24-25`).
+- `resolvePaths` makes relative overrides absolute and otherwise consults XDG, `HOME`/`USERPROFILE`, `APPDATA` and
+  `LOCALAPPDATA` while deriving config, state and data (`packages/core/src/paths.ts:37-66`). A registered server's
+  minimal environment currently fixes only the config directory (`packages/core/src/mcp-install.ts:266-280`).
+- Every channel declares its binary and package facts in `package.json`; the tooling discovers that data rather than
+  keeping a channel list (`docs/superpowers/specs/2026-09-26-channel-plugins-design.md:24-52`,
+  `scripts/channels.mjs:27-59`, `scripts/channels.mjs:114-150`).
+- The current Windows renderer accepts only the intersection safely understood by cmd.exe and both PowerShell eras,
+  and otherwise emits inert JSON (`packages/core/src/cli-runtime.ts:67-129`,
+  `packages/core/src/cli-runtime.ts:136-191`).
 
 ## 3. Decisions
 
-### D1. One core locator prints the exact running installation
+### D1. One structured locator; three resolution directions
 
-Core owns one function, `locateCliCommand`, used wherever runtime output tells a person to run an
-agent-communications CLI. Its input names the calling package and resolver URL, the target manifest, argument words,
-the process environment and the requested shell. Its result is a structured command: absolute Node, retained Node
-flags, absolute CLI entry, arguments, carried environment and the runnable rendering or an explicit reason no line
-can be rendered. A caller never supplies a CLI name as the executable and never quotes a line itself.
+Core owns `locateCliCommand`. A request supplies the calling package's resolver URL, the target channel manifest,
+argument words, whether the command needs the data directory, and the output platform. A successful result contains
+launcher words and their shell renderings; a failure contains a reason, the package to install and the equivalent MCP
+tool or action. Callers never supply a binary as word zero and never quote a line themselves.
 
-The executable is `process.execPath`. The retained `process.execArgv` allowlist is:
+For an absolute Node-and-entry launch, the interpreter is `process.execPath`. The only retained `process.execArgv`
+flags are `--experimental-strip-types`, and `--experimental-transform-types` when the running source invocation used
+it. Debug, test, eval, preload/loader, condition, warning, source-map, title and memory flags are not CLI requirements.
+The existing local launcher shows why source needs type stripping (`packages/core/src/mcp-install.ts:546-556`).
 
-- `--experimental-strip-types`, because Node 22.12–22.17 needs it to execute this repository's `.ts` CLI entries;
-- `--experimental-transform-types`, only when the running checkout used it, because a TypeScript entry using
-  transform-only syntax needs the same transform.
+Resolution is directional:
 
-Every other Node flag is dropped: debugger and profiler listeners, test/eval/input mode, preloaders and loaders,
-conditions, source-map and warning preferences, titles and memory tuning are properties of the parent invocation,
-not requirements of these CLIs. In particular, the checkout launcher's `--disable-warning=ExperimentalWarning` is
-cosmetic and is not copied. The existing launcher establishes why type stripping is needed here
-(`packages/core/src/mcp-install.ts:546-556`, `scripts/registries.mjs:21-22`). Flag spellings are kept as passed; the
-filter never copies a following word for an option it does not retain.
+1. **The calling product's own CLI.** Walk from the resolver URL to the package manifest and verify its name. If the
+   resolver URL itself ends in `.ts`, select exactly `<package-root>/src/cli.ts`; do not inspect `dist`. Otherwise
+   select the manifest's `bin[agentcomms.binary]`. This makes a checkout with no build and one with a stale build both
+   run source.
+2. **Channel to core.** Resolve the channel's installed `@agentcomms/core` runtime dependency from the caller, verify
+   the channel and core versions are equal, then resolve core by rule 1. Every channel moves `@agentcomms/core` from
+   `devDependencies` to `dependencies`; those edges are currently development-only
+   (`packages/gmail/package.json:44-45`, `packages/slack/package.json:41-42`,
+   `packages/resend/package.json:41-42`, `packages/whatsapp/package.json:41-42`). Gmail's server-only wrapper still
+   supplies a resolver URL from its Gmail dependency (`packages/gmail-mcp/package.json:41-43`).
+3. **Core to a channel.** Core scans the client registrations it can read, filters registrations belonging to the
+   manifest product with the existing product recogniser, and sorts usable matches by client, config path and server
+   name for a deterministic choice. For a managed registration it reuses the registration's interpreter and checked
+   runtime CLI entry, dropping the server-only `mcp` and narrowing arguments. For an npx registration it uses the
+   registered npx executable and emits `npx -y @agentcomms/<channel>@<registered-version> …`; Gmail uses
+   `@agentcomms/gmail`, not its server-only wrapper. A registration with an absent entry, an unpinned npx spec, an
+   unreadable command, or an unrecognised launcher is not usable. With no usable registration, the result contains no
+   shell line: it names `@agentcomms/<channel>` and the channel MCP tool/action instead. Core has no channel dependency
+   to follow (`packages/core/src/operations/servers.ts:107-123`), while managed and npx registrations already expose
+   their version shapes (`packages/core/src/mcp-install.ts:338-350`,
+   `packages/core/src/operations/servers.ts:575-608`).
 
-The entry is resolved from package data, never from `PATH`:
+Before any file entry is returned, the locator `realpath`s both package root and entry, requires a readable regular
+file, and checks containment by path segments after realpath. A missing manifest binary, a mismatch between
+`agentcomms.binary` and `bin`, a symlink escape, a directory or unreadable target, a non-absolute interpreter, or a
+version mismatch returns no command. Only the interpreter and a file entry are necessarily absolute; subcommands,
+flags, ids and an npx package spec are ordinary argument words.
 
-1. For the calling product's own CLI, the caller's module URL locates that package root; its top-level `bin` entry
-   for `agentcomms.binary` is resolved, contained under that root and made absolute. This also handles
-   `@agentcomms/gmail-mcp`: Gmail supplies a resolver URL from the Gmail package reached through the wrapper's
-   dependency, rather than treating the wrapper's server entry as `agent-gmail`.
-2. For another suite package — today, a channel printing core's `agentcomms` — resolution starts at the calling
-   package and follows its own `@agentcomms/core` dependency. In 0.13.1 every channel moves that existing workspace
-   edge into `dependencies`, published at the same exact lockstep version. The locator reads both package versions
-   and refuses a mismatch. It then resolves core's own `bin.agentcomms`, not a sibling path guessed by the channel.
-3. A missing package, missing or escaping bin entry, non-absolute `process.execPath`, or version mismatch produces no
-   substitute bare command. It is an installation error reported in the result.
+The same resolver handles manifest-generated approval-kind corrections. The current corrections concatenate every
+manifest's approve string (`packages/core/src/channel-words.ts:39-52`, `packages/core/src/changes.ts:314-332`,
+`packages/core/src/approvals.ts:644-655`); after this change each alternative is located separately. An unavailable
+alternative names its package and tells the person to return to the originating channel MCP action, never to type a
+bare approve command.
 
-The resulting shapes are installation-independent:
+### D2. Resolved paths travel as global options, never environment assignments
 
-| Launcher that started the result | Command shape |
-|---|---|
-| managed | `/absolute/node <data>/runtime/0.13.1-gmail/node_modules/@agentcomms/gmail/dist/cli.mjs …` |
-| npx | `/absolute/node <npx-cache>/node_modules/@agentcomms/gmail/dist/cli.mjs …` |
-| global | `/absolute/node <global-prefix>/node_modules/@agentcomms/gmail/dist/cli.mjs …` |
-| checkout | `/absolute/node --experimental-strip-types <repo>/packages/gmail/src/cli.ts …` |
-
-Thus npx output does not require `npx` to remain on `PATH`, a global output does not depend on the global bin
-directory, a managed output uses that managed runtime, and a checkout output keeps the flag which makes its source
-entry executable. POSIX and Windows differ only in rendering; all stored words are absolute.
-
-### D2. Carry the server's path overrides into the command
-
-The locator copies the five variables in §2 when they are present in the printing process's environment, including
-an explicitly empty value, in this fixed order:
+Every CLI gains these global options in the shared CLI runtime:
 
 ```
-AGENT_COMMS_CONFIG_DIR AGENT_COMMS_STATE_DIR AGENT_COMMS_DATA_DIR XDG_CONFIG_HOME XDG_DATA_HOME
+--config-dir <dir>  --state-dir <dir>  --data-dir <dir>
 ```
 
-It does not replace them with resolved directories: preserving the original environment preserves precedence and
-lets the invoked CLI resolve paths by the same rules. An unset variable is omitted.
+They are parsed before a core/channel context is opened. Each has exactly the precedence, empty-value treatment and
+absolute `resolve()` behaviour of `AGENT_COMMS_CONFIG_DIR`, `AGENT_COMMS_STATE_DIR` and
+`AGENT_COMMS_DATA_DIR` respectively (`packages/core/src/paths.ts:37-66`). Directly entered relative values therefore
+resolve in the invoked CLI's working directory, just as the environment overrides do.
 
-Argument words still go through `shellCommand`, and prose still embeds the result through `inlineCommand` or
-`commandText`. The environment-aware renderer uses the same quote-or-refuse rules for values. POSIX gets assignment
-prefixes. Windows gets separate, labelled PowerShell and cmd.exe forms because their assignment and invocation
-syntax is not interchangeable. A Windows result never calls one line universal.
+The locator does not reproduce the printing environment. Between the entry/package word and the subcommand, it
+always inserts the printing process's already-resolved, absolute `--config-dir` and `--state-dir`, plus `--data-dir`
+for a command that reads or changes managed runtimes.
+Those option values override conflicting variables in the target shell. Consequently a different working directory,
+relative source override, XDG setting, `HOME`, `USERPROFILE`, `APPDATA` or `LOCALAPPDATA` cannot redirect the pasted
+handoff. No environment assignment is printed on any platform, so the command cannot leave a changed session
+environment behind.
 
-For a config directory containing a space, an apostrophe and a non-ASCII character, the exact forms are:
+These options are flags, not capabilities. They add no row to `capabilities.json`, whose rows describe a CLI command,
+MCP tool and shared operation (`capabilities.json:1-2`). The parity check continues to enumerate command paths and
+tool names, not global flags (`scripts/parity.mjs:317-333`); its CLI driver must exercise every row once with the path
+flags to prove parsing precedes operation dispatch.
 
-```sh
-AGENT_COMMS_CONFIG_DIR='/opt/Agent'\''s café files/config' '/opt/Agent'\''s café files/node' '/opt/Agent'\''s café files/core/dist/cli.mjs' approve ap_example
-```
+### D3. Render for one Windows shell at a time
+
+POSIX keeps its single-quote renderer. Windows returns a primary **PowerShell** line and, when possible, a labelled
+**cmd.exe alternative**:
+
+- PowerShell is `& '<word>' '<word>' …`. Every word is single-quoted and an apostrophe is doubled. `$`, `%`, `!`, a
+  backtick, an empty word and trailing backslashes are literal in this form.
+- cmd.exe double-quotes every word. The run of backslashes before the closing quote is doubled. A word containing `%`
+  or `"` has no safe form under this contract, so the cmd.exe alternative is omitted and the result says which word
+  made it unavailable. PowerShell remains present.
+
+For all hostile characters together, the exact primary result is:
 
 ```powershell
-$env:AGENT_COMMS_CONFIG_DIR = "C:\Agent's café files\config"; & "C:\Agent's café files\node.exe" "C:\Agent's café files\core\dist\cli.mjs" approve ap_example
+& 'C:\Agent$Data\node.exe' 'C:\Agent''s suite\core\dist\cli.mjs' '--config-dir' 'C:\100%!`store\' '--state-dir' 'C:\Agent''s café state\' 'approve' 'ap_example'
 ```
+
+The cmd.exe alternative is omitted with: `cmd.exe alternative unavailable: the --config-dir value contains %`.
+Without `%` or a double quote, trailing backslashes are doubled exactly:
 
 ```bat
-set "AGENT_COMMS_CONFIG_DIR=C:\Agent's café files\config" && "C:\Agent's café files\node.exe" "C:\Agent's café files\core\dist\cli.mjs" approve ap_example
+"C:\Agent$Data\node.exe" "C:\Suite\core\dist\cli.mjs" "--config-dir" "C:\Agent!`store\\" "--state-dir" "C:\Café State\\" "approve" "ap_example"
 ```
 
-Additional variables repeat the assignment segment in the fixed order. If an existing Windows safety rule cannot
-render a value or argument, the result contains the inert JSON words and names the shell-specific manual action; it
-does not print a partial line or call JSON a runnable command (`packages/core/src/cli-runtime.ts:117-121`,
-`packages/core/src/cli-runtime.ts:152-191`).
+The equivalent POSIX shape remains:
 
-### D3. Every runtime handoff uses the locator, and a manifest-derived lint enforces it
+```sh
+'/opt/Agent'\''s/node' '/opt/Agent'\''s/core/dist/cli.mjs' --config-dir '/opt/Agent'\''s/config' --state-dir '/opt/Agent'\''s/state' approve ap_example
+```
 
-The migration inventory is below. “Handoff” means runtime result, error, hint, fix, command or `nextStep` text that
-asks a person to run a suite CLI; static help syntax and prose explaining a command's grammar are not machine-specific
-handoffs.
+`ShellCommand`, `inlineCommand` and `commandText` carry the labelled renderings rather than pretending one Windows
+line is universal. They never fall back to runnable-looking JSON for a legal Windows path.
 
-- **Core:** change approval and rerun, approval-kind correction, save-destination approval, daily update and
-  `update --later`, policy/attachment/organisation/secrets reruns and repairs, install/update registration repair and
-  doctor fixes (`packages/core/src/changes.ts:73-98`, `packages/core/src/changes.ts:265-283`,
-  `packages/core/src/changes.ts:461-465`, `packages/core/src/approvals.ts:635-655`,
-  `packages/core/src/approvals.ts:889-897`, `packages/core/src/change-flow.ts:272-302`,
-  `packages/core/src/save-destination.ts:648-676`, `packages/core/src/save-destination.ts:744-756`,
-  `packages/core/src/update-state.ts:305-347`, `packages/core/src/update-gate.ts:375-414`,
-  `packages/core/src/operations/update.ts:298-307`, `packages/core/src/operations/update.ts:740-750`,
-  `packages/core/src/config.ts:722`, `packages/core/src/organisations.ts:243-244`,
-  `packages/core/src/organisations.ts:506`, `packages/core/src/organisations.ts:698-718`,
-  `packages/core/src/organisations.ts:870`, `packages/core/src/operations/organisations.ts:205-407`,
+### D4. Packaging follows the runtime edge
+
+All four channel packages publish exact-lockstep `@agentcomms/core` runtime dependencies. Their bundles may still
+inline core for startup, but comments may no longer claim that installing a channel has no dependency tree; those
+claims exist in every channel bundler config (`packages/gmail/tsdown.config.ts:3-5`,
+`packages/slack/tsdown.config.ts:3-5`, `packages/resend/tsdown.config.ts:3-5`,
+`packages/whatsapp/tsdown.config.ts:3-6`).
+
+`scripts/verify-package.mjs` recursively packs the candidate's transitive workspace `dependencies` and
+`optionalDependencies`, deduplicates them, and gives every tarball to the isolated npm install in dependency order.
+It currently packs only direct workspace edges (`scripts/verify-package.mjs:96-108`) before the consumer install
+(`scripts/verify-package.mjs:135-150`). Thus verifying `gmail-mcp` packs Gmail and Gmail's local core tarball rather
+than asking the registry for an unpublished core.
+
+### D5. Every runtime handoff migrates; a manifest-derived lint keeps it migrated
+
+The implementation keeps a checked, table-driven inventory with one row per runtime handoff and an assertion for the
+row's command or no-command fallback. The audited groups are:
+
+- **Core:** approvals, change flow, save-destination questions, update, policy, attachment, organisation, secrets,
+  registration and doctor handoffs (`packages/core/src/changes.ts:73-98`,
+  `packages/core/src/changes.ts:265-332`, `packages/core/src/changes.ts:461-465`,
+  `packages/core/src/approvals.ts:635-655`, `packages/core/src/approvals.ts:889-897`,
+  `packages/core/src/change-flow.ts:272-302`, `packages/core/src/save-destination.ts:648-676`,
+  `packages/core/src/save-destination.ts:744-756`, `packages/core/src/update-state.ts:305-347`,
+  `packages/core/src/update-gate.ts:340-414`, `packages/core/src/update-check.ts:382-445`,
+  `packages/core/src/render.ts:432-479`, `packages/core/src/config.ts:722`,
+  `packages/core/src/organisations.ts:243-244`, `packages/core/src/organisations.ts:506`,
+  `packages/core/src/organisations.ts:698-718`, `packages/core/src/organisations.ts:870`,
+  `packages/core/src/operations/attach-settings.ts:304-348`,
+  `packages/core/src/operations/maintenance.ts:143-162`,
+  `packages/core/src/operations/maintenance.ts:217-220`,
+  `packages/core/src/operations/maintenance.ts:238-265`,
+  `packages/core/src/operations/maintenance.ts:327-360`,
+  `packages/core/src/operations/organisations.ts:205-407`,
   `packages/core/src/operations/organisations.ts:578-730`,
   `packages/core/src/operations/organisations.ts:1152-1376`,
   `packages/core/src/operations/secrets-migrate.ts:250-376`,
-  `packages/core/src/operations/change-policy.ts:135-145`,
-  `packages/core/src/operations/maintenance.ts:217-220`,
-  `packages/core/src/operations/maintenance.ts:327-360`, `packages/core/src/channel-words.ts:39-52`,
-  `packages/core/src/channel-words.ts:75-82`, `packages/core/src/cli.ts:285-290`,
-  `packages/core/src/cli.ts:456-787`, `packages/core/src/cli.ts:863-900`,
-  `packages/core/src/cli.ts:948-950`).
-- **Gmail:** send approval and refusal, save-destination and confirm-client completion, sign-in/finish/reauth, client,
-  inbox, organisation and scope repair, setup/import, doctor and retry handoffs
-  (`packages/gmail/src/operations/send.ts:386-455`, `packages/gmail/src/operations/send.ts:585-612`,
-  `packages/gmail/src/operations/attachments.ts:374-375`, `packages/gmail/src/mcp/server.ts:160-162`,
-  `packages/gmail/src/mcp/server.ts:997`, `packages/gmail/src/mcp/server.ts:1388`,
-  `packages/gmail/src/mcp/server.ts:2381-2393`, `packages/gmail/src/mcp/server.ts:2481-2487`,
-  `packages/gmail/src/cli/program.ts:388-693`, `packages/gmail/src/cli/program.ts:1033-1046`,
-  `packages/gmail/src/cli/program.ts:1281-1302`, `packages/gmail/src/cli/program.ts:1823-2422`,
-  `packages/gmail/src/auth/flows.ts:117`,
-  `packages/gmail/src/auth/scopes.ts:85-88`, `packages/gmail/src/auth/session.ts:104-176`,
-  `packages/gmail/src/gmail-api/errors.ts:140-156`, `packages/gmail/src/operations/client-choice.ts:95-254`,
+  `packages/core/src/operations/change-policy.ts:135-145`, `packages/core/src/jail.ts:199-205`,
+  `packages/core/src/secrets.ts:73-74`, `packages/core/src/channel-words.ts:39-52`,
+  `packages/core/src/cli.ts:285-290`, `packages/core/src/cli.ts:456-787`,
+  `packages/core/src/cli.ts:863-900`, `packages/core/src/cli.ts:948-950`).
+- **Gmail:** send, sign-in, client/inbox/consent repair, setup, doctor and rendering handoffs
+  (`packages/gmail/src/operations/send.ts:386-612`, `packages/gmail/src/operations/attachments.ts:374-375`,
+  `packages/gmail/src/operations/inboxes.ts:350-370`, `packages/gmail/src/operations/client-choice.ts:95-254`,
   `packages/gmail/src/operations/clients.ts:134-511`, `packages/gmail/src/operations/consent.ts:91-610`,
   `packages/gmail/src/operations/signin.ts:213-681`, `packages/gmail/src/operations/doctor.ts:269-565`,
-  `packages/gmail/src/operations/import-legacy.ts:505-512`, `packages/gmail/src/operations/inbox-names.ts:23`,
-  `packages/gmail/src/cli/render.ts:83-204`, `packages/gmail/src/cli/render.ts:661-916`).
-- **Slack:** post/reaction approval and refusal, workspace sign-in/finish/reauth/mode/removal, app/manifest, draft,
-  destination, file and doctor handoffs (`packages/slack/src/operations/send.ts:573-605`,
-  `packages/slack/src/auth/refresh.ts:168-170`, `packages/slack/src/operations/changes.ts:70-494`,
-  `packages/slack/src/operations/workspaces.ts:235-542`, `packages/slack/src/operations/signin.ts:120-1064`,
-  `packages/slack/src/operations/mode.ts:68-132`, `packages/slack/src/operations/app.ts:283-441`,
-  `packages/slack/src/operations/doctor.ts:152-760`, `packages/slack/src/compose/drafts.ts:206`,
+  `packages/gmail/src/operations/import-legacy.ts:505-512`,
+  `packages/gmail/src/operations/inbox-names.ts:23`, `packages/gmail/src/auth/flows.ts:117`,
+  `packages/gmail/src/auth/scopes.ts:85-88`, `packages/gmail/src/auth/session.ts:104-176`,
+  `packages/gmail/src/gmail-api/errors.ts:140-156`, `packages/gmail/src/context.ts:89`,
+  `packages/gmail/src/cli/tui.ts:64`, `packages/gmail/src/cli/render.ts:48-211`,
+  `packages/gmail/src/cli/render.ts:661-927`, `packages/gmail/src/cli/program.ts:388-693`,
+  `packages/gmail/src/cli/program.ts:1033-1046`, `packages/gmail/src/cli/program.ts:1281-1302`,
+  `packages/gmail/src/cli/program.ts:1823-2422`, `packages/gmail/src/mcp/server.ts:160-162`,
+  `packages/gmail/src/mcp/server.ts:997`, `packages/gmail/src/mcp/server.ts:1388`,
+  `packages/gmail/src/mcp/server.ts:2381-2393`, `packages/gmail/src/mcp/server.ts:2481-2487`).
+- **Slack:** post/reaction, workspace, app, manifest, draft, destination, file, auth and doctor handoffs
+  (`packages/slack/src/auth/bundle.ts:109-125`, `packages/slack/src/auth/refresh.ts:168-170`,
+  `packages/slack/src/operations/send.ts:169-410`, `packages/slack/src/operations/send.ts:573-605`,
+  `packages/slack/src/operations/send.ts:1256`, `packages/slack/src/operations/changes.ts:70-494`,
+  `packages/slack/src/operations/changes.ts:692`, `packages/slack/src/operations/workspaces.ts:105-542`,
+  `packages/slack/src/operations/signin.ts:120-1064`, `packages/slack/src/operations/mode.ts:68-132`,
+  `packages/slack/src/operations/app.ts:266-441`, `packages/slack/src/operations/doctor.ts:138-760`,
+  `packages/slack/src/compose/drafts.ts:206`, `packages/slack/src/operations/drafts.ts:222`,
   `packages/slack/src/operations/destination.ts:20`, `packages/slack/src/operations/files.ts:100`,
-  `packages/slack/src/operations/session.ts:144`, `packages/slack/src/mcp/server.ts:1136-1151`,
-  `packages/slack/src/cli/render.ts:63-505`, `packages/slack/src/cli/program.ts:464-1541`).
-- **Resend:** send approval/refusal/status recovery, account/policy/key repair, scheduled cancellation, doctor and
-  rerun handoffs (`packages/resend/src/operations/send.ts:100-365`,
-  `packages/resend/src/operations/send.ts:516-565`, `packages/resend/src/operations/send.ts:669-675`,
-  `packages/resend/src/accounts.ts:101-167`, `packages/resend/src/context.ts:106`,
-  `packages/resend/src/operations/accounts.ts:335-344`, `packages/resend/src/operations/doctor.ts:53-54`,
-  `packages/resend/src/api/client.ts:115`, `packages/resend/src/cli/program.ts:279-770`).
-- **WhatsApp:** add/remove/sync, index/config repair, chat-list, approval refusal and rerun handoffs
-  (`packages/whatsapp/src/operations/accounts.ts:39-133`, `packages/whatsapp/src/config.ts:163`,
+  `packages/slack/src/operations/files.ts:428`, `packages/slack/src/operations/session.ts:144`,
+  `packages/slack/src/mcp/server.ts:1136-1151`, `packages/slack/src/cli/render.ts:63-598`,
+  `packages/slack/src/cli/program.ts:464-1541`).
+- **Resend:** account, send/status, domain/read, scheduled and doctor handoffs
+  (`packages/resend/src/accounts.ts:101-167`, `packages/resend/src/api/client.ts:61`,
+  `packages/resend/src/context.ts:106`, `packages/resend/src/operations/accounts.ts:178-483`,
+  `packages/resend/src/operations/send.ts:100-365`, `packages/resend/src/operations/send.ts:516-565`,
+  `packages/resend/src/operations/send.ts:669-675`, `packages/resend/src/operations/read.ts:145-160`,
+  `packages/resend/src/operations/doctor.ts:53-58`, `packages/resend/src/operations/doctor.ts:144`,
+  `packages/resend/src/cli/render.ts:29`, `packages/resend/src/cli/program.ts:279-770`).
+- **WhatsApp:** account, sync/index, config, chat-list, approval and permission handoffs
+  (`packages/whatsapp/src/operations/accounts.ts:39-133`, `packages/whatsapp/src/config.ts:114-163`,
   `packages/whatsapp/src/index-db.ts:310-322`, `packages/whatsapp/src/operations/chat-lists.ts:99-119`,
-  `packages/whatsapp/src/operations/status.ts:144`, `packages/whatsapp/src/cli/render.ts:73`,
+  `packages/whatsapp/src/operations/status.ts:144`, `packages/whatsapp/src/operations/sync.ts:25-28`,
+  `packages/whatsapp/src/source/snapshot.ts:120-125`, `packages/whatsapp/src/cli/render.ts:73`,
   `packages/whatsapp/src/cli/program.ts:416-604`).
 
-The expanded lint reads every manifest binary through the existing channel registry. It rejects a runtime
-`shellCommand` whose first word is a bare manifest binary, a raw/template command beginning with one, and any
-handoff renderer that did not receive the locator's structured result. Its narrow allowlist contains individual
-help/usage-only sites with a reason. Adding a channel automatically adds its binary to the rule. This tightens the
-existing lint rather than adding a hand-maintained list (`test/printed-command-construction.test.mjs:18-27`,
-`test/printed-command-construction.test.mjs:77-99`).
+The search also found incomplete argument-only `shellCommand` values. The fragments at
+`packages/core/src/operations/organisations.ts:394`, `packages/core/src/operations/organisations.ts:578-582`,
+`packages/gmail/src/operations/clients.ts:353-356` and `packages/core/src/cli.ts:896-903` become prose about options
+or words appended to a complete located command; they are never rendered as commands themselves.
 
-### D4. Do not print a bare-name alternative
+The lint reads manifest binaries through the channel registry. Using a syntax tree, it rejects any manifest binary
+which appears as a word anywhere inside a string or template literal in runtime source, not merely at the beginning,
+and rejects every `shellCommand` list that is empty or whose first word is an option/fragment. Its explicit allowlist
+contains only reviewed help/usage/grammar files and a reason per file; operation results, errors, hints, fixes and
+`nextStep` strings are never allowlisted. A fixture-only manifest proves a new channel's binary is covered. This
+replaces the current regex lint, which accepts bare names passed to `shellCommand`
+(`test/printed-command-construction.test.mjs:7-16`, `test/printed-command-construction.test.mjs:61-99`).
 
-0.13.1 prints no secondary “also works if it is on PATH” hint. It adds no correctness and makes a long absolute
-handoff easier to mistake for optional detail. A person may still type a bare command they already know works; the
-product does not recommend or verify it. If PATH shims are designed later, that release may add a secondary hint,
-never ahead of the absolute command.
+### D6. The guarantee is time-of-print identity, not immutability
 
-### D5. Old released binaries get a documented best-effort escape hatch
+For a file launch, the printed command names the installation found at print time and the entry has passed the
+realpath/file/containment checks then. It does not make that path durable. If an npx cache is evicted, the pinned npx
+command fetches/runs that exact release or fails non-zero. If a global installation or checkout is changed in place,
+the command fails cleanly or runs the code then at that path. Approval is data-only, so a newer compatible CLI
+approving the stored id is harmless; all normal digest, kind, expiry and policy checks still run.
 
-Already released 0.13.x binaries still print bare names and cannot be changed in place
-(`packages/core/src/changes.ts:91-98`, `packages/core/src/approvals.ts:889-897`,
-`packages/gmail/src/operations/send.ts:449-453`). `comms_paths` and `agentcomms paths` return the resolved data
-directory (`packages/core/src/operations/maintenance.ts:27-39`), and a
-managed registration contains the absolute Node command and runtime entry
-(`packages/core/src/mcp-install.ts:566-580`). The 0.13.1 changelog and the troubleshooting guide linked by the README
-(`README.md:328-343`) give two recovery routes:
+The command does not neutralise `NODE_OPTIONS`, preloaders, shell functions or later same-user replacement. Those are
+inside the person's ambient shell and the documented same-OS-user boundary (`SECURITY.md:51-59`).
 
-1. Read `dataDir` from `comms_paths` (or `agentcomms paths` where that CLI can already be started), read the registered
-   server's absolute Node command from the MCP client entry, and run the matching entry:
-   `<dataDir>/runtime/<version>-<package>/node_modules/<package>/dist/cli.mjs approve <id>`. For core 0.13.0 that is
-   `<dataDir>/runtime/0.13.0-core/node_modules/@agentcomms/core/dist/cli.mjs`; the path is derived by the managed
-   runtime helpers (`packages/core/src/mcp-install.ts:299-321`). Carry the same path environment as in D2.
-2. Where `npx` is on the person's `PATH`, run the package and version which printed the approval, never `latest`:
-   `npx -y @agentcomms/core@<version> approve <id>`, or the corresponding Gmail, Slack, Resend or WhatsApp package,
-   with the same path environment.
+No secondary bare-name command is printed. The result may say that an installation changed or disappeared, but it
+never silently resolves a different suite binary from `PATH`.
 
-The release's approval, update, onboarding, setup, attachment and sending skills teach the same fallback and never
-run a terminal approval for the person. This is explicitly best effort: skills are installed separately from the
-runtime (`docs/superpowers/specs/2026-09-18-agent-communications-design.md:979-984`), the current update skill still
-names bare `agentcomms approve` (`skills/comms-update/SKILL.md:80-86`), an old result may not identify its Node path,
-and `npx` may itself be absent. New 0.13.1 results do not depend on this bridge.
+### D7. The 0.13.0 fallback remains explicitly best effort
 
-### D6. PATH shims move to a follow-up design
+0.13.0 and affected earlier releases still print bare names and cannot be changed in place. `comms_paths` and
+`agentcomms paths` return resolved directories, not the environment or relative values which produced them
+(`packages/core/src/operations/maintenance.ts:27-39`). The 0.13.1 troubleshooting guide gives two limited routes:
 
-Publishing `agentcomms` and `agent-*` into a user bin directory is out of scope for 0.13.1. It is a convenience, not
-the fix: the absolute command already makes every new handoff runnable. Three reviews kept finding lifecycle and
-security work unrelated to the approval deadlock.
+1. For a **managed** registration, read its absolute Node command and runtime entry and run that entry. The managed
+   layout is derived centrally (`packages/core/src/mcp-install.ts:299-320`,
+   `packages/core/src/mcp-install.ts:566-580`). This route does not cover global or checkout 0.13.0 installs; those
+   users must locate their own Node and package entry.
+2. Where npx exists, run the exact package and release which printed the result, never `latest`:
+   `npx -y @agentcomms/<product>@0.13.0 …`.
 
-The follow-up starts with these known requirements:
+Neither route can reconstruct the original path environment from `comms_paths`. A custom-path user must supply the
+known old-release `AGENT_COMMS_*` overrides and quote them for their shell. Skills are installed separately from the
+runtime (`docs/superpowers/specs/2026-09-18-agent-communications-design.md:979-984`), npx may be absent, and an old
+result may not identify Node. New 0.13.1 results use D1-D3 instead.
 
-- safe bin-directory ownership, modes and ACLs on Linux, macOS and Windows, including macOS extended ACLs;
-- receipts, startup validation and recovery for installed runtimes and their published commands;
-- one rule for prune while shim publication is opted out, so no dangling command survives;
-- one authoritative data root across CLI and stripped MCP environments; and
-- CLI–MCP parity for any durable shim preference, plus migration from an unsafe or obsolete choice.
+### D8. PATH shims stay a follow-up
 
-No part of 0.13.1 creates, repoints, removes or diagnoses a shim, edits `PATH`, writes a profile or the Windows
-registry, adds a shim preference, or changes install/prune approval effects.
+0.13.1 creates, changes and diagnoses no shim, profile, registry entry or durable shim preference. A later design must
+cover ownership/modes/ACLs (including macOS extended ACLs), receipts and startup validation, prune and opt-out,
+authoritative data roots, and CLI-MCP parity for the preference.
 
 ## 4. Tests
 
-1. **Locator matrix.** On POSIX and Windows, fixtures for a managed runtime, an npx cache path, a global install and a
-   checkout resolve `process.execPath` plus the exact package entry. The checkout keeps only the two D1 flags under
-   their stated conditions; debugger, test, eval, preload, loader and unrelated flags are absent. Symlinked npm bins
-   and the Gmail server-only wrapper still resolve the owning channel package.
-2. **Same package graph.** A channel result which prints core's command resolves `@agentcomms/core` from that channel's
-   dependency. The fixture places another core elsewhere and proves it is not selected; caller and target versions
-   must be equal, and a mismatch returns no bare fallback.
-3. **Environment carriage.** Each of the five variables, all together, absent values and explicitly empty values are
-   covered. Executing the result reports the same config, state and data directories as the printing process.
-4. **Rendering.** Assert the exact POSIX, PowerShell and cmd.exe forms in D2 for paths containing spaces, an
-   apostrophe and non-ASCII text. Existing unsafe-Windows cases remain inert JSON, never a partial runnable line.
-5. **Lint.** A fixture channel added only by manifest makes its binary subject to the rule. Bare names in
-   `shellCommand`, template strings, errors, hints, fixes and `nextStep` fail; a locator result passes; each documented
-   help-only allowlist entry passes for its stated reason.
-6. **End to end.** Prepare a harmless change approval through the CLI and through MCP, take the printed command, and
-   execute it in a fresh real shell whose `PATH` contains Node and system tools but no agent-communications CLI. The
-   command approves the record in the same temporary state directory. Run the POSIX shell test on POSIX and the two
-   labelled Windows forms on Windows. No provider transport is called.
-7. **Inventory.** Exercise at least one CLI and one MCP result from every D3 inventory group, plus every approval
-   producer, and assert its primary runnable form begins with the absolute Node/entry command and carries the path
-   environment.
-8. Run full `pnpm verify`. No test contacts Gmail, Slack or Resend, posts to Slack, uses a real Resend key, writes the
-   real home, or contains a real address, token or client secret.
+1. **Own locator matrix:** managed, npx, global and checkout installations on POSIX and Windows; only the two allowed
+   Node flags survive. Checkout fixtures have no `dist`, then a stale `dist`, and both select `src/cli.ts`. Gmail's
+   wrapper resolves Gmail. Manifest/bin mismatch, missing, unreadable and non-file targets fail with no bare fallback.
+2. **Direction matrix:** channel-to-core selects the channel's exact runtime dependency and rejects version drift.
+   Standalone core prints Gmail and Slack handoffs from managed and npx registrations; with no usable registration,
+   and with only an unreadable registration, it names the package and MCP action and prints no command. Include
+   manifest-generated approval-kind corrections.
+3. **Paths:** every CLI accepts the three global options before dispatch. Execute a handoff in a fresh shell with
+   conflicting `AGENT_COMMS_*`, XDG, home/AppData values and another cwd; it reports the printing process's same
+   config/state/data directories. Relative source overrides are printed as resolved absolutes. Commands which do not
+   use data omit `--data-dir`; runtime/install/prune/update commands include it. No output contains an environment
+   assignment.
+4. **Rendering:** byte-exact POSIX and PowerShell output for spaces, apostrophes, non-ASCII, `$`, `%`, `!`, backticks,
+   empty words and trailing backslashes. cmd.exe output doubles trailing backslashes; `%` and `"` each omit only the
+   cmd alternative with the stated reason. Running the PowerShell form and every available cmd form leaves sentinel
+   parent/session environment variables unchanged, including on failure.
+5. **Containment and mutation:** lexical and realpath symlink escapes, root-prefix siblings and post-print replacement.
+   Delete an npx cache before execution and assert an exact-version run or clean non-zero failure. Upgrade a fake global
+   install in place and assert the newer fixture runs. A hostile test `NODE_OPTIONS` preloader demonstrates the
+   documented same-user boundary without changing path selection.
+6. **Packaging:** the verifier's transitive closure is deduplicated and ordered. The packed `gmail-mcp` consumer is
+   installed with local Gmail and core tarballs in an isolated cache and performs its existing handshake without a
+   registry copy of the candidate release.
+7. **Lint and inventory:** a fixture manifest adds a binary automatically; binary words embedded at the beginning or
+   middle of strings/templates fail outside the reasoned help/grammar allowlist; incomplete `shellCommand` word lists
+   fail. A table-driven migration test iterates every D5 row—no sampling—and asserts a located runnable result or its
+   specified package/MCP fallback for both CLI and MCP surfaces where the site serves both.
+8. **End to end:** prepare harmless change approvals through CLI and MCP, execute each printed command in a real shell
+   with no suite binary on `PATH`, and observe the same temporary approval store. Run POSIX on POSIX and PowerShell plus
+   the available cmd alternative on Windows. No provider transport is called.
+9. Run full `pnpm verify`. No test sends email, posts to Slack, calls Resend, uses a real key, writes the real home, or
+   contains a real address, token or client secret.
 
-## 5. Departures from the ticket
+## 5. Departure from the ticket
 
-CUE-403's title asks for the CLIs on `PATH`. Version 0.13.1 instead fixes the user-visible failure the ticket exposed:
-every new terminal approval, handoff and fix is runnable from the exact installation that printed it, even when no
-suite CLI is on `PATH`. PATH convenience is a separate follow-up with the lifecycle, ownership and parity work in D6.
+CUE-403's title asks for CLIs on `PATH`. 0.13.1 instead fixes the blocking handoff with commands tied to the
+installation available at print time and with explicit path options. PATH convenience remains the separately scoped
+follow-up in D8.
