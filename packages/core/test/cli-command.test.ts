@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import childProcess from 'node:child_process';
+import childProcess, { spawnSync } from 'node:child_process';
 import {
   chmodSync,
   mkdirSync,
@@ -15,7 +15,7 @@ import {
 import { syncBuiltinESMExports } from 'node:module';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { test } from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   type CliCommandRequest,
   type CliCommandResult,
@@ -29,6 +29,7 @@ import type { RegisteredServer } from '../src/mcp-clients.ts';
 import { findUngatedGmailServers, otherSlackServerRemoval } from '../src/other-servers.ts';
 import type { PathName, ResolvedPaths } from '../src/paths.ts';
 import { satisfiesRange } from '../src/versions.ts';
+import { bareEnv, runPrinted, writeNpxCache, writePreloader, writeRunnable } from './fixtures/cli-command/runnable.ts';
 import {
   link,
   markingProgram,
@@ -1069,6 +1070,230 @@ function rmSyncTree(path: string): void {
   rmSync(path, { recursive: true, force: true });
 }
 
+// ── Time of print (D6): checked when printed, not frozen; nothing else is ever run in its place ──────────────────────
+
+const POSIX = process.platform !== 'win32';
+
+/** Runs `body` with this process's `PATH` set to `path`, as a person's shell might have it, and puts it back. */
+function withPath<T>(path: string, body: () => T): T {
+  const before = process.env.PATH;
+  process.env.PATH = path;
+  try {
+    return body();
+  } finally {
+    if (before === undefined) delete process.env.PATH;
+    else process.env.PATH = before;
+  }
+}
+
+test("an npx-launched process's own command names its cache entry, and fails cleanly once the cache is gone (5b)", () => {
+  /*
+   * Proves: the command names the file found when it was printed, and when that file is evicted — the entry alone, or
+   * the whole npx cache — running it fails with Node's own missing-module error naming that file, and nothing found by
+   * name on PATH runs instead; located again, there is no command. Cannot prove that a cache is never evicted, or
+   * that a person will not run some other command themselves: that is the person's shell. On Windows the decoy cannot
+   * run at all, so there only the absolute program and the missing-file failure are what is shown.
+   */
+  const home = realTemp('home-');
+  const decoys = join(home, 'decoys');
+  const decoy = markingProgram(decoys, 'agent-slack');
+  const { cache, root, entry } = writeNpxCache(home, 'slack', '5f2e1a', 'slack from the npx cache');
+  const ownCommand = request(moduleUrl(root, 'dist', 'cli.mjs'), 'slack', 'slack');
+  const command = located(withPath(decoys, () => locateCliCommand(ownCommand, NODE)));
+  const printed = [...command.words];
+  assert.deepEqual(printed.slice(0, 2), [process.execPath, entry]);
+  const env = bareEnv({ PATH: decoys });
+  const ran = runPrinted(command, env);
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.deepEqual(JSON.parse(ran.stdout), {
+    fixture: 'slack from the npx cache',
+    args: [...PINS, 'approve', 'abc123'],
+  });
+  for (const [evicted, reason] of [
+    [entry, 'entry'],
+    [cache, 'manifest'],
+  ] as const) {
+    rmSyncTree(evicted);
+    const gone = runPrinted(command, env);
+    assert.notEqual(gone.status, 0, `${evicted} gone`);
+    assert.equal(gone.stdout, '');
+    assert.match(gone.stderr, /Cannot find module/);
+    assert.ok(gone.stderr.includes(entry), gone.stderr);
+    assert.equal(decoy.ran(), false, 'nothing on PATH ran in its place');
+    assert.deepEqual(command.words, printed, 'and the command is still what was printed');
+    notLocated(
+      withPath(decoys, () => locateCliCommand(ownCommand, NODE)),
+      reason,
+      'slack',
+    );
+  }
+});
+
+test('a global install upgraded in place: the command printed before runs the newer code at that path (5c)', () => {
+  /*
+   * Proves: the guarantee is identity at the time of printing, not immutability. The command names the global
+   * install's file; upgraded in place, the same words run the newer code there, while locating again now refuses that
+   * registration, which is another release. Cannot prove the newer code is compatible: approval is data-only, and the
+   * newer CLI checks digest, kind, expiry and policy itself (D6).
+   */
+  const temp = realTemp();
+  const platform = process.platform;
+  const global = writeGlobal(join(temp, 'prefix'), 'slack', { windows: platform === 'win32' });
+  writeRunnable(join(global.root, 'dist', 'cli.mjs'), `slack ${VERSION}`);
+  const server = registration({ name: 'slack', command: global.command, args: ['mcp'] });
+  const command = located(fromRegistrations('core', 'slack', [server], { platform }));
+  const printed = [...command.words];
+  assert.equal(command.entry, join(global.root, 'dist', 'cli.mjs'));
+  assert.equal(JSON.parse(runPrinted(command).stdout).fixture, `slack ${VERSION}`);
+  // Upgraded in place by whatever installed it: the same folder, a newer release.
+  writePackage(global.root, 'slack', { version: '0.14.0', files: [] });
+  writeRunnable(join(global.root, 'dist', 'cli.mjs'), 'slack 0.14.0');
+  const after = runPrinted(command);
+  assert.equal(after.status, 0, after.stderr);
+  assert.equal(JSON.parse(after.stdout).fixture, 'slack 0.14.0', 'the same path runs what is there now');
+  assert.deepEqual(command.words, printed);
+  assert.deepEqual(
+    whyNot(notLocated(fromRegistrations('core', 'slack', [server], { platform }), 'not-registered', 'slack')),
+    ['version'],
+  );
+});
+
+test('an entry replaced after printing runs as it is then, and is checked again only when located again (5a-replacement)', () => {
+  /*
+   * Proves: the checks — a real, readable file inside its package — hold when the command is printed. A same-user
+   * replacement after that is what the command meets: its contents swapped, or (on POSIX, where a test can make one)
+   * a link out of the package. Locating again checks again, and refuses the escape. Cannot prove anything about what
+   * happens between printing and running: that is the same-OS-user boundary (SECURITY.md), which this does not move.
+   */
+  const temp = realTemp();
+  const { root, entry } = writeManaged(join(temp, 'data'), 'slack');
+  writeRunnable(entry, 'the slack that was checked');
+  // Printed by another product from the registration, and by the installation for itself.
+  const server = registration({ name: 'slack', command: '/n', args: [entry, 'mcp'] });
+  const own = request(moduleUrl(root, 'dist', 'cli.mjs'), 'slack', 'slack');
+  const commands = [located(fromRegistrations('core', 'slack', [server])), located(locateCliCommand(own, NODE))];
+  for (const command of commands) {
+    assert.equal(JSON.parse(runPrinted(command).stdout).fixture, 'the slack that was checked');
+  }
+  writeRunnable(entry, 'replaced in place');
+  for (const command of commands) assert.equal(JSON.parse(runPrinted(command).stdout).fixture, 'replaced in place');
+  assert.equal(located(fromRegistrations('core', 'slack', [server])).entry, entry, 'still inside its package');
+  if (POSIX) {
+    const outside = writeRunnable(join(temp, 'elsewhere', 'cli.mjs'), 'something outside the package');
+    rmSyncTree(entry);
+    link(outside, entry);
+    for (const command of commands) {
+      assert.equal(JSON.parse(runPrinted(command).stdout).fixture, 'something outside the package');
+    }
+    // Located again: the registration's own file now leads out of every package, and the entry out of its own.
+    assert.deepEqual(whyNot(notLocated(fromRegistrations('core', 'slack', [server]), 'not-registered', 'slack')), [
+      'no-package',
+    ]);
+    notLocated(locateCliCommand(own, NODE), 'entry', 'slack');
+  }
+});
+
+test('a hostile NODE_OPTIONS preloader runs inside the printed command, and changes nothing the locator chooses (5d)', () => {
+  /*
+   * Proves two things, and claims no more. The boundary: the printed command does not neutralise `NODE_OPTIONS` — a
+   * preloader set in the person's shell runs before the CLI, which still runs — because that shell is inside the
+   * same-OS-user boundary (D6, SECURITY.md). The selection: preload, loader, inspector and other flags this process was
+   * started with, or a `NODE_OPTIONS` it has, are never copied into the command or used to choose its file — in this
+   * process, and in a child process that is itself started with a preloader. Cannot prove that a preloader in the
+   * locating process could not patch the locator itself: it could, as any code running as that user could.
+   */
+  const temp = realTemp();
+  const hostile = writePreloader(join(temp, 'hostile'));
+  const { root, entry } = writeManaged(join(temp, 'data'), 'slack');
+  writeRunnable(entry, 'slack');
+  const { packages } = writeCheckout(join(temp, 'checkout'), ['gmail']);
+  const built = request(moduleUrl(root, 'dist', 'cli.mjs'), 'slack', 'slack');
+  const requests = [built, request(moduleUrl(packages.gmail as string, 'src', 'mcp', 'install.ts'), 'gmail', 'gmail')];
+  // Every flag a debugging, preloading or tracing process might have been started with.
+  const ambient = [
+    '--require',
+    hostile.path,
+    `--require=${hostile.path}`,
+    '--import',
+    pathToFileURL(hostile.path).href,
+    '--loader=./loader.mjs',
+    '--experimental-loader',
+    './loader.mjs',
+    '--inspect',
+    '--inspect-brk=0.0.0.0:9229',
+    '--inspect-port=0',
+    '--cpu-prof',
+    '--heapsnapshot-signal=SIGUSR2',
+    '--enable-source-maps',
+    '--conditions=development',
+    '--no-warnings',
+    '--title=agent',
+    '--max-old-space-size=64',
+    STRIP,
+  ];
+  const nodeOptions = `--require=${hostile.path.replace(/\\/g, '/')} --inspect-port=0`;
+  for (const each of requests) {
+    const clean = located(locateCliCommand(each, NODE)).words;
+    const preloaded = withEnv(
+      { NODE_OPTIONS: nodeOptions },
+      () => located(locateCliCommand(each, { version: NODE.version, execArgv: ambient })).words,
+    );
+    assert.deepEqual(preloaded, clean);
+    for (const word of preloaded)
+      assert.doesNotMatch(word, /^--(?:require|import|loader|experimental-loader|inspect|cpu-prof|title|max-old)/);
+  }
+  assert.equal(hostile.loaded(), false, 'locating loads nothing');
+
+  // In a process of its own, started with a preloader of its own and NODE_OPTIONS: the same words as a clean one.
+  const script = writeFile(
+    join(temp, 'locate.mjs'),
+    [
+      `const { locateCliCommand } = await import(${JSON.stringify(pathToFileURL(fileURLToPath(new URL('../src/cli-command.ts', import.meta.url))).href)});`,
+      `const result = locateCliCommand(JSON.parse(process.env.LOCATE_REQUEST));`,
+      'process.stdout.write(JSON.stringify(result.ok ? result.command.words : result.message));',
+    ].join('\n'),
+  );
+  const locateIn = (flags: string[], extra: Record<string, string>) => {
+    const ran = spawnSync(process.execPath, [STRIP, ...flags, script], {
+      encoding: 'utf8',
+      env: bareEnv({ LOCATE_REQUEST: JSON.stringify(built), ...extra }),
+    });
+    assert.equal(ran.status, 0, ran.stderr);
+    return JSON.parse(ran.stdout) as string[];
+  };
+  const cleanChild = locateIn([], {});
+  const preloadedChild = locateIn(['--require', hostile.path, '--import=data:text/javascript,'], {
+    NODE_OPTIONS: nodeOptions,
+  });
+  assert.ok(hostile.loaded(), 'the preloader ran in the locating process');
+  assert.deepEqual(preloadedChild, cleanChild);
+  assert.deepEqual(cleanChild, located(locateCliCommand(built, NODE)).words);
+
+  // And it runs inside the command a person pastes: their shell's NODE_OPTIONS applies, the CLI still runs.
+  const fresh = writePreloader(join(temp, 'shell'));
+  const run = runPrinted(
+    located(locateCliCommand(built, NODE)),
+    bareEnv({ NODE_OPTIONS: `--require=${fresh.path.replace(/\\/g, '/')}` }),
+  );
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(JSON.parse(run.stdout).fixture, 'slack');
+  assert.ok(fresh.loaded(), 'the preloader ran: the command does not neutralise NODE_OPTIONS');
+});
+
+/** Runs `body` with these variables set in this process's environment, and puts them back. */
+function withEnv<T>(values: Record<string, string>, body: () => T): T {
+  const before = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
+  Object.assign(process.env, values);
+  try {
+    return body();
+  } finally {
+    for (const [key, value] of Object.entries(before)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
 // ── The words: the caller's, after the entry, with the directories the command uses ────────────────────────────────
 
 test('only the directories the command uses are pinned, between the entry and its words and before any --', () => {
@@ -1230,7 +1455,7 @@ test('externalCommand refuses a path inside a suite package root, directly or th
     ['node', join(installed, 'dist', 'cli.mjs')],
     ['node', `--import=${join(CORE_ROOT, 'src', 'cli.ts')}`],
     ['sh', '-c', `node "${join(GMAIL_ROOT, 'dist', 'cli.mjs')}" approve x`],
-    ['node', new URL(`file://${join(CORE_ROOT, 'dist', 'cli.mjs')}`).href],
+    ['node', pathToFileURL(join(CORE_ROOT, 'dist', 'cli.mjs')).href],
   ]) {
     assert.throws(
       () => externalCommand(words, 'a test', 'linux'),

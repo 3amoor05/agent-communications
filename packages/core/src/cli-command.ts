@@ -70,7 +70,10 @@ class PrintedCommand {
     Object.freeze(this);
   }
 
-  /** The real path of the file it runs, as it was checked when the command was located. */
+  /**
+   * The real path of the file it runs, as it was checked when the command was located: a fact about then (D6). The
+   * command names this path and nothing else, so what runs is whatever is there when the person runs it.
+   */
   get entry(): string {
     return this.#entry;
   }
@@ -111,7 +114,12 @@ export interface CliCommandRequest {
 export interface NodeRuntime {
   /** `process.version`, checked against the target's `engines.node`. */
   readonly version: string;
-  /** `process.execArgv`, read only for whether `--experimental-transform-types` was used. */
+  /**
+   * `process.execArgv`, read only for whether `--experimental-transform-types` was used. A preload, loader, inspector,
+   * condition or memory flag this process was started with is never carried into a command, nor is a `NODE_OPTIONS` it
+   * has; the person's own `NODE_OPTIONS` still applies when they run it, inside their shell and the same-OS-user
+   * boundary, which a printed command does not move (D6, SECURITY.md).
+   */
   readonly execArgv: readonly string[];
 }
 
@@ -179,13 +187,22 @@ export interface RegistrationNotUsed {
   readonly why: RegistrationRejection;
 }
 
+/**
+ * A command, and what it was decided from. Identity at the time of printing, not immutability (D6): every check held
+ * when it was made. An npx cache evicted later leaves a command that fails with the missing file; an installation
+ * upgraded or replaced in place leaves one that runs what is then at that path. Neither is ever swapped for a command
+ * found by name on PATH, and locating again checks everything again.
+ */
 export interface CliCommandLocated {
   readonly ok: true;
   readonly command: PrintedCommand;
   readonly basis: CliCommandBasis;
 }
 
-/** No command: nothing to run, and a sentence naming the product, its package and the exact version it needs. */
+/**
+ * No command: nothing to run, and a sentence naming the product, its package and the exact version it needs. An
+ * installation that has gone or changed since is said so, never replaced by a suite command found by name on PATH.
+ */
 export interface CliCommandNotLocated {
   readonly ok: false;
   readonly reason: CliNotLocatedReason;
@@ -627,6 +644,11 @@ function notLocated(
 /**
  * The entry's real path, when it is a readable regular file inside its package's real root by whole segments — as
  * written and after links are resolved — or why not.
+ *
+ * Checked now, for the command printed now (D6). This does not make the path durable: an npx cache evicted, a global
+ * install upgraded in place or a file replaced after this is what the command meets when it runs — a missing file
+ * fails with Node's own error naming it, a replaced one runs as it then is. Nothing here, or in the command, looks
+ * anywhere else for the product, PATH included, and a later locate checks the path again.
  */
 function checkedEntry(root: string, entry: string): { ok: true; path: string } | { ok: false; why: string } {
   if (!isWithin(root, entry)) return { ok: false, why: `${entry} is outside its package, ${root}` };
