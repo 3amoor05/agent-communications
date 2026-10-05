@@ -427,6 +427,38 @@ test('tracked records an admitted earlier-release send finished — used, failed
   assert.equal(JSON.parse(readV1Record(m.core.paths.stateDir, id('3'))).state, 'sending');
 });
 
+test('a version-1 send already being sent when the conversion runs is tracked as such, listed by the conversion’s report and shown by doctor — never revoked (R29c, CUE-404)', async () => {
+  const time = clock();
+  const m = machine(body(), time);
+  // An earlier release's claim under way at the conversion: written `sending` a moment ago, its send in flight.
+  const sending = writeV1Record(
+    m.core.paths.stateDir,
+    v1(id('5'), { state: 'sending', updatedAt: new Date(T - 30_000).toISOString() }),
+  );
+  // One left `sending` past 0.13's own five minutes reads `unknown` by its rules: history, as used or failed is.
+  writeV1Record(
+    m.core.paths.stateDir,
+    v1(id('6'), { state: 'sending', updatedAt: new Date(T - 6 * MIN).toISOString() }),
+  );
+  const result = await ensureSendEpochConfig(m.core, { now: time.now });
+  assert.equal(read(m.file).version, 3);
+  assert.deepEqual(drainOf(m.file), { since: new Date(T).toISOString(), tracked: { [id('5')]: 'sending' } });
+  assert.deepEqual(result.legacyDrain, { couldNotRevoke: [], inFlight: [id('5')] }, 'the conversion lists it');
+  assert.equal(readV1Record(m.core.paths.stateDir, id('5')), sending, 'never revoked under it');
+  const check = (await doctor(m.core, m.env, { keyring: null })).checks.find(
+    (one) => one.name === 'earlier-release approvals',
+  );
+  assert.equal(
+    check?.detail,
+    `being retired since ${new Date(T).toISOString()}: 1 tracked, 0 still open, 1 reached by an earlier release's send (${id('5')})`,
+  );
+  // It holds nothing open: past the earlier release's lifetime the drain closes, the send still its own.
+  time.set(T + LEGACY_DRAIN_MS);
+  await ensureSendEpochConfig(m.core, { now: time.now });
+  assert.equal(drainOf(m.file), undefined);
+  assert.equal(readV1Record(m.core.paths.stateDir, id('5')), sending);
+});
+
 test('doctor names an open drain — what it tracks, what is still open, what an earlier release reached — and nothing once it closes', async () => {
   const time = clock();
   const m = machine(body(), time);

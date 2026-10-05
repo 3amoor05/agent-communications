@@ -1,6 +1,12 @@
 import { SEND_EPOCH_REASON } from './approval-outcome.ts';
 import { stateOf } from './approval-stored.ts';
-import { type Config, fencedOwners, type LegacyDrainOutcome, type LooseningConsent } from './config.ts';
+import {
+  type Config,
+  fencedOwners,
+  type LegacyDrain,
+  type LegacyDrainOutcome,
+  type LooseningConsent,
+} from './config.ts';
 import { SEND_POLICY_HOOKS, type SendPolicyHooks } from './config-hooks.ts';
 import type { Core } from './core.ts';
 import { CommsError } from './errors.ts';
@@ -61,13 +67,28 @@ export async function ensureSendEpochConfig(
   options: { now?: (() => Date) | undefined } = {},
 ): Promise<{ config: Config; legacyDrain?: LegacyDrainReport }> {
   const now = options.now ?? (() => new Date());
-  const converted = await core.config.convertToVersion3(
-    async () => Object.fromEntries((await activeLegacySends(core)).map((id) => [id, 'open' as const])),
-    { now },
-  );
+  const converted = await core.config.convertToVersion3(() => conversionScan(core), { now });
   const config = converted.config;
   if (config.version !== 3 || config.legacyDrain === undefined) return { config };
   return drain(core, now);
+}
+
+/**
+ * What the conversion tracks: every version-1 send record still `pending` or `approved` by its own release's rules,
+ * `open` for the drain to retire — and every one already `sending`, an earlier release's send it had admitted before
+ * this release could see it, which can neither be revoked nor claimed again: recorded as `sending` from the start, so
+ * the conversion's report lists it and `doctor` shows it (design 2026-10-05 §D1, the stated limit; §5 Round-29 (c)).
+ * One already `used`, `failed`, `revoked`, expired or `unknown` by its own rules is history, and is not tracked.
+ */
+async function conversionScan(core: Core): Promise<LegacyDrain['tracked']> {
+  const listed = await core.approvals.list({ states: ['pending', 'approved', 'sending'] });
+  return Object.fromEntries(
+    listed.flatMap((stored) =>
+      stored.form === 'legacy' && stored.view.kind === 'send'
+        ? [[stored.view.approvalId, stored.view.state === 'sending' ? ('sending' as const) : ('open' as const)]]
+        : [],
+    ),
+  );
 }
 
 /** Every version-1 send record still `pending` or `approved` by its own release's rules: what a drain must retire. */

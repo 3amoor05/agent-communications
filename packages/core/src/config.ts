@@ -1255,7 +1255,7 @@ export class ConfigStore {
    * With no config file at all there is nothing to convert, and nothing is written.
    */
   async convertToVersion3(
-    scan: () => Promise<Record<string, 'open'>>,
+    scan: () => Promise<LegacyDrain['tracked']>,
     options: { now?: (() => Date) | undefined } = {},
   ): Promise<{ status: 'converted' | 'already' | 'empty'; config: Config }> {
     // Most calls find version 3 already, and need no lock.
