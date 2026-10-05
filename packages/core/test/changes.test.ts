@@ -610,14 +610,18 @@ test('a policy tightened after prepare governs the claim; one loosened after pre
   );
 });
 
-test('a change approval expires ten minutes after it is prepared', async () => {
+test('a pending chat change is claimed inside its ten minutes, and expires at them', async () => {
   const { core, time } = coreWith({ accounts: { 'acme/slack': account(ACME) } });
   const spec = await widening(core);
-  const prepared = await prepareChange(core, { ...spec, summary: 'x' }, { channel: 'core', surface: 'mcp' });
-  time.advance(10 * 60 * 1000);
+  const claimed = await prepareChange(core, { ...spec, summary: 'x' }, { channel: 'core', surface: 'mcp' });
+  const late = await prepareChange(core, { ...spec, summary: 'x' }, { channel: 'core', surface: 'mcp' });
+  time.advance(10 * 60 * 1000 - 1);
+  const consent = await claimChange(core, claimed.approvalId, spec, { surface: 'mcp' });
+  assert.deepEqual(consent.paths, ['accounts.acme/slack.mode'], 'claimed a millisecond before its window closes');
+  time.advance(1);
   await assert.rejects(
-    claimChange(core, prepared.approvalId, spec, { surface: 'mcp' }),
-    refusedWith('APPROVAL_EXPIRED', /nothing was changed: the approval expired/),
+    claimChange(core, late.approvalId, spec, { surface: 'mcp' }),
+    refusedWith('APPROVAL_EXPIRED', /^this approval expired; nothing was changed with it: prepared at .+, expired at /),
   );
 });
 

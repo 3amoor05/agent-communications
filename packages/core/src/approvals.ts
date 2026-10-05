@@ -26,6 +26,7 @@ import {
   type StoredApproval,
   stateOf,
 } from './approval-stored.ts';
+import { CLOCK_ANOMALY } from './approval-validate.ts';
 import { accountChannels } from './channel-words.ts';
 import {
   type ChangePolicy,
@@ -476,14 +477,6 @@ export interface ClaimOptions {
 export const DOWNLOAD_ANSWER_HINT =
   'It is answered, not approved with a code: the person says where in the chat, or — under a confirm change policy — at their own terminal, with the `approve` command of the channel the files come from and this id. The download that asked is then made again with this id.';
 
-/** How long a pending send or change on the `chat` route stays open: the lifetime profile's (`APPROVAL_LIFETIMES`). */
-export const APPROVAL_TTL_MS: number = APPROVAL_LIFETIMES.chat;
-/**
- * How long a download's question stays open: longer than an approval, because it waits on a person to decide where
- * files go — look in a folder, ask somebody — rather than to read a preview and say yes, and a question that has
- * expired is asked again from the start.
- */
-export const DOWNLOAD_QUESTION_TTL_MS: number = APPROVAL_LIFETIMES.download;
 /** A record left in `sending` this long belongs to a process that died mid-send: the outcome is unknown. */
 export const SENDING_STALE_MS: number = 5 * 60 * 1000;
 export const MAX_CHALLENGE_ATTEMPTS = 3;
@@ -694,29 +687,37 @@ export class ApprovalStore {
     await writeFileAtomic(this.#path(record.approvalId), `${JSON.stringify(record, null, 2)}\n`);
   }
 
-  /** Derived states: expiry for pending/approved, `unknown` for a send whose process died. */
+  /**
+   * Derived states (design 2026-10-05 §D1, "Version-2 timestamps fail closed"): expiry for an active record, and
+   * `unknown` for a send whose process died.
+   *
+   * Only `pending` and `approved` expire. A pending record expires at `expiresAt` — its route's lifetime from creation,
+   * ten minutes on `chat` and thirty on `confirm` — and an approved send or change at `usableUntil`, a day from its
+   * approval, so a person's approval does not run out with the window it was given in. A download's question has no
+   * window of its own: answered or not, it expires at `expiresAt`. Equality is expired, and `expiredAt` is the boundary
+   * that applied, never the moment it was noticed.
+   *
+   * A clock seen before the record was made, or before it was approved, expires it at once: stepped backwards — an NTP
+   * correction, a resumed VM, a person changing the date — it must never put an expired record back in play, nor be
+   * trusted to measure one. That expiry says so (`reason: 'clock-anomaly'`) and records when the clock was seen, and
+   * claims no deadline it did not reach.
+   */
   #derive(record: ApprovalRecord): ApprovalRecord {
     const observed = this.#now();
     const now = observed.getTime();
-    const expiresAt = new Date(record.expiresAt).getTime();
-    const createdAt = new Date(record.createdAt).getTime();
-    // Expired, and also: an expiry that does not parse, and a clock that has moved behind the record's own
-    // creation. `now >= NaN` is false, so a record with a nonsense `expiresAt` never expired at all; and a clock
-    // stepped backwards — an NTP correction, a resumed VM, a user changing the date — put an expired record back
-    // into `pending`. Neither should be the difference between a send and no send.
-    const anomaly = Number.isFinite(createdAt) && now < createdAt;
-    const unusable = !Number.isFinite(expiresAt);
-    if ((record.state === 'pending' || record.state === 'approved') && (anomaly || unusable || now >= expiresAt)) {
-      // A clock seen before the record was made expires it at the time it was seen, and says so: it never claims a
-      // deadline it did not reach.
-      if (anomaly) return { ...record, state: 'expired', reason: 'clock-anomaly', expiredAt: observed.toISOString() };
-      return {
-        ...record,
-        state: 'expired',
-        reason: record.reason ?? (unusable ? 'the approval window cannot be read' : 'the approval window passed'),
-        // The boundary that applied, not the moment it was noticed.
-        ...(unusable ? {} : { expiredAt: record.expiresAt }),
-      };
+    if (record.state === 'pending' || record.state === 'approved') {
+      const approvedAt = record.state === 'approved' ? record.approvedAt : undefined;
+      if (now < Date.parse(record.createdAt) || (approvedAt !== undefined && now < Date.parse(approvedAt))) {
+        return { ...record, state: 'expired', reason: CLOCK_ANOMALY, expiredAt: observed.toISOString() };
+      }
+      const deadline =
+        record.state === 'approved' && record.kind !== 'download' && record.usableUntil !== undefined
+          ? record.usableUntil
+          : record.expiresAt;
+      if (now >= Date.parse(deadline)) {
+        return { ...record, state: 'expired', reason: 'the approval window passed', expiredAt: deadline };
+      }
+      return record;
     }
     if (record.state === 'sending' && now - new Date(record.updatedAt).getTime() >= SENDING_STALE_MS) {
       return { ...record, state: 'unknown', reason: 'the sending process stopped before recording an outcome' };

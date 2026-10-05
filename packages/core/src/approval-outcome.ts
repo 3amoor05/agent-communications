@@ -1,5 +1,6 @@
 import type { ApprovalRoute } from './approval-binding.ts';
 import { integrityRefusal, type StoredApproval } from './approval-stored.ts';
+import { CLOCK_ANOMALY } from './approval-validate.ts';
 import {
   type ApprovalKind,
   type ApprovalRecord,
@@ -390,13 +391,24 @@ function errorOf(
         record,
         approval,
       );
-    case 'expired':
-      return refuse(
-        'APPROVAL_EXPIRED',
-        download ? 'the question expired before it was answered' : 'the approval expired before it was used',
-        record,
-        approval,
-      );
+    case 'expired': {
+      if (download) return refuse('APPROVAL_EXPIRED', 'the question expired before it was answered', record, approval);
+      // Said as it happened (D2): before a person approved it, after — or because the clock moved backwards.
+      const nothing = `nothing was ${record.kind === 'change' ? 'changed' : 'sent'} with it`;
+      const message =
+        record.reason === CLOCK_ANOMALY
+          ? `the clock moved backwards; this approval was expired safely at ${record.expiredAt}; ${nothing}`
+          : record.approvedAt !== undefined
+            ? `this approval expired; ${nothing}: approved at ${record.approvedAt}, expired unused at ${record.expiredAt}`
+            : `this approval expired; ${nothing}: prepared at ${record.createdAt}, expired at ${record.expiredAt}`;
+      return new CommsError('APPROVAL_EXPIRED', message, {
+        hint:
+          record.kind === 'change'
+            ? 'Prepare the change again and show the new preview to the user.'
+            : 'Prepare the send again and show the new preview to the user.',
+        details: { approvalId: record.approvalId, state: record.state, approval },
+      });
+    }
     case 'used':
       if (download) {
         return refuse(

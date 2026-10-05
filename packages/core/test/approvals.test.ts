@@ -1068,3 +1068,242 @@ test('a derived expiry is persisted with expiredAt at the boundary that applied;
   );
   assert.equal(unknown.after.state, 'failed', 'a late outcome still lands, from unknown');
 });
+
+// ── Route-bound lifetimes (CUE-404 Task 6; design 2026-10-05 §D1) ───────────────────────────────────────────────
+
+const MINUTE = 60_000;
+const at = (ms: number) => new Date(Date.parse('2026-09-18T10:00:00.000Z') + ms).toISOString();
+const stateNow = async (store: ApprovalStore, approvalId: string) => asV2(await store.get(approvalId));
+
+test('chat-route records expire at ten minutes and confirm-route records at thirty, escalated sends included; equality is expired', async () => {
+  for (const [name, policy, escalated, lifetime] of [
+    ['a chat send', 'chat', false, 10 * MINUTE],
+    ['a confirm send', 'confirm', false, 30 * MINUTE],
+    ['an escalated chat send', 'chat', true, 30 * MINUTE],
+  ] as const) {
+    const { store, record, time } = await setup(policy, escalated);
+    assert.equal(record.route, lifetime === 10 * MINUTE ? 'chat' : 'confirm', name);
+    assert.equal(record.expiresAt, at(lifetime), name);
+    time.advance(lifetime - 1);
+    assert.equal((await stateNow(store, record.approvalId))?.state, 'pending', `${name}, a millisecond before`);
+    time.advance(1);
+    await assert.rejects(store.claimForSend(record.approvalId, live()), isRefusal(/expired/, 'APPROVAL_EXPIRED'), name);
+    const expired = await stateNow(store, record.approvalId);
+    assert.equal(expired?.state, 'expired', `${name}, at the boundary`);
+    assert.equal(expired?.expiredAt, at(lifetime), `${name}: the boundary is what is written`);
+  }
+  for (const [policy, lifetime] of [
+    ['chat', 10 * MINUTE],
+    ['confirm', 30 * MINUTE],
+  ] as const) {
+    const { store, time } = await setup();
+    const change = await store.createChange({ channel: 'slack', change: CHANGE, policy });
+    time.advance(lifetime - 1);
+    assert.equal((await stateNow(store, change.approvalId))?.state, 'pending', `a ${policy} change`);
+    time.advance(1);
+    assert.equal((await stateNow(store, change.approvalId))?.state, 'expired', `a ${policy} change, at ${lifetime}`);
+  }
+});
+
+test('a confirm route never claims directly after loosening; a chat route tightened to confirm waits inside its own window', async () => {
+  const confirm = await setup('confirm');
+  confirm.config.write(gate('chat'));
+  await assert.rejects(
+    confirm.store.claimForSend(confirm.record.approvalId, live()),
+    isRefusal(/outside the chat/, 'APPROVAL_PENDING'),
+  );
+  assert.equal((await stateNow(confirm.store, confirm.record.approvalId))?.state, 'pending');
+
+  const chat = await setup('chat');
+  chat.config.write(gate('confirm'));
+  chat.time.advance(5 * MINUTE);
+  await assert.rejects(
+    chat.store.claimForSend(chat.record.approvalId, live()),
+    isRefusal(/outside the chat/, 'APPROVAL_PENDING'),
+  );
+  assert.equal((await stateNow(chat.store, chat.record.approvalId))?.state, 'pending', 'waiting, not voided');
+  // A person approves it inside the ten minutes it was given: from then it has a day.
+  const code = await chat.store.issueChallenge(chat.record.approvalId);
+  await chat.store.approve(chat.record.approvalId, 'terminal', LIVE_DRAFT, code);
+  chat.time.advance(20 * MINUTE);
+  assert.equal((await chat.store.claimForSend(chat.record.approvalId, live())).state, 'sending');
+  // Unapproved, the tightened record does not outlive its original window.
+  const late = await setup('chat');
+  late.config.write(gate('confirm'));
+  late.time.advance(10 * MINUTE);
+  await assert.rejects(
+    late.store.claimForSend(late.record.approvalId, live()),
+    isRefusal(/expired/, 'APPROVAL_EXPIRED'),
+  );
+});
+
+test('an approved send survives its pending deadline and expires exactly a day after approval, unused', async () => {
+  const { store, record, time } = await setup('confirm');
+  time.advance(MINUTE);
+  await humanApproves(store, record.approvalId);
+  const approved = await stateNow(store, record.approvalId);
+  assert.equal(approved?.usableUntil, at(MINUTE + 24 * 60 * MINUTE));
+  time.advance(30 * MINUTE);
+  assert.equal((await stateNow(store, record.approvalId))?.state, 'approved', 'past the pending deadline');
+  time.advance(24 * 60 * MINUTE - 30 * MINUTE - 1);
+  assert.equal((await stateNow(store, record.approvalId))?.state, 'approved', 'a millisecond before its day ends');
+  time.advance(1);
+  await assert.rejects(
+    store.claimForSend(record.approvalId, live()),
+    (e: unknown) =>
+      e instanceof CommsError &&
+      e.code === 'APPROVAL_EXPIRED' &&
+      e.message ===
+        `this approval expired; nothing was sent with it: approved at ${at(MINUTE)}, expired unused at ${at(MINUTE + 24 * 60 * MINUTE)}`,
+  );
+  const expired = await stateNow(store, record.approvalId);
+  assert.equal(expired?.expiredAt, expired?.usableUntil, 'the boundary that applied is the approval’s own');
+  assert.equal(expired?.approvedAt, at(MINUTE), 'and its approval is kept');
+
+  // Claimed inside the day: once.
+  const again = await setup('confirm');
+  await humanApproves(again.store, again.record.approvalId);
+  again.time.advance(23 * 60 * MINUTE);
+  assert.equal((await again.store.claimForSend(again.record.approvalId, live())).state, 'sending');
+});
+
+test('an approved change can be claimed until its own day ends, not its pending deadline', async () => {
+  const { store, time } = await setup();
+  const change = await store.createChange({ channel: 'slack', change: CHANGE, policy: 'confirm' });
+  const digest = { draftMessageId: change.contentDigest, contentDigest: change.contentDigest };
+  time.advance(MINUTE);
+  await store.approve(
+    change.approvalId,
+    'terminal',
+    digest,
+    await store.issueChallenge(change.approvalId, 'change'),
+    'change',
+  );
+  time.advance(12 * 60 * MINUTE);
+  assert.equal((await store.claimForChange(change.approvalId, { change: CHANGE, policy: 'confirm' })).state, 'used');
+});
+
+test('an approval at the pending deadline is refused as expired, and nothing approved is written', async () => {
+  const { store, record, time } = await setup('confirm');
+  const code = await store.issueChallenge(record.approvalId);
+  time.advance(30 * MINUTE);
+  await assert.rejects(
+    store.approve(record.approvalId, 'terminal', LIVE_DRAFT, code),
+    (e: unknown) =>
+      e instanceof CommsError &&
+      e.code === 'APPROVAL_EXPIRED' &&
+      e.message ===
+        `this approval expired; nothing was sent with it: prepared at ${at(0)}, expired at ${at(30 * MINUTE)}`,
+  );
+  const after = await stateNow(store, record.approvalId);
+  assert.equal(after?.state, 'expired');
+  assert.equal(after?.approvedAt, undefined, 'never approved at the boundary');
+});
+
+test('a download’s question expires thirty minutes after it was asked, answered or not, and never gains a window of its own', async () => {
+  const dir = tempDir();
+  const time = clock();
+  const store = new ApprovalStore(dir, { now: time.now, loadConfig: liveConfig(dir, gate()).loadConfig });
+  const request = {
+    target: { kind: 'account' as const, name: 'acme/slack', id: SLACK },
+    operation: 'files.download',
+    request: { selection: { kind: 'files', fileIds: ['F01'] }, maxFiles: 50 },
+    files: ['F01'],
+    names: ['report.pdf'],
+  };
+  const ask = () =>
+    store.createDownload({
+      channel: 'slack',
+      download: { ...request, summary: 'where to save 1 file', folders: { downloads: '/d', current: '/c' } },
+      policy: 'confirm',
+    });
+  const unanswered = await ask();
+  const answered = await ask();
+  time.advance(29 * MINUTE);
+  await store.answerDownload(answered.approvalId, 'terminal', { choice: 'downloads' });
+  time.advance(MINUTE);
+  for (const question of [unanswered, answered]) {
+    const now = await stateNow(store, question.approvalId);
+    assert.equal(now?.state, 'expired');
+    assert.equal(now?.expiredAt, at(30 * MINUTE));
+    assert.equal(now?.usableUntil, undefined);
+    assert.equal(now?.approvedAt, undefined);
+  }
+});
+
+test('a conversational no the server never hears: claims at eleven and twenty-nine minutes find a chat route expired', async () => {
+  const { store, record, time } = await setup('chat');
+  time.advance(11 * MINUTE);
+  await assert.rejects(store.claimForSend(record.approvalId, live()), isRefusal(/expired/, 'APPROVAL_EXPIRED'), '11');
+  time.advance(18 * MINUTE);
+  await assert.rejects(store.claimForSend(record.approvalId, live()), isRefusal(/expired/, 'APPROVAL_EXPIRED'), '29');
+  assert.equal((await stateNow(store, record.approvalId))?.expiredAt, at(10 * MINUTE));
+});
+
+test('two simultaneous claims after the former ten-minute boundary of a confirm route: one winner', async () => {
+  const { store, record, time, config } = await setup('confirm');
+  time.advance(11 * MINUTE);
+  assert.equal((await stateNow(store, record.approvalId))?.state, 'pending', 'thirty minutes, not ten');
+  await humanApproves(store, record.approvalId);
+  const stateDir = store.directory.replace(/[/\\]approvals$/, '');
+  const results = await Promise.allSettled(
+    [0, 1].map(() =>
+      new ApprovalStore(stateDir, { now: time.now, loadConfig: config.loadConfig }).claimForSend(
+        record.approvalId,
+        live(),
+      ),
+    ),
+  );
+  assert.equal(results.filter((result) => result.status === 'fulfilled').length, 1);
+  assert.equal((await stateNow(store, record.approvalId))?.state, 'sending');
+});
+
+test('a clock moved back before creation or approval expires the record at the time it was seen, safely, for good', async () => {
+  // Before creation: pending.
+  const pending = await setup('confirm');
+  pending.time.advance(-5 * MINUTE);
+  await assert.rejects(
+    pending.store.claimForSend(pending.record.approvalId, live()),
+    (e: unknown) =>
+      e instanceof CommsError &&
+      e.code === 'APPROVAL_EXPIRED' &&
+      e.message ===
+        `the clock moved backwards; this approval was expired safely at ${at(-5 * MINUTE)}; nothing was sent with it`,
+  );
+  // Before approval: approved a minute in, then the clock goes back half a minute.
+  const approved = await setup('confirm');
+  approved.time.advance(MINUTE);
+  await humanApproves(approved.store, approved.record.approvalId);
+  approved.time.advance(-30_000);
+  await assert.rejects(
+    approved.store.claimForSend(approved.record.approvalId, live()),
+    isRefusal(/the clock moved backwards; this approval was expired safely at /, 'APPROVAL_EXPIRED'),
+  );
+  for (const [fixture, seen] of [
+    [pending, at(-5 * MINUTE)],
+    [approved, at(30_000)],
+  ] as const) {
+    const written = stored(fixture.store, fixture.record.approvalId);
+    assert.equal(written.state, 'expired');
+    assert.equal(written.reason, 'clock-anomaly');
+    assert.equal(written.expiredAt, seen, 'the time the clock was seen');
+    // A restart with the clock put right: still expired, and the same record.
+    const restarted = new ApprovalStore(fixture.dir, {
+      now: () => new Date(Date.parse(at(2 * MINUTE))),
+      loadConfig: fixture.config.loadConfig,
+    });
+    assert.equal(asV2(await restarted.get(fixture.record.approvalId))?.state, 'expired');
+    await assert.rejects(
+      restarted.claimForSend(fixture.record.approvalId, live()),
+      isRefusal(/clock moved backwards/, 'APPROVAL_EXPIRED'),
+    );
+  }
+  // Only that reason excuses an expiry before creation: the same record with another reason is corrupt.
+  const path = join(pending.store.directory, `${pending.record.approvalId}.json`);
+  writeFileSync(
+    path,
+    JSON.stringify({ ...stored(pending.store, pending.record.approvalId), reason: 'the approval window passed' }),
+  );
+  const read = await pending.store.get(pending.record.approvalId);
+  assert.equal(read === null ? null : stateOf(read), 'corrupt');
+});
