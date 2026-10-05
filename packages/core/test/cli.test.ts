@@ -1347,10 +1347,11 @@ test('word helpers normalize pre-sentinel path pins and insert generated options
     'literal-config',
     '--data-dir=literal-data',
   ]);
+  // A filesystem root keeps its separator: `/` here, the drive's root (`D:\`) on Windows.
   assert.deepEqual(normalizePathOptionWords(['entry.mjs', 'mcp'], { configDir: '/' }, 1), [
     'entry.mjs',
     '--config-dir',
-    '/',
+    resolve('/'),
     'mcp',
   ]);
   assert.throws(

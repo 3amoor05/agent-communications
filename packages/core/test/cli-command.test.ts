@@ -798,7 +798,9 @@ test('only a registration of the same version is used, managed first, then by cl
     command: node,
     args: [STRIP, localEntry, 'mcp'],
   });
-  const other = writeManaged(join(temp, 'data2'), 'slack');
+  // `data~` sorts after `data` followed by either separator: `data2` came after `data/` on POSIX but before `data\`
+  // on Windows, where the backslash sorts after the digits.
+  const other = writeManaged(join(temp, 'data~'), 'slack');
   const managedAt = (client: string, path: string, name: string, command = node, entry = other.entry) =>
     registration({ client, path, name, command, args: [entry, 'mcp'] });
 
