@@ -53,9 +53,10 @@ process still running. The first 0.14 server or command that prepares, approves 
 policy, converts it; from then on a server still on 0.13 fails every call it starts with "this release reads versions
 1 and 2". **Restart every client after updating.** Sends 0.13 prepared and nobody used are retired ("prepared by an
 earlier release; prepare it again"), and until they are — no sooner than ten minutes after the conversion — no send
-policy can be loosened; `doctor` shows them under "earlier-release approvals". This breaks the usual rule that a
-release reads a configuration version before any release writes it, on purpose: a 0.13 process that kept going could
-still send with an approval prepared before sending was turned off.
+policy can be loosened; `doctor` shows them under "earlier-release approvals", with any send 0.13 was already making,
+which is left to finish. This breaks the usual rule that a release reads a configuration version before any release
+writes it, on purpose: a 0.13 process that kept going could still send with an approval prepared before sending was
+turned off.
 
 **Approval records are kept 90 days.** A finished approval is deleted 90 days after it finished, in one bounded batch
 a day, with an `approval.retained` line in the audit log first. A record that cannot be read, or fails its integrity
@@ -71,9 +72,10 @@ What it means for you: a minor release, with changes you will see and some a scr
   public object — `approvalId`, `state`, `claimable`, `route`, its times and reason, what a sender wrote inside the
   untrusted-content envelope. The stored fields, `policy`, `requiredPolicy`, `riskFlags` and the rest, are gone.
   `--state corrupt` lists the records that cannot be used.
-- An approval id of the wrong kind — a send's given to a change, say — now gets the same `NOT_FOUND` as an id nobody
-  prepared, with no hint pointing at another command. Every approval `NOT_FOUND` now reads alike, "nothing was sent:
-  no approval <id>" (or changed, or saved), pinned servers included: "no approval "x" for the "work" mailbox" is gone.
+- An approval id of the wrong kind or channel — a send's given to a change, or a Slack post's to `agent-gmail approve`,
+  say — now gets the same `NOT_FOUND` as an id nobody prepared, with no hint pointing at another command. Every
+  approval `NOT_FOUND` now reads alike, "nothing was sent: no approval <id>" (or changed, or saved), pinned servers
+  included: "no approval "x" for the "work" mailbox" is gone.
 - An uncertain provider outcome is `SEND_OUTCOME_UNKNOWN` (exit `10`, never retryable) instead of `TRANSIENT` (exit
   `75`), for Gmail, Slack and Resend alike. An expired approval is `APPROVAL_EXPIRED` everywhere; `APPROVAL_REQUIRED`
   now means only that a person's approval is missing; a used approval is `APPROVAL_VOID`, and one being sent is a
@@ -85,7 +87,8 @@ What it means for you: a minor release, with changes you will see and some a scr
   "sent (Resend reports delivered)", "Resend reports a bounce", "scheduled for <time>, not yet sent", "Resend reports
   it cancelled" — in a new `outcome` and its `verdict`. With a sending-only key it says "current outcome unavailable"
   rather than "sent". A scheduled email is "accepted by Resend, scheduled for <time>", never "sent" because its time
-  has passed. A cancellation Resend confirmed stays a success even when this machine could not record it.
+  has passed. A cancellation Resend confirmed stays a success even when this machine could not record it. An approval
+  used already is refused as "accepted by Resend at <time>", never as sent.
 - Setting a send policy — `agent-gmail inbox policy`, `agent-slack workspace policy`, `agent-resend account policy` and
   their tools — returns `fenced`: `{ revoked, alreadySending, couldNotRevoke }`, which the CLI prints.
 - A Slack file post that fails says "nothing was posted", naming any file that went up first.
