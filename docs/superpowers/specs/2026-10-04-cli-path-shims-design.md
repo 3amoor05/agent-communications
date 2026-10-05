@@ -1,6 +1,6 @@
 # CUE-403 — runnable CLI handoffs from the running installation — design
 
-Status: **proposed for 0.13.1; revised after round 9 (1 P1, 3 P2), 2026-10-05. No implementation is in
+Status: **proposed for 0.13.1; revised after round 10 (1 P2, 2 P3), 2026-10-05. No implementation is in
 this change.**
 
 ## 1. What is being fixed
@@ -58,7 +58,12 @@ word zero or quote a line.
 
 The interpreter rule is one rule: the running package's own CLI and channel→core use `process.execPath`; a command
 resolved from a registration uses that registration's recorded interpreter when it has one, otherwise
-`process.execPath`. The only retained `process.execArgv` flags are `--experimental-strip-types`, and
+`process.execPath`. Whichever interpreter is chosen must satisfy the **target** package's `engines.node` range, checked
+against that interpreter's own version (for a recorded interpreter, by running it with `--version` once and caching the
+answer for the process); lockstep packages do not share one floor — core accepts Node `>=22.12.0` while WhatsApp needs
+`>=22.16.0` and checks it before every action (`packages/core/package.json:8-10`, `packages/whatsapp/package.json:8-10`,
+`packages/whatsapp/src/cli/program.ts:200, 477`). An interpreter outside the range yields no command, with the reason naming
+the required Node range. The only retained `process.execArgv` flags are `--experimental-strip-types`, and
 `--experimental-transform-types` when the running source invocation used it. Debug, test, eval, preload/loader,
 condition, warning, source-map, title and memory flags are not CLI requirements. The existing local launcher shows why
 source needs type stripping (`packages/core/src/mcp-install.ts:546-556`).
@@ -147,7 +152,10 @@ platform application-data variables — exactly as when the person types the com
 therefore acts on that person's own clients by design.
 
 The locator does not reproduce the printing environment. It first removes every existing path option from supplied or
-registered argument words, at any position: both `--x value` and `--x=value` forms for all five names. It then inserts,
+registered argument words, at any position **before a `--` end-of-options word**: both `--x value` and `--x=value`
+forms for all five names. Option recognition stops at the first `--`; that word and everything after it are positional
+data and are kept exactly. A spaced form with no value before `--` (or at the end) is an installation error and yields
+no command. It then inserts,
 between the entry/package word and the subcommand, exactly one canonical absolute option for every
 **agent-communications** directory the target command uses: config, state, data, secrets and, for a handoff which reads
 or writes downloads, downloads. It emits none for a suite directory the target does not use. Thus caller ordering,
@@ -199,8 +207,10 @@ PowerShell- or cmd-specific renderers.
 Resolved directory option values have redundant trailing separators removed before rendering (a filesystem root
 keeps its root separator). A legal Windows path can still have no common-shell line when it contains `$`, `%`, `!`,
 a backtick, a curly double quote, a Unicode control/format character, or an unspaced `&`, `^`, `(` or `)`; the same
-refusal covers argument words containing `|`, `<` or `>` in that position. Empty words, words ending in `\`, and
-words containing a straight double quote are also refused. The person sees the exact argv as non-runnable JSON and
+refusal covers argument words containing `|`, `<` or `>` in that position. Empty words, words that need quoting
+**and** end in `\`, and words containing a straight double quote are also refused; a bare-safe word ending in `\`
+(such as `C:\Profiles\`) is printed unquoted, as today (`packages/core/src/cli-runtime.ts:144-150`,
+`packages/core/test/cli.test.ts:1384-1386`). The person sees the exact argv as non-runnable JSON and
 the manual-typing instruction, not a partial command
 (`packages/core/src/cli-runtime.ts:136-191`). An npx registration, including an absolute `npx.cmd` on Windows, goes
 through these same rules (`packages/core/src/mcp-install.ts:1017-1024`).
@@ -406,6 +416,11 @@ authoritative data roots, and CLI-MCP parity for the preference.
 
 ## 4. Tests
 
+0. **Round-10 cases:** a core process on Node 22.12–22.15 resolving a same-version WhatsApp registration (global and
+   managed, with and without a recorded interpreter) prints no command and names Node `>=22.16.0`, while a
+   satisfying recorded interpreter is used; raw retry argv containing `-- --config-dir` and `-- --config-dir=value` keeps
+   every word after `--` exactly, and a dangling spaced `--config-dir` before `--` yields no command; `C:\Profiles\` is
+   printed bare while a quote-requiring word ending in `\` is refused.
 1. **Own locator matrix:** installer-written managed, npx and local registrations, plus global and direct-checkout
    installations, on POSIX and Windows; only the two allowed Node flags survive. Checkout fixtures have no `dist`, then
    a stale `dist`, and both select `src/cli.ts`. Gmail's wrapper resolves Gmail. Manifest/bin mismatch, missing,
