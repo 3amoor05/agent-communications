@@ -38,7 +38,7 @@ test('a full-access key typed through RESEND_API_KEY is detected, stored only in
   const data = result.json<Record<string, unknown>>().data ?? {};
   assert.equal(data.key, 'full_access');
   assert.equal(data.mode, 'read', 'a full-access key is added read-only unless a person asks for send');
-  assert.match(String(data.guarantee), /enforced by agent-resend’s own code, not by the key/);
+  assert.match(String(data.guarantee), /enforced by this package’s own code, not by the key/);
   const account = (await harness.context().accounts.require('acme/resend')).account;
   assert.equal(await (await harness.core.secrets('file')).get(secretRefFor(account.id)), FULL);
   assert.ok(!JSON.stringify(account).includes(FULL.slice(3)), 'the account record holds no part of the key');
@@ -269,7 +269,7 @@ test('show and doctor say plainly that read-only is this package’s promise, no
   await harness.addAccount({ name: 'acme/resend', mode: 'read' });
   await harness.addAccount({ name: 'acme/resend-send', tier: 'sending_access', key: SENDING });
   const show = await harness.cli(['account', 'show', 'acme/resend']);
-  assert.match(show.stdout, /Read-only is enforced by agent-resend’s own code, not by the key/);
+  assert.match(show.stdout, /Read-only is enforced by this package’s own code, not by the key/);
   const doctor = await harness.cli(['--json', 'doctor']);
   assert.equal(doctor.code, 0, doctor.stdout);
   const result = doctor.json<{

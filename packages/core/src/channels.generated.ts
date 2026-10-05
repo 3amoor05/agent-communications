@@ -104,7 +104,7 @@ export const CHANNEL_SNAPSHOT: readonly ChannelEntry[] = [
         guarantee: {
           ceiling: 'code',
           floor: 'code',
-          why: "Resend has no read-only key, and a full-access key can also manage domains and keys: read mode, and send mode's limit to sending, are enforced by agent-resend's own code. A sending-access key can only send, and Resend enforces that.",
+          why: "Resend has no read-only key, and a full-access key can also manage domains and keys: read mode, and send mode's limit to sending, are enforced by this package's own code. A sending-access key can only send, and Resend enforces that.",
         },
       },
       narrowing: [

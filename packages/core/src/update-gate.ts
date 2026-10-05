@@ -1,5 +1,6 @@
 import { type ApprovalKind, approvalKind } from './approvals.ts';
 import { gatedChangeAtTerminal } from './change-flow.ts';
+import { CHANNEL_SNAPSHOT } from './channels.generated.ts';
 import { agentMarker, canPrompt, type OutputOptions, paint, type Streams } from './cli-runtime.ts';
 import type { Core } from './core.ts';
 import { CommsError, EXIT_CODES } from './errors.ts';
@@ -155,7 +156,11 @@ export function updateToolGate(options: UpdateToolGateOptions): ToolGate {
     if (pending === null) return null;
     const claim = options.approvals?.[tool];
     if (await claimsApproval(options.core, args[claim?.argument ?? 'approvalId'], claim)) return null;
-    return stoppedCall(pending, { server: options.server, tool }, updateCommands(options.core));
+    return stoppedCall(
+      pending,
+      { server: options.server, channel: options.channel, tool },
+      updateCommands(options.core),
+    );
   };
 }
 
@@ -166,7 +171,7 @@ export function updateToolGate(options: UpdateToolGateOptions): ToolGate {
  */
 export function stoppedCall(
   pending: PendingUpdate,
-  where: { server: string; tool: string },
+  where: { server: string; channel: string; tool: string },
   commands: UpdateCommands,
 ): object {
   const message = updateStopMessage(pending, where, commands);
@@ -273,7 +278,10 @@ export interface TerminalUpdateHooks {
 export interface TerminalGateOptions extends TerminalUpdateHooks {
   core: Core;
   env: NodeJS.ProcessEnv;
-  /** The command a person typed, `agent-gmail`: what the prompt and the messages name. */
+  /**
+   * The program a person typed, `agent-gmail`: an identity, kept with the gate and never said. The messages name the
+   * CLI by its product — "this Gmail CLI" — since a binary's bare name is no command most people can run (CUE-403).
+   */
   binary: string;
   /** Its channel, `gmail`, `core`: whose global package says whether running the command again would run `latest`. */
   channel: string;
@@ -343,7 +351,7 @@ export async function updateGateAtTerminal(options: TerminalGateOptions): Promis
   const person =
     agentMarker(env) === null && canPrompt(env, streams, { json: output.json, noInput: options.noInput === true });
   const commands = updateCommands(core, output.platform);
-  if (!person) throw updateRequired(pending, options.binary, commands);
+  if (!person) throw updateRequired(pending, cliOf(options.channel), commands);
 
   const bold = (word: string) => paint(output.color, 'bold', word);
   const answer = (
@@ -359,14 +367,14 @@ export async function updateGateAtTerminal(options: TerminalGateOptions): Promis
   if (answer === 'now' || answer === 'update') {
     if (pending.kind === 'restart') {
       streams.stdout.write(
-        `${pending.latest} is installed globally; this ${options.binary} is ${pending.running}, started from somewhere else — npx's cache, a project's own install, a checkout. Run your command again from the installed one. ${options.binary} did not run.\n`,
+        `${pending.latest} is installed globally; this ${cliOf(options.channel)} is ${pending.running}, started from somewhere else — npx's cache, a project's own install, a checkout. Run your command again from the installed one. The command did not run.\n`,
       );
       return EXIT_CODES.UPDATE;
     }
     if (!options.update) {
       // WhatsApp: it has no network code, so it cannot fetch an update itself; `agentcomms update` does it for all.
       streams.stdout.write(
-        `${options.binary} reads only this machine and cannot fetch the update itself. ${updateCommandSaid(commands, 'update', (command) => `Run ${command}, then run your command again.`)}\n`,
+        `This ${cliOf(options.channel)} reads only this machine and cannot fetch the update itself. ${updateCommandSaid(commands, 'update', (command) => `Run ${command}, then run your command again.`)}\n`,
       );
       return EXIT_CODES.UPDATE;
     }
@@ -388,16 +396,25 @@ export async function updateGateAtTerminal(options: TerminalGateOptions): Promis
     );
     return null;
   }
-  throw new CommsError('USAGE', `cancelled: ${options.binary} did not run, and nothing was changed`, {
+  throw new CommsError('USAGE', 'cancelled: the command did not run, and nothing was changed', {
     hint: bothSaid(commands, (update, later) => `Update with ${update}, or put it off until tomorrow with ${later}.`),
   });
+}
+
+/**
+ * The CLI a gate stops, in product words — "Gmail CLI", "core CLI" — for its sentences: never its binary, which is no
+ * command most people can run, and which a sentence would read as one (CUE-403).
+ */
+function cliOf(channel: string): string {
+  if (channel === 'core') return 'core CLI';
+  return `${CHANNEL_SNAPSHOT.find((entry) => entry.manifest.channel === channel)?.manifest.label ?? channel} CLI`;
 }
 
 /**
  * The stop where nobody can be asked: the command does not run. "Update" names the update and "not now"; "restart"
  * — the update installed, and an older copy running — says to run the command from the installed one.
  */
-function updateRequired(pending: PendingUpdate, binary: string, commands: UpdateCommands): CommsError {
+function updateRequired(pending: PendingUpdate, cli: string, commands: UpdateCommands): CommsError {
   const ways = updateWaysOf(commands);
   const details = {
     running: pending.running,
@@ -409,7 +426,7 @@ function updateRequired(pending: PendingUpdate, binary: string, commands: Update
   if (pending.kind === 'restart') {
     return new CommsError(
       'UPDATE_REQUIRED',
-      `Hang on a minute, the update is installed, but this command isn't running it yet. ${pending.latest} is installed globally, and this ${binary} is ${pending.running}: ${handoffSentence(commands.later, (later) => `run the command again from the installed one, or ${later} to put it off until tomorrow`)}`,
+      `Hang on a minute, the update is installed, but this command isn't running it yet. ${pending.latest} is installed globally, and this ${cli} is ${pending.running}: ${handoffSentence(commands.later, (later) => `run the command again from the installed one, or ${later} to put it off until tomorrow`)}`,
       {
         hint: `Nothing was done. An older copy is running — npx's cache, a project's own install, a checkout. "Not now" is a change a person approves: an agent gets the preview and an approval id (exit 10), and runs the same command again with --approval <id> once the person agrees.`,
         details,
@@ -442,8 +459,9 @@ async function afterUpdate(
   options: TerminalGateOptions,
   before: PendingUpdate,
 ): Promise<number> {
-  const { streams, binary } = options;
-  const notRun = `${binary} did not run`;
+  const { streams } = options;
+  const cli = cliOf(options.channel);
+  const notRun = 'The command did not run';
   const commands = updateCommands(options.core, options.output.platform);
   if (outcome === 'failed') {
     streams.stdout.write(`${notRun}: the update did not finish — each step says how it went, above.\n`);
@@ -458,13 +476,13 @@ async function afterUpdate(
       streams.stdout.write('Updated. Run your command again.\n');
       return EXIT_CODES.OK;
     }
-    streams.stdout.write(`${before.latest} is installed here: run your command again from it. ${notRun}.\n`);
+    streams.stdout.write(`${before.latest} is installed here: run your command again from it. It did not run.\n`);
     return EXIT_CODES.UPDATE;
   }
   // Nothing the update reaches runs this command: `agentcomms update` moves registrations and global packages, and
   // this copy is neither. Saying "Updated" here would send the person round the same question again.
   streams.stdout.write(
-    `${notRun}: the update did not bring it to ${before.latest}. The update moves what this machine registers and has installed globally — what it found is said above — and this ${binary} ${before.running} is started from somewhere else: npx's cache, a project's own install, a checkout. ${handoffSentence(commands.later, (later) => `Run it from ${before.latest}, or put this off until tomorrow with ${later}.`)}\n`,
+    `${notRun}: the update did not bring it to ${before.latest}. The update moves what this machine registers and has installed globally — what it found is said above — and this ${cli}, ${before.running}, is started from somewhere else: npx's cache, a project's own install, a checkout. ${handoffSentence(commands.later, (later) => `Run it from ${before.latest}, or put this off until tomorrow with ${later}.`)}\n`,
   );
   return EXIT_CODES.UPDATE;
 }

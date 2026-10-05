@@ -227,14 +227,14 @@ export async function run(argv: readonly string[], deps: CliDeps = {}): Promise<
     .addHelpText(
       'after',
       `
-Getting started:
-  agent-slack manifest --port 51234        the app to create in Slack, and how
-  agent-slack app create --port 51234      or create it from here, with an app configuration token
-  agent-slack workspace add acme/slack --client-id <id> --port 51234
-  agent-slack doctor                       what works and what does not
-  agent-slack mcp install --client claude-code
-  agent-slack channels --workspace acme/slack
-  agent-slack read <channel> --workspace acme/slack
+Getting started — run these with this CLI:
+  manifest --port 51234        the app to create in Slack, and how
+  app create --port 51234      or create it from here, with an app configuration token
+  workspace add acme/slack --client-id <id> --port 51234
+  doctor                       what works and what does not
+  mcp install --client claude-code
+  channels --workspace acme/slack
+  read <channel> --workspace acme/slack
 
 Exit codes: 0 ok · 1 unexpected · 10 a post or a change was refused or needs approval, or a
 sign-in is still waiting · 11 an update is out: update first, or put it off, with the commands

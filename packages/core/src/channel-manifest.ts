@@ -253,7 +253,7 @@ const manifestSchema = z
     }
     // The commands a person types: the core's own, or `agent-<something>`, so no channel's reads as anything else.
     if (isCore) {
-      if (manifest.binary !== CORE_BINARY) issue(['binary'], `the core's command is \`${CORE_BINARY}\``);
+      if (manifest.binary !== CORE_BINARY) issue(['binary'], "is not the core's own command name");
     } else if (!CHANNEL_BINARY.test(manifest.binary)) {
       issue(['binary'], "a channel's command is `agent-<something>`");
     }
@@ -287,7 +287,7 @@ const manifestSchema = z
       }
     }
     if (manifest.approve !== undefined && !manifest.approve.startsWith(`${manifest.binary} `)) {
-      issue(['approve'], `the channel's own command: \`${manifest.binary} …\``);
+      issue(['approve'], "must start with the channel's own command, its `binary`, and a space");
     }
     if (manifest.skills) {
       const family = manifest.skills.prefix.slice(0, -1);

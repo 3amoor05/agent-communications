@@ -106,19 +106,19 @@ export async function run(argv: readonly string[], deps: CliDeps = {}): Promise<
     .addHelpText(
       'after',
       `
-Getting started (a person, in a terminal):
-  agent-whatsapp add personal/whatsapp         reads WhatsApp for Mac's store; macOS may ask to allow access
-  agent-whatsapp sync --account personal/whatsapp
-  agent-whatsapp chats --account personal/whatsapp
-  agent-whatsapp search "invoice" --account personal/whatsapp
-  agent-whatsapp draft +15555550101 "On my way"   a link; you press send in WhatsApp
-  agent-whatsapp deny +15555550102 --account personal/whatsapp   agents never see that chat
-  agent-whatsapp mcp install --client claude-code --account personal/whatsapp
+Getting started — a person runs these with this CLI, in a terminal:
+  add personal/whatsapp         reads WhatsApp for Mac's store; macOS may ask to allow access
+  sync --account personal/whatsapp
+  chats --account personal/whatsapp
+  search "invoice" --account personal/whatsapp
+  draft +15555550101 "On my way"   a link; you press send in WhatsApp
+  deny +15555550102 --account personal/whatsapp   agents never see that chat
+  mcp install --client claude-code --account personal/whatsapp
 
 Nothing here connects to WhatsApp or any other server, and nothing here can send. Needs Node 22.16 or newer.
 
 Exit codes: 0 ok · 1 unexpected · 10 only a person may do that, or a change needs approval · 11 an update
-is out: update first, or put it off (agentcomms update, agentcomms update --later) · 64 usage
+is out: update first, or put it off (the stop names both commands) · 64 usage
 · 65 bad data (a store whose layout changed) · 66 not found · 69 unavailable · 75 temporary (retry;
 a macOS dialog may be waiting) · 77 permission needed (macOS privacy) · 78 configuration problem.`,
     )

@@ -99,7 +99,7 @@ export async function buildInstructions(context: ResendContext, pinned: string |
     'you cannot approve it yourself, so say so and wait. Under `never` nothing sends. Never repeat a send whose',
     'outcome is unknown: check it with `resend_send_status`.',
     '',
-    'Read-only is enforced by agent-resend, not by the key: Resend has no read-only key.',
+    'Read-only is enforced by this package’s own code, not by the key: Resend has no read-only key.',
     'A key is added only by a person, at their own terminal. Never ask for one in chat.',
     '',
     pinned
@@ -235,7 +235,7 @@ export async function createResendMcpServer(options: ResendMcpOptions = {}): Pro
     {
       title: 'List accounts',
       description:
-        'The connected Resend accounts: each key’s permission, its mode, its send policy, and who enforces what. Read-only is agent-resend’s own promise, never the key’s.',
+        'The connected Resend accounts: each key’s permission, its mode, its send policy, and who enforces what. Read-only is this package’s own promise, never the key’s.',
       inputSchema: {},
       annotations: readsLocal,
     },
@@ -310,7 +310,7 @@ export async function createResendMcpServer(options: ResendMcpOptions = {}): Pro
     {
       title: 'Doctor',
       description:
-        'What works and what does not, per account — and, plainly, that read-only is enforced by agent-resend’s code, not by the key.',
+        'What works and what does not, per account — and, plainly, that read-only is enforced by this package’s code, not by the key.',
       inputSchema: { ...accountArg, offline: z.boolean().optional().describe('do not ask Resend anything') },
       annotations: readsResend,
     },

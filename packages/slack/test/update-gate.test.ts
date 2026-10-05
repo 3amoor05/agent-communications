@@ -77,7 +77,7 @@ test('an update that is out stops every Slack tool but the doctor, and a call cl
     const listed = await call('slack_workspaces_list', {});
     assert.equal(code(listed), 'UPDATE_REQUIRED');
     assert.ok(text(listed).startsWith(UPDATE_FIRST), text(listed));
-    assert.match(text(listed), /This is agent-slack /);
+    assert.match(text(listed), /This is the Slack server, /);
     assert.notEqual(code(await call('slack_doctor', { offline: true })), 'UPDATE_REQUIRED');
     const send = (claimed: string) =>
       call('slack_post_send', {
@@ -446,7 +446,7 @@ test('slack_file_download: an update that is out answers "Hang on a minute" and 
   assert.equal(result.isError, true, JSON.stringify(result.structuredContent));
   assert.equal(code(result), 'UPDATE_REQUIRED', JSON.stringify(result.structuredContent));
   assert.ok(text(result).startsWith("Hang on a minute, there's an update. Let's update first."), text(result));
-  assert.match(text(result), /This is agent-slack /);
+  assert.match(text(result), /This is the Slack server, /);
   assert.match(text(result), /slack_file_download did not run/);
   const error = (result.structuredContent as { error: { message: string; details: Record<string, unknown> } }).error;
   assert.ok(error.message.startsWith(UPDATE_FIRST), 'the structured content carries the same words');

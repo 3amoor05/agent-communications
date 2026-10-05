@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { CHANNEL_SNAPSHOT } from './channels.generated.ts';
 import { type UpdateCheckSetting, updateCheckSetting } from './config.ts';
 import type { Core } from './core.ts';
 import { writeFileAtomic } from './fs.ts';
@@ -350,29 +351,36 @@ export function updateWaysOf(commands: UpdateCommands): UpdateWays {
   };
 }
 
+/** A channel's product name, from core's snapshot of the manifests: `Gmail`. */
+function labelOf(channel: string): string {
+  return CHANNEL_SNAPSHOT.find((entry) => entry.manifest.channel === channel)?.manifest.label ?? channel;
+}
+
 /**
  * What a stopped tool call says, in words an agent passes on: the owner's sentence first, then the versions, then the
  * two ways on — the update, from chat or a terminal, or "not now", which the person approves like any other change.
  */
 export function updateStopMessage(
   pending: PendingUpdate,
-  where: { server: string; tool: string },
+  where: { server: string; channel: string; tool: string },
   commands: UpdateCommands,
 ): string {
+  // The server by its product — never its name as a client lists it, which reads as a command to run (CUE-403).
+  const server = where.channel === 'core' ? 'the core server' : `the ${labelOf(where.channel)} server`;
   const didNotRun = `Nothing was done: ${where.tool} did not run.`;
   const later = `Not now: call comms_update with \`later: true\` — a change the person approves — and nothing stops again until midnight; the next request after it asks again. ${updateCommandSaid(commands, 'later', (command) => `At a terminal: ${command}.`)}`;
   if (pending.kind === 'restart') {
     return [
       "Hang on a minute, the update is installed, but this server isn't running it yet. Restart the client first.",
-      `This is ${where.server} ${pending.running}; ${pending.latest} is installed on this machine — every registration of this server names it — and a client starts it only once it is restarted. ${didNotRun}`,
+      `This is ${server}, ${pending.running}; ${pending.latest} is installed on this machine — every registration of this server names it — and a client starts it only once it is restarted. ${didNotRun}`,
       `Ask the person to restart the MCP client — quit it and open it again — and carry on after. ${later}`,
     ].join('\n');
   }
   return [
     UPDATE_FIRST,
-    `This is ${where.server} ${pending.running}; the latest release is ${pending.latest}. ${didNotRun}`,
+    `This is ${server}, ${pending.running}; the latest release is ${pending.latest}. ${didNotRun}`,
     'Ask the person which they want:',
-    `- Update now: call comms_update on the agentcomms (core) server. It shows every step and asks before it changes anything; restart the client after. ${updateCommandSaid(commands, 'update', (command) => `At a terminal: ${command}.`)} A server comms_update does not find registered here — a plugin's, an extension's — is updated where it was installed.`,
+    `- Update now: call comms_update on the core server. It shows every step and asks before it changes anything; restart the client after. ${updateCommandSaid(commands, 'update', (command) => `At a terminal: ${command}.`)} A server comms_update does not find registered here — a plugin's, an extension's — is updated where it was installed.`,
     `- ${later}`,
   ].join('\n');
 }

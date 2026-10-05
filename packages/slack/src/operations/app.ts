@@ -9,7 +9,14 @@ import {
 import { callSlack, type SlackCall, type SlackProblem, type SlackResponse } from '../api/call.ts';
 import { closedPermit, configureWith, type FetchLike } from '../api/guard.ts';
 import { handoffsSentence } from '../handoffs.ts';
-import { appManifestUrl, buildManifest, type InstallMode, parseMode, type SlackManifest } from '../manifest.ts';
+import {
+  APP_NAME,
+  appManifestUrl,
+  buildManifest,
+  type InstallMode,
+  parseMode,
+  type SlackManifest,
+} from '../manifest.ts';
 import { narrowingSteps } from './mode.ts';
 import type { AuditSink } from './send.ts';
 
@@ -442,7 +449,7 @@ export async function createApp(input: AppCreateInput): Promise<AppCreated> {
   if (typeof appId !== 'string' || !PRINTABLE_ID.test(appId)) {
     await record('failed', {}, 'no-app-id');
     throw new CommsError('PROVIDER_UNAVAILABLE', 'Slack answered without naming the app it created', {
-      hint: 'Look for a new app called "agent-slack" at https://api.slack.com/apps before running this again.',
+      hint: `Look for a new app called "${APP_NAME}" at https://api.slack.com/apps before running this again.`,
     });
   }
   await record('ok', { appId });

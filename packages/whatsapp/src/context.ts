@@ -108,7 +108,7 @@ export class WhatsAppContext {
       now: this.now,
       surface: this.surface,
     }).then((result) => {
-      if (result) this.#log?.(`agent-whatsapp: ${describeMigration(result)}`);
+      if (result) this.#log?.(`WhatsApp: ${describeMigration(result)}`);
       return result;
     });
     return this.#migration;

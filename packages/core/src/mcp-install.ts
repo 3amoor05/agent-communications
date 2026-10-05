@@ -908,7 +908,7 @@ function capture(
  */
 async function codexRegistration(
   env: NodeJS.ProcessEnv,
-  binary: string,
+  cliPath: string,
   name: string,
   path: string,
   platform: NodeJS.Platform | undefined,
@@ -919,7 +919,7 @@ async function codexRegistration(
     });
   let answer: Awaited<ReturnType<typeof capture>>;
   try {
-    answer = await capture(env, binary, ['mcp', 'get', name, '--json']);
+    answer = await capture(env, cliPath, ['mcp', 'get', name, '--json']);
   } catch (error) {
     /*
      * Codex did not run at all, which is a different fact from codex not saying, and the one a person can act on.
@@ -1012,20 +1012,20 @@ export async function installTarget(
   options: Pick<InstallOptions, 'client' | 'apply'>,
 ): Promise<{
   cliName: 'claude' | 'codex' | null;
-  binary: string | null;
+  cliPath: string | null;
   own: string | undefined;
   configPath: string | undefined;
   writes: boolean;
 }> {
   const apply = options.apply ?? true;
   const cliName = options.client === 'claude-code' ? 'claude' : options.client === 'codex' ? 'codex' : null;
-  const binary = cliName ? await findClientCli(cliName, context.env) : null;
+  const cliPath = cliName ? await findClientCli(cliName, context.env) : null;
   // The file this client keeps its servers in, as this environment resolves it — for Claude Code and codex, the
   // one their own CLI writes. `--client json` has none.
   const own = knownClientConfigs(context.env).find((file) => file.client === options.client)?.path;
   const configPath = options.client === 'claude-code' ? undefined : own;
-  const writes = apply && (cliName ? binary !== null : configPath !== undefined);
-  return { cliName, binary, own, configPath, writes };
+  const writes = apply && (cliName ? cliPath !== null : configPath !== undefined);
+  return { cliName, cliPath, own, configPath, writes };
 }
 
 /**
@@ -1088,7 +1088,7 @@ export async function preflightInstall(
   const scan = await scanRegisteredServers(context.env);
   const existing = scan.servers;
   const target = await installTarget(context, options);
-  const { binary, own, configPath, writes } = target;
+  const { cliPath, own, configPath, writes } = target;
 
   // Before anything is installed or written: a refusal should cost nothing.
   if (writes) {
@@ -1104,8 +1104,8 @@ export async function preflightInstall(
     }
   }
   let previous = writes ? claimName(product, options, name, existing, context.platform) : [];
-  if (writes && binary && options.client === 'codex') {
-    const reported = await codexRegistration(context.env, binary, name, configPath ?? 'codex', context.platform);
+  if (writes && cliPath && options.client === 'codex') {
+    const reported = await codexRegistration(context.env, cliPath, name, configPath ?? 'codex', context.platform);
     if (reported) previous = claimName(product, options, name, [reported], context.platform);
   }
   const { options: effective, kept } = keepNarrowing(product, options, previous);
@@ -1163,7 +1163,7 @@ export interface PlannedInstall {
   readonly writes: boolean;
   /** Where it goes: the client's CLI it registers through, by path, and the client's own file. */
   readonly cliName: 'claude' | 'codex' | null;
-  readonly binary: string | null;
+  readonly cliPath: string | null;
   readonly configPath: string | null;
   readonly own: string | null;
   /** This product's own entries under the name that it replaces, each whole. Empty when it adds. */
@@ -1181,7 +1181,7 @@ export function plannedInstall(preflight: InstallPreflight): PlannedInstall {
   return {
     writes: target.writes,
     cliName: target.cliName,
-    binary: target.binary,
+    cliPath: target.cliPath,
     configPath: target.configPath ?? null,
     own: target.own ?? null,
     // Whole, env included: an entry swapped for another of ours under the same name is another entry to replace.
@@ -1234,8 +1234,8 @@ function planDrift(
     } else {
       drift.push(now.writes ? 'it would write the entry rather than print it' : 'it would only print the entry');
     }
-  } else if (planned.binary !== now.binary) {
-    drift.push(`it would register through another ${cli ?? 'client CLI'} than the one planned: ${now.binary}`);
+  } else if (planned.cliPath !== now.cliPath) {
+    drift.push(`it would register through another ${cli ?? 'client CLI'} than the one planned: ${now.cliPath}`);
   }
   if (planned.configPath !== now.configPath || planned.own !== now.own) {
     drift.push(
@@ -1303,7 +1303,7 @@ export async function mcpInstall(
   const effective =
     planned === undefined ? preflight.effective : { ...preflight.effective, ...pinsOf(planned.narrowing) };
   const existing = scan.servers;
-  const { cliName, binary, own, configPath, writes } = target;
+  const { cliName, cliPath, own, configPath, writes } = target;
   // The client being installed, only. Every other client's findings were being reported here too, with removal
   // advice that said "the file above" and meant a different file.
   const warnings = (
@@ -1382,7 +1382,7 @@ export async function mcpInstall(
   let applied = false;
   let notApplied: string | undefined;
 
-  if (cliName && binary && writes) {
+  if (cliName && cliPath && writes) {
     const codexEnv = (values: Record<string, string> | undefined) =>
       Object.entries(values ?? {}).flatMap(([key, value]) => ['--env', `${key}=${value}`]);
     const args =
@@ -1401,7 +1401,7 @@ export async function mcpInstall(
       const removal =
         options.client === 'claude-code' ? ['mcp', 'remove', name, '--scope', 'user'] : ['mcp', 'remove', name];
       try {
-        await run(context.env, binary, removal);
+        await run(context.env, cliPath, removal);
       } catch (error) {
         // Nothing registered under that name is the state we wanted anyway. Anything else is a real failure and
         // must not be swallowed: proceeding would add beside an entry we failed to remove.
@@ -1410,7 +1410,7 @@ export async function mcpInstall(
       }
 
       try {
-        await run(context.env, binary, args);
+        await run(context.env, cliPath, args);
       } catch (error) {
         // What was there goes back if the replacement does not land. Otherwise `--force` removes a working entry
         // and leaves the client with no server at all — strictly worse than the stale one it was asked to replace.
@@ -1436,7 +1436,7 @@ export async function mcpInstall(
         // their working server survived, when in fact nothing is registered at all.
         let restored = true;
         try {
-          await run(context.env, binary, restore);
+          await run(context.env, cliPath, restore);
         } catch {
           restored = false;
         }
@@ -1459,7 +1459,7 @@ export async function mcpInstall(
       }
     } else {
       try {
-        await run(context.env, binary, args);
+        await run(context.env, cliPath, args);
       } catch (error) {
         const message = error instanceof CommsError ? error.message : String(error);
         if (/already exists/i.test(message)) {
@@ -1468,7 +1468,7 @@ export async function mcpInstall(
             'CONFIG',
             `${cliName} already has an MCP server called "${name}", somewhere this could not read`,
             {
-              hint: `Look at it with ${clientCommandHint([cliName, 'mcp', 'get', name], context.platform, `${cliName}'s own \`mcp get\`, for the entry called "${name}"`)}. If it is an older ${product.binary}, remove it with ${clientCommandHint([cliName, 'mcp', 'remove', name], context.platform, `${cliName}'s own \`mcp remove\``)} and run this again; if not, choose another --name.`,
+              hint: `Look at it with ${clientCommandHint([cliName, 'mcp', 'get', name], context.platform, `${cliName}'s own \`mcp get\`, for the entry called "${name}"`)}. If it is an older copy of this server, remove it with ${clientCommandHint([cliName, 'mcp', 'remove', name], context.platform, `${cliName}'s own \`mcp remove\``)} and run this again; if not, choose another --name.`,
               cause: error,
             },
           );

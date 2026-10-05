@@ -173,15 +173,15 @@ export async function run(argv: readonly string[], deps: CliDeps = {}): Promise<
     .addHelpText(
       'after',
       `
-Getting started:
-  agent-resend account add acme/resend            a person types the key; it goes into the keychain
-  agent-resend doctor                              what works, and who enforces what
-  agent-resend domains --account acme/resend
-  agent-resend received list --account acme/resend
-  agent-resend mcp install --client claude-code   register the server with an agent, once a person approves it
+Getting started — run these with this CLI:
+  account add acme/resend            a person types the key; it goes into the keychain
+  doctor                              what works, and who enforces what
+  domains --account acme/resend
+  received list --account acme/resend
+  mcp install --client claude-code   register the server with an agent, once a person approves it
 
 Exit codes: 0 ok · 1 unexpected · 10 a send or a change was refused or needs approval · 11 an update
-is out: update first, or put it off (agentcomms update, agentcomms update --later) · 64 usage ·
+is out: update first, or put it off (the stop names both commands) · 64 usage ·
 65 bad data · 66 not found · 69 provider or secret store unavailable · 75 temporary (retry later) ·
 77 key or permission needed · 78 configuration problem.`,
     )

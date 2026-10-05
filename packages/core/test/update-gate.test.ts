@@ -486,7 +486,7 @@ test('an update that is out stops a tool with the owner’s words, and never the
     assert.ok(textOf(result).startsWith("Hang on a minute, there's an update. Let's update first."));
     assert.match(
       textOf(result),
-      new RegExp(`agentcomms ${VERSION.replaceAll('.', '\\.')}; the latest release is 99\\.0\\.0`),
+      new RegExp(`This is the core server, ${VERSION.replaceAll('.', '\\.')}; the latest release is 99\\.0\\.0`),
     );
     assert.match(textOf(result), /comms_update/);
     // Both ways on as this installation's own commands, located, and no npx form beside them.
@@ -1361,7 +1361,7 @@ test('at a terminal: "Update now, later today, or cancel?" — and each answer d
     ),
   );
   assert.equal(cancel.error?.code, 'USAGE');
-  assert.match(String(cancel.error?.message), /cancelled: agentcomms did not run/);
+  assert.match(String(cancel.error?.message), /cancelled: the command did not run/);
   assert.equal((await readUpdateCheck(cancelled.stateDir)).snoozedUntil, null);
 
   // Later: put off until midnight — the answer is the approval — and the command runs.
@@ -1829,7 +1829,7 @@ test('at a terminal, an update installed and an older copy running stops as the 
     String(script.error?.message),
     /^Hang on a minute, the update is installed, but this command isn't running it yet\./,
   );
-  assert.match(String(script.error?.message), /99\.0\.0 is installed globally, and this agentcomms is /);
+  assert.match(String(script.error?.message), /99\.0\.0 is installed globally, and this core CLI is /);
   assert.ok(String(script.error?.message).includes(coreInline(m.core.paths, ['update', '--later'])));
   // A person: now says to run it again from the installed one, ends 11, and runs nothing and updates nothing.
   let updated = false;
@@ -1841,7 +1841,7 @@ test('at a terminal, an update installed and an older copy running stops as the 
   });
   assert.match(person.tty.err(), /^99\.0\.0 is installed \(this is [^)]+\)\. Switch now, later today, or cancel\? /);
   assert.equal(person.value, 11);
-  assert.match(person.tty.out(), /Run your command again from the installed one\. agentcomms did not run\./);
+  assert.match(person.tty.out(), /Run your command again from the installed one\. The command did not run\./);
   assert.equal(updated, false, 'there was nothing to update');
   // Later: put off, and the command runs.
   const later = await gateAt(m, ['later']);
@@ -1857,7 +1857,7 @@ test('now, at a terminal: "Updated" only when this command is at the latest rele
   assert.equal(nothing.error, null, String(nothing.error));
   assert.equal(nothing.value, 11);
   assert.doesNotMatch(nothing.tty.out(), /Updated\./);
-  assert.match(nothing.tty.out(), /agentcomms did not run: the update did not bring it to 99\.0\.0/);
+  assert.match(nothing.tty.out(), /The command did not run: the update did not bring it to 99\.0\.0/);
 
   // The check could not tell (npm ls unreadable, say), and the global package was at the latest all along: the update
   // changes nothing, and says so — not "Updated" — and the command still did not run.
@@ -1867,10 +1867,7 @@ test('now, at a terminal: "Updated" only when this command is at the latest rele
   assert.equal(installed.value, 11, installed.tty.out());
   assert.match(installed.tty.out(), /Nothing was changed\./);
   assert.doesNotMatch(installed.tty.out(), /Updated\./);
-  assert.match(
-    installed.tty.out(),
-    /99\.0\.0 is installed here: run your command again from it\. agentcomms did not run\./,
-  );
+  assert.match(installed.tty.out(), /99\.0\.0 is installed here: run your command again from it\. It did not run\./);
 
   // A step fails: said, not "Updated", exit 69 — and the file keeps saying "update", not "restart".
   const failing = machine();
@@ -1884,7 +1881,7 @@ test('now, at a terminal: "Updated" only when this command is at the latest rele
   const failed = await gateAt(failing, ['now', 'yes'], {}, broken);
   assert.equal(failed.value, 69, failed.tty.out());
   assert.doesNotMatch(failed.tty.out(), /Updated\./);
-  assert.match(failed.tty.out(), /agentcomms did not run: the update did not finish/);
+  assert.match(failed.tty.out(), /The command did not run: the update did not finish/);
   const record = await readUpdateCheck(failing.stateDir);
   assert.equal(record.behind, true, 'a failed update was recorded as done');
   assert.deepEqual(record.current, { registered: [], global: [] });

@@ -177,7 +177,7 @@ test('the page says what it knows, and does not claim the workspace is connected
   });
   try {
     const html = await (await fetchListener(`${listener.redirectUrl}?state=st-2&code=abc`)).text();
-    assert.match(html, /agent-slack/);
+    assert.match(html, /agent-communications · Slack/);
     assert.match(html, /Connecting/);
     assert.match(html, /acme/);
     assert.match(html, /Nothing is stored yet/i);

@@ -21,7 +21,7 @@ has no read-only key. No tool adds a key, and no tool approves.
 | [`resend_account_show`](#resend_account_show) | One account: its key’s permission (full access or sending only), mode, send policy and guarantee. |
 | [`resend_account_remove`](#resend_account_remove) | Forget an account and delete its key from this machine. |
 | [`resend_account_policy`](#resend_account_policy) | Report how an account’s sends and changes are approved, or set `sendPolicy` (chat, confirm, never), `mode` (read, send) and `changePolicy` (chat, confirm). |
-| [`resend_doctor`](#resend_doctor) | What works and what does not, per account — and, plainly, that read-only is enforced by agent-resend’s code, not by the key. |
+| [`resend_doctor`](#resend_doctor) | What works and what does not, per account — and, plainly, that read-only is enforced by this package’s code, not by the key. |
 | [`resend_domains`](#resend_domains) | The team’s domains and whether each is verified for sending; with `domain`, the DNS records it needs. |
 | [`resend_emails_list`](#resend_emails_list) | Recent sent emails, newest first, with each one’s last event (delivered, bounced, scheduled…). |
 | [`resend_email_show`](#resend_email_show) | One sent email: its last event, its Message-ID, its tags and what it said (inside <untrusted-content>). |
@@ -38,7 +38,7 @@ has no read-only key. No tool adds a key, and no tool approves.
 
 ### `resend_accounts_list`
 
-The connected Resend accounts: each key’s permission, its mode, its send policy, and who enforces what. Read-only is agent-resend’s own promise, never the key’s.
+The connected Resend accounts: each key’s permission, its mode, its send policy, and who enforces what. Read-only is this package’s own promise, never the key’s.
 
 *read-only*
 
@@ -81,7 +81,7 @@ Report how an account’s sends and changes are approved, or set `sendPolicy` (c
 
 ### `resend_doctor`
 
-What works and what does not, per account — and, plainly, that read-only is enforced by agent-resend’s code, not by the key.
+What works and what does not, per account — and, plainly, that read-only is enforced by this package’s code, not by the key.
 
 *read-only*
 

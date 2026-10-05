@@ -270,7 +270,7 @@ export function changedOutsideHint(draftId: string, handoffs: CliHandoffs): stri
     (command) => `Delete it with ${command} and compose it again.`,
     { instead: 'Delete it with slack_draft_delete from a chat and compose it again.' },
   );
-  return `It was changed outside agent-slack. ${remove}`;
+  return `It was changed outside agent-communications. ${remove}`;
 }
 
 /**

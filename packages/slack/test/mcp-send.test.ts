@@ -102,7 +102,7 @@ test('send handoff commands use the selected shell platform, located from this i
   const changed = changedOutsideHint('10', windows);
   assert.equal(
     changed,
-    `It was changed outside agent-slack. Delete it with ${slackInlineToFill(TEST_PATHS, ['draft', 'delete', '10', '--workspace'], ['<name>'], 'win32')} and compose it again.`,
+    `It was changed outside agent-communications. Delete it with ${slackInlineToFill(TEST_PATHS, ['draft', 'delete', '10', '--workspace'], ['<name>'], 'win32')} and compose it again.`,
   );
   // The name for the agent to fill in is left as written, outside the quoting: `--workspace <name>`.
   assert.match(changed, / draft delete "10" --workspace <name>` and compose it again\.$/);

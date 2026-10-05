@@ -41,7 +41,7 @@ export function nodeSupportsSqlite(version: string = process.versions.node): boo
 /** Refuses to start on a Node too old for `node:sqlite`, saying which Node it is and what it needs. */
 export function requireSupportedNode(version: string = process.versions.node): void {
   if (nodeSupportsSqlite(version)) return;
-  throw new CommsError('CONFIG', `agent-whatsapp needs Node ${MIN_NODE} or newer, and this is Node ${version}`, {
+  throw new CommsError('CONFIG', `the WhatsApp channel needs Node ${MIN_NODE} or newer, and this is Node ${version}`, {
     hint: `It reads WhatsApp's store with Node's own SQLite (node:sqlite), which Node ${MIN_NODE} is the first to have complete. Install a newer Node — the current 22 or 24 release — and run it again.`,
     details: { reason: 'NODE_TOO_OLD', node: version, needs: MIN_NODE },
   });
@@ -63,7 +63,7 @@ export function loadSqlite(): Promise<SqliteModule> {
         return await import('node:sqlite');
       } catch (error) {
         throw new CommsError('CONFIG', `this Node (${process.versions.node}) has no usable node:sqlite`, {
-          hint: `agent-whatsapp needs Node ${MIN_NODE} or newer, run without flags that turn built-in modules off.`,
+          hint: `The WhatsApp channel needs Node ${MIN_NODE} or newer, run without flags that turn built-in modules off.`,
           cause: error,
         });
       } finally {

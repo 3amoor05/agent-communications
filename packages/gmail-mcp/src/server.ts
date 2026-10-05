@@ -51,7 +51,7 @@ try {
     if (values[name] === '') throw new TypeError(`--${name} needs a non-empty directory`);
   }
 } catch (error) {
-  process.stderr.write(`agent-gmail-mcp: ${error instanceof Error ? error.message : String(error)}\n\n${help()}`);
+  process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n\n${help()}`);
   values = undefined;
   process.exitCode = 64;
 }

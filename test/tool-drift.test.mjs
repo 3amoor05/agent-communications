@@ -90,8 +90,11 @@ async function definedCommands(product) {
 async function usageCommands(product) {
   const source = await readFile(join(ROOT, product.program), 'utf8');
   const help = /const HELP = `([\s\S]*?)`;/.exec(source)?.[1] ?? '';
+  // The usage table: the CLI's own words, two spaces in, with no program name (CUE-403) — a description's next line
+  // is further in, and the table ends at the first blank line.
+  const table = /^Usage\b[^:\n]*:\n([\s\S]*?)\n\n/m.exec(help)?.[1] ?? '';
   const paths = new Set();
-  for (const [, rest] of help.matchAll(new RegExp(`^\\s+${product.binary}\\s+(.*)$`, 'gm'))) {
+  for (const [, rest] of table.matchAll(/^ {2}([a-z].*)$/gm)) {
     const words = [];
     for (const word of rest
       .split(/\s{2,}/)[0]

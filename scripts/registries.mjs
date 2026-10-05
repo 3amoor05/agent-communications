@@ -188,14 +188,15 @@ async function commanderTree(surface, env) {
 
 async function usageTree(surface, env) {
   const help = await capture(surface, ['--help'], env);
-  // The table is the block under `Usage:`, up to the first blank line; the options and exit codes follow it.
+  // The table is the block under `Usage…:`, up to the first blank line; the options and exit codes follow it. Each
+  // line is the CLI's own words — no program name (CUE-403) — two spaces in; a description's next line is further in.
   const all = help.split(/\r?\n/);
-  const start = all.findIndex((line) => /^Usage:\s*$/.test(line));
+  const start = all.findIndex((line) => /^Usage\b[^:]*:\s*$/.test(line));
   const blank = all.findIndex((line, index) => index > start && !line.trim());
   const block = start === -1 ? [] : all.slice(start + 1, blank === -1 ? all.length : blank);
   const own = [];
   for (const line of block) {
-    const rest = new RegExp(`^\\s+${surface.binary}\\s+(.*)$`).exec(line)?.[1];
+    const rest = /^ {2}([a-z].*)$/.exec(line)?.[1];
     if (rest === undefined) continue;
     // The description, when a line has one, sits after a run of spaces; the command ends at its first argument.
     const words = [];

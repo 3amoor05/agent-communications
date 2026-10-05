@@ -133,7 +133,12 @@ test('--version and --help print and exit 0', () => {
   assert.match(run(['--version']).stdout, /^\d+\.\d+\.\d+/);
   const help = run(['--help']);
   assert.equal(help.status, 0);
-  assert.match(help.stdout, /agentcomms paths/);
+  // The CLI's own words, introduced as such: no program name a person would type and not find (CUE-403).
+  assert.match(help.stdout, /^agent-communications core \d+\.\d+\.\d+/);
+  assert.match(help.stdout, /^Usage — run these with this CLI, each as the words after its program:$/m);
+  assert.match(help.stdout, /^ {2}paths {2,}where config/m);
+  assertNoBareCommand(help.stdout);
+  assert.doesNotMatch(help.stdout, /agentcomms/);
   assert.match(help.stdout, /Exit codes:/);
   // It said every policy change is "shown before it happens"; `policy confirm` tightens, and applies at once.
   const prose = help.stdout.replace(/\s+/g, ' ');
@@ -1320,7 +1325,7 @@ test('approve is refused to an agent and to anything without a terminal, touches
 
   const noId = run(['approve', '--json'], { AGENT_COMMS_CONFIG_DIR: config });
   assert.equal(noId.status, 64);
-  assert.match(run(['--help']).stdout, /agentcomms approve <approvalId>/);
+  assert.match(run(['--help']).stdout, /^ {2}approve <approvalId> {2,}approve a configuration change/m);
 });
 
 // ── Commands printed to be run ──────────────────────────────────────────────────────────────────────────────────

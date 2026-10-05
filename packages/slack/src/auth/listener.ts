@@ -70,9 +70,9 @@ function pageOk(about: PageAbout | undefined): string {
     ? `<dl><dt>${about.reauth ? 'Re-authorising' : 'Connecting'}</dt><dd>${escapeHtml(about.alias)}</dd>` +
       `<dt>Access</dt><dd>${escapeHtml(about.mode)}</dd></dl>`
     : '';
-  return `<!doctype html><meta charset="utf-8"><title>Signed in — agent-slack</title>
+  return `<!doctype html><meta charset="utf-8"><title>Signed in — Slack · agent-communications</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">${STYLE}
-<body><main><p class="brand">agent-slack</p>
+<body><main><p class="brand">agent-communications · Slack</p>
 <h1><span class="tick">&check;</span> Slack returned the grant</h1>
 <p class="lede">Nothing is stored yet.</p>${rows}
 <p class="note">The workspace and the account are checked against what was asked for before anything is saved, and
@@ -81,9 +81,9 @@ the workspace.</p></main>`;
 }
 
 function pageError(message?: string): string {
-  return `<!doctype html><meta charset="utf-8"><title>Not signed in — agent-slack</title>
+  return `<!doctype html><meta charset="utf-8"><title>Not signed in — Slack · agent-communications</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">${STYLE}
-<body><main><p class="brand">agent-slack</p>
+<body><main><p class="brand">agent-communications · Slack</p>
 <h1>Not signed in</h1>
 <p class="lede">${escapeHtml(message ?? 'The sign-in did not complete.')}</p>
 <p class="note">Nothing was changed. Go back to your terminal or your agent: it will say what happened and how to

@@ -21,7 +21,7 @@ import { guaranteeOf } from './accounts.ts';
  */
 
 export const READ_ONLY_STATEMENT =
-  'Read-only is enforced by agent-resend’s own code, not by the key: Resend has no read-only API key, and a full-access key can also send, delete domains and create keys. A sending-only key can only send; Resend enforces that one.';
+  'Read-only is enforced by this package’s own code, not by the key: Resend has no read-only API key, and a full-access key can also send, delete domains and create keys. A sending-only key can only send; Resend enforces that one.';
 
 export interface DoctorCheck {
   name: string;

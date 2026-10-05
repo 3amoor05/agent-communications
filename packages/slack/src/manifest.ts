@@ -21,6 +21,9 @@ const DISPLAY = {
   background_color: '#1a1a1a',
 };
 
+/** The name a new app is created with, as Slack's own pages list it: the app's identity there, not a command. */
+export const APP_NAME: string = DISPLAY.name;
+
 /**
  * Reading, and nothing else.
  *

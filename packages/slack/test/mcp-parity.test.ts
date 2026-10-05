@@ -1063,7 +1063,7 @@ test('a draft is shown as what it would post, by `draft show` and `slack_draft_g
     assert.equal(shown.problem?.reason, 'source-differs');
     assert.equal(
       shown.problem?.hint,
-      `It was changed outside agent-slack. Delete it with ${slackInlineToFill(harness.core.paths, ['draft', 'delete', draftId, '--workspace'], ['<name>'])} and compose it again.`,
+      `It was changed outside agent-communications. Delete it with ${slackInlineToFill(harness.core.paths, ['draft', 'delete', draftId, '--workspace'], ['<name>'])} and compose it again.`,
     );
     assert.doesNotMatch(JSON.stringify(shown), /lunch/);
 
@@ -1082,7 +1082,7 @@ test('a draft is shown as what it would post, by `draft show` and `slack_draft_g
       const words = await printed(harness, argv);
       assert.match(words, /@U024BE7LH ready & waiting/, argv.join(' '));
       assert.doesNotMatch(words, /lunch/, argv.join(' '));
-      assert.match(words, /changed outside agent-slack/, argv.join(' '));
+      assert.match(words, /changed outside agent-communications/, argv.join(' '));
     }
 
     // And showing and posting agree: the preview a person approves has the text the draft was shown with.

@@ -1,14 +1,15 @@
 import { type Handoff, handoffSentence } from '@agentcomms/gmail';
 
 /**
- * What `agent-gmail-mcp --help` prints, around the one command it hands a person: Gmail's own `setup`, as the Gmail
+ * What the server-only package's `--help` prints, around the one command it hands a person: Gmail's own `setup`, as the Gmail
  * dependency locates it (`gmailCommand`, from Gmail's `RESOLVER_URL`) — never this wrapper, whose modules belong to a
  * package with no CLI, and never a bare name that may not be on the person's PATH (CUE-403). With no command here, the
  * sentence says why, and nothing stands in its place.
  */
 export function serverHelp(setup: Handoff): string {
   return [
-    'agent-gmail-mcp — the Gmail MCP server (stdio)',
+    // Named by its product, not its program: a program's bare name reads as a command a person could run (CUE-403).
+    'The Gmail MCP server, on stdio — what an MCP client starts.',
     '',
     'Options:',
     '  --inbox <alias>       serve only this mailbox',

@@ -83,7 +83,7 @@ test(`the greeting stays under ${GREETING_LIMIT} bytes with many accounts, and k
     /the approve command the preparation gives/,
     /you cannot approve it\s+yourself/,
     /above 10 recipients/,
-    /Read-only is enforced by agent-resend, not by the key/,
+    /Read-only is enforced by this package’s own code, not by the key/,
     /Never ask for one in chat/,
     /Pass `account` on every call/,
     /and 32 more/,

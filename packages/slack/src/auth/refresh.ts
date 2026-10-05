@@ -446,7 +446,7 @@ async function refreshUnderLock(
   if (current.state !== 'ready') {
     if (forced) return current;
     throw new CommsError('AUTH_REQUIRED', `the stored credential is in a state this version does not know`, {
-      hint: `Upgrade agent-slack, or ${reauthHint(deps.alias, deps.handoffs, 'run')}`,
+      hint: `Upgrade the Slack CLI and server, or ${reauthHint(deps.alias, deps.handoffs, 'run')}`,
       details: { state: String(current.state) },
     });
   }
@@ -722,7 +722,7 @@ function unsettled(alias: string | undefined, kind: UnsettledRefresh['kind'], ha
     running: `a token refresh for ${name} was still running when this process exited`,
   }[kind];
   const next = 'If a later command says a refresh was interrupted, the workspace needs signing in again.';
-  return { workspace: alias, kind, message: `agent-slack: ${what}. ${next} ${reauthHint(alias, handoffs)}` };
+  return { workspace: alias, kind, message: `Slack: ${what}. ${next} ${reauthHint(alias, handoffs)}` };
 }
 
 // ── Classifying a failed exchange ──────────────────────────────────────────────────────────────────────────────

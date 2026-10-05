@@ -54,7 +54,7 @@ test('an update that is out stops every Gmail tool but the doctor, and a call cl
     const listed = await call('gmail_inboxes_list', {});
     assert.equal(code(listed), 'UPDATE_REQUIRED');
     assert.ok(text(listed).startsWith(UPDATE_FIRST), text(listed));
-    assert.match(text(listed), /This is agent-gmail \d+\.\d+\.\d+[^;]*; the latest release is 99\.0\.0/);
+    assert.match(text(listed), /This is the Gmail server, \d+\.\d+\.\d+[^;]*; the latest release is 99\.0\.0/);
     assert.match(text(listed), /gmail_inboxes_list did not run/);
     assert.notEqual(code(await call('gmail_doctor', {})), 'UPDATE_REQUIRED');
     // Claiming an approval the person already gave: past the stop, to the tool's own answer.

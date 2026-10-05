@@ -86,54 +86,54 @@ import { VERSION } from './version.ts';
  * which is what every product's CLI is called.
  */
 
-const HELP = `agentcomms ${VERSION} — agent-communications core
+const HELP = `agent-communications core ${VERSION}
 
-Usage:
-  agentcomms paths                         where config, state, data and downloads live
-  agentcomms doctor                        check this machine: Node, directories, secret store, and which MCP
-                                           clients start each server
-  agentcomms audit tail [--inbox <alias>] [--since <ISO time>] [--limit <n>]
-  agentcomms approvals list [--inbox <alias>] [--state <state>]
-  agentcomms approvals revoke <approvalId>
-  agentcomms approve <approvalId>          approve a configuration change at this terminal: read it, type the code
-  agentcomms policy [--account <name> | --inbox <name>] [chat|confirm] [--approval <id>]
-                                           report or set the change policy: how a loosening is approved;
-                                           confirm applies at once, chat is approved first
-  agentcomms attach                        which files may be attached: the folders they may come from, the
-                                           paths they never may, and the built-in list
-  agentcomms attach roots add <folder> [--approval <id>]
-                                           let files under a folder be attached: approved first
-  agentcomms attach roots remove <folder>  stop attaching files from under a folder: applies at once
-  agentcomms attach deny add <path>        never attach files from a path: applies at once
-  agentcomms attach deny remove <path> [--approval <id>]
-                                           take one of your own deny entries away: approved first
-  agentcomms channels                      which channel servers exist, which are installed, and where they are registered
-  agentcomms org add <file> [--for-other-addresses] [--adopt <client>] [--store keychain|file] [--approval <id>]
-                                           add an organisation's profile — its Google client and Slack apps,
-                                           beside what is here: approved first
-  agentcomms org list                      the organisation profiles added here
-  agentcomms org show <organisation>       one profile: its clients, which mailboxes use them, and any drift
-  agentcomms org update <organisation> [--source <file>] [--for-other-addresses on|off] [--adopt <client>]
-                                           [--store keychain|file] [--approval <id>]
-                                           read a profile again and repair drift: a changed profile, a new
-                                           source and --for-other-addresses on are approved first
-  agentcomms org remove <organisation> [--approval <id>]
-                                           forget a profile and the clients it made: approved first
-  agentcomms mcp                           run the core MCP server on stdio (what an MCP client starts)
-  agentcomms mcp install --client <client> [--name <name>] [--launcher managed|npx|local] [--force]
-                                           [--print] [--no-verify] [--approval <id>]
-                                           register the core MCP server with a client, and prove it starts
-  agentcomms mcp prune [--dry-run] [--include-printed] [--approval <id>]
-                                           remove the core's managed runtimes that nothing uses
-  agentcomms update [--check] [--no-verify] [--approval <id>]
-                                           bring every registration, runtime and global package to the latest
-                                           release; --check only says what is behind
-  agentcomms update --later [--approval <id>]
-                                           not now: nothing stops for the update until midnight
-  agentcomms update --auto on|off [--approval <id>]
-                                           turn the daily update check on or off for this machine
-  agentcomms secrets migrate --to keychain|file [--approval <id>]
-  agentcomms names migrate [--rename <old>=<new>] [--dry-run] [--approval <id>]
+Usage — run these with this CLI, each as the words after its program:
+  paths                         where config, state, data and downloads live
+  doctor                        check this machine: Node, directories, secret store, and which MCP
+                                clients start each server
+  audit tail [--inbox <alias>] [--since <ISO time>] [--limit <n>]
+  approvals list [--inbox <alias>] [--state <state>]
+  approvals revoke <approvalId>
+  approve <approvalId>          approve a configuration change at this terminal: read it, type the code
+  policy [--account <name> | --inbox <name>] [chat|confirm] [--approval <id>]
+                                report or set the change policy: how a loosening is approved;
+                                confirm applies at once, chat is approved first
+  attach                        which files may be attached: the folders they may come from, the
+                                paths they never may, and the built-in list
+  attach roots add <folder> [--approval <id>]
+                                let files under a folder be attached: approved first
+  attach roots remove <folder>  stop attaching files from under a folder: applies at once
+  attach deny add <path>        never attach files from a path: applies at once
+  attach deny remove <path> [--approval <id>]
+                                take one of your own deny entries away: approved first
+  channels                      which channel servers exist, which are installed, and where they are registered
+  org add <file> [--for-other-addresses] [--adopt <client>] [--store keychain|file] [--approval <id>]
+                                add an organisation's profile — its Google client and Slack apps,
+                                beside what is here: approved first
+  org list                      the organisation profiles added here
+  org show <organisation>       one profile: its clients, which mailboxes use them, and any drift
+  org update <organisation> [--source <file>] [--for-other-addresses on|off] [--adopt <client>]
+                                [--store keychain|file] [--approval <id>]
+                                read a profile again and repair drift: a changed profile, a new
+                                source and --for-other-addresses on are approved first
+  org remove <organisation> [--approval <id>]
+                                forget a profile and the clients it made: approved first
+  mcp                           run the core MCP server on stdio (what an MCP client starts)
+  mcp install --client <client> [--name <name>] [--launcher managed|npx|local] [--force]
+                                [--print] [--no-verify] [--approval <id>]
+                                register the core MCP server with a client, and prove it starts
+  mcp prune [--dry-run] [--include-printed] [--approval <id>]
+                                remove the core's managed runtimes that nothing uses
+  update [--check] [--no-verify] [--approval <id>]
+                                bring every registration, runtime and global package to the latest
+                                release; --check only says what is behind
+  update --later [--approval <id>]
+                                not now: nothing stops for the update until midnight
+  update --auto on|off [--approval <id>]
+                                turn the daily update check on or off for this machine
+  secrets migrate --to keychain|file [--approval <id>]
+  names migrate [--rename <old>=<new>] [--dry-run] [--approval <id>]
 
 A change that loosens something or cannot be taken back — policy chat, attach roots add, attach deny remove, mcp
 install and prune, update, secrets and names migrate, org add, update and remove — is shown before it happens. At a
@@ -1026,7 +1026,8 @@ function renderChannels(report: ChannelsReport): string {
   for (const channel of report.channels) {
     const where = [
       ...channel.runtimes.map((runtime) => `runtime ${runtime.version}`),
-      ...(channel.onPath ? [`${channel.binary} ${channel.onPath.version ?? '(version unknown)'} on PATH`] : []),
+      // Its command found on PATH, said by version: the name is the manifest's, and printed it reads as a command to run.
+      ...(channel.onPath ? [`its command on PATH, ${channel.onPath.version ?? 'version unknown'}`] : []),
     ];
     lines.push(
       `${channel.label.padEnd(18)} ${channel.package}  ${channel.installed ? (where.length > 0 ? where.join(', ') : `this process, ${report.core}`) : 'not installed'}`,
@@ -1073,7 +1074,7 @@ if (invokedDirectly) {
       process.exitCode = code;
     },
     (error: unknown) => {
-      process.stderr.write(`agentcomms: ${error instanceof Error ? error.message : String(error)}\n`);
+      process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`);
       process.exitCode = 64;
     },
   );

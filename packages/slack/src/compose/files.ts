@@ -357,9 +357,9 @@ async function recheck(
   keep: boolean,
 ): Promise<FileRead | { readonly ok: true; readonly bytes: undefined }> {
   const not = (why: string): { ok: false; why: string } => ({ ok: false, why });
-  // Nothing but agent-slack writes these, and it writes them from the path: a record saying otherwise was edited.
+  // Nothing but this package writes these, and it writes them from the path: a record saying otherwise was edited.
   if (file.name !== basename(file.path) || file.mimeType !== mimeTypeOf(file.name)) {
-    return not('its record was changed outside agent-slack');
+    return not('its record was changed outside agent-communications');
   }
   let info: BigIntStats;
   let real: string;

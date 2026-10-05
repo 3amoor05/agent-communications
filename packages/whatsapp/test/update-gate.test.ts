@@ -68,7 +68,7 @@ test('with the network cut off, an update in the file stops every tool but whats
       assert.equal(chats.structuredContent.error?.code, 'UPDATE_REQUIRED');
       const text = (chats as { content?: { type: string; text?: string }[] }).content?.[0]?.text ?? '';
       assert.ok(text.startsWith(UPDATE_FIRST), text);
-      assert.match(text, /This is agent-whatsapp /);
+      assert.match(text, /This is the WhatsApp server, /);
       const status = await call('whatsapp_status', {});
       assert.notEqual(status.isError, true, JSON.stringify(status.structuredContent));
       // Every registration of WhatsApp's server here names the latest — the file says so, and no network is needed

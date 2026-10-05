@@ -38,7 +38,7 @@ test('the page names the mailbox, the address asked for, and the access requeste
     'state=st_1&code=abc',
   );
   assert.equal(status, 200);
-  assert.match(html, /agent-gmail/, 'the page does not say what produced it');
+  assert.match(html, /agent-communications · Gmail/, 'the page does not say what produced it');
   assert.match(html, /Connecting/);
   assert.match(html, /work/);
   assert.match(html, /jo@example\.test/);
@@ -83,7 +83,7 @@ test('the failure page is branded too, names the mailbox, and says nothing chang
     { state: 'st_5', about: { ...ABOUT }, timeoutMs: 5_000 },
     'state=st_5&error=access_denied',
   );
-  assert.match(html, /agent-gmail/);
+  assert.match(html, /agent-communications · Gmail/);
   assert.match(html, /Not signed in/);
   assert.match(html, /work/);
   assert.match(html, /Nothing was changed/i);
@@ -93,7 +93,7 @@ test('a caller that supplies nothing still gets a usable page', async () => {
   // `about` is optional, so a listener started without it must not render "undefined" at somebody.
   const { status, html } = await fetchPage({ state: 'st_6', timeoutMs: 5_000 }, 'state=st_6&code=abc');
   assert.equal(status, 200);
-  assert.match(html, /agent-gmail/);
+  assert.match(html, /agent-communications · Gmail/);
   assert.doesNotMatch(html, /undefined/);
 });
 

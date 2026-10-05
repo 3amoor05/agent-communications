@@ -86,7 +86,7 @@ test('an update that is out stops every Resend tool but the doctor, and a call c
       const listed = await call('resend_accounts_list', {});
       assert.equal(code(listed), 'UPDATE_REQUIRED');
       assert.ok(text(listed).startsWith(UPDATE_FIRST), text(listed));
-      assert.match(text(listed), /This is agent-resend /);
+      assert.match(text(listed), /This is the Resend server, /);
       assert.notEqual(code(await call('resend_doctor', {})), 'UPDATE_REQUIRED');
       // The status of a send is looked up by the approval it went under — waiting, or used once it went — and goes
       // past the stop as the send did.

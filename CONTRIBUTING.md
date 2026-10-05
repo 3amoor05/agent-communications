@@ -204,6 +204,20 @@ process's own. Commands go in `hint`, `next`, a note or a result field, which ar
 result. `registered()` reads every MCP client's configuration, so read it where the command is needed — an error path,
 a report that names one — not on every call.
 
+**8. Name a program by its product, never its binary.** A string a person reads never names one of this suite's
+binaries — not as a command, not as a product (`this agent-slack is …`), not as a program in a page's title. Say "the
+Slack CLI", "the core server", "this package", "the command": a bare binary is no command most people can run, and
+any sentence that names one reads as one. A `--help` example block shows the CLI's own words after "run these with
+this CLI" (`  post prepare --workspace <org>/slack …`). Identities stay what they are: an MCP server's `name`,
+Commander's `.name()` — whose `Usage:` line is the protocol's — a gate's `binary`, a manifest's fields.
+`test/printed-command-construction.test.mjs` holds every runtime package to this with a syntax-tree scan derived
+from `capabilities.json` and the channel registry: a binary at a word's edge in any string or template, a manifest's
+`binary` or `approve` interpolated or written whole into a hint, an MCP instruction or description, a stream or a
+result's field, `node` before a suite entry, `npx` before a suite package, a shell whose payload starts a product. It
+leaves comments, types, regular expressions and identity positions alone by their syntax, never by file — see
+`test/helpers/printed-command-guard.mjs` — and its fixtures in `test/fixtures/printed-commands/` show what it refuses
+and what it accepts. A client's own CLI is never called `binary` there (`cliPath`).
+
 Before — the 0.13.0 way, which no longer compiles: `shellCommand` is not exported, and `commandText` takes only a located
 or an external command:
 

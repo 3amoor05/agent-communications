@@ -519,7 +519,7 @@ test(
         core: context(tempDir(), home).core,
       };
       const target = await installTarget(installing, { client: 'claude-code' });
-      assert.equal(target.binary, join(bin, 'claude'), `looked for claude in ${where}`);
+      assert.equal(target.cliPath, join(bin, 'claude'), `looked for claude in ${where}`);
       const result = await mcpInstall(installing, pinnedProduct(), {
         client: 'claude-code',
         launcher: 'npx',

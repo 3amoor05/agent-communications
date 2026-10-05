@@ -596,7 +596,7 @@ test('only Gmail and Slack keep the shapes they had before the manifest; every o
         at(e, 'core').binary = 'agent-core';
         at(e, 'core').approve = 'agent-core approve';
       },
-      /@agentcomms\/core: agentcomms\.binary: the core's command is `agentcomms`/,
+      /@agentcomms\/core: agentcomms\.binary: is not the core's own command name/,
     ],
   ];
   for (const [what, edit, expected] of cases) assert.match(problemsAfter(edit), expected, what);

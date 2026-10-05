@@ -112,13 +112,13 @@ export interface AccountView {
 export function guaranteeOf(account: ResendAccount): string {
   if (keyPermissionOf(account) === 'sending_access') {
     const lock = account.domainLock
-      ? ` It was declared restricted to ${account.domainLock} when it was added; that is not something agent-resend can check without sending, so Resend enforces it, not this package.`
+      ? ` It was declared restricted to ${account.domainLock} when it was added; that is not something this package can check without sending, so Resend enforces it, not this package.`
       : '';
-    return `This key can only send: Resend enforces that, and refuses it every read.${lock} agent-resend still sends only after a person approves each email.`;
+    return `This key can only send: Resend enforces that, and refuses it every read.${lock} This package still sends only after a person approves each email.`;
   }
   return account.mode === 'read'
-    ? 'Read-only is enforced by agent-resend’s own code, not by the key. Resend has no read-only key: this full-access key could send mail, delete domains and create API keys in anything else that held it. agent-resend refuses every send from this account while it is in read mode.'
-    : 'This full-access key can do anything at Resend. agent-resend sends only after a person approves each email, and never manages domains, keys or webhooks — but the key itself would not stop anything else that held it.';
+    ? 'Read-only is enforced by this package’s own code, not by the key. Resend has no read-only key: this full-access key could send mail, delete domains and create API keys in anything else that held it. This package refuses every send from this account while it is in read mode.'
+    : 'This full-access key can do anything at Resend. This package sends only after a person approves each email, and never manages domains, keys or webhooks — but the key itself would not stop anything else that held it.';
 }
 
 export function viewOf(named: NamedAccount, config: Config): AccountView {

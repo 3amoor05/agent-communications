@@ -286,15 +286,15 @@ test('the greeting and every tool say to run the command a result gives, and nam
 
 test('Gmail’s source prints no suite command by its bare name: only reviewed identities (7d-gmail)', () => {
   /*
-   * A line-level check of this package's runtime source, ahead of the syntax-tree guard (CUE-403 task 15): every
+   * A line-level check of this package's runtime source, beside the syntax-tree guard (CUE-403 task 15): every
    * string or template naming `agent-gmail` or `agentcomms` followed by words is one of the few reviewed identities —
-   * the program name Commander shows in usage, the update gate's prose name, the server's MCP name, the sign-in page's
-   * brand. The deprecated bridge's field is gone with the bridge (CUE-403 task 15).
+   * the program name Commander shows in usage, the update gate's identity field, the server's MCP name. The deprecated
+   * bridge's field, and the sign-in page's brand, name none now (CUE-403 task 15); the repository-wide syntax-tree
+   * guard (`test/printed-command-construction.test.mjs`) holds every package to the same.
    */
   const reviewed = new Map<string, RegExp>([
     ['src/cli/program.ts', /^\s*(?:\.name\('agent-gmail'\)|binary: 'agent-gmail',)$/],
     ['src/mcp/server.ts', /^\s*(?:\{ name: 'agent-gmail', version: VERSION \},|server: 'agent-gmail',)$/],
-    ['src/auth/loopback.ts', /agent-gmail<\/(?:p|title)>/],
   ]);
   const root = fileURLToPath(new URL('..', import.meta.url));
   // Every module of the package's runtime source, found rather than listed, so a new one is checked too.

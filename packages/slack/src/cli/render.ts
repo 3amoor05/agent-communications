@@ -237,7 +237,7 @@ export function renderDrafts(drafts: readonly DraftView[], color: boolean): stri
         return `${head}  ${paint(color, 'yellow', cell(draft.problem?.message ?? 'cannot be posted', 200))}`;
       }
       const changed = draft.problem
-        ? paint(color, 'yellow', '  · changed outside agent-slack; shown as it would post')
+        ? paint(color, 'yellow', '  · changed outside agent-communications; shown as it would post')
         : '';
       const count = draft.files?.length ?? 0;
       const files = count === 0 ? '' : paint(color, 'dim', `  · ${count} file${count === 1 ? '' : 's'}`);

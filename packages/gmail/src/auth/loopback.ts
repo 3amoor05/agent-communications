@@ -58,7 +58,8 @@ dd{margin:0;font-variant-numeric:tabular-nums;word-break:break-all}
 .note{font-size:.9rem;color:var(--dim);margin:0}
 </style>`;
 
-const BRAND = '<p class="brand">agent-gmail</p>';
+/** What produced the page, by its product: a program's bare name would read as a command to run (CUE-403). */
+const BRAND = '<p class="brand">agent-communications · Gmail</p>';
 
 function pageOk(about: LoopbackAbout | undefined): string {
   const rows: string[] = [];
@@ -75,7 +76,7 @@ function pageOk(about: LoopbackAbout | undefined): string {
   const check = about?.expectEmail
     ? `The address is checked against <strong>${escapeHtml(about.expectEmail)}</strong> before anything is stored, and a different account is refused.`
     : 'The account is checked before anything is stored.';
-  return `<!doctype html><meta charset="utf-8"><title>Signed in — agent-gmail</title>
+  return `<!doctype html><meta charset="utf-8"><title>Signed in — Gmail · agent-communications</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">${STYLE}
 <body><main>${BRAND}
 <h1><span class="tick">&check;</span> Google returned the grant</h1>
@@ -87,7 +88,7 @@ ${detail}
 
 function pageError(about: LoopbackAbout | undefined): string {
   const who = about ? ` for <strong>${escapeHtml(about.alias)}</strong>` : '';
-  return `<!doctype html><meta charset="utf-8"><title>Not signed in — agent-gmail</title>
+  return `<!doctype html><meta charset="utf-8"><title>Not signed in — Gmail · agent-communications</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">${STYLE}
 <body><main>${BRAND}
 <h1>Not signed in</h1>
