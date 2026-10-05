@@ -105,6 +105,14 @@ export function startMcpServer(
 export function commandsIn(text: string): string[];
 export function commandEndingWith(text: string, tail: readonly string[], platform?: NodeJS.Platform): string;
 export function wordsOf(line: string, platform?: NodeJS.Platform): string[] | null;
+export function argvOf(command: string, platform?: NodeJS.Platform): string[] | null;
+export function refusesWithoutATerminal(approve: string, shell: Shell, tail: readonly string[]): void;
+export function inWindowsShells(
+  command: string,
+  shell: Shell,
+  check: (result: SpawnSyncReturns<string>, name: string) => void,
+  shells?: readonly WindowsShell[],
+): void;
 export function pinsOf(words: readonly string[]): Folders;
 export function environmentAssignments(text: string): string[];
 export function real(path: string): string;

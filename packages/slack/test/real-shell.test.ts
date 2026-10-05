@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
@@ -18,11 +17,11 @@ import {
   posixShellAsync,
   posixTerminalAsync,
   real,
+  refusesWithoutATerminal,
   type Shell,
   sealAttempts,
   suiteCommandsOn,
   suiteTraces,
-  windowsShells,
   wordsOf,
 } from '../../../test/helpers/real-shell.mjs';
 import { run } from '../src/cli/program.ts';
@@ -121,28 +120,13 @@ function assertSlackCommand(command: string, m: Machine, tail: readonly string[]
   assert.deepEqual(words.slice(3 + FOUR_FOLDERS.length * 2), tail, command);
 }
 
-/** Every audit record in the harness's state. */
-function audit(m: Machine): Array<Record<string, unknown>> {
-  const dir = join(m.harness.core.paths.stateDir, 'audit');
-  if (!existsSync(dir)) return [];
-  return readdirSync(dir)
-    .filter((file) => file.endsWith('.jsonl'))
-    .flatMap((file) => readFileSync(join(dir, file), 'utf8').split('\n'))
-    .filter(Boolean)
-    .map((line) => JSON.parse(line) as Record<string, unknown>);
-}
-
 /**
  * Pastes `approve` where a person would: a terminal of their own on POSIX, the code typed back. Windows gives a test no
- * terminal, so there each shell runs it and it refuses for want of one — against the harness's own approval store.
+ * terminal, so there each shell runs it and it refuses for want of one, naming the very command pasted.
  */
 async function personApproves(m: Machine, approve: string, id: string, shell: Shell): Promise<boolean> {
   if (process.platform === 'win32') {
-    for (const each of windowsShells()) {
-      const result = each.run(approve, { env: shell.env, cwd: shell.cwd });
-      assert.match(`${result.stdout}${result.stderr}`, /needs an interactive terminal/, each.name);
-    }
-    assert.ok(audit(m).some((record) => record.approvalId === id && record.outcome === 'refused'));
+    refusesWithoutATerminal(approve, shell, ['approve', id]);
     return false;
   }
   assertSlackCommand(approve, m, ['approve', id]);

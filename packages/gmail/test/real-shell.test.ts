@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -20,13 +20,13 @@ import {
   posixShellAsync,
   posixTerminalAsync,
   real,
+  refusesWithoutATerminal,
   runNodeAsync,
   type Shell,
   sealAttempts,
   startMcpServer,
   suiteCommandsOn,
   suiteTraces,
-  windowsShells,
   wordsOf,
 } from '../../../test/helpers/real-shell.mjs';
 import type { FakeMessage } from './support/fake-google.ts';
@@ -244,12 +244,8 @@ test('a Gmail change prepared at the CLI is approved with Gmail’s own command 
   const agent = shellFor(p, 'agent');
 
   if (process.platform === 'win32') {
-    // No terminal to give a person from here: the approval refuses for want of one, against the printing store.
-    for (const each of windowsShells()) {
-      const result = each.run(approve, { env: person.env, cwd: person.cwd });
-      assert.match(`${result.stdout}${result.stderr}`, /needs an interactive terminal/, each.name);
-    }
-    assert.ok(audit(p.folders.stateDir).some((record) => record.approvalId === id));
+    // No terminal to give a person from here: it refuses for want of one, naming the very command pasted.
+    refusesWithoutATerminal(approve, person, ['approve', id]);
   } else {
     assertGmailCommand(approve, p, FOUR_FOLDERS, ['approve', id]);
     assertGmailCommand(rerun, p, FOUR_FOLDERS, tail);
@@ -293,10 +289,7 @@ test('a Gmail change prepared through Gmail’s server is approved at a fresh te
   assert.deepEqual(environmentAssignments(said), []);
   const person = shellFor(p, 'person');
   if (process.platform === 'win32') {
-    for (const each of windowsShells()) {
-      const result = each.run(approve, { env: person.env, cwd: person.cwd });
-      assert.match(`${result.stdout}${result.stderr}`, /needs an interactive terminal/, each.name);
-    }
+    refusesWithoutATerminal(approve, person, ['approve', id]);
   } else {
     assertGmailCommand(approve, p, FOUR_FOLDERS, ['approve', id]);
     if (NEEDS_TERMINAL.skip === undefined) {
@@ -312,14 +305,3 @@ test('a Gmail change prepared through Gmail’s server is approved at a fresh te
   assert.deepEqual(sends(p.harness), []);
   assert.ok(existsSync(join(p.folders.stateDir, 'approvals', `${id}.json`)), 'the approval is in the pinned state');
 });
-
-/** Every audit record in a state folder. */
-function audit(stateDir: string): Array<Record<string, unknown>> {
-  const dir = join(stateDir, 'audit');
-  if (!existsSync(dir)) return [];
-  return readdirSync(dir)
-    .filter((file) => file.endsWith('.jsonl'))
-    .flatMap((file) => readFileSync(join(dir, file), 'utf8').split('\n'))
-    .filter(Boolean)
-    .map((line) => JSON.parse(line) as Record<string, unknown>);
-}

@@ -14,11 +14,11 @@ import {
   posixShellAsync,
   posixTerminalAsync,
   real,
+  refusesWithoutATerminal,
   type Shell,
   sealAttempts,
   suiteCommandsOn,
   suiteTraces,
-  windowsShells,
   wordsOf,
 } from '../../../test/helpers/real-shell.mjs';
 import { type Harness, newHarness } from './support/harness.ts';
@@ -74,15 +74,11 @@ function assertResendCommand(command: string, harness: Harness, tail: readonly s
 
 /**
  * Pastes `approve` where a person would: a terminal of their own on POSIX, the code typed back. Windows gives a test no
- * terminal, so there each shell runs it and it refuses for want of one — against the harness's own approval store.
+ * terminal, so there each shell runs it and it refuses for want of one, naming the very command pasted.
  */
 async function personApproves(harness: Harness, approve: string, id: string, shell: Shell): Promise<boolean> {
   if (process.platform === 'win32') {
-    for (const each of windowsShells()) {
-      const result = each.run(approve, { env: shell.env, cwd: shell.cwd });
-      assert.match(`${result.stdout}${result.stderr}`, /needs an interactive terminal/, each.name);
-    }
-    assert.ok((await harness.audit()).some((record) => record.approvalId === id && record.outcome === 'refused'));
+    refusesWithoutATerminal(approve, shell, ['approve', id]);
     return false;
   }
   assertResendCommand(approve, harness, ['approve', id]);

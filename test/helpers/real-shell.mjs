@@ -20,6 +20,7 @@
  * is under the temporary folder a test gives it, and every write it makes is refused before it happens when its target
  * is in the real home (`fixtureWrites`): nothing here reads or writes the real home.
  */
+import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import {
   existsSync,
@@ -161,13 +162,27 @@ function within(path, root) {
 }
 
 /**
+ * A folder as given and as the file system names it: Windows' short `RUNNER~1` and its long name, macOS's `/var` and
+ * `/private/var`. A fixture's folders are real paths, and the system's temporary folder may be given as either.
+ */
+function bothForms(path) {
+  const forms = [resolve(path)];
+  try {
+    forms.push(realpathSync.native(path));
+  } catch {
+    // Not there: only as given.
+  }
+  return forms;
+}
+
+/**
  * Refuses a path a fixture is about to write when it is in the real home: the home itself or anything in it, except the
  * system's temporary folder — which on Windows is inside the profile, and where every fixture here lives. Checked
  * before the call reaches the file system, so a refused write leaves nothing behind (design 2026-10-04 §4 item 9).
  * `home` and `temp` are the machine's own unless a test gives others.
  */
 export function refuseRealHome(path, { home = homedir(), temp = tmpdir() } = {}) {
-  if (within(path, home) && !within(path, temp)) {
+  if (bothForms(home).some((root) => within(path, root)) && !bothForms(temp).some((root) => within(path, root))) {
     throw new Error(
       `refused before writing: ${path} is in the real home, and a test writes only under its temp folder`,
     );
@@ -402,6 +417,38 @@ export function windowsShells() {
   return shells;
 }
 
+/**
+ * A printed command run in each Windows shell (`shells`, all of them unless given) — or, where the renderer gave its
+ * words as JSON because no line is safe in every shell (D3's second outcome: on a default Windows install, a Node
+ * under `C:\\Program Files`), those words as a person types them. `check(result, name)` judges each run.
+ */
+export function inWindowsShells(command, shell, check, shells = windowsShells()) {
+  const words = wordsOf(command, 'win32');
+  if (words === null) {
+    const typed = JSON.parse(command);
+    check(spawnSync(typed[0], typed.slice(1), { ...RUN, env: shell.env, cwd: shell.cwd, input: '' }), 'typed');
+    return;
+  }
+  for (const each of shells) check(each.run(command, { env: shell.env, cwd: shell.cwd }), each.name);
+}
+
+/**
+ * A pasted `approve` on Windows, where no test can give a person a terminal: in each shell it refuses for want of one,
+ * and names the command to run instead — made by the pasted process from its own folders. It names the very words that
+ * were pasted only when the pins decided its folders, not the shell's decoys.
+ */
+export function refusesWithoutATerminal(approve, shell, tail) {
+  inWindowsShells(approve, shell, (result, name) => {
+    const said = `${result.stdout}${result.stderr}`;
+    assert.match(said, /needs an interactive terminal/, `${name}: ${said}`);
+    assert.deepEqual(
+      argvOf(commandEndingWith(said, tail, 'win32'), 'win32'),
+      argvOf(approve, 'win32'),
+      `${name}: the refusal names the command that was pasted`,
+    );
+  });
+}
+
 // ── A server, as a client starts it ──────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -476,7 +523,7 @@ export function commandsIn(text) {
 /** The one command in `text` whose words end with `tail` (words after the program), or a failure naming the text. */
 export function commandEndingWith(text, tail, platform = process.platform) {
   const found = commandsIn(text).filter((command) => {
-    const words = wordsOf(command, platform);
+    const words = argvOf(command, platform);
     return words !== null && words.slice(-tail.length).join('\0') === tail.join('\0');
   });
   if (found.length !== 1) {
@@ -496,6 +543,21 @@ export function wordsOf(line, platform = process.platform) {
   return [...line.matchAll(/'((?:[^']|'\\'')*)'|(\S+)/g)].map((m) =>
     m[1] !== undefined ? m[1].replaceAll("'\\''", "'") : m[2],
   );
+}
+
+/**
+ * A printed command's words: its line read as its shell reads it, or — the JSON form, D3's second outcome — the words
+ * it gives to type. Null for text that is neither.
+ */
+export function argvOf(command, platform = process.platform) {
+  const words = wordsOf(command, platform);
+  if (words !== null) return words;
+  try {
+    const typed = JSON.parse(command);
+    return Array.isArray(typed) && typed.every((word) => typeof word === 'string') ? typed : null;
+  } catch {
+    return null;
+  }
 }
 
 /** The path options among `words` before any `--`, by the directory each pins: what a printed command carries. */

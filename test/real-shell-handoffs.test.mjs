@@ -4,6 +4,7 @@ import { dirname, join, resolve, sep } from 'node:path';
 import { test } from 'node:test';
 import { pathToFileURL } from 'node:url';
 import {
+  argvOf,
   baseEnvironment,
   builtCli,
   commandEndingWith,
@@ -12,6 +13,7 @@ import {
   FOUR_FOLDERS,
   filesUnder,
   freshShell,
+  inWindowsShells,
   isCanonical,
   NEEDS_TERMINAL,
   ON_POSIX,
@@ -106,11 +108,6 @@ async function machine(options = {}) {
   return { root, home, cwd, env, folders, pinArgs, print, nodeBin, sealLog: env.AGENTCOMMS_TEST_SEAL_LOG };
 }
 
-/** A printed command's words: its line read as its shell reads it, or — the JSON form — its words. */
-function argvOf(command, platform = process.platform) {
-  return wordsOf(command, platform) ?? JSON.parse(command);
-}
-
 /** The JSON envelope a `--json` run printed first. */
 function envelope(result) {
   const line = String(result.stdout)
@@ -180,21 +177,6 @@ function audit(stateDir) {
     .flatMap((file) => readFileSync(join(dir, file), 'utf8').split('\n'))
     .filter(Boolean)
     .map((line) => JSON.parse(line));
-}
-
-/**
- * A printed command run in each Windows shell — or, where the renderer gave its words as JSON because no line is safe
- * in every shell (D3's second outcome: a program path that needs quotes), those words as a person types them.
- */
-function inWindowsShells(command, shell, check, shells = windowsShells()) {
-  const words = wordsOf(command, 'win32');
-  if (words === null) {
-    const typed = JSON.parse(command);
-    const result = runNode(typed.slice(1), { env: shell.env, cwd: shell.cwd });
-    check(result, 'typed from its JSON words');
-    return;
-  }
-  for (const each of shells) check(each.run(command, { env: shell.env, cwd: shell.cwd }), each.name);
 }
 
 // ── 3b, 3g, 8a, 8c, 8d: a change prepared at the CLI ─────────────────────────────────────────────────────────────
