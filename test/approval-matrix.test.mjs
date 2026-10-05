@@ -42,11 +42,14 @@ import { tempDir } from './helpers/temp-dir.mjs';
  */
 
 /** The drivers: each a package's own program, run with its own fakes. */
-const DRIVERS = ['gmail', 'slack', 'resend'].map((channel) => ({
-  channel,
-  dir: join(ROOT, 'packages', channel),
-  entry: join('test', 'support', 'matrix.ts'),
-}));
+const DRIVERS = [
+  ...['gmail', 'slack', 'resend'].map((channel) => ({
+    channel,
+    dir: join(ROOT, 'packages', channel),
+    entry: join('test', 'support', 'matrix.ts'),
+  })),
+  { channel: 'core', dir: join(ROOT, 'packages', 'core'), entry: join('test', 'helpers', 'matrix.ts') },
+];
 
 /** Every surface each driver must report on, by the action it takes: nothing named here may go missing. */
 const SURFACES = {
@@ -78,6 +81,18 @@ const SURFACES = {
       look: ['resend_send_status', 'resend_send_wait'],
       claim: ['resend_send_execute'],
       approve: ['approve (terminal)'],
+    },
+  },
+  core: {
+    send: {
+      look: ['gmail', 'slack', 'resend'].map((channel) => `comms_approval_wait (a ${channel} send)`),
+      list: ['gmail', 'slack', 'resend'].map((channel) => `comms_approvals_list (a ${channel} send)`),
+    },
+    change: {
+      look: ['comms_approval_wait'],
+      list: ['comms_approvals_list'],
+      claim: ['comms_attach'],
+      approve: ['agentcomms approve'],
     },
   },
 };
@@ -452,7 +467,128 @@ function usedRefusal(channel) {
   );
 }
 
-const EXPECT = { send: SEND };
+/** Applied, once, with the approval spent. */
+function applied(o) {
+  assert.equal(o.ok, true, `applied: ${JSON.stringify(o)}`);
+  assert.equal(o.sends, 1, 'the change was made');
+  assert.equal(o.approval?.state, 'used');
+  assert.equal(o.approval?.claimable, false);
+}
+
+/** D2 for a change: as for a send, in a change's words — nothing was changed, and never a provider id or "sent". */
+const CHANGE = {
+  corrupt: SEND.corrupt,
+  'pending-chat': { look: shows('pending', true), list: shows('pending', true), claim: applied, approve: approvedNow },
+  'pending-confirm': {
+    look: shows('pending', false),
+    list: shows('pending', false),
+    // D2: a confirm change is APPROVAL_PENDING, with the terminal command and the wait; changes never raise a form.
+    claim: refused(
+      'APPROVAL_PENDING',
+      /^nothing was changed: this change needs a person to approve it at a terminal first$/,
+      'pending',
+      (o) => {
+        assert.ok(o.hint?.includes(o.approval.id), `the hint names this approval: ${o.hint}`);
+        assert.match(o.hint ?? '', /wait/);
+      },
+    ),
+    approve: approvedNow,
+  },
+  'wrong-code-1': {
+    ...SEND['wrong-code-1'],
+    approve: refused('APPROVAL_REQUIRED', /^nothing was changed: the challenge did not match$/, 'pending', (o) =>
+      assert.equal(o.extra?.stored, 'pending'),
+    ),
+  },
+  'wrong-code-2': {
+    ...SEND['wrong-code-2'],
+    approve: refused('APPROVAL_REQUIRED', /^nothing was changed: the challenge did not match$/, 'pending', (o) =>
+      assert.equal(o.extra?.stored, 'pending'),
+    ),
+  },
+  'wrong-code-3': {
+    ...SEND['wrong-code-3'],
+    approve: refused(
+      'APPROVAL_VOID',
+      /^nothing was changed: too many wrong answers to the challenge$/,
+      'revoked',
+      (o) => assert.equal(o.extra?.stored, 'revoked'),
+    ),
+  },
+  approved: { ...SEND.approved, claim: applied },
+  'expired-pending': {
+    look: shows('expired', false),
+    list: shows('expired', false),
+    claim: refused(
+      'APPROVAL_EXPIRED',
+      new RegExp(`^this approval expired; nothing was changed with it: prepared at ${TIME}, expired at ${TIME}$`),
+      'expired',
+    ),
+    approve: refused(
+      'APPROVAL_EXPIRED',
+      new RegExp(`^this approval expired; nothing was changed with it: prepared at ${TIME}, expired at ${TIME}$`),
+      'expired',
+    ),
+  },
+  'expired-approved': {
+    look: shows('expired', false),
+    list: shows('expired', false),
+    claim: refused(
+      'APPROVAL_EXPIRED',
+      new RegExp(
+        `^this approval expired; nothing was changed with it: approved at ${TIME}, expired unused at ${TIME}$`,
+      ),
+      'expired',
+    ),
+    approve: refused(
+      'APPROVAL_EXPIRED',
+      new RegExp(
+        `^this approval expired; nothing was changed with it: approved at ${TIME}, expired unused at ${TIME}$`,
+      ),
+      'expired',
+    ),
+  },
+  'clock-anomaly': {
+    look: shows('expired', false),
+    list: shows('expired', false, (o) => assert.equal(o.approval.reason, 'clock-anomaly')),
+    claim: refused(
+      'APPROVAL_EXPIRED',
+      new RegExp(
+        `^the clock moved backwards; this approval was expired safely at ${TIME}; nothing was changed with it$`,
+      ),
+      'expired',
+    ),
+    approve: refused(
+      'APPROVAL_EXPIRED',
+      new RegExp(
+        `^the clock moved backwards; this approval was expired safely at ${TIME}; nothing was changed with it$`,
+      ),
+      'expired',
+    ),
+  },
+  used: {
+    look: shows('used', false),
+    list: shows('used', false),
+    claim: refused(
+      'APPROVAL_VOID',
+      new RegExp(`^nothing was changed: the approved change was already claimed at ${TIME}$`),
+      'used',
+    ),
+    approve: refused(
+      'APPROVAL_VOID',
+      new RegExp(`^nothing was changed: the approved change was already claimed at ${TIME}$`),
+      'used',
+    ),
+  },
+  revoked: {
+    look: shows('revoked', false),
+    list: shows('revoked', false),
+    claim: refused('APPROVAL_VOID', /^nothing was changed: the approval was voided \(cancelled\)$/, 'revoked'),
+    approve: refused('APPROVAL_VOID', /^nothing was changed: the approval was voided \(cancelled\)$/, 'revoked'),
+  },
+};
+
+const EXPECT = { send: SEND, change: CHANGE };
 
 /** D2's one NOT_FOUND: no record detail, `approval: null`, nothing asked of the provider. */
 function notFound(o) {
@@ -478,7 +614,7 @@ const labelOf = (line) =>
     line.observation.extra?.variant ? ` · ${line.observation.extra.variant}` : ''
   }`;
 
-for (const kind of ['send']) {
+for (const kind of ['send', 'change']) {
   test(`${kind}: every surface reported every row its actions meet`, () => {
     for (const [channel, kinds] of Object.entries(SURFACES)) {
       for (const [action, surfaces] of Object.entries(kinds[kind] ?? {})) {
