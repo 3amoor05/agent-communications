@@ -1,21 +1,28 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
 import { approveChangeAtTerminal, gatedChangeAtTerminal, refuseUnclaimedApproval } from './change-flow.ts';
-import { changeApprovalCommand, type PreparedChange } from './changes.ts';
+import type { PreparedChange } from './changes.ts';
 import {
   colorEnabled,
-  commandText,
   defaultStreams,
-  inlineCommand,
   type OutputOptions,
   pathOverridesFromCliOptions,
   runCommand,
-  shellCommand,
   writeError,
   writeResult,
 } from './cli-runtime.ts';
 import { openCore } from './core.ts';
 import { CommsError, EXIT_CODES } from './errors.ts';
+import {
+  type CliHandoffs,
+  CORE_CALLER,
+  cliHandoffs,
+  type Handoff,
+  type HandoffMaker,
+  handoffSentence,
+  handoffSentenceToFill,
+  handoffText,
+} from './handoffs.ts';
 import { installExitStatus, type Launcher, type SupportedClient } from './mcp-install.ts';
 import type { NamesMigrationRow, NotApplicableRename } from './names.ts';
 import { wholeNumber } from './numbers.ts';
@@ -61,6 +68,7 @@ import {
   updateLaterChange,
 } from './operations/update-settings.ts';
 import { profileSourcePath, shownPath } from './organisations.ts';
+import { resolvePaths } from './paths.ts';
 import { renderDoctor, renderInstall, renderPrune, renderUpdate, renderUpdateCheck } from './render.ts';
 import { runUpdateCheckChild, terminalUpdateHooks, UPDATE_CHECK_CHILD_COMMAND } from './update-check.ts';
 import { CHANGE_CLAIM, exemptFromUpdateGate, updateGateAtTerminal } from './update-gate.ts';
@@ -156,8 +164,9 @@ Exit codes: 0 ok · 1 unexpected · 10 approval required · 11 an update is out:
             77 auth or scope missing · 78 config error
 `;
 
-function usage(message: string): CommsError {
-  return new CommsError('USAGE', message, { hint: 'Run `agentcomms --help`.' });
+/** A usage error, its hint the help of this installation: `help`, located (`CliHandoffs.own(['--help'])`). */
+function usageError(message: string, help: Handoff): CommsError {
+  return new CommsError('USAGE', message, { hint: handoffSentence(help, (command) => `Run ${command}.`) });
 }
 
 function parse(argv: string[]) {
@@ -281,7 +290,7 @@ function refuseApprovalNotTaken(command: string | undefined, sub: string | undef
 function refuseOrgOptionsElsewhere(
   command: string | undefined,
   values: { 'for-other-addresses'?: boolean; adopt?: string; store?: string; source?: string },
-  platform: NodeJS.Platform,
+  help: Handoff,
 ): void {
   if (command === 'org') return;
   const given = [
@@ -293,14 +302,8 @@ function refuseOrgOptionsElsewhere(
   if (given.length === 0) return;
   throw new CommsError(
     'USAGE',
-    `${given.join(', ')} ${given.length === 1 ? 'is an option' : 'are options'} of ${inlineCommand(
-      shellCommand(['agentcomms', 'org'], platform),
-    )} only`,
-    {
-      hint: `Run ${inlineCommand(
-        shellCommand(['agentcomms', '--help'], platform),
-      )} for what each command takes. Nothing was run.`,
-    },
+    `${given.join(', ')} ${given.length === 1 ? 'is an option' : 'are options'} of the org command only`,
+    { hint: handoffSentence(help, (command) => `Run ${command} for what each command takes. Nothing was run.`) },
   );
 }
 
@@ -319,6 +322,12 @@ export async function main(
       | undefined;
   } = {},
 ): Promise<number> {
+  // This installation's own help, for a usage error before the folders are known: it reads none of them.
+  const help = cliHandoffs({ caller: CORE_CALLER, paths: resolvePaths({ env, platform }), platform, env }).own(
+    ['--help'],
+    { uses: [] },
+  );
+  const usage = (message: string) => usageError(message, help);
   let parsed: ReturnType<typeof parse>;
   try {
     parsed = parse(argv);
@@ -349,18 +358,20 @@ export async function main(
   const [command, sub, arg] = positionals;
   try {
     refuseApprovalNotTaken(command, sub, values.approval);
-    refuseOrgOptionsElsewhere(command, values, platform);
+    refuseOrgOptionsElsewhere(command, values, help);
   } catch (error) {
     return writeError(error as CommsError, output);
   }
-  const core = openCore({ env, platform, pathOverrides });
+  const core = openCore({ env, platform, pathOverrides, caller: CORE_CALLER });
+  // Opened with core's own caller, so these are always there: every command this prints is located from here.
+  const handoffs = core.handoffs as CliHandoffs;
   const approval = { approvalId: values.approval, env, output };
   /** An exit status for a command that printed its result and still did not do what was asked. */
   let softExit: number = EXIT_CODES.OK;
 
   // The server speaks on stdout, so nothing else may: it is run outside `runCommand`, which prints a result there.
   if (command === 'mcp' && sub === undefined) {
-    if (values.json) return writeError(usage('`agentcomms mcp` runs the server; it prints no result'), output);
+    if (values.json) return writeError(usage('`mcp` runs the server; it prints no result'), output);
     const startCoreStdioServer = deps.startMcp ?? (await import('./mcp/server.ts')).startCoreStdioServer;
     await startCoreStdioServer({ core, env, platform });
     return EXIT_CODES.OK;
@@ -413,7 +424,7 @@ export async function main(
         return;
       }
       case 'audit': {
-        if (sub !== 'tail') throw usage('usage: agentcomms audit tail');
+        if (sub !== 'tail') throw usage('usage: audit tail');
         // Checked as typed: `Number.parseInt` read `1e2` as 1 and `12abc` as 12.
         const limit = wholeNumber(values.limit, { name: '--limit', min: 1 });
         const records = await auditTail(core, { inbox: values.inbox, since: values.since, limit });
@@ -440,15 +451,15 @@ export async function main(
           return;
         }
         if (sub === 'revoke') {
-          if (!arg) throw usage('usage: agentcomms approvals revoke <approvalId>');
+          if (!arg) throw usage('usage: approvals revoke <approvalId>');
           const record = await revokeApproval(core, arg, 'cli');
           writeResult(record, output, (r) => `${r.approvalId} is ${r.state}`);
           return;
         }
-        throw usage('usage: agentcomms approvals list|revoke');
+        throw usage('usage: approvals list|revoke');
       }
       case 'approve': {
-        if (!sub || arg !== undefined) throw usage('usage: agentcomms approve <approvalId>');
+        if (!sub || arg !== undefined) throw usage('usage: approve <approvalId>');
         const result = await approveChangeAtTerminal(core, sub, env, output);
         writeResult(result, output, (r) =>
           r.state === 'approved'
@@ -458,8 +469,7 @@ export async function main(
         return;
       }
       case 'policy': {
-        if (arg !== undefined)
-          throw usage('usage: agentcomms policy [--account <name> | --inbox <name>] [chat|confirm]');
+        if (arg !== undefined) throw usage('usage: policy [--account <name> | --inbox <name>] [chat|confirm]');
         const scope = { inbox: values.inbox, account: values.account };
         if (sub === undefined) {
           // Reporting takes no --approval: refused with the rest, before the update check's stop.
@@ -470,7 +480,7 @@ export async function main(
         const where = values.account ? ['--account', values.account] : values.inbox ? ['--inbox', values.inbox] : [];
         const report = await gatedChangeAtTerminal(core, changePolicyChange(core, scope, sub, platform), {
           ...approval,
-          command: shellCommand(['agentcomms', 'policy', ...where, sub], platform),
+          rerun: ['policy', ...where, sub],
         });
         writeResult(report, output, renderPolicy);
         return;
@@ -479,18 +489,18 @@ export async function main(
         const [, list, action, path, ...extra] = positionals;
         if (list === undefined) {
           // Reporting takes no --approval: refused with the rest, before the update check's stop.
-          writeResult(await attachReport(core, env), output, (report) => renderAttach(report, platform));
+          writeResult(await attachReport(core, env), output, (report) => renderAttach(report, handoffs));
           return;
         }
         const kind = ATTACH_KINDS[`${list} ${action ?? ''}`];
         if (kind === undefined || path === undefined || extra.length > 0) {
-          throw usage('usage: agentcomms attach [roots|deny add|remove <path>] [--approval <id>]');
+          throw usage('usage: attach [roots|deny add|remove <path>] [--approval <id>]');
         }
         const result = await gatedChangeAtTerminal(core, attachChange(core, env, { kind, path }, 'cli'), {
           ...approval,
-          command: shellCommand(['agentcomms', 'attach', list, action as string, path], platform),
+          rerun: ['attach', list, action as string, path],
         });
-        writeResult(result, output, (change) => renderAttachChange(change, platform));
+        writeResult(result, output, (change) => renderAttachChange(change, handoffs));
         return;
       }
       case 'org': {
@@ -509,37 +519,33 @@ export async function main(
             .filter(([, on]) => on)
             .map(([flag]) => flag);
           const wrong = given.filter((flag) => !taken.includes(flag));
-          if (wrong.length > 0)
+          if (wrong.length > 0) {
             throw usage(
-              `${inlineCommand(
-                shellCommand(['agentcomms', 'org', ...(sub === undefined ? [] : [sub])], platform),
-              )} takes no --${wrong.join(', --')}`,
+              `the ${['org', ...(sub === undefined ? [] : [sub])].join(' ')} command takes no --${wrong.join(', --')}`,
             );
+          }
         };
         if (sub === 'list') {
-          if (target !== undefined) throw usage('usage: agentcomms org list');
+          if (target !== undefined) throw usage('usage: org list');
           flagsOf([]);
-          writeResult(await orgList(core, platform), output, (views) => renderOrgList(views, platform));
+          writeResult(await orgList(core, platform), output, (views) => renderOrgList(views, handoffs));
           return;
         }
         if (sub === 'show') {
-          if (target === undefined || extra.length > 0) throw usage('usage: agentcomms org show <organisation>');
+          if (target === undefined || extra.length > 0) throw usage('usage: org show <organisation>');
           flagsOf([]);
           writeResult(await orgShow(core, target, platform), output, renderOrg);
           return;
         }
         if (sub === 'add') {
           if (target === undefined || extra.length > 0 || word !== undefined) {
-            throw usage(
-              'usage: agentcomms org add <file> [--for-other-addresses] [--adopt <client>] [--store keychain|file]',
-            );
+            throw usage('usage: org add <file> [--for-other-addresses] [--adopt <client>] [--store keychain|file]');
           }
           flagsOf(['for-other-addresses', 'adopt', 'store']);
           // The file as it will be read, absolute: the command run again from another directory reads the same file.
           const path = profileSourcePath(target, env, undefined, platform);
           const repeated = rerunPath(path);
-          const command =
-            repeated === null ? ['agentcomms', 'org', 'add', '--help'] : ['agentcomms', 'org', 'add', repeated];
+          const command = repeated === null ? ['org', 'add', '--help'] : ['org', 'add', repeated];
           if (values['for-other-addresses']) command.push('--for-other-addresses');
           if (values.adopt !== undefined) command.push('--adopt', values.adopt);
           if (values.store !== undefined) command.push('--store', values.store);
@@ -558,9 +564,9 @@ export async function main(
             ),
             {
               ...approval,
-              command: shellCommand(command, platform),
+              rerun: command,
               ...(repeated === null
-                ? { pendingHint: (prepared: PreparedChange) => hiddenPathApprovalHint(prepared, platform) }
+                ? { pendingHint: (prepared: PreparedChange) => hiddenPathApprovalHint(prepared, handoffs) }
                 : {}),
             },
           );
@@ -570,11 +576,11 @@ export async function main(
         if (sub === 'update') {
           if (target === undefined || extra.length > 0 || (values['for-other-addresses'] && word === undefined)) {
             throw usage(
-              'usage: agentcomms org update <organisation> [--source <file>] [--for-other-addresses on|off] [--adopt <client>] [--store keychain|file]',
+              'usage: org update <organisation> [--source <file>] [--for-other-addresses on|off] [--adopt <client>] [--store keychain|file]',
             );
           }
           flagsOf(['for-other-addresses', 'adopt', 'store', 'source']);
-          const command = ['agentcomms', 'org', 'update', target];
+          const command = ['org', 'update', target];
           let repeatedSource = true;
           // The source as it will be read, absolute: the command run again from another directory reads the same file.
           if (values.source !== undefined) {
@@ -601,9 +607,9 @@ export async function main(
             ),
             {
               ...approval,
-              command: shellCommand(repeatedSource ? command : ['agentcomms', 'org', 'update', '--help'], platform),
+              rerun: repeatedSource ? command : ['org', 'update', '--help'],
               ...(!repeatedSource
-                ? { pendingHint: (prepared: PreparedChange) => hiddenPathApprovalHint(prepared, platform) }
+                ? { pendingHint: (prepared: PreparedChange) => hiddenPathApprovalHint(prepared, handoffs) }
                 : {}),
             },
           );
@@ -611,23 +617,23 @@ export async function main(
           return;
         }
         if (sub === 'remove') {
-          if (target === undefined || extra.length > 0) throw usage('usage: agentcomms org remove <organisation>');
+          if (target === undefined || extra.length > 0) throw usage('usage: org remove <organisation>');
           flagsOf([]);
           const result = await gatedChangeAtTerminal(
             core,
             orgRemoveChange(core, { organisation: target }, orgOptions),
             {
               ...approval,
-              command: shellCommand(['agentcomms', 'org', 'remove', target], platform),
+              rerun: ['org', 'remove', target],
             },
           );
           writeResult(result, output, renderOrgRemove);
           return;
         }
-        throw usage('usage: agentcomms org add|list|show|update|remove');
+        throw usage('usage: org add|list|show|update|remove');
       }
       case 'channels': {
-        if (sub !== undefined) throw usage('usage: agentcomms channels');
+        if (sub !== undefined) throw usage('usage: channels');
         writeResult(await channelsAvailable(core, env), output, renderChannels);
         return;
       }
@@ -635,13 +641,16 @@ export async function main(
         if (sub === 'install') {
           if (!values.client) {
             throw new CommsError('USAGE', 'name the client with --client', {
-              hint: 'For example: `agentcomms mcp install --client claude-code`.',
+              hint: handoffSentence(
+                handoffs.own(['mcp', 'install', '--client', 'claude-code']),
+                (example) => `For example: ${example}.`,
+              ),
             });
           }
           if (!CLIENT_NAMES.includes(values.client)) {
             throw usage(`--client must be one of: ${CLIENT_NAMES.join(', ')}`);
           }
-          const words = ['agentcomms', 'mcp', 'install', '--client', values.client];
+          const words = ['mcp', 'install', '--client', values.client];
           if (values.name) words.push('--name', values.name);
           if (values.launcher) words.push('--launcher', values.launcher);
           if (values.force) words.push('--force');
@@ -657,7 +666,7 @@ export async function main(
               print: values.print,
               noVerify: values['no-verify'],
             }),
-            { ...approval, command: shellCommand(words, platform) },
+            { ...approval, rerun: words },
           );
           // Asked to register and did not — the client's CLI is not on PATH — or registered an entry that did not
           // start. The result is still printed, but a zero exit told a script (or an agent) that it worked.
@@ -666,7 +675,7 @@ export async function main(
           return;
         }
         if (sub === 'prune') {
-          const words = ['agentcomms', 'mcp', 'prune'];
+          const words = ['mcp', 'prune'];
           if (values['include-printed']) words.push('--include-printed');
           const result = await gatedChangeAtTerminal(
             core,
@@ -675,16 +684,16 @@ export async function main(
               dryRun: values['dry-run'],
               includePrinted: values['include-printed'],
             }),
-            { ...approval, command: shellCommand(words, platform) },
+            { ...approval, rerun: words },
           );
           writeResult(result, output, (r) => renderPrune(r, output.color));
           return;
         }
-        throw usage('usage: agentcomms mcp [install|prune]');
+        throw usage('usage: mcp [install|prune]');
       }
       case 'update': {
         if (sub !== undefined) {
-          throw usage('usage: agentcomms update [--check | --later | --auto on|off] [--no-verify] [--approval <id>]');
+          throw usage('usage: update [--check | --later | --auto on|off] [--no-verify] [--approval <id>]');
         }
         const modes = [values.check, values.later, values.auto !== undefined].filter(Boolean).length;
         if (modes > 1 || (values['no-verify'] && (values.later || values.auto !== undefined))) {
@@ -693,7 +702,7 @@ export async function main(
         if (values.later) {
           const result = await gatedChangeAtTerminal(core, updateLaterChange(core), {
             ...approval,
-            command: 'agentcomms update --later',
+            rerun: ['update', '--later'],
           });
           writeResult(result, output, renderLater);
           return;
@@ -702,7 +711,7 @@ export async function main(
           if (values.auto !== 'on' && values.auto !== 'off') throw usage('--auto takes on or off');
           const result = await gatedChangeAtTerminal(core, updateAutoChange(core, values.auto), {
             ...approval,
-            command: shellCommand(['agentcomms', 'update', '--auto', values.auto], platform),
+            rerun: ['update', '--auto', values.auto],
           });
           writeResult(result, output, renderAuto);
           return;
@@ -714,11 +723,11 @@ export async function main(
           writeResult(await updateCheck(core, env), output, renderUpdateCheck);
           return;
         }
-        const words = ['agentcomms', 'update'];
+        const words = ['update'];
         if (values['no-verify']) words.push('--no-verify');
         const result = await gatedChangeAtTerminal(core, updateChange(core, env, { noVerify: values['no-verify'] }), {
           ...approval,
-          command: shellCommand(words, platform),
+          rerun: words,
         });
         // Printed either way, but a step that did not work is not a success to a script, as for `mcp install`.
         softExit = result.ok ? EXIT_CODES.OK : EXIT_CODES.UNAVAILABLE;
@@ -727,7 +736,7 @@ export async function main(
       }
       case 'names': {
         if (sub !== 'migrate') {
-          throw usage('usage: agentcomms names migrate [--rename <old>=<new>] [--dry-run] [--approval <id>]');
+          throw usage('usage: names migrate [--rename <old>=<new>] [--dry-run] [--approval <id>]');
         }
         if (values.yes) {
           throw new CommsError(
@@ -777,10 +786,7 @@ export async function main(
         }
         const result = await gatedChangeAtTerminal(core, namesMigration(core, renames), {
           ...approval,
-          command: shellCommand(
-            ['agentcomms', 'names', 'migrate', ...renames.flatMap((rename) => ['--rename', rename])],
-            platform,
-          ),
+          rerun: ['names', 'migrate', ...renames.flatMap((rename) => ['--rename', rename])],
         });
         writeResult(result, output, (data) =>
           data.status === 'already-migrated' || !('rows' in data)
@@ -794,14 +800,14 @@ export async function main(
       }
       case 'secrets': {
         if (sub !== 'migrate' || (values.to !== 'keychain' && values.to !== 'file')) {
-          throw usage('usage: agentcomms secrets migrate --to keychain|file');
+          throw usage('usage: secrets migrate --to keychain|file');
         }
         const result = await gatedChangeAtTerminal(
           core,
           secretsMigration(core, values.to, { surface: 'cli', platform }),
           {
             ...approval,
-            command: shellCommand(['agentcomms', 'secrets', 'migrate', '--to', values.to], platform),
+            rerun: ['secrets', 'migrate', '--to', values.to],
           },
         );
         /*
@@ -866,7 +872,7 @@ function renderAttachEntries(entries: readonly AttachEntry[]): string[] {
 }
 
 /** Exported for its test, which asks for Windows' quoting by name. */
-export function renderAttach(report: AttachReport, platform: NodeJS.Platform = process.platform): string {
+export function renderAttach(report: AttachReport, handoffs: HandoffMaker): string {
   return [
     'Files may be attached from under:',
     ...renderAttachEntries(report.roots),
@@ -880,9 +886,7 @@ export function renderAttach(report: AttachReport, platform: NodeJS.Platform = p
           // The whole command, quoted for the shell it is pasted into (`shellCommand`): the entry as written, a space
           // at either end or nothing at all, and never a `$HOME` or a `$(…)` the shell would expand or run. On Windows a
           // command with an entry no quoting brings through — a `%USERPROFILE%`, nothing at all — is shown as words.
-          ...report.ignored.map(
-            (root) => `  ${commandText(shellCommand(['agentcomms', 'attach', 'roots', 'remove', root], platform))}`,
-          ),
+          ...report.ignored.map((root) => `  ${handoffText(handoffs.own(['attach', 'roots', 'remove', root]))}`),
         ]),
     '',
     'Never from, by your own entries:',
@@ -891,14 +895,24 @@ export function renderAttach(report: AttachReport, platform: NodeJS.Platform = p
     'Never from, whatever the configuration says:',
     ...renderAttachEntries(report.builtIn),
     '',
-    'To allow another folder: agentcomms attach roots add <folder> (you approve it first).',
-    'To stop attaching from one: agentcomms attach roots remove <folder>; to deny a path: agentcomms attach deny add <path>.',
+    handoffSentenceToFill(
+      handoffs.own(['attach', 'roots', 'add']),
+      ['<folder>'],
+      (command) => `To allow another folder: ${command} (you approve it first).`,
+    ),
+    handoffSentenceToFill(handoffs.own(['attach', 'roots', 'remove']), ['<folder>'], (remove) =>
+      handoffSentenceToFill(
+        handoffs.own(['attach', 'deny', 'add']),
+        ['<path>'],
+        (deny) => `To stop attaching from one: ${remove}; to deny a path: ${deny}.`,
+      ),
+    ),
   ].join('\n');
 }
 
-function renderAttachChange(result: AttachChangeResult, platform: NodeJS.Platform): string {
+function renderAttachChange(result: AttachChangeResult, handoffs: HandoffMaker): string {
   const done = result.changed ? 'Done.' : 'Nothing was changed.';
-  return [result.note ?? done, '', renderAttach(result, platform)].join('\n');
+  return [result.note ?? done, '', renderAttach(result, handoffs)].join('\n');
 }
 
 /**
@@ -910,14 +924,17 @@ function rerunPath(path: string): string | null {
   return shownPath(path) === path ? path : null;
 }
 
-function hiddenPathApprovalHint(prepared: PreparedChange, platform: NodeJS.Platform): string {
-  const carrying = inlineCommand(shellCommand(['--approval', prepared.approvalId], platform));
+function hiddenPathApprovalHint(prepared: PreparedChange, handoffs: HandoffMaker): string {
+  // The approval option to add, as words: the command it goes on is the one the person just ran, which is not shown.
+  const carrying = `\`--approval ${prepared.approvalId}\``;
   const hidden = ' Its file path is not repeated here because it contains text this output neutralises.';
   return prepared.policy === 'confirm'
-    ? `Show the person the preview. They run ${inlineCommand(
-        changeApprovalCommand(undefined, prepared.approvalId, platform),
-      )}; then run the same command again with ${carrying}.${hidden}`
-    : `Show the person the preview. Once they say yes, run the same command again with ${carrying}.${hidden}`;
+    ? handoffSentence(
+        handoffs.own(['approve', prepared.approvalId]),
+        (approve) =>
+          `Show the person the preview. They run ${approve}; then run the same command again with ${carrying} added.${hidden}`,
+      )
+    : `Show the person the preview. Once they say yes, run the same command again with ${carrying} added.${hidden}`;
 }
 
 /** One profile at a terminal. Every string in a view that came from a profile is already neutralised and on one line. */
@@ -960,11 +977,13 @@ function renderOrg(view: OrganisationView): string {
   return lines.join('\n');
 }
 
-function renderOrgList(views: readonly OrganisationView[], platform: NodeJS.Platform): string {
-  if (views.length === 0)
-    return `No organisation profiles have been added here. Add one with ${inlineCommand(
-      shellCommand(['agentcomms', 'org', 'add', '--help'], platform),
-    )}.`;
+function renderOrgList(views: readonly OrganisationView[], handoffs: HandoffMaker): string {
+  if (views.length === 0) {
+    return handoffSentence(
+      handoffs.own(['org', 'add', '--help']),
+      (command) => `No organisation profiles have been added here. Add one with ${command}.`,
+    );
+  }
   return views.map(renderOrg).join('\n\n');
 }
 

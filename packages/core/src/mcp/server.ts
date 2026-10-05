@@ -5,6 +5,7 @@ import { CHANNELS } from '../channel-servers.ts';
 import { accountChannels, listed, narrowingOwner } from '../channel-words.ts';
 import { type Core, openCore } from '../core.ts';
 import { CommsError, toCommsError } from '../errors.ts';
+import { CORE_CALLER } from '../handoffs.ts';
 import { installFailure, SERVER_NAME_MESSAGE, SERVER_NAME_PATTERN } from '../mcp-install.ts';
 import { ATTACH_CHANGE_KINDS, attachChange, attachReport } from '../operations/attach-settings.ts';
 import {
@@ -123,7 +124,8 @@ async function buildInstructions(core: Core): Promise<string> {
 
 export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise<CoreMcpServer> {
   const env = options.env ?? process.env;
-  const core = options.core ?? openCore({ env });
+  // Opened as core itself, so every command this server hands a person is located from this installation.
+  const core = options.core ?? openCore({ env, caller: CORE_CALLER });
   const platform = options.platform ?? process.platform;
   const updateDeps: UpdateDeps = { ...options.update, platform };
   const server = new McpServer(

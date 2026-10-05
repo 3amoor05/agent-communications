@@ -5,11 +5,12 @@ import {
   type ChangeTarget,
   changeDigest,
   DOWNLOAD_ANSWER_HINT,
+  isMisdirectedSend,
+  sendApprovesHint,
   stricterPolicy,
 } from './approvals.ts';
 import type { AuditRecord } from './audit.ts';
 import { channelApproveCommands } from './channel-words.ts';
-import { inlineCommand, type ShellCommand, shellCommand } from './cli-runtime.ts';
 import {
   type ChangePolicy,
   type Config,
@@ -22,6 +23,7 @@ import {
 } from './config.ts';
 import type { Core } from './core.ts';
 import { CommsError, toCommsError } from './errors.ts';
+import { handoffSentence, handoffsFor, registeredFor } from './handoffs.ts';
 import { lookupName, resolveName } from './names.ts';
 import { truncateDisplay } from './render.ts';
 
@@ -77,24 +79,13 @@ export interface ChangeOptions {
    * The command a person runs to approve a change under `confirm`, as it is installed beside whatever asked: `agent-gmail
    * approve` and `agent-slack approve` approve changes too, and `agentcomms` is not installed with either package, so
    * naming it there sends the person to a command they do not have. `agentcomms approve` when left out.
+   *
+   * @deprecated Read only when `core.handoffs` is not there: the printing package's own `approve` is located from it
+   * instead (CONTRIBUTING.md, "Telling a person what to run"). Goes with the bridge (CUE-403 task 15).
    */
   approveCommand?: string | undefined;
   /** The shell syntax used when the approval command is shown. */
   platform?: NodeJS.Platform | undefined;
-}
-
-/** The terminal command that approves a change, for the channel that asked. */
-export function approveCommandOf(options: Pick<ChangeOptions, 'approveCommand'>): string {
-  return options.approveCommand ?? 'agentcomms approve';
-}
-
-/** The channel's fixed approval-command prefix with this generated id, rendered by the common shell rule. */
-export function changeApprovalCommand(
-  approveCommand: string | undefined,
-  approvalId: string,
-  platform: NodeJS.Platform = process.platform,
-): ShellCommand {
-  return shellCommand([...(approveCommand ?? 'agentcomms approve').trim().split(/\s+/), approvalId], platform);
 }
 
 export interface PreparedChange {
@@ -239,7 +230,7 @@ export async function prepareChange(
       effects: binding.effects,
       preview: renderChangePreview({ ...record, change: binding }),
       expiresAt: record.expiresAt,
-      next: nextStep(record.approvalId, policy, options),
+      next: nextStep(record.approvalId, policy, core, options),
     };
   } catch (error) {
     await auditRefusal(core, 'change.prepare', error, {
@@ -278,8 +269,12 @@ export async function claimChange(
       approvalId,
       { change: binding, policy },
       {
-        pendingHint: `Ask the user to run ${inlineCommand(changeApprovalCommand(options.approveCommand, approvalId, options.platform))} in their own terminal, then try again with the same approval.`,
+        pendingHint: handoffSentence(
+          handoffsFor(core, options).own(['approve', approvalId]),
+          (command) => `Ask the user to run ${command} in their own terminal, then try again with the same approval.`,
+        ),
         platform: options.platform,
+        handoffs: core.handoffs,
       },
     );
     const decided = stricterPolicy(policy, record.requiredPolicy) === 'chat' ? 'chat' : 'confirm';
@@ -300,7 +295,15 @@ export async function claimChange(
       paths: binding.loosened.map((loosening) => loosening.path),
       changes: binding.loosened,
     };
-  } catch (error) {
+  } catch (caught) {
+    // A send's approval offered here: said again with every sending channel's `approve` found where it is registered.
+    const error =
+      isMisdirectedSend(caught) && core.handoffs !== undefined
+        ? new CommsError(caught.code, caught.message, {
+            hint: sendApprovesHint(await registeredFor(handoffsFor(core, options)), approvalId),
+            ...(caught.details === undefined ? {} : { details: caught.details }),
+          })
+        : caught;
     await auditRefusal(core, 'change.claim', error, {
       surface: options.surface,
       approvalId,
@@ -312,7 +315,11 @@ export async function claimChange(
 }
 
 /** A change approval, checked to be one and to describe the change its digest binds. */
-async function changeRecord(core: Core, approvalId: string): Promise<ApprovalRecord & { change: ChangeBinding }> {
+async function changeRecord(
+  core: Core,
+  approvalId: string,
+  options: Pick<ChangeOptions, 'approveCommand' | 'platform'> = {},
+): Promise<ApprovalRecord & { change: ChangeBinding }> {
   const record = await core.approvals.get(approvalId);
   if (!record) {
     throw new CommsError('NOT_FOUND', `no approval ${approvalId}`, {
@@ -328,7 +335,10 @@ async function changeRecord(core: Core, approvalId: string): Promise<ApprovalRec
   }
   if (approvalKind(record) !== 'change') {
     throw new CommsError('USAGE', `approval ${approvalId} is for a send, not a configuration change`, {
-      hint: `Approve it with the command that prepared it: ${channelApproveCommands({ sending: true })}.`,
+      hint:
+        core.handoffs === undefined
+          ? `Approve it with the command that prepared it: ${channelApproveCommands({ sending: true })}.`
+          : sendApprovesHint(await registeredFor(handoffsFor(core, options)), approvalId),
     });
   }
   /*
@@ -356,7 +366,7 @@ export async function beginChangeApproval(
 ): Promise<ChangeApprovalPrompt> {
   let record: (ApprovalRecord & { change: ChangeBinding }) | undefined;
   try {
-    record = await changeRecord(core, approvalId);
+    record = await changeRecord(core, approvalId, options);
     const challenge = await core.approvals.issueChallenge(approvalId, 'change', options.platform);
     return { approvalId, preview: renderChangePreview(record), challenge };
   } catch (error) {
@@ -379,7 +389,7 @@ export async function finishChangeApproval(
 ): Promise<ApprovalRecord> {
   let record: (ApprovalRecord & { change: ChangeBinding }) | undefined;
   try {
-    record = await changeRecord(core, approvalId);
+    record = await changeRecord(core, approvalId, options);
     const digest = changeDigest(record.change);
     const approved = await core.approvals.approve(
       approvalId,
@@ -458,10 +468,14 @@ function changePolicyOf(record: Pick<ApprovalRecord, 'requiredPolicy'>): ChangeP
   return record.requiredPolicy === 'chat' ? 'chat' : 'confirm';
 }
 
-function nextStep(approvalId: string, policy: ChangePolicy, options: ChangeOptions): string {
+function nextStep(approvalId: string, policy: ChangePolicy, core: Core, options: ChangeOptions): string {
   return policy === 'chat'
     ? `Show this preview to the user and ask. If they say yes, claim approval ${approvalId} and apply the change; if not, revoke it.`
-    : `The change policy is confirm: ask the user to run ${inlineCommand(changeApprovalCommand(options.approveCommand, approvalId, options.platform))} in their own terminal and type the code it shows. Then claim approval ${approvalId} and apply the change.`;
+    : handoffSentence(
+        handoffsFor(core, options).own(['approve', approvalId]),
+        (command) =>
+          `The change policy is confirm: ask the user to run ${command} in their own terminal and type the code it shows. Then claim approval ${approvalId} and apply the change.`,
+      );
 }
 
 interface ChangeAuditEntry {

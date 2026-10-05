@@ -60,6 +60,7 @@ import {
   updateVerdict,
 } from '../src/update-state.ts';
 import { VERSION } from '../src/version.ts';
+import { locatedCoreLine } from './helpers/handoffs.ts';
 import { tempDir } from './helpers/temp.ts';
 
 /*
@@ -1190,7 +1191,12 @@ test('the command: --later and --auto off wait for an approval; --auto on applie
   const pending = JSON.parse(later.stdout) as { error: { code: string; hint: string; details: { preview: string } } };
   assert.equal(pending.error.code, 'APPROVAL_PENDING');
   assert.match(pending.error.details.preview, /puts off the update to 99\.0\.0/);
-  assert.match(pending.error.hint, /agentcomms update --later --approval ap_/);
+  locatedCoreLine(pending.error.hint, [
+    'update',
+    '--later',
+    '--approval',
+    String(pending.error.hint.match(/ap_\w+/)?.[0]),
+  ]);
   const off = run(['update', '--auto', 'off', '--json']);
   assert.equal(off.status, 10, off.stdout + off.stderr);
   const on = run(['update', '--auto', 'on', '--json']);

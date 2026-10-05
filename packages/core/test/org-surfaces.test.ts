@@ -9,6 +9,8 @@ import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { inlineCommand, shellCommand } from '../src/cli-runtime.ts';
 import { type Core, openCore } from '../src/core.ts';
 import { createCoreMcpServer } from '../src/mcp/server.ts';
+import { resolvePaths } from '../src/paths.ts';
+import { assertNoBareCommand, coreInline } from './helpers/handoffs.ts';
 import { tempDir } from './helpers/temp.ts';
 
 /*
@@ -203,19 +205,10 @@ test('at a terminal: the same change, the same view, and --for-other-addresses r
   // Absolute — the run again from another directory reads the same file — whatever the temp directory resolves to.
   assert.ok(
     pending.hint.includes(
-      inlineCommand(
-        shellCommand(
-          [
-            'agentcomms',
-            'org',
-            'add',
-            realpathSync(profile),
-            '--for-other-addresses',
-            '--approval',
-            pending.details.approvalId,
-          ],
-          platform,
-        ),
+      coreInline(
+        resolvePaths({ env: m.env, platform }),
+        ['org', 'add', realpathSync(profile), '--for-other-addresses', '--approval', pending.details.approvalId],
+        platform,
       ),
     ),
     pending.hint,
@@ -268,18 +261,16 @@ test('the org CLI quotes approval reruns for darwin and win32, with a space and 
     const asked = cliForPlatform(m, ['org', 'add', path, '--json'], platform);
     assert.equal(asked.status, 10, `${platform}: ${asked.stdout}${asked.stderr}`);
     const error = asked.json().error;
-    const expected = inlineCommand(
-      shellCommand(['agentcomms', 'org', 'add', path, '--approval', error.details.approvalId], platform),
+    const expected = coreInline(
+      resolvePaths({ env: m.env, platform }),
+      ['org', 'add', path, '--approval', error.details.approvalId],
+      platform,
     );
-    assert.match(error.hint, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), platform);
+    assert.ok(error.hint.includes(expected), `${platform}: ${error.hint}`);
 
     const wrong = cliForPlatform(m, ['org', 'list', '--source', path, '--json'], platform);
     assert.equal(wrong.status, 64, `${platform}: ${wrong.stdout}${wrong.stderr}`);
-    assert.equal(
-      wrong.json().error.message,
-      `${inlineCommand(shellCommand(['agentcomms', 'org', 'list'], platform))} takes no --source`,
-      platform,
-    );
+    assert.equal(wrong.json().error.message, 'the org list command takes no --source', platform);
   }
 });
 
@@ -409,15 +400,18 @@ test('the command to run again names a plain path as it is, and a path that cann
     const pending = plain.json().error;
     assert.ok(
       pending.hint.includes(
-        inlineCommand(
-          shellCommand(['agentcomms', 'org', 'add', plainPath, '--approval', pending.details.approvalId], platform),
+        coreInline(
+          resolvePaths({ env: m.env, platform }),
+          ['org', 'add', plainPath, '--approval', pending.details.approvalId],
+          platform,
         ),
       ),
       `${platform}: ${pending.hint}`,
     );
     const masked = cliForPlatform(m, ['org', 'add', odd, '--json'], platform);
     assertNothingRaw(`${masked.stdout}${masked.stderr}`, `org add (${platform})`);
-    assert.doesNotMatch(masked.json().error.hint, /<the same file>|agentcomms org add/);
+    assert.doesNotMatch(masked.json().error.hint, /<the same file>| org add /);
+    assertNoBareCommand(masked.json().error.hint);
     assert.match(masked.json().error.hint, /run the same command again with `--approval ap_/);
     assert.match(masked.json().error.hint, /file path is not repeated here/);
   }

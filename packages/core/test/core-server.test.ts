@@ -21,6 +21,7 @@ import { serverInstallChange, serverPruneChange } from '../src/operations/server
 import { renderDoctor } from '../src/render.ts';
 import type { SecretStore } from '../src/secrets.ts';
 import { VERSION } from '../src/version.ts';
+import { locatedCoreLine } from './helpers/handoffs.ts';
 import { tempDir } from './helpers/temp.ts';
 
 /*
@@ -990,12 +991,17 @@ test('`agentcomms mcp install` is the same change at the command line', NOT_ON_W
   assert.equal(asked.status, 10, asked.stderr);
   const pending = asked.json().error;
   assert.match(pending.details.preview, /registers the agentcomms \(core\) MCP server with claude-code/);
-  assert.match(
-    pending.hint,
-    new RegExp(
-      `agentcomms mcp install --client claude-code --launcher local --no-verify --approval ${pending.details.approvalId}`,
-    ),
-  );
+  locatedCoreLine(pending.hint, [
+    'mcp',
+    'install',
+    '--client',
+    'claude-code',
+    '--launcher',
+    'local',
+    '--no-verify',
+    '--approval',
+    pending.details.approvalId,
+  ]);
   assert.deepEqual(readClaude(), []);
 
   const done = cli(m, [...args, '--approval', pending.details.approvalId, '--json'], { CLAUDECODE: '1' });

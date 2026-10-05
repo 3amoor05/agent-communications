@@ -18,6 +18,7 @@ import { compareVersions, npmLatestVersion } from '../src/npm.ts';
 import type { UpdateDeps } from '../src/operations/update.ts';
 import { readUpdateCheck, updateCheckPath } from '../src/update-state.ts';
 import { VERSION } from '../src/version.ts';
+import { locatedCoreLine } from './helpers/handoffs.ts';
 import { tempDir } from './helpers/temp.ts';
 
 /*
@@ -1427,7 +1428,7 @@ test('`agentcomms update` gives the tool’s check and preview, and claims the a
       same(error.details.preview, error.details.approvalId),
       same(String(asked.preview), String(asked.approvalId)),
     );
-    assert.match(error.hint, new RegExp(`agentcomms update --approval ${error.details.approvalId}`));
+    locatedCoreLine(error.hint, ['update', '--approval', error.details.approvalId]);
     assert.match(String(asked.preview), new RegExp(`${PACKAGES.gmailMcp}@${LATEST}`));
 
     // The approval the tool prepared, claimed by the command: one change, whichever surface asked.

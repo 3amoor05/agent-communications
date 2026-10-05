@@ -1,6 +1,6 @@
 import { open, readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { channelApproveCommands } from './channel-words.ts';
+import { accountChannels, channelApproveCommands } from './channel-words.ts';
 import { inlineCommand, shellCommand } from './cli-runtime.ts';
 import {
   type ChangePolicy,
@@ -13,6 +13,7 @@ import {
 import { canonicalJson, normaliseAddress, sha256Hex } from './digest.ts';
 import { CommsError, type ErrorCode } from './errors.ts';
 import { ensurePrivateDir, writeFileAtomic } from './fs.ts';
+import { type CliHandoffs, type HandoffMaker, handoffChoices, handoffSentence } from './handoffs.ts';
 import { APPROVAL_ID_PATTERN, challengeMatches, hashChallenge, newApprovalId, newChallenge } from './ids.ts';
 import { withFileLock } from './lock.ts';
 import type { RenameReason } from './saved-files.ts';
@@ -370,6 +371,11 @@ export interface ClaimOptions {
   /** The shell syntax used by any approval command this refusal prints. */
   platform?: NodeJS.Platform | undefined;
   /**
+   * The commands the printing package gives a person (`core.handoffs`), for a refusal that names one: the store's own
+   * when left out. With neither, a refusal names the bare commands it did before CUE-403.
+   */
+  handoffs?: CliHandoffs | undefined;
+  /**
    * What the caller is told when the send is waiting for a person: which command approves it, and what to run after.
    *
    * The product's to say, because the store is shared and the command that approves is not. The store used to say
@@ -478,14 +484,59 @@ export function publicView(record: ApprovalRecord): Omit<ApprovalRecord, 'challe
 
 type Failure = { code: ErrorCode; reason: string };
 
+/**
+ * The refusals of a send's approval offered to a change. They name each sending channel's `approve`; another product's
+ * is found only among the registrations read for it, which the store does not read under its lock — so a caller that
+ * can read them says it again with them (`sendApprovesHint`).
+ */
+const MISDIRECTED_SENDS = new WeakSet<CommsError>();
+
+/**
+ * What an agent is told when a change waits for a person at a terminal: the printing package's own `approve` with this
+ * id, located — or, before that package gives core its caller, `agentcomms approve` as it was.
+ */
+function approvePendingHint(
+  handoffs: CliHandoffs | undefined,
+  approvalId: string,
+  platform: NodeJS.Platform | undefined,
+): string {
+  const say = (command: string) =>
+    `Ask the user to run ${command} in their own terminal, then try again with the same approval.`;
+  return handoffs === undefined
+    ? say(inlineCommand(shellCommand(['agentcomms', 'approve', approvalId], platform ?? process.platform)))
+    : handoffSentence(handoffs.on(platform ?? handoffs.platform).own(['approve', approvalId]), say);
+}
+
+/** Whether `error` is the refusal of a send's approval offered as a change's. */
+export function isMisdirectedSend(error: unknown): error is CommsError {
+  return error instanceof CommsError && MISDIRECTED_SENDS.has(error);
+}
+
+/**
+ * What approves the send `approvalId`: the `approve` of every channel that sends, one of which prepared it — a send
+ * record does not say which (D1). Each is a located command, or why it has none here.
+ */
+export function sendApprovesHint(maker: HandoffMaker, approvalId: string): string {
+  const sending = accountChannels().filter((manifest) => manifest.accounts?.modes.includes('send') === true);
+  return `It is approved with the command that prepared it — ${handoffChoices(
+    sending.map((manifest) => maker.of(manifest.channel, ['approve', approvalId])),
+    'and none is locatable here:',
+  )} — and permits only that send.`;
+}
+
 export class ApprovalStore {
   readonly directory: string;
   readonly #now: () => Date;
   readonly #ttlMs: number;
   readonly #downloadTtlMs: number;
+  readonly #handoffs: CliHandoffs | undefined;
 
-  constructor(stateDir: string, options: { now?: () => Date; ttlMs?: number; downloadTtlMs?: number } = {}) {
+  constructor(
+    stateDir: string,
+    options: { now?: () => Date; ttlMs?: number; downloadTtlMs?: number; handoffs?: CliHandoffs | undefined } = {},
+  ) {
     this.directory = join(stateDir, 'approvals');
+    this.#handoffs = options.handoffs;
     this.#now = options.now ?? (() => new Date());
     this.#ttlMs = options.ttlMs ?? APPROVAL_TTL_MS;
     this.#downloadTtlMs = options.downloadTtlMs ?? DOWNLOAD_QUESTION_TTL_MS;
@@ -619,7 +670,13 @@ export class ApprovalStore {
    * Nothing written, because the caller made a mistake about an approval that may be perfectly good: voiding a post
    * somebody is about to approve, because an agent passed its id to a change, would punish the wrong party.
    */
-  #requireKind(record: ApprovalRecord, kind: ApprovalKind, platform: NodeJS.Platform): void {
+  #requireKind(
+    record: ApprovalRecord,
+    kind: ApprovalKind,
+    platform: NodeJS.Platform,
+    handoffs: CliHandoffs | undefined = this.#handoffs,
+  ): void {
+    const maker = handoffs?.on(platform);
     const actual = approvalKind(record);
     if (actual === kind) return;
     const id = record.approvalId;
@@ -641,19 +698,30 @@ export class ApprovalStore {
         'Pass the choice id the download’s question came with, and the person’s answer beside it.',
       );
     }
-    throw kind === 'send'
-      ? refuse(
-          'USAGE',
-          `approval ${id} is for a configuration change, not a send`,
-          record,
-          `A person approves it with ${inlineCommand(shellCommand(['agentcomms', 'approve', id], platform))} — or ${channelApproveCommands()}, whichever is installed — and it permits only the change it was prepared for.`,
-        )
-      : refuseChange(
-          'USAGE',
-          `approval ${id} is for a send, not a configuration change`,
-          record,
-          `It is approved with the command that prepared it — ${channelApproveCommands({ sending: true })} — and permits only that send.`,
-        );
+    if (kind === 'send') {
+      throw refuse(
+        'USAGE',
+        `approval ${id} is for a configuration change, not a send`,
+        record,
+        // A change is approved by any of the suite's `approve` commands, so the printing package's own does it.
+        maker === undefined
+          ? `A person approves it with ${inlineCommand(shellCommand(['agentcomms', 'approve', id], platform))} — or ${channelApproveCommands()}, whichever is installed — and it permits only the change it was prepared for.`
+          : handoffSentence(
+              maker.own(['approve', id]),
+              (command) => `A person approves it with ${command}, and it permits only the change it was prepared for.`,
+            ),
+      );
+    }
+    const misdirected = refuseChange(
+      'USAGE',
+      `approval ${id} is for a send, not a configuration change`,
+      record,
+      maker === undefined
+        ? `It is approved with the command that prepared it — ${channelApproveCommands({ sending: true })} — and permits only that send.`
+        : sendApprovesHint(maker, id),
+    );
+    MISDIRECTED_SENDS.add(misdirected);
+    throw misdirected;
   }
 
   /** Issues a new challenge to show a human; only its hash is kept. */
@@ -731,7 +799,7 @@ export class ApprovalStore {
     const result = await this.#transition(approvalId, (current) => {
       // Before anything else: a change approval names an account in the same field, and a send claimed against it
       // would otherwise be judged — and voided — as a send that went wrong.
-      this.#requireKind(current, 'send', options.platform ?? process.platform);
+      this.#requireKind(current, 'send', options.platform ?? process.platform, options.handoffs ?? this.#handoffs);
       if (current.state !== 'pending' && current.state !== 'approved') throw this.#stateError(current);
       /*
        * Cancelled while the claim waited for the lock: nothing written, the record as it was. Here, before every branch
@@ -873,7 +941,7 @@ export class ApprovalStore {
     const digest = changeDigest(live.change);
     let failure: Failure | null = null;
     const result = await this.#transition(approvalId, (current) => {
-      this.#requireKind(current, 'change', options.platform ?? process.platform);
+      this.#requireKind(current, 'change', options.platform ?? process.platform, options.handoffs ?? this.#handoffs);
       if (current.state !== 'pending' && current.state !== 'approved') throw this.#stateError(current);
       // As for a send: a cancellation that landed while this waited for the lock writes nothing.
       if (options.signal?.aborted) throw cancelledClaim(current);
@@ -892,8 +960,7 @@ export class ApprovalStore {
             'APPROVAL_PENDING',
             'this change needs a person to approve it at a terminal first',
             current,
-            options.pendingHint ??
-              `Ask the user to run ${inlineCommand(shellCommand(['agentcomms', 'approve', approvalId], options.platform ?? process.platform))} in their own terminal, then try again with the same approval.`,
+            options.pendingHint ?? approvePendingHint(options.handoffs ?? this.#handoffs, approvalId, options.platform),
           );
         }
         // `confirm` means a person at a terminal. An approval given any other way — a form in a client window, which
@@ -1031,12 +1098,13 @@ export class ApprovalStore {
       pendingHint?: string | undefined;
       signal?: AbortSignal | undefined;
       platform?: NodeJS.Platform | undefined;
+      handoffs?: CliHandoffs | undefined;
     } = {},
   ): Promise<ApprovalRecord & { download: DownloadBinding }> {
     const digest = downloadDigest(live);
     let failure: Failure | null = null;
     const result = await this.#transition(approvalId, (current) => {
-      this.#requireKind(current, 'download', options.platform ?? process.platform);
+      this.#requireKind(current, 'download', options.platform ?? process.platform, options.handoffs ?? this.#handoffs);
       if (current.state !== 'pending' && current.state !== 'approved') throw this.#stateError(current);
       if (options.signal?.aborted) throw cancelledClaim(current);
       const voidWith = (reason: string): ApprovalRecord => {

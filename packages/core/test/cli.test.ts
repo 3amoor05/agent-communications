@@ -19,6 +19,7 @@ import { secretsStoreOf } from '../src/config.ts';
 import { CommsError } from '../src/errors.ts';
 import { isInside } from '../src/jail.ts';
 import { resolvePaths } from '../src/paths.ts';
+import { assertNoBareCommand, coreCommand, coreHandoffs, locatedCoreLine } from './helpers/handoffs.ts';
 import { tempDir } from './helpers/temp.ts';
 
 /** A fixed timestamp, so a fixture never depends on when the suite ran. */
@@ -977,7 +978,7 @@ test('secrets migrate --to file asks for approval from an agent and from anythin
       error.details.preview,
       /copies the 1 credential this configuration names .* then deletes the originals/,
     );
-    assert.match(error.hint, new RegExp(`agentcomms secrets migrate --to file --approval ${error.details.approvalId}`));
+    locatedCoreLine(error.hint, ['secrets', 'migrate', '--to', 'file', '--approval', error.details.approvalId]);
   }
   assert.equal(
     JSON.parse(readFileSync(join(config, 'config.json'), 'utf8')).secrets,
@@ -1251,12 +1252,15 @@ test('approve is refused to an agent and to anything without a terminal, touches
   const refusal = JSON.parse(agent.stdout).error;
   assert.equal(refusal.code, 'LOOSENING_REFUSED');
   assert.equal(refusal.message, 'only a person can approve a change, not an agent');
-  assert.equal(refusal.hint, `Ask the user to run \`agentcomms approve ${approvalId}\` in their own terminal.`);
+  const approve = locatedCoreLine(refusal.hint, ['approve', approvalId]);
+  assert.equal(refusal.hint, `Ask the user to run \`${approve}\` in their own terminal.`);
 
   const piped = run(['approve', approvalId], { AGENT_COMMS_CONFIG_DIR: config });
   assert.equal(piped.status, 10, piped.stderr);
   assert.match(piped.stderr, /approving a change needs an interactive terminal/);
-  assert.match(piped.stderr, new RegExp(`Run \`agentcomms approve ${approvalId}\` directly in a terminal`));
+  assert.ok(
+    piped.stderr.includes(`Run \`${locatedCoreLine(piped.stderr, ['approve', approvalId])}\` directly in a terminal`),
+  );
 
   const record = await core.approvals.get(approvalId);
   assert.equal(record?.state, 'pending');
@@ -1824,16 +1828,21 @@ test('the list of entries to take out shows one Windows cannot print as its word
     builtIn: [],
     ignored: ['%USERPROFILE%\\outgoing', '', 'outgoing'],
   } as unknown as Parameters<typeof renderAttach>[0];
-  const shown = renderAttach(report, 'win32');
+  const paths = resolvePaths({ env: { HOME: tempDir(), AGENT_COMMS_CONFIG_DIR: tempDir() } });
+  const shown = renderAttach(report, coreHandoffs(paths, 'win32'));
+  const remove = (entry: string, platform: NodeJS.Platform) =>
+    coreCommand(paths, ['attach', 'roots', 'remove', entry], platform);
   const said = "(the command's words, written as JSON: one of them cannot be quoted the same way";
-  assert.ok(
-    shown.includes(`\n  ["agentcomms","attach","roots","remove","\\u0025USERPROFILE\\u0025\\\\outgoing"] ${said}`),
-    shown,
-  );
-  assert.ok(shown.includes(`\n  ["agentcomms","attach","roots","remove",""] ${said}`), shown);
-  assert.ok(shown.includes('\n  agentcomms attach roots remove outgoing\n'), shown);
-  assert.doesNotMatch(shown, /\n {2}agentcomms attach roots remove (?!outgoing\n)/, 'no other line to paste');
-  assert.ok(renderAttach(report, 'linux').includes("\n  agentcomms attach roots remove '%USERPROFILE%\\outgoing'\n"));
+  for (const entry of ['%USERPROFILE%\\outgoing', '']) {
+    assert.ok(remove(entry, 'win32').startsWith('[') && remove(entry, 'win32').includes(said), remove(entry, 'win32'));
+    assert.ok(shown.includes(`\n  ${remove(entry, 'win32')}\n`), shown);
+  }
+  assert.ok(!remove('outgoing', 'win32').startsWith('['), 'a plain entry has a line');
+  assert.ok(shown.includes(`\n  ${remove('outgoing', 'win32')}\n`), shown);
+  assertNoBareCommand(shown);
+  const posix = renderAttach(report, coreHandoffs(paths, 'linux'));
+  assert.ok(remove('%USERPROFILE%\\outgoing', 'linux').endsWith(" remove '%USERPROFILE%\\outgoing'"));
+  assert.ok(posix.includes(`\n  ${remove('%USERPROFILE%\\outgoing', 'linux')}\n`));
 });
 
 test('core quotes a command to be run in one place, and pastes no word into one unquoted', () => {

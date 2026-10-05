@@ -7,11 +7,11 @@ import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { renderAttach } from '../src/cli.ts';
-import { commandText, shellCommand } from '../src/cli-runtime.ts';
 import { type Core, openCore } from '../src/core.ts';
 import { defaultAttachDeny } from '../src/jail.ts';
 import { createCoreMcpServer } from '../src/mcp/server.ts';
 import { attachReport, checkedPath } from '../src/operations/attach-settings.ts';
+import { coreCommand, coreHandoffs, coreInline } from './helpers/handoffs.ts';
 import { tempDir } from './helpers/temp.ts';
 
 /*
@@ -129,7 +129,9 @@ test('the report lists the folders, the person’s own deny entries and the buil
     assert.deepEqual(byCommand.json().data, report);
     const plain = cli(m, ['attach']);
     assert.equal(plain.status, 0, plain.stderr);
-    assert.match(plain.stdout, /agentcomms attach roots add <folder>/, 'it says how to allow another folder');
+    // This installation's own command, with the folder for the person to fill in.
+    const add = coreCommand(m.core.paths, ['attach', 'roots', 'add']);
+    assert.ok(plain.stdout.includes(`To allow another folder: \`${add} <folder>\``), plain.stdout);
   } finally {
     await close();
   }
@@ -278,7 +280,10 @@ test('`agentcomms attach roots add` is the same change at the command line: an a
   assert.equal(asked.status, 10, asked.stdout + asked.stderr);
   const { approvalId, preview } = asked.json().error.details as { approvalId: string; preview: string };
   assert.ok(preview.includes('folders attachments may come from'), preview);
-  assert.match(asked.json().error.hint, new RegExp(`agentcomms attach roots add .* --approval ${approvalId}`));
+  assert.equal(
+    asked.json().error.hint,
+    `Show the person the preview. Once they say yes, run ${coreInline(m.core.paths, ['attach', 'roots', 'add', folder, '--approval', approvalId])}.`,
+  );
   assert.deepEqual((await defaultsOf(m)).attachRoots, ['~']);
 
   const claimed = cli(m, ['attach', 'roots', 'add', folder, '--approval', approvalId, '--json'], { CLAUDECODE: '1' });
@@ -346,10 +351,8 @@ test('the report shows a listed folder that names no place apart: it allows noth
     }
     const shown = cli(m, ['attach']);
     assert.equal(shown.status, 0, shown.stderr);
-    assert.match(
-      shown.stdout,
-      /Listed, but allowing nothing[^\n]*\n[^\n]*\n {2}agentcomms attach roots remove outgoing\n/,
-    );
+    assert.match(shown.stdout, /Listed, but allowing nothing[^\n]*\n[^\n]*\n/);
+    assert.ok(shown.stdout.includes(`\n  ${coreCommand(m.core.paths, ['attach', 'roots', 'remove', 'outgoing'])}\n`));
     if (allowed === 0) assert.match(shown.stdout, /so nothing can be attached/);
     else assert.doesNotMatch(shown.stdout, /so nothing can be attached/);
   }
@@ -360,16 +363,20 @@ test('an entry is taken out exactly as it is listed: spaces at either end, or no
   const shown = cli(m, ['attach']);
   const report = await attachReport(m.core, m.env);
   // Both forms are asked for by name. The test runner's host must not decide which command the assertion expects.
-  const posix = renderAttach(report, 'darwin');
+  const remove = (entry: string, platform: NodeJS.Platform) =>
+    coreCommand(m.core.paths, ['attach', 'roots', 'remove', entry], platform);
+  const posix = renderAttach(report, coreHandoffs(m.core.paths, 'darwin'));
   assert.ok(
-    posix.includes("\n  agentcomms attach roots remove ' outgoing '\n  agentcomms attach roots remove ''\n"),
+    remove(' outgoing ', 'darwin').endsWith(" remove ' outgoing '") && remove('', 'darwin').endsWith(" remove ''"),
+  );
+  assert.ok(
+    posix.includes(`\n  ${remove(' outgoing ', 'darwin')}\n  ${remove('', 'darwin')}\n`),
     `the spaces and the empty entry are not visible: ${posix}`,
   );
-  const windows = renderAttach(report, 'win32');
+  const windows = renderAttach(report, coreHandoffs(m.core.paths, 'win32'));
+  assert.ok(remove(' outgoing ', 'win32').endsWith(' remove " outgoing "'), remove(' outgoing ', 'win32'));
   assert.ok(
-    windows.includes(
-      `\n  agentcomms attach roots remove " outgoing "\n  ${commandText(shellCommand(['agentcomms', 'attach', 'roots', 'remove', ''], 'win32'))}\n`,
-    ),
+    windows.includes(`\n  ${remove(' outgoing ', 'win32')}\n  ${remove('', 'win32')}\n`),
     `the Windows command words are not visible: ${windows}`,
   );
   assert.match(shown.stdout, /Listed, but allowing nothing/, 'the CLI did not render the report');
@@ -396,11 +403,12 @@ test(
     const m = machine({ attachRoots: ['~', ...entries] });
     const shown = cli(m, ['attach']);
     assert.equal(shown.status, 0, shown.stderr);
-    const commands = shown.stdout.split('\n').filter((line) => line.startsWith('  agentcomms attach roots remove'));
+    const prefix = coreCommand(m.core.paths, ['attach', 'roots', 'remove']);
+    const commands = shown.stdout.split('\n').filter((line) => line.startsWith(`  ${prefix} `));
     assert.equal(commands.length, entries.length);
     for (const [index, command] of commands.entries()) {
       // The shell reads the line; printf hands back the one word it was given in place of the folder.
-      const word = command.trim().replace(/^agentcomms attach roots remove /, '');
+      const word = command.trim().slice(prefix.length + 1);
       const echoed = spawnSync('/bin/sh', ['-c', `printf '%s' ${word}`], { encoding: 'utf8' });
       assert.equal(echoed.stdout, entries[index], command);
     }

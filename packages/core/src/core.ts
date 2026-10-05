@@ -1,6 +1,8 @@
 import { ApprovalStore } from './approvals.ts';
 import { AuditLog } from './audit.ts';
+import type { CliCommandCaller } from './cli-command.ts';
 import { ConfigStore, secretsStoreOf } from './config.ts';
+import { type CliHandoffs, cliHandoffs } from './handoffs.ts';
 import { SendLedger } from './ledger.ts';
 import { type PathEnvironment, type PathOverrides, type ResolvedPaths, resolvePathIdentity } from './paths.ts';
 import { PlanStore } from './plans.ts';
@@ -22,27 +24,43 @@ export interface Core {
   audit: AuditLog;
   /** Opens the config directory's one secret backend (as recorded in config, or `kind` before the first write). */
   secrets(kind?: SecretStoreKind): Promise<SecretStore>;
+  /**
+   * The commands this process tells a person to run — its own CLI's, core's, another product's — located from the
+   * caller it was opened with (`OpenCoreOptions.caller`), for these folders. Undefined when none was given: then core's
+   * own sentences fall back to the bare names they printed before CUE-403 (`handoffsFor`), until every package gives one.
+   */
+  handoffs?: CliHandoffs | undefined;
 }
 
 export interface OpenCoreOptions extends PathEnvironment {
   now?: () => Date;
+  /**
+   * The package opening core, so the commands it prints run its own installation: `{ url: import.meta.url, packageName }`
+   * of a module of that package (see CONTRIBUTING.md, "Telling a person what to run").
+   */
+  caller?: CliCommandCaller | undefined;
 }
 
 export function openCore(options: OpenCoreOptions = {}): Core {
   const { paths, pathOverrides } = resolvePathIdentity(options);
   const now = options.now ?? (() => new Date());
   const config = new ConfigStore(paths.configDir);
+  const handoffs =
+    options.caller === undefined
+      ? undefined
+      : cliHandoffs({ caller: options.caller, paths, platform: options.platform, env: options.env });
   let cached: { kind: SecretStoreKind; store: SecretStore } | null = null;
   return {
     paths,
     pathOverrides,
     config,
     states: new InboxStateStore(paths.stateDir),
-    approvals: new ApprovalStore(paths.stateDir, { now }),
+    approvals: new ApprovalStore(paths.stateDir, { now, handoffs }),
     ledger: new SendLedger(paths.stateDir, now),
     plans: new PlanStore(paths.stateDir, now),
     taint: new TaintStore(paths.stateDir, now),
     audit: new AuditLog(paths.stateDir, now),
+    handoffs,
     async secrets(kind?: SecretStoreKind): Promise<SecretStore> {
       const chosen = kind ?? secretsStoreOf(await config.load());
       if (cached?.kind === chosen) return cached.store;

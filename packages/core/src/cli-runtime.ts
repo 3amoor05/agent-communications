@@ -395,8 +395,11 @@ export interface PersonGate {
   refusedToAgent: string;
   /** The refusal when there is no terminal to ask at. */
   refusedWithoutTerminal: string;
-  /** The command the person should run themselves, named in both refusals. */
-  command: string;
+  /**
+   * The command the person should run themselves, named in both refusals: a located command, or why there is none here
+   * (anything with a `message`), or — before its package locates its commands — the bare text it always was.
+   */
+  command: string | ShellCommand | { readonly message: string };
   /** The one line said before the challenge. */
   prompt: string;
   color: boolean;
@@ -429,7 +432,7 @@ export function refuseUnlessPerson(env: NodeJS.ProcessEnv, streams: Streams, gat
   const marker = agentMarker(env);
   if (marker) {
     throw new CommsError('LOOSENING_REFUSED', gate.refusedToAgent, {
-      hint: `Ask the user to run \`${gate.command}\` in their own terminal.`,
+      hint: gateSentence(gate.command, (command) => `Ask the user to run ${command} in their own terminal.`),
       details: { marker },
     });
   }
@@ -438,7 +441,13 @@ export function refuseUnlessPerson(env: NodeJS.ProcessEnv, streams: Streams, gat
   if (gate.noInput !== undefined) prompting.noInput = gate.noInput;
   if (!canPrompt(env, streams, prompting)) {
     throw new CommsError('LOOSENING_REFUSED', gate.refusedWithoutTerminal, {
-      hint: `Run \`${gate.command}\` directly in a terminal.`,
+      hint: gateSentence(gate.command, (command) => `Run ${command} directly in a terminal.`),
     });
   }
+}
+
+/** A gate's command in a sentence: in backticks, or the sentence saying why there is none in its place. */
+function gateSentence(command: PersonGate['command'], say: (command: string) => string): string {
+  if (typeof command === 'string') return say(`\`${command}\``);
+  return 'message' in command ? command.message : say(inlineCommand(command));
 }

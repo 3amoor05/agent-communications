@@ -31,6 +31,27 @@ export * from './core.ts';
 export * from './digest.ts';
 export * from './errors.ts';
 export * from './fs.ts';
+/*
+ * The commands a package tells a person to run, located from where it is (CUE-403): `openCore({ caller })`, then
+ * `core.handoffs`. See CONTRIBUTING.md, "Telling a person what to run". `CORE_CALLER` is core's own and is not here.
+ */
+export {
+  type CliHandoffs,
+  type CliHandoffsOptions,
+  cliHandoffs,
+  HANDOFF_FOLDERS,
+  type Handoff,
+  type HandoffMaker,
+  type HandoffUse,
+  handoffChoices,
+  handoffSentence,
+  handoffSentenceToFill,
+  handoffsFor,
+  handoffText,
+  isCommand,
+  registeredFor,
+  requireHandoffs,
+} from './handoffs.ts';
 export * from './ids.ts';
 export * from './internet-mark.ts';
 export * from './jail.ts';

@@ -129,6 +129,75 @@ between operations (`agent-gmail inbox add` starts a sign-in, and with `--finish
 back several commands (`comms_server_install` is `mcp install` in every package); `reason` on such a row says how the
 two meet.
 
+## Telling a person what to run
+
+Every command this suite prints for a person — an approval, a change run again with `--approval`, a repair — names
+this Node and a checked file of the installation that printed it, with its folders pinned, or says plainly that there
+is none here ([design](docs/superpowers/specs/2026-10-04-cli-path-shims-design.md), D1–D6). A bare `agent-gmail …` or
+`agentcomms …` is not on most people's PATH. So no package prints one, quotes a line itself, or builds a command from
+words it pasted together: it asks core's handoffs (`packages/core/src/handoffs.ts`).
+
+**1. Give core your caller, once, where your package opens core.** `url` is a module of your own package — the nearest
+`package.json` above it must carry `packageName` — never core's, and never a wrapper's: Gmail's server-only package
+locates Gmail from Gmail's exported `RESOLVER_URL`.
+
+```ts
+const core = openCore({ env, platform, pathOverrides, caller: { url: import.meta.url, packageName: PACKAGE_NAME } });
+```
+
+From then on core's own sentences — approvals, a change waiting at a terminal, a download's question, an update that
+stops a command — name your commands, located, and `core.handoffs` (or `requireHandoffs(core)`, which throws if the
+caller was left out) makes yours:
+
+| Call | Runs |
+|---|---|
+| `handoffs.own(words, use?)` | your own CLI: `own(['inbox', 'reauth', alias])` |
+| `handoffs.core(words, use?)` | core's CLI, through your installed dependency on it |
+| `handoffs.of(channel, words, use?)` | another product's CLI, found only among the servers registered with this machine's MCP clients: `(await handoffs.registered()).of('slack', words)` |
+| `handoffs.on(platform)` | the same, quoted for the shell your output is for (`context.platform`) |
+
+`words` start after the program — never the binary, never a path. Each call returns a `Handoff`: a `PrintedCommand`, or
+a `CliCommandNotLocated` whose `message` names the product, its package and the exact version it needs and says it is
+not locatable here. `use` pins folders: the four every command opens by default (config, state, data, secrets);
+`{ downloads: true }` for one that saves files; `{ uses: [] }` for one that opens none, such as `--help`.
+
+**2. Render it with the helpers, never by interpolating words.**
+
+- In a sentence: `handoffSentence(handoff, (command) => \`Run ${command} to …\`)`. With no command, the whole sentence
+  is the not-locatable one — never the template with something else in the command's place.
+- As a value of its own — a list item, a `fix`, a `command` field: `handoffText(handoff)`.
+- With words the agent fills in (`<folder>`): `handoffSentenceToFill(handoff, ['<folder>'], say)`.
+- Several that could each do it (each sending channel's `approve`): `handoffChoices(handoffs, none)`.
+
+**3. A command run again with its approval.** Give `gatedChangeAtTerminal` and `downloadAtTerminal` the words of the
+command after its program as `rerun`; the approval goes in before any `--`. `command` and `approveCommand` are the
+deprecated bridge for a package without its caller, and are ignored once core has it.
+
+**4. On every surface it is the same text.** The CLI prints the rendered sentence or value; `--json` envelopes and MCP
+`structuredContent` carry the same strings in the fields they always had — a command's line, or its words as JSON with
+what to do when no Windows line is safe, or the not-locatable sentence. Do not put a `PrintedCommand` object into a
+result yet: typing those fields is CUE-403 task 15.
+
+Before:
+
+```ts
+fix: commandText(shellCommand(['agent-gmail', 'inbox', 'reauth', alias], context.platform)),
+hint: `Run ${inlineCommand(shellCommand(['agent-gmail', 'whoami', '--inbox', alias], platform))} to check it.`,
+```
+
+After:
+
+```ts
+const handoffs = requireHandoffs(context.core).on(context.platform);
+fix: handoffText(handoffs.own(['inbox', 'reauth', alias])),
+hint: handoffSentence(handoffs.own(['whoami', '--inbox', alias]), (command) => `Run ${command} to check it.`),
+```
+
+Tests build the expected command the same way rather than by hand: `packages/core/test/helpers/handoffs.ts`
+(`coreHandoffs`, `coreCommand`, `locatedCoreLine`, `assertNoBareCommand`) and the package fixtures in
+`packages/core/test/fixtures/cli-command/`. A channel's tests import core from its build, so run
+`pnpm --filter @agentcomms/core build` after changing core.
+
 ## Adding a channel
 
 A channel is a package that says what it is; nothing in the core or the tooling is edited to add one

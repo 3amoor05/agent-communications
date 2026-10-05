@@ -10,7 +10,6 @@ import {
   type ListedFile,
   type RecordedSaveAnswer,
 } from './approvals.ts';
-import { changeApprovalCommand } from './changes.ts';
 import {
   agentMarker,
   canPrompt,
@@ -26,6 +25,7 @@ import {
 import type { ChangePolicy } from './config.ts';
 import type { Core } from './core.ts';
 import { CommsError } from './errors.ts';
+import { type Handoff, handoffSentence, handoffSentenceToFill, handoffsFor } from './handoffs.ts';
 import { APPROVAL_ID_PATTERN } from './ids.ts';
 import { createUniqueFile } from './jail.ts';
 import { DOWNLOADS_KNOWN_FOLDER, knownFolder } from './known-folders.ts';
@@ -659,9 +659,8 @@ function questionText(input: {
   options: readonly SaveOption[];
   warnings: readonly string[];
   policy: ChangePolicy;
-  approveCommand: string;
-  choiceId: string;
-  platform?: NodeJS.Platform | undefined;
+  /** The printing package's `approve` with this choice id: what answers the question at a terminal, under `confirm`. */
+  approve?: Handoff | ShellCommand | undefined;
 }): string {
   const files = `${input.count} ${input.count === 1 ? 'file' : 'files'}`;
   const [downloads, current] = input.options;
@@ -676,9 +675,13 @@ function questionText(input: {
     '  3. Another folder — one you name, absolute or starting with ~',
   ];
   for (const warning of input.warnings) lines.push(`  ! ${warning}`);
-  if (input.policy !== 'chat') {
+  if (input.policy !== 'chat' && input.approve !== undefined) {
     lines.push(
-      `The change policy of ${input.account} is confirm: answer this yourself, at your own terminal — ${inlineCommand(changeApprovalCommand(input.approveCommand, input.choiceId, input.platform))} — or in the form your client shows you.`,
+      handoffSentence(
+        input.approve,
+        (command) =>
+          `The change policy of ${input.account} is confirm: answer this yourself, at your own terminal — ${command} — or in the form your client shows you.`,
+      ),
     );
   }
   return lines.join('\n');
@@ -726,6 +729,11 @@ export async function askWhereToSave(core: Core, input: AskInput): Promise<Desti
   const choiceId = record.approvalId;
   const options = [downloads, current, other];
   const warnings = listingWarnings(input.listing);
+  // The printing package's own `approve` answers it (`core.handoffs`); before it locates its commands, the one it named.
+  const approve = handoffsFor(core, { platform: input.platform, approveCommand: input.approveCommand }).own([
+    'approve',
+    choiceId,
+  ]);
   const question = questionText({
     count: input.count,
     bytes: input.bytes,
@@ -734,9 +742,7 @@ export async function askWhereToSave(core: Core, input: AskInput): Promise<Desti
     options,
     warnings,
     policy: record.requiredPolicy === 'chat' ? 'chat' : 'confirm',
-    approveCommand: input.approveCommand,
-    choiceId,
-    platform: input.platform,
+    approve,
   });
   const choices = [downloads, current]
     .filter((option) => option.unavailable === undefined)
@@ -757,8 +763,8 @@ export async function askWhereToSave(core: Core, input: AskInput): Promise<Desti
         ? `Nothing has been saved. Show the person this question and the files — each name and size — and wait for their answer; never choose for them.${warned} Then call ${input.tool} again with the same arguments, choiceId "${choiceId}", and saveTo: ${answers.join(', ')}.`
         : `Nothing has been saved. Show the person this question and the files, and wait for their answer; never choose for them.${warned} Then run the same command again with --choice ${choiceId} and ${answers.join(', ')}.`
       : input.surface === 'mcp'
-        ? `Nothing has been saved. The change policy of ${account} is confirm, so the person answers this themselves — you cannot answer it for them, and a saveTo you pass is refused. Show them the question and the files, and ask them to run ${inlineCommand(changeApprovalCommand(input.approveCommand, choiceId, input.platform))} in their own terminal.${warned} Then call ${input.tool} again with the same arguments and choiceId "${choiceId}" alone. A client trusted to show approval forms asks them in a form on that call instead.`
-        : `Nothing has been saved. The change policy of ${account} is confirm, so the person answers this themselves: ask them to run ${inlineCommand(changeApprovalCommand(input.approveCommand, choiceId, input.platform))} in their own terminal.${warned} Then run the same command again with --choice ${choiceId} alone.`;
+        ? `Nothing has been saved. The change policy of ${account} is confirm, so the person answers this themselves — you cannot answer it for them, and a saveTo you pass is refused. Show them the question and the files, and ${handoffSentence(approve, (command) => `ask them to run ${command} in their own terminal.`)}${warned} Then call ${input.tool} again with the same arguments and choiceId "${choiceId}" alone. A client trusted to show approval forms asks them in a form on that call instead.`
+        : `Nothing has been saved. The change policy of ${account} is confirm, so the person answers this themselves: ${handoffSentence(approve, (command) => `ask them to run ${command} in their own terminal.`)}${warned} Then run the same command again with --choice ${choiceId} alone.`;
   return {
     destinationRequired: true,
     choiceId,
@@ -862,10 +868,22 @@ export async function settleDestination(core: Core, input: SettleInput): Promise
   }
 
   const { saveTo, choiceId: choiceWord } = words(input.surface);
+  const answerHere = handoffsFor(core, { platform, approveCommand: input.approveCommand }).own([
+    'approve',
+    answer.choiceId,
+  ]);
   const pendingHint =
     input.surface === 'mcp'
-      ? `Ask the person to run ${inlineCommand(changeApprovalCommand(input.approveCommand, answer.choiceId, platform))} in their own terminal and answer there, then call again with the same arguments and choiceId "${answer.choiceId}" alone.`
-      : `Ask the person to run ${inlineCommand(changeApprovalCommand(input.approveCommand, answer.choiceId, platform))} in their own terminal and answer there, then run this again with --choice ${answer.choiceId} alone.`;
+      ? handoffSentence(
+          answerHere,
+          (command) =>
+            `Ask the person to run ${command} in their own terminal and answer there, then call again with the same arguments and choiceId "${answer.choiceId}" alone.`,
+        )
+      : handoffSentence(
+          answerHere,
+          (command) =>
+            `Ask the person to run ${command} in their own terminal and answer there, then run this again with --choice ${answer.choiceId} alone.`,
+        );
   const asked = await core.approvals.get(answer.choiceId).catch(() => null);
   if (
     asked !== null &&
@@ -1014,10 +1032,23 @@ export interface DownloadAtTerminalOptions<Q extends DestinationQuestion> {
   env: NodeJS.ProcessEnv;
   output: { json?: boolean | undefined; color: boolean; platform?: NodeJS.Platform | undefined };
   noInput?: boolean | undefined;
-  /** The command to run again, for the hint an agent gets: `agent-gmail attachments download … --inbox acme/gmail`. */
-  command: string | ShellCommand;
-  /** The channel's command that answers a question at a terminal: `agent-gmail approve`. */
-  approveCommand: string;
+  /**
+   * The words of this command after its program — `['attachments', 'download', …, '--inbox', 'acme/gmail']` — to run
+   * again with the answer: located as the printing package's own CLI (`core.handoffs`), the downloads folder pinned.
+   */
+  rerun?: readonly string[] | undefined;
+  /**
+   * The command to run again, for the hint an agent gets: `agent-gmail attachments download … --inbox acme/gmail`.
+   *
+   * @deprecated For a package that does not locate its commands yet; `rerun` replaces it (CUE-403 task 15).
+   */
+  command?: string | ShellCommand | undefined;
+  /**
+   * The channel's command that answers a question at a terminal: `agent-gmail approve`.
+   *
+   * @deprecated Read only without `core.handoffs`, whose own `approve` is used instead (CUE-403 task 15).
+   */
+  approveCommand?: string | undefined;
   /** The question with its files, as a person reads it. */
   render: (question: Q) => string;
   streams?: Streams | undefined;
@@ -1062,18 +1093,28 @@ export async function downloadAtTerminal<Q extends DestinationQuestion>(
      * the value itself, and on Windows its `<` and `|` would leave no line to print at all. A command whose own words
      * cannot be printed safely is still shown as its words in JSON, with these after them.
      */
-    const runWith = (...words: string[]) => {
-      if (typeof options.command === 'string') {
-        return `\`${insertWordsBeforeSentinel(options.command.split(' '), ...words).join(' ')}\``;
+    const maker = handoffsFor(options.core, {
+      platform: options.output.platform,
+      approveCommand: options.approveCommand,
+    });
+    const { command, rerun } = options;
+    const runWith = (say: (command: string) => string, ...words: string[]) => {
+      if (rerun !== undefined && options.core.handoffs !== undefined) {
+        return handoffSentenceToFill(maker.own(rerun, { downloads: true }), words, say);
       }
-      const line = lineWithWordsToFill(options.command, ...words);
-      return line === null ? inlineCommand(withWords(options.command, ...words)) : `\`${line}\``;
+      if (command === undefined) return handoffSentenceToFill(maker.own(rerun ?? []), words, say);
+      if (typeof command === 'string') {
+        return say(`\`${insertWordsBeforeSentinel(command.split(' '), ...words).join(' ')}\``);
+      }
+      const line = lineWithWordsToFill(command, ...words);
+      return say(line === null ? inlineCommand(withWords(command, ...words)) : `\`${line}\``);
     };
+    const approve = maker.own(['approve', question.choiceId]);
     throw new CommsError('APPROVAL_PENDING', 'nothing was saved: where to save the files is the person’s to say', {
       hint:
         question.policy === 'chat'
-          ? `Show the person the question and the files. Once they answer, run ${runWith('--to', '<downloads|current|folder>', '--choice', question.choiceId)}.`
-          : `The change policy is confirm: ask the person to run ${inlineCommand(changeApprovalCommand(options.approveCommand, question.choiceId, options.output.platform))} in their own terminal and answer there. Then run ${runWith('--choice', question.choiceId)}.`,
+          ? `Show the person the question and the files. ${runWith((run) => `Once they answer, run ${run}.`, '--to', '<downloads|current|folder>', '--choice', question.choiceId)}`
+          : `The change policy is confirm: ${handoffSentence(approve, (run) => `ask the person to run ${run} in their own terminal and answer there.`)} ${runWith((run) => `Then run ${run}.`, '--choice', question.choiceId)}`,
       details: { ...(question as unknown as Record<string, unknown>) },
     });
   }
@@ -1279,8 +1320,6 @@ async function storedQuestion(
       warnings: listingWarnings(listing),
       // Shown where the person answers it, the line about where to answer would only repeat itself.
       policy: 'chat',
-      approveCommand: '',
-      choiceId,
     }),
   );
   return { text: lines.join('\n'), options: [downloads, current, other], deny };
