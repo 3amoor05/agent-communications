@@ -10,6 +10,7 @@ import {
   requireKnownChannel,
   SENDING_LEASE_MS,
 } from './approval-binding.ts';
+import { changePendingHint } from './approval-handoffs.ts';
 import { decodeLegacyV1, deriveLegacyV1State, type LegacyApprovalRecord } from './approval-legacy.ts';
 import {
   type ApprovalObject,
@@ -46,7 +47,7 @@ import {
 import { canonicalJson, normaliseAddress, sha256Hex } from './digest.ts';
 import { CommsError, type ErrorCode } from './errors.ts';
 import { ensurePrivateDir, writeFileAtomic } from './fs.ts';
-import { type CliHandoffs, handoffChoices, handoffSentence, requiredHandoffs } from './handoff-text.ts';
+import { type CliHandoffs, handoffChoices, requiredHandoffs } from './handoff-text.ts';
 import { APPROVAL_ID_PATTERN, challengeMatches, hashChallenge, newApprovalId, newChallenge } from './ids.ts';
 import { withFileLock } from './lock.ts';
 import type { RenameReason } from './saved-files.ts';
@@ -479,13 +480,6 @@ export interface ClaimOptions {
   signal?: AbortSignal | undefined;
 }
 
-/**
- * What to do with a download's question, for a caller that took it for something else: it is answered, not approved
- * with a code — in the chat, or at the person's own terminal with the command of the channel that asked.
- */
-export const DOWNLOAD_ANSWER_HINT =
-  'It is answered, not approved with a code: the person says where in the chat, or — under a confirm change policy — at their own terminal, with the `approve` command of the channel the files come from and this id. The download that asked is then made again with this id.';
-
 export const MAX_CHALLENGE_ATTEMPTS = 3;
 /** The reason a `sending` record reads `unknown` with when its lease ran out; a late completion replaces it. */
 export const STALE_LEASE_REASON = 'the sending process stopped before recording an outcome';
@@ -629,8 +623,9 @@ export function publicView(record: ApprovalRecord): Omit<ApprovalRecord, 'challe
 type Failure = { code: ErrorCode; reason: string };
 
 /**
- * What an agent is told when a change waits for a person at a terminal: the printing package's own `approve` with this
- * id, located, or why there is none here.
+ * What an agent is told when a change waits for a person at a terminal, for a claim made with no surface's words: the
+ * printing package's own `approve` with this id and its wait, as the command line takes them — each located, or why
+ * there is none here.
  */
 function approvePendingHint(
   handoffs: CliHandoffs | undefined,
@@ -638,10 +633,7 @@ function approvePendingHint(
   platform: NodeJS.Platform | undefined,
 ): string {
   const located = requiredHandoffs(handoffs);
-  return handoffSentence(
-    located.on(platform ?? located.platform).own(['approve', approvalId]),
-    (command) => `Ask the user to run ${command} in their own terminal, then try again with the same approval.`,
-  );
+  return changePendingHint(located.on(platform ?? located.platform), 'cli', approvalId);
 }
 
 /**

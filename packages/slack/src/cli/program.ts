@@ -3,6 +3,7 @@ import {
   answerDownloadAtTerminal,
   approvalsOf,
   approveChangeAtTerminal,
+  approveRefusedHint,
   CommsError,
   canPrompt,
   cliHandoffs,
@@ -1363,11 +1364,9 @@ temporary (retry later) · 77 sign-in or permission needed · 78 configuration p
             'APPROVAL_REQUIRED',
             'only a person can approve a post, a reaction or a change, not an agent',
             {
-              // Terminal-only: with no command here, the sentence saying why, and no other way to approve it.
-              hint: handoffSentence(
-                context.handoffs.own(['approve', approvalId]),
-                (command) => `Ask the user to run ${command} in their own terminal.`,
-              ),
+              // Terminal-only: with no command here, the sentence saying why, and no other way to approve it. With
+              // one, the wait that learns when they have (design 2026-10-05 §D7).
+              hint: approveRefusedHint(context.handoffs, approvalId),
               details: { marker },
             },
           );

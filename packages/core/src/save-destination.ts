@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { constants, readFileSync } from 'node:fs';
 import { access, type FileHandle, lstat, mkdir, open, realpath, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
+import { approveAndWaitSentence } from './approval-handoffs.ts';
 import { downloadExpiredWords } from './approval-outcome.ts';
 import { asV2, integrityRefusal, kindOf } from './approval-stored.ts';
 import { validateV2 } from './approval-validate.ts';
@@ -18,7 +19,7 @@ import { agentMarker, canPrompt, defaultStreams, paint, type Streams } from './c
 import type { ChangePolicy } from './config.ts';
 import type { Core } from './core.ts';
 import { CommsError } from './errors.ts';
-import { type Handoff, handoffSentence, handoffSentenceToFill, requireHandoffs } from './handoffs.ts';
+import { type CliHandoffs, type Handoff, handoffSentence, handoffSentenceToFill, requireHandoffs } from './handoffs.ts';
 import { APPROVAL_ID_PATTERN } from './ids.ts';
 import { createUniqueFile } from './jail.ts';
 import { DOWNLOADS_KNOWN_FOLDER, knownFolder } from './known-folders.ts';
@@ -703,6 +704,23 @@ export function listingWarnings(listing: readonly ListedFile[]): string[] {
 }
 
 /**
+ * Who answers a question under `confirm`, and how the agent learns they have (design 2026-10-05 §D7): `ask` them to run
+ * the printing package's own `approve` in their own terminal and answer there, then wait for the answer with its wait —
+ * the tool over MCP, the located command at the command line — each located, or why there is none here.
+ */
+function answerThere(maker: CliHandoffs, surface: DownloadSurface, choiceId: string, ask: string): string {
+  return approveAndWaitSentence(
+    maker,
+    surface,
+    choiceId,
+    (approve, wait) =>
+      `${ask} to run ${approve} in their own terminal and answer there${
+        wait === undefined ? '.' : `; wait for their answer with ${wait}.`
+      }`,
+  );
+}
+
+/**
  * Asks where to save, and keeps the question: a `download` record in the approval store, bound to the request and the
  * files, held to the account's change policy, that expires as an approval does and is claimed once. Nothing is written
  * anywhere else.
@@ -727,7 +745,8 @@ export async function askWhereToSave(core: Core, input: AskInput): Promise<Desti
   const options = [downloads, current, other];
   const warnings = listingWarnings(input.listing);
   // The printing package's own `approve` answers it (`core.handoffs`).
-  const approve = requireHandoffs(core, input.platform).own(['approve', choiceId]);
+  const maker = requireHandoffs(core, input.platform);
+  const approve = maker.own(['approve', choiceId]);
   const question = questionText({
     count: input.count,
     bytes: input.bytes,
@@ -757,8 +776,8 @@ export async function askWhereToSave(core: Core, input: AskInput): Promise<Desti
         ? `Nothing has been saved. Show the person this question and the files — each name and size — and wait for their answer; never choose for them.${warned} Then call ${input.tool} again with the same arguments, choiceId "${choiceId}", and saveTo: ${answers.join(', ')}.`
         : `Nothing has been saved. Show the person this question and the files, and wait for their answer; never choose for them.${warned} Then run the same command again with --choice ${choiceId} and ${answers.join(', ')}.`
       : input.surface === 'mcp'
-        ? `Nothing has been saved. The change policy of ${account} is confirm, so the person answers this themselves — you cannot answer it for them, and a saveTo you pass is refused. Show them the question and the files, and ${handoffSentence(approve, (command) => `ask them to run ${command} in their own terminal.`)}${warned} Then call ${input.tool} again with the same arguments and choiceId "${choiceId}" alone. A client trusted to show approval forms asks them in a form on that call instead.`
-        : `Nothing has been saved. The change policy of ${account} is confirm, so the person answers this themselves: ${handoffSentence(approve, (command) => `ask them to run ${command} in their own terminal.`)}${warned} Then run the same command again with --choice ${choiceId} alone.`;
+        ? `Nothing has been saved. The change policy of ${account} is confirm, so the person answers this themselves — you cannot answer it for them, and a saveTo you pass is refused. Show them the question and the files, and ${answerThere(maker, input.surface, choiceId, 'ask them')}${warned} Then call ${input.tool} again with the same arguments and choiceId "${choiceId}" alone. A client trusted to show approval forms asks them in a form on that call instead.`
+        : `Nothing has been saved. The change policy of ${account} is confirm, so the person answers this themselves: ${answerThere(maker, input.surface, choiceId, 'ask them')}${warned} Then run the same command again with --choice ${choiceId} alone.`;
   return {
     destinationRequired: true,
     choiceId,
@@ -806,11 +825,6 @@ export interface SettleInput {
    * waits for it saves nothing and leaves the question unused (see `ClaimOptions.signal`). Absent from a command line.
    */
   signal?: AbortSignal | undefined;
-  /**
-   * The channel's wait tool — `gmail_send_wait`, `slack_approval_wait` — which a refusal over MCP names to an agent left
-   * waiting for the person's own answer, so it can learn when they have given it.
-   */
-  waitTool?: string | undefined;
 }
 
 /** Whether a relayed answer is the one the person recorded: the same choice, and for a folder the same folder. */
@@ -869,20 +883,20 @@ export async function settleDestination(core: Core, input: SettleInput): Promise
   }
 
   const { saveTo, choiceId: choiceWord } = words(input.surface);
-  const answerHere = requireHandoffs(core, platform).own(['approve', answer.choiceId]);
-  const waiting = input.waitTool === undefined ? '' : `; wait for their answer with ${input.waitTool}`;
-  const pendingHint =
-    input.surface === 'mcp'
-      ? handoffSentence(
-          answerHere,
-          (command) =>
-            `Ask the person to run ${command} in their own terminal and answer there${waiting}, then call again with the same arguments and choiceId "${answer.choiceId}" alone.`,
-        )
-      : handoffSentence(
-          answerHere,
-          (command) =>
-            `Ask the person to run ${command} in their own terminal and answer there, then run this again with --choice ${answer.choiceId} alone.`,
-        );
+  // The person's `approve`, and the wait that learns when they have answered: the printing package's own (§D7).
+  const pendingHint = approveAndWaitSentence(
+    requireHandoffs(core, platform),
+    input.surface,
+    answer.choiceId,
+    (command, wait) =>
+      `Ask the person to run ${command} in their own terminal and answer there${
+        wait === undefined ? '' : `; wait for their answer with ${wait}`
+      }, then ${
+        input.surface === 'mcp'
+          ? `call again with the same arguments and choiceId "${answer.choiceId}" alone.`
+          : `run this again with --choice ${answer.choiceId} alone.`
+      }`,
+  );
   // Only a valid version-2 question reaches the checks below; any other form is no open question here, and the claim
   // that follows refuses it.
   const asked = asV2(await core.approvals.get(answer.choiceId).catch(() => null));
@@ -1103,12 +1117,11 @@ export async function downloadAtTerminal<Q extends DestinationQuestion>(
     const maker = requireHandoffs(options.core, options.output.platform);
     const runWith = (say: (command: string) => string, ...words: string[]) =>
       handoffSentenceToFill(maker.own(options.rerun, { downloads: true }), words, say);
-    const approve = maker.own(['approve', question.choiceId]);
     throw new CommsError('APPROVAL_PENDING', 'nothing was saved: where to save the files is the person’s to say', {
       hint:
         question.policy === 'chat'
           ? `Show the person the question and the files. ${runWith((run) => `Once they answer, run ${run}.`, '--to', '<downloads|current|folder>', '--choice', question.choiceId)}`
-          : `The change policy is confirm: ${handoffSentence(approve, (run) => `ask the person to run ${run} in their own terminal and answer there.`)} ${runWith((run) => `Then run ${run}.`, '--choice', question.choiceId)}`,
+          : `The change policy is confirm: ${answerThere(maker, 'cli', question.choiceId, 'ask the person')} ${runWith((run) => `Then run ${run}.`, '--choice', question.choiceId)}`,
       details: { ...(question as unknown as Record<string, unknown>) },
     });
   }

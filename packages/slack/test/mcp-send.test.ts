@@ -10,8 +10,15 @@ import { run } from '../src/cli/program.ts';
 import { compose } from '../src/compose/blocks.ts';
 import { openDraftStore } from '../src/compose/drafts.ts';
 import { createSlackMcpServer } from '../src/mcp/server.ts';
-import { approveCommand, changedOutsideHint, refileCommand } from '../src/operations/send.ts';
-import { assertNoBareCommand, slackCommand, slackHandoffs, slackInlineToFill, TEST_PATHS } from './support/handoffs.ts';
+import { approveCommand, changedOutsideHint, refileCommand, waitingHint } from '../src/operations/send.ts';
+import {
+  assertNoBareCommand,
+  slackCommand,
+  slackHandoffs,
+  slackInline,
+  slackInlineToFill,
+  TEST_PATHS,
+} from './support/handoffs.ts';
 import { type Harness, newHarness } from './support/harness.ts';
 
 /**
@@ -107,6 +114,38 @@ test('send handoff commands use the selected shell platform, located from this i
   // The name for the agent to fill in is left as written, outside the quoting: `--workspace <name>`.
   assert.match(changed, / draft delete "10" --workspace <name>` and compose it again\.$/);
   for (const text of [approve, refile, changed]) assertNoBareCommand(text);
+});
+
+test('a post or a reaction waiting for a person names its approve and the wait — slack_approval_wait over MCP, the located `approval wait` at the command line — quoted for each shell (D7-a)', () => {
+  for (const platform of ['darwin', 'win32'] as const) {
+    const handoffs = slackHandoffs(TEST_PATHS, platform);
+    const approve = slackInline(TEST_PATHS, ['approve', '7'], platform);
+    for (const surface of ['mcp', 'cli'] as const) {
+      const wait =
+        surface === 'mcp' ? 'slack_approval_wait' : slackInline(TEST_PATHS, ['approval', 'wait', '7'], platform);
+      const again = {
+        post:
+          surface === 'mcp'
+            ? 'call `slack_post_send` again with the same arguments'
+            : 'run the same post send command again',
+        reaction:
+          surface === 'mcp'
+            ? 'call `slack_react_send` with approvalId 7 and the same channel, ts and emoji'
+            : 'run the same react command again with `--approval 7` added',
+      };
+      assert.equal(
+        waitingHint('post', surface, '7', handoffs),
+        `Show the user the preview, then ask them to run ${approve} in their own terminal; learn when they have with ${wait}, then ${again.post}. You cannot approve this yourself.`,
+        `${platform} ${surface}`,
+      );
+      assert.equal(
+        waitingHint('reaction', surface, '7', handoffs),
+        `Tell the user which emoji and which message, then ask them to run ${approve} in their own terminal; learn when they have with ${wait}, then ${again.reaction}. You cannot approve this yourself.`,
+        `${platform} ${surface}`,
+      );
+      assertNoBareCommand(waitingHint('post', surface, '7', handoffs));
+    }
+  }
 });
 
 /** The CLI, as a person at a terminal runs it: the approval code is read off the prompt and typed back. */
@@ -397,6 +436,10 @@ test('a post held for a person is the same refusal on both surfaces, each naming
     assert.match(error?.hint ?? '', /run the same post send command again/);
     assertNoBareCommand(error?.hint ?? '');
     assert.match(tool.hint ?? '', /slack_post_send/);
+    // Each names the wait that learns when the person has approved, as its surface takes it (D7-a).
+    assert.ok(tool.hint?.includes('; learn when they have with slack_approval_wait, then'), tool.hint ?? undefined);
+    const wait = slackInline(harness.core.paths, ['approval', 'wait', approvalId], 'darwin');
+    assert.ok(error?.hint?.includes(`; learn when they have with ${wait}, then`), error?.hint);
   } finally {
     await close();
   }

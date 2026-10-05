@@ -1,3 +1,4 @@
+import { approvalWaitOf, approveAndWaitSentence } from './approval-handoffs.ts';
 import {
   beginChangeApproval,
   type ChangeRequest,
@@ -22,7 +23,7 @@ import {
 import { type Config, classifyChange, type LooseningConsent } from './config.ts';
 import type { Core } from './core.ts';
 import { CommsError } from './errors.ts';
-import { type CliHandoffs, type Handoff, handoffSentence, isCommand, requireHandoffs } from './handoffs.ts';
+import { type CliHandoffs, type Handoff, isCommand, requireHandoffs } from './handoffs.ts';
 
 /**
  * One changing operation, run the same way from the CLI and from MCP.
@@ -280,12 +281,15 @@ export function approvalHint(
       : `Show the person the preview. Once they say yes, run ${run}.`;
   }
   const approve = maker.own(['approve', prepared.approvalId]);
-  if (isCommand(approve) && run !== null) {
-    return `Show the person the preview. They run ${inlineCommand(approve)}; then run ${run}.`;
+  if (!isCommand(approve)) {
+    return `Show the person the preview. ${approve.message} ${run === null ? rerunSaid : `Then run ${run}.`}`;
   }
-  return `Show the person the preview. ${handoffSentence(approve, (command) => `They run ${command}.`)} ${
-    run === null ? rerunSaid : `Then run ${run}.`
-  }`;
+  // The person's `approve`, and the wait that learns when they have used it (design 2026-10-05 §D7).
+  const handed = approveAndWaitSentence(maker, 'cli', prepared.approvalId, (command, wait) => {
+    const learn = wait === undefined ? '' : `; learn when they have with ${wait}`;
+    return run === null ? `They run ${command}${learn}.` : `They run ${command}${learn}, then run ${run}.`;
+  });
+  return `Show the person the preview. ${handed}${run === null ? ` ${rerunSaid}` : ''}`;
 }
 
 /**
@@ -309,11 +313,13 @@ export async function approveChangeAtTerminal(
   streams: Streams = defaultStreams,
 ): Promise<{ approvalId: string; state: 'approved' | 'cancelled' }> {
   try {
-    const approve = requireHandoffs(core, output.platform).own(['approve', approvalId]);
+    const handoffs = requireHandoffs(core, output.platform);
     refuseUnlessPerson(env, streams, {
       refusedToAgent: 'only a person can approve a change, not an agent',
       refusedWithoutTerminal: 'approving a change needs an interactive terminal',
-      command: approve,
+      command: handoffs.own(['approve', approvalId]),
+      // An agent is told what learns when the person has approved it (design 2026-10-05 §D7).
+      wait: approvalWaitOf(handoffs, approvalId).command,
       color: output.color,
       json: output.json,
     });

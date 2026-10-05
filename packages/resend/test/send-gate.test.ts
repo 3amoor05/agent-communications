@@ -250,6 +250,39 @@ test(`above ${REACH_CONFIRM_THRESHOLD} recipients a person approves at a termina
   assert.equal(ten.effectivePolicy, 'chat');
 });
 
+for (const platform of ['darwin', 'win32'] as const) {
+  test(`under confirm, a send's next step and its refusal name the person's approve and the wait — resend_send_wait over MCP, the located \`send wait\` at the command line — quoted for ${platform} (D7-a)`, async () => {
+    harness = await newHarness();
+    await harness.addAccount({ name: 'acme/resend', mode: 'send', sendPolicy: 'confirm' });
+    for (const surface of ['mcp', 'cli'] as const) {
+      const context = harness.context(surface, platform);
+      const prepared = await prepareSend(context, 'acme/resend', message());
+      const id = prepared.approvalId;
+      const approve = resendInline(harness.core, ['approve', id], platform);
+      const wait = surface === 'mcp' ? 'resend_send_wait' : resendInline(harness.core, ['send', 'wait', id], platform);
+      assert.equal(
+        prepared.nextStep,
+        `Show the preview to the user, then have them run ${approve} in their own terminal; learn when they have with ${wait}. You cannot approve this yourself. Then execute it with the same approval id and the recipients and subject shown.`,
+        surface,
+      );
+      await assert.rejects(
+        executeSend(context, 'acme/resend', { approvalId: id, expect: prepared.expect }),
+        (error: unknown) => {
+          assert.ok(error instanceof CommsError && error.code === 'APPROVAL_PENDING', String(error));
+          assert.equal(
+            error.hint,
+            `Ask the user to run ${approve} in their own terminal; learn when they have with ${wait}, then execute it again with the same approval. You cannot approve it yourself.`,
+            surface,
+          );
+          assertNoBareCommand(error.hint ?? '');
+          return true;
+        },
+      );
+    }
+    assert.equal(harness.fake.sends().length, 0);
+  });
+}
+
 test('an address that arrived in mail read here, never written to, raises the send to a terminal approval', async () => {
   harness = await newHarness();
   await sendMode();

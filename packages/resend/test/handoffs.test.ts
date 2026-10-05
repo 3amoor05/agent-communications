@@ -212,7 +212,7 @@ test('under confirm the preview, the next step and the claim name Resend’s own
     );
     assert.equal(
       prepared.nextStep,
-      `Show the preview to the user, then have them run ${approve} in their own terminal. You cannot approve this yourself. Then execute it with the same approval id and the recipients and subject shown.`,
+      `Show the preview to the user, then have them run ${approve} in their own terminal; learn when they have with resend_send_wait. You cannot approve this yourself. Then execute it with the same approval id and the recipients and subject shown.`,
     );
     const pending = await hintOf(
       executeSend(context, 'acme/resend', { approvalId: prepared.approvalId, expect: prepared.expect }),
@@ -220,7 +220,7 @@ test('under confirm the preview, the next step and the claim name Resend’s own
     );
     assert.equal(
       pending,
-      `Ask the user to run ${approve} in their own terminal, then execute it again with the same approval. You cannot approve it yourself.`,
+      `Ask the user to run ${approve} in their own terminal; learn when they have with resend_send_wait, then execute it again with the same approval. You cannot approve it yourself.`,
     );
     for (const text of [prepared.preview, prepared.nextStep, pending]) assertNoBareCommand(text);
   }
@@ -388,7 +388,11 @@ test('approving as an agent, or with no terminal, names the approve a person run
   harness = await newHarness();
   const approve = resendInline(harness.core, ['approve', 'ap_1']);
   const agent = await harness.cli(['--json', 'approve', 'ap_1'], { env: { CLAUDECODE: '1' } });
-  assert.equal(agent.json().error?.hint, `Ask the user to run ${approve} in their own terminal.`);
+  // And the wait that learns when they have (design 2026-10-05 §D7).
+  assert.equal(
+    agent.json().error?.hint,
+    `Ask the user to run ${approve} in their own terminal; learn when they have with ${resendInline(harness.core, ['send', 'wait', 'ap_1'])}.`,
+  );
   const script = await harness.cli(['--json', 'approve', 'ap_1']);
   assert.equal(script.json().error?.hint, `Run ${approve} directly in a terminal.`);
   // A key, likewise: the command a person runs is this one, with the name, located.

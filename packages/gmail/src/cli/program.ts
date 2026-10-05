@@ -4,6 +4,7 @@ import {
   approvalHint,
   approvalsOf,
   approveChangeAtTerminal,
+  approveRefusedHint,
   CommsError,
   canPrompt,
   cliHandoffs,
@@ -1378,10 +1379,8 @@ update first, or put it off (the stop names both commands) · 64 usage · 65 bad
         const marker = agentMarker(env);
         if (marker) {
           throw new CommsError('APPROVAL_REQUIRED', 'only a person can approve a send or a change, not an agent', {
-            hint: handoffSentence(
-              context.handoffs.own(['approve', approvalId]),
-              (command) => `Ask the user to run ${command} in their own terminal.`,
-            ),
+            // And the wait that learns when they have (design 2026-10-05 §D7).
+            hint: approveRefusedHint(context.handoffs, approvalId),
             details: { marker },
           });
         }

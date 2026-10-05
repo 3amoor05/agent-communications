@@ -3,6 +3,7 @@ import {
   type ApprovalOutcome,
   answerDownloadInForm,
   approvalNotFound,
+  approveAndWaitSentence,
   asV2,
   type CliHandoffs,
   CommsError,
@@ -1075,10 +1076,13 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
             downloadForms.delete(choiceId);
             if (asked === undefined || asked !== client || !(await isAllowlisted(client))) {
               throw new CommsError('APPROVAL_REQUIRED', 'nothing was saved: that answer was not to a form this asked', {
-                hint: handoffSentence(
-                  context.handoffs.own(['approve', choiceId]),
-                  (command) =>
-                    `Ask the person to run ${command} in their own terminal and answer there, then call again with choiceId "${choiceId}" alone.`,
+                // The person's own `approve`, and the wait that learns when they have answered (§D7).
+                hint: approveAndWaitSentence(
+                  context.handoffs,
+                  'mcp',
+                  choiceId,
+                  (command, wait) =>
+                    `Ask the person to run ${command} in their own terminal and answer there; wait for their answer with ${wait}, then call again with choiceId "${choiceId}" alone.`,
                 ),
                 details: { choiceId, client },
               });
@@ -1111,10 +1115,12 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
                 'APPROVAL_PENDING',
                 `nothing was saved: the form was ${how}, and the question is still waiting`,
                 {
-                  hint: handoffSentence(
-                    context.handoffs.own(['approve', choiceId]),
-                    (command) =>
-                      `It is still the person's to answer: they can run ${command} in their own terminal while you wait with gmail_send_wait, then call again with choiceId "${choiceId}" alone — or call again with it now to show them the form.`,
+                  hint: approveAndWaitSentence(
+                    context.handoffs,
+                    'mcp',
+                    choiceId,
+                    (command, wait) =>
+                      `It is still the person's to answer: they can run ${command} in their own terminal while you wait with ${wait}, then call again with choiceId "${choiceId}" alone — or call again with it now to show them the form.`,
                     {
                       instead: `It is still the person's to answer: call again with choiceId "${choiceId}" alone to show them the form.`,
                     },
@@ -2578,10 +2584,12 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
               const client = server.server.getClientVersion()?.name ?? '';
               if (!(await isAllowlisted(client))) {
                 throw new CommsError('APPROVAL_REQUIRED', 'this send needs approval outside the chat', {
-                  hint: handoffSentence(
-                    context.handoffs.own(['approve', approvalId]),
-                    (command) =>
-                      `This needs your approval outside the chat: run ${command} in a terminal, and I will wait with gmail_send_wait.`,
+                  hint: approveAndWaitSentence(
+                    context.handoffs,
+                    'mcp',
+                    approvalId,
+                    (command, wait) =>
+                      `This needs your approval outside the chat: run ${command} in a terminal, and I will wait with ${wait}.`,
                     { instead: 'This needs your approval outside the chat; it can also be sent from Gmail.' },
                   ),
                   details: { approvalId, approval: outcome.approval },
@@ -2628,10 +2636,12 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
                 'APPROVAL_PENDING',
                 `nothing was sent: the form was ${how}, and the approval is still waiting`,
                 {
-                  hint: handoffSentence(
-                    context.handoffs.own(['approve', approvalId]),
-                    (command) =>
-                      `It is still the person's to give: they can run ${command} in a terminal while you wait with gmail_send_wait, or you can call gmail_draft_send again to show them the form.`,
+                  hint: approveAndWaitSentence(
+                    context.handoffs,
+                    'mcp',
+                    approvalId,
+                    (command, wait) =>
+                      `It is still the person's to give: they can run ${command} in a terminal while you wait with ${wait}, or you can call gmail_draft_send again to show them the form.`,
                     {
                       instead:
                         "It is still the person's to give: call gmail_draft_send again to show them the form, or they can send it from Gmail.",

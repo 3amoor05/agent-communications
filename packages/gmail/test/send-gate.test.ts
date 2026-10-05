@@ -16,7 +16,7 @@ import {
   revokeApproval,
 } from '../src/operations/send.ts';
 import type { FakeGoogle } from './support/fake-google.ts';
-import { gmailInline } from './support/handoffs.ts';
+import { assertNoBareCommand, gmailInline } from './support/handoffs.ts';
 import { type Harness, newHarness } from './support/harness.ts';
 import { cli } from './support/surfaces.ts';
 
@@ -280,6 +280,40 @@ test('under confirm, no argument an agent can pass will send: only a typed appro
   });
   assert.ok(sent.sentMessageId);
 });
+
+for (const platform of ['darwin', 'win32'] as const) {
+  test(`under confirm, a send's next step and its refusal name the person's approve and the wait — gmail_send_wait over MCP, the located \`send wait\` at the command line — quoted for ${platform} (D7-a)`, async () => {
+    const { harness, google } = await connected({ sendPolicy: 'confirm', riskEscalation: false });
+    for (const surface of ['mcp', 'cli'] as const) {
+      const context = new GmailContext({ core: harness.core, env: harness.env, surface, platform });
+      const draftId = await draftTo(context, ['sam@partner.test']);
+      const prepared = await prepareSend(context, 'work', draftId);
+      const id = prepared.approvalId;
+      const approve = gmailInline(context.core.paths, ['approve', id], platform);
+      const wait =
+        surface === 'mcp' ? 'gmail_send_wait' : gmailInline(context.core.paths, ['send', 'wait', id], platform);
+      assert.equal(
+        prepared.nextStep,
+        `Show the preview to the user, then have them run ${approve} in a terminal; learn when they have with ${wait} — or they can send it from Gmail. You cannot approve this yourself.`,
+        surface,
+      );
+      await assert.rejects(
+        executeSend(context, 'work', { draftId, approvalId: id, expect: prepared.expect }),
+        (error: unknown) => {
+          assert.ok(error instanceof CommsError && error.code === 'APPROVAL_PENDING', String(error));
+          assert.equal(
+            error.hint,
+            `Ask the user to approve it in the terminal (${approve}) or in a trusted client form, or to send it from Gmail; learn when they have with ${wait}.`,
+            surface,
+          );
+          assertNoBareCommand(error.hint ?? '');
+          return true;
+        },
+      );
+    }
+    assert.equal(google.requests.filter((request) => request.path.endsWith('/send')).length, 0);
+  });
+}
 
 test('a policy of never refuses at prepare, before anything is computed', async () => {
   const { context } = await connected({ sendPolicy: 'never', riskEscalation: false });

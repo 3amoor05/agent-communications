@@ -328,7 +328,13 @@ test('approve refused to an agent, or away from a terminal, names this installat
   const approve = ownInline(harness.env, ['approve', 'ap_1']);
   const byAgent = await harness.cli(['approve', 'ap_1', '--json']);
   assert.equal(byAgent.code, 10);
-  assert.equal(byAgent.json().error?.hint, `Ask the person to run ${approve} in their own terminal.`);
+  // And the wait that learns when they have: core's, which WhatsApp has installed, as it has no wait of its own (§D7).
+  const wait = coreInline(harness.env, ['approval', 'wait', 'ap_1']);
+  assert.equal(
+    byAgent.json().error?.hint,
+    `Ask the person to run ${approve} in their own terminal; learn when they have with ${wait}.`,
+  );
+  assertNoBareCommand(String(byAgent.json().error?.hint));
   const noTerminal = await harness.cli(['approve', 'ap_1', '--json'], { env: harness.personEnv });
   assert.equal(noTerminal.json().error?.hint, `Run ${approve} directly in a terminal.`);
 });
@@ -359,7 +365,7 @@ test('a change waiting for approval is run again with this installation’s own 
   const id = pending.details.approvalId;
   assert.equal(
     pending.hint,
-    `Show the person the preview. They run ${ownInline(harness.env, ['approve', id])}; then run ${ownInline(harness.env, [...rerun, '--force', '--approval', id])}.`,
+    `Show the person the preview. They run ${ownInline(harness.env, ['approve', id])}; learn when they have with ${coreInline(harness.env, ['approval', 'wait', id])}, then run ${ownInline(harness.env, [...rerun, '--force', '--approval', id])}.`,
   );
 
   const unnamed = await harness.cli(['mcp', 'install', '--json']);

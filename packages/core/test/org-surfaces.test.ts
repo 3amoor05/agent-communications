@@ -415,6 +415,20 @@ test('the command to run again names a plain path as it is, and a path that cann
     assert.match(masked.json().error.hint, /run the same command again with `--approval ap_/);
     assert.match(masked.json().error.hint, /file path is not repeated here/);
   }
+  // Under confirm the person approves it first: core's own approve, and the wait that learns when they have (D7-b).
+  assert.equal(cli(m, ['policy', 'confirm']).status, 0);
+  for (const platform of ['darwin', 'win32'] as const) {
+    const masked = cliForPlatform(m, ['org', 'add', odd, '--json'], platform);
+    const { hint, details } = masked.json().error;
+    const paths = resolvePaths({ env: m.env, platform });
+    assert.ok(
+      hint.includes(
+        `They run ${coreInline(paths, ['approve', details.approvalId], platform)}; learn when they have with ${coreInline(paths, ['approval', 'wait', details.approvalId], platform)}, then run the same command again with \`--approval ${details.approvalId}\` added.`,
+      ),
+      `${platform}: ${hint}`,
+    );
+    assertNoBareCommand(hint);
+  }
 });
 
 test('a project id a client file wrote is shown neutralised when a repair names it, from both surfaces', async () => {

@@ -1107,10 +1107,17 @@ test('approving a send refuses an agent, and refuses a pipe', async () => {
   const harness = await newHarness({ accounts: [{ sub: 'sub-1', email: 'jo@example.test' }] });
   await harness.connectInbox({ alias: 'work', email: 'jo@example.test', sub: 'sub-1' });
 
-  // The marker check runs before anything else: an agent is told to hand this to a person, whatever the id.
-  const agent = await cli(harness, ['approve', 'ap_whatever', '--json'], { env: { CLAUDECODE: '1' } });
-  assert.equal(agent.code, EXIT_CODES.APPROVAL);
-  assert.match(agent.json<Envelope<never>>().error?.hint ?? '', /their own terminal/);
+  // The marker check runs before anything else: an agent is told to hand this to a person, whatever the id — and,
+  // quoted for the shell it was given, the wait that learns when they have (design 2026-10-05 §D7).
+  for (const platform of ['darwin', 'win32'] as const) {
+    const agent = await cli(harness, ['approve', 'ap_whatever', '--json'], { env: { CLAUDECODE: '1' }, platform });
+    assert.equal(agent.code, EXIT_CODES.APPROVAL);
+    assert.equal(
+      agent.json<Envelope<never>>().error?.hint,
+      `Ask the user to run ${gmailInline(harness.core.paths, ['approve', 'ap_whatever'], platform)} in their own terminal; learn when they have with ${gmailInline(harness.core.paths, ['send', 'wait', 'ap_whatever'], platform)}.`,
+      platform,
+    );
+  }
 
   // And without a terminal there is nobody to ask.
   const piped = await cli(harness, ['approve', 'ap_whatever', '--json']);

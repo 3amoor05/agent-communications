@@ -191,7 +191,7 @@ test('under confirm the tool hands over the command a person runs, and sends not
     assert.equal((waiting.details?.approval as { state?: string } | undefined)?.state, 'pending');
     assert.equal(
       waiting.hint,
-      `Ask the user to run ${resendInline(harness.core, ['approve', prepared.approvalId])} in their own terminal, then execute it again with the same approval. You cannot approve it yourself.`,
+      `Ask the user to run ${resendInline(harness.core, ['approve', prepared.approvalId])} in their own terminal; learn when they have with resend_send_wait, then execute it again with the same approval. You cannot approve it yourself.`,
     );
     assert.equal(harness.fake.sends().length, 0);
   } finally {

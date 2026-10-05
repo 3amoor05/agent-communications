@@ -133,7 +133,7 @@ test('an agent asked to approve a post is told this installation’s own approve
     assert.equal(error.code, 'APPROVAL_REQUIRED');
     assert.equal(
       error.hint,
-      `Ask the user to run ${slackInline(harness.core.paths, ['approve', 'ap_0000000000000000000000000'], platform)} in their own terminal.`,
+      `Ask the user to run ${slackInline(harness.core.paths, ['approve', 'ap_0000000000000000000000000'], platform)} in their own terminal; learn when they have with ${slackInline(harness.core.paths, ['approval', 'wait', 'ap_0000000000000000000000000'], platform)}.`,
     );
     assertNoBareCommand(asked.stdout, `${platform}: the approve refusal`);
     assert.deepEqual(fake.requests, [], `${platform}: something reached Slack`);

@@ -260,6 +260,11 @@ export interface PersonGate {
   refusedWithoutTerminal: string;
   /** The command the person should run themselves, named in both refusals: located, or why there is none here. */
   command: PrintedCommand | CliCommandNotLocated;
+  /**
+   * What learns when the person has run `command` — an approval's wait (design 2026-10-05 §D7) — named to an agent
+   * refused, so it need not ask the person to say so: located, or why there is none here. Left out where nothing waits.
+   */
+  wait?: PrintedCommand | CliCommandNotLocated | undefined;
   /** The one line said before the challenge. */
   prompt: string;
   color: boolean;
@@ -291,8 +296,17 @@ export async function requirePerson(env: NodeJS.ProcessEnv, streams: Streams, ga
 export function refuseUnlessPerson(env: NodeJS.ProcessEnv, streams: Streams, gate: Omit<PersonGate, 'prompt'>): void {
   const marker = agentMarker(env);
   if (marker) {
+    const wait = gate.wait;
     throw new CommsError('LOOSENING_REFUSED', gate.refusedToAgent, {
-      hint: gateSentence(gate.command, (command) => `Ask the user to run ${command} in their own terminal.`),
+      hint: gateSentence(gate.command, (command) =>
+        wait === undefined
+          ? `Ask the user to run ${command} in their own terminal.`
+          : gateSentence(
+              wait,
+              (learn) => `Ask the user to run ${command} in their own terminal; learn when they have with ${learn}.`,
+              `Ask the user to run ${command} in their own terminal.`,
+            ),
+      ),
       details: { marker },
     });
   }
@@ -306,7 +320,11 @@ export function refuseUnlessPerson(env: NodeJS.ProcessEnv, streams: Streams, gat
   }
 }
 
-/** A gate's command in a sentence: in backticks, or the sentence saying why there is none in its place. */
-function gateSentence(command: PersonGate['command'], say: (command: string) => string): string {
-  return 'message' in command ? command.message : say(inlineCommand(command));
+/**
+ * A gate's command in a sentence: in backticks, or the sentence saying why there is none in its place — after
+ * `instead`, when given.
+ */
+function gateSentence(command: PersonGate['command'], say: (command: string) => string, instead?: string): string {
+  if (!('message' in command)) return say(inlineCommand(command));
+  return instead === undefined ? command.message : `${instead} ${command.message}`;
 }

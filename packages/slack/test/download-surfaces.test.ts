@@ -590,6 +590,24 @@ test('under confirm, the person answers with this installation’s approve at th
     assert.ok((refused.hint ?? '').includes(`${approve} in their own terminal`), refused.hint ?? undefined);
     assertNoBareCommand(refused.hint ?? '');
     assert.deepEqual(bytes.asked, [], 'fetched before the person answered');
+    // And the wait that learns when they have answered: the workspace's own, as each surface takes it (D7-b).
+    assert.ok(asked.next.includes('; wait for their answer with slack_approval_wait.'), asked.next);
+    assert.ok(
+      (refused.hint ?? '').includes('; wait for their answer with slack_approval_wait, then call again'),
+      refused.hint ?? undefined,
+    );
+    const atTerminal = await cliError(harness, ['files', 'download', '--workspace', 'acme', '--file', 'F0AAA2'], {
+      read: slackApi(script()).fetch,
+    });
+    assert.equal(atTerminal.code, 'APPROVAL_PENDING');
+    const choice = String(atTerminal.details?.choiceId);
+    assert.ok(
+      atTerminal.hint?.includes(
+        `ask the person to run ${slackInline(harness.core.paths, ['approve', choice], 'darwin')} in their own terminal and answer there; wait for their answer with ${slackInline(harness.core.paths, ['approval', 'wait', choice], 'darwin')}. Then run `,
+      ),
+      atTerminal.hint ?? undefined,
+    );
+    assertNoBareCommand(atTerminal.hint ?? '');
 
     // An agent cannot answer it; the person at their terminal can.
     const agent = await cli(harness, ['approve', asked.choiceId], { json: false, tty: [] });
