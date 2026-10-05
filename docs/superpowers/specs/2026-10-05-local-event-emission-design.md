@@ -1,6 +1,6 @@
 # Local event emission — design
 
-Status: **revised after round 7; five owner questions open (§8)**. Specification only, not an implementation.
+Status: **revised after round 8; five owner questions open (§8)**. Specification only, not an implementation.
 Written from the cited research pass (§2) and a checked read of this repository at `74fa592`.
 This design adds a new **standing disclosure authorisation**; it does not treat recurring event delivery
 as the existing per-content send gate
@@ -56,10 +56,10 @@ reads, and for a design of everything that takes:
 
 | Fact | Source |
 |---|---|
-| Gmail `history.list` is cursor-paginated, history IDs are non-contiguous, an expired cursor normally returns 404, and the final `historyId` is stored only when no `nextPageToken` remains. Specific change lists can duplicate the generic `messages` list. Its request filter is one singular `labelId: string`, not a set of labels. A `History` record has specific `messagesAdded`, `labelsAdded` and `labelsRemoved` arrays; the latter two carry the label ids changed by that record. Their nested object is a `Message`, whose schema permits `labelIds`, although the list method warns that messages in a history response will typically have only `id` and `threadId`. `getProfile` returns the mailbox's current `historyId`. | [Gmail `users.history.list`](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.history/list), [Gmail `History` resource](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.history#History), [Gmail `Message` resource](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages#Message), [Gmail `users.getProfile`](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users/getProfile) |
+| Gmail `history.list` is cursor-paginated, history IDs are non-contiguous, an expired cursor normally returns 404, and the final `historyId` is stored only when no `nextPageToken` remains. Specific change lists can duplicate the generic `messages` list. Its request filter is one singular `labelId: string`, not a set of labels. A `History` record has specific `messagesAdded`, `labelsAdded` and `labelsRemoved` arrays; the latter two carry the label ids changed by that record. The list method explicitly warns that messages in a history response will typically have only `id` and `threadId`, so `messagesAdded[].message.labelIds` is neither a dependable label source nor a documented historical label snapshot. `getProfile` returns the mailbox's current `historyId`. | [Gmail `users.history.list`](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.history/list), [Gmail `History` resource](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.history#History), [Gmail `Message` resource](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages#Message), [Gmail `users.getProfile`](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users/getProfile) |
 | Slack has separate cursor-paginated history and replies methods; callers must follow `next_cursor`, not infer completion from page size. Its rate-limit notice establishes a conservative regime of one call per minute and 15 results for affected new non-Marketplace apps. | [`conversations.history`](https://docs.slack.dev/reference/methods/conversations.history/), [`conversations.replies`](https://docs.slack.dev/reference/methods/conversations.replies/), [Slack rate-limit notice](https://docs.slack.dev/changelog/2025/05/29/rate-limit-changes-for-non-marketplace-apps/) |
 | Resend's received and sent lists are cursor-paginated, and the sent list exposes only the current `last_event`. | [Resend received list](https://resend.com/docs/api-reference/emails/list-received-emails), [Resend sent list](https://resend.com/docs/api-reference/emails/list-emails) |
-| CloudEvents 1.0 requires `id`, `source`, `specversion` and `type`; extension values use the CloudEvents scalar type system. Standard Webhooks signs `id.timestamp.payload`, serialises symmetric secrets with `whsec_`, serialises a signature as `v1,<base64>`, and supports overlapping signatures for rotation. | [CloudEvents 1.0.2](https://github.com/cloudevents/spec/blob/v1.0.2/cloudevents/spec.md), [Standard Webhooks specification](https://github.com/standard-webhooks/standard-webhooks/blob/main/spec/standard-webhooks.md) |
+| CloudEvents 1.0 requires `id`, `source`, `specversion` and `type`; extension values use the CloudEvents scalar type system. Its JSON event format uses `application/cloudevents+json`, and the HTTP binding identifies that media type as structured content mode. Standard Webhooks signs `id.timestamp.payload`, serialises symmetric secrets with `whsec_`, serialises a signature as `v1,<base64>`, and supports overlapping signatures for rotation. | [CloudEvents 1.0.2](https://github.com/cloudevents/spec/blob/v1.0.2/cloudevents/spec.md), [CloudEvents JSON format](https://github.com/cloudevents/spec/blob/v1.0.2/cloudevents/formats/json-format.md), [CloudEvents HTTP binding](https://github.com/cloudevents/spec/blob/v1.0.2/cloudevents/bindings/http-protocol-binding.md), [Standard Webhooks specification](https://github.com/standard-webhooks/standard-webhooks/blob/main/spec/standard-webhooks.md) |
 | JSON Pointer has no wildcard; tokens escape `~` as `~0` and `/` as `~1`. Native `EventSource` accepts a URL and `withCredentials`, not an arbitrary Authorization header. | [RFC 6901](https://www.rfc-editor.org/rfc/rfc6901), [HTML Standard: server-sent events](https://html.spec.whatwg.org/multipage/server-sent-events.html) |
 | TypeSafe documents Jev through its hosted System One API, Noul as a 0–1 yes/no probability, and current model limits, but the reviewed published artefacts and terms provide no local weights or self-hosting contract. Ollama also returns a 0–1 probability for Noul. | [TypeSafe quick start](https://docs.typesafe.ai/introduction/quickstart), [TypeSafe models](https://docs.typesafe.ai/models), [Ollama decisions](https://docs.ollama.com/capabilities/decision) |
 | The documented near-name is Laya, from a different publisher. Its published usage is a Transformers-style decision head and it offers an ONNX Runtime extra. | [Laya model page](https://huggingface.co/convaiinnovations/laya) |
@@ -248,23 +248,28 @@ claimed cross-store transaction:
 2. Terminal or app approval calls `approveDisclosure` with the re-planned live binding. The activation operation then
    calls `claimForDisclosure` on that exact approved record. Core's existing store uses a per-record transition and
    an `O_EXCL` marker for its single-use guarantee (`packages/core/src/approvals.ts:20-29,801-813`).
-3. For rule and judge-budget activation, a final SQLite transaction re-checks the intent, expected pointer state and
-   binding, applies only the kind-specific effect above, records the activation and marks the intent complete.
-   `enable-all` deliberately inserts D12's provider-baseline stage between the claim and this final transaction; its
-   staged cursors are durable rows tied to the activation intent, so a used approval is still recoverable without
-   inventing another authority.
+3. A judge-budget activation, and a rule activation whose effect needs no provider baseline, proceeds directly to a
+   final SQLite transaction that re-checks the intent, expected pointer state and binding, applies only the
+   kind-specific effect above, records the activation and marks the intent complete. A rule activation that makes the
+   first Gmail event type effective for any selected account while the global switch is enabled—or any activation
+   for which D4 requires another source adapter to establish a provider “now” cursor—uses D12's staged-baseline
+   protocol between the claim and that final transaction. `enable-all` uses the same protocol. Durable baseline rows
+   are tied to the activation intent and account; every required account must have one before the pointer or switch
+   effect commits, so a used approval is recoverable without inventing another authority and partial provider
+   success can never make only part of a multi-account rule effective.
 
-Startup runs recovery before any source or worker. A rule or budget intent paired with `used` finishes step 3. An
-`enable-all` intent paired with `used` runs D12's baseline-and-finalise recovery before any scheduled poll. One paired with
-`approved` is re-planned and, only if the binding and expected pointers still match, resumes the single claim and
-then follows the kind-specific completion path—direct step 3 for rule/budget, D12 baseline then step 3 for
-`enable-all`; drift voids it. A still-pending approval leaves the intent pending until approval or expiry. Expired, revoked
-or absent approvals drop the intent without moving an active pointer. Because the intent is durable before the claim,
-a used disclosure approval always has enough SQLite state either to finish or, for `enable-all`, to rerun its bounded
-baseline stage until D12's one-hour completion deadline. At that deadline an unfinished `enable-all` intent becomes
-terminal `failed`, provider retries stop and a new approval is required; it cannot remain stranded in
-`pending-completion`. Recovery is crash-injected after every durable write, approval-store transition, baseline
-response and final transaction.
+Startup runs recovery before any source or worker. An intent paired with `used` either finishes the direct final
+transaction or, when its planned effect needs provider baselines, resumes D12's staged-baseline-and-finalise path from
+the already committed per-account rows before any scheduled poll. One paired with `approved` is re-planned and, only
+if the binding and expected pointers still match, resumes the single claim and then follows that same planned path;
+drift voids it. A still-pending approval leaves the intent pending until approval or expiry. Expired, revoked or
+absent approvals drop the intent without moving an active pointer. Because the intent is durable before the claim,
+every used disclosure approval has enough SQLite state either to finish directly or to resume its bounded baseline
+stage until the common one-hour completion deadline. At that deadline any unfinished provider-baselined activation
+becomes terminal `failed`, provider retries stop, a content-free audit row is written and a new approval is required;
+it cannot remain stranded in `pending-completion`. `disable-all` cancels any such incomplete activation and wins the
+race as D12 specifies. Recovery is crash-injected after every durable write, approval-store transition, baseline
+response, staged-row commit and final transaction.
 
 A loosening or any edit outside the whitelist below creates a pending rule version. The approved active rule version
 keeps running until that pending version completes the protocol above. A target, subscriber or judge edit always
@@ -428,13 +433,26 @@ and its own body. Version 1 includes only provider-source events:
 
 | Type | Body (abridged) | Required CloudEvents `subject` | Sender-controlled patterns |
 |---|---|---|---|
-| `gmail.message.received` | `messageId, threadId, labels[]?, from{address,name}, to[], cc[], subject, snippet, date, hasAttachments, attachments[{name,type,size}], body?` | Gmail `messageId` | `["from","name"]`, `["subject"]`, `["snippet"]`, `["attachments",{"any":true},"name"]`, `["body"]` |
+| `gmail.message.received` | `messageId, threadId, labels[], from{address,name}, to[], cc[], subject, snippet, date, hasAttachments, attachments[{name,type,size}], body?` | Gmail `messageId` | `["from","name"]`, `["subject"]`, `["snippet"]`, `["attachments",{"any":true},"name"]`, `["body"]` |
 | `gmail.message.sent` | as received, from the sending mailbox | Gmail `messageId` | subject, body, display and attachment names |
 | `gmail.message.labelled` | `messageId, threadId, added[], removed[]` | Gmail `messageId` | — |
 | `slack.message.posted` | `ts, channel{id,name,kind}, user{id,name}, text, threadTs?, files[]` | `<channel.id>/<ts>` | text and names |
 | `resend.email.received` | `id, from, to[], subject, receivedAt, attachments[]` | Resend email `id` | sender, subject and attachment names |
 | `resend.email.status_changed` | `id, to[], subject, previous, current, at` | Resend email `id` | subject |
 | `whatsapp.message.received` | `id, chat{id,name,kind}, sender{id,name}, text, at, media?` | `<chat.id>/<id>` | text and names |
+
+`observedAt` is sampled once when the daemon first accepts the provider occurrence into durable normalised-event
+staging; provider page/scan staging that still lacks a required classification read is not yet that observation. A
+response lost before the normalised stage commits has not been durably observed. When the provider supplies a
+timestamp for the occurrence, `occurredAt` is that value: Gmail message `internalDate` for received/sent, Slack `ts`, Resend
+`receivedAt`, and the WhatsApp message `at`. Version 1 has exactly two sources without a provider occurrence
+timestamp: a Gmail label change and a Resend `last_event` state change. For `gmail.message.labelled`, `occurredAt`
+is the observation time at which the daemon first read and durably staged that history record; for
+`resend.email.status_changed`, it is the observation time of the first durably staged changed state. In both cases
+`occurredAt === observedAt`; the Resend event body's `at` is that same stored value. Source staging carries the
+sampled value until the same value is stored in the content-free `ingest` row. Normalisation retry, crash recovery,
+decision replay and delivery retry always read the stored value and never sample a new clock value, so D6's
+CloudEvent bytes remain identical.
 
 Every version-1 catalogue event therefore has a non-empty subject; it is derived before mapping and cannot be
 overridden by the mapping or a target. A later event type or breaking version must add its own explicit subject row
@@ -524,59 +542,69 @@ conversation, kind or chat at a time and prove both the digest and classificatio
 
 | Source | Version 1 | Later |
 |---|---|---|
-| Gmail | Keep exactly one mailbox-level cursor per account and make one unfiltered `users.history.list` scan from its stored `historyId`; the request deliberately omits `labelId`, because Gmail accepts only one singular label filter rather than the union several rules require. Follow every `nextPageToken` before committing the final response's `historyId`, and use the specific change arrays rather than duplicate generic entries. Occurrence-time label selection and per-event-type activation fences are defined below. A 404 re-baselines the one mailbox cursor at `getProfile().historyId` and records `agentcomms.source.gap` for the app/doctor, with no silent backfill. This broader acquisition is disclosed in the UI and follows Gmail's documented pagination and change resources ([`users.history.list`](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.history/list), [`History`](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.history#History), [`Message`](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages#Message), [`users.getProfile`](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users/getProfile)). | `watch` plus Pub/Sub pull may wake the same reconciliation path; it never replaces `history.list`. |
+| Gmail | Keep exactly one mailbox-level cursor per account and make one unfiltered `users.history.list` scan from its stored `historyId`; the request deliberately omits `labelId`, because Gmail accepts only one singular label filter rather than the union several rules require. Follow every `nextPageToken` before committing the final response's `historyId`, and use the specific change arrays rather than duplicate generic entries. Gmail explicitly warns that messages in a history response will typically contain only `id` and `threadId`, so received/sent classification and selection use the observation-time metadata read below rather than `messagesAdded[].message.labelIds`; labelled events alone use their own change arrays. A 404 re-baselines the one mailbox cursor at `getProfile().historyId` and records `agentcomms.source.gap` for the app/doctor, with no silent backfill. This broader acquisition is disclosed in the UI and follows Gmail's documented pagination and change resources ([`users.history.list`](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.history/list), [`History`](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.history#History), [`Message`](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages#Message), [`users.getProfile`](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users/getProfile)). | `watch` plus Pub/Sub pull may wake the same reconciliation path; it never replaces `history.list`. |
 | Slack | Poll only the non-empty conversation-id sets named by active rule versions and promise **top-level posted messages only**, plus the bounded reply reconciliation below. Each conversation has a committed timestamp watermark and a durable scan `{oldest: watermark, latest: cycle-start, cursor}`. Follow every `response_metadata.next_cursor`, even after a short or empty page; a cycle may spend only its workspace request budget, so a cut-short scan persists that exact cursor and boundary and continues next cycle. It commits the new watermark only after the last page and committed ingest. A budget cut, ordinary empty page or `invalid_cursor` alone is never a gap. On `invalid_cursor`, restart the same bounded scan without a cursor; record `agentcomms.source.gap` only when Slack explicitly reports an `is_limited` or equivalent retained-history boundary that excludes the committed watermark. If coverage cannot be established, mark the source degraded and do not advance or record a gap. Posts dedupe on `(channelId, ts)`. The scheduler supports Slack's conservative affected-app limit and learns from 429/`Retry-After`; the UI shows worst-case latency ([`conversations.history`](https://docs.slack.dev/reference/methods/conversations.history/), [Slack rate-limit notice](https://docs.slack.dev/changelog/2025/05/29/rate-limit-changes-for-non-marketplace-apps/)). For a thread whose parent was observed within the previous seven days, maintain a separate reply watermark and fully cursor-page `conversations.replies` under the same resumable budget ([`conversations.replies`](https://docs.slack.dev/reference/methods/conversations.replies/)). **Polling does not emit replies to older threads or any message edits.** Those are documented version-1 polling limits, not silent completeness claims. | Socket Mode needs its own future design (D15); this specification makes no completeness or replay-cursor claim for it. |
 | Resend | `received.list` is paged newest-first toward the stored anchor. A durable scan keeps `{anchorId, cycleHeadId, after, pagesScanned}` between cycles; `cycleHeadId` is the first id seen, and `after` is the last id on the last completed page. Pages are staged encrypted and the anchor advances to `cycleHeadId` only when the old anchor is found and all staged rows commit to ingest. If the anchor is not found within ten pages—because retention or deletion made it unreachable—the daemon purges the stage, atomically re-baselines to `cycleHeadId` and records `agentcomms.source.gap`; it never scans an unbounded history. The sent list is paged newest-first through every id from the most recent seven days. Those ids have rows in a state table for seven days; each read compares `last_event` with the stored value and emits only a change. The UI says these are observed states, not every intermediate transition. The daemon may consume at most half the machine-wide throttle and an interactive CLI/MCP call always takes the next available slot ([Resend received list](https://resend.com/docs/api-reference/emails/list-received-emails)). | A signed hosted relay for Resend webhooks is a separate product. |
 | WhatsApp | Change the existing snapshot-and-rebuild sync (`packages/whatsapp/src/operations/sync.ts:45-113`) so, under its index lock, it renames the current target to an owner-only sibling `index.previous.sqlite` **before** the existing atomic building-index replacement point (`packages/whatsapp/src/index-db.ts:266-277`), then renames the checked building index into place and fsyncs the directory. Startup restores the sibling if a crash landed between the renames. Diff old and new before deleting the sibling. The comparison is a multiset: rows with `ZSTANZAID` are counted under that id; otherwise occurrences are keyed by `(chatId, timestamp, sender, SHA-256(text), occurrenceIndex)`, where the stable occurrence index is the row's order within that equal four-field group. Equal rows are never coalesced, and repeated stanza ids also retain their counts. A decrease in maximum `Z_PK`, an index-format change, or disappearance of a previously retained non-empty stanza-id set is a store reset: re-baseline and record a gap rather than treating old high-water marks as current. Apple's PPPC page establishes only the identifiers available to a managed privacy payload ([Apple Platform Deployment](https://support.apple.com/en-gb/guide/deployment/dep38df53c2a/web)). **Hypotheses for the phase-D spike**, not current claims, are that interactive TCC follows the same executable identity and that app-launched and service-launched copies may need separate grants; background collection does not ship until the spike establishes the actual behaviour and the app explains it. | A file-system notification may wake the same safe snapshot path; it never reads the live store. |
 
-**Gmail occurrence-time selectors.** An occurrence key is `(historyRecordId, messageId, changeType)` for
-`received`/`sent`, and `(historyRecordId, messageId, "labelled")` for the one labelled occurrence formed by
-combining that record's additions and removals for the message. `messageAdded` with occurrence-time `DRAFT` is
-ignored; with occurrence-time `SENT` and not `DRAFT` it is sent; without either it is received. Selection never uses
-labels from a later `messages.get` or other metadata read:
+**Gmail observation-time classification and selection.** An occurrence key is
+`(historyRecordId, messageId, changeType)` for `received`/`sent`, and
+`(historyRecordId, messageId, "labelled")` for the one labelled occurrence formed by combining that record's
+additions and removals for the message. Before the daemon accepts a `messagesAdded` occurrence as observed, it
+performs one `messages.get(format=metadata)` for that message with `labelIds` requested. On the first successful read
+it samples D3's `observedAt` once and durably stages that timestamp with the resulting label set. A successful
+response with no `labelIds` member is the observed empty set. Any observed `DRAFT` label skips the occurrence
+completely; otherwise observed `SENT` classifies it as `gmail.message.sent`; otherwise it is
+`gmail.message.received`. `labels: "any"` does not bypass this
+classification read. A failed, unavailable or undecodable metadata read leaves only the raw history occurrence in
+source scan staging for retry, prevents the mailbox cursor from advancing over it and makes no received/sent
+projection, body fetch or delivery; it has not acquired an observation-time label set and there is no
+default-to-received path.
 
-- a `gmail.message.received` or `.sent` occurrence is filtered only by the `labelIds` carried by its own
-  `messagesAdded[].message`; its event body's `labels` is that same occurrence-time set when present and the field is
-  absent when the history entry omitted it;
-- a `gmail.message.labelled` occurrence is filtered only by the union of its own `labelsAdded[].labelIds` and
-  `labelsRemoved[].labelIds`, while its body preserves the two arrays separately. A selected-label removal therefore
-  matches, as do the corresponding add and a later re-add; and
-- `includeSpamTrash` is evaluated from the same occurrence evidence, never current state. With complete evidence,
-  `SPAM` or `TRASH` excludes the occurrence only when the rule binds `false`.
+The same observed label set is the received/sent event body's required `labels` value, filters `inbox` and explicit
+label selectors, and evaluates `includeSpamTrash`: observed `SPAM` or `TRASH` excludes the occurrence when the rule
+binds `false`. One metadata read serves every rule over that occurrence. The approval preview for a received/sent
+rule restricted to an explicit label says **“messages carrying <label> when agentcomms observes them”** (substituting
+the displayed label name, and listing each label for a set); the `inbox` preview uses the same sentence with
+`INBOX`. This is deliberately observation-time semantics, not a historical-label claim. In healthy operation the
+gap from the mailbox change to observation is at most one configured polling interval; it can be longer after daemon
+downtime or while collection is disabled. A label changed during that gap is judged in its observed state. Thus a
+label added after arrival but before observation can make the received/sent occurrence match, while an add after
+observation cannot change that occurrence's classification, body or matched rules and is visible only through its
+own labelled occurrence. Disabled intervals are still not backfilled under D12.
 
-If a `messagesAdded` entry carries no `message.labelIds`, or a labelled occurrence carries no ids in either of its
-own change arrays, its label selector is unknown. The occurrence is withheld from every rule whose `labels` is
-`inbox` or an explicit set. It may still match `labels: "any"`; when that rule also has `includeSpamTrash: false`, it
-is withheld because spam/trash membership is likewise unknown, while `includeSpamTrash: true` needs no label
-evidence. A durable content-free `selector-unknown` counter keyed by Gmail account and event type increments once for
-every such occurrence; `doctor` and the app show its count and last occurrence time. A later metadata fetch may
-supply content needed by a projection, but its `labelIds` are discarded for selection and cannot clear the counter.
-
-The phase-B1 Gmail source spike is a manual, read-only check that records real `users.history.list` response shapes
-for received, sent, add, removal and add/remove/add cases and verifies specifically whether
-`messagesAdded[].message.labelIds` is populated. Automated tests remain on the fake Gmail transport. The
-implementation and fake fixtures follow the contract above regardless of the result: missing occurrence-time labels
-remain fail-closed for label-restricted rules and visible as `selector-unknown`. The spike report cites the same
-official `history.list`, `History` and `Message` resources and is a release gate for Gmail label-restricted rules.
+`gmail.message.labelled` remains occurrence-specific. It uses only the union of its own
+`labelsAdded[].labelIds` and `labelsRemoved[].labelIds` for selector matching and `includeSpamTrash`, while its body
+preserves the two arrays separately. A selected-label removal therefore matches, as do the corresponding add and a
+later re-add. An entry with no label id in either change array produces no labelled occurrence. It never consults
+the received/sent observation-time metadata snapshot or a later metadata read. Its `occurredAt` is D3's durably
+stored observation time for the first read of that history record because Gmail supplies no label-change timestamp.
 
 **Gmail mailbox cursor and type activations.** The one cursor is keyed only by Gmail account, never by event type.
 Each transition of `(accountId, eventType)` from zero effective rules to one records a new activation epoch. When the
-global switch is enabled, the rule activation takes that mailbox's source lock, calls `getProfile`, and records the
-returned mailbox history id as `activatedAtHistoryId` in the same SQLite transaction that installs the rule pointer.
-When the switch is disabled, installing a rule pointer makes no provider call and is not yet a type activation;
-D12's approved `enable-all` obtains one mailbox profile baseline and its final transaction records that same history
-id as each newly effective type's activation epoch. A first activation may create an absent mailbox cursor at that
-value; activating another type, including during a multi-page scan, never moves or replaces an existing mailbox
-cursor or scan continuation. Additional rules for an already-effective type do not create another type epoch; after
-the last effective rule for a type disappears, its next zero-to-one transition records a new epoch.
+global switch is enabled, a rule activation that would cause that transition plans one `getProfile` baseline for
+every affected Gmail account, claims its disclosure approval, and uses D12's durable per-account staging protocol.
+All affected accounts must baseline successfully before one final transaction installs the rule pointer and records
+each returned mailbox history id as that account/type's `activatedAtHistoryId`; partial multi-account success changes
+no pointer or type epoch. When the switch is disabled, installing a rule pointer makes no provider call and is not
+yet a type activation; D12's approved `enable-all` obtains one mailbox profile baseline per account and its final
+transaction records that same history id as each newly effective type's activation epoch. A first activation may
+create an absent mailbox cursor at that value; activating another type, including during a multi-page scan, never
+moves or replaces an existing mailbox cursor or scan continuation. Additional rules for an already-effective type
+do not create another type epoch; after the last effective rule for a type disappears, its next zero-to-one
+transition records a new epoch. Provider failure, crash recovery, the one-hour completion deadline and a concurrent
+`disable-all` use the same D12 contract as `enable-all`.
 
 Gmail history ids are compared as unsigned decimal integers, never lexicographically. An occurrence is eligible for
 a type only when its history-record id is strictly greater than that type epoch's `activatedAtHistoryId`; otherwise
 that type gets no projection even though another already-active type may project the same record. The mailbox lock
-serialises the profile response/activation commit with page-stage and final-cursor commits. Thus activation in the
-middle of a durable multi-page scan preserves that scan for existing types, while the new type's fence suppresses
-every earlier record. The single scan fans eligible occurrences through all active type/rule snapshots; it is never
-restarted or duplicated merely because a type activates.
+and D12's durable activation-completion scope fence serialise the cut-over with page-stage and final-cursor commits.
+Claim waits for any in-flight scan commit, then pauses further commits for every affected mailbox before the first
+profile call; finalisation installs the type epoch before releasing those fences. Thus activation in the middle of a
+durable multi-page scan preserves that scan continuation for existing types, while the resumed scan suppresses every
+record at or below the new type's staged fence and collects every later one. Failure or `disable-all` releases/cancels
+the fence under the same source lock. The single scan fans eligible occurrences through all active type/rule
+snapshots; it is never restarted or duplicated merely because a type activates.
 
 Slack opens a fresh `openWorkspace` session for every poll and never caches credentials across polls, matching the
 current token boundary (`packages/slack/src/operations/session.ts:131-145`;
@@ -593,11 +621,15 @@ not update the interactive `lastUsedAt` field that current Gmail reads update
 (`packages/gmail/src/operations/read.ts:314-315,359-360`); sources record `lastPolledAt`.
 
 There is no independently enabled source. A source/account/event-type tuple polls exactly while at least one active
-rule version names that live account and event type. For non-Gmail sources, the first such rule establishes that
-tuple's “now” cursor and records a gap rather than backfilling earlier history. Gmail instead keeps the mailbox cursor
-and per-type activation epochs above: polling the mailbox continues while any Gmail type is active, and activating a
-second type does not disturb already-active work. When the last tuple for a provider scope disappears, polling stops.
-D9 defines live-account removal, and D12 defines the stronger disabled-interval re-baseline.
+rule version names that live account and event type. For a non-Gmail source whose zero-to-one activation must call
+the provider to establish that tuple's “now” cursor, the rule activation plans one baseline per affected account and
+uses D12's same claimed, staged, all-accounts-or-none protocol; its final transaction installs the pointer and all
+cursors together and records a gap rather than backfilling earlier history. An adapter whose “now” baseline is
+entirely local still stages its cursor under that protocol if activation calls the adapter. Gmail instead keeps the
+mailbox cursor and per-type activation epochs above: polling the mailbox continues while any Gmail type is active,
+and activating a second type does not disturb already-active work. When the last tuple for a provider scope
+disappears, polling stops. D9 defines live-account removal, and D12 defines the stronger disabled-interval
+re-baseline.
 
 Each source is an operation in `packages/<channel>/src/operations/events.ts`, tested against that channel's existing
 fake (`packages/gmail/test/support/fake-google.ts:1-20`; `packages/slack/test/support/fake-slack.ts:7-12`;
@@ -754,6 +786,13 @@ vector for every catalogue type, so every required attribute, subject derivation
 schema id and extension omission has one implementation-independent oracle. A separate vector exercises an approved
 rule-defined `cloudEventType`.
 
+For webhook delivery this JSON object is the CloudEvents JSON event format carried in HTTP **structured content
+mode**, not binary mode. Every POST therefore has the exact header
+`Content-Type: application/cloudevents+json; charset=utf-8`; `datacontenttype: "application/json"` still describes
+the event's `data` member and does not replace that HTTP envelope media type. This follows the
+[CloudEvents JSON format](https://github.com/cloudevents/spec/blob/v1.0.2/cloudevents/formats/json-format.md) and its
+[HTTP binding](https://github.com/cloudevents/spec/blob/v1.0.2/cloudevents/bindings/http-protocol-binding.md).
+
 The D7 installation-reset notice is a target-level control delivery, not a mapped catalogue event. It uses the same
 CloudEvents structured envelope and signing/retention machinery with a reset-notification id stable across its
 attempts, type `io.agentcomms.control.installation-reset.v1`, source
@@ -802,7 +841,7 @@ every CLI, MCP, app, preview, audit and diagnostic output to prove the full secr
 | Target | Version 1 contract |
 |---|---|
 | **Dry-run** | No network I/O. At the delivery boundary, append the exact would-be CloudEvent bytes to the encrypted `dryrun_log` table using D8's packed-record format. The target version binds a retention no longer than 24 hours. `targetKey` is `dryrun:<targetId>:<targetVersion>`. The append charges the rule's ordinary delivery cap and completes the delivery atomically. Only a person at the terminal or in the app may read it, through D3's untrusted text renderer; no MCP result, structured content, log or audit row contains its payload. |
-| **Webhook** | HTTPS `POST` of the exact CloudEvent bytes, Standard Webhooks signed. Success is 2xx. Retry with capped exponential backoff and jitter until success, the approved delivery-retention deadline or 20 attempts. Exhausting attempts before the deadline is `dead-lettered`; reaching the deadline first is `retention-expired`. Promise: **bounded at-least-once attempts**, not unconditional receipt. |
+| **Webhook** | HTTPS `POST` of the exact CloudEvent bytes in CloudEvents structured mode with exactly `Content-Type: application/cloudevents+json; charset=utf-8`, plus the Standard Webhooks headers and signatures below. Success is 2xx. Retry with capped exponential backoff and jitter until success, the approved delivery-retention deadline or 20 attempts. Exhausting attempts before the deadline is `dead-lettered`; reaching the deadline first is `retention-expired`. Promise: **bounded at-least-once attempts**, not unconditional receipt. |
 | **Local SSE stream** | `GET /v1/streams/<subscriber>` on 127.0.0.1/::1. Each subscriber has an encrypted retained stream log, default 24 hours and maximum 7 days, bound into its standing authorisation. `Last-Event-ID` replays entries still in that window only while the recorded rule is its active pointer, its target/subscriber/judge versions are unrevoked, the global switch is enabled and D9's account is live. There is no acknowledgement, so the promise is only **available for replay within the approved window**, never receipt or processing. |
 
 Dry-run, webhook and SSE are the only delivery adapters specified here; phase B1 implements dry-run and phase B2
@@ -977,23 +1016,22 @@ One SQLite database, `<stateDir>/events/events.sqlite`, is owned only by `agent-
   no-approval rule-tightening edge created atomically with its new version and pointer; exact activations and derived
   rows together must form D2's complete acyclic lineage to the approval named by `active_versions.approvalId`;
   `object_revocations(kind, objectId, version, revokedAt)` carries immediate target/subscriber/judge revocations;
-  durable `activation_intents` store the canonical activation kind/document/effect, closed status `pending |
-  pending-completion | completed | failed | cancelled`, nullable `claimedAt`/`completionDeadline`, stable terminal
-  failure code and timestamps, and `activations`/`revocations` are append-only;
+  durable `activation_intents` store the canonical activation kind/document/effect, its exact required provider
+  baseline scopes, closed status `pending | pending-completion | completed | failed | cancelled`, nullable
+  `claimedAt`/`completionDeadline`, stable terminal failure code and timestamps, and `activations`/`revocations` are
+  append-only;
 - `cursors(source, accountId, cursorScope, cursor, updatedAt, PRIMARY KEY(source, accountId, cursorScope))` and
   `source_scan_state(id, source, accountId, cursorScope, encryptedRecord, updatedAt)` hold encrypted source-specific
   continuation and staging. Gmail has exactly one `cursorScope = "mailbox"` row per account and never an event-type
   cursor. Append-only `gmail_type_activations(accountId, eventType, activationEpoch, activatedAtHistoryId,
   activationId, activatedAt, deactivatedAt?, PRIMARY KEY(accountId, eventType, activationEpoch))` has at most one
   open epoch per tuple and supplies D4's strict history-id fence;
-- `enable_baselines(intentId, source, accountId, cursorScope, encryptedCursor, responseAt)` holds only D12's staged
-  provider-now cursors and is deleted by finalisation, failure or cancellation. A Gmail enable baseline is keyed once
-  by `(intentId, "gmail", accountId, "mailbox")`, regardless of how many Gmail event types are active; finalisation
-  installs that one mailbox cursor and records the same returned history id as each active Gmail type's new
-  `activatedAtHistoryId` epoch;
-- content-free `source_health_counters(source, accountId, eventType, code, count, lastAt)` admits the closed code
-  `selector-unknown` for D4's missing occurrence-time Gmail label evidence; it stores no message id, label, sender or
-  event payload and is shown by `doctor` and the app;
+- `activation_baselines(intentId, source, accountId, cursorScope, encryptedCursor, responseAt, PRIMARY KEY(intentId,
+  source, accountId, cursorScope))` holds D12's staged provider-now cursors for any provider-baselined rule activation
+  or `enable-all`, and is deleted only by successful finalisation, terminal failure or cancellation. A Gmail baseline
+  is keyed once by `(intentId, "gmail", accountId, "mailbox")`, regardless of how many Gmail event types are being
+  made effective; finalisation creates a missing mailbox cursor when needed and records the returned history id as
+  each newly effective Gmail type's `activatedAtHistoryId` epoch without replacing an existing mailbox cursor;
 - content-free `ingest(eventId UNIQUE, installationId, type, version, accountId, dedupeKey, occurredAt, observedAt)`
   plus `ingest_rules(eventId, ruleId, ruleVersion, decisionDeadline, encryptedProjection)`. Each projection contains
   only the concrete fields referenced by that rule version's deterministic conditions, judge inputs and mapping;
@@ -1036,6 +1074,12 @@ body or file metadata only when at least one such rule requires it. It then buil
 version by retaining only that rule's condition paths, judge-input paths and mapping paths; parent references retain
 the referenced subtree, never unrelated siblings. One transaction inserts the content-free identity, every encrypted
 projection and the cursor advance together. No shared encrypted full event is written.
+
+The `ingest.occurredAt` and `ingest.observedAt` values are immutable parts of that identity tombstone. For D3's
+Gmail-label and Resend-status occurrences without provider timestamps, source staging supplies the one sampled
+observation time as both values; replay, re-evaluation and every regenerated CloudEvent read it from `ingest` rather
+than the clock. A retry before ingest commit reuses the staged value. A crash after ingest commit therefore cannot
+change `occurredAt`, the canonical envelope body or its Standard Webhooks signature input.
 
 Each `ingest_rules` projection has only that rule's approved `decisionDeadline`. It is purged as soon as that rule's
 decision is terminal or its deadline yields `retention-expired`, regardless of every other rule over the event; a
@@ -1288,9 +1332,9 @@ kind, a `disclosure` approval id, digest and complete preview. A repeated MCP ca
 approval operation re-plans under the daemon activation lock, refuses kind/version-list/digest drift and runs D2's
 intent → core claim → SQLite activation protocol.
 `doctor` reports daemon/protocol health, global switch, every active exact approval or complete derived lineage,
-pending activation and pending-completion intents (including a claimed `enable-all` awaiting baselines), terminal
-failed `enable-all` intents and their audit code, Gmail `selector-unknown` counts/last occurrence, source lag, leases,
-held decisions, dead letters, retention deadlines and missing secrets.
+pending activation and pending-completion intents (including any claimed rule or `enable-all` activation awaiting
+provider baselines), terminal failed activations and their audit code, Gmail metadata-read failures and source lag,
+leases, held decisions, dead letters, retention deadlines and missing secrets.
 
 The `agentcomms-events` skill teaches an agent to propose and test a disabled rule, explain both untrusted
 representations, and hand the approval id to the person. It never instructs the agent to type or request a secret.
@@ -1347,14 +1391,15 @@ pre-delivery decision, including held and judging work, `cancelled`; releases ju
 or retryable delivery and purges its encrypted record; marks a delivery already past `disclosing` terminal
 `in-flight-at-disable` and purges its retained record; purges every retained dead-letter payload; and purges every
 retained dry-run and SSE row. This terminalises all pre-disable work in that transaction. It needs no approval and
-leaves the immutable standing authorisations inactive but intact. It also cancels any incomplete `enable-all`
-activation intent, purges its staged baselines and marks its already-used approval as cancelled-for-completion; that
-approval can never enable a later generation.
+leaves the immutable standing authorisations inactive but intact. It also cancels any incomplete
+provider-baselined activation, whether a rule activation or `enable-all`, purges its staged baselines and marks its
+already-used approval as cancelled-for-completion; that approval can never mutate a later generation.
 
-Scheduled source polling never runs while disabled. The only pre-enable provider exception is the approved
-`enable-all` baseline operation below: each source adapter exposes a separate baseline-only path limited to its
-cursor/profile or list-head endpoint, with no body/file fetch, normalisation, projection or ingest. No judge, target
-or ordinary poll call is allowed. A provider, judge or webhook result that returns after the transaction, and a
+Scheduled source polling never runs while disabled. The only pre-enable provider exception is an approved
+`enable-all` baseline operation. While enabled, a claimed rule activation may likewise call only the baseline paths
+its D4 plan requires. Each source adapter exposes a separate baseline-only path limited to its cursor/profile or
+list-head endpoint, with no body/file fetch, normalisation, projection or ingest. No judge, target or ordinary poll
+call is allowed through that path. A provider, judge or webhook result that returns after `disable-all`, and a
 dry-run/SSE append that began before it, is fenced by D8's generation check: older-generation work becomes terminal
 `cancelled`, or remains `in-flight-at-disable` if it had crossed `disclosing`; reservations are released, payloads are
 purged and nothing is re-queued. The external operation may already have happened and is audited as such, but it can
@@ -1364,32 +1409,47 @@ never recreate work for a later enable.
 document contains exactly the current disabled `switchGeneration` and the sorted ids of the active rule versions that
 will become effective; its derived version list contains exactly those rules. The preview may show their stored
 digests and derived live source/account/event-type set, but those are not extra document fields. Generation or active
-rule-pointer drift refuses it. The recoverable order is fixed:
+rule-pointer drift refuses it.
+
+**Provider-baselined activation protocol.** The first active Gmail type for an account while enabled, every other
+source activation whose D4 adapter must call the provider to establish “now”, and `enable-all` all use this same
+recoverable order. The activation plan fixes the complete, duplicate-free set of required
+`(source, accountId, cursorScope)` baselines before approval; it is not recomputed after claim.
 
 1. **Claim authority.** After terminal/app approval, the daemon claims the disclosure approval and durably observes
-   core state `used` while the switch remains disabled. Under the same activation lock it changes the SQLite intent
-   to `pending-completion`, records `claimedAt` and an exact `completionDeadline = claimedAt + 1 hour`, then releases
-   the lock. No provider baseline call occurs before this claim and durable observation.
-2. **Stage baselines.** For every distinct provider cursor scope derived from the bound rule versions, call only that adapter's
-   cursor/profile/list-head baseline path. Each successful response is stored as an encrypted `enable_baselines` row
-   tied to the activation intent; there is no body/file fetch, normalisation, projection, ingest, decision or
-   delivery. Gmail is deduplicated to one `getProfile` baseline per account, keyed as mailbox scope even when several
-   Gmail event types are active. A failed call leaves the intent in visible `pending-completion` state and the switch
-   disabled while bounded retries remain before the completion deadline.
-3. **Enable atomically.** One final SQLite transaction rechecks the disabled generation, exact rule-pointer set,
-   complete authorisation lineages, completion deadline and one staged baseline for every cursor scope; installs all
-   cursors, records one content-free `agentcomms.source.gap` operational record per source for the omitted interval,
-   sets every active Gmail `(accountId, eventType)` activation fence to its mailbox baseline history id, sets
-   `enabled = true`, completes the intent and deletes the stage rows.
+   core state `used`. Under the same activation lock it changes the SQLite intent to `pending-completion`, records
+   `claimedAt`, an exact `completionDeadline = claimedAt + 1 hour` and the fixed baseline-scope set. In sorted
+   source/account order it also takes those source locks, waits for any in-flight cursor commit and makes the
+   `pending-completion` intent a durable scheduler fence against further poll/commit work on those scopes, then
+   releases the locks. `enable-all` already has every scope fenced by the disabled switch; a rule activation leaves
+   its prior active pointer and cursor state unchanged but temporarily pauses the affected scopes. No provider
+   baseline call occurs before this claim and durable observation.
+2. **Stage baselines per account.** For each required scope that has no committed row, call only that adapter's
+   cursor/profile/list-head baseline path and immediately store the successful response as an encrypted
+   `activation_baselines` row tied to the intent and account. There is no body/file fetch, normalisation, projection,
+   ingest, decision or delivery. Gmail is deduplicated to one `getProfile` baseline per account, keyed as mailbox
+   scope even when several Gmail event types are being made effective. A failed call leaves the intent visibly
+   `pending-completion`; successful rows for other accounts remain committed and are never made effective on their
+   own. Retries and restart skip those rows and call only missing scopes. Thus every required account must baseline,
+   or none of the activation's pointer/switch effect commits.
+3. **Finalise atomically.** Under the activation lock and the required source locks in the same sorted order, one
+   final SQLite transaction rechecks the switch generation, exact expected pointer set, complete authorisation
+   lineages, fixed baseline-scope set, completion deadline and one staged row for every scope.
+   For a rule activation it installs the one rule pointer and all required cursors/type epochs together. For
+   `enable-all` it installs all cursors, records one content-free `agentcomms.source.gap` operational record per
+   source for the omitted disabled interval, sets every active Gmail `(accountId, eventType)` activation fence to its
+   account's mailbox baseline history id and sets `enabled = true`. Either path completes the intent and deletes all
+   of its staged rows in that transaction; the affected source locks remain held until the completed status has
+   released every activation-completion scheduler fence.
 
 **Used-intent mutation fence.** Every operation that can create, replace or remove an active rule pointer—including
 a rule activation, enable/disable/remove, and every no-approval tightening that moves the pointer—takes the activation
-lock and, before writing, joins unfinished `enable-all` intents to core approval state. If any such intent is `used`,
-the operation makes no mutation and returns `ENABLE_ALL_COMPLETING` with `retryable: true`. This check is repeated in
-the pointer transaction, so a request admitted just before the claim cannot commit after it. The enable operation
-holds the same lock across core's `used` transition and the SQLite `pending-completion` write; after a crash, startup
-reconstructs that fence from core before accepting control requests. A used intent therefore cannot acquire pointer
-drift after its claim.
+lock and, before writing, joins every unfinished provider-baselined intent to core approval state. If any such intent
+is `used`, the operation makes no mutation and returns `ACTIVATION_COMPLETING` with `retryable: true`. This check is
+repeated in the pointer transaction, so a request admitted just before the claim cannot commit after it. The
+activation operation holds the same lock across core's `used` transition and the SQLite `pending-completion` write;
+after a crash, startup reconstructs that fence from core before accepting control requests. A used intent therefore
+cannot acquire pointer or activation-count drift after its claim.
 
 `disable-all` is the sole exception and always wins: under the activation lock it performs the earlier kill-switch
 transaction, settles the intent `cancelled`, deletes every staged baseline and records the used approval as
@@ -1397,22 +1457,29 @@ cancelled-for-completion. A concurrent pointer mutation is either committed befo
 binding fail, or observes the fence and receives retry-later; it can never land between a successful claim and
 finalisation.
 
-Startup recovery sees a used `enable-all` approval with no completed step 3, discards any partial staged set, re-runs
-all of step 2 against fresh provider “now” values, and then attempts step 3, but only while the persisted completion
-deadline has not passed. It never reclaims or reapproves the used record. At or after one hour from `claimedAt`, an
-unfinished intent is settled `failed` before another provider call: the switch stays disabled, staged baselines are
-deleted, provider retries stop, and a content-free audit row records the intent id, `enable-all`, `failed`,
-`completion-timeout`, claim/deadline/failure times and the stable failing source codes—never provider error text or
-content. The used approval remains single-use and cannot be resumed; enabling requires a newly prepared and approved
-intent. `doctor` and the app show the failed terminal outcome and new-approval action. A finalisation invariant
-failure such as impossible pointer drift also settles `failed` immediately with its stable code instead of retrying
-providers. `disable-all` remains the explicit pre-deadline cancellation path described above.
+Startup recovery sees a used provider-baselined approval with no completed step 3, keeps every valid committed stage
+row, resumes only the missing account/scopes and then attempts step 3, but only while the persisted completion
+deadline has not passed. It never reclaims or reapproves the used record. A crash after a provider response but
+before its stage-row commit repeats only that uncommitted call; a crash after the commit reuses the exact stored
+cursor and `responseAt`. At or after one hour from `claimedAt`, an unfinished intent is settled `failed` before
+another provider call: `enable-all` leaves the switch disabled, a rule activation leaves its prior pointer in place,
+all staged baselines are deleted, every activation-completion source fence is released under its source lock, and
+provider retries stop. A content-free audit row records the intent id,
+activation kind, `failed`, `completion-timeout`, claim/deadline/failure times and stable failing source codes—never
+provider error text or content. The used approval remains single-use and cannot be resumed; the operation requires a
+newly prepared and approved intent. `doctor` and the app show the terminal outcome and new-approval action. Continued
+failure across restart cannot extend the deadline. A finalisation invariant failure such as impossible pointer drift
+also settles `failed` immediately with its stable code instead of retrying providers. `disable-all` remains the
+explicit pre-deadline cancellation path described above and wins concurrently for both rule and `enable-all`
+activations.
 
-The cut-over is intentionally per source, not globally atomic with the provider: that source's cut-over point is the
-instant its successful baseline response represents. Events before that response belong to the disabled interval and
-are not backfilled; events arriving in the seconds after that response and before step 3 are collected by the first
-ordinary poll from the staged cursor. That baseline-to-enable interval is the only disabled-time window that is
-collected. Cancelled deliveries, purged ingest and purged replay rows never return.
+The cut-over is intentionally per account/source, not globally atomic with the providers: each cut-over point is the
+instant its successful staged response represents, even when another account is staged later or after restart.
+Events before that response are not backfilled; events arriving after it and before step 3 are collected by the first
+ordinary poll from the staged cursor. For `enable-all`, that baseline-to-finalisation interval is the only
+disabled-time window collected. For a rule activation, the new rule/type/account scope sees nothing before its own
+baseline while every previously active pointer continues normally until the all-or-nothing final transaction.
+Cancelled deliveries, purged ingest and purged replay rows never return.
 
 Tests stop each worker before and after the generation and disclosure boundaries. `pause|resume` remains an
 operational control that retains queues and replay and therefore grants no disclosure authority; it cannot stand in
@@ -1433,10 +1500,10 @@ no recursive delivery case.
 
 1. **Overview** — the authoritative global enable/disable switch, daemon/protocol health, source lag, active
    exact/derived authorisation lineages, recent delivery outcomes, held decisions, pending approvals and
-   `enable-all` pending-completion or terminal-failed state with its deadline/new-approval action. Disable applies
-   immediately; enable opens the D12 out-of-chat approval flow.
+   every provider-baselined rule/`enable-all` pending-completion or terminal-failed state with its
+   deadline/new-approval action. Disable applies immediately; enable opens the D12 out-of-chat approval flow.
 2. **Sources** — accounts, event types, interval/budget, expected latency, mailbox/type cursor fences, Gmail
-   `selector-unknown` counts and health.
+   metadata-read retry/degraded health and the observation-time label limitation.
 3. **Rules** — deterministic tree, optional judge, exact input fields and budgets, mapping builder, target-specific
    representation/schema, delivery rate cap, preview and dry-run test.
 4. **Targets and subscribers** — dry-run retention, webhook URL form/network policy, SSE retention/origins,
@@ -1606,7 +1673,7 @@ Each phase is specified, reviewed, planned and built separately. The order is by
 | Phase | Delivers | Depends on |
 |---|---|---|
 | A | Isomorphic `@agentcomms/events`: catalogue and pointer/provenance patterns, semantic formats, bundled Unicode 15.1 case folding and UTS #46, conditions, mapping, generated source/delivery schemas and shared Node/browser conformance vectors; no I/O or `node:` imports | — |
-| B1 | Daemon skeleton: authenticated/versioned control protocol, stale recovery, owner-only authoritative SQLite state and global switch, AES-GCM per-rule projections, deterministic event ids, canonical Gmail source options, the Gmail occurrence-label response-shape spike and release gate, one mailbox cursor plus per-type activation fences, rule evaluation, core `disclosure` records/create-approve-claim/refusals plus the three canonical activation documents and recoverable intents, the bounded `enable-all` mutation fence/failure settlement, exact and derived standing-authorisation lineages and the `SECURITY.md` amendment, two-lock taint-origin sidecar and taint-before-every-judge/disclosure, independent daemon secret store/migration, terminal retention, outbox/leases/cancellation; **only** a local `dry-run` target with encrypted at-most-24-hour log and human-only safe reads | A |
+| B1 | Daemon skeleton: authenticated/versioned control protocol, stale recovery, owner-only authoritative SQLite state and global switch, AES-GCM per-rule projections, deterministic event ids, canonical Gmail source options, observation-time received/sent classification, one mailbox cursor plus per-type activation fences, rule evaluation, core `disclosure` records/create-approve-claim/refusals plus the three canonical activation documents and recoverable intents, bounded staged provider baselines with mutation fences/failure settlement for rule activation and `enable-all`, exact and derived standing-authorisation lineages and the `SECURITY.md` amendment, two-lock taint-origin sidecar and taint-before-every-judge/disclosure, independent daemon secret store/migration, terminal retention, outbox/leases/cancellation; **only** a local `dry-run` target with encrypted at-most-24-hour log and human-only safe reads | A |
 | B2 | Network hardening, plain/secret webhook URLs with URL changes creating new target versions, pinned resolution, Standard Webhooks per-attempt signing/rotation, webhook delivery/manual-retry state fences, durable reset barriers/degraded resume, authenticated generation-bound SSE with rotation close, exact-origin CORS, replay retention and version-bound purge | B1 |
 | B3 | CLI/MCP parity and exception rows, the complete named human-only secret-operation set and migration, dry-run reads and target resume, lineage/pending-completion `doctor`, event skill | B2 |
 | C | Desktop app and tray lifecycle, separate privileged `secrets` window, per-window capabilities, production no-egress CSP/navigation policy, Rust approval/secret surfaces, supervision and protocol compatibility | B3 |
@@ -1664,7 +1731,10 @@ No phase before B2 can make network disclosures. No new source ships without tai
   rule-defined-type vector. Exact non-null dry-run, webhook and SSE `targetKey` values. Two distinct
   target versions referencing the same subscriber version produce two deliveries with different SSE keys. Exact-byte
   Standard Webhooks tests cover `whsec_`, overlapping signatures, raw-body verification and five-minute tolerance;
-  an injected clock proves retries keep `webhook-id`/body and change `webhook-timestamp`/signature.
+  an injected clock proves retries keep `webhook-id`/body and change `webhook-timestamp`/signature. Every webhook
+  delivery vector also asserts the exact outbound header
+  `Content-Type: application/cloudevents+json; charset=utf-8` beside those body and signature bytes; no binary-mode
+  `ce-*` header is required or substituted.
 - **Digest, approvals and activation recovery:** golden vectors for the three canonical activation documents. Rule
   vectors mutate source/account scope, a newly connected but unselected account, every Gmail label, `any`/`inbox`
   selector transition and `includeSpamTrash`, every Slack conversation id, every Resend kind, every WhatsApp
@@ -1680,6 +1750,11 @@ No phase before B2 can make network disclosures. No new source ships without tai
   wrong-kind claim among all four kinds. Crash injection before/after activation-intent insert, disclosure-record
   create/attachment, approval, claim-marker creation, core `used`, active-pointer commit and completed-intent mark
   proves pending remains pending, approved resumes safely, `intent + used` finishes and expired/revoked/absent drops.
+  For a provider-baselined rule activation, failure immediately after claim leaves the old pointer effective and the
+  intent recoverable; a crash after a Gmail profile response but before its stage-row commit repeats only that
+  account; partial success across a multi-account rule persists successful rows but activates no account; restart
+  resumes only missing rows; continued provider failure reaches the one-hour terminal `failed` audit outcome and
+  requires a new approval. The same matrix runs for `enable-all`.
   After each whitelist tightening that leaves a rule effective—and with a crash injected on both sides of version,
   `derived_authorizations` and pointer writes—the new version and derivation edge are all committed or none are.
   Restart, `doctor`, the app and an attempted disclosure must each validate the full acyclic chain to the exact parent
@@ -1704,22 +1779,24 @@ No phase before B2 can make network disclosures. No new source ships without tai
   dry-run rows—and increments the generation; every late commit is terminal
   `cancelled` or `in-flight-at-disable`, never retryable. Outside an in-progress, explicitly approved `enable-all`,
   the disabled state permits no **scheduled poll** or other provider call. `enable-all` calls only each adapter's
-  baseline cursor/profile/list-head
-  allowlist while the switch is false and creates no ingest or projection; any poll/body/judge/target call fails the
-  test. Crash injection runs immediately before and after intent creation, terminal/app approval, claim, core `used`,
-  every individual baseline response/stage write, clearing a partial stage for recovery, the final enable transaction
-  and completed-intent mark. After core records `used`, after **each** individual baseline write, and immediately
+  baseline cursor/profile/list-head allowlist while the switch is false and creates no ingest or projection; any
+  poll/body/judge/target call fails the test. The common provider-baselined protocol is exercised for both
+  `enable-all` and a first-active-type rule activation: crash injection runs immediately before and after intent
+  creation, terminal/app approval, claim, core `used`, every individual baseline response/stage-row commit, the final
+  transaction and completed-intent mark. Provider failure immediately after claim leaves no partial effect. A crash
+  after a Gmail profile response but before commit repeats that account, while a crash after commit reuses its exact
+  row. Partial success across several accounts persists only the successful rows and activates none; restart calls
+  only the missing accounts. After core records `used`, after **each** individual baseline write, and immediately
   before finalisation, tests attempt every rule-pointer mutation (activation, enable, disable, remove and every
-  pointer-moving whitelist tightening); each receives retryable `ENABLE_ALL_COMPLETING` with no drift, then restart
-  repeats the refusal or completes the original intent. `disable-all` at each same point cancels the intent, deletes
-  its stage and wins. A used intent lacking the final transaction re-runs **all** baselines and completes once when
-  they succeed. Injected time at one tick before, exactly at and after `claimedAt + 1 hour` proves persistent baseline
-  failure is visible only before the deadline; at the deadline it settles `failed`, emits the content-free audit row,
-  deletes stages, makes no further provider call across restart and requires a new approval. Golden binding checks
-  refuse chat/MCP approval plus pre-claim generation/rule-pointer drift. One event is
-  injected after the last baseline response but before the final transaction and is collected on the first poll;
-  one immediately before each source's baseline is not. No other disabled-interval event is backfilled, and no
-  cancelled ingest, delivery, dry-run or stream row is resurrected.
+  pointer-moving whitelist tightening); each receives retryable `ACTIVATION_COMPLETING` with no drift, then restart
+  repeats the refusal or completes the original intent. Concurrent `disable-all` at each same point cancels either
+  kind of intent, deletes its stages, leaves a staged rule's prior pointer in place and wins. Injected time at one
+  tick before, exactly at and after `claimedAt + 1 hour` proves persistent or continued-after-restart provider failure
+  is visible only before the deadline; at the deadline it settles `failed`, emits the content-free audit row, deletes
+  stages, makes no further provider call and requires a new approval. Golden binding checks refuse chat/MCP approval
+  plus pre-claim generation/rule-pointer drift. One event injected after an account's baseline response but before
+  the final transaction is collected on the first poll; one immediately before that baseline is not. No other
+  disabled-interval event is backfilled, and no cancelled ingest, delivery, dry-run or stream row is resurrected.
 - **Delivery state, caps, dry-run and SSE:** a webhook charges once at its first attempt and every retry reuses that
   charge; a cap-blocked webhook makes no attempt. The manual-retry matrix permits only `retryable` with attempts below
   the original limit, an unexpired deadline, current switch generation, live account, active rule and unrevoked bound
@@ -1787,19 +1864,27 @@ No phase before B2 can make network disclosures. No new source ships without tai
   core binary migrates core's backend in both directions after event secrets exist; the events selector, namespace,
   files and readability remain unchanged. No secret is exposed.
 - **Sources:** Gmail makes one unfiltered, fully paged mailbox `history.list` scan with one mailbox cursor and no
-  `labelId`; it dedupes generic/specific occurrences and never uses a later metadata read for selection. Exact
-  fixtures cover receive-before-label-add, receive-before-label-removal, removal of the selected label, and
-  add/remove/add split across both page and crash boundaries, **each** against disjoint and overlapping rule sets.
-  Received/sent selection uses only that `messagesAdded[].message.labelIds`; labelled selection uses only that
-  occurrence's own `labelsAdded`/`labelsRemoved` ids, including selected-label removal. Missing occurrence-time
-  labels withhold every label-restricted projection, may still project to `labels: "any"` under the stated
-  spam/trash rule, and increment the durable `selector-unknown` doctor/app counter. The phase-B1 response-shape spike
-  captures received, sent, add, remove and add/remove/add results and gates release without weakening that oracle.
-  Simultaneous disjoint label rules, overlapping selectors and one occurrence matching several rules prove the right
-  projections are created once each. Activate a second Gmail event type during a multi-page scan both before and
+  `labelId`; it dedupes generic/specific occurrences and treats history messages as identifier-only, matching Gmail's
+  documented warning. Every `messagesAdded` occurrence gets one observation-time metadata read before classification
+  or source-option filtering. Fixtures with `messagesAdded[].message.labelIds` omitted cover received, sent and draft
+  messages: sent and draft cases under `labels: "any"` with `includeSpamTrash` both `false` and `true` never produce a
+  received projection, body fetch or delivery. Any `DRAFT` skips; otherwise observed `SENT` emits sent; otherwise
+  received. Metadata read failure is retried with the mailbox cursor held and never defaults to received. Exact
+  fixtures add a selected label after arrival but before first observation (the received/sent occurrence matches) and
+  after observation (that occurrence and its bytes remain unchanged; only the labelled occurrence can match).
+  Labelled selection uses only that history record's `labelsAdded`/`labelsRemoved` ids, including selected-label
+  removal; add/remove/add is split across page and crash boundaries against disjoint and overlapping rule sets.
+  Delayed polling fixes a labelled event's `occurredAt` to its first durable observation time, and crashes after
+  staging, ingest, decision creation and delivery creation prove replay emits the same `occurredAt` and exact
+  CloudEvent envelope bytes. The equivalent crash vectors cover Resend status changes, the other version-1 source
+  without a provider timestamp. Simultaneous disjoint label rules, overlapping selectors and one occurrence matching
+  several rules prove the right projections are created once each. Activate a second Gmail event type during a
+  multi-page scan both before and
   after the mailbox cursor commit, then crash/restart at every activation/fence/scan write: there remains exactly one
   provider scan and mailbox cursor, no occurrence at or below the new type's `activatedAtHistoryId` is projected for
-  it, and the already-active type loses none. Additional cursor restart/crash cases, multiple pages, DRAFT/SENT,
+  it, and the already-active type loses none. While the baseline intent is pending, affected mailbox commits pause;
+  success installs the epoch before they resume, while timeout failure releases the fence and lets the old rule/type
+  catch up from its unchanged cursor. Additional cursor restart/crash cases, multiple pages, DRAFT/SENT,
   `includeSpamTrash` false/true and a 404 gap preserve the same contract. Slack tests each non-empty conversation-id set,
   short/empty pages with `next_cursor`, bounded cycle continuation, watermark
   commit, history-loss-only gap, seven-day reply pagination and refusal to promise old-thread replies or edits. Resend
@@ -1863,7 +1948,13 @@ are in scope only through the approved
    protection, as `SECURITY.md:51-63` states.
 5. **Provider limits can make polling slow.** Slack may be one call/minute, Gmail can invalidate cursors, and Resend
    shares its budget with interactive work. The schedulers prefer correctness and interactive use over low latency,
-   and the app states expected lag rather than promising real time.
+   and the app states expected lag rather than promising real time. Gmail received/sent classification and label
+   selectors deliberately use the message labels observed by the daemon, not a label snapshot at the mailbox-change
+   instant: for an occurrence that remains eligible to be observed, a change during the normal
+   at-most-one-poll-interval gap—or the longer gap after downtime or while source collection is disabled—is judged as
+   observed. D12's no-backfill rule still means an occurrence skipped wholly inside the global disabled interval
+   creates no event. Approval previews therefore say “messages carrying <label> when agentcomms observes them”;
+   Gmail-labelled events remain tied to their own history record's additions/removals.
 6. **The app is a high-value approval surface.** The authoritative record and digest stay in the daemon; Rust
    re-fetches and text-renders them, custom commands are per-window, and hostile-preview/digest-drift tests are release
    gates.
