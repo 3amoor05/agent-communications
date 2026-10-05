@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { composeDraft, createWhatsAppMcpServer, PACKAGE_NAME, VERSION } from '@agentcomms/whatsapp';
 
 /*
@@ -138,7 +138,18 @@ const printed = run('mcp', 'install', '--client', 'json', '--launcher', 'npx', '
 assert.equal(printed.status, 0, `mcp install --print failed: ${printed.stdout.slice(0, 400)}`);
 const install = JSON.parse(printed.stdout);
 assert.equal(install.data.applied, false, '--print must not write anything');
-assert.deepEqual(install.data.entry.args.slice(0, 3), ['-y', `${PACKAGE_NAME}@${VERSION}`, 'mcp']);
+const args = install.data.entry.args;
+assert.equal(args[0], '-y');
+assert.equal(args[1], `${PACKAGE_NAME}@${VERSION}`, 'the npx entry pins exactly this version');
+// Then this machine's four folders, pinned as options before the subcommand (CUE-403), then `mcp`.
+assert.deepEqual(
+  [args[2], args[4], args[6], args[8]],
+  ['--config-dir', '--state-dir', '--data-dir', '--secrets-dir'],
+  `the npx entry pins the four folders: ${JSON.stringify(args)}`,
+);
+for (const value of [args[3], args[5], args[7], args[9]]) assert.ok(isAbsolute(String(value)), JSON.stringify(args));
+assert.equal(args[3], resolve(configDir), 'the folder it was installed for');
+assert.equal(args[10], 'mcp', `the npx entry runs the CLI, so it must say \`mcp\`: ${JSON.stringify(args)}`);
 
 console.log(
   `whatsapp consumer check: mcp initialize and tools/list over stdio OK, npx entry keeps \`mcp\` (${VERSION})`,

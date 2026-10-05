@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { createSlackMcpServer, PACKAGE_NAME, VERSION } from '@agentcomms/slack';
 
 /*
@@ -202,6 +202,14 @@ assert.equal(install.data.applied, false, '--print must not write anything');
 const args = install.data.entry.args;
 assert.equal(args[0], '-y');
 assert.equal(args[1], `${PACKAGE_NAME}@${VERSION}`, 'the npx entry pins exactly this version');
-assert.equal(args[2], 'mcp', `the npx entry runs the CLI, so it must say \`mcp\`: ${JSON.stringify(args)}`);
+// Then this machine's four folders, pinned as options before the subcommand (CUE-403), then `mcp`.
+assert.deepEqual(
+  [args[2], args[4], args[6], args[8]],
+  ['--config-dir', '--state-dir', '--data-dir', '--secrets-dir'],
+  `the npx entry pins the four folders: ${JSON.stringify(args)}`,
+);
+for (const value of [args[3], args[5], args[7], args[9]]) assert.ok(isAbsolute(String(value)), JSON.stringify(args));
+assert.equal(args[3], resolve(configDir), 'the folder it was installed for');
+assert.equal(args[10], 'mcp', `the npx entry runs the CLI, so it must say \`mcp\`: ${JSON.stringify(args)}`);
 
 console.log(`slack consumer check: mcp initialize and tools/list over stdio OK, npx entry keeps \`mcp\` (${VERSION})`);
