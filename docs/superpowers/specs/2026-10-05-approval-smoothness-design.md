@@ -1,6 +1,6 @@
 # CUE-404 — approving a send without fighting the clock — design
 
-Status: **revised after round 9 (2 P2, 1 P3, all addressed)**, 2026-10-05, from Linear CUE-404 (High; the
+Status: **revised after round 10 (2 P2, 1 P3, all addressed)**, 2026-10-05, from Linear CUE-404 (High; the
 owner: "this is very not smooth") and a cited research pass over this repository, the MCP specification and the
 clients' documentation. Depends on CUE-403 (the CLIs on PATH,
 [its spec](2026-10-04-cli-path-shims-design.md)) for every printed terminal command to work; ships after it.
@@ -101,6 +101,14 @@ implement the first two. The short repeat preview is dropped for this release an
 canonical approval binding includes the content/change digest plus the immutable route and its lifetime profile:
 `{route, pendingMs, approvedMs}` for sends and changes, and the fixed creation-relative download profile for downloads.
 That makes the bump a real change in what an approval authorises, not an advisory field an older binary can ignore.
+
+**Two digests, two jobs.** A version-2 record stores `contentDigest` — the outward content or change identity, computed
+exactly as today's message/change digest (`packages/core/src/digest.ts:130`) — and `bindingDigest`, the canonical
+hash of `{ contentDigest, route, pendingMs, approvedMs }` (or the download profile). Claims and approvals check
+`bindingDigest`; D9 groups records by `contentDigest` (with the exact Slack revision), so identical content prepared
+under different routes or profiles is still one outward post. A legacy record's single `digest` decodes as its
+`contentDigest` with no `bindingDigest`; such records are refused for claims by the digest-version gate and are only
+ever read for reporting.
 
 Released 0.13.0 code already refuses any record whose `digestVersion` differs from its own constant, with “the approval
 was prepared by a different version of agent-communications” (`packages/core/src/approvals.ts:292-293, 570-588`). An
@@ -528,7 +536,9 @@ the strongest permitted draft-level claim: records at or beyond the 90-day reten
 pruned, and the retained audit row does not carry the Gmail or Slack grouping key. The report therefore never makes an
 all-time claim from the approval directory. It is also still a local claim: approval records cannot prove what
 another Gmail client did. When the directory holds more approval files than the scan reads, **every returned candidate
-row instead says “not sent with any of the last 500 approvals”**. A matching `used`, `sending`, `unknown` or
+row instead says “not sent with any of the 500 most recently changed approval records”**. Reading or deriving a status rewrites a record and so changes its modification time; the wording therefore names
+what was scanned — the 500 most recently *changed* records, not the 500 newest approvals — and makes no claim about
+older ones. A matching `used`, `sending`, `unknown` or
 `approved` record inside the window still blocks the candidate; one outside it is exactly why the remaining wording
 is bounded.
 
@@ -757,6 +767,12 @@ lookup failures stay attached to their draft and do not raise the concurrency or
 
 ## 5. Tests owed
 
+- **Round-10 cases:** more than 500 old records rewritten by `list`/`status` just before a report, displacing a newer
+  used blocker — the report's wording names the 500 most recently changed records and claims nothing more; identical Slack
+  content and revision prepared under `chat` and `confirm` groups as one by `contentDigest` while each claim checks its own
+  `bindingDigest`; a production-shaped fake Gmail `sendDraft` held across several heartbeat intervals keeps `sending` and
+  then records success, and again records failure.
+
 Each guard is watched failing under a mutation, then restored.
 
 - **D1 — routes and time:** chat-route sends and changes expire at ten minutes; confirm-route sends/changes (including
@@ -924,7 +940,7 @@ Each guard is watched failing under a mutation, then restored.
 - **D9 — capped, bounded, busy and unreadable evidence:** fixtures contain far more than 500 approval files across
   several mailboxes with controlled mtimes and repeated records per draft. A same-key `used`, `sending` and `unknown`
   record is placed at file 501 in turn while a newer matching expiry remains inside the window; every row says only
-  “not sent with any of the last 500 approvals”, never an all-time claim or the unqualified “its approvals expired”.
+  “not sent with any of the 500 most recently changed approval records”, never an all-time claim or the unqualified “its approvals expired”.
   An unreadable file at each
   position inside the selected window makes every candidate row for the scan exactly “indeterminate (an
   approval record could not be read)”; its unknown ownership is never guessed. An unreadable file outside a capped
@@ -1040,7 +1056,7 @@ approvals to the preparing process.
    exceptions. The report's 500-file cap bounds only its own opened record contents; a due prune can open up to 200
    more first. Report record locks are non-blocking, but a busy retained window can still push a mailbox's record
    outside the scan. Even an uncapped readable scan says only “not sent with any approval in the last 90 days”; every
-   fully read capped row says “not sent with any of the last 500 approvals”. An unreadable or busy selected record, or
+   fully read capped row says “not sent with any of the 500 most recently changed approval records”. An unreadable or busy selected record, or
    approval evidence omitted at the deadline, makes the affected key/scan indeterminate under D9's rules, and doctor
    never presents either count as complete.
 9. **`unknown` can receive one late claimant result** — process suspension or a failed heartbeat can exhaust the
