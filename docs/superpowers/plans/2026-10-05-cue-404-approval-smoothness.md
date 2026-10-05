@@ -152,7 +152,43 @@ The ranges below are where the code actually is:
        sends write `kind: 'send'`.
      - `#transition` (571-589) checks the digest version **before** its derived-state write-back (577), so a record
        of another version is refused with nothing written. Today a v1 record past its expiry is persisted `expired`
-       first. The design never rewrites a v1 record except for the drain's revocation (Task 4).
+       first.
+   - **Only two writers ever touch a v1 record: the legacy drain (Task 4) and a person-directed revoke.** Every other
+     v1 transition stays refused by the version gate: claim, approve, challenge, answer, complete, expiry write-back,
+     and integrity voids. Both writers go through one locked legacy path, which this task introduces because this is
+     the task that makes `#transition` refuse v1 before any write:
+     - **New `revokeLegacy(id, reason)` in `approvals.ts`.**
+       - It takes the record's own lock, `<id>.json.lock`. That is the lock 0.13.0's `#transition` takes
+         (`approvals.ts:573`), so the two serialise.
+       - Under the lock it re-reads the raw file and derives its state by 0.13.0's rules.
+       - Only a derived `pending` or `approved` record is rewritten, as `{ ...raw, state: 'revoked', reason,
+         updatedAt }`. That is **v1-shaped**: `digestVersion` stays 1, an absent `kind` stays absent, and nothing is
+         added — no v2 field (`contentDigest`, `bindingDigest`, `channel`, `revokedAt`, …) and no `<id>.claim`
+         marker.
+       - Any other derived state is written nothing and returned as it is. This includes a stored `pending` or
+         `approved` record past its original expiry, which reads `expired`. This is the choice consistent with the
+         spec's legacy decoder: v1's own derivation decides, an expired record is never rewritten, and it matches
+         today's `revoke` leaving a finished record as it is (`approvals.ts:1078-1083`).
+     - **New `packages/core/src/approval-legacy.ts`** holds `deriveLegacyV1State(raw, now)`, the frozen 0.13.0
+       `#derive` rules (`approvals.ts:513-533`: creation-relative expiry, and `sending` turning `unknown` after 5
+       minutes on `updatedAt`). Task 3 builds its `decodeLegacyV1` on this same function, so there is still one
+       decoder.
+     - **`revoke(id, reason)` (1079-1083) is the person-directed entry point.** When the record is v1 it takes the
+       legacy path instead of `#transition`. Its callers are all person-directed:
+       - the revoke tools and commands: core `revokeApproval` (`maintenance.ts:430`) and `revokeChange`
+         (`changes.ts:438`); Gmail `revokeApproval` (`send.ts:763`), which is `gmail_send_cancel` and `send cancel`;
+         Slack `revokeApproval` (`approve.ts:221`); and Resend `revokeSendApproval` (`send.ts:918`). A conversational
+         "no" is the agent calling one of these;
+       - the terminal cancels: Gmail's Enter-to-cancel (`cli/program.ts:1352`), and the download cancels
+         (`save-destination.ts:1080, 1220`);
+       - the form decline (Task 13).
+
+       0.14's terminal and form refuse a v1 record before rendering it, so in practice a v1 record is revoked through
+       the tools and commands. A decline path that ever reached one would take the same legacy path.
+     - **The integrity voids stay version-gated.** The integrity voids that call `revoke` today (Gmail
+       `beginApproval`, `send.ts:487`; Resend `beginSendApproval`, `send.ts:863`) refuse a v1 record with the
+       version refusal before reading the draft, so they never write one. The same check goes into Slack
+       `beginApproval` (`approve.ts:159`).
    - **New module `packages/core/src/send-epoch.ts`** with `sendEpochOf(config, ownerId)`, which reads an absent value
      as 0. Version 3 does not exist until Task 4, so every epoch reads 0 until then.
    - **Callers.**
@@ -188,6 +224,24 @@ The ranges below are where the code actually is:
      - the download answer and claim, `answerDownload` (`approvals.ts:979`) and `claimForDownload`
        (`approvals.ts:1026`).
 
+   **Revoking a v1 record (person-directed).** In `approvals.test.ts`, with v1 fixtures in the released 0.13.0 shape
+   (sends without `kind`, changes, downloads):
+   - **"a person's revoke of a fresh v1 record writes a v1-shaped revoked".** This runs for a fresh v1 `pending`
+     record and a fresh v1 `approved` record, through each tool and command caller above. The file afterwards is the
+     original plus `state: 'revoked'`, the reason and `updatedAt`, and nothing else. `digestVersion` is still 1 and
+     there is no `.claim` marker. `deriveLegacyV1State` (0.13.0's rules) reads it as `revoked`, and Task 24 repeats
+     this with the real frozen 0.13.0 `ApprovalStore`.
+   - **"a person's revoke of an expired v1 record writes nothing".** A v1 `pending` or `approved` record past its
+     original expiry: the file is byte-identical, and the result is the record with its derived state `expired`, not
+     an error.
+   - **Other derived states.** v1 `used`, `failed`, `revoked`, and `sending` both fresh and stale: nothing is written.
+   - **Every other transition stays refused.** Claim, approve, challenge, answer and complete on a v1 record are
+     refused by the version gate with no write (above).
+   - **Integrity voids.** A v1 record passed to Gmail `beginApproval`, Resend `beginSendApproval` or Slack
+     `beginApproval` is refused before any draft read, and nothing is written.
+   - **The race against a real 0.13 claim** needs the frozen 0.13.0 release and its process harness, so it lives with
+     them in Task 24.
+
    Mutations, each of which must fail a named vector, round-trip or refusal test:
 
    - drop a field from `identityOf`;
@@ -195,10 +249,15 @@ The ranges below are where the code actually is:
    - skip channel validation;
    - leave `DIGEST_VERSION` at 1;
    - put the version check back after the derived-state write-back (`#transition`), which must fail the
-     past-expiry v1 cases' "byte-identical file" assertions.
+     past-expiry v1 cases' "byte-identical file" assertions;
+   - route a v1 revoke through the ordinary version gate (`#transition`) instead of `revokeLegacy`, which must fail
+     "a person's revoke of a fresh v1 record writes a v1-shaped revoked";
+   - add a v2 field (`revokedAt`) to the legacy revoke's write, which must fail the v1-shape assertion.
 
    **Done when.** Every new record is version 2 with both digests. The binding recomputes from stored fields alone.
-   Every caller compiles against `contentDigest`. The existing approval suites pass on version-2 fixtures.
+   Every caller compiles against `contentDigest`. The existing approval suites pass on version-2 fixtures. A person's
+   revoke still retires a live v1 record, in v1 shape, so a running 0.13 client can no longer claim it, and nothing
+   else writes a v1 record.
 
 2. **Risky — State-specific timestamps on every transition, and the version-2 integrity validator.**
 
@@ -260,11 +319,12 @@ The ranges below are where the code actually is:
      - **Unreadable**: the stub `{ approvalId, state: 'corrupt', reason }`. `reason` is a fixed category (invalid
        JSON, truncated, missing ownership, missing kind, wrong shape) and never echoes file bytes. The `approvalId` is
        taken only from a file name that passes `APPROVAL_ID_PATTERN`.
-   - **New module `packages/core/src/approval-legacy.ts`.** `decodeLegacyV1(raw, config, now)` applies only v1's own
-     rules:
+   - **`packages/core/src/approval-legacy.ts`** (from Task 1) gains `decodeLegacyV1(raw, config, now)`, which applies
+     only v1's own rules:
      - An absent `kind` is a send.
-     - State is derived exactly as 0.13.0 `#derive` derives it (creation-relative expiry; `sending` turns `unknown`
-       after 5 minutes on `updatedAt`), and nothing is written back.
+     - State is derived by Task 1's `deriveLegacyV1State`: exactly as 0.13.0 `#derive` derives it (creation-relative
+       expiry; `sending` turns `unknown` after 5 minutes on `updatedAt`), and nothing is written back. `revokeLegacy`
+       uses the same function, so a revoke and a read never disagree about a v1 record's state.
      - No v2 timestamp is ever added.
      - `ownerScope` is `global` when `inboxId` is `''`, else `owner`.
      - The channel: `ibx_` is Gmail. `acc_` is the stored `platform` of the account while it still exists. Anything
@@ -277,6 +337,9 @@ The ranges below are where the code actually is:
      - corrupt records and unreadable stubs, which are never rewritten;
      - a stored `approvalId` that differs from the file name. That case is corrupt before `#path`, the lock or
        `#markClaimed` (802-814) touch the other id.
+   - **`revoke`** keeps routing a legacy record to Task 1's `revokeLegacy`. It now chooses that route from the decoded
+     `StoredApproval`, not from a raw version check. A corrupt record or an unreadable stub is never revoked or
+     rewritten. It is reported as it is.
    - **`list` (1085-1104)** drops `.catch(() => null)`. It returns every file as one of the four forms.
    - **Callers adapt mechanically**, treating anything not v2 as unusable; Task 9 reworks them properly:
      - core: maintenance `listApprovals` (`maintenance.ts:405`) and `revokeApproval` (430); `claimsApproval`
@@ -308,10 +371,12 @@ The ranges below are where the code actually is:
      rule never applies to them.
 
    Mutations: restore the catch-and-skip; put a byte of the file in `reason`; let the decoder write; treat a v1 record
-   with no binding as corrupt; drop the filename check.
+   with no binding as corrupt; drop the filename check. Re-run Task 1's legacy revoke tests through the new read path
+   and require them to pass. Then route a legacy `StoredApproval` to `#transition`, which must fail "a person's revoke
+   of a fresh v1 record writes a v1-shaped revoked".
 
-   **Done when.** No read returns a record it has not validated or decoded, nothing is silently omitted, and v1 files
-   are readable for reporting only.
+   **Done when.** No read returns a record it has not validated or decoded, and nothing is silently omitted. v1 files
+   are readable for reporting, and written only by Task 1's legacy path (the drain and a person's revoke).
 
 4. **Risky — Config version 3: the send epoch, the conversion door and the legacy drain.**
 
@@ -340,10 +405,9 @@ The ranges below are where the code actually is:
          used.
        - Test-only barrier hooks (`beforeLock`, `afterScan`, `beforeWrite`) are injected through the constructor and
          are unreachable from the package's public API, as `enableNamesMigrationForTests` is (`release-gate.ts`).
-   - **`approvals.ts`: new `revokeLegacy(id, reason)`.** This is the one write a v1 record ever receives. Under the
-     record lock, it rewrites a record that is `pending` or `approved` by v1 derivation to `revoked` **in v1 shape**,
-     so 0.13 still parses it, with the reason `prepared by an earlier release; prepare it again`. It reports each
-     record's outcome.
+   - **The drain revokes through Task 1's `revokeLegacy(id, reason)`**, the same locked, v1-shaped path a person's
+     revoke uses, with the reason `prepared by an earlier release; prepare it again`. The drain and a person's revoke
+     remain the only v1 writers. It reports each record's outcome.
    - **`send-epoch.ts`: `ensureSendEpochConfig(core)`.**
      - **Converting.** It scans v1 send records that are `pending` or `approved` by the legacy decoder and marks
        them `open`; historical `used`, `failed`, `revoked` and `expired` records are never tracked.
@@ -446,7 +510,8 @@ The ranges below are where the code actually is:
        throws one byte-identical `NOT_FOUND` with `approval: null`, before any classification.
    - **New `inspect(id, expect)`**, a locked read that persists only derived expiry and `unknown`. This extends the
      write-back rule to every read, as "Expiry is monotonic" requires.
-   - `revoke` (1079-1083) goes through the classifier and persists a derived revocation.
+   - `revoke` (1079-1083) goes through the classifier and persists a derived revocation for a v2 record. A legacy
+     record still takes Task 1's `revokeLegacy`, and is never classified as v2.
    - The wrong-code path (704-716) keeps its boundary.
    - `claimForSend` loses `live.policy` (decision 4).
 
@@ -1454,6 +1519,21 @@ The ranges below are where the code actually is:
       - A forced failed revocation: the record is named, the drain stays pending, loosening is refused, and the
         revocation is retried.
       - A claim that already holds its lock completes, and the conversion lists it.
+    - **A person's revoke against a frozen claim (Task 1's legacy path).** The config is still version 2, so no
+      conversion or drain is involved. The frozen 0.13 `agent-gmail send execute` claims a v1 `pending` record that a
+      0.14 process revokes as a person's "no" (`agentcomms approvals revoke`). Fake Google's `slowNext()` on the
+      frozen process's draft read is the barrier: it falls after the frozen process's config read and before its
+      record lock.
+      - **"a person's revoke that takes the record lock first stops a frozen 0.13 claim".** The revoke runs while the
+        frozen process is held, then the barrier is released. The frozen claim reads the v1-shaped `revoked` and
+        refuses. Fake Google records no `drafts/send` request, and no `.claim` marker exists. The frozen 0.13.0
+        `ApprovalStore` reads the file as `revoked`.
+      - **"a frozen 0.13 claim that takes the record lock first is the documented locked-winner limit".** The barrier
+        is moved onto `drafts/send`, so the frozen claim has already written `sending`. The 0.14 revoke then writes
+        nothing and returns the record as `sending`. The send completes as an in-flight send does, and the stand-in
+        records exactly one request. The test asserts this limit as the expected outcome, not a failure.
+      - Mutation: route the legacy revoke through the ordinary version gate. The first case must fail, with a
+        `drafts/send` request recorded.
     - **The D2 matrix on every surface**, Slack files and reactions included.
     - **The ticket's acceptance**, end to end with fake Gmail:
       - an internal colleague from another mailbox, through an untrusted client;
@@ -1466,8 +1546,9 @@ The ranges below are where the code actually is:
     Mutations: make 0.14 write version 2; let the drain skip a record whose lock is busy; let the acceptance flow
     re-prepare. The frozen tests must fail.
 
-    **Done when.** The old release fails closed against everything 0.14 writes. Every D2 row holds on every surface.
-    The ticket's four-attempt story is one prepare and one decision. `pnpm verify` passes.
+    **Done when.** The old release fails closed against everything 0.14 writes. A person's "no" given to 0.14 stops a
+    0.13 claim that has not yet taken its lock. Every D2 row holds on every surface. The ticket's four-attempt story
+    is one prepare and one decision. `pnpm verify` passes.
 
 25. **Skills, docs, the changelog, and the 0.14.0 release.**
 
