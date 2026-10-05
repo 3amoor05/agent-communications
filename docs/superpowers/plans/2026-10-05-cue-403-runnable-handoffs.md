@@ -97,9 +97,12 @@ ongoing completeness check. In Task 15, inspect false-negative fixtures as close
    from inherited environment. Update the channel terminal-update hooks only to pass the same resolved path identity,
    not a second option implementation.
 
-   **Tests first.** Extend `packages/core/test/update.test.ts` and every channel's `update-gate.test.ts` for §4 **3i**:
-   a due child launched from a flag-pinned parent under conflicting ambient roots reads and writes only the parent's
-   directories. Mutate the child spawn to omit one pin and mutate the child to resolve before applying pins; the
+   **Tests first.** Extend `packages/core/test/update.test.ts` and the Gmail, Slack and Resend `update-gate.test.ts` for
+   §4 **3i**: a due child launched from a flag-pinned parent under conflicting ambient roots reads and writes only the
+   parent's directories. WhatsApp has no detached child by design (it imports only the reader and never asks the
+   registry — `docs/superpowers/specs/2026-09-28-daily-update-check-design.md:147`,
+   `packages/whatsapp/test/update-gate.test.ts:122`): its test asserts instead that a flag-pinned run reads the update
+   state from the pinned directory and that the bundle still contains no child. Mutate the child spawn to omit one pin and mutate the child to resolve before applying pins; the
    tests must fail.
 
    **Done when.** The detached child has the same suite path identity as its parent on core and channel surfaces, no
@@ -284,8 +287,12 @@ ongoing completeness check. In Task 15, inspect false-negative fixtures as close
    `update-gate.ts`, `update-check.ts`, `render.ts`, `config.ts`, `organisations.ts`, `jail.ts`, `secrets.ts`,
    `channel-words.ts`, `cli.ts`, and the files under `packages/core/src/operations/` named by the spec
    (`update.ts`, `attach-settings.ts`, `maintenance.ts`, `organisations.ts`, `secrets-migrate.ts`,
-   `change-policy.ts`). Also migrate `installCommand` at `packages/core/src/mcp-install.ts:758`; its refusal hints and
-   retry/re-register commands must use the locator outcome rather than constructing a suite `ShellCommand`. The
+   `change-policy.ts`). Also migrate `installCommand` at `packages/core/src/mcp-install.ts:758` without breaking the
+   import graph: `mcp-install.ts` must not import the locator, so its refusal paths (`claimName`, `mcp-install.ts:661`,
+   and the others) return **structured refusal data** — the product, the words to run and why — with no command, and
+   the operations layer (`operations/servers.ts`, which may import `cli-command.ts`) turns that data into a located
+   `PrintedCommand` or a no-command outcome before the result leaves core. No suite `ShellCommand` is built in
+   `mcp-install.ts`. The
    principal functions are `approveCommandOf`, `changeApprovalCommand`, `nextStep`,
    `changeToolResult`, `approvalHint`, `gatedChangeAtTerminal`, `questionText`, `downloadAtTerminal`,
    `updateStopMessage`, `updateRequired`, `updateCheckChildEntry`, `renderInstall`, `renderDoctor`, `renderPrune`,
