@@ -88,15 +88,25 @@ implement the first two. The short repeat preview is dropped for this release an
   account, expected recipients or subject, or a drifted change plan still voids it at claim. Boundary equality is
   expired. It is claimable only while the effective live policy is not `never`.
 - **`never` revokes; loosening revives nothing.** `never` exists only for sends (`ChangePolicy` has no such value,
-  `packages/core/src/config.ts:37, 45`). The operation that sets an owner's send policy to `never` revokes, in the same
-  operation and under each record's lock, every `pending` and `approved` send record of that owner, with reason
-  `sending was turned off (policy: never)`; a record already `sending` is left to finish or become `unknown`, and a
-  failure to revoke one is reported with the policy change rather than hidden. Independently, as today, any claim,
-  execute, or terminal/form approval that meets an effective `never` — the live policy, or a record's
-  `requiredPolicy: never` — revokes that record under its lock and returns `POLICY_NEVER`
-  (`packages/core/src/approvals.ts:757-758, 770-772`); an approval attempt never moves a record to `approved` under
-  `never`. So no record created before `never` can send after the policy is loosened again: a later `chat` or `confirm`
-  policy needs a newly prepared approval.
+  `packages/core/src/config.ts:37, 45`). The guarantee rests on a durable fence, not on a sweep. Config holds a
+  per-owner **send epoch**, an integer (absent reads as 0). Every config write that makes an owner's *effective* send
+  policy `never` — its own setting, or an inherited organisation or default change — increments the epoch of every
+  owner whose effective policy that write turns to `never`, in the same atomic config write
+  (`packages/gmail/src/operations/inboxes.ts:228` is the Gmail case today). A send record stores the owner's epoch as
+  read at prepare, bound into `identity`. A claim, execute, or terminal/form approval compares it with the live epoch
+  under the record lock; any difference revokes the record with reason `sending was turned off since this was prepared
+  (policy: never)` and returns `APPROVAL_VOID` — whatever the policy is by then. So a prepare that read `chat` and wrote
+  its record after a `never` change landed (prepare reads policy and creates the record outside one transaction,
+  `packages/resend/src/operations/send.ts:293`), or a record a sweep failed to revoke, can never send after the policy
+  is loosened: its epoch is behind for good. Loosening never decrements the epoch.
+
+  The sweep is cleanup on top of the fence: the operation that sets `never` also revokes, under each record's lock,
+  every `pending` and `approved` send record of the owners it fenced, so that status and lists say so at once; a record
+  already `sending` is left to finish or become `unknown`, and a failure to revoke one is reported with the policy
+  change. And while the effective policy is `never`, any claim, execute, or terminal/form approval revokes the record
+  and returns `POLICY_NEVER`. For claims this is today's behaviour (`packages/core/src/approvals.ts:757-758, 770-772`);
+  for terminal/form approval it is new — today's `approve()` is not given the live policy and can approve — and an
+  approval attempt never moves a record to `approved` under `never`.
 - **Downloads do not adopt the new approval lifetime.** A download question expires thirty minutes after creation,
   including after it is answered, and has no `usableUntil`; this is the existing model
   (`packages/core/src/approvals.ts:921-1004`).
@@ -122,7 +132,8 @@ ever read for reporting.
 characters). This is the **only** definition: one core helper, `bindingDigestOf(record)`, returns the SHA-256 of the
 canonical JSON (the existing `canonicalJson`) of `{ "v": 2, "kind", "contentDigest", "route", "pendingMs",
 "approvedMs", "identity" }`, where `identity` is the record's **own top-level operational fields** that ownership and
-execution already use — `{ approvalId, inboxId, inboxSub, draftId, draftMessageId, expect }` (`packages/core/src/approvals.ts:302`,
+execution already use — `{ approvalId, inboxId, inboxSub, draftId, draftMessageId, expect }`, plus `sendEpoch` on a
+send record (D1, "`never` revokes") — (`packages/core/src/approvals.ts:302`,
 used by claim at `approvals.ts:725` and by Gmail at `packages/gmail/src/operations/send.ts:472`). There is no second
 copy: no stored `groupKey`. For a download the object is `{ "v": 2, "kind": "download", "contentDigest", "profile":
 { "pendingMs": 1800000, "policy", "requiredPolicy" }, "identity", "offered", "listing" }` — `policy` and
@@ -890,6 +901,12 @@ lookup failures stay attached to their draft and do not raise the concurrency or
 
 ## 5. Tests owed
 
+- **Round-26 cases:** a sweep that fails to revoke a `pending` and an `approved` record, followed by `never → chat` and
+  `never → confirm`: each record's claim, execute and approval revoke it on the stale epoch; a prepare that read the
+  `chat` policy and epoch N, then wrote its record after a completed `never` change (epoch N+1) and that change's sweep,
+  followed by loosening: its claim revokes on the stale epoch; an inherited organisation or default change that turns an
+  owner's effective policy to `never` increments that owner's epoch and no other's; loosening leaves every epoch as it
+  is; the epoch is in `identity`, so editing it in a stored record breaks `bindingDigest`.
 - **Round-25 cases:** a `pending` and an `approved` send each taken through `chat → never → chat` and
   `confirm → never → confirm`: the change to `never` revokes both, and after loosening neither can be claimed, executed
   or approved — each returns the revoked result, and only a newly prepared approval can send; a revocation failure
