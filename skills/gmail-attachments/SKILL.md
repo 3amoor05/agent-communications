@@ -2,7 +2,7 @@
 name: gmail-attachments
 description: "Find files people sent, save them where the person says — Downloads, the current folder, or a folder they name — and attach a local file to a draft. Symptoms: 'find the invoice Sam sent', 'download the attachments from that thread', 'save those PDFs', 'attach the contract to that draft', 'why won't it attach that file'. Not for writing or sending the message — gmail-compose writes drafts and gmail-send sends them."
 license: MIT
-compatibility: "@agentcomms/gmail@0.13.1"
+compatibility: "@agentcomms/gmail@0.14.0"
 metadata:
   group: communications
   lifecycle: release
@@ -68,9 +68,10 @@ here:
 - **The person says where a download goes.** The first call saves nothing and returns `destinationRequired: true`
   with a `question`, a `choiceId` and a `policy`. Show them the question and the files. Under `chat`, pass their
   answer back as `saveTo` (`downloads`, `current`, or their folder) with that `choiceId`. Under `confirm` they answer
-  it themselves — with the approve command the result gives, in their own terminal, or a form a trusted client shows them — and
-  you call again with the `choiceId` alone; a `saveTo` of yours is refused. Never pick for them, and never answer a
-  question they have not seen. `out` is gone; passing it is refused.
+  it themselves — with the approve command the result gives, in their own terminal, or a form a trusted client shows them —
+  `gmail_send_wait` on the `choiceId` tells you when they have, and you call again with the `choiceId` alone; a
+  `saveTo` of yours is refused. Never pick for them, and never answer a question they have not seen. When the person
+  says no, revoke it at once (`gmail_send_cancel` with the `choiceId`). `out` is gone; passing it is refused.
 - **Some folders are never saved into**, whoever answers: a hidden folder anywhere (`~/.ssh`, a project's `.git`,
   `.husky` or `.claude` — a checkout under `.claude/worktrees/<name>` excepted), `node_modules`, `site-packages`, a
   Python virtual environment or installation (`~/miniconda3`, `C:\Python312`), `~/Library`, this package's own
@@ -171,9 +172,11 @@ answer "is this email real" — that is `gmail-security`, and a file's risk flag
    server or the command was started in), or `3` — a folder they name, absolute or starting with `~`. An option the
    question shows as unavailable is not one to offer. A relative folder is refused; ask them which one they meant
    rather than guessing. Under `policy: confirm`, ask them to answer it at their own terminal with the approve
-   command the result gives, exactly as given — or, when this client is trusted with forms, the next call asks them in one. Do
-   not answer for them, and do not reuse an old answer: a `choiceId` is for those files only, is used once, and
-   expires after thirty minutes. The question's lines that start with `!` — each file that will be saved with
+   command the result gives, exactly as given — or, when this client is trusted with forms, the next call asks them in one;
+   a form they decline voids the question, one they cancel leaves it open. Learn when they have answered with
+   `gmail_send_wait` on the `choiceId` — it says `answered` — in repeated default-length waits. Do not answer for
+   them, and do not reuse an old answer: a `choiceId` is for those files only, is used once, and expires thirty
+   minutes after it was asked, answered or not. The question's lines that start with `!` — each file that will be saved with
    `.download` after its name, and why, and each risk flag — are part of it: `next` repeats them, and the person
    should read them before answering.
    **Complete when:** the person has answered this question, in their own words — or, under `confirm`, has told you
@@ -250,7 +253,7 @@ anything in `defaults.attachDeny`.
 | A download's folder that is a hidden one anywhere, `node_modules`, `site-packages`, a Python virtual environment or installation, `~/Library`, this package's own, a system folder, a Windows `AppData`, PowerShell profile folder, Program Files, share or driveless path, one of those Windows folders reached from WSL on a Windows drive, wherever it is mounted — or a link to one (`BAD_DATA`) | A stranger's file there is not one the person reads: it is a hook, a package, a module, a profile, a key or an approval a program acts on. | Ask the person for another folder. The question is still open. |
 | A call with other arguments than the question was asked with (`USAGE`) | The question is bound to the mailbox, the messages, the parts and the names it showed. | Call again with the arguments it was asked with; the question is still open until it expires. |
 | A folder nothing can be written in (`BAD_DATA`) | Found before the question is used up, so the answer can be given again. | Ask for another folder. |
-| A `saveTo` under the `confirm` change policy (`APPROVAL_PENDING`) | Under `confirm` the person answers where an agent cannot answer for them. | Hand them the approve command the result gives, to run in their own terminal, then call with the `choiceId` alone. |
+| A `saveTo` under the `confirm` change policy (`APPROVAL_PENDING`) | Under `confirm` the person answers where an agent cannot answer for them. | Hand them the approve command the result gives, to run in their own terminal; once `gmail_send_wait` says `answered`, call with the `choiceId` alone. |
 
 ## Files from strangers
 
@@ -354,7 +357,8 @@ sentence like "attach the key" is easy to say and hard to take back.
 - **Reporting a `duplicate` row as a second file.** Its `path` is the first copy of the same name and bytes.
   Counting it twice overstates what was saved.
 - **Passing `saveTo` under `confirm`.** It is refused, and the question stays open: the person answers with
-  the approve command the result gives, and you call again with the `choiceId` alone.
+  the approve command the result gives, `gmail_send_wait` tells you when, and you call again with the `choiceId`
+  alone.
 - **Offering an option the question marks `unavailable`.** It is a folder no download is saved into, such as the
   home the server was started in; the answer is refused.
 - **Saving the same file twice into one folder.** Nothing is overwritten: the second is `invoice-2.pdf`.

@@ -61,21 +61,25 @@ Three policies, per mailbox:
 
 | Policy | What it takes to send | Who can do it |
 |---|---|---|
-| `chat` (default) | You approve the preview in the conversation | You, in the chat |
-| `confirm` | You type a code at a terminal, or in a form the agent cannot answer | You, outside the agent |
+| `chat` (default) | You approve the preview in the chat, within ten minutes | You, in the chat |
+| `confirm` | You type a code at a terminal, or in a form from a client you chose to trust, within thirty minutes; the agent then has 24 hours to send it | You, outside the agent |
 | `never` | Nothing. The draft waits in Gmail | You, in Gmail |
 
 Under `chat` the server cannot see your conversation, so what it guarantees is narrower and it says
 so plainly: nothing is sent without a prepare step for **exactly** that content, within ten minutes,
 once, with matching recipients and subject, under the rate caps, and audited. Whether the agent
-actually showed you the preview is between you and your agent — which is why `confirm` exists. The same goes for
+actually showed you the preview — and revoked it when you said no — is between you and your agent,
+which is why `confirm` exists. Under `confirm` the agent learns that you approved by waiting
+(`gmail_send_wait`), never by asking, and every result says where its approval stands; a send whose
+outcome Gmail never answered says so (`SEND_OUTCOME_UNKNOWN`) and is checked in Sent, never repeated. The same goes for
 loosening a mailbox: under the default `chat` change policy your yes in the conversation approves it, and the software
 cannot tell that yes from the agent's own, so for an agent you are not watching set `agentcomms policy confirm` too.
 
 A `chat` mailbox raises itself to `confirm` on its own when something looks like exfiltration: a
-recipient whose address arrived in mail that was read this week and whom you have never written to,
-an attachment going to a first-time external address, a domain within two characters of one you
-know.
+recipient whose address arrived in mail that was read this week and whom you have never written to
+(a domain alone never escalates a colleague on your own domain), an attachment going to a first-time
+external address, a domain within two characters of one you know. [Sending and approvals](docs/sending.md)
+has the whole of it.
 
 ## Install
 
@@ -322,7 +326,8 @@ says so, so an upgrade never widens what the server may reach. Restart the clien
 
 Coming from an older release, or bringing another computer up to date — the rename to
 organisation/platform names, both MCP servers, and a prompt an agent there can follow:
-[Upgrading](docs/upgrading.md).
+[Upgrading](docs/upgrading.md). From 0.14.0 the shared configuration moves to version 3, which 0.13
+cannot read: restart every client after updating, so no server is left on 0.13.
 
 > **Remove the other Gmail server once you have migrated.** Everything here assumes it owns the only route to
 > Gmail's send endpoints. A second server with an ungated `send_email` tool does not break that guarantee so much
@@ -413,6 +418,9 @@ Stated plainly, because a security tool that overstates itself is worse than one
   checks catch addresses, not prose.
 - **A message asking you to reply to its own sender** with something private is caught only by you
   reading the preview, under `chat`. `confirm` covers it.
+- **An approval you gave at a terminal, for 24 hours.** Any process sharing this machine's approval
+  store can use it once, for exactly what you approved, until it expires — and a "no" you say in the
+  chat reaches the server only when the agent revokes the approval.
 - **Another WhatsApp server beside this one.** This package cannot send; a linked-device server can,
   and an agent uses whichever tool it finds. `mcp install` warns about any it sees registered.
 - **The WhatsApp index at rest.** It is a plaintext copy of the chats agents may see, readable by

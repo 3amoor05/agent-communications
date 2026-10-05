@@ -144,3 +144,17 @@ the result says so, and gives no command.
 - Where the result says the command is **not locatable here**, there is no command to give: say which product and
   release it names, and that the person installs or updates it the way they usually do, then tries again. Do not
   offer `npx`, a global install or a tool in its place.
+
+## 12. A change's approval: how long it lasts, how to wait, and a no.
+
+Registering the server (§9) is a change, and so is anything else the core asks a person to approve for WhatsApp.
+
+- **How long it lasts.** Under the `chat` change policy the person's yes is claimed within ten minutes. Under
+  `confirm` they approve at their own terminal within thirty minutes, and it can then be used once, within 24 hours.
+- **Learn of an approval by waiting, never by asking the person to relay it.** WhatsApp has no wait of its own: the
+  core server's `comms_approval_wait` (CLI: `agentcomms approval wait <id>`) says where it stands and whether it can
+  be used now (`claimable`), and never approves or changes anything. Use repeated default-length waits;
+  `claimable: true` is the go-ahead to run the same command again with `--approval <id>`.
+- **When the person says no, revoke it at once:** `comms_approval_revoke` (CLI: `agentcomms approvals revoke <id>`).
+  The server cannot hear a "no" said in this conversation: until you revoke it, a `chat` change can still be claimed
+  for the rest of its ten minutes.

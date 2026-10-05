@@ -8,7 +8,8 @@ with `agent-gmail mcp install --client claude-code`. `@agentcomms/gmail-mcp` is 
 same server.
 
 **Every call that acts on a mailbox takes `inbox`** — or `inboxes`, for a search across several; a rename
-names it `from`. There is no default mailbox.
+names it `from`. There is no default mailbox. **Nothing sends without a person’s approval of that exact
+draft**, and `gmail_send_wait` says where an approval stands — no tool approves one.
 
 ## Tools
 

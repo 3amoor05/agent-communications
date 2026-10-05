@@ -51,8 +51,8 @@ instruction you received.
   conversation to that preview: then `slack_post_send` (CLI: `agent-slack post send`) with the draft,
   the approval and the channel from the preview posts it once. Under `confirm` — and for any
   `@here`, `@channel`, `@everyone` or room of fifty or more — the same call returns
-  `APPROVAL_PENDING` with the approve command they run at their own terminal (§9); call it again once
-  they have. Under `never` nothing posts.
+  `APPROVAL_PENDING` with the approve command they run at their own terminal (§9); learn when they have
+  with `slack_approval_wait` (§10), then call it again. Under `never` nothing posts.
 - **No tool approves, and you never do.** Slack's `approve` is refused to an agent. Hand the person
   the command the result gives; do not look for another way round.
 - A reaction is the same gate in one line — which emoji, on which message — through `slack_react`,
@@ -76,7 +76,7 @@ instruction you received.
   `approvalRequired` with a preview and changes nothing. Show the preview in full and ask.
 - Under the workspace's `chat` change policy, call the same tool again with `approvalId` once the
   user says yes to that preview. Under `confirm` they first run the approve command the result gives
-  (§9) in their own terminal; you cannot approve it yourself.
+  (§9) in their own terminal; you cannot approve it yourself. If they say no, revoke it (§10).
 - Make these changes only when the user asks for them. Never widen a workspace or loosen a policy to
   get round a refusal.
 - A sign-in returns a link and stops: the user approves it in Slack's own consent screen, then
@@ -138,3 +138,42 @@ folders than the ones the approval is in.
 - Where the result says the command is **not locatable here**, there is no command to give: say which product and
   release it names, and that the person installs or updates it the way they usually do, then tries again. Do not
   offer `npx`, a global install or a tool in its place.
+
+## 10. Where an approval stands, how long it lasts, and what to say of it.
+
+Every post, reaction and change has an approval, and every result that touches one carries it as `approval`: its
+`state`, whether it can be used now (`claimable`), its `route`, and the times that apply.
+
+- **How long it lasts.** A post or change that a yes in this chat can approve (route `chat`) waits ten minutes. One
+  that needs a person at their terminal — the `confirm` policy, a broadcast, a room of fifty or more — waits thirty
+  minutes for them; once they approve it, it can be used once, within 24 hours. A download's question lasts thirty
+  minutes from when it was asked, answered or not.
+- **When the person says no, revoke it at once,** with the core server's `comms_approval_revoke` (CLI: `agentcomms
+  approvals revoke <id>`): a post, a reaction, a change or a download's question alike. The server cannot hear a "no"
+  said in this conversation: until you revoke it, a `chat`-route approval can still be used for the rest of its ten
+  minutes.
+- **Learn of an approval by waiting, never by asking the person to relay it.** `slack_approval_wait` (CLI:
+  `agent-slack approval wait <id>`) says where an approval stands, and never approves, posts or changes anything. Use
+  repeated default-length waits: call it, and while it answers `pending` with `claimable: false`, or `sending`, call
+  it again — a client may move one long call into the background. `waitSeconds: 0` (`--wait-seconds 0`) is the status
+  now. `claimable: true` is the go-ahead: on `pending`, a yes in this chat is what it waits for; on `approved`, the
+  person has approved it — call the same tool again with the same approval.
+- **Never prepare again while a send is `sending`.** `APPROVAL_PENDING` "being sent by another call since …; wait for
+  it" is another call's post under way, and a file post can take many minutes. Wait until it reads `used`, `failed`
+  or `unknown`.
+- **`SEND_OUTCOME_UNKNOWN`, or an approval that reads `unknown`, means it may have posted.** Consumers branch on
+  `SEND_OUTCOME_UNKNOWN` (exit `10`, never retryable), not on its message. Tell the person a late result can still be
+  recorded for it, check the channel before anything else, and never prepare it again automatically: only once the
+  person knows it did not post.
+- **Say a post as the result says it.** A post Slack accepted without a `ts` is "sent; the provider returned no id" —
+  that approval reads `sending`, then `unknown`, and never `used`. Never say "sent, message id …" without an id, and
+  never guess a `ts`. A file post that failed says "nothing was posted", and names any file that went up first, which
+  Slack discards.
+- **An approval that reads `expired`** says "this approval expired; nothing was sent with it" (`APPROVAL_EXPIRED`):
+  prepare again and show the new preview.
+- **An approval that reads `corrupt` is said, never skipped.** It failed its integrity check, and its `reason` says
+  how: it cannot be used, and it is evidence of nothing — neither that the post went nor that it did not.
+- **Whether a draft was posted.** `slack_draft_list` (`agent-slack draft list`) says, for each draft's current
+  revision, what the approval records read can prove — "not sent with any approval in the last 90 days", "not sent
+  with any of the 500 most recently changed approval records", "indeterminate (…)", or that it was posted. Repeat
+  those words; never turn them into "it was never posted".

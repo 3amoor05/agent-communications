@@ -102,6 +102,13 @@ code instead:
   permit naming that draft, so a send added anywhere in the package fails at the request rather than at review.
 - **An approval bound to the bytes.** The record covers a digest of everything a recipient would see and the
   draft's Gmail message id, which changes on every save. Edit the draft and the approval is void.
+- **An approval bound to its route.** The record also binds how it may be approved — a yes in the chat, or a person
+  outside it — and so how long it lasts: ten minutes on the chat route, thirty for a person, 24 hours once they
+  approved. Every send, status and list says where it stands (`state`, `claimable`), an agent learns of an approval
+  with a wait that only looks, and a send whose answer was lost is `SEND_OUTCOME_UNKNOWN`, never retried.
+- **A fence before the provider.** A claimed send holds a two-minute lease it renews every thirty seconds, and checks
+  it immediately before Gmail is asked; a claimant that lost it sends nothing. Turning sending off (`never`) moves the
+  mailbox's send epoch, so nothing prepared before it can send again, whatever the policy becomes.
 
 What that buys, stated narrowly: an agent using this package cannot send without an approval. It does not stop an
 agent with a shell, and it does not stop a different Gmail server installed beside it. See
@@ -115,7 +122,9 @@ from Slack: every way of putting something in front of people (`chat.postMessage
 reaction) is behind the one permit, and the approval covers how many people the post reaches, so a room that grew
 after the preview voids it. Both surfaces post through that one gate: `slack_post_prepare` returns the preview, and
 `slack_post_send` (or `agent-slack post send`) posts it once the approval allows — a yes in the conversation under
-`chat`, the approve command the result gives, at the person's own terminal under `confirm`, which no tool can run.
+`chat`, the approve command the result gives, at the person's own terminal under `confirm`, which no tool can run —
+the agent learns that it was with `slack_approval_wait`. Each step of a post — each upload, the share, the message, a
+reaction — starts only after a fence on the approval's lease, so a long file post stays `sending` while it renews.
 
 A post can carry local files, chosen by the attachment jail Gmail uses (under the home folder, never from its hidden
 folders). The draft records each by real path, name, size, type and SHA-256; the preview lists them and the digest
@@ -134,8 +143,9 @@ is Gmail's shape for an API with no drafts: `resend_send_prepare` stores the ema
 recipient, BCC included, the reach and the From domain; `resend_send_execute` (or `agent-resend send execute`) is
 the one function that may call Resend's send endpoint, claims the approval once, and sends with the approval id as
 the `Idempotency-Key`. More than ten recipients, or an address first seen in mail read here, needs a person at a
-terminal whatever the policy. A send whose outcome is unknown is recorded as unknown and checked with
-`resend_send_status`, never repeated. The key is typed by a person at a terminal (`agent-resend account add`), and no
+terminal whatever the policy, and the agent learns of it with `resend_send_wait`. A send whose outcome is unknown is
+`SEND_OUTCOME_UNKNOWN`, recorded as unknown and checked with `resend_send_status` — which says what Resend's own last
+event reports, attributed to Resend — never repeated. The key is typed by a person at a terminal (`agent-resend account add`), and no
 tool accepts one.
 
 ## How WhatsApp is kept read-only

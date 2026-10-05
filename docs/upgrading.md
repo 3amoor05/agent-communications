@@ -98,6 +98,31 @@ couple of minutes later. WhatsApp's server and command, which never reach the ne
 themselves; they stop once any other server or command on the machine has found an update. The check is skipped
 entirely when `CI` is set, or when `AGENT_COMMS_UPDATE_CHECK=off`.
 
+## 0.14.0: the configuration moves to version 3
+
+0.14.0 adds a send epoch to the shared configuration — the counter that makes turning sending off (`never`) final for
+every approval prepared before it, whatever the policy is set to later — and that needs **configuration version 3**.
+0.13 reads versions 1 and 2 and refuses any other before it does anything, so the first 0.14 server or command that
+prepares, approves or sends anything, or changes a send policy, converts the configuration in one write. From then on:
+
+- **A server still running 0.13 fails every call it starts**, with "`<path>` has version 3; this release reads
+  versions 1 and 2" and "Upgrade agent-communications, or restore a config written by this version". Restart every
+  client after the update — the update already asks for that — so it starts its servers on 0.14. Nothing in the
+  configuration is lost; it gains `sendEpochs`, and `legacyDrain` while the step below runs. This breaks, on purpose,
+  the usual rule that a release reads a configuration version before any release writes it: a 0.13 process that
+  kept going could still use an approval prepared before sending was turned off.
+- **What 0.13 prepared is retired.** Each send it prepared that is still waiting or approved is revoked with
+  "prepared by an earlier release; prepare it again" — 0.14 could never use one anyway — and the call that converted
+  lists them (`legacyDrain`). Prepare them again. A 0.13 send that had already taken its record when the conversion
+  came is not stopped; it is listed by id, so it is never silent. `agentcomms doctor` shows "earlier-release
+  approvals" until every one is retired.
+- **No send policy can be loosened meanwhile:** "records from an earlier release are still being retired, so no send
+  policy can be loosened yet". Every send prepare, claim or approval retries the retiring. It ends no sooner than ten
+  minutes after the conversion — the longest anything 0.13 prepared could still be waiting. Tightening is never held
+  up.
+- **What 0.14 prepares, 0.13 cannot use either:** its records are a new version, which 0.13 refuses with "the approval
+  was prepared by a different version of agent-communications".
+
 Everything below is the long way round — and the only way across the rename, which `update` does not do.
 
 ## Before you start

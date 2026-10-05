@@ -211,8 +211,10 @@ draft ──► send prepare ──► you read the preview ──► send execu
 message id, which changes whenever the draft is edited. `send execute` re-reads the draft and refuses if either has
 moved. The approval is single-use.
 
-Each mailbox has a policy: `chat` (the default) needs your yes in the conversation, `confirm` needs a code typed at
-a terminal, `never` means the draft waits in Gmail for you to send yourself.
+Each mailbox has a policy: `chat` (the default) needs your yes in the chat, within ten minutes; `confirm` needs a
+code typed at a terminal, within thirty, and the agent then has 24 hours to send it; `never` means the draft waits in
+Gmail for you to send yourself. Under `confirm` the agent hands you the command to run and waits for it
+(`gmail_send_wait`) — you never have to tell it you approved. If you say no, it revokes the approval.
 
 ## Slack
 

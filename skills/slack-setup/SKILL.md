@@ -2,7 +2,7 @@
 name: slack-setup
 description: "Connect a Slack workspace to agent-slack: the app manifest, the PKCE sign-in, read and send modes, and what doctor reports. Symptoms: 'connect my Slack', 'set up agent-slack', 'why can't it post', 'move this workspace to send mode', 'agent-slack doctor says something is wrong'. Not for reading or posting once it works — slack-reading and slack-posting do those."
 license: MIT
-compatibility: "@agentcomms/slack@0.13.1"
+compatibility: "@agentcomms/slack@0.14.0"
 metadata:
   group: communications
   lifecycle: release
@@ -138,10 +138,15 @@ Tightening — renewing a grant, narrowing, a stricter policy — applies at onc
      terminal, the same command with `--approval <approvalId>`).
    - `confirm`: they run the approve command the result gives in their own terminal — this installation's own,
      its folders pinned, whether core is installed beside Slack or only inside it; hand it over exactly as given —
-     and type the code it shows. You cannot approve it yourself; call the tool again with `approvalId` once they
-     say they have.
-4. The approval is single use, lasts ten minutes, and is bound to exactly the change shown. If the workspace changed
-   in between, it is refused and has to be asked for again.
+     and type the code it shows. You cannot approve it yourself; learn when they have with `slack_approval_wait`
+     (`agent-slack approval wait <approvalId>`), in repeated default-length waits, then call the tool again with
+     `approvalId`.
+4. When the person says no, revoke it at once, with the core server's `comms_approval_revoke` (CLI: `agentcomms
+   approvals revoke <approvalId>`): the server never hears a "no", and until it is revoked a change under `chat` can
+   still be claimed for the rest of its ten minutes.
+5. The approval is single use and bound to exactly the change shown. It waits ten minutes for a yes in chat, thirty
+   for the terminal, and once approved there it can be used within 24 hours. If the workspace changed in between, it
+   is refused and has to be asked for again.
 
 A person running the command at a terminal approves there and then: a `yes` under `chat`, the typed code under
 `confirm`.
@@ -182,8 +187,8 @@ remove, asks nobody. The server appears after the client is restarted.
 
 What the agent gets is everything the CLI does except approving, and changing the Slack app itself. Posting and
 reacting go through the same approval gate as the CLI: under `chat` the person's yes in the conversation is the
-approval, under `confirm` they approve at their own terminal with the approve command the result gives, and under `never` nothing
-posts — see `slack-posting`. Changing a workspace goes through a change approval, as above.
+approval, under `confirm` they approve at their own terminal with the approve command the result gives — the agent
+learns when with `slack_approval_wait` — and under `never` nothing posts — see `slack-posting`. Changing a workspace goes through a change approval, as above.
 
 | MCP tool | CLI |
 |---|---|

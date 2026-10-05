@@ -2,7 +2,7 @@
 name: comms-onboarding
 description: "Set a person up with agent-communications from chat: which channels and accounts, which mode each account should have, the servers registered, every sign-in started, and the steps only they can take named. Symptoms: 'set up my email and Slack', 'install agent-communications', 'connect Gmail and Slack to Claude', 'onboard me', 'set this up on my other computer'. Not for one account's settings once it works — gmail-setup and slack-setup do those."
 license: MIT
-compatibility: "@agentcomms/core@0.13.1"
+compatibility: "@agentcomms/core@0.14.0"
 metadata:
   group: communications
   lifecycle: release
@@ -46,8 +46,9 @@ Ask in one message, and wait:
      only. The key is typed by the person at a terminal (`agent-resend account add`) — never in chat.
    - WhatsApp: read only, always. The person adds the store at a terminal (`agent-whatsapp add`); a
      reply is a draft link they send themselves in WhatsApp.
-4. **How sends and changes are approved:** by a yes in chat (`chat`, the default) or at a terminal
-   with a typed code (`confirm`). A send policy can also be `never`: nothing is sent or posted from
+4. **How sends and changes are approved:** by a yes in chat (`chat`, the default), given within ten
+   minutes, or at a terminal with a typed code (`confirm`), within thirty minutes — an approval given
+   there then holds for 24 hours. A send policy can also be `never`: nothing is sent or posted from
    here, and they do it in Gmail, Slack or Resend themselves.
 
 `comms_channels_available` says what is already installed, at which version, and registered where;
@@ -57,7 +58,9 @@ start from that rather than from nothing.
 
 `comms_server_install` for each channel chosen, with their client — skipping a channel whose server
 `comms_channels_available` already shows registered with that client. It is a change: show the
-preview, get their yes, call again with `approvalId`.
+preview, get their yes, call again with `approvalId`. Under `confirm`, `comms_approval_wait` tells you
+when they have approved it at their terminal. When the person says no, revoke it at once with
+`comms_approval_revoke`: the server never hears a "no".
 
 Then ask them to restart the client **now**, once, after every server is registered: the channels'
 tools below (`gmail_…`, `slack_…`, `resend_…`, `whatsapp_…`) exist only in the next session. Claude Code resumes this conversation with
@@ -162,12 +165,14 @@ A change stops with exit `10`, its preview and an approval id, and changes nothi
 exception: `agentcomms org update <organisation> --for-other-addresses off` turns that off at once,
 because narrowing never waits, and the preview and the final result both say it was done. Show the
 preview; after their yes, run the command its hint gives, which carries the approval id. Under `confirm` they
-first run the approve command the hint gives, in their own terminal, exactly as given. A person running a command at a terminal
-approves there and then: `yes`, or the code under `confirm`.
+first run the approve command the hint gives, in their own terminal, exactly as given, and
+`agentcomms approval wait <id>` tells you when they have. If they say no, `agentcomms approvals revoke <id>`, at
+once. A person running a command at a terminal approves there and then: `yes`, or the code under `confirm`.
 
 ## Pitfalls
 
 - **Asking per step instead of once.** Ask the choices in step 1 together; then only approvals.
+- **Asking whether they have approved yet.** The wait says so; and a "no" is revoked, never left to expire.
 - **Creating a second own Slack app** for a workspace that has one. A new app is a new installation;
   the old one keeps its permissions.
 - **An own-app port that does not match the manifest.** Slack matches the redirect URL exactly; use the port

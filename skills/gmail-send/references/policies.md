@@ -25,7 +25,7 @@ the effective value, which reads identically either way.
 **What it guarantees.** Nothing leaves unless a `gmail_send_prepare` call has run for *exactly* this
 content and produced an approval record, and then only:
 
-- within ten minutes of that prepare;
+- within ten minutes of that prepare — the chat route's lifetime (§5);
 - once — the claim creates a `<approvalId>.claim` file with `O_EXCL`, which the file system lets
   exactly one process create, so two servers racing cannot both send;
 - against the same draft, identified by the draft's Gmail **message id**, which Gmail changes on
@@ -50,15 +50,19 @@ of `SKILL.md` is written as an obligation rather than a suggestion — under `ch
 the protection, and it is yours.
 
 It also does not guarantee that the user meant *this* message. An "ok" answering a different
-question is an approval as far as the code can tell.
+question is an approval as far as the code can tell. And it cannot hear a "no": a chat-route approval
+the person refused stays usable for the rest of its ten minutes unless you revoke it
+(`gmail_send_cancel`) — so revoke it at once.
 
 ### `confirm`
 
 **What it guarantees.** Everything `chat` guarantees, plus: the record must be in state `approved`
 before it can be claimed, and it reaches that state only when a person typed a four-character
-challenge that was shown to them alongside a freshly re-rendered preview. The challenge is generated
-per approval, only its hash is stored, and it is never returned to an agent. Three wrong answers
-void the record.
+challenge that was shown to them alongside a freshly re-rendered preview — the standard preview,
+once: that rendering is the approval, and it sends nothing. The challenge is generated per approval,
+only its hash is stored, and it is never returned to an agent. Three wrong answers void the record.
+The person has thirty minutes from the prepare to approve it; approved, it can be claimed once, within
+24 hours (§5), and the agent learns that it was with `gmail_send_wait`.
 
 There are exactly two channels:
 
@@ -67,9 +71,13 @@ There are exactly two channels:
 | Terminal | The user runs the approve command the result gives — this installation's own, its folders pinned — reads the preview it prints, and types the code | The command refuses when an agent marker is present in the environment (`APPROVAL_REQUIRED`), and again when there is no interactive terminal |
 | Trusted client form | An MCP client raises a form carrying the preview and the code; the person types it back | The client's `clientInfo.name` must already be on `defaults.confirm.elicitationClients`, which is empty by default; a name is added by `gmail_confirm_client_add` or `agent-gmail confirm-clients add`, only after that client passed a probe in the last ten minutes, and only through a change approval (a yes in chat under the `chat` change policy, the approve command the result gives under `confirm`). Taking a name off it needs nobody: `gmail_confirm_client_remove`, or `agent-gmail confirm-clients remove` |
 
-An un-allowlisted client asking to send under `confirm` gets `APPROVAL_REQUIRED` with the terminal
-command in the hint, and **the record is left pending** — being asked from the wrong client is not
-evidence that anything is wrong with the message.
+An un-allowlisted client asking to send under `confirm` gets `APPROVAL_REQUIRED` — "This needs your
+approval outside the chat: run … in a terminal, and I will wait with gmail_send_wait." — and **the
+record is left pending**: being asked from the wrong client is not evidence that anything is wrong
+with the message. The list is never advertised in that refusal. In a trusted client's form, an
+explicit decline revokes the record (`declined`); a form cancelled or dismissed decides nothing, and
+the record stays pending. The probe proves only that a client can return a form's answer — not that a
+person gave it; that the client reaches one is what the person attests to by trusting it.
 
 **What it does not guarantee.** That the person who typed the code is the mailbox owner, or that
 they read the preview rather than skipping to the prompt. And `SECURITY.md` says the terminal check
@@ -85,9 +93,13 @@ for the default) does moving it off `confirm` need a code typed at a terminal.
 ### `never`
 
 **What it guarantees.** `prepareSend` throws `POLICY_NEVER` before it reads the draft, so no
-approval is ever created. If a mailbox is set to `never` *after* an approval was prepared,
-`claimForSend` voids the record with `POLICY_NEVER` as well. Nothing in this package can send from
-that mailbox.
+approval is ever created. Setting a mailbox to `never` *after* an approval was prepared revokes every
+waiting send of that mailbox at once — the change reports them under `fenced`, with any already being
+sent — and moving it back to `chat` or `confirm` later revives none of them: each was prepared under
+the mailbox's earlier send epoch, and reads revoked "sending was turned off since this was prepared
+(policy: never)" for good. A claim, a terminal approval or a form under `never` revokes the record and
+returns `POLICY_NEVER`; it never writes `approved`. Nothing in this package can send from that
+mailbox. A send already under way when the policy changed is not recalled.
 
 **What it does not guarantee.** That mail cannot be sent from the account by other means. The draft
 is still in Gmail Drafts and the user can send it from there, which is the point. It also says
@@ -101,20 +113,21 @@ Two values meet, and the stricter one wins. Strictness is ranked `chat` < `confi
 
 | Value | Where it comes from | When it is read |
 |---|---|---|
-| Live policy | The mailbox's `sendPolicy`, else `defaults.sendPolicy` | Freshly, at prepare, at approve and again at claim |
-| `requiredPolicy` | Stored on the approval record: `confirm` when risk escalation raised any flag, else `chat` — but never lower than the live policy at prepare time | Written once, at prepare; read at approve and at claim |
+| Live policy | The mailbox's `sendPolicy`, else `defaults.sendPolicy` | Freshly, under the record's lock, at approve and again at claim |
+| `route` | Stored on the approval record, and bound into it: `confirm` when the live policy was `confirm` or risk escalation raised any flag, else `chat` | Written once, at prepare; never changed by a later policy |
 
-So the effective policy is `stricter(live policy now, record.requiredPolicy)`, and it is recomputed
-at every step rather than trusted from the preview.
+So a record is claimable (`claimable: true`) when it is `approved` and inside its 24 hours, or when
+it is `pending` on the `chat` route while the live policy is still `chat` — and never while the live
+policy is `never`. It is recomputed at every step rather than trusted from the preview.
 
 Two consequences worth knowing:
 
-- **Loosening the mailbox does not weaken an approval already prepared.** Because the record's
-  `requiredPolicy` absorbs the live policy at prepare time, a send prepared while the mailbox was on
-  `confirm` still needs a human approval even if someone sets the mailbox to `chat` a minute later.
-- **Tightening applies immediately.** Raise the mailbox to `confirm` and a pending `chat` approval
-  can no longer be claimed without a typed challenge; set it to `never` and the claim voids the
-  record.
+- **Loosening the mailbox does not weaken an approval already prepared.** A send prepared while the
+  mailbox was on `confirm` is on the `confirm` route for good: it still needs a human approval even if
+  someone sets the mailbox to `chat` a minute later.
+- **Tightening applies immediately.** Raise the mailbox to `confirm` and a pending chat-route
+  approval can no longer be claimed on a yes in the chat: it waits for a typed challenge, inside its
+  original ten minutes. Set it to `never` and it is revoked.
 
 Escalation only ever raises to `confirm`. It cannot raise to `never`, and nothing lowers it.
 
@@ -132,9 +145,9 @@ First, the facts it computes for every address in `To`, `Cc` and `Bcc`:
 |---|---|
 | own | The mailbox's own address, or any address Gmail reports as a verified send-as. Never external, never first-time, never tainted |
 | `external` | Not an own address, and its domain is not in the mailbox's configured `internalDomains` |
-| written-to | A Gmail search for `in:sent to:<address>` returning up to five messages, whose parsed `To`/`Cc`/`Bcc` are then compared against the address — Gmail's `to:` matching is fuzzy, so a raw hit is not trusted |
+| written-to | A Gmail search for `in:sent {to:<address> cc:<address> bcc:<address>}`, paged through up to 50 hits, whose `To`/`Cc`/`Bcc` are then compared against the exact address — Gmail's matching is fuzzy, so a raw hit is not trusted. One prepare spends at most 200 history requests across all its recipients; the answers are kept for ten minutes, so the terminal's re-check does not ask Gmail again |
 | `firstTime` | `external` and not written-to |
-| `tainted` | The address, or its domain, is in the taint store — and the mailbox has **not** written to it before |
+| `tainted` | The exact address is in the taint store, or its domain is and the recipient is **external** to this mailbox — and the mailbox has **not** written to the address before |
 
 The preview shows these against each recipient as `EXTERNAL`, `internal`, `FIRST-TIME`,
 `ADDRESS SEEN IN MAIL YOU READ` and `LOOKS LIKE <domain>`.
@@ -143,7 +156,7 @@ Then the three flags:
 
 | Flag | What fires it | The evidence behind it |
 |---|---|---|
-| `recipient-tainted` | Any recipient is tainted | The address, or its non-public domain, was seen in the headers or body of a message read, exported or downloaded through this package in the last seven days — from **any** connected mailbox, because a message read in one inbox can ask for a send from another. The mailbox's own addresses and its internal domains are never recorded |
+| `recipient-tainted` | Any recipient is tainted | The address, or its non-public domain, was seen in the headers or body of a message read, exported or downloaded through this package in the last seven days — from **any** connected mailbox, because a message read in one inbox can ask for a send from another. The mailbox's own addresses and its internal domains are never recorded. A domain alone never escalates a colleague on this mailbox's own domains; their exact address still does. The preview says only what the store holds: "seen in mail read in these mailboxes within the last seven days", "most recently on <date>", and "seen at least once in a header" when it was |
 | `attachment-to-first-time-recipient` | The draft has at least one attachment **and** at least one recipient is first-time | Attachment presence comes from the draft's parts; first-time from the `in:sent` check above. The two do not have to be the same recipient |
 | `lookalike-domain` | A first-time recipient's domain is within a Levenshtein distance of 2 of a domain this mailbox writes to | "Writes to" means: a domain seen in the recipients of the last two hundred messages in Sent, plus this mailbox's own addresses and its internal domains |
 
@@ -164,9 +177,12 @@ bill of health.
   not in the comparison set and a lookalike of them will not fire. It is also distance-2 only:
   `acme-invoices.test` against `acme.test` is nine characters away and passes. Comparing the domain
   with the one the user expects is still work done by eye, in the preview.
-- **The written-to check reads five messages.** Somebody written to once, long ago, behind five more
-  recent messages to the same address, is still recognised; somebody whose only correspondence is
-  outside those five results may read as first-time. The error is in the safe direction.
+- **The written-to check reads 50 hits, within 200 requests a prepare.** Somebody whose only
+  correspondence is past the 50th fuzzy hit, or a recipient left unchecked when a long recipient list
+  spends the budget, reads as not written to, and the preview says so: "prior-send history was not
+  fully checked (the 200-read budget was reached); treated as not previously written." A search that
+  fails says "prior-send history could not be checked". The error is in the safe direction: doubt
+  never removes a flag.
 - **Nothing reads the body.** A draft whose text says "please wire the money to the new account"
   raises no flag. Escalation is about who a message goes to, not what it says.
 - **An internal domain is whatever the mailbox says it is.** `internalDomains` is configuration —
@@ -190,55 +206,69 @@ alias. Removing and re-adding one does, because that mints a new id — which is
 worth suggesting. Raising the caps is classified as loosening `defaults.sendCaps`; no command or tool
 here raises them, so it is the user's own edit to their configuration. Lowering them needs nothing.
 
-## 5. The ten-minute lifetime
+## 5. How long an approval lasts
 
-An approval is created with `expiresAt` ten minutes after `createdAt`, and the value is returned by
-prepare. Two details matter:
+Every approval is created with `expiresAt` from its `route`, and the value is returned by prepare:
+
+| Route, or state | Lasts | Then |
+|---|---|---|
+| `pending`, route `chat` | ten minutes from the prepare | `expired` |
+| `pending`, route `confirm` (the policy, or escalation) | thirty minutes from the prepare, for the person to approve it | `expired` |
+| `approved` | 24 hours from the approval (`usableUntil`), to be claimed once | `expired`, still unused |
+| a download's question | thirty minutes from when it was asked, answered or not | `expired` |
+
+Three details matter:
 
 - **Expiry is derived, not scheduled.** A `pending` or `approved` record past its deadline simply
-  *reads* as `expired` the next time anything looks at it. Nothing runs in the background, so an
-  approval does not become dangerous by being forgotten — but neither does it disappear from the
-  state directory.
-- **The clock does not restart.** Approving under `confirm` does not extend the window; the person
-  has the remainder of the same ten minutes to type the code and the agent to call the send.
+  *reads* as `expired` the next time anything looks at it, and that look writes it. The boundary is
+  expired: an approval typed at exactly `expiresAt` is refused. Nothing runs in the background, so an
+  approval does not become dangerous by being forgotten.
+- **An expired approval says so.** "this approval expired; nothing was sent with it", followed by when
+  it was prepared — or approved — and when it expired (`APPROVAL_EXPIRED`), on the send as on the
+  approve. A clock found running backwards expires a record at once, and says that instead.
+- **Finished records are kept 90 days.** A record that was used, failed, revoked, expired or ended
+  `unknown` is deleted 90 days after it finished, in one bounded batch a day — a call may take up to
+  five seconds once a day for it — with an `approval.retained` line in the audit log first.
 
-Preparing again is free and is the correct response to almost every refusal: each prepare is its own
-record with its own digest and its own ten minutes. What is not free is leaving the old one pending,
-which is why step 8 of `SKILL.md` says to cancel it (`gmail_send_cancel`, CLI `agent-gmail send
+Preparing again is free and is the correct response to an expired approval: each prepare is its own
+record with its own digest and its own lifetime. What is not free is leaving the old one pending,
+which is why step 8 of `SKILL.md` says to revoke it (`gmail_send_cancel`, CLI `agent-gmail send
 cancel <approvalId>`). `gmail_send_list` (CLI: `agent-gmail send list`) shows what is still open.
 
 ## 6. The record state machine
 
 ```text
-pending ──approve (confirm)──▶ approved ──claim──▶ sending ──▶ used
-   │                               │                  │
-   └──────claim (effective chat)───┘                  ├──▶ failed
-                                                      └──▶ unknown (derived)
+pending ──approve (confirm route)──▶ approved ──claim──▶ sending ──▶ used
+   │                                                       │
+   └──────claim (chat route, live policy chat)─────────────┤──▶ failed
+                                                           └──▶ unknown (derived, lease lost)
 pending | approved ──▶ revoked        pending | approved ──▶ expired (derived)
 ```
 
 | State | What it means to a person |
 |---|---|
-| `pending` | Prepared and waiting. Nothing has been sent. Under `chat` it can be claimed now; under `confirm` it is waiting for somebody to type a code |
-| `approved` | A person typed the challenge for this exact content. Nothing has been sent yet; the send still has to be called |
-| `sending` | A process is sending it right now. Drafts refuse edits and deletion while a record for them is in this state |
-| `used` | It was sent, once. The record carries the sent message id. This approval can never be used again |
-| `failed` | The one send attempt returned an error. **Whether the message arrived is not known from here** — a send is never retried, because a retry can deliver twice |
-| `unknown` | A process died mid-send: the record sat in `sending` for five minutes without recording an outcome. Same uncertainty as `failed`, with less information |
-| `expired` | The ten minutes passed with nobody using it. Nothing was sent. Prepare again |
-| `revoked` | Voided or cancelled. The record's `reason` says which: the user cancelled it, the draft changed, the recipients or subject did not match, it named another mailbox or another Google account, the mailbox moved to `never`, three wrong challenge answers, or another process claimed it first |
+| `pending` | Prepared and waiting. Nothing has been sent. On the `chat` route a yes in the chat sends it (`claimable: true`); on `confirm` it waits for somebody to type a code |
+| `approved` | A person typed the challenge for this exact content. Nothing has been sent yet; it can be claimed once, within 24 hours |
+| `sending` | A process is sending it right now, renewing a two-minute lease every thirty seconds. Drafts refuse edits and deletion; another send call is told "being sent by another call since …; wait for it". Never prepare again while a send is `sending` |
+| `used` | Gmail accepted it, once. The record carries the sent message id. This approval can never be used again |
+| `failed` | The send was refused, and the message says why: "nothing was sent: …". This approval is not used again |
+| `unknown` | The sending process lost its lease — it died, or Gmail's answer never came — so the mail **may have gone**. Final to everyone but that process, which may still record a late result. Check Sent first; never prepare it again automatically |
+| `expired` | Its lifetime passed with nobody using it. Nothing was sent. Prepare again |
+| `revoked` | Voided or cancelled. The record's `reason` says which: revoked by the user, declined in a form, the draft changed, the recipients or subject did not match, it named another mailbox or another Google account, sending was turned off since it was prepared (policy: never), its mailbox was removed, too many wrong challenge answers, or prepared by an earlier release |
+| `corrupt` | Not a stored state: the record failed its integrity check, and `reason` says how. Never used, and evidence of nothing; say so rather than skip it |
 
 Only `pending` and `approved` can be claimed. Only `pending` and `approved` can be revoked —
 cancelling a `used` record leaves it exactly as it is, which is the honest answer rather than a
-silent success. And a record written by a different digest version of this package is refused with
-`APPROVAL_VOID` rather than re-interpreted.
+silent success. And a record written by a different digest version of this package — one 0.13 or
+earlier prepared — is refused with `APPROVAL_VOID`, "the approval was prepared by a different version
+of agent-communications", rather than re-interpreted: prepare it again.
 
 ## 7. What to say when a policy stops you
 
 - Under `confirm`, the sentence is: this mailbox needs the send approved outside this conversation;
   run this command in a terminal, or send the draft from Gmail — followed by the approve command the
   result gave, exactly as given (where it says the command is not locatable here, that sentence
-  instead). Then stop.
+  instead). Then wait with `gmail_send_wait`, and send once it answers `claimable: true`.
 - Under `never`, the sentence is: this mailbox does not send through agents; the draft is in Gmail
   Drafts and can be sent from there.
 - Under either, changing the policy to get past it is the wrong instinct. Loosening is a change the

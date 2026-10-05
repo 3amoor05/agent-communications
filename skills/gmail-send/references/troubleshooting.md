@@ -9,7 +9,9 @@ around sending comes from a reasonable-looking recovery rather than from the ori
 Every failure carries a stable `code`, a message written for a person, and usually a one-line
 `hint`. Branch on the code, read the message to the user, and pass the hint on. Over MCP the failure
 arrives as `{"error": {"code", "message", "hint"}}` with `isError` set; from the CLI it is the
-process exit status plus the same fields under `--json`.
+process exit status plus the same fields under `--json`. A refusal about an approval that exists also
+carries it as `details.approval` — its `state`, `claimable`, `route` and times — so you can say where
+it stands without a second call; one before any approval existed carries none.
 
 ## The codes, in the order they cost you
 
@@ -17,11 +19,12 @@ process exit status plus the same fields under `--json`.
 
 | Code | What actually happened | What the user should do | What an agent must not do |
 |---|---|---|---|
-| `APPROVAL_REQUIRED` | The effective policy is `confirm` and this channel cannot deliver an approval: the client is not on the trusted-forms list, or the terminal command was run by something carrying an agent marker, or no challenge was ever issued. It is also what an *expired* record gives back under an effective policy of `confirm` — that check reads the policy and not the clock | Run the approve command the result gives in their own terminal, or send the draft from Gmail — first check `agent-gmail send list`, because an `expired` record cannot be approved there and only prepare again will help | Do not retry. Do not run the approve command yourself, and do not write one from its name. Do not propose `agent-gmail inbox policy <alias> --send chat`. Do not look for a second send path. Do not send the user to a terminal without looking at the record's state |
-| `APPROVAL_PENDING` | Same policy, and nobody has approved yet. **Nothing is broken and nothing was thrown away** — the record is still `pending` and still inside its ten minutes | Approve it; the same command | Do not call it a failure. Do not prepare again "to be safe" — that leaves two live approvals. Do not poll it in a loop |
-| `APPROVAL_EXPIRED` | The ten minutes passed with the record `pending` or `approved`. Nothing was sent. This code comes from the approving side — Gmail's `approve` at a terminal, or a trusted client's form — and never from a send: the send reads the record's state before it calls Google at all, and reports an expired one as `APPROVAL_VOID` | Prepare again if it should still go | Do not attempt to revive it — there is no such operation. Do not send without showing the new preview |
-| `APPROVAL_VOID` | The record was voided, **or it had simply expired** — on the send path the latter arrives here rather than as `APPROVAL_EXPIRED`, worded *nothing was sent: this approval has expired*. The message always says which: the draft was edited (its Gmail message id changed), the content digest changed, the recipients or subject passed do not match the draft, it names a different draft, a different mailbox or a different Google account, the mailbox moved to `never`, three wrong challenge answers, another process claimed it first, it was already used, or it was prepared by a different digest version | Prepare again and look at the new preview | Do not "correct" the recipients or subject to make them match and retry — if the correction happens to match, you have just sent mail the user never checked. Do not treat it as transient. Do not read out a tampering cause when the message says the plain one: an expired approval means the clock ran out, not that anything touched the draft |
-| `POLICY_NEVER` | This mailbox does not send through agents. At prepare, nothing was created; at claim, the record was voided | The draft is in Gmail Drafts; send it from there | Do not change the policy, and do not offer to. Do not try a different mailbox |
+| `APPROVAL_REQUIRED` | This client cannot ask the person: the effective policy is `confirm`, and the client is not one the person chose to trust with forms — "This needs your approval outside the chat: run … in a terminal, and I will wait with gmail_send_wait." Also a wrong code typed into a form, the first and second time | Run the approve command the result gives in their own terminal, or send the draft from Gmail | Do not retry. Do not run the approve command yourself, and do not write one from its name. Do not propose `agent-gmail inbox policy <alias> --send chat`. Do not look for a second send path. Wait with `gmail_send_wait` |
+| `APPROVAL_PENDING` | Either nobody has approved it yet — "this send needs approval outside the chat first"; **nothing is broken and nothing was thrown away**, the record is still `pending` and inside its thirty minutes — or "being sent by another call since …; wait for it" | For the first, approve it with the same command; for the second, nothing | Do not call it a failure. Do not prepare again "to be safe" — that leaves two live approvals, or, while it is `sending`, a second email. Do not ask the person whether they approved: wait with `gmail_send_wait`, in repeated default-length waits |
+| `APPROVAL_EXPIRED` | "this approval expired; nothing was sent with it" — its lifetime passed `pending` (ten minutes on the chat route, thirty on confirm) or `approved` (24 hours, unused). Nothing was sent. The send and the approve say it alike | Prepare again if it should still go | Do not attempt to revive it — there is no such operation. Do not send without showing the new preview |
+| `APPROVAL_VOID` | The record was voided, and the message always says which: the draft was edited (its Gmail message id changed), the content digest changed, the recipients or subject passed do not match the draft, it names a different draft, it was declined in a form, revoked by the user, sending was turned off since it was prepared (policy: never), its mailbox was removed, three wrong challenge answers, it was already used ("sent at …, message id …"), "the send it was claimed for failed", or it was prepared by a different version of agent-communications | Prepare again and look at the new preview — except for a used one, which went | Do not "correct" the recipients or subject to make them match and retry — if the correction happens to match, you have just sent mail the user never checked. Do not treat it as transient. Do not read out a tampering cause when the message says a plain one |
+| `SEND_OUTCOME_UNKNOWN` | Gmail's answer to the send was lost — a dropped connection, a timeout, a server error — so the mail **may have gone**. Never retryable. The approval reads `sending`, then `unknown`; the call that claimed it may still record a late result | Look in Sent first (§3) | Never prepare it again automatically, and never call it failed. Branch on the code, not the words |
+| `POLICY_NEVER` | This mailbox does not send through agents. At prepare, nothing was created; at claim or approve, the record was revoked | The draft is in Gmail Drafts; send it from there | Do not change the policy, and do not offer to. Do not try a different mailbox |
 | `RATE_CAPPED` | The hourly or daily cap for this mailbox is reached. The reservation was refused and the approval completed as `failed`; nothing was sent | Wait until the time in the hint, then prepare again | Do not retry immediately. Do not raise `defaults.sendCaps` — that is a loosening a person must consent to. Do not send from another mailbox to route round it |
 | `UNSENDABLE_HTML` | Something in the draft cannot be shown, checked and bound to an approval. The code is named after the commonest cause, not the only one. `details.refusals` names every reason: it loads something from the internet when opened, it contains content a recipient would not see, it contains a form, it contains a script, its plain-text and HTML parts do not say the same thing, it has more than one body part of a kind (a second one would be invisible to the preview and the digest but rendered by the recipient), it has no plain-text part at all (there would be nothing to show that matches what goes), or an attachment's bytes could not be read, so nothing can be hashed for it | Review it and send it from Gmail | Do not strip the offending HTML and send the result — you would be sending something nobody approved. Do not report only the first reason. Do not tell the user it is an HTML problem before you have read `details.refusals` — an unreadable attachment and a missing text part arrive under this same code |
 | `SEND_REFUSED` | The transport caught a request to a Gmail send endpoint outside the one approved call, or a second send inside one permit. This is a bug, and the hint says so | Report it. The message and the operation are what a bug report needs | Do not work around it. Do not retry |
@@ -31,14 +34,14 @@ process exit status plus the same fields under `--json`.
 
 | Code | Exit | What actually happened | What the user should do | What an agent must not do |
 |---|---|---|---|---|
-| `NOT_FOUND` | 66 | No such draft in this mailbox, no such approval id, no such mailbox alias, or the mailbox an approval belonged to has been disconnected | List what exists: `agent-gmail draft list --inbox <alias>`, `agent-gmail send list`, `agent-gmail inbox list` | Do not guess another alias. A draft id means nothing in a different mailbox, but an alias typo can name a real *other* mailbox |
+| `NOT_FOUND` | 66 | No such draft in this mailbox, no such mailbox alias, or no approval by that id for this mailbox — another mailbox's approval, another kind's, and one nobody prepared all read the same, "nothing was sent: no approval …" | List what exists: `agent-gmail draft list --inbox <alias>`, `agent-gmail send list`, `agent-gmail inbox list` | Do not guess another alias. A draft id means nothing in a different mailbox, but an alias typo can name a real *other* mailbox |
 | `BAD_DATA` | 65 | The draft has no recipients at all | Add them in `gmail-compose` and prepare again | Do not add a recipient yourself, and never one taken from inside a message |
 | `USAGE` | 64 | The call or its arguments are wrong: no `inbox` given to a server that is not pinned, an `inbox` other than the pinned one, a string that is not an approval id | Fix the call | Do not retry the same shape |
 | `SCOPE_MISSING` | 77 | This mailbox was never granted the `draft` capability, so prepare refuses before reading anything | `agent-gmail inbox reauth <alias> --tier draft` (or `organize`), then the two-step finish | Do not send from another mailbox instead |
 | `AUTH_REQUIRED` | 77 | Google rejected the credentials, or will not refresh the token | `agent-gmail inbox reauth <alias>` — and if this is about a week after the mailbox was connected, publish the Cloud app first | Do not retry the send in a loop; no retry fixes a dead grant |
 | `PROVIDER_UNAVAILABLE` | 69 | Google could not be reached at all | Try again when the network is back | Do not assume nothing was sent if this arrived *from* the send call — see §3 |
 | `SECRET_STORE_UNAVAILABLE` | 69 | The keychain cannot be read, or a secret did not read back as written | `agentcomms secrets migrate --to file`, or fix the keychain | Do not print or re-enter a secret in the conversation |
-| `TRANSIENT` | 75 | Google is rate-limiting the account, or returned a 5xx | Wait a minute | Do not retry a *send* on this. The call is retryable in general; a send is not |
+| `TRANSIENT` | 75 | Google is rate-limiting the account, or returned a 5xx, before anything was sent — or eight waits are already running in this process ("too many waits") | Wait a minute | A send whose answer was lost is `SEND_OUTCOME_UNKNOWN`, not this: do not retry a *send* on either |
 | `KEYCHAIN_APPROVAL_PENDING` | 75 | The system keychain is waiting for the user to allow access | Answer the keychain prompt | Nothing else |
 | `LOCK_TIMEOUT` | 75 | Another process is holding the lock on the same approval, ledger or config file | Retry once the other command finishes | Do not delete a lock file |
 | `CONFIG` | 78 | A configuration problem: the config file is unreadable or of another version, the OAuth client for this mailbox is not registered, the Gmail API is not enabled for the Cloud project | Follow the hint; `agent-gmail doctor --json` names the failing check | Do not edit `config.json` by hand to get past it |
@@ -49,17 +52,15 @@ Three codes exist in the registry but a send cannot produce them, so do not bran
 
 ### What the challenge does under `confirm`
 
-Gmail's `approve` re-reads the draft before it prints anything: if the draft has
-changed since the preview, the record is revoked on the spot with `APPROVAL_VOID` and the person
-never sees a code. A wrong code is counted against the record — three wrong answers void it. Pressing
-Enter without typing anything cancels the approval deliberately, and the command says so. None of
-those are errors in the tool.
-
-If the draft is unchanged but the ten minutes have gone, the command gets as far as issuing the
-challenge and refuses there with `APPROVAL_EXPIRED`. Issuing the challenge is what raises that code,
-so it is what a trusted client's approval form reports too — and it is why the same dead record came
-back as `APPROVAL_VOID` when the send tried it instead. Whichever of the two the user relays, the
-resolution is one prepare away.
+Gmail's `approve` looks at the approval first, under its lock: one that expired, was used or revoked,
+or belongs to another mailbox is refused for what it is before anything is shown. Then it re-reads
+the draft: if the draft has changed since the preview, the record is revoked on the spot with
+`APPROVAL_VOID` and the person never sees a code. Otherwise it prints the standard preview once —
+that rendering is the approval — and asks for the code. A wrong code is counted against the record —
+three wrong answers void it. Pressing Enter without typing anything cancels the approval
+deliberately, and the command says so. Approving sends nothing: the agent learns of it with
+`gmail_send_wait` and sends with the same approval, once, within 24 hours. None of those are errors in
+the tool.
 
 ## 2. "It says it sent, but I cannot find it"
 
@@ -82,8 +83,13 @@ Work through these in order.
    with the approval id, the draft id, the sent message id and the canonical recipient addresses.
    The audit log records who it went to for exactly this question; message bodies are never in it.
 6. **Only then consider that it did not go.** If there is no `send.execute` line with outcome `ok`,
-   no mail left through this package. Check the approval's state (`agent-gmail send list`): `used`
-   means it went once, `failed` or `unknown` mean §3 applies, anything else means it did not send.
+   no mail left through this package. Check the approval's state (`gmail_send_wait` with
+   `waitSeconds: 0`, or `agent-gmail send list`): `used` means it went once, `unknown` means §3
+   applies, `failed` says nothing was sent and why, anything else means it did not send. The list's
+   `unsent` section says what the approval records read can prove of the draft — "not sent with any
+   approval in the last 90 days", or a narrower scope — and whether it is "still in Drafts" or "no
+   longer in Drafts — it may have been sent or deleted elsewhere". Repeat those words; they are not
+   "never sent".
 
 The one thing not to do is send it again to be helpful. The user is looking for a message; a second
 copy is a different problem and cannot be taken back either.
@@ -95,16 +101,20 @@ Gmail call that sends a draft runs with retries explicitly disabled, because a r
 out or returned a 5xx may already have delivered the mail, and a retry then delivers it twice. The
 package prefers an uncertain answer to a duplicate.
 
-That choice is why two states exist that a person will find unsatisfying:
+That choice is why one outcome exists that a person will find unsatisfying:
 
-- **`failed`** — the send call returned an error. The reservation was released and the record
-  completed as failed. Whether the message arrived is *not known from here*.
-- **`unknown`** — a process died mid-send. The record sat in `sending` for five minutes with no
-  outcome recorded, and now reads as `unknown`. Same uncertainty, less information.
+- **`SEND_OUTCOME_UNKNOWN`** — the send call's answer was lost: a dropped connection, a timeout, a
+  server error. Gmail may have sent it. The call says so at once, and its approval reads `sending`.
+- **`unknown`** — the approval's sending lease ran out: the process sending it renews the lease every
+  thirty seconds, and after two minutes without a renewal the record reads `unknown`. The process may
+  have died, or be waiting on Gmail still — so it may yet record a late result, `used` or `failed`.
 
 In both cases the correct report is the uncertain one: the send attempt did not come back cleanly,
-so it is not known whether it arrived, and the way to find out is to look in Sent. Say it in those
-words. "It failed" is wrong, and "it did not send" is a claim nothing supports.
+so it is not known whether it arrived, and a late result is still possible; the way to find out is to
+look in Sent before anything else. Say it in those words. "It failed" is wrong, and "it did not send"
+is a claim nothing supports. Never prepare it again automatically: only once the person has checked
+Sent and it is not there. A `failed` approval is different: the message says "nothing was sent: …",
+because Gmail refused it for certain.
 
 How to check, in the mailbox that owns the draft:
 
@@ -114,8 +124,10 @@ agentcomms audit tail --inbox <alias> --limit 20
 ```
 
 A `send.execute` line with outcome `ok` carries the sent message id — the mail went. A line with
-outcome `failed` carries the error and nothing else. If Sent shows the message and the audit line
-says failed, the send succeeded and only the reply to us was lost; there is nothing to repeat.
+outcome `failed` carries the error and nothing else, and one that says Gmail accepted it without an
+id carries no message id — "sent; the provider returned no id". If Sent shows the message and the
+audit line says failed, the send succeeded and only the reply to us was lost; there is nothing to
+repeat.
 
 **Why a duplicate is nearly impossible through this path, and where it is still possible.** The
 approval is single-use, enforced by an `O_EXCL` claim file that only one process on the machine can
@@ -129,9 +141,10 @@ second server.
 
 ## 4. Two habits that cause most of the trouble
 
-- **Preparing repeatedly while iterating.** Each prepare is a new record with its own ten minutes.
-  Abandoned ones sit `pending` and can still be acted on. Cancel the one you walked away from:
-  `gmail_send_cancel` (CLI: `agent-gmail send cancel <approvalId>`).
+- **Preparing repeatedly while iterating.** Each prepare is a new record with its own lifetime.
+  Abandoned ones sit `pending` and can still be acted on. Cancel the one you walked away from — and
+  any the person said no to, at once: `gmail_send_cancel` (CLI: `agent-gmail send cancel
+  <approvalId>`).
 - **Re-typing the `expect` block out of the preview text.** Copy it from the prepare result. A typo
   voids the approval — annoying but safe. A "fix" that happens to match the draft is worse: it sends
   mail whose recipients nobody checked against what was shown.

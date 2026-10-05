@@ -65,9 +65,10 @@ or removed, a mailbox imported or removed, a client trusted to show approval for
 call. The tool returns `approvalRequired`, a `preview` of exactly what would change and an `approvalId`; the agent
 shows you the preview and asks. Under the `chat` change policy (the default) your yes is the approval, and the agent
 calls again with the id. Under `confirm` you run the approve command the result gives, exactly as given, in your own
-terminal and type the code it shows first. An approval is for the change it previewed, once, for ten minutes: if
-anything is different by the time it is claimed, it is refused and the change is prepared again. Tightening needs
-nobody. The same approval can be claimed from the command line with `--approval <id>`, and the other way round.
+terminal and type the code it shows first; the agent learns that you have with `gmail_send_wait`, and calls again.
+An approval is for the change it previewed, once: it waits ten minutes for a yes in the chat, thirty for your
+terminal, and holds 24 hours once you approved it there. If anything is different by the time it is claimed, it is
+refused and the change is prepared again; if you say no, the agent revokes it. Tightening needs nobody. The same approval can be claimed from the command line with `--approval <id>`, and the other way round.
 
 The writers are withheld from a server started `--read-only`. One pinned to a single mailbox with `--inbox` offers,
 of the tools above, the ones that read, `gmail_inbox_policy` for its own mailbox, and `gmail_confirm_client_remove`,
