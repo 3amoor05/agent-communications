@@ -6,7 +6,9 @@ import {
   type ClientConfig,
   type Config,
   committedSecretsStore,
+  hasNames,
   type LooseningConsent,
+  namingOf,
   type OrganisationGeneration,
   type OrganisationRecord,
   parseConfig,
@@ -288,7 +290,8 @@ function canonical(value: unknown): string {
  */
 function inputsOf(config: Config): string {
   return canonical({
-    version: config.version,
+    // How it names its accounts, not its version: the version-3 conversion renames nothing a profile plans from.
+    naming: namingOf(config),
     store: committedSecretsStore(config),
     clients: config.clients,
     organisations: organisationsOf(config),
@@ -433,7 +436,7 @@ async function planProfile(config: Config, input: PlanInput): Promise<ProfilePla
   const { file, now } = input;
   const { profile } = file;
   const { handoffs } = input.commands;
-  if (config.version !== 2) {
+  if (!hasNames(config)) {
     throw new CommsError('CONFIG', 'an organisation profile needs the configuration’s organisation/platform names', {
       hint: handoffSentence(
         handoffs.core(['names', 'migrate']),
@@ -901,7 +904,7 @@ async function planProfile(config: Config, input: PlanInput): Promise<ProfilePla
 /** The configuration with a plan made in it, and nothing else. */
 function withPlan(config: Config, plan: ProfilePlan, store: StoreKind | null): Config {
   const next = structuredClone(config);
-  if (next.version !== 2)
+  if (!hasNames(next))
     throw new CommsError('UNEXPECTED', 'an organisation profile was planned into a version-1 configuration');
   next.organisations = { ...(next.organisations ?? {}), [plan.organisation]: structuredClone(plan.next) };
   for (const [name, row] of Object.entries(plan.rows)) next.clients[name] = structuredClone(row);
@@ -1086,7 +1089,7 @@ async function narrowAtOnce(
     let changed = false;
     const written = await core.config.update((current) => {
       const record = recordOf(current, organisation);
-      if (current.version !== 2 || !record?.forOtherAddresses) return current;
+      if (!hasNames(current) || !record?.forOtherAddresses) return current;
       changed = true;
       return {
         ...current,
@@ -1394,7 +1397,7 @@ async function planRemoval(config: Config, organisation: string, commands: OrgHa
 
 function withoutProfile(config: Config, removal: RemovalPlan): Config {
   const next = structuredClone(config);
-  if (next.version !== 2) return next;
+  if (!hasNames(next)) return next;
   const organisations = { ...(next.organisations ?? {}) };
   delete organisations[removal.organisation];
   if (Object.keys(organisations).length > 0) next.organisations = organisations;

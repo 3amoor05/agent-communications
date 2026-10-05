@@ -12,6 +12,8 @@ import {
   configFingerprint,
   emptyConfig,
   type InboxConfig,
+  type NamedConfig,
+  type PlainConfig,
   parseConfig,
 } from '../src/config.ts';
 import { CommsError } from '../src/errors.ts';
@@ -614,9 +616,10 @@ test('an existing backup is never overwritten', async () => {
 test('a refused migration leaves no backup behind', async () => {
   const store = storeWith(machine());
   const plan = ready(planNamesMigration(await store.load()));
+  // A tightening, which needs no approval: a send policy would not move on version 1 at all (it needs version 3).
   await store.update((config) => ({
     ...config,
-    inboxes: { ...config.inboxes, cue: { ...present(config.inboxes.cue), sendPolicy: 'never' } },
+    inboxes: { ...config.inboxes, cue: { ...present(config.inboxes.cue), changePolicy: 'confirm' } },
   }));
   await assert.rejects(migrateNames(store, plan), isError('TRANSIENT'));
   assert.deepEqual(
@@ -832,9 +835,10 @@ test('a refused migration names the migration again: core’s command, located f
 test('a change to nothing but a policy between preview and apply refuses it too', async () => {
   const store = storeWith(machine());
   const plan = ready(planNamesMigration(await store.load()));
+  // A tightening, which needs no approval: a send policy would not move on version 1 at all (it needs version 3).
   await store.update((config) => ({
     ...config,
-    inboxes: { ...config.inboxes, cue: { ...present(config.inboxes.cue), sendPolicy: 'never' } },
+    inboxes: { ...config.inboxes, cue: { ...present(config.inboxes.cue), changePolicy: 'confirm' } },
   }));
   await assert.rejects(migrateNames(store, plan), isError('TRANSIENT'));
   assert.equal(JSON.parse(readFileSync(store.path, 'utf8')).version, 1);
@@ -868,7 +872,7 @@ test('a build that changes more than names is refused before it is written', asy
   const store = storeWith(machine());
   const current = (await store.load()) as ConfigV1;
   const plan = ready(planNamesMigration(current));
-  const widened = (config: ConfigV1): ConfigV2 => {
+  const widened = (config: PlainConfig): NamedConfig => {
     const next = applyNamesMigration(config, plan.rows);
     next.inboxes['cue/gmail'] = { ...present(next.inboxes['cue/gmail']), sendPolicy: 'chat' };
     return next;
@@ -877,7 +881,7 @@ test('a build that changes more than names is refused before it is written', asy
     store.migrateNames(plan.fingerprint, plan.rows, widened),
     isError('CONFIG', /changes more than names/),
   );
-  const dropped = (config: ConfigV1): ConfigV2 => {
+  const dropped = (config: PlainConfig): NamedConfig => {
     const next = applyNamesMigration(config, plan.rows);
     delete next.inboxes['cue/gmail'];
     return next;
@@ -886,7 +890,7 @@ test('a build that changes more than names is refused before it is written', asy
     store.migrateNames(plan.fingerprint, plan.rows, dropped),
     isError('CONFIG', /number of inboxes changed/),
   );
-  const defaults = (config: ConfigV1): ConfigV2 => ({
+  const defaults = (config: PlainConfig): NamedConfig => ({
     ...applyNamesMigration(config, plan.rows),
     defaults: { ...config.defaults, sendPolicy: 'never' },
   });
@@ -1094,7 +1098,7 @@ test('a migration that forges, omits or adds a former name is refused', async ()
   const plan = ready(planNamesMigration(await store.load()));
   const tamper =
     (edit: (formerNames: ConfigV2['formerNames']) => void) =>
-    (config: ConfigV1): ConfigV2 => {
+    (config: PlainConfig): NamedConfig => {
       const next = applyNamesMigration(config, plan.rows);
       edit(next.formerNames);
       return next;
@@ -1124,7 +1128,7 @@ test('a widening in the same write as a rename is reported under the new name', 
     accounts: { live: account(ACC_A, { sendPolicy: 'never' }) },
   });
   const renamed = applyNamesMigration(before, ready(planNamesMigration(before)).rows);
-  const after: ConfigV2 = {
+  const after: NamedConfig = {
     ...renamed,
     inboxes: {
       'cue/gmail': {

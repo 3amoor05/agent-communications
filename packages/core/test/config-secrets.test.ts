@@ -91,11 +91,50 @@ test('parseConfig refuses bad JSON, unknown versions and invalid aliases with CO
     () => parseConfig('{'),
     (e: unknown) => e instanceof CommsError && e.code === 'CONFIG',
   );
-  assert.throws(() => parseConfig('{"version":3}'), /version 3; this release reads versions 1 and 2/);
+  assert.throws(() => parseConfig('{"version":4}'), /version 4; this release reads versions 1, 2 and 3/);
+  // Version 3 says how its accounts are named; without it, there is no body to validate.
+  assert.throws(() => parseConfig('{"version":3}'), /naming: version 3 names its accounts by naming 1 or 2/);
   assert.throws(
     () => parseConfig(JSON.stringify({ version: 1, inboxes: { 'Bad Alias': inbox() } })),
     /lowercase letters, digits or hyphens/,
   );
+});
+
+test('version 3 reads the names its naming says, refuses the other kind, and validates its epochs and its drain', () => {
+  const plain = parseConfig(JSON.stringify({ version: 3, naming: 1, inboxes: { work: inbox() } }));
+  assert.equal(plain.version, 3);
+  assert.deepEqual(Object.keys(plain.inboxes), ['work']);
+  const named = parseConfig(JSON.stringify({ version: 3, naming: 2, inboxes: { 'acme/gmail': inbox() } }));
+  assert.deepEqual(Object.keys(named.inboxes), ['acme/gmail']);
+  assert.throws(() => parseConfig(JSON.stringify({ version: 3, naming: 1, inboxes: { 'acme/gmail': inbox() } })), {
+    name: 'CommsError',
+  });
+  assert.throws(() => parseConfig(JSON.stringify({ version: 3, naming: 2, inboxes: { work: inbox() } })), {
+    name: 'CommsError',
+  });
+  assert.throws(() => parseConfig(JSON.stringify({ version: 3, naming: 3 })), /naming 1 or 2/);
+  // An epoch is a count that only grows from 0; a drain names when it opened and what it tracks.
+  for (const sendEpochs of [{ ibx_A: -1 }, { ibx_A: 1.5 }, { ibx_A: '1' }]) {
+    assert.throws(() => parseConfig(JSON.stringify({ version: 3, naming: 2, sendEpochs })), { name: 'CommsError' });
+  }
+  for (const legacyDrain of [
+    { tracked: {} },
+    { since: '2026-10-05T10:00:00.000Z', tracked: { [`ap_${'0'.repeat(26)}`]: 'gone' } },
+  ]) {
+    assert.throws(() => parseConfig(JSON.stringify({ version: 3, naming: 2, legacyDrain })), { name: 'CommsError' });
+  }
+  const tracked = { [`ap_${'0'.repeat(26)}`]: 'open', [`ap_${'0'.repeat(25)}1`]: 'used' };
+  const drained = parseConfig(
+    JSON.stringify({
+      version: 3,
+      naming: 2,
+      sendEpochs: { ibx_A: 3 },
+      legacyDrain: { since: '2026-10-05T10:00:00.000Z', tracked },
+    }),
+  );
+  assert.ok(drained.version === 3);
+  assert.deepEqual(drained.sendEpochs, { ibx_A: 3 });
+  assert.deepEqual(drained.legacyDrain?.tracked, tracked);
 });
 
 const pendingRevocation = {
@@ -224,8 +263,8 @@ test('ConfigStore writes owner-only, validates before writing, and reloads chang
 
   // An edit by another process is picked up.
   const other = new ConfigStore(dir);
-  await other.update((config) => ({ ...config, defaults: { ...config.defaults, sendPolicy: 'never' } }));
-  assert.equal((await store.load()).defaults.sendPolicy, 'never');
+  await other.update((config) => ({ ...config, defaults: { ...config.defaults, timezone: 'Europe/Bucharest' } }));
+  assert.equal((await store.load()).defaults.timezone, 'Europe/Bucharest');
 });
 
 test('concurrent updates from separate stores never lose each other', async () => {

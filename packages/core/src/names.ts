@@ -3,12 +3,13 @@ import {
   type AccountConfig,
   type Config,
   type ConfigStore,
-  type ConfigV1,
-  type ConfigV2,
   configFingerprint,
   type FormerNames,
+  hasNames,
   type InboxConfig,
   isValidAlias,
+  type NamedConfig,
+  type PlainConfig,
   RESERVED_ALIASES,
 } from './config.ts';
 import { CommsError } from './errors.ts';
@@ -131,7 +132,7 @@ export function findById(
  * name that now belongs to nothing.
  */
 export function formerNameRefusal(config: Config, kind: NameKind, name: string): CommsError | null {
-  if (config.version !== 2) return null;
+  if (!hasNames(config)) return null;
   const former = own(config.formerNames[MAP[kind]], name);
   if (!former) return null;
   const current = kind === 'inbox' ? findById(config, 'inbox', former.id) : findById(config, 'account', former.id);
@@ -153,7 +154,7 @@ export function formerNameRefusal(config: Config, kind: NameKind, name: string):
  * the old name can still be found after a rename.
  */
 export function formerNamesOf(config: Config, kind: NameKind, name: string): string[] {
-  if (config.version !== 2) return [];
+  if (!hasNames(config)) return [];
   const row = kind === 'inbox' ? own(config.inboxes, name) : own(config.accounts, name);
   if (!row) return [];
   return Object.entries(config.formerNames[MAP[kind]])
@@ -182,7 +183,7 @@ export type NameCheck = { ok: true } | { ok: false; error: CommsError };
  */
 export function nameAvailable(config: Config, kind: NameKind, name: string, platform: string): NameCheck {
   const refuse = (error: CommsError): NameCheck => ({ ok: false, error });
-  if (config.version === 1) {
+  if (!hasNames(config)) {
     if (RESERVED_ALIASES.has(name)) {
       return refuse(new CommsError('USAGE', `"${name}" is reserved`, { hint: 'Choose another name.' }));
     }
@@ -234,7 +235,7 @@ export function renameEntry<C extends Config>(config: C, kind: NameKind, from: s
   const renamed: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(entries)) if (key !== from) renamed[key] = value;
   renamed[to] = row;
-  if (config.version === 1) return { ...config, [map]: renamed };
+  if (!hasNames(config)) return { ...config, [map]: renamed };
   const records: FormerNames[typeof map] = {};
   for (const [key, record] of Object.entries(config.formerNames[map])) {
     // Spread, so a field a newer release added to the record survives this one rewriting it.
@@ -253,7 +254,7 @@ export function renameEntry<C extends Config>(config: C, kind: NameKind, from: s
  * replaces the id; `ConfigStore.update` allows exactly this change and no other to a former name's id.
  */
 export function retargetFormerNames<C extends Config>(config: C, kind: NameKind, fromId: string, toId: string): C {
-  if (config.version !== 2) return config;
+  if (!hasNames(config)) return config;
   const map = MAP[kind];
   const records: FormerNames[typeof map] = {};
   for (const [key, record] of Object.entries(config.formerNames[map])) {
@@ -300,7 +301,7 @@ export type NamesMigrationPlan =
  * mapping the same names differently are not each other's retry.
  */
 export function planNamesMigration(config: Config, renames: readonly string[] = []): NamesMigrationPlan {
-  if (config.version === 2) return { status: 'already-migrated' };
+  if (hasNames(config)) return { status: 'already-migrated' };
   const problems: string[] = [];
   const overrides = new Map<string, string>();
   const notApplicable: NotApplicableRename[] = [];
@@ -393,8 +394,11 @@ export function planNamesMigration(config: Config, renames: readonly string[] = 
   return { status: 'ready', fingerprint: configFingerprint(config), rows, notApplicable };
 }
 
-/** Version 2 from version 1 and a plan made from it: every key renamed, every old name recorded. Nothing else. */
-export function applyNamesMigration(config: ConfigV1, rows: readonly NamesMigrationRow[]): ConfigV2 {
+/**
+ * `organisation/platform` names from plain ones and a plan made from them: every key renamed, every old name recorded,
+ * nothing else. Version 1 becomes version 2; version 3 stays version 3, with `naming: 2` — never written back as 2.
+ */
+export function applyNamesMigration(config: PlainConfig, rows: readonly NamesMigrationRow[]): NamedConfig {
   const target = new Map(rows.map((row) => [`${row.kind}:${row.from}`, row.to]));
   const rename = <T extends { id: string }>(kind: NameKind, entries: Record<string, T>) => {
     const renamed: Record<string, T> = {};
@@ -409,13 +413,12 @@ export function applyNamesMigration(config: ConfigV1, rows: readonly NamesMigrat
   };
   const inboxes = rename('inbox', config.inboxes);
   const accounts = rename('account', config.accounts);
-  return {
-    ...config,
-    version: 2,
+  const named = {
     inboxes: inboxes.renamed,
     accounts: accounts.renamed,
     formerNames: { inboxes: inboxes.former, accounts: accounts.former },
   };
+  return config.version === 3 ? { ...config, ...named, naming: 2 } : { ...config, ...named, version: 2 };
 }
 
 /**
@@ -426,6 +429,6 @@ export function applyNamesMigration(config: ConfigV1, rows: readonly NamesMigrat
 export function migrateNames(
   store: ConfigStore,
   plan: Extract<NamesMigrationPlan, { status: 'ready' }>,
-): Promise<{ status: 'migrated' | 'already-migrated'; config: ConfigV2; backup?: string }> {
+): Promise<{ status: 'migrated' | 'already-migrated'; config: NamedConfig; backup?: string }> {
   return store.migrateNames(plan.fingerprint, plan.rows, (current) => applyNamesMigration(current, plan.rows));
 }

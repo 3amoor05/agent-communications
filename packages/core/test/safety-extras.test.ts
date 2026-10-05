@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { writeFileSync } from 'node:fs';
 import { parse } from 'node:path';
 import { test } from 'node:test';
 import { parseAddressList } from '../src/addresses.ts';
@@ -138,6 +139,8 @@ test('address lists: groups expanded, names kept, addresses canonical and de-dup
 test('loosening a safety setting is refused without consent; tightening and consented loosening pass', async () => {
   const dir = tempDir();
   const store = new ConfigStore(dir);
+  // Version 3, where a send policy is written with its send epoch: before it, no send policy moves at all.
+  writeFileSync(store.path, `${JSON.stringify({ version: 3, naming: 2 }, null, 2)}\n`);
   await store.update((c) => ({
     ...c,
     inboxes: { 'acme/gmail': inbox('ibx_AAAAAAAAAAAAAAAA', { sendPolicy: 'confirm' }) },

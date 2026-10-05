@@ -12,6 +12,7 @@ import type {
   OrganisationServes,
   OrganisationSlackApp,
 } from './config.ts';
+import { hasNames } from './config.ts';
 import { CommsError } from './errors.ts';
 import {
   type CliHandoffs,
@@ -366,7 +367,7 @@ export function own<T>(map: Record<string, T> | undefined, key: string): T | und
 
 /** The organisation profiles this configuration records — none on version 1, which cannot hold them. */
 export function organisationsOf(config: Config): Record<string, OrganisationRecord> {
-  return config.version === 2 ? (config.organisations ?? {}) : {};
+  return hasNames(config) ? (config.organisations ?? {}) : {};
 }
 
 export function recordOf(config: Config, organisation: string): OrganisationRecord | undefined {
@@ -1017,7 +1018,7 @@ export function learnProfileSlackAppId(
       handoffs,
     );
   }
-  if (config.version !== 2) {
+  if (!hasNames(config)) {
     throw slackTargetProblem(
       expected.organisation,
       'organisation profiles require a version-2 configuration',

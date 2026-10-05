@@ -4,6 +4,7 @@ import { homedir, platform } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { z } from 'zod';
 import { CHANNEL_SNAPSHOT } from './channels.generated.ts';
+import { CONVERSION_HOOKS, type ConversionHooks } from './config-hooks.ts';
 import { type ConfigVersion, NEW_CONFIG_VERSION } from './config-version.ts';
 import { CommsError } from './errors.ts';
 import { FILE_MODE, writeFileAtomic } from './fs.ts';
@@ -26,7 +27,7 @@ import { namesMigrationEnabled } from './release-gate.ts';
  * `organisation/platform[-qualifier]` and records the names it replaced (see `name-grammar.ts`). A release reads a
  * version or refuses it outright; it never guesses at a shape it does not know.
  */
-export const READABLE_CONFIG_VERSIONS: readonly ConfigVersion[] = [1, 2];
+export const READABLE_CONFIG_VERSIONS: readonly ConfigVersion[] = [1, 2, 3];
 
 export { type ConfigVersion, NEW_CONFIG_VERSION } from './config-version.ts';
 
@@ -316,7 +317,63 @@ export interface ConfigV2 extends ConfigBody {
   organisations?: Record<string, OrganisationRecord> | undefined;
 }
 
-export type Config = ConfigV1 | ConfigV2;
+/** What a legacy drain records of one tracked record: still open, or what became of it. */
+export type LegacyDrainOutcome = 'revoked' | 'expired' | 'used' | 'failed' | 'sending' | 'unknown';
+
+/**
+ * The approvals an earlier release prepared that were still waiting when this configuration became version 3, and
+ * what has become of each (design 2026-10-05 §D1, "Old releases are locked out before the fence is relied on").
+ */
+export interface LegacyDrain {
+  /** When the conversion that opened the drain was written. */
+  since: string;
+  /** Every tracked version-1 send record by id: `open` until it has an outcome. */
+  tracked: Record<string, 'open' | LegacyDrainOutcome>;
+}
+
+/** What version 3 adds to a body of either naming. */
+interface Version3Fields {
+  /** Each owner's send epoch by id; absent reads as 0. Raised by every write that turns its send policy to `never`. */
+  sendEpochs?: Record<string, number> | undefined;
+  /** Present while records from an earlier release are being retired. */
+  legacyDrain?: LegacyDrain | undefined;
+}
+
+/** Version 3 over a version-1 body: one plain word per account. */
+export interface ConfigV3Naming1 extends ConfigBody, Version3Fields {
+  version: 3;
+  naming: 1;
+}
+
+/** Version 3 over a version-2 body: `organisation/platform` names, and the names they replaced. */
+export interface ConfigV3Naming2 extends Omit<ConfigV2, 'version'>, Version3Fields {
+  version: 3;
+  naming: 2;
+}
+
+/**
+ * Version 3: the send epoch and the legacy drain (design 2026-10-05 §D1), over either naming — converted from version 1
+ * or 2 without renaming anything, so its body keeps the rules of the version it came from.
+ */
+export type ConfigV3 = ConfigV3Naming1 | ConfigV3Naming2;
+
+export type Config = ConfigV1 | ConfigV2 | ConfigV3;
+
+/** A configuration whose accounts are named `organisation/platform`: version 2, or version 3 over it. */
+export type NamedConfig = ConfigV2 | ConfigV3Naming2;
+
+/** A configuration whose accounts have one plain word each: version 1, or version 3 over it. */
+export type PlainConfig = ConfigV1 | ConfigV3Naming1;
+
+/** Which naming a configuration's body has: 1 — plain words — or 2 — `organisation/platform`. */
+export function namingOf(config: Config): 1 | 2 {
+  return config.version === 3 ? config.naming : config.version;
+}
+
+/** Whether a configuration names its accounts `organisation/platform` (version 2, or version 3 over it). */
+export function hasNames(config: Config): config is NamedConfig {
+  return namingOf(config) === 2;
+}
 
 /** The committed config returned by an update; process-only commit metadata is deliberately stored out of band. */
 export type ConfigUpdateResult = Config;
@@ -473,25 +530,34 @@ function checkWithinMaps(
  * This is the version-1 schema exactly as every earlier release has it. Tightening it would make files those
  * releases wrote unreadable here.
  */
+/** The fields of a version-1 body, which version 3 over it shares. */
+const v1BodyShape = {
+  secrets: z.looseObject({ store: storeKindSchema }).optional(),
+  clients: z.record(aliasSchema, clientSchema).default({}),
+  inboxes: z.record(aliasSchema, inboxSchema).default({}),
+  accounts: z.record(aliasSchema, accountSchema).default({}),
+  pendingRevocations: z.array(pendingRevocationSchema).optional(),
+  defaults: defaultsSchema.default(defaultsSchema.parse({})),
+};
+
+/**
+ * Across the two maps a collision cannot be an error. A v1 invariant may not depend on old writers enforcing a rule
+ * they have never heard of: 0.1.2 can rename a mailbox onto an alias this version gave an account, and it will,
+ * because nothing in it can see the account. Refusing to parse the result would turn a name clash into a
+ * configuration that cannot be read at all — every mailbox gone, on a file the user never touched. So a persisted
+ * collision is tolerated here and reported by `aliasConflicts`, and the lookup that cannot answer refuses at the point
+ * somebody asks it something ambiguous.
+ */
+function checkV1Body(
+  config: { inboxes: Record<string, { id: string }>; accounts: Record<string, { id: string }> },
+  ctx: z.RefinementCtx,
+): void {
+  checkWithinMaps(config, ctx);
+}
+
 export const configV1Schema: z.ZodType<ConfigV1, unknown> = z
-  .looseObject({
-    version: z.literal(1),
-    secrets: z.looseObject({ store: storeKindSchema }).optional(),
-    clients: z.record(aliasSchema, clientSchema).default({}),
-    inboxes: z.record(aliasSchema, inboxSchema).default({}),
-    accounts: z.record(aliasSchema, accountSchema).default({}),
-    pendingRevocations: z.array(pendingRevocationSchema).optional(),
-    defaults: defaultsSchema.default(defaultsSchema.parse({})),
-  })
-  .superRefine((config, ctx) => {
-    // Across the two maps a collision cannot be an error. A v1 invariant may not depend on old writers enforcing a
-    // rule they have never heard of: 0.1.2 can rename a mailbox onto an alias this version gave an account, and it
-    // will, because nothing in it can see the account. Refusing to parse the result would turn a name clash into a
-    // configuration that cannot be read at all — every mailbox gone, on a file the user never touched. So a
-    // persisted collision is tolerated here and reported by `aliasConflicts`, and the lookup that cannot answer
-    // refuses at the point somebody asks it something ambiguous.
-    checkWithinMaps(config, ctx);
-  });
+  .looseObject({ version: z.literal(1), ...v1BodyShape })
+  .superRefine(checkV1Body);
 
 /*
  * The organisations record. Loose at every level, as the rest of the file is: a later release adds keys inside it — a
@@ -542,80 +608,113 @@ const formerKeySchema = z.string().refine((key) => ALIAS_PATTERN.test(key) || NA
  * that predates version 2 refuses to read the file at all — so nothing that cannot see the other map can put a
  * clash into it.
  */
-export const configV2Schema: z.ZodType<ConfigV2, unknown> = z
-  .looseObject({
-    version: z.literal(2),
-    secrets: z.looseObject({ store: storeKindSchema }).optional(),
-    // OAuth clients keep plain names. One client is shared by mailboxes across organisations, so an organisation
-    // prefix on it would be wrong.
-    clients: z.record(aliasSchema, clientSchema).default({}),
-    inboxes: z.record(nameSchema, inboxSchema).default({}),
-    accounts: z.record(nameSchema, accountSchema).default({}),
-    pendingRevocations: z.array(pendingRevocationSchema).optional(),
-    defaults: defaultsSchema.default(defaultsSchema.parse({})),
-    formerNames: z
-      .looseObject({
-        inboxes: z.record(formerKeySchema, formerNameSchema).default({}),
-        accounts: z.record(formerKeySchema, formerNameSchema).default({}),
-      })
-      .default({ inboxes: {}, accounts: {} }),
-    organisations: z
-      .record(
-        z.string().regex(ORGANISATION_PATTERN, 'an organisation is a name’s first half'),
-        organisationRecordSchema,
-      )
-      .optional(),
-  })
-  .superRefine((config, ctx) => {
-    checkWithinMaps(config, ctx);
-    for (const [name, inbox] of Object.entries(config.inboxes)) {
-      const platform = parseName(name)?.platform;
-      if (platform !== undefined && platform !== inbox.provider) {
-        ctx.addIssue({
-          code: 'custom',
-          path: ['inboxes', name],
-          message: `ends in /${platform}, but it is a ${inbox.provider} mailbox`,
-        });
-      }
-    }
-    for (const [name, account] of Object.entries(config.accounts)) {
-      const platform = parseName(name)?.platform;
-      if (platform !== undefined && platform !== account.platform) {
-        ctx.addIssue({
-          code: 'custom',
-          path: ['accounts', name],
-          message: `ends in /${platform}, but it is a ${account.platform} account`,
-        });
-      }
-      if (config.inboxes[name]) {
-        ctx.addIssue({ code: 'custom', path: ['accounts', name], message: 'names a mailbox too' });
-      }
-    }
-    const inboxIds = new Set(Object.values(config.inboxes).map((inbox) => inbox.id));
-    for (const [name, account] of Object.entries(config.accounts)) {
-      if (inboxIds.has(account.id)) {
-        ctx.addIssue({ code: 'custom', path: ['accounts', name, 'id'], message: 'duplicates the id of a mailbox' });
-      }
-    }
-    // A former name is never reusable. Checked here, on every write, rather than only where names are proposed: a
-    // lookup of a former name is refused with its replacement, so an account that took one would be unreachable
-    // by it — or worse, reached by somebody who meant the old one.
-    const live = new Set([...Object.keys(config.inboxes), ...Object.keys(config.accounts)]);
-    for (const map of ['inboxes', 'accounts'] as const) {
-      for (const former of Object.keys(config.formerNames[map])) {
-        if (live.has(former)) {
-          ctx.addIssue({
-            code: 'custom',
-            path: ['formerNames', map, former],
-            message: `"${former}" was renamed and cannot be used again`,
-          });
-        }
-      }
-    }
-  });
+/** The fields of a version-2 body, which version 3 over it shares. */
+const v2BodyShape = {
+  secrets: z.looseObject({ store: storeKindSchema }).optional(),
+  // OAuth clients keep plain names. One client is shared by mailboxes across organisations, so an organisation
+  // prefix on it would be wrong.
+  clients: z.record(aliasSchema, clientSchema).default({}),
+  inboxes: z.record(nameSchema, inboxSchema).default({}),
+  accounts: z.record(nameSchema, accountSchema).default({}),
+  pendingRevocations: z.array(pendingRevocationSchema).optional(),
+  defaults: defaultsSchema.default(defaultsSchema.parse({})),
+  formerNames: z
+    .looseObject({
+      inboxes: z.record(formerKeySchema, formerNameSchema).default({}),
+      accounts: z.record(formerKeySchema, formerNameSchema).default({}),
+    })
+    .default({ inboxes: {}, accounts: {} }),
+  organisations: z
+    .record(z.string().regex(ORGANISATION_PATTERN, 'an organisation is a name’s first half'), organisationRecordSchema)
+    .optional(),
+};
 
-function schemaFor(version: ConfigVersion): z.ZodType<Config, unknown> {
+function checkV2Body(config: Omit<ConfigV2, 'version'>, ctx: z.RefinementCtx): void {
+  checkWithinMaps(config, ctx);
+  for (const [name, inbox] of Object.entries(config.inboxes)) {
+    const platform = parseName(name)?.platform;
+    if (platform !== undefined && platform !== inbox.provider) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['inboxes', name],
+        message: `ends in /${platform}, but it is a ${inbox.provider} mailbox`,
+      });
+    }
+  }
+  for (const [name, account] of Object.entries(config.accounts)) {
+    const platform = parseName(name)?.platform;
+    if (platform !== undefined && platform !== account.platform) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['accounts', name],
+        message: `ends in /${platform}, but it is a ${account.platform} account`,
+      });
+    }
+    if (config.inboxes[name]) {
+      ctx.addIssue({ code: 'custom', path: ['accounts', name], message: 'names a mailbox too' });
+    }
+  }
+  const inboxIds = new Set(Object.values(config.inboxes).map((inbox) => inbox.id));
+  for (const [name, account] of Object.entries(config.accounts)) {
+    if (inboxIds.has(account.id)) {
+      ctx.addIssue({ code: 'custom', path: ['accounts', name, 'id'], message: 'duplicates the id of a mailbox' });
+    }
+  }
+  // A former name is never reusable. Checked here, on every write, rather than only where names are proposed: a
+  // lookup of a former name is refused with its replacement, so an account that took one would be unreachable
+  // by it — or worse, reached by somebody who meant the old one.
+  const live = new Set([...Object.keys(config.inboxes), ...Object.keys(config.accounts)]);
+  for (const map of ['inboxes', 'accounts'] as const) {
+    for (const former of Object.keys(config.formerNames[map])) {
+      if (live.has(former)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['formerNames', map, former],
+          message: `"${former}" was renamed and cannot be used again`,
+        });
+      }
+    }
+  }
+}
+
+export const configV2Schema: z.ZodType<ConfigV2, unknown> = z
+  .looseObject({ version: z.literal(2), ...v2BodyShape })
+  .superRefine(checkV2Body);
+
+const LEGACY_DRAIN_OUTCOMES = ['revoked', 'expired', 'used', 'failed', 'sending', 'unknown'] as const;
+
+/** What version 3 adds, loose as the rest of the file is: a later release's keys inside them are kept. */
+const v3Shape = {
+  sendEpochs: z.record(z.string().min(1), z.number().int().min(0)).optional(),
+  legacyDrain: z
+    .looseObject({
+      since: absoluteTimeSchema,
+      tracked: z.record(z.string().min(1), z.enum(['open', ...LEGACY_DRAIN_OUTCOMES])),
+    })
+    .optional(),
+};
+
+/** Version 3 over a version-1 body: its body validated by version 1's own rules. */
+const configV3Naming1Schema: z.ZodType<ConfigV3Naming1, unknown> = z
+  .looseObject({ version: z.literal(3), naming: z.literal(1), ...v1BodyShape, ...v3Shape })
+  .superRefine(checkV1Body);
+
+/** Version 3 over a version-2 body: its body validated by version 2's own rules. */
+const configV3Naming2Schema: z.ZodType<ConfigV3Naming2, unknown> = z
+  .looseObject({ version: z.literal(3), naming: z.literal(2), ...v2BodyShape, ...v3Shape })
+  .superRefine(checkV2Body);
+
+/** Version 3, either naming. Loose at every level, so a key a later release adds survives this one's writes. */
+export const configV3Schema: z.ZodType<ConfigV3, unknown> = z.union([configV3Naming1Schema, configV3Naming2Schema]);
+
+function schemaFor(version: ConfigVersion, naming: unknown = 2): z.ZodType<Config, unknown> {
+  if (version === 3) return naming === 1 ? configV3Naming1Schema : configV3Naming2Schema;
   return version === 2 ? configV2Schema : configV1Schema;
+}
+
+/** The schema that validates a write of `config`: its version's, and for version 3 its naming's. */
+function schemaOf(config: Config): z.ZodType<Config, unknown> {
+  return schemaFor(config.version, config.version === 3 ? config.naming : undefined);
 }
 
 /**
@@ -747,7 +846,7 @@ export function isValidAlias(alias: string): boolean {
 
 /** A config with nothing in it, at `version` — by default the version a new config is created at. */
 export function emptyConfig(version: ConfigVersion = NEW_CONFIG_VERSION): Config {
-  return schemaFor(version).parse({ version });
+  return schemaFor(version).parse(version === 3 ? { version, naming: 2 } : { version });
 }
 
 /**
@@ -810,15 +909,16 @@ export function effectiveChangePolicy(config: Config, scope: { inbox?: string; a
   return entry?.changePolicy ?? defaultChangePolicy(config);
 }
 
-function describeIssues(error: z.ZodError, version: ConfigVersion): string {
+/** `naming` is the body's: 2 for `organisation/platform` names (version 2, or version 3 over it), 1 for plain ones. */
+function describeIssues(error: z.ZodError, naming: 1 | 2): string {
   return error.issues
     .slice(0, 5)
     .map((issue) => {
       const where = issue.path.join('.') || '(root)';
       // zod reports a bad record key as "Invalid key in record"; say what a valid name looks like instead.
       if (issue.code !== 'invalid_key') return `${where}: ${issue.message}`;
-      if (version === 2 && issue.path[0] !== 'clients') return `${where}: ${NAME_MESSAGE}`;
-      return `${where}: ${version === 2 ? 'client' : 'inbox and client'} ${ALIAS_MESSAGE}`;
+      if (naming === 2 && issue.path[0] !== 'clients') return `${where}: ${NAME_MESSAGE}`;
+      return `${where}: ${naming === 2 ? 'client' : 'inbox and client'} ${ALIAS_MESSAGE}`;
     })
     .join('; ');
 }
@@ -832,18 +932,22 @@ export function parseConfig(text: string, source = 'config.json'): Config {
     throw new CommsError('CONFIG', `${source} is not valid JSON`, { cause: error });
   }
   const version = (raw as { version?: unknown } | null)?.version;
-  if (version !== 1 && version !== 2) {
+  if (version !== 1 && version !== 2 && version !== 3) {
     throw new CommsError(
       'CONFIG',
-      `${source} has version ${String(version)}; this release reads versions ${READABLE_CONFIG_VERSIONS.join(' and ')}`,
+      `${source} has version ${String(version)}; this release reads versions ${READABLE_CONFIG_VERSIONS.slice(0, -1).join(', ')} and ${READABLE_CONFIG_VERSIONS.at(-1)}`,
       {
         hint: 'Upgrade agent-communications, or restore a config written by this version.',
       },
     );
   }
-  const parsed = schemaFor(version).safeParse(raw);
+  const naming = version === 3 ? (raw as { naming?: unknown }).naming : version;
+  if (version === 3 && naming !== 1 && naming !== 2) {
+    throw new CommsError('CONFIG', `${source} is invalid: naming: version 3 names its accounts by naming 1 or 2`);
+  }
+  const parsed = schemaFor(version, naming).safeParse(raw);
   if (!parsed.success) {
-    throw new CommsError('CONFIG', `${source} is invalid: ${describeIssues(parsed.error, version)}`);
+    throw new CommsError('CONFIG', `${source} is invalid: ${describeIssues(parsed.error, naming === 1 ? 1 : 2)}`);
   }
   return parsed.data;
 }
@@ -852,17 +956,26 @@ export class ConfigStore {
   readonly path: string;
   readonly #lockPath: string;
   readonly #handoffs: CliHandoffs | undefined;
+  readonly #hooks: ConversionHooks | undefined;
   #cache: { key: string; config: Config } | null = null;
 
   /**
    * @param options.handoffs the printing package's handoffs (`core.handoffs`, CUE-403), for the command a refusal
    *   names; left out, a refusal that has to name one is a programming error (`requiredHandoffs`).
    */
-  constructor(configDir: string, options: { readonly handoffs?: CliHandoffs | undefined } = {}) {
+  constructor(
+    configDir: string,
+    options: {
+      readonly handoffs?: CliHandoffs | undefined;
+      /** Test-only pauses inside the version-3 conversion (`config-hooks.ts`); unreachable from the package root. */
+      readonly [CONVERSION_HOOKS]?: ConversionHooks | undefined;
+    } = {},
+  ) {
     this.path = join(configDir, 'config.json');
     // The lock sits next to the file it guards, so an overridden state directory cannot split it.
     this.#lockPath = join(configDir, '.config.lock');
     this.#handoffs = options.handoffs;
+    this.#hooks = options[CONVERSION_HOOKS];
   }
 
   /** "Run the names migration again", as core's command — located from whatever is printing — or the tool. */
@@ -912,23 +1025,31 @@ export class ConfigStore {
         this.#cache = null;
         const current = structuredClone(await this.load());
         const next = await mutator(structuredClone(current));
-        // An ordinary write keeps the version it found. Changing it is a migration — it renames every account and
-        // decides which releases can still read the file — and has exactly one door, `migrateNames`.
+        // An ordinary write keeps the version it found, and its naming. Changing either is a migration — renaming
+        // every account, or deciding which releases can still read the file — and each has exactly one door:
+        // `migrateNames`, and `convertToVersion3`.
         if ((next as { version?: unknown }).version !== current.version) {
           throw new CommsError(
             'CONFIG',
             `refusing to change the config version from ${current.version} to ${String((next as { version?: unknown }).version)}`,
-            { hint: 'Only the names migration changes the version. This is a bug — please report it.' },
+            {
+              hint: 'Only the names migration and the version-3 conversion change it. This is a bug — please report it.',
+            },
           );
         }
-        const parsed = schemaFor(current.version).safeParse(next);
+        if (current.version === 3 && (next as { naming?: unknown }).naming !== current.naming) {
+          throw new CommsError('CONFIG', 'refusing to change how the configuration names its accounts', {
+            hint: 'Only the names migration changes it. This is a bug — please report it.',
+          });
+        }
+        const parsed = schemaOf(current).safeParse(next);
         if (!parsed.success) {
           throw new CommsError(
             'CONFIG',
-            `refusing to write invalid config: ${describeIssues(parsed.error, current.version)}`,
+            `refusing to write invalid config: ${describeIssues(parsed.error, namingOf(current))}`,
           );
         }
-        if (current.version === 2 && parsed.data.version === 2) {
+        if (hasNames(current) && hasNames(parsed.data)) {
           const dropped = formerNamesDropped(current, parsed.data);
           if (dropped !== null) {
             throw new CommsError('CONFIG', `refusing to write a config that ${dropped}`, {
@@ -967,11 +1088,15 @@ export class ConfigStore {
             });
           }
         }
-        const serialized = `${JSON.stringify(parsed.data, null, 2)}\n`;
+        // The send epoch (design 2026-10-05 §D1), last, once the write is otherwise allowed: on version 3, raised for
+        // every owner this write turns to `never`, and never lowered; before it, no send policy of an existing owner
+        // moves at all.
+        const written = withSendEpochs(current, parsed.data);
+        const serialized = `${JSON.stringify(written, null, 2)}\n`;
         await writeFileAtomic(this.path, serialized, FILE_MODE, options.signal);
-        committed = parsed.data;
+        committed = written;
         this.#cache = null;
-        return parsed.data;
+        return written;
       });
     } catch (error) {
       if (!options.signal?.aborted || !committed) throw error;
@@ -1015,8 +1140,8 @@ export class ConfigStore {
   async migrateNames(
     expected: string,
     rows: readonly RenamedAccount[],
-    build: (current: ConfigV1) => ConfigV2,
-  ): Promise<{ status: 'migrated' | 'already-migrated'; config: ConfigV2; backup?: string }> {
+    build: (current: PlainConfig) => NamedConfig,
+  ): Promise<{ status: 'migrated' | 'already-migrated'; config: NamedConfig; backup?: string }> {
     if (!namesMigrationEnabled()) {
       throw new CommsError('CONFIG', 'this release reads version 2 of the config but does not write it', {
         hint: 'Names are migrated by a later release, once every program that shares this config can read the result.',
@@ -1032,7 +1157,7 @@ export class ConfigStore {
          */
         const raw = await readFileIfExists(this.path);
         const current = raw === null ? emptyConfig() : parseConfig(raw, this.path);
-        if (current.version === 2) {
+        if (hasNames(current)) {
           if (!migrationApplied(current, rows)) {
             throw new CommsError('TRANSIENT', 'the names were migrated while this ran, and not to these names', {
               hint: this.#namesMigrateAgain('to see what they are called now'),
@@ -1045,7 +1170,15 @@ export class ConfigStore {
             hint: this.#namesMigrateAgain('to see the mapping for the configuration as it is now'),
           });
         }
-        const parsed = configV2Schema.safeParse(build(structuredClone(current)));
+        // Version 1 becomes version 2; version 3 over version 1's names stays version 3, over version 2's. Never back.
+        const target = current.version === 3 ? 3 : 2;
+        const built = build(structuredClone(current));
+        if (built.version !== target) {
+          throw new CommsError('CONFIG', `refusing a migration that writes version ${built.version}`, {
+            hint: 'This is a bug — please report it.',
+          });
+        }
+        const parsed = (schemaFor(target, 2) as z.ZodType<NamedConfig, unknown>).safeParse(built);
         if (!parsed.success) {
           throw new CommsError('CONFIG', `refusing to write invalid config: ${describeIssues(parsed.error, 2)}`);
         }
@@ -1076,6 +1209,132 @@ export class ConfigStore {
       }),
     );
   }
+
+  /**
+   * The one way a configuration becomes version 3 (design 2026-10-05 §D1, "Old releases are locked out before the
+   * fence is relied on").
+   *
+   * Version 3 carries the send epoch, which 0.13 does not know, and 0.13 refuses to read it — so from this write on, no
+   * 0.13 process can start a prepare, a claim, an approval or a policy change through this file. Nothing is renamed:
+   * a version-1 body stays version 1's (`naming: 1`) until the names migration, which needs its own approval.
+   *
+   * Under the config lock, the file is read again — never from the cache, never from the read before the lock — and an
+   * existing version 3 returned unchanged: a second converter that lost the race keeps the winner's epochs and drain.
+   * `scan` runs under the same lock, so a record written while this waited for it is seen, and an update cannot land
+   * between the scan and the write; the version-3 write carries `legacyDrain` only when the scan tracked something.
+   * With no config file at all there is nothing to convert, and nothing is written.
+   */
+  async convertToVersion3(
+    scan: () => Promise<Record<string, 'open'>>,
+    options: { now?: (() => Date) | undefined } = {},
+  ): Promise<{ status: 'converted' | 'already' | 'empty'; config: Config }> {
+    // Most calls find version 3 already, and need no lock.
+    const seen = await this.load();
+    if (seen.version === 3) return { status: 'already', config: seen };
+    await this.#hooks?.beforeLock?.();
+    return withFileLock(this.#lockPath, async () => {
+      this.#cache = null;
+      const raw = await readFileIfExists(this.path);
+      if (raw === null) return { status: 'empty' as const, config: emptyConfig() };
+      const current = parseConfig(raw, this.path);
+      if (current.version === 3) return { status: 'already' as const, config: current };
+      const tracked = await scan();
+      await this.#hooks?.afterScan?.();
+      const since = (options.now?.() ?? new Date()).toISOString();
+      const converted = {
+        ...current,
+        version: 3,
+        naming: current.version,
+        ...(Object.keys(tracked).length > 0 ? { legacyDrain: { since, tracked } } : {}),
+      };
+      const parsed = schemaFor(3, current.version).safeParse(converted);
+      if (!parsed.success) {
+        throw new CommsError(
+          'CONFIG',
+          `refusing to write invalid config: ${describeIssues(parsed.error, current.version)}`,
+          { hint: 'This is a bug — please report it.' },
+        );
+      }
+      await this.#hooks?.beforeWrite?.();
+      await writeFileAtomic(this.path, `${JSON.stringify(parsed.data, null, 2)}\n`);
+      this.#cache = null;
+      return { status: 'converted' as const, config: parsed.data };
+    });
+  }
+}
+
+/**
+ * Each owner's effective send policy, by id: a mailbox's own or the default, an account's own or the default.
+ *
+ * By id, because a name can change within one write and a policy must be compared for the same owner.
+ */
+function sendPoliciesById(config: Config): Map<string, SendPolicy> {
+  const policies = new Map<string, SendPolicy>();
+  for (const [alias, inbox] of Object.entries(config.inboxes))
+    policies.set(inbox.id, effectiveSendPolicy(config, alias));
+  for (const [name, account] of Object.entries(config.accounts)) {
+    policies.set(account.id, effectiveAccountSendPolicy(config, name));
+  }
+  return policies;
+}
+
+/**
+ * The owners this write turns to `never`: each one there before and after whose effective send policy was not `never`
+ * and is now — by its own setting, or by the default it inherits.
+ */
+export function fencedOwners(before: Config, after: Config): string[] {
+  const was = sendPoliciesById(before);
+  return [...sendPoliciesById(after)]
+    .filter(([id, policy]) => policy === 'never' && was.has(id) && was.get(id) !== 'never')
+    .map(([id]) => id);
+}
+
+/** Whether this write makes any send policy looser: an owner's effective one, or the default. */
+function loosensASendPolicy(before: Config, after: Config): boolean {
+  const was = sendPoliciesById(before);
+  for (const [id, policy] of sendPoliciesById(after)) {
+    const earlier = was.get(id);
+    if (earlier !== undefined && POLICY_RANK[policy] < POLICY_RANK[earlier]) return true;
+  }
+  return POLICY_RANK[after.defaults.sendPolicy] < POLICY_RANK[before.defaults.sendPolicy];
+}
+
+/**
+ * `after`, with the send epochs this write owes (design 2026-10-05 §D1, "`never` revokes; loosening revives nothing").
+ *
+ * On version 3: every owner this write turns to `never` gets its epoch raised by one, in this same atomic write, and
+ * no epoch is ever lowered — whatever the write's own copy says. While a legacy drain is open no send policy may be
+ * loosened at all, so a revocation that failed cannot be followed by `never → chat`.
+ *
+ * Before version 3 there is no epoch, so no write may move an existing owner's send policy: every writer that does
+ * converts first (`ensureSendEpochConfig`), and one that did not would skip the fence.
+ */
+function withSendEpochs(before: Config, after: Config): Config {
+  if (before.version !== 3 || after.version !== 3) {
+    const was = sendPoliciesById(before);
+    const moved = [...sendPoliciesById(after)].some(([id, policy]) => was.has(id) && was.get(id) !== policy);
+    if (moved) {
+      throw new CommsError('CONFIG', 'refusing to change a send policy before the configuration is version 3', {
+        hint: 'A send policy is changed only with its send epoch, on version 3. This is a bug — please report it.',
+      });
+    }
+    return after;
+  }
+  if ((before.legacyDrain !== undefined || after.legacyDrain !== undefined) && loosensASendPolicy(before, after)) {
+    throw new CommsError(
+      'TRANSIENT',
+      'records from an earlier release are still being retired, so no send policy can be loosened yet',
+      {
+        hint: 'Try again in a few minutes: until every approval an earlier release prepared is retired, a looser policy could let one through.',
+      },
+    );
+  }
+  const epochs: Record<string, number> = {};
+  for (const [id, epoch] of Object.entries(before.sendEpochs ?? {})) epochs[id] = epoch;
+  // Never lowered, whatever the write's own copy says.
+  for (const [id, epoch] of Object.entries(after.sendEpochs ?? {})) epochs[id] = Math.max(epochs[id] ?? 0, epoch);
+  for (const id of fencedOwners(before, after)) epochs[id] = (before.sendEpochs?.[id] ?? 0) + 1;
+  return Object.keys(epochs).length === 0 ? after : { ...after, sendEpochs: epochs };
 }
 
 async function readFileIfExists(path: string): Promise<string | null> {
@@ -1163,7 +1422,7 @@ export interface RenamedAccount {
  * False, then, for somebody else's mapping, for a migration of a configuration this plan never saw, for a rename
  * after this one, for an account removed since, and for an id that has moved.
  */
-function migrationApplied(config: ConfigV2, rows: readonly RenamedAccount[]): boolean {
+function migrationApplied(config: NamedConfig, rows: readonly RenamedAccount[]): boolean {
   for (const map of ['inboxes', 'accounts'] as const) {
     const kind = map === 'inboxes' ? 'inbox' : 'account';
     const planned = rows.filter((row) => row.kind === kind);
@@ -1190,7 +1449,7 @@ function migrationApplied(config: ConfigV2, rows: readonly RenamedAccount[]): bo
  * that has just arrived. Its `name` is only the fallback shown when the account has been removed, so it may change
  * freely.
  */
-function formerNamesDropped(before: ConfigV2, after: ConfigV2): string | null {
+function formerNamesDropped(before: NamedConfig, after: NamedConfig): string | null {
   for (const map of ['inboxes', 'accounts'] as const) {
     for (const [key, record] of Object.entries(before.formerNames[map])) {
       const now = Object.hasOwn(after.formerNames[map], key) ? after.formerNames[map][key] : undefined;
@@ -1219,11 +1478,11 @@ function formerNamesDropped(before: ConfigV2, after: ConfigV2): string | null {
  * condition, a former name of an account removed long ago could be pointed at whatever was connected next.
  */
 /** The account that replaced `fromId` in this write as its reauth, if one did. */
-function replacementOf(before: ConfigV2, after: ConfigV2, fromId: string): AccountConfig | undefined {
+function replacementOf(before: NamedConfig, after: NamedConfig, fromId: string): AccountConfig | undefined {
   return Object.values(after.accounts).find((row) => followsReauth(before, after, fromId, row.id));
 }
 
-function followsReauth(before: ConfigV2, after: ConfigV2, fromId: string, toId: string): boolean {
+function followsReauth(before: NamedConfig, after: NamedConfig, fromId: string, toId: string): boolean {
   const was = Object.values(before.accounts).find((row) => row.id === fromId);
   const now = Object.values(after.accounts).find((row) => row.id === toId);
   if (!was || !now) return false;
@@ -1236,7 +1495,7 @@ function followsReauth(before: ConfigV2, after: ConfigV2, fromId: string, toId: 
  * Null when `after` is `before` with only account keys changed — plus the version, and exactly one record of each
  * former name naming where it went — or a description of the first other difference.
  */
-function onlyKeysRenamed(before: ConfigV1, after: ConfigV2): string | null {
+function onlyKeysRenamed(before: PlainConfig, after: NamedConfig): string | null {
   for (const map of ['inboxes', 'accounts'] as const) {
     const was = new Map(Object.values(before[map]).map((row) => [row.id, canonicalJson(row)]));
     const now = Object.values(after[map]);
@@ -1256,8 +1515,23 @@ function onlyKeysRenamed(before: ConfigV1, after: ConfigV2): string | null {
       }
     }
   }
-  const { version: _v1, inboxes: _i1, accounts: _a1, ...restBefore } = before;
-  const { version: _v2, inboxes: _i2, accounts: _a2, formerNames: _f, ...restAfter } = after;
+  const {
+    version: _v1,
+    inboxes: _i1,
+    accounts: _a1,
+    naming: _n1,
+    ...restBefore
+  } = before as PlainConfig & {
+    naming?: unknown;
+  };
+  const {
+    version: _v2,
+    inboxes: _i2,
+    accounts: _a2,
+    formerNames: _f,
+    naming: _n2,
+    ...restAfter
+  } = after as NamedConfig & { naming?: unknown };
   return canonicalJson(restBefore) === canonicalJson(restAfter) ? null : 'a setting other than a name changed';
 }
 

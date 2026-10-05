@@ -241,7 +241,8 @@ test('a consent carrying approved values lets exactly that change through, and n
   const store = new ConfigStore(tempDir());
   writeFileSync(
     store.path,
-    JSON.stringify({ version: 2, accounts: { 'acme/slack': account(ACME, { sendPolicy: 'never' }) } }),
+    // Version 3, where a send policy is written with its send epoch: before it, no send policy moves at all.
+    JSON.stringify({ version: 3, naming: 2, accounts: { 'acme/slack': account(ACME, { sendPolicy: 'never' }) } }),
   );
   const path = 'accounts.acme/slack.sendPolicy';
   const to = (sendPolicy: 'chat' | 'confirm') => (config: Config) => {
