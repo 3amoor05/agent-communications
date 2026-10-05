@@ -521,7 +521,8 @@ test('whoami reaches Google and reports what it says, with the server version', 
 
 test('doctor reports the checks and their fixes through the tool', async () => {
   const harness = await newHarness();
-  const { client, close } = await connect({ core: harness.core, env: harness.env });
+  // POSIX-pinned, server and expectation both: the fix is read back with `gmailRetryWords`, a POSIX reader.
+  const { client, close } = await connect({ core: harness.core, env: harness.env, platform: 'darwin' });
   try {
     const result = (await client.callTool({ name: 'gmail_doctor', arguments: {} })) as ToolResult;
     const checks = result.structuredContent?.checks as Array<{ id: string; status: string; fix: string | null }>;
@@ -532,7 +533,7 @@ test('doctor reports the checks and their fixes through the tool', async () => {
     // nothing had mentioned — repair advice given to somebody who had not built the thing yet. An agent reading
     // this over MCP cannot do any of it either, so what it needs is the single thing to tell the user.
     // This installation's own `setup`, located (CUE-403): the server's folders pinned, not a bare name.
-    const setup = gmailCommand(harness.core.paths, ['setup']);
+    const setup = gmailCommand(harness.core.paths, ['setup'], 'darwin');
     assert.equal(client_?.fix, setup);
     assert.equal(checks.find((check) => check.id === 'inboxes')?.fix, setup);
     assert.deepEqual(gmailRetryWords(setup).slice(-1), ['setup']);
@@ -755,7 +756,8 @@ test('a pinned gmail_setup answers about its own mailbox and nothing else', asyn
 test('a pinned gmail_setup refuses the machine-wide profile change', async () => {
   const harness = await newHarness({ accounts: [{ sub: 'sub-1', email: 'jo@example.test' }] });
   await harness.addInbox({ alias: 'work', email: 'jo@example.test', sub: 'sub-1', refreshToken: 'rt_x' });
-  const { client, close } = await connect({ core: harness.core, env: harness.env, inbox: 'work' });
+  // POSIX-pinned: the hint's command is read back with `locatedGmailLine`, a POSIX reader.
+  const { client, close } = await connect({ core: harness.core, env: harness.env, inbox: 'work', platform: 'darwin' });
   try {
     const result = (await client.callTool({
       name: 'gmail_setup',
