@@ -119,10 +119,15 @@ test('the claimant renews its lease every thirty seconds while its work is outst
   const { store, id, claim, time, dir } = await claimed();
   t.mock.timers.enable({ apis: ['setInterval'] });
   const tokens: string[] = [];
+  let settled = 0;
   const renewing = {
-    heartbeat: (approvalId: string, claimToken: string) => {
+    heartbeat: async (approvalId: string, claimToken: string) => {
       tokens.push(claimToken);
-      return store.heartbeat(approvalId, claimToken);
+      try {
+        return await store.heartbeat(approvalId, claimToken);
+      } finally {
+        settled += 1;
+      }
     },
   };
   let finish!: (value: string) => void;
@@ -133,8 +138,9 @@ test('the claimant renews its lease every thirty seconds while its work is outst
   for (let beat = 1; beat <= 3; beat += 1) {
     time.advance(30_000);
     t.mock.timers.tick(30_000);
+    // Settled — its lock let go too — before the next tick: one renewal at a time, so a tick during one is skipped.
     await until(
-      () => JSON.parse(file(dir, id)).sendingHeartbeatAt === at(beat * 30_000),
+      () => settled === beat && JSON.parse(file(dir, id)).sendingHeartbeatAt === at(beat * 30_000),
       `renewal ${beat} written under the lock`,
     );
   }

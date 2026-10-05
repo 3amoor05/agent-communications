@@ -1,4 +1,7 @@
-import type { Config, LegacyDrainOutcome } from './config.ts';
+import { SEND_EPOCH_REASON } from './approval-outcome.ts';
+import { stateOf } from './approval-stored.ts';
+import { type Config, fencedOwners, type LegacyDrainOutcome, type LooseningConsent } from './config.ts';
+import { SEND_POLICY_HOOKS, type SendPolicyHooks } from './config-hooks.ts';
 import type { Core } from './core.ts';
 import { CommsError } from './errors.ts';
 
@@ -164,4 +167,104 @@ function outcomeOf(state: string): LegacyDrainOutcome {
       // `revokeLegacy` rewrites a pending or approved record, so neither comes back: anything else is not one it knows.
       throw new CommsError('UNEXPECTED', `a record from an earlier release read as "${state}" after it was retired`);
   }
+}
+
+/**
+ * What a change to `never` did to the approvals prepared before it, by id (design 2026-10-05 §D1, "Order between a
+ * claim and a `never` change"): revoked; already being sent when sending was turned off — the stated limit, admitted
+ * before the change and never recalled; and those whose revocation failed, which the epoch still fences.
+ */
+export interface FenceReport {
+  revoked: string[];
+  /** Already being sent when sending was turned off: claimed before the change, and left to finish. */
+  alreadySending: string[];
+  couldNotRevoke: string[];
+  /** When the approvals could not even be listed: why. The epoch fences them all the same. */
+  unswept?: string | undefined;
+}
+
+/**
+ * The sweep after a change to `never`: every `pending` and `approved` version-2 send of the fenced owners revoked,
+ * each under its own record lock, and every one already `sending` listed.
+ *
+ * Cleanup on top of the fence, not the fence itself: the epoch the change raised already stops every claim and
+ * approval of these records, however this goes. Run after the change committed, with the config lock let go — the
+ * config lock is never held while a record lock is taken, so this and a claim, which holds its record lock and reads
+ * the configuration without the config lock, never wait on each other.
+ */
+export async function sweepFencedOwners(core: Core, owners: readonly string[]): Promise<FenceReport> {
+  const report: FenceReport = { revoked: [], alreadySending: [], couldNotRevoke: [] };
+  if (owners.length === 0) return report;
+  const fenced = new Set(owners);
+  let listed: Awaited<ReturnType<Core['approvals']['list']>>;
+  try {
+    listed = await core.approvals.list();
+  } catch (error) {
+    return { ...report, unswept: error instanceof Error ? error.message : String(error) };
+  }
+  for (const stored of listed) {
+    if (stored.form !== 'v2' || stored.record.kind !== 'send' || !fenced.has(stored.record.inboxId)) continue;
+    const { approvalId, state } = stored.record;
+    if (state === 'sending') {
+      report.alreadySending.push(approvalId);
+      continue;
+    }
+    if (state !== 'pending' && state !== 'approved') continue;
+    try {
+      const after = stateOf(await core.approvals.revoke(approvalId, SEND_EPOCH_REASON, { disposition: 'lifecycle' }));
+      // Claimed between the list and its lock: under way before the revocation reached it.
+      if (after === 'revoked') report.revoked.push(approvalId);
+      else if (after === 'sending') report.alreadySending.push(approvalId);
+    } catch {
+      report.couldNotRevoke.push(approvalId);
+    }
+  }
+  return report;
+}
+
+/**
+ * A write that may move a send policy, as every send-policy writer makes it (design 2026-10-05 §D1): the
+ * configuration made version 3 first (`ensureSendEpochConfig`), then the write — which raises the epoch of every
+ * owner it turns to `never`, in the same atomic write (`ConfigStore.update`) — and then, with the config lock let go,
+ * the sweep of those owners' approvals (`sweepFencedOwners`).
+ */
+export async function applySendPolicyChange(
+  core: Core,
+  write: (current: Config) => Config | Promise<Config>,
+  options: {
+    consent?: LooseningConsent | undefined;
+    now?: (() => Date) | undefined;
+    [SEND_POLICY_HOOKS]?: SendPolicyHooks | undefined;
+  } = {},
+): Promise<{ config: Config; legacyDrain?: LegacyDrainReport; fenced: FenceReport }> {
+  const { legacyDrain } = await ensureSendEpochConfig(core, { now: options.now });
+  let before: Config | undefined;
+  const config = await core.config.update(
+    (current) => {
+      before = structuredClone(current);
+      return write(current);
+    },
+    options.consent === undefined ? {} : { consent: options.consent },
+  );
+  await options[SEND_POLICY_HOOKS]?.afterCommit?.();
+  const fenced = await sweepFencedOwners(core, before === undefined ? [] : fencedOwners(before, config));
+  return { config, ...(legacyDrain === undefined ? {} : { legacyDrain }), fenced };
+}
+
+/** What a person is told of a change to `never`'s sweep: one line for each list that has anything in it. */
+export function describeFenceReport(report: FenceReport): string[] {
+  return [
+    ...(report.revoked.length === 0
+      ? []
+      : [`Revoked, prepared before sending was turned off: ${report.revoked.join(', ')}.`]),
+    ...(report.alreadySending.length === 0
+      ? []
+      : [`Already being sent when sending was turned off, and not recalled: ${report.alreadySending.join(', ')}.`]),
+    ...(report.couldNotRevoke.length === 0
+      ? []
+      : [`Could not be revoked, though none of them can send any more: ${report.couldNotRevoke.join(', ')}.`]),
+    ...(report.unswept === undefined
+      ? []
+      : [`The approvals could not be listed to revoke them (${report.unswept}); none prepared before it can send.`]),
+  ];
 }
