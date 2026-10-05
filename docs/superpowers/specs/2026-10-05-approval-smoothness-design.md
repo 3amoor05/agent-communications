@@ -1,6 +1,6 @@
 # CUE-404 — approving a send without fighting the clock — design
 
-Status: **revised after round 23 (4 P2, all addressed)**, 2026-10-05, from Linear CUE-404 (High; the
+Status: **READY-TO-PLAN after review round 35**, 2026-10-05, from Linear CUE-404 (High; the
 owner: "this is very not smooth") and a cited research pass over this repository, the MCP specification and the
 clients' documentation. Depends on CUE-403 (the CLIs on PATH,
 [its spec](2026-10-04-cli-path-shims-design.md)) for every printed terminal command to work; ships after it.
@@ -113,7 +113,7 @@ implement the first two. The short repeat preview is dropped for this release an
 
   A 0.13 operation already past its config read is not stopped by the version: released Gmail execution reads its
   policy before the draft work and hands that value to the claim, which does not read config again
-  (`packages/gmail/src/operations/send.ts:518, 565, 596`; `packages/core/src/approvals.ts:725`). So the conversion
+  (`packages/gmail/src/operations/send.ts:565-566, 586, 596-605`; `packages/core/src/approvals.ts:725`). So the conversion
   also drains legacy records: right after the version-3 write it revokes, under each record's lock, every v1 send
   record still `pending` or `approved` by D2's derived state (reason `prepared by an earlier release; prepare it
   again`) — 0.14 can never claim them, and an in-flight 0.13 claim that takes the lock afterwards finds the record
@@ -693,8 +693,8 @@ inventing a state:
   names; escaping or truncation alone is not enough (`packages/gmail/src/domain/untrusted-fields.ts:3-15, 39-62`).
 - **Status at any time** is the matching D3 wait pair with `waitSeconds: 0`; it returns the same approval object and
   never calls a provider. The existing Resend `send status` remains its send-record lookup, not the approval-status
-  contract; it may ask Resend when resolving an unknown or scheduled send
-  (`capabilities.json:897-902`; `packages/resend/src/operations/send.ts:744-827`).
+  contract; it asks Resend whenever the account's key has full access
+  (`capabilities.json:897-902`; `packages/resend/src/operations/send.ts:744-827, 780-789`).
 - **List surfaces are explicit.** Gmail `agent-gmail send list` / `gmail_send_list` → `listApprovals` gains the approval objects
   and D9's `unsent` section (`capabilities.json:550-555`). Every approval kind remains visible through the existing
   core `agentcomms approvals list` / `comms_approvals_list` → `listApprovals`
@@ -713,9 +713,10 @@ it breaks `bindingDigest`. Grouping, provider-specific status wording (D3's Rese
 alternative are chosen from this stored field, never by looking up the account, which may since have been removed
 (`packages/core/src/approvals.ts:302` stores only a generic owner id today). A v1 record has no channel: the shared
 legacy decoder (D2) attributes it only from evidence that cannot point elsewhere: an `ibx_` owner id is a Gmail inbox
-(`packages/core/src/config.ts:338`); an `acc_` owner id — Slack, Resend and WhatsApp accounts alike, all of which
-wrote v1 records (`packages/slack/src/operations/send.ts:464, 1268`; `packages/resend/src/operations/send.ts:310`;
-`config.ts:343`) — is attributed by that account's stored `platform` while the account still exists. Otherwise it is
+(`packages/core/src/config.ts:338`); an `acc_` owner id — the generic account id Slack and Resend send records carry
+(`packages/slack/src/operations/send.ts:464, 1268`; `packages/resend/src/operations/send.ts:310`; `config.ts:343`;
+WhatsApp writes only core change approvals, `packages/whatsapp/src/cli/program.ts:552, 594`) — is attributed by that
+account's stored `platform` while the account still exists. Otherwise it is
 unattributable: it takes no part in any channel's grouping and gets only generic wording.
 
 **Grouping comes from the channel's manifest, as data.** Each channel declares `approvalGrouping` in its `"agentcomms"`
