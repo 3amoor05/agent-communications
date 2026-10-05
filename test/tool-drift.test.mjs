@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readdir, readFile } from 'node:fs/promises';
 import { extname, join, relative } from 'node:path';
 import { test } from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { REGISTRY } from '../scripts/channels.mjs';
 
 /**
@@ -220,3 +220,22 @@ for (const product of PRODUCTS) {
     assert.deepEqual(missing, [], `${product.reference} does not document:\n${missing.join('\n')}`);
   });
 }
+
+/*
+ * A refusal that sends a person to a terminal names the wait an agent learns the outcome from (design 2026-10-05 §D7):
+ * a tool over MCP, a command at the command line, from core's `APPROVAL_WAITS` as built. A wait named and never
+ * registered sends an agent to a tool that is not there, and it concludes the approval is lost — so each is read
+ * against the source of the server that would answer it and the CLI that would run it, as the documentation is.
+ */
+test('every wait a refusal names is a tool its server registers and a command its CLI defines (D7-c)', async () => {
+  const { APPROVAL_WAITS } = await import(pathToFileURL(join(ROOT, 'packages', 'core', 'dist', 'index.mjs')).href);
+  const named = Object.entries(APPROVAL_WAITS);
+  assert.ok(named.length > 0, 'the waits should be readable from the built core');
+  for (const [channel, wait] of named) {
+    const product = PRODUCTS.find((each) => each.channel === channel);
+    assert.ok(product, `${channel} is a product of this suite`);
+    assert.ok((await registeredTools(product)).has(wait.tool), `${product.server} registers ${wait.tool}`);
+    const { paths } = await definedCommands(product);
+    assert.ok(paths.has(wait.words.join(' ')), `${product.binary} defines \`${wait.words.join(' ')}\``);
+  }
+});

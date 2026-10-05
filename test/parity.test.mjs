@@ -164,6 +164,27 @@ test('the four waits are one operation, each row its own surface by the channel 
   assertNamed(checkOperations(changed, registries, driven), 'gmail.send.wait');
 });
 
+test('the wait every refusal names is a capability row of its own channel: that command, that tool, reaching waitForApproval on both sides (D7-c)', async () => {
+  // What the refusals print (core's `APPROVAL_WAITS`, as built): a person's `approve` beside the wait an agent uses.
+  const { APPROVAL_WAITS } = await import(pathToFileURL(join(ROOT, 'packages', 'core', 'dist', 'index.mjs')).href);
+  const rows = table.capabilities.filter((row) => row.operation === 'waitForApproval');
+  const byChannel = Object.fromEntries(rows.map((row) => [row.expect?.['options.channel'] ?? 'core', row]));
+  assert.deepEqual(Object.keys(APPROVAL_WAITS).sort(), Object.keys(byChannel).sort(), 'one wait per row, no other');
+  for (const [channel, wait] of Object.entries(APPROVAL_WAITS)) {
+    const row = byChannel[channel];
+    assert.equal(row.package, channel, `${channel}: the row is its own package's`);
+    assert.equal(wait.words.join(' '), row.cli, `${channel}: the command a refusal names is the row's`);
+    assert.equal(wait.tool, row.mcp, `${channel}: the tool a refusal names is the row's`);
+    // It parses as a command of that CLI, and the tool is one that server lists.
+    assert.ok(registries[channel].commands.includes(row.cli), `${channel}: \`${row.cli}\` is a command of its CLI`);
+    assert.ok(registries[channel].tools.includes(row.mcp), `${channel}: ${row.mcp} is a tool of its server`);
+    for (const side of ['cli', 'mcp']) {
+      const calls = driven.reports[row.id]?.[side]?.calls ?? [];
+      assert.deepEqual(calls, ['core:waitForApproval'], `${channel}: the ${side} side reaches the wait`);
+    }
+  }
+});
+
 test('`pnpm verify:parity --strict` exits non-zero exactly while a row is pending', async () => {
   // The release reads this exit code, so a script that printed its problems and exited 0 would be a gate that never
   // shut. Checked against the table as it stands: failing while anything is pending, passing once nothing is.

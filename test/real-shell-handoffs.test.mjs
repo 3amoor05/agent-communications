@@ -21,6 +21,7 @@ import {
   PATH_OPTIONS,
   pinsOf,
   posixShell,
+  posixShellAsync,
   posixTerminal,
   ROOT,
   real,
@@ -208,12 +209,23 @@ test('a change prepared at the CLI is approved at a fresh terminal and run again
     tail: ['attach', 'roots', 'add', allowed, '--approval', id],
   });
 
-  // The person, at a terminal of their own: the approval is in the printing process's store, and they approve it.
+  // And the wait that learns when they have (design 2026-10-05 §D7, D7-b): core's own, pinned as the approve is.
+  const wait = commandEndingWith(hint, ['approval', 'wait', id]);
+  assertLocated(wait, { entry: CORE, folders: m.folders, tail: ['approval', 'wait', id] });
+
+  // The person, at a terminal of their own: the approval is in the printing process's store, and they approve it —
+  // while the agent, in a shell of its own, waits as it was told, and sees them do it.
   const person = shellUnder(m.root, 'person');
+  const watcher = shellUnder(m.root, 'watcher');
+  const waiting = posixShellAsync(wait, watcher);
   const approved = posixTerminal(approve, person);
   assert.equal(approved.status, 0, approved.stdout);
   assert.match(approved.stdout, /Approved\./);
   assertClean(person);
+  const waited = await waiting;
+  assert.equal(waited.status, 0, `${waited.stdout}\n${waited.stderr}`);
+  assert.match(waited.stdout, new RegExp(`^${id}: approved, and can be used now`, 'm'));
+  assertClean(watcher);
 
   // The agent, in another fresh shell, runs the change again: it lands in the printing process's configuration.
   const agent = shellUnder(m.root, 'agent');
@@ -269,6 +281,14 @@ test(
       assert.equal(result.status, 10, `${name}: ${result.stdout}${result.stderr}`);
       assert.match(`${result.stdout}${result.stderr}`, /needs an interactive terminal/, name);
     });
+    // The wait named beside it (D7-b): withdrawn from the printing store, the approval is found there, revoked, by the
+    // wait pasted in each shell — as only its pins could find it.
+    const wait = commandEndingWith(hint, ['approval', 'wait', id], 'win32');
+    assert.equal(m.print(['approvals', 'revoke', id]).status, 0);
+    inWindowsShells(wait, person, (result, name) => {
+      assert.equal(result.status, 0, `${name}: ${result.stdout}${result.stderr}`);
+      assert.match(result.stdout, new RegExp(`^${id}: revoked`, 'm'), name);
+    });
     const refused = audit(m.folders.stateDir).filter(
       (record) => record.approvalId === id && record.operation === 'change.approve' && record.outcome === 'refused',
     );
@@ -307,11 +327,15 @@ test('a change prepared through the core server is approved at a fresh terminal,
   const approve = commandEndingWith(asked.next, ['approve', asked.approvalId]);
   assertLocated(approve, { entry: CORE, folders: m.folders, tail: ['approve', asked.approvalId] });
   assert.deepEqual(environmentAssignments(asked.next), []);
+  // The wait it names is a tool of the server that named it (D7-b).
+  assert.match(asked.next, /; learn when they have with comms_approval_wait\./);
 
   const person = shellUnder(m.root, 'person');
   const approved = posixTerminal(approve, person);
   assert.equal(approved.status, 0, approved.stdout);
   assert.match(approved.stdout, /Approved\./);
+  const waited = await server.call('comms_approval_wait', { approvalId: asked.approvalId, waitSeconds: 0 });
+  assert.deepEqual([waited.state, waited.claimable], ['approved', true], JSON.stringify(waited));
 
   const applied = await server.call('comms_attach', { rootsAdd: allowed, approvalId: asked.approvalId });
   assert.equal(applied.applied, true, JSON.stringify(applied));
