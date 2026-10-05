@@ -3,12 +3,13 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
-import { gatedChange, openCore, serverInstallChange } from '@agentcomms/core';
+import { gatedChange, openCore, sendApprovesHint, serverInstallChange } from '@agentcomms/core';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { createWhatsAppMcpServer } from '../src/mcp/server.ts';
 import { VERSION } from '../src/version.ts';
 import { ALICE, buildFixtureStore } from './support/fixture.ts';
+import { assertNoBareCommand, whatsappHandoffs } from './support/handoffs.ts';
 import { type Harness, newHarness } from './support/harness.ts';
 
 /**
@@ -108,7 +109,7 @@ test('registering is a change a person approves; the approval is claimed with --
   assert.deepEqual(cursorEntry(harness).args.slice(-3), ['mcp', '--account', ACCOUNT]);
 });
 
-test('an approval comms_server_install prepared is claimed by agent-whatsapp mcp install: one change on two surfaces', async () => {
+test('an approval comms_server_install prepared is claimed by WhatsApp’s mcp install: one change on two surfaces', async () => {
   const harness = await newHarness({ env: { CLAUDECODE: '1' } });
   await harness.ready(ACCOUNT);
   const core = openCore({ env: harness.env });
@@ -178,7 +179,7 @@ test('a pin to an account that is not there, or is not WhatsApp’s, is refused 
   assert.match(serve.stderr, /no WhatsApp account called "nobody\/whatsapp"/);
 });
 
-test('under confirm, only a person approves — agent-whatsapp approve, at a terminal — and then the install applies', async () => {
+test('under confirm, only a person approves — WhatsApp’s own approve, at a terminal — and then the install applies', async () => {
   const harness = await newHarness({ env: { CLAUDECODE: '1' } });
   await harness.ready(ACCOUNT);
   setChangePolicy(harness, 'confirm');
@@ -375,8 +376,12 @@ test('a send’s approval is not approved here, and the refusal names every comm
   });
   assert.equal(refused.code, 64, said);
   assert.match(said, /is for a send, and WhatsApp never sends/);
-  for (const command of ['agent-gmail approve', 'agent-slack approve', 'agent-resend approve']) {
-    assert.ok(said.includes(`\`${command}\``), `${command} is named: ${said}`);
+  // Each that can have prepared it, as this machine's registrations find it — none here, so each says why not.
+  const registered = await whatsappHandoffs(harness.personEnv).registered();
+  assert.ok(said.includes(sendApprovesHint(registered, record.approvalId)), said);
+  for (const product of ['Gmail', 'Slack', 'Resend']) {
+    assert.match(said, new RegExp(`${product} \\S+ \\(@agentcomms/\\w+\\) is not locatable here`), product);
   }
-  assert.ok(!said.includes('agent-whatsapp approve`'), 'not this one, which never prepared a send');
+  assert.ok(!said.includes('(@agentcomms/whatsapp)'), 'not this one, which never prepared a send');
+  assertNoBareCommand(said);
 });

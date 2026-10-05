@@ -1,4 +1,4 @@
-import { isCommsError, toCommsError } from '@agentcomms/core';
+import { handoffSentenceToFill, isCommsError, toCommsError } from '@agentcomms/core';
 import type { WhatsAppContext } from '../context.ts';
 import { WhatsAppIndex } from '../index-db.ts';
 import { probeStore } from '../source/snapshot.ts';
@@ -54,7 +54,7 @@ export interface StatusResult {
   accounts: AccountStatus[];
   reads: string;
   sends: string;
-  /** What to run first, when nothing is set up. */
+  /** What to run first, when nothing is set up: this installation's own `add`, located, with the name to fill in. */
   setup?: string | undefined;
   /**
    * What happened to the spike's accounts, when this process found its file: moved into `config.json`, or why not.
@@ -99,7 +99,7 @@ async function statusOf(context: WhatsAppContext, named: string, check: boolean)
   }
   let index: AccountStatus['index'] = { synced: false };
   try {
-    const opened = await WhatsAppIndex.open(context.accountDir(account), name, new Visibility(lists), context.platform);
+    const opened = await WhatsAppIndex.open(context.accountDir(account), name, new Visibility(lists), context.handoffs);
     try {
       const stats = opened.stats();
       index = {
@@ -141,7 +141,13 @@ export async function whatsappStatus(
     reads: READS,
     sends: SENDS,
     ...(accounts.length === 0
-      ? { setup: 'agent-whatsapp add <organisation>/whatsapp — run by a person, in a terminal' }
+      ? {
+          setup: handoffSentenceToFill(
+            context.handoffs.own(['add']),
+            ['<organisation>/whatsapp'],
+            (command) => `${command} — run by a person, in a terminal`,
+          ),
+        }
       : {}),
     ...(spike ? { spike: describeMigration(spike) } : {}),
   };

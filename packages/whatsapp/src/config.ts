@@ -4,10 +4,11 @@ import {
   type AccountConfig,
   CommsError,
   type Config,
-  inlineCommand,
+  type HandoffMaker,
+  handoffSentence,
+  handoffSentenceToFill,
   newAccountId,
   resolveName,
-  shellCommand,
 } from '@agentcomms/core';
 import { STORE_FILE, WHATSAPP_BUSINESS_CONTAINER, WHATSAPP_GROUP_CONTAINER } from './source/location.ts';
 
@@ -102,16 +103,25 @@ export function newWhatsAppAccount(options: {
  * The configuration has names this channel can use.
  *
  * WhatsApp accounts are `organisation/whatsapp`, which only version 2 of the configuration names. A version-1 file is
- * one an older release on this machine may still share; `agentcomms names migrate` moves it on, and until then this
- * channel adds and reads nothing rather than invent a flat name for a platform that never had one.
+ * one an older release on this machine may still share; core's `names migrate` moves it on, and until then this
+ * channel adds and reads nothing rather than invent a flat name for a platform that never had one. The refusal names
+ * core's command as `handoffs` find it: the core this package installs.
  */
-export function requireNamedConfig(config: Config): void {
+export function requireNamedConfig(config: Config, handoffs: HandoffMaker): void {
   if (config.version !== 2) {
     throw new CommsError(
       'CONFIG',
       'WhatsApp accounts need the organisation/platform names, and this configuration still has the old flat ones',
       {
-        hint: 'Run `agentcomms names migrate --dry-run` to see what everything would be called, then `agentcomms names migrate`.',
+        hint: handoffSentence(
+          handoffs.core(['names', 'migrate', '--dry-run']),
+          (dryRun) =>
+            handoffSentence(
+              handoffs.core(['names', 'migrate']),
+              (migrate) => `Run ${dryRun} to see what everything would be called, then ${migrate}.`,
+            ),
+          { instead: 'Call comms_names_migrate from a chat.' },
+        ),
       },
     );
   }
@@ -125,13 +135,17 @@ export function whatsappAccountNames(config: Config): string[] {
     .sort();
 }
 
-function notFound(config: Config, name: string): () => CommsError {
+function notFound(config: Config, name: string, handoffs: HandoffMaker): () => CommsError {
   return () => {
     const known = whatsappAccountNames(config);
     return new CommsError('NOT_FOUND', `no WhatsApp account called "${name}"`, {
       hint: known.length
         ? `Known accounts: ${known.join(', ')}.`
-        : 'None yet: a person adds one with `agent-whatsapp add <organisation/whatsapp>`.',
+        : handoffSentenceToFill(
+            handoffs.own(['add']),
+            ['<organisation>/whatsapp'],
+            (command) => `None yet: a person adds one with ${command}.`,
+          ),
     });
   };
 }
@@ -142,25 +156,25 @@ function notFound(config: Config, name: string): () => CommsError {
  * Through core's `resolveName`, so a former name is refused with the name the account has now. Another platform's
  * account under the name is "not found", as a missing one is. A record whose mode is not `read`, or whose `source`
  * is not a store path this package would read, is refused rather than acted on: nothing here would know what it
- * means, and the vocabulary is closed (design §5).
+ * means, and the vocabulary is closed (design §5). A refusal names this package's commands as `handoffs` find them.
  */
 export function requireAccount(
   config: Config,
   name: string | undefined,
-  platform: NodeJS.Platform = process.platform,
+  handoffs: HandoffMaker,
 ): { name: string; account: WhatsAppAccount } {
   if (name === undefined || name === '') {
     throw new CommsError('USAGE', 'which WhatsApp account? there is no default', {
       hint: 'Pass the account, as `organisation/whatsapp`.',
     });
   }
-  requireNamedConfig(config);
-  const { account } = resolveName(config, 'account', name, notFound(config, name));
-  if (account.platform !== PLATFORM) throw notFound(config, name)();
+  requireNamedConfig(config, handoffs);
+  const { account } = resolveName(config, 'account', name, notFound(config, name, handoffs));
+  if (account.platform !== PLATFORM) throw notFound(config, name, handoffs)();
   const mode = account.mode ?? account.tier;
   if (mode !== READ_MODE) {
     throw new CommsError('CONFIG', `"${name}" is recorded in mode "${String(mode)}", and WhatsApp accounts only read`, {
-      hint: `Nothing was read. Remove it with ${inlineCommand(shellCommand(['agent-whatsapp', 'remove', name], platform))} and add it again.`,
+      hint: `Nothing was read. ${handoffSentence(handoffs.own(['remove', name]), (command) => `Remove it with ${command} and add it again.`)}`,
     });
   }
   const source = (account as WhatsAppAccount).source;

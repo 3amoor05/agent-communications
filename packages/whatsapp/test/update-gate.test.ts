@@ -9,6 +9,7 @@ import { test } from 'node:test';
 import tls from 'node:tls';
 import { fileURLToPath } from 'node:url';
 import { openCore, UPDATE_FIRST, updateCheckPath, updateLaterChange } from '@agentcomms/core';
+import { coreInline } from './support/handoffs.ts';
 import { newHarness, tempDir } from './support/harness.ts';
 import { ACCOUNT, connect } from './support/surfaces.ts';
 
@@ -86,8 +87,9 @@ test('with the network cut off, an update in the file stops every tool but whats
     assert.equal(refused.code, 11, refused.stdout + refused.stderr);
     const error = refused.json().error as { code: string; message: string };
     assert.equal(error.code, 'UPDATE_REQUIRED');
-    assert.match(error.message, /`agentcomms update`/);
-    assert.match(error.message, /`agentcomms update --later`/);
+    // Core's commands, as this package finds core through its own dependency on it: never a bare `agentcomms`.
+    assert.ok(error.message.includes(coreInline(harness.env, ['update'])), error.message);
+    assert.ok(error.message.includes(coreInline(harness.env, ['update', '--later'])), error.message);
     assert.equal((await harness.cli(['status', '--json'])).code, 0);
     // WhatsApp's package installed globally at the latest, and this copy older: stopped, and told to run the
     // installed one.

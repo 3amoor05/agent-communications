@@ -7,9 +7,9 @@ import {
   DIR_MODE,
   ensurePrivateDir,
   FILE_MODE,
-  inlineCommand,
+  type HandoffMaker,
+  handoffSentence,
   isGroupOrWorldAccessible,
-  shellCommand,
 } from '@agentcomms/core';
 import { CHAT_ID } from './chat-ref.ts';
 import { readChats, readMessages, readPushNames } from './source/read-source.ts';
@@ -295,19 +295,26 @@ export class WhatsAppIndex {
     this.#db = db;
   }
 
-  /** Every read opens the index through here, and cannot without the account's lists. */
+  /**
+   * Every read opens the index through here, and cannot without the account's lists. A refusal names the sync to run
+   * as `handoffs` find it.
+   */
   static async open(
     directory: string,
     accountName: string,
     visibility: Visibility,
-    platform: NodeJS.Platform = process.platform,
+    handoffs: HandoffMaker,
   ): Promise<WhatsAppIndex> {
     const path = join(directory, INDEX_FILE);
+    // Located only for a refusal: locating reads this package's files, which a read that goes ahead has no need of.
+    const sync = () => handoffs.own(['sync', '--account', accountName]);
     try {
       await stat(path);
     } catch {
       throw new CommsError('NOT_FOUND', `"${accountName}" has not been synced yet, so there is nothing to read`, {
-        hint: `Run ${inlineCommand(shellCommand(['agent-whatsapp', 'sync', '--account', accountName], platform))} (or the whatsapp_sync tool) first.`,
+        hint: handoffSentence(sync(), (command) => `Run ${command} (or the whatsapp_sync tool) first.`, {
+          instead: 'Call the whatsapp_sync tool first.',
+        }),
         details: { reason: 'NOT_SYNCED' },
       });
     }
@@ -319,7 +326,9 @@ export class WhatsAppIndex {
     if (format !== String(INDEX_FORMAT)) {
       db.close();
       throw new CommsError('CONFIG', `the index for "${accountName}" was written by another version of this package`, {
-        hint: `Run ${inlineCommand(shellCommand(['agent-whatsapp', 'sync', '--account', accountName], platform))} to rebuild it.`,
+        hint: handoffSentence(sync(), (command) => `Run ${command} to rebuild it.`, {
+          instead: 'Call the whatsapp_sync tool to rebuild it.',
+        }),
       });
     }
     // The lists, as SQL can ask them: every query below filters with these, so none can forget to.

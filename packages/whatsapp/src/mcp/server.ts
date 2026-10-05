@@ -23,6 +23,9 @@ import { VERSION } from '../version.ts';
  * **Pinned** (`agent-whatsapp mcp --account acme/whatsapp`, which `mcp install --account` writes): every call acts on
  * that account, `account` may be left out, any other is refused, and nothing about another account is said — not in
  * the greeting, not in `whatsapp_status`. The pin is held by the account's id, so a rename follows it.
+ *
+ * The greeting names no command (CUE-403): what a person runs is in the result that needs it — `whatsapp_status`'s
+ * `setup`, a refusal's `hint` — located from this installation when it is asked for.
  */
 
 export interface WhatsAppMcpOptions extends WhatsAppContextOptions {}
@@ -67,7 +70,7 @@ async function buildInstructions(context: WhatsAppContext): Promise<string> {
           'account’s lists; without it, every account’s do.',
           names.length > 0
             ? `Known accounts: ${names.slice(0, 8).join(', ')}${names.length > 8 ? `, and ${names.length - 8} more` : ''}.`
-            : 'No account is set up yet: a person runs `agent-whatsapp add <organisation>/whatsapp` in a terminal.',
+            : 'No account is set up yet: a person adds one in a terminal — whatsapp_status gives the command, as `setup`.',
         ]),
   ].join('\n');
 }

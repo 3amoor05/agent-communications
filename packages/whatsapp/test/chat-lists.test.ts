@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { allowChat, clearChats, denyChat } from '../src/operations/chat-lists.ts';
 import { ALICE, BOB, ERIN_STATUS, GROUP, HIDDEN } from './support/fixture.ts';
+import { ownInline, ownText } from './support/handoffs.ts';
 import { newHarness } from './support/harness.ts';
 import { ACCOUNT, asIfAbsent, connect, NOBODY, person, surfaces } from './support/surfaces.ts';
 
@@ -148,7 +149,10 @@ test('a list applies at once, and the next sync leaves what it hides out of the 
     await person(harness, 'clear');
     assert.equal((await on.read(BOB)).code, 66, 'not in the index at all: cleared, it is still not there');
     const cleared = await harness.cli(['clear', '--account', ACCOUNT], { platform: 'darwin' });
-    assert.match(cleared.stdout, /agent-whatsapp sync --account acme\/whatsapp/, 'the person is told to sync');
+    assert.ok(
+      cleared.stdout.includes(ownText(harness.env, ['sync', '--account', ACCOUNT])),
+      'the person is told to sync',
+    );
     await harness.cli(['sync', '--account', ACCOUNT]);
     assert.equal((await on.read(BOB)).code, 0, 'the next sync brings it back');
 
@@ -168,7 +172,8 @@ test('a list change renders its next sync for the selected Windows shell', async
   const harness = await newHarness();
   await harness.ready('7/whatsapp');
   const result = await clearChats(harness.context({ platform: 'win32' }), { account: '7/whatsapp' });
-  assert.equal(result.next, 'agent-whatsapp sync --account "7/whatsapp"');
+  assert.equal(result.next, ownText(harness.env, ['sync', '--account', '7/whatsapp'], 'win32'));
+  assert.ok(result.next.endsWith(' sync --account "7/whatsapp"'), result.next);
 });
 
 test('allow, deny and clear are a person’s: refused to an agent, unchanged by one, and offered by no tool', async () => {
@@ -182,7 +187,10 @@ test('allow, deny and clear are a person’s: refused to an agent, unchanged by 
     assert.equal(result.code, 10, `${argv.join(' ')}: only a person may`);
     assert.equal(result.json().error?.code, 'LOOSENING_REFUSED');
     assert.match(String(result.json().error?.message), /only a person changes which chats an agent may see/);
-    assert.match(String(result.json().error?.hint), new RegExp(`agent-whatsapp ${argv[0]}`));
+    assert.equal(
+      result.json().error?.hint,
+      `Ask the person to run ${ownInline(harness.env, [...argv, '--account', ACCOUNT])} in their own terminal.`,
+    );
   }
   assert.deepEqual(readFileSync(configPath), config, 'nothing was written');
   assert.equal(harness.listsFile(), null, 'no list was written either');

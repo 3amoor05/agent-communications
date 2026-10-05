@@ -1,4 +1,4 @@
-import { commandText, isCommsError, shellCommand } from '@agentcomms/core';
+import { handoffText, isCommsError } from '@agentcomms/core';
 import { chatRefOf } from '../chat-ref.ts';
 import type { WhatsAppAccount } from '../config.ts';
 import type { WhatsAppContext } from '../context.ts';
@@ -67,7 +67,7 @@ async function named(
 ): Promise<Pick<ChatListsResult, 'chat' | 'warning'>> {
   let index: WhatsAppIndex;
   try {
-    index = await WhatsAppIndex.open(context.accountDir(account), name, new Visibility(undefined), context.platform);
+    index = await WhatsAppIndex.open(context.accountDir(account), name, new Visibility(undefined), context.handoffs);
   } catch (error) {
     if (!isCommsError(error) || error.details?.reason !== 'NOT_SYNCED') throw error;
     return {
@@ -96,15 +96,11 @@ async function change(
 ): Promise<ChatListsResult> {
   refuseAnAgent(
     context,
-    shellCommand(
-      [
-        'agent-whatsapp',
-        command,
-        ...(request.chat === undefined ? [] : [request.chat]),
-        ...(request.account === undefined ? [] : ['--account', request.account]),
-      ],
-      context.platform,
-    ),
+    [
+      command,
+      ...(request.chat === undefined ? [] : [request.chat]),
+      ...(request.account === undefined ? [] : ['--account', request.account]),
+    ],
     'changes which chats an agent may see',
   );
   const chatId = request.chat === undefined ? undefined : chatRefOf(request.chat, { international: true }).id;
@@ -116,7 +112,7 @@ async function change(
     deny: [...after.deny],
     changed: JSON.stringify(before) !== JSON.stringify(after),
     effect: effectOf(after),
-    next: commandText(shellCommand(['agent-whatsapp', 'sync', '--account', name], context.platform)),
+    next: handoffText(context.handoffs.own(['sync', '--account', name])),
     ...(chatId === undefined ? {} : await named(context, name, account, chatId)),
   };
 }

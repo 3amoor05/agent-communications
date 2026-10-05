@@ -1,4 +1,13 @@
-import { CommsError, type Config, type Core, openCore, type PathOverrides } from '@agentcomms/core';
+import {
+  type CliHandoffs,
+  CommsError,
+  type Config,
+  type Core,
+  openCore,
+  type PathOverrides,
+  requireHandoffs,
+} from '@agentcomms/core';
+import { CALLER } from './caller.ts';
 import { PLATFORM, requireAccount, type WhatsAppAccount, whatsappAccountNames } from './config.ts';
 import { accountStateDir } from './index-db.ts';
 import { ChatListStore } from './lists.ts';
@@ -15,6 +24,10 @@ import type { ChatLists } from './visibility.ts';
  * Accounts are core's (`config.json`'s `accounts`), read through core's `ConfigStore`; the person's chat lists are this
  * package's own file (`lists.ts`). The first read of the configuration in a process moves the spike's accounts in, when
  * there are any (`spike-migration.ts`).
+ *
+ * Core is opened with this package as its caller, so every command this tells a person to run — its own, core's — is
+ * located from here: this Node and this installation's CLI, with the folders of this run pinned, or the sentence saying
+ * there is none (CUE-403; CONTRIBUTING.md, "Telling a person what to run"). `handoffs` makes them.
  */
 
 export interface WhatsAppContextOptions {
@@ -49,6 +62,8 @@ export class WhatsAppContext {
   readonly surface: 'cli' | 'mcp';
   readonly platform: NodeJS.Platform;
   readonly core: Core;
+  /** The commands this tells a person to run, located, and quoted for this context's shell. */
+  readonly handoffs: CliHandoffs;
   readonly lists: ChatListStore;
   /** The name a pinned server was started for, as given. */
   readonly pinned: string | undefined;
@@ -73,7 +88,10 @@ export class WhatsAppContext {
         now: this.now,
         platform: this.platform,
         ...(options.pathOverrides ? { pathOverrides: options.pathOverrides } : {}),
+        caller: CALLER,
       });
+    // A core given without its caller is a programming error, said here rather than as a bare command later.
+    this.handoffs = requireHandoffs(this.core).on(this.platform);
     this.lists = new ChatListStore(this.core.paths.configDir);
     this.pinned = options.account;
     this.#log = options.log;
@@ -84,6 +102,7 @@ export class WhatsAppContext {
   migration(): Promise<SpikeMigration | null> {
     this.#migration ??= migrateSpikeAccounts({
       core: this.core,
+      handoffs: this.handoffs,
       lists: this.lists,
       env: this.env,
       now: this.now,
@@ -109,7 +128,7 @@ export class WhatsAppContext {
    */
   async checkPin(): Promise<void> {
     if (this.pinned === undefined) return;
-    this.#pinnedId = requireAccount(await this.config(), this.pinned, this.platform).account.id;
+    this.#pinnedId = requireAccount(await this.config(), this.pinned, this.handoffs).account.id;
   }
 
   /** The name a call acts on: the one it gave, checked against the pin when there is one. */
@@ -137,7 +156,7 @@ export class WhatsAppContext {
   /** One account, resolved and checked, with the person's lists for it — which every read applies. */
   async account(named: string | undefined): Promise<ResolvedAccount> {
     const config = await this.config();
-    const { name, account } = requireAccount(config, await this.#nameFor(config, named), this.platform);
+    const { name, account } = requireAccount(config, await this.#nameFor(config, named), this.handoffs);
     return { name, account, lists: await this.lists.of(account.id) };
   }
 
@@ -157,7 +176,7 @@ export class WhatsAppContext {
   }
 
   sourceOptions(isDefault: boolean): SourceOptions {
-    return { ...this.#source, env: this.env, isDefault };
+    return { ...this.#source, env: this.env, isDefault, handoffs: this.handoffs };
   }
 
   /** The account's own directory under core's state directory: its index and its brief snapshots. */

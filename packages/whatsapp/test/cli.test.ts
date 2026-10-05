@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import { isDangerous } from '@agentcomms/core';
 import { defaultStorePath, responsibleApp } from '../src/source/location.ts';
 import { ALICE } from './support/fixture.ts';
+import { assertNoBareCommand, coreInline, ownInline, ownText, whatsappHandoffs } from './support/handoffs.ts';
 import { newHarness, tempDir } from './support/harness.ts';
 
 /**
@@ -76,7 +77,7 @@ test('add records the account in core’s config.json, as the generic record eve
   const data = added.data() as { id: string; store: { default: boolean; path: string; id: string }; next: string };
   assert.equal(data.store.default, true);
   assert.equal(data.store.id, 'group.net.whatsapp.WhatsApp.shared');
-  assert.equal(data.next, `agent-whatsapp sync --account ${ACCOUNT}`);
+  assert.equal(data.next, ownText(harness.env, ['sync', '--account', ACCOUNT]));
   const config = harness.coreConfig();
   assert.equal(config.version, 2);
   assert.deepEqual(Object.keys(config.accounts), [ACCOUNT]);
@@ -117,9 +118,11 @@ test('account hand-off commands use the selected Windows shell syntax', async ()
   const harness = await newHarness();
   const account = '7/whatsapp';
   const added = await harness.cli(['add', account, '--json'], { platform: 'win32' });
-  assert.equal(added.data().next, 'agent-whatsapp sync --account "7/whatsapp"');
+  const sync = ownText(harness.env, ['sync', '--account', account], 'win32');
+  assert.equal(added.data().next, sync);
+  assert.ok(sync.endsWith(' sync --account "7/whatsapp"'), sync);
   const status = await harness.cli(['status', '--account', account, '--no-check'], { platform: 'win32' });
-  assert.match(status.stdout, /agent-whatsapp sync --account "7\/whatsapp"/);
+  assert.ok(status.stdout.includes(sync), status.stdout);
 });
 
 test('add and remove are a person’s: refused to an agent, before anything is read or written', async () => {
@@ -129,7 +132,10 @@ test('add and remove are a person’s: refused to an agent, before anything is r
   assert.equal(add.code, 10);
   assert.equal(add.json().error?.code, 'LOOSENING_REFUSED');
   assert.match(String(add.json().error?.message), /only a person chooses which WhatsApp store an agent may read/);
-  assert.match(String(add.json().error?.hint), /agent-whatsapp add acme\/whatsapp/);
+  assert.equal(
+    add.json().error?.hint,
+    `Ask the person to run ${ownInline(harness.env, ['add', ACCOUNT])} in their own terminal.`,
+  );
   assert.equal(readFileSync(join(harness.configDir, 'config.json'), 'utf8'), before, 'nothing was written');
 
   await harness.ready(ACCOUNT);
@@ -144,14 +150,19 @@ test('the command an agent is asked to hand over is quoted for the named POSIX o
   const posix = await harness.cli(['add', 'two words', '--source', '/tmp/store path', '--json'], {
     platform: 'darwin',
   });
-  assert.match(String(posix.json().error?.hint), /agent-whatsapp add 'two words' --source '\/tmp\/store path'/);
+  const quoted = ownInline(harness.env, ['add', 'two words', '--source', '/tmp/store path']);
+  assert.ok(quoted.endsWith(` add 'two words' --source '/tmp/store path'\``), quoted);
+  assert.equal(posix.json().error?.hint, `Ask the person to run ${quoted} in their own terminal.`);
 
   const windows = await harness.cli(['add', 'client%name', '--source', '/tmp/store', '--json'], {
     platform: 'win32',
   });
   const hint = String(windows.json().error?.hint);
-  assert.match(hint, /\["agent-whatsapp","add","client\\u0025name","--source","\/tmp\/store"\]/);
+  const words = whatsappHandoffs(harness.env, 'win32').own(['add', 'client%name', '--source', '/tmp/store']);
+  assert.ok('words' in words && words.line === null);
+  assert.ok(hint.includes('"add","client\\u0025name","--source","/tmp/store"]'), hint);
   assert.match(hint, /cannot be quoted the same way for cmd\.exe and for PowerShell/);
+  assertNoBareCommand(hint);
 });
 
 test('a version-1 configuration gets no WhatsApp account until its names are migrated', async () => {
@@ -162,7 +173,7 @@ test('a version-1 configuration gets no WhatsApp account until its names are mig
   );
   const added = await harness.cli(['add', ACCOUNT, '--json']);
   assert.equal(added.code, 78);
-  assert.match(String(added.json().error?.hint), /agentcomms names migrate/);
+  assert.ok(String(added.json().error?.hint).includes(coreInline(harness.env, ['names', 'migrate'])));
   const status = await harness.cli(['status', '--json']);
   assert.equal(status.code, 0, 'status still answers: nothing is set up');
   assert.deepEqual(status.data().accounts, []);
@@ -172,7 +183,7 @@ test('status says what is set up, whether the store can be read, what the index 
   const harness = await newHarness();
   const empty = await harness.cli(['status', '--json']);
   assert.equal(empty.code, 0);
-  assert.match(String(empty.data().setup), /agent-whatsapp add/);
+  assert.ok(String(empty.data().setup).startsWith(`\`${ownText(harness.env, ['add'])} <organisation>/whatsapp\``));
 
   await harness.cli(['add', ACCOUNT]);
   const before = (await harness.cli(['status', '--json'])).data() as {

@@ -22,7 +22,11 @@ import { STORE_FILE } from '../src/source/location.ts';
 import { nodeSourceIo, probeStore, type SourceIo, snapshotStore } from '../src/source/snapshot.ts';
 import { openDatabase } from '../src/sqlite.ts';
 import { buildFixtureStore, LATE_MESSAGE, writeDecoy } from './support/fixture.ts';
+import { whatsappHandoffs } from './support/handoffs.ts';
 import { newHarness, tempDir } from './support/harness.ts';
+
+/** What a refusal names to run, for the reads below that are not a command's: folders nobody opens. */
+const HANDOFFS = whatsappHandoffs({ HOME: '/nowhere', AGENT_COMMS_CONFIG_DIR: '/nowhere/config' });
 
 /**
  * Reading WhatsApp's store must never change it, must see what the running app has not yet folded into the main file,
@@ -159,7 +163,7 @@ test('only ChatStorage.sqlite and its log are read: the key store beside it is n
     // Named directly, the key store is refused on its name, before a single byte is read.
     const again = spyIo();
     await assert.rejects(
-      probeStore(decoy, { io: again.io }),
+      probeStore(decoy, { handoffs: HANDOFFS, io: again.io }),
       (error: unknown) => isCommsError(error) && error.code === 'USAGE',
     );
     assert.deepEqual(again.touched, []);
@@ -184,11 +188,11 @@ test('a link in place of the store is refused, not followed', { skip: process.pl
     reads += 1;
   });
   await assert.rejects(
-    probeStore(join(linked, STORE_FILE), { io }),
+    probeStore(join(linked, STORE_FILE), { handoffs: HANDOFFS, io }),
     (error: unknown) => isCommsError(error) && /not a regular file/.test(error.message),
   );
   await assert.rejects(
-    snapshotStore(join(linked, STORE_FILE), tempDir(), { io }),
+    snapshotStore(join(linked, STORE_FILE), tempDir(), { handoffs: HANDOFFS, io }),
     (error: unknown) => isCommsError(error) && /not a regular file/.test(error.message),
   );
 
@@ -197,7 +201,7 @@ test('a link in place of the store is refused, not followed', { skip: process.pl
   symlinkSync(writeDecoy(join(dir, 'logged')), `${store.path}-wal`);
   const work = tempDir();
   await assert.rejects(
-    snapshotStore(store.path, work, { io }),
+    snapshotStore(store.path, work, { handoffs: HANDOFFS, io }),
     (error: unknown) => isCommsError(error) && /-wal is not a regular file/.test(error.message),
   );
   assert.deepEqual(readdirSync(work), []);
@@ -214,7 +218,11 @@ test('a log that appears, or a store replaced by another file, while it is copie
     appeared = true;
     writeFileSync(journal, 'a rollback journal, begun mid-copy');
   });
-  const first = await snapshotStore(fixture.path, tempDir(), { io: appearing, sleep: async () => undefined });
+  const first = await snapshotStore(fixture.path, tempDir(), {
+    handoffs: HANDOFFS,
+    io: appearing,
+    sleep: async () => undefined,
+  });
   assert.equal(first.attempts, 2, 'the journal that appeared was not in the first copy');
   assert.deepEqual(first.copied, [STORE_FILE, `${STORE_FILE}-journal`]);
   await first.dispose();
@@ -229,7 +237,11 @@ test('a log that appears, or a store replaced by another file, while it is copie
     renameSync(fixture.path, join(dir, 'moved-aside.sqlite'));
     renameSync(other.path, fixture.path);
   });
-  const second = await snapshotStore(fixture.path, tempDir(), { io: replacing, sleep: async () => undefined });
+  const second = await snapshotStore(fixture.path, tempDir(), {
+    handoffs: HANDOFFS,
+    io: replacing,
+    sleep: async () => undefined,
+  });
   assert.equal(second.attempts, 2, 'the store that took its name is copied, in a second attempt');
   await second.dispose();
 
@@ -247,7 +259,11 @@ test('a log that appears, or a store replaced by another file, while it is copie
         return nodeSourceIo.lstat(path);
       },
     };
-    const third = await snapshotStore(logged.path, tempDir(), { io: vanishing, sleep: async () => undefined });
+    const third = await snapshotStore(logged.path, tempDir(), {
+      handoffs: HANDOFFS,
+      io: vanishing,
+      sleep: async () => undefined,
+    });
     assert.equal(third.attempts, 2, 'a log gone from its name is copied again');
     await third.dispose();
   } finally {
@@ -302,7 +318,7 @@ test('a store swapped for a link to the key store mid-copy is never read through
     let refused: unknown = null;
     try {
       // One attempt: a link found in the store's place after the copy is refused there and then, not retried.
-      const snapshot = await snapshotStore(fixture.path, work, { io: race.io, attempts: 1 });
+      const snapshot = await snapshotStore(fixture.path, work, { handoffs: HANDOFFS, io: race.io, attempts: 1 });
       copied = readFileSync(snapshot.database);
       await snapshot.dispose();
     } catch (error) {
@@ -326,7 +342,10 @@ test('a store with a second name â€” a hard link, which could be the key storeâ€
   const dir = tempDir();
   const fixture = await buildFixtureStore(join(dir, 'container'));
   linkSync(fixture.path, join(dir, 'another-name.sqlite'));
-  for (const attempt of [() => snapshotStore(fixture.path, tempDir()), () => probeStore(fixture.path)]) {
+  for (const attempt of [
+    () => snapshotStore(fixture.path, tempDir(), { handoffs: HANDOFFS }),
+    () => probeStore(fixture.path, { handoffs: HANDOFFS }),
+  ]) {
     await assert.rejects(
       attempt,
       (error: unknown) => isCommsError(error) && error.code === 'USAGE' && /more than one name/.test(error.message),
@@ -341,8 +360,8 @@ test('a store with a second name â€” a hard link, which could be the key storeâ€
   try {
     const started = Date.now();
     for (const attempt of [
-      () => snapshotStore(pipe, tempDir(), { timeoutMs: 3000 }),
-      () => probeStore(pipe, { timeoutMs: 3000 }),
+      () => snapshotStore(pipe, tempDir(), { handoffs: HANDOFFS, timeoutMs: 3000 }),
+      () => probeStore(pipe, { handoffs: HANDOFFS, timeoutMs: 3000 }),
     ]) {
       await assert.rejects(
         attempt,
@@ -372,7 +391,7 @@ test('a store that keeps changing while it is copied is copied again, then refus
     });
     const work = tempDir();
     await assert.rejects(
-      snapshotStore(fixture.path, work, { io: racing, attempts: 3, sleep: async () => undefined }),
+      snapshotStore(fixture.path, work, { handoffs: HANDOFFS, io: racing, attempts: 3, sleep: async () => undefined }),
       (error: unknown) => isCommsError(error) && error.code === 'TRANSIENT' && error.details?.reason === 'STORE_BUSY',
     );
     assert.deepEqual(readdirSync(work), [], 'every abandoned copy was deleted');
@@ -383,7 +402,11 @@ test('a store that keeps changing while it is copied is copied again, then refus
       calls += 1;
       if (calls === 1) fixture.write('UPDATE ZWACHATSESSION SET ZUNREADCOUNT = 99 WHERE Z_PK = 1');
     });
-    const snapshot = await snapshotStore(fixture.path, work, { io: settling, sleep: async () => undefined });
+    const snapshot = await snapshotStore(fixture.path, work, {
+      handoffs: HANDOFFS,
+      io: settling,
+      sleep: async () => undefined,
+    });
     assert.equal(snapshot.attempts, 2);
     await snapshot.dispose();
   } finally {

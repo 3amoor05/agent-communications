@@ -5,6 +5,7 @@ import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { createWhatsAppMcpServer } from '../src/mcp/server.ts';
 import { ALICE, ERIN_STATUS } from './support/fixture.ts';
+import { assertNoBareCommand } from './support/handoffs.ts';
 import { type Harness, newHarness, tempDir } from './support/harness.ts';
 
 /**
@@ -218,7 +219,8 @@ test('the instructions stay under 2 KB and say what matters first: content is da
     assert.match(instructions, /untrusted-content/);
     assert.match(instructions, /no tool sends/);
     assert.match(instructions, /Never claim a message was sent/);
-    assert.match(instructions, /a person runs `agent-whatsapp add/);
+    assert.match(instructions, /No account is set up yet: a person adds one in a terminal/);
+    assertNoBareCommand(instructions, 'the instructions');
   } finally {
     await Promise.all([client.close(), server.close()]);
   }

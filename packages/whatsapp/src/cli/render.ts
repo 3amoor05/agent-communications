@@ -1,4 +1,4 @@
-import { commandText, escapeForDisplay, paint, shellCommand, truncateDisplay } from '@agentcomms/core';
+import { escapeForDisplay, type HandoffMaker, handoffText, paint, truncateDisplay } from '@agentcomms/core';
 import type { AddedAccount, RemovedAccount } from '../operations/accounts.ts';
 import type { ChatListsResult } from '../operations/chat-lists.ts';
 import type { DraftResult } from '../operations/draft.ts';
@@ -36,11 +36,8 @@ export function renderRemoved(result: RemovedAccount, color: boolean): string {
   return `${paint(color, 'green', 'Removed')} ${result.account}, and its local index. WhatsApp's own store was not touched.`;
 }
 
-export function renderStatus(
-  result: StatusResult,
-  color: boolean,
-  platform: NodeJS.Platform = process.platform,
-): string {
+/** Status for a person; an account not synced yet names the sync, located as `handoffs` find this package's CLI. */
+export function renderStatus(result: StatusResult, color: boolean, handoffs: HandoffMaker): string {
   const lines: string[] = [];
   if (result.accounts.length === 0) lines.push(`No WhatsApp account yet. ${result.setup ?? ''}`);
   for (const account of result.accounts) {
@@ -68,11 +65,7 @@ export function renderStatus(
         lines.push(paint(color, 'dim', `          without ${entry.part}: ${entry.costs}`));
       }
     } else {
-      lines.push(
-        `  index   not synced yet — ${commandText(
-          shellCommand(['agent-whatsapp', 'sync', '--account', account.account], platform),
-        )}`,
-      );
+      lines.push(`  index   not synced yet — ${handoffText(handoffs.own(['sync', '--account', account.account]))}`);
     }
   }
   lines.push('', paint(color, 'dim', `Reads: ${result.reads}.`), paint(color, 'dim', `Sends: ${result.sends}.`));

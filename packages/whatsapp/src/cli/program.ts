@@ -3,17 +3,17 @@ import {
   approvalKind,
   approvalsOf,
   approveChangeAtTerminal,
-  CHANNELS,
   CommsError,
   canPrompt,
-  channelManifest,
+  cliHandoffs,
   colorEnabled,
   commandPathOf,
   EXIT_CODES,
   exemptFromUpdateGate,
   type GatedChange,
   gatedChangeAtTerminal,
-  inlineCommand,
+  type Handoff,
+  handoffSentence,
   installExitStatus,
   type OutputOptions,
   openCore,
@@ -22,30 +22,18 @@ import {
   pathOverridesFromCliOptions,
   renderInstall,
   renderPrune,
+  resolvePaths,
   runCommand,
-  type ShellCommand,
   type Streams,
   type SupportedClient,
+  sendApprovesHint,
   serverInstallChange,
   serverPruneChange,
-  shellCommand,
   updateGateAtTerminal,
   writeResult,
 } from '@agentcomms/core';
-
-/**
- * Every channel's approve command that can have prepared a send, from the manifests: the channels whose accounts can
- * be in `send`. WhatsApp's is not among them — it never sends — and a channel added later is, without an edit here.
- */
-function sendApproveCommands(): string {
-  const commands = CHANNELS.flatMap((channel) => {
-    const manifest = channelManifest(channel);
-    return manifest?.approve && manifest.accounts?.modes.includes('send') ? [`\`${manifest.approve}\``] : [];
-  });
-  return commands.length <= 1 ? commands.join('') : `${commands.slice(0, -1).join(', ')} or ${commands.at(-1)}`;
-}
-
 import { Command, CommanderError, InvalidArgumentError, Option } from 'commander';
+import { CALLER } from '../caller.ts';
 import { WhatsAppContext, type WhatsAppContextOptions } from '../context.ts';
 import { WHATSAPP_MCP } from '../mcp/install.ts';
 import { addAccount, removeAccount } from '../operations/accounts.ts';
@@ -79,6 +67,9 @@ import {
  *
  * The accounts are core's (`config.json`); registering the server with an MCP client is core's change too, so
  * `mcp install` here and `comms_server_install` from a chat are one change and one approval.
+ *
+ * Every command it tells a person to run is located from this installation (CUE-403): core is opened with this
+ * package as its caller, so its approvals and update stops name this Node and this CLI, or say there is none here.
  */
 
 export interface CliDeps extends WhatsAppContextOptions {
@@ -150,9 +141,20 @@ a macOS dialog may be waiting) · 77 permission needed (macOS privacy) · 78 con
       Object.fromEntries(PATH_OPTIONS.map(({ key, option }) => [option, options[key] as string | undefined])),
     );
     invocationCore =
-      Object.keys(pathOverrides).length === 0 && deps.core ? deps.core : openCore({ env, platform, pathOverrides });
+      Object.keys(pathOverrides).length === 0 && deps.core
+        ? deps.core
+        : openCore({ env, platform, pathOverrides, caller: CALLER });
     return invocationCore;
   };
+
+  /**
+   * This installation's own `--help`, for a command line that named nothing it can run: located from this package, and
+   * pinned to no folder, since help opens none — so it is there even before the folders are known.
+   */
+  const help = (): Handoff =>
+    cliHandoffs({ caller: CALLER, paths: resolvePaths({ env, platform }), platform, env }).own(['--help'], {
+      uses: [],
+    });
 
   const output = (): OutputOptions => {
     const options = program.opts();
@@ -196,7 +198,6 @@ a macOS dialog may be waiting) · 77 permission needed (macOS privacy) · 78 con
           output: output(),
           noInput: false,
           streams,
-          approveCommand: 'agent-whatsapp approve',
           approvals: approvalsOf(command),
         });
       },
@@ -306,7 +307,7 @@ a macOS dialog may be waiting) · 77 permission needed (macOS privacy) · 78 con
           account: flags.account === undefined ? undefined : String(flags.account),
           check: flags.check !== false,
         });
-        writeResult(result, options, () => renderStatus(result, options.color, context.platform), streams);
+        writeResult(result, options, () => renderStatus(result, options.color, context.handoffs), streams);
       }),
     );
 
@@ -436,13 +437,19 @@ a macOS dialog may be waiting) · 77 permission needed (macOS privacy) · 78 con
         const marker = agentMarker(env);
         if (marker) {
           throw new CommsError('APPROVAL_REQUIRED', 'only a person can approve a change, not an agent', {
-            hint: `Ask the person to run ${inlineCommand(shellCommand(['agent-whatsapp', 'approve', approvalId], context.platform))} in their own terminal.`,
+            hint: handoffSentence(
+              context.handoffs.own(['approve', approvalId]),
+              (command) => `Ask the person to run ${command} in their own terminal.`,
+            ),
             details: { marker },
           });
         }
         if (!canPrompt(env, streams, { json: options.json })) {
           throw new CommsError('APPROVAL_REQUIRED', 'approving a change needs an interactive terminal', {
-            hint: `Run ${inlineCommand(shellCommand(['agent-whatsapp', 'approve', approvalId], context.platform))} directly in a terminal.`,
+            hint: handoffSentence(
+              context.handoffs.own(['approve', approvalId]),
+              (command) => `Run ${command} directly in a terminal.`,
+            ),
           });
         }
         const pending = await context.core.approvals.get(approvalId);
@@ -452,8 +459,13 @@ a macOS dialog may be waiting) · 77 permission needed (macOS privacy) · 78 con
           });
         }
         if (approvalKind(pending) !== 'change') {
+          /*
+           * Each channel that can have prepared a send — whose accounts can be in `send`, from the manifests, so not
+           * WhatsApp's — by its approve command as this machine's registrations find it, or why there is none here.
+           * Read only now: looking through every MCP client's configuration is for this refusal, not every approve.
+           */
           throw new CommsError('USAGE', `approval ${approvalId} is for a send, and WhatsApp never sends`, {
-            hint: `Approve it with the command that prepared it — ${sendApproveCommands()} — not this one.`,
+            hint: sendApprovesHint(await context.handoffs.registered(), approvalId),
           });
         }
         const outcome = await approveChangeAtTerminal(
@@ -471,18 +483,18 @@ a macOS dialog may be waiting) · 77 permission needed (macOS privacy) · 78 con
       }),
     );
 
+  /** A change at this terminal; `rerun` is this command's words after the program, run again with its approval. */
   const changeAt = <T>(
     context: WhatsAppContext,
     change: GatedChange<T>,
     flags: Options,
-    command: ShellCommand,
+    rerun: readonly string[],
   ): Promise<T> =>
     gatedChangeAtTerminal(context.core, change, {
       approvalId: flags.approval === undefined ? undefined : String(flags.approval),
       env,
       output: output(),
-      command,
-      approveCommand: 'agent-whatsapp approve',
+      rerun,
       streams,
     });
 
@@ -543,7 +555,10 @@ a macOS dialog may be waiting) · 77 permission needed (macOS privacy) · 78 con
         // Named, never assumed: writing into a client's configuration nobody named is the thing to ask about.
         if (!flags.client) {
           throw new CommsError('USAGE', 'name the client with --client', {
-            hint: 'For example: `agent-whatsapp mcp install --client claude-code --account personal/whatsapp`.',
+            hint: handoffSentence(
+              context.handoffs.own(['mcp', 'install', '--client', 'claude-code', '--account', 'personal/whatsapp']),
+              (command) => `For example: ${command}.`,
+            ),
           });
         }
         /*
@@ -560,21 +575,17 @@ a macOS dialog may be waiting) · 77 permission needed (macOS privacy) · 78 con
          */
         // The pin is checked against `config.json` by core, so the spike's accounts have to be there first.
         await context.migration();
-        const again = shellCommand(
-          [
-            'agent-whatsapp',
-            'mcp',
-            'install',
-            '--client',
-            String(flags.client),
-            ...(name !== undefined && name !== 'whatsapp' ? ['--name', name] : []),
-            ...(pinned !== undefined ? ['--account', pinned] : []),
-            ...(launcher !== undefined ? ['--launcher', launcher] : []),
-            ...(flags.verify === false ? ['--no-verify'] : []),
-            ...(flags.force === true ? ['--force'] : []),
-          ],
-          context.platform,
-        );
+        const again = [
+          'mcp',
+          'install',
+          '--client',
+          String(flags.client),
+          ...(name !== undefined && name !== 'whatsapp' ? ['--name', name] : []),
+          ...(pinned !== undefined ? ['--account', pinned] : []),
+          ...(launcher !== undefined ? ['--launcher', launcher] : []),
+          ...(flags.verify === false ? ['--no-verify'] : []),
+          ...(flags.force === true ? ['--force'] : []),
+        ];
         const result = await changeAt(
           context,
           serverInstallChange(
@@ -626,10 +637,7 @@ a macOS dialog may be waiting) · 77 permission needed (macOS privacy) · 78 con
             WHATSAPP_MCP,
           ),
           flags,
-          shellCommand(
-            ['agent-whatsapp', 'mcp', 'prune', ...(flags.includePrinted === true ? ['--include-printed'] : [])],
-            context.platform,
-          ),
+          ['mcp', 'prune', ...(flags.includePrinted === true ? ['--include-printed'] : [])],
         );
         writeResult(result, output(), () => renderPrune(result, options.color), streams);
       }),
@@ -644,7 +652,9 @@ a macOS dialog may be waiting) · 77 permission needed (macOS privacy) · 78 con
       return runCommand(
         output(),
         async () => {
-          throw new CommsError('USAGE', message, { hint: 'Run `agent-whatsapp --help` to see the commands.' });
+          throw new CommsError('USAGE', message, {
+            hint: handoffSentence(help(), (command) => `Run ${command} to see the commands.`),
+          });
         },
         streams,
       );
@@ -652,7 +662,8 @@ a macOS dialog may be waiting) · 77 permission needed (macOS privacy) · 78 con
     throw error;
   }
   if (!ran) {
-    streams.stderr.write(`${paint(output().color, 'dim', 'Nothing to do. Try `agent-whatsapp --help`.')}\n`);
+    const said = handoffSentence(help(), (command) => `Try ${command}.`);
+    streams.stderr.write(`${paint(output().color, 'dim', `Nothing to do. ${said}`)}\n`);
     return 64;
   }
   return exitCode;

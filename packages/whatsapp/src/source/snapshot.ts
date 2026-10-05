@@ -2,7 +2,13 @@ import { randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
 import { type FileHandle, lstat, open, readdir, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { CommsError, ensurePrivateDir } from '@agentcomms/core';
+import {
+  CommsError,
+  ensurePrivateDir,
+  type HandoffMaker,
+  handoffSentence,
+  handoffSentenceToFill,
+} from '@agentcomms/core';
 import { checkStorePath, responsibleApp, SIDE_FILES, STORE_FILE } from './location.ts';
 
 /**
@@ -106,6 +112,11 @@ class SourceTimeout extends Error {
 const stuckCalls = new WeakMap<SourceIo, Promise<unknown>>();
 
 export interface SourceOptions {
+  /**
+   * What a refusal names to run — `status` at a terminal, an `add` for another store — located as the package printing
+   * it finds its own command (`WhatsAppContext.handoffs`). Required: there is no bare `agent-whatsapp` to fall back on.
+   */
+  handoffs: HandoffMaker;
   io?: SourceIo | undefined;
   env?: NodeJS.ProcessEnv | undefined;
   platform?: NodeJS.Platform | undefined;
@@ -119,8 +130,13 @@ export interface SourceOptions {
 
 function pendingError(options: SourceOptions): CommsError {
   const app = responsibleApp(options.env ?? {}) ?? 'your terminal or MCP client';
+  const terminal = handoffSentence(
+    options.handoffs.own(['status']),
+    (command) => `An MCP server cannot answer it: run ${command} in a terminal once, or grant Full Disk Access.`,
+    { instead: 'An MCP server cannot answer it: grant Full Disk Access.' },
+  );
   return new CommsError('TRANSIENT', 'reading WhatsApp’s message store is waiting for a macOS permission dialog', {
-    hint: `Look for a dialog asking whether ${app} may access data from other apps, choose Allow, then run this again. An MCP server cannot answer it: run \`agent-whatsapp status\` in a terminal once, or grant Full Disk Access.`,
+    hint: `Look for a dialog asking whether ${app} may access data from other apps, choose Allow, then run this again. ${terminal}`,
     details: { reason: 'MACOS_PROMPT_PENDING' },
   });
 }
@@ -167,7 +183,16 @@ export function sourceError(error: unknown, path: string, options: SourceOptions
   if (code === 'ENOENT' || code === 'ENOTDIR') {
     return new CommsError('NOT_FOUND', `there is no WhatsApp message store at ${path}`, {
       hint: options.isDefault
-        ? 'Is WhatsApp for Mac installed and signed in here? It creates this file once it has synced. The WhatsApp Business app keeps its own, under group.net.whatsapp.WhatsAppSMB.shared: pass it with --source.'
+        ? `Is WhatsApp for Mac installed and signed in here? It creates this file once it has synced. ${handoffSentenceToFill(
+            options.handoffs.own(['add']),
+            ['<organisation>/whatsapp', '--source', '<path to its ChatStorage.sqlite>'],
+            (command) =>
+              `The WhatsApp Business app keeps its own, under group.net.whatsapp.WhatsAppSMB.shared: add it with ${command}.`,
+            {
+              instead:
+                'The WhatsApp Business app keeps its own, under group.net.whatsapp.WhatsAppSMB.shared: a person adds that with add’s --source.',
+            },
+          )}`
         : 'Check the path given with --source.',
       details: { reason: 'NO_STORE', path },
     });
@@ -347,7 +372,7 @@ export async function removeStaleSnapshots(workDir: string): Promise<number> {
 export async function snapshotStore(
   storePath: string,
   workDir: string,
-  options: SourceOptions = {},
+  options: SourceOptions,
 ): Promise<StoreSnapshot> {
   checkStorePath(storePath);
   const attempts = options.attempts ?? 5;
@@ -405,7 +430,7 @@ const SQLITE_HEADER = Buffer.from('SQLite format 3\0', 'latin1');
  * Opening the file is what macOS's privacy check guards, so this is the cheapest honest test of access: a `stat` can
  * succeed where an `open` is refused. The bytes are only compared with SQLite's magic header.
  */
-export async function probeStore(storePath: string, options: SourceOptions = {}): Promise<void> {
+export async function probeStore(storePath: string, options: SourceOptions): Promise<void> {
   checkStorePath(storePath);
   const io = options.io ?? nodeSourceIo;
   let header: Buffer;

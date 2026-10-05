@@ -6,8 +6,7 @@
  */
 import { VERSION } from './version.ts';
 
-export { VERSION };
-export const PACKAGE_NAME = '@agentcomms/whatsapp';
-
+export { PACKAGE_NAME } from './caller.ts';
 export { createWhatsAppMcpServer, type WhatsAppMcpOptions, type WhatsAppMcpServer } from './mcp/server.ts';
 export { composeDraft, type DraftResult } from './operations/draft.ts';
+export { VERSION };

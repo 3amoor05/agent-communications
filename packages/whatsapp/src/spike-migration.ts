@@ -4,6 +4,8 @@ import {
   ACCOUNT_ID_PATTERN,
   type Config,
   type Core,
+  type HandoffMaker,
+  handoffSentence,
   nameAvailable,
   nameShapeProblem,
   withFileLock,
@@ -34,8 +36,8 @@ import { checkStorePath, defaultStorePath } from './source/location.ts';
  *   so a run that stopped before the rename finishes on the next one.
  * - **Logged.** A line in core's audit log, and a line on stderr for the person when a command did it.
  *
- * A version-1 configuration has no `organisation/whatsapp` names, so nothing moves until `agentcomms names migrate`
- * has run; the file stays where it is and the next run tries again.
+ * A version-1 configuration has no `organisation/whatsapp` names, so nothing moves until core's `names migrate` has
+ * run — named as the context's handoffs find core's command — and the file stays where it is for the next run.
  */
 
 export const SPIKE_CONFIG_FILE = 'whatsapp-spike.json';
@@ -72,6 +74,8 @@ export interface SpikeMigration {
 
 export interface MigrationContext {
   core: Core;
+  /** What the log names to run: core's `names migrate`, located. */
+  handoffs: HandoffMaker;
   lists: ChatListStore;
   env: NodeJS.ProcessEnv;
   now: () => Date;
@@ -113,8 +117,11 @@ export async function migrateSpikeAccounts(context: MigrationContext): Promise<S
     if (config.version !== 2) {
       return {
         ...result,
-        deferred:
-          'the configuration still has the old flat names; after `agentcomms names migrate`, the spike’s accounts move on the next run',
+        deferred: `the configuration still has the old flat names; ${handoffSentence(
+          context.handoffs.core(['names', 'migrate']),
+          (command) => `after ${command}, the spike’s accounts move on the next run`,
+          { instead: 'after comms_names_migrate, the spike’s accounts move on the next run.' },
+        ).replace(/\.$/, '')}`,
       };
     }
 

@@ -6,6 +6,7 @@ import { isCommsError } from '@agentcomms/core';
 import { inspectSchema } from '../src/source/schema.ts';
 import { openDatabase } from '../src/sqlite.ts';
 import { buildFixtureStore, type FixtureOptions } from './support/fixture.ts';
+import { ownInline } from './support/handoffs.ts';
 import { newHarness, tempDir } from './support/harness.ts';
 
 /**
@@ -112,7 +113,10 @@ test('an index an earlier reader built, under older rules, is refused until the 
 
   const stale = await harness.cli(['chats', '--account', 'acme/whatsapp', '--json']);
   assert.equal(stale.code, 78, stale.stdout);
-  assert.match(String(stale.json().error?.hint), /agent-whatsapp sync --account acme\/whatsapp/);
+  assert.equal(
+    stale.json().error?.hint,
+    `Run ${ownInline(harness.env, ['sync', '--account', 'acme/whatsapp'])} to rebuild it.`,
+  );
   assert.equal((await harness.cli(['sync', '--account', 'acme/whatsapp'])).code, 0);
   assert.equal((await harness.cli(['chats', '--account', 'acme/whatsapp', '--json'])).code, 0);
 });

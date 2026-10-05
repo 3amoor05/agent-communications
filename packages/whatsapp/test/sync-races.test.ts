@@ -7,6 +7,7 @@ import { syncAccount } from '../src/operations/sync.ts';
 import { nodeSourceIo, type SourceIo } from '../src/source/snapshot.ts';
 import { openDatabase } from '../src/sqlite.ts';
 import { BOB } from './support/fixture.ts';
+import { ownInline } from './support/handoffs.ts';
 import { type CliRun, type Harness, newHarness } from './support/harness.ts';
 
 /**
@@ -143,6 +144,11 @@ test('an account taken out of config.json by any other means while it syncs gets
   const synced = await harness.cli(['sync', '--account', ACCOUNT, '--json'], { env: harness.personEnv, sourceIo: io });
   assert.equal(synced.code, 66, synced.stdout);
   assert.match(String(synced.json().error?.message), /removed while it was being synced/);
+  assert.equal(
+    synced.json().error?.hint,
+    `Add it again with ${ownInline(harness.personEnv, ['add', ACCOUNT])} to read it.`,
+    'the add that reads it again, located',
+  );
   const after = statSync(index, { bigint: true });
   assert.deepEqual([after.ino, after.mtimeNs], [before.ino, before.mtimeNs], 'the index was not replaced');
 });

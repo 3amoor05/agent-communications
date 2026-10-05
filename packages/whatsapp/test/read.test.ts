@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import type { CommsError } from '@agentcomms/core';
 import { innerText, type MessageView, type UntrustedField } from '../src/present.ts';
 import { ALICE, BOB, BROADCAST_LIST, CAROL, DAVE, ERIN_STATUS, GROUP, HIDDEN } from './support/fixture.ts';
+import { ownInline } from './support/handoffs.ts';
 import { newHarness } from './support/harness.ts';
 
 /**
@@ -255,7 +256,10 @@ test('a read before any sync says to sync first', async () => {
   await harness.cli(['add', ACCOUNT]);
   const result = await harness.cli(['chats', '--account', ACCOUNT, '--json']);
   assert.equal(result.code, 66);
-  assert.match(String(result.json().error?.hint), /agent-whatsapp sync --account acme\/whatsapp/);
+  assert.equal(
+    result.json().error?.hint,
+    `Run ${ownInline(harness.env, ['sync', '--account', ACCOUNT])} (or the whatsapp_sync tool) first.`,
+  );
 });
 
 test('a read before any sync renders its repair for the selected shell platform', async () => {
@@ -263,7 +267,10 @@ test('a read before any sync renders its repair for the selected shell platform'
   await harness.cli(['add', '7/whatsapp']);
   const result = await harness.cli(['chats', '--account', '7/whatsapp', '--json'], { platform: 'win32' });
   assert.equal(result.code, 66);
-  assert.match(String(result.json().error?.hint), /agent-whatsapp sync --account "7\/whatsapp"/);
+  assert.equal(
+    result.json().error?.hint,
+    `Run ${ownInline(harness.env, ['sync', '--account', '7/whatsapp'], 'win32')} (or the whatsapp_sync tool) first.`,
+  );
 });
 
 test('an invalid account renders its removal for the selected shell platform', async () => {
@@ -279,7 +286,10 @@ test('an invalid account renders its removal for the selected shell platform', a
     { consent: { kind: 'loosening-consent', paths: ['accounts.7/whatsapp.mode'] } },
   );
   await assert.rejects(context.account('7/whatsapp'), (error: CommsError) => {
-    assert.match(error.hint ?? '', /agent-whatsapp remove "7\/whatsapp"/);
+    assert.equal(
+      error.hint,
+      `Nothing was read. Remove it with ${ownInline(harness.env, ['remove', '7/whatsapp'], 'win32')} and add it again.`,
+    );
     return true;
   });
 });

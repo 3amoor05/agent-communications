@@ -1,4 +1,5 @@
-import { CommsError, ensurePrivateDir, withFileLock } from '@agentcomms/core';
+import { CommsError, ensurePrivateDir, handoffSentence, withFileLock } from '@agentcomms/core';
+import type { WhatsAppAccount } from '../config.ts';
 import type { WhatsAppContext } from '../context.ts';
 import { type IndexStats, rebuildIndex } from '../index-db.ts';
 import { inspectSchema } from '../source/schema.ts';
@@ -22,9 +23,11 @@ export interface SyncResult extends IndexStats {
 /** Builds tried before a sync whose lists keep changing under it gives up. */
 const LIST_ROUNDS = 3;
 
-function removedWhileSyncing(name: string): CommsError {
+/** The account went while it synced; adding it again — this name, this store — is the person's, located here. */
+function removedWhileSyncing(context: WhatsAppContext, name: string, account: WhatsAppAccount): CommsError {
+  const add = ['add', name, ...(account.source === undefined ? [] : ['--source', account.source])];
   return new CommsError('NOT_FOUND', `"${name}" was removed while it was being synced, so nothing was indexed`, {
-    hint: 'Add it again with `agent-whatsapp add` to read it.',
+    hint: handoffSentence(context.handoffs.own(add), (command) => `Add it again with ${command} to read it.`),
   });
 }
 
@@ -53,7 +56,7 @@ export async function syncAccount(
     context.syncLock(account),
     async () => {
       let current = await context.accountById(account.id);
-      if (!current) throw removedWhileSyncing(name);
+      if (!current) throw removedWhileSyncing(context, name, account);
       await ensurePrivateDir(directory);
       const staleRemoved = await removeStaleSnapshots(directory);
       const snapshot = await snapshotStore(store.path, directory, context.sourceOptions(store.isDefault));
@@ -81,7 +84,7 @@ export async function syncAccount(
               new Visibility(built.lists),
               async () => {
                 const now = await context.accountById(account.id);
-                if (!now) throw removedWhileSyncing(built.name);
+                if (!now) throw removedWhileSyncing(context, built.name, account);
                 current = now;
                 return sameLists(now.lists, built.lists);
               },
