@@ -42,9 +42,11 @@ import { tempDir } from './helpers/temp-dir.mjs';
  */
 
 /** The drivers: each a package's own program, run with its own fakes. */
-const DRIVERS = [
-  { channel: 'gmail', dir: join(ROOT, 'packages', 'gmail'), entry: join('test', 'support', 'matrix.ts') },
-];
+const DRIVERS = ['gmail', 'slack'].map((channel) => ({
+  channel,
+  dir: join(ROOT, 'packages', channel),
+  entry: join('test', 'support', 'matrix.ts'),
+}));
 
 /** Every surface each driver must report on, by the action it takes: nothing named here may go missing. */
 const SURFACES = {
@@ -54,6 +56,21 @@ const SURFACES = {
       list: ['gmail_send_list'],
       claim: ['gmail_draft_send', 'gmail_draft_send (a client trusted with forms)', 'send execute'],
       approve: ['approve (terminal)'],
+    },
+  },
+  slack: {
+    send: {
+      look: [
+        'slack_approval_wait (a post)',
+        'slack_approval_wait (a post with a file)',
+        'slack_approval_wait (a reaction)',
+      ],
+      claim: ['slack_post_send', 'slack_post_send (a post with a file)', 'slack_react_send'],
+      approve: [
+        'approve (terminal, a post)',
+        'approve (terminal, a post with a file)',
+        'approve (terminal, a reaction)',
+      ],
     },
   },
 };
@@ -69,6 +86,12 @@ const KNOWN = [
     variant: 'another channel',
     todo: 'Gmail’s terminal approval looks for any send, not only a Gmail one: another channel’s id is classified, then refused as “the mailbox this approval belongs to is no longer connected” — not D2’s one NOT_FOUND',
   },
+  ...['a post', 'a post with a file', 'a reaction'].map((what) => ({
+    channel: 'slack',
+    surface: `approve (terminal, ${what})`,
+    variant: 'another channel',
+    todo: 'Slack’s terminal approval looks for any send, not only a Slack one: another channel’s id is classified, then refused as “the workspace this approval belongs to is no longer connected” — not D2’s one NOT_FOUND',
+  })),
 ];
 
 const NOT_FOUND_APPROVAL_NULL = true;
@@ -359,11 +382,23 @@ const SEND = {
   failed: {
     look: shows('failed', false),
     list: shows('failed', false),
-    claim: refused(
-      'APPROVAL_VOID',
-      /^nothing was sent: the send it was claimed for failed \(backendError\)$/,
-      'failed',
-    ),
+    claim: (o, { role }) => {
+      // The failure itself, as Slack's post with a file meets it: the upload done, the share refused. Nothing was
+      // posted, and what was uploaded is said (D2, `failed`).
+      if (role === 'provider-refused') {
+        assert.equal(o.ok, false);
+        assert.match(o.message, /^nothing was posted: Slack refused the request: posting_to_channel_denied$/);
+        assert.notEqual(o.code, 'SEND_OUTCOME_UNKNOWN');
+        assert.equal(o.sends, 1, 'the share was asked, and refused');
+        assert.equal(o.details?.uploaded?.length, 1);
+        assert.equal(o.details.uploaded[0].name, 'report.pdf');
+        assert.ok(o.details.uploaded[0].id, 'by its id in Slack');
+        assert.equal(o.approval?.state, 'failed');
+        assert.equal(o.extra?.stored, 'failed');
+        return;
+      }
+      refused('APPROVAL_VOID', /^nothing was sent: the send it was claimed for failed \(backendError\)$/, 'failed')(o);
+    },
     approve: refused(
       'APPROVAL_VOID',
       /^nothing was sent: the send it was claimed for failed \(backendError\)$/,
