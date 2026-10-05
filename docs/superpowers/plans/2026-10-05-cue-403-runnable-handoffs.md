@@ -32,10 +32,16 @@ ongoing completeness check. In Task 15, inspect false-negative fixtures as close
    wins over configuration while an unpinned run is unchanged.
 
    **Tests first.** Extend `packages/core/test/paths.test.ts`, `packages/core/test/cli.test.ts` and
-   `packages/core/test/core-server.test.ts` for §4 **3a-core** (the core CLI accepts all five before dispatch), **3b**
-   (conflicting environment/XDG/home/AppData/cwd, independent relative-to-absolute pins and only used pins), **3c**
-   (Windows split roaming/local roots with file secrets) and **3d** (downloads pins win only for download handoffs).
-   Mutate each overlay back to environment-style derivation and mutate downloads precedence; the new tests must fail.
+   `packages/core/test/core-server.test.ts` for §4 **3a-core** (the core CLI accepts all five before dispatch) and
+   focused path/preference unit cases: conflicting environment/XDG/home/AppData/cwd, independent
+   relative-to-absolute overrides, Windows split roaming/local roots with file secrets, and the used-directory set.
+   Add focused download-root precedence cases to `packages/gmail/test/attachments.test.ts`,
+   `packages/slack/test/files-download.test.ts` and `packages/resend/test/read.test.ts` for the selections at
+   `packages/gmail/src/operations/attachments.ts:353`, `packages/slack/src/operations/files.ts:751` and
+   `packages/resend/src/operations/read.ts:515`: an explicit downloads pin beats `defaults.downloadsDir`, while an
+   unpinned operation keeps the configured/default root. Task 16 owns the fresh-shell handoff acceptance cases
+   **3b–3d** after the locator and migrations exist. Mutate each overlay back to environment-style derivation and
+   mutate each of the three channel precedence branches; the focused test for that branch must fail.
 
    **Done when.** `openCore` receives a fully resolved, independent directory identity before constructing any store;
    `--config-dir` cannot move state, data or secrets; an explicit downloads pin cannot persist configuration; and the
@@ -128,16 +134,26 @@ ongoing completeness check. In Task 15, inspect false-negative fixtures as close
 
 6. **Risky — introduce the branded command types and locate own-product and channel-to-core CLIs.**
 
-   **Changes.** Add `packages/core/src/cli-command.ts`, exported from `packages/core/src/index.ts`. Define
-   `PrintedCommand` with its brand and constructor private to this module; define the `PrintedCommand | ExternalCommand`
-   renderable union consumed by `inlineCommand` and `commandText`. Add the opaque `ExternalCommand` and reviewed
-   `externalCommand(words, reason)` constructor. It checks every word against all manifest binaries, all
-   `@agentcomms/` specifiers and real/symlinked paths inside discovered suite roots, case-insensitively for Windows
-   executable names. Migrate the legitimate external sites in `packages/gmail/src/operations/doctor.ts`,
-   `packages/core/src/operations/maintenance.ts`, `packages/core/src/mcp-install.ts` and
-   `packages/core/src/other-servers.ts` (`chmod`, `claude mcp`, `codex mcp`, and rival removal) with an explicit reason.
-   Initially retain the old `ShellCommand` construction path only as a deprecated migration bridge; Task 15 removes
-   it after every suite handoff is located.
+   **Changes.** Add three deliberately one-way modules. `packages/core/src/command-brands.ts` is the leaf that owns
+   the private brand symbols, exports only the opaque `PrintedCommand` and `ExternalCommand` types plus the reviewed
+   `externalCommand(words, reason)` constructor, and exports no `PrintedCommand` constructor or branding token. It
+   must not import `operations/servers.ts` or `mcp-install.ts`. `externalCommand` checks every word against all
+   manifest binaries, all `@agentcomms/` specifiers and real/symlinked paths inside discovered suite roots,
+   case-insensitively for Windows executable names. `packages/core/src/registrations.ts` is a neutral parser: move
+   `launcherOf` out of `packages/core/src/operations/servers.ts` into it and put the registration argv/product/version
+   parsing shared by server reports and the locator there, expressed over neutral structural facts so it imports
+   neither `mcp-install.ts` nor `cli-command.ts`. `packages/core/src/cli-command.ts` imports both neutral modules and
+   is the only reviewed module that materialises a `PrintedCommand` after location and verification. Export only the
+   opaque command types, `externalCommand` and the public locator/rendering surface from
+   `packages/core/src/index.ts`; do not re-export either private brand symbol or a `PrintedCommand` factory.
+
+   The permitted import graph is `mcp-clients/channel facts → registrations`, manifest/path facts →
+   `command-brands`, `command-brands + registrations → cli-command`, `command-brands → mcp-install`, and
+   `registrations + mcp-install → operations/servers`; there is no reverse edge. Migrate the legitimate external
+   sites in `packages/gmail/src/operations/doctor.ts`, `packages/core/src/operations/maintenance.ts`,
+   `packages/core/src/mcp-install.ts` and `packages/core/src/other-servers.ts` (`chmod`, `claude mcp`, `codex mcp`,
+   and rival removal) with an explicit reason. Initially retain the old `ShellCommand` construction path only as a
+   deprecated migration bridge; Task 15 removes it after every suite handoff is located.
 
    Implement `locateCliCommand`'s own-product and channel-to-core branches in that module: walk from the caller
    resolver URL and verify the manifest name; source callers select only `src/cli.ts`; built callers select the
@@ -153,8 +169,11 @@ ongoing completeness check. In Task 15, inspect false-negative fixtures as close
    global/direct source on POSIX and Windows; only allowed flags; absent/stale dist still selects source; Gmail wrapper;
    manifest/bin missing, mismatch, unreadable or non-file gives no fallback), §4 **2a** (all channel→core decision
    facts and source/built/external/other-checkout selections), §4 **7b** (every external-constructor negative), and
-   §4 **7e-external** (the reviewed external positives). Mutate manifest-name, same-checkout, source-suffix,
-   engine-range and every external-word check independently; the tests must fail.
+   §4 **7e-external** (the reviewed external positives). Add a source-import graph test over
+   `command-brands.ts`, `registrations.ts`, `cli-command.ts`, `mcp-install.ts` and `operations/servers.ts`; it must
+   topologically sort the graph above and fail on any cycle. Mutate manifest-name, same-checkout, source-suffix,
+   engine-range and every external-word check independently, then add an edge from `command-brands.ts` back to
+   `mcp-install.ts`; the corresponding test must fail.
 
    **Done when.** Own and channel→core success can only originate in `locateCliCommand`, failure carries no command,
    registrations are not involved in these two directions, external suite escapes are refused, and the new focused
@@ -163,7 +182,11 @@ ongoing completeness check. In Task 15, inspect false-negative fixtures as close
 7. **Risky — add cross-product resolution without trusting or executing registrations.**
 
    **Changes.** Complete `locateCliCommand` in `packages/core/src/cli-command.ts` using
-   `scanRegisteredServers`, the manifest-derived product recogniser and `launcherOf`. Strip all five pre-sentinel path
+   `scanRegisteredServers` plus the manifest-derived product recogniser, registration parser and `launcherOf` from
+   neutral `packages/core/src/registrations.ts`. Preserve the Task 6 graph: the locator imports
+   `command-brands.ts` and `registrations.ts`; `registrations.ts` imports neither the locator nor `mcp-install.ts`;
+   `mcp-install.ts` imports only `command-brands.ts`; and `operations/servers.ts` imports the neutral registration
+   helpers rather than supplying them. Strip all five pre-sentinel path
    options and their operands before recognition. Reject npx registrations. Require the registration's package
    version to equal the printing package version and `process.execPath` to satisfy the target engine. Rank managed
    entries before other checked file entries, then sort by client/config/server/command/args. For managed entries use
@@ -182,9 +205,16 @@ ongoing completeness check. In Task 15, inspect false-negative fixtures as close
    **2b–2e** (launcher/version/tie-break matrix, Windows absolute npm `.cmd`, exact no-location wording, Windows mixed
    case versus POSIX case, including non-absolute file-backed candidates), **3h-registered** (registered
    duplicate/reordered/equal/spaced relative pins and changed cwd) and **5a-containment** (lexical escape, realpath
-   symlink escape and root-prefix sibling). Mutate version equality,
-   npx rejection, ordering, case rules, path-operand removal, no-spawn behaviour and segment containment separately;
-   the corresponding case must fail.
+   symlink escape and root-prefix sibling). Add `packages/core/test/cli-command-old-node.test.mjs` as the one
+   built-package integration test for case **0000**. In `.github/workflows/release.yml`, add a focused Ubuntu job
+   beside the normal verify matrix: install and build under the repository's Node 22.18 tooling floor, switch to
+   exactly Node 22.12.0, and run only `node --test packages/core/test/cli-command-old-node.test.mjs` against those
+   already-built packages. Make the release/publish gate require this job as well as the ordinary verify matrix, and
+   extend `test/release-packages.test.mjs` to prove that the release and verify paths keep the focused job, exact Node
+   version and single-test command. Do not lower root `engines.node` below 22.18. Mutate version equality, npx
+   rejection, ordering, case rules, path-operand removal, no-spawn behaviour and segment containment separately;
+   make `registrations.ts` import `mcp-install.ts`; and remove `--experimental-strip-types` from a selected `.ts`
+   entry. The registration graph test or case **0000**, respectively, must fail.
 
    **Done when.** A cross-product result is same-release, target-engine-compatible and backed by a checked contained
    file, or contains no executable command at all; configured interpreters are never run; and the complete locator
@@ -214,7 +244,10 @@ ongoing completeness check. In Task 15, inspect false-negative fixtures as close
    `tsdown.config.ts` files and in `packages/gmail/src/index.ts`, `packages/slack/src/index.ts` and
    `packages/resend/src/index.ts`. Amend the runtime-edge rules in
    `docs/superpowers/specs/2026-09-26-channel-plugins-design.md` and `CONTRIBUTING.md`, and correct the obsolete npx/
-   Gmail statements in `docs/superpowers/specs/2026-09-18-agent-communications-design.md`.
+   Gmail statements in `docs/superpowers/specs/2026-09-18-agent-communications-design.md`. Update
+   `docs/RELEASING.md:98` to say that each channel depends exactly on the same-version core package and therefore
+   core is packed and published before every channel; remove the obsolete permission to first-publish a channel
+   before core.
 
    Extend `test/channel-registry.test.mjs` to validate every manifest-discovered non-core channel, including its
    synthetic newcomer: core appears only in runtime `dependencies`, source resolves to the channel's version, and the
@@ -225,9 +258,11 @@ ongoing completeness check. In Task 15, inspect false-negative fixtures as close
 
    **Tests first.** Own §4 **6a–6d** in `test/channel-registry.test.mjs`,
    `test/release-packages.test.mjs` and package-consumer fixtures: ordered/deduplicated closure; isolated gmail-mcp
-   handshake; present/missing/dev-only/ranged/mismatched/synthetic dependency cases; and consistency of both designs,
-   CONTRIBUTING, bundler comments and library comments. Mutate the recursion, deduplication, core exclusion, each
-   dependency-field rejection and exact packed pin; a test must fail each time.
+   handshake; present/missing/dev-only/ranged/mismatched/synthetic dependency cases; and the D4 consistency fixture
+   over both designs, `CONTRIBUTING.md`, `docs/RELEASING.md`, bundler comments and library comments. Assert the release
+   documentation's exact-dependency and core-first order explicitly. Mutate the recursion, deduplication, core
+   exclusion, each dependency-field rejection, exact packed pin and documented publish order; a test must fail each
+   time.
 
    **Done when.** A packed channel can resolve the core locator at runtime, publish order remains topological,
    gmail-mcp consumes candidate tarballs transitively, all policy fixtures pass, and no current/future channel is
@@ -243,7 +278,9 @@ ongoing completeness check. In Task 15, inspect false-negative fixtures as close
    `update-gate.ts`, `update-check.ts`, `render.ts`, `config.ts`, `organisations.ts`, `jail.ts`, `secrets.ts`,
    `channel-words.ts`, `cli.ts`, and the files under `packages/core/src/operations/` named by the spec
    (`update.ts`, `attach-settings.ts`, `maintenance.ts`, `organisations.ts`, `secrets-migrate.ts`,
-   `change-policy.ts`). The principal functions are `approveCommandOf`, `changeApprovalCommand`, `nextStep`,
+   `change-policy.ts`). Also migrate `installCommand` at `packages/core/src/mcp-install.ts:758`; its refusal hints and
+   retry/re-register commands must use the locator outcome rather than constructing a suite `ShellCommand`. The
+   principal functions are `approveCommandOf`, `changeApprovalCommand`, `nextStep`,
    `changeToolResult`, `approvalHint`, `gatedChangeAtTerminal`, `questionText`, `downloadAtTerminal`,
    `updateStopMessage`, `updateRequired`, `updateCheckChildEntry`, `renderInstall`, `renderDoctor`, `renderPrune`,
    `renderUpdate`, `installCommand`, `registrationChecks`, `registerAgain` and `main`. Every own/core/cross-product
@@ -254,11 +291,15 @@ ongoing completeness check. In Task 15, inspect false-negative fixtures as close
    `operations/organisations.ts`'s option-only sites and `cli.ts`'s argument-only site to prose/words appended to a
    complete located command.
 
-   **Tests first.** Update the affected core operation, update, doctor, approval, change-flow and MCP tests. Add the
+   **Tests first.** Update the affected core operation, update, doctor, approval, change-flow and MCP tests. Extend
+   `packages/core/test/mcp-install.test.ts` with focused refusal and retry/re-register cases for `installCommand`,
+   including kept narrowing, `--force`, safe located own-product output and the locator's exact no-command result.
+   Add the
    core slice of §4 **7d**: core's bare/option-only/help/MCP-instruction fixtures and cross-channel corrections produce
    a located command or the exact no-command outcome, including mixed-case Windows executable input. Mutate one
-   channel alternative back to `manifest.approve`, one MCP description back to `agentcomms …`, and one argument
-   fragment back to a command; the package tests and later guard fixture must fail.
+   channel alternative back to `manifest.approve`, one MCP description back to `agentcomms …`, `installCommand`
+   back to `shellCommand`, and one argument fragment back to a command; the focused refusal/retry tests, package tests
+   or later guard fixture must fail.
 
    **Done when.** Every file/line range in the spec's core inventory has been checked off in the review notes, core
    never invents a cross-product repair, approval alternatives preserve terminal-only semantics, and focused core
@@ -353,15 +394,22 @@ ongoing completeness check. In Task 15, inspect false-negative fixtures as close
    Add compile-time rejection fixtures for every migrated `hint`/`fix`/`nextStep`/`command`-like result variant, and
    type those fields as `PrintedCommand | ExternalCommand` with prose in separate fields/fixed renderers. Change
    `inlineCommand` and `commandText` to accept only that union. Remove the deprecated `ShellCommand` export and public
-   arbitrary constructor; only the locator can create `PrintedCommand`, and only `externalCommand` can create
-   `ExternalCommand`.
+   arbitrary constructor; `command-brands.ts` exposes the opaque types but no `PrintedCommand` constructor or brand
+   token, only the locator can materialise `PrintedCommand`, and only `externalCommand` can create `ExternalCommand`.
 
    **Tests first.** Add fixtures under `test/fixtures/printed-commands/` and an isolated compile harness for §4
    **7a** (plain strings rejected in known command fields), **7c** (all named AST negative sinks and derived
    interpolation), and **7e-structure** (locator inputs and protocol identities remain allowed; all reviewed external
-   sites remain allowed). The package migrations already own **7d**. Mutate every sink visitor, token-boundary rule,
-   derived-binary rule, capability-derived package enumeration and branded field to accept a string; one fixture must
-   fail for each mutation.
+   sites remain allowed). Add separate runtime-source syntax-tree fixtures for `node <suite-entry>`,
+   `npx @agentcomms/<product>` and a wrapper whose payload launches a suite product; each must fail because of its own
+   AST rule, independently of `externalCommand`'s constructor tests. Add a compile-only fixture with explicit
+   `@ts-expect-error` imports/assignments proving that neither a `PrintedCommand` constructor nor its brand symbol is
+   reachable from `command-brands.ts`, `cli-command.ts` or the package public API outside the locator, while the
+   opaque type remains usable as a return type. The package migrations already own **7d**. Mutate every sink visitor,
+   token-boundary rule, derived-binary rule, capability-derived package enumeration and branded field to accept a
+   string; independently disable the node-entry, npx-package and wrapper-payload AST matchers; and expose a
+   `PrintedCommand` constructor or brand token. The corresponding fixture or `@ts-expect-error` compile must fail for
+   every mutation.
 
    **Done when.** There are exactly two renderable command brands, suite commands have no public constructor, the
    guard discovers current/future capability packages, all negative fixtures fail for their intended reason, and the
@@ -378,14 +426,19 @@ ongoing completeness check. In Task 15, inspect false-negative fixtures as close
    channels, setup, approvals and downloads. Let client config discovery continue to read the executing shell's
    `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, home and AppData while suite pins remain fixed.
 
-   **Tests first.** Own §4 **3e–3g** (per-operation used directories, execution-time client configs, no environment
-   assignments), **3j** (managed/npx/local registered servers with custom roots, Windows split roots/file secrets,
-   harmless terminal approval on the same stores), and **8a–8d** (CLI- and MCP-prepared harmless approvals; own and
-   same-version cross-product real-shell commands with no suite binary on PATH; unlocatable result has no executable;
-   POSIX/PowerShell/available cmd; no provider transport). Extend `test/parity.test.mjs` to assert every eligible row
-   was driven with pins. Mutate one command's declared path uses, let PATH resolve a suite binary, let an MCP-client
-   config inherit a suite pin, remove a launcher pin and enable each fake send/post transport; the matching test must
-   fail.
+   **Tests first.** Own §4 **3b–3d** here, after the locator and all handoff migrations exist: execute printed
+   handoffs in a fresh shell under conflicting `AGENT_COMMS_*`, XDG, home/AppData values and a changed cwd; assert
+   relative printing-process options became canonical absolutes, only directories the target uses were emitted,
+   Windows split roaming/local roots retain the printing process's file-secrets directory, download handoffs carry
+   the downloads pin, and non-download handoffs omit it. Also own **3e–3g** (per-operation used directories,
+   execution-time client configs, no environment assignments), **3j** (managed/npx/local registered servers with
+   custom roots, Windows split roots/file secrets, harmless terminal approval on the same stores), and **8a–8d**
+   (CLI- and MCP-prepared harmless approvals; own and same-version cross-product real-shell commands with no suite
+   binary on PATH; unlocatable result has no executable; POSIX/PowerShell/available cmd; no provider transport).
+   Extend `test/parity.test.mjs` to assert every eligible row was driven with pins. Mutate one used-directory
+   declaration, remove the secrets or downloads pin from a printed handoff, let PATH resolve a suite binary, let an
+   MCP-client config inherit a suite pin, remove a launcher pin and enable each fake send/post transport; the matching
+   test must fail.
 
    **Done when.** The acceptance criterion's pasteable/no-command branches work in real shells, installer-written
    registrations share one path identity between server and approval CLI, parity remains operation-identical, all
@@ -399,10 +452,15 @@ ongoing completeness check. In Task 15, inspect false-negative fixtures as close
    entry; otherwise, where available, use the exact package and release (`npx -y @agentcomms/<product>@0.13.0`), never
    `latest`; custom-path users must supply the known old `AGENT_COMMS_*` values because `comms_paths` cannot reconstruct
    their old environment; state the global/checkout/npx/old-result limitations. Update the approval/handoff wording in
-   `skills/_shared/contract-{comms,gmail,slack,resend}.md` and the affected
-   `skills/{comms-onboarding,comms-update,gmail-attachments,gmail-compose,gmail-send,gmail-setup,slack-posting,slack-reading,slack-setup,resend-sending}/SKILL.md`
-   files to tell agents to relay the result-provided command/no-command outcome, never synthesize a bare fallback.
-   Run `pnpm sync:skills` and `pnpm sync:reference` for generated copies/pages.
+   every contract and skill discovered from `scripts/channels.mjs`'s `skillFamilies` view, not a fixed channel list,
+   so agents relay the result-provided command/no-command outcome and never synthesize a bare fallback. The current
+   affected set includes `skills/_shared/contract-{comms,gmail,slack,resend,whatsapp}.md`,
+   `skills/{comms-onboarding,comms-update,gmail-attachments,gmail-compose,gmail-send,gmail-setup,slack-posting,slack-reading,slack-setup,resend-sending,whatsapp-reading}/SKILL.md`;
+   in particular migrate `skills/_shared/contract-whatsapp.md:65` and
+   `skills/whatsapp-reading/SKILL.md:84`. Make `test/skill-contracts.test.mjs` and
+   `test/skill-commands.test.mjs` derive the assertion from that registry view so every present or future channel's
+   declared contract and every skill under its prefix are covered. Run `pnpm sync:skills` and
+   `pnpm sync:reference` for generated copies/pages.
 
    Set root `package.json` to 0.13.1 and run `pnpm sync:versions` so all package/plugin/extension/launcher/skill pins
    move together. Write the `CHANGELOG.md` 0.13.1 section after all implementation and user guidance is final. Lead
@@ -413,8 +471,11 @@ ongoing completeness check. In Task 15, inspect false-negative fixtures as close
 
    **Tests first.** Own §4 **9a–9b**. Watch the new doc/skill assertions fail before edits, run the generated-file and
    version checks, then run full `pnpm verify`. Mutation-check the skills by restoring one bare synthesized approval
-   command, the fallback by changing the exact version to `latest`, and the safety harness by pointing a temp-home
-   assertion at the real home; each relevant test must fail. Record the final `pnpm verify` result.
+   command, and the fallback by changing the exact version to `latest`; each relevant test must fail. For the §4
+   **9b** real-home guard, inject a filesystem-write spy into the integration safety harness, give it a simulated
+   target classified as the real home, and assert the harness refuses before any `mkdir`, open, write, rename or
+   remove call reaches the spy. Mutate that pre-I/O refusal off and require the spy test to fail without ever naming
+   or touching the machine's actual home. Record the final `pnpm verify` result.
 
    **Done when.** Skills, generated references, manifests and changelog all say 0.13.1; the old-release workaround is
    precise about what it cannot recover; `git diff --check` and full `pnpm verify` pass; tests made no real provider
@@ -449,9 +510,9 @@ Each row below is owned by exactly one task. Compound spec bullets are split onl
 | 2e | Windows mixed-case recognition and POSIX case sensitivity | 7 |
 | 3a-core | Core CLI accepts all five options before dispatch | 1 |
 | 3a-channels | Every channel CLI accepts all five options before dispatch | 2 |
-| 3b | Fresh-shell conflicting environment/defaults/cwd, only used pins, relative values become absolute | 1 |
-| 3c | Windows split roaming/local roots and file secrets retain the printing process's secrets directory | 1 |
-| 3d | Download handoffs carry downloads; non-download handoffs omit it | 1 |
+| 3b | Fresh-shell conflicting environment/defaults/cwd, only used pins, relative values become absolute | 16 |
+| 3c | Windows split roaming/local roots and file secrets retain the printing process's secrets directory | 16 |
+| 3d | Download handoffs carry downloads; non-download handoffs omit it | 16 |
 | 3e | Runtime/install/prune/update, doctor, channels and setup have explicit directory-use fixtures | 16 |
 | 3f | MCP-client config follows execution-time client variables while suite pins remain fixed | 16 |
 | 3g | No output contains an environment assignment | 16 |
@@ -473,10 +534,11 @@ Each row below is owned by exactly one task. Compound spec bullets are split onl
 | 6a | Transitive package closure is ordered and deduplicated | 9 |
 | 6b | Isolated packed gmail-mcp installs local Gmail/core and handshakes without registry candidate | 9 |
 | 6c | Discovered/synthetic channel validator plus missing/dev-only/ranged/mismatched failures | 9 |
-| 6d | Governing docs, channel instructions, bundler/library comments remain consistent | 9 |
+| 6d | Governing docs, channel instructions, `docs/RELEASING.md` core-first order and bundler/library comments remain consistent | 9 |
 | 7a | Compile-time command-bearing fields reject strings | 15 |
-| 7b | `externalCommand` rejects manifest/package/root/direct/symlink/node/npx/wrapper escapes | 6 |
-| 7c | AST scan rejects all named output sinks and derived interpolation | 15 |
+| 7b-constructor | `externalCommand` rejects manifest/package/root/direct/symlink/node/npx/wrapper escapes | 6 |
+| 7c-sinks | AST scan rejects all named output sinks and derived interpolation | 15 |
+| 7c-launches | Independent AST fixtures reject `node <suite-entry>`, `npx @agentcomms/<product>` and wrapper payloads in runtime source | 15 |
 | 7d-core | Core literals/fragments/help/instructions and cross-channel alternatives | 10 |
 | 7d-gmail | Gmail bare/option/help/wrapper/mixed-case fixtures | 11 |
 | 7d-slack | Slack bare/option/help/mixed-case fixtures | 12 |
@@ -484,6 +546,7 @@ Each row below is owned by exactly one task. Compound spec bullets are split onl
 | 7d-whatsapp | WhatsApp bare/option/help/mixed-case fixtures | 14 |
 | 7e-external | Reviewed chmod/claude/codex/other-server commands remain accepted | 6 |
 | 7e-structure | Locator inputs and protocol identities remain accepted | 15 |
+| 7e-encapsulation | `@ts-expect-error` proves no `PrintedCommand` constructor or brand token is reachable outside the locator | 15 |
 | 8a | CLI/MCP harmless approvals execute own/same-version commands with no suite PATH and same temp store | 16 |
 | 8b | Unlocatable cross-product returns no executable words | 16 |
 | 8c | POSIX and Windows PowerShell/available cmd real-shell execution | 16 |
