@@ -117,7 +117,11 @@ implement the first two. The short repeat preview is dropped for this release an
   also drains legacy records: right after the version-3 write it revokes, under each record's lock, every v1 send
   record still `pending` or `approved` by D2's derived state (reason `prepared by an earlier release; prepare it
   again`) — 0.14 can never claim them, and an in-flight 0.13 claim that takes the lock afterwards finds the record
-  revoked and stops. Config records `legacyDrain: pending` until every such record is revoked or derived-expired; each
+  revoked and stops. The drain **tracks** exactly the v1 send records that were `pending` or `approved` (derived) at
+  the conversion — a v1 record already `used`, `failed`, `revoked` or expired then is history and is never tracked —
+  and config records `legacyDrain: pending` until every tracked record has left those two states: `revoked`,
+  `expired`, `used` or `failed`, or `sending`/`unknown` (an admitted in-flight 0.13 send, which can neither be revoked
+  nor claimed again; it is reported, as below, and does not hold the drain open); each
   later 0.14 epoch-governed operation retries the outstanding revocations first; and while the drain is pending, 0.14
   refuses to **loosen** any send policy (“records from an earlier release are still being retired”), so a failed
   revocation cannot be followed by `never → chat`. The stated limit, as in the order rule above: a 0.13 operation that
@@ -916,10 +920,12 @@ lookup failures stay attached to their draft and do not raise the concurrency or
 
 ## 4. Departures from the ticket
 
-0. **Config version 3 stops 0.13 processes at once (D1).** The first 0.14 operation that relies on the send epoch
-   converts the shared config to version 3, which 0.13 refuses to read. An MCP server still running 0.13 then fails
-   every call with the upgrade hint until its client restarts it on 0.14 — the update flow already asks for that
-   restart. This breaks the suite's usual rule that a release reads a config version before any release writes it;
+0. **Config version 3 refuses new 0.13 calls (D1).** The first 0.14 operation that relies on the send epoch converts
+   the shared config to version 3, which 0.13 refuses to read. An MCP server still running 0.13 then fails every call
+   it *starts* with the upgrade hint until its client restarts it on 0.14 — the update flow already asks for that
+   restart. A 0.13 call already past its config read is not refused by the version; D1's legacy drain stops it at its
+   record lock, and the one stated limit (it had already taken the lock, or its record could not be revoked) is
+   reported by id. This breaks the suite's usual rule that a release reads a config version before any release writes it;
    the alternative, letting a 0.13 process keep claiming, is the no-revival hole the epoch exists to close.
 
 1. **No in-chat approval for a fresh, untrusted Claude Code yet.** It is deferred to a URL-mode design because no MCP
@@ -954,7 +960,9 @@ lookup failures stay attached to their draft and do not raise the concurrency or
   is refused while it is pending, the next 0.14 epoch-governed operation retries and revokes, and only then may the
   policy be loosened; (c) the documented limit: a 0.13 claim already holding the record lock when the conversion runs
   completes, and the conversion's report lists it. `legacyDrain` clears once every v1 record is revoked or expired,
-  and a version-3 config with no v1 records never sets it.
+  and a version-3 config with no v1 records never sets it. Historical v1 records that were `used` or `failed` before
+  the conversion are not tracked and never set it; a tracked record that an admitted in-flight 0.13 sender completes
+  as `used` (or leaves `sending`/`unknown`) clears its place in the drain and is listed in the report.
 - **Round-28 cases:** with the frozen 0.13 tarball the release tests already use, against one shared config and
   approvals store: (a) a 0.14 `never` change converts a version-2 config to version 3 and increments the epoch, after
   which the frozen process's prepare, claim, approve and send-policy commands each refuse with “this release reads
