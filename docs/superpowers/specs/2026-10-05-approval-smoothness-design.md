@@ -1,6 +1,6 @@
 # CUE-404 — approving a send without fighting the clock — design
 
-Status: **revised after round 20 (1 P2, 2 P3, all addressed)**, 2026-10-05, from Linear CUE-404 (High; the
+Status: **revised after round 21 (3 P2, all addressed)**, 2026-10-05, from Linear CUE-404 (High; the
 owner: "this is very not smooth") and a cited research pass over this repository, the MCP specification and the
 clients' documentation. Depends on CUE-403 (the CLIs on PATH,
 [its spec](2026-10-04-cli-path-shims-design.md)) for every printed terminal command to work; ships after it.
@@ -285,12 +285,24 @@ pinned server cannot verify ownership and therefore omits the file from lists an
 record is never claimable, never included in D9's unsent inference and never rewritten. This replaces the current
 catch-and-skip behavior (`packages/core/src/approvals.ts:1085-1103`).
 
+**Two classes of parseable `corrupt` record.** *Attribution verified*: its `bindingDigest` recomputes correctly, so its
+owner (`inboxId`) and identity are trustworthy and it is corrupt for another reason (state, timestamps, evidence); it
+is shown to its owner like any other record, with `state: "corrupt"` and its safe fields. *Attribution unverifiable*:
+its `bindingDigest` is missing, malformed or mismatched, so its owner cannot be trusted; it is treated exactly as an
+unreadable file above — the unpinned stub `{ approvalId, state: "corrupt", reason }`, and on pinned surfaces omission
+from lists and the owner-hidden `NOT_FOUND`.
+
 The outcome keeps storage and actionability separate. For sends and changes, `state` is the persisted state (`pending`,
 `approved`, `sending`, `used`, `failed`, `unknown`, `expired` or `revoked`), except that an integrity failure is
 reported as `corrupt`; `claimable` is a boolean. It is true only for an `approved` send/change before `usableUntil`
 while the effective live policy is not `never`, or a pending chat-route send/change while the effective live policy
 is still `chat`. `claimable` is never a stored state and a wait does not change the state merely because the record can
-be claimed. Downloads retain their public `answered` classification for stored `approved`/`used` records.
+be claimed. Downloads retain their public `answered` classification for stored `approved`/`used` records, and their
+`claimable` is exactly: **pending** with live change policy `chat` and `requiredPolicy` `chat` → `true` (it can be answered
+in chat now); **pending** otherwise → `false` (waiting for the terminal or a form); **answered** at the terminal or in a
+form (`approved`) and unexpired → `true` (the save may proceed); **used**, **expired**, **revoked** or **corrupt** →
+`false`. A nonzero wait therefore stops at once for a chat-answerable pending question and keeps polling for one that
+needs the terminal.
 
 | Record and context | Outcome |
 |---|---|
@@ -310,7 +322,7 @@ be claimed. Downloads retain their public `answered` classification for stored `
 | provider response leaves this call's outcome uncertain | immediately return non-retryable `SEND_OUTCOME_UNKNOWN` with `approval.state: sending`, `claimable: false`, `sendingAt`, any `sendingHeartbeatAt` and derived `unknownAt`; the send may have happened |
 | `sending`, inside its renewed lease, observed by another call | retryable `APPROVAL_PENDING`: “being sent by another call since …; wait for it”; include `sendingAt`, any `sendingHeartbeatAt` and derived `unknownAt`; never “prepare again” |
 | `unknown` at or after the sending-lease limit | `SEND_OUTCOME_UNKNOWN`: final to every caller except the original claim token's `used`/`failed` completion; the send may have happened and its claimant may still record a late provider result; check Sent/the channel before doing anything else |
-| used send | `APPROVAL_VOID`: already used at `usedAt == sentAt`, with its non-empty provider message id |
+| used send | `APPROVAL_VOID`: already used at `usedAt`, with its non-empty provider message id. `used` means the provider **accepted** the send; the record's `providerState` says what that meant: `sent` (wording "sent"), `scheduled` with `scheduledAt` (Resend's future sends, `packages/resend/src/operations/send.ts:717`; wording "scheduled for <time>, not yet sent", and after that time "scheduled for <time> — check Resend for delivery"), or `cancelled` (wording "cancelled before sending"), which Resend's own cancel operation writes onto the approval record under its lock when it cancels the scheduled send (`packages/resend/src/operations/scheduled.ts:104`) |
 | used change | `APPROVAL_VOID`: the approved change was already claimed at `usedAt`; no provider-id or “sent” wording |
 | `failed` | `APPROVAL_VOID` with channel-specific truth. Gmail/Resend certain failures say nothing was sent. A Slack file failure says **“nothing was posted”** and preserves `uploaded` and `possiblyUploaded` ids/names because bytes may already have reached Slack (`packages/slack/src/operations/send.ts:1016-1018, 1032-1035, 1088-1111, 1137-1172`) |
 | `revoked` | `APPROVAL_VOID` with its reason; an explicit decline is “declined”, while cancellation is not a revoke |
@@ -841,6 +853,12 @@ lookup failures stay attached to their draft and do not raise the concurrency or
 
 ## 5. Tests owed
 
+- **Round-21 cases:** a Resend scheduled send through zero-wait status and list before its time ("scheduled, not yet
+  sent"), after cancellation ("cancelled before sending", written by the cancel operation under the record lock) and
+  after its time; an attribution-verified corrupt record shown to its owner versus a missing/mismatched-binding record
+  as an unpinned stub and a pinned `NOT_FOUND`, across status, wait and lists; the download `claimable` matrix for
+  pending chat, pending confirm, answered-unused, used, expired, revoked and corrupt records, including a live-policy
+  change mid-wait.
 - **Round-20 cases:** distinct answer, deadline and observation times, then restart: status, wait and list say
   "answered and expired before it was used" with no answer time; golden and round-trip cases for an absent `listing`
   (no `listing` key, no name comparison), an empty `listing` and a populated one.
