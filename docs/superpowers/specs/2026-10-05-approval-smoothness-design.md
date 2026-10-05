@@ -2,7 +2,7 @@
 
 Status: **written 2026-10-05**, from Linear CUE-404 (High; the owner: "this is very not smooth") and a cited research
 pass over this repository, the MCP specification and the clients' documentation. **Revised after Codex design review
-round 1** (NEEDS-REVISION: 5 P1, 5 P2, 1 P3 — all addressed below). Depends on CUE-403 (the CLIs on PATH,
+round 2** (NEEDS-REVISION: 6 P1, 3 P2, 1 P3 — all addressed below). Depends on CUE-403 (the CLIs on PATH,
 [its spec](2026-10-04-cli-path-shims-design.md)) for every printed terminal command to work; ships after it.
 
 ## 1. What was asked
@@ -15,9 +15,12 @@ minutes later the approved record expired unused and the send answered `APPROVAL
 just given. The ticket asks for: approved approvals not racing the clock; the agent learning about an approval without
 being told; an accurate `APPROVAL_EXPIRED`; no escalation for internal or previously-mailed recipients on taint alone,
 explained when it does fire; an in-chat approval route for Claude Code; the same for update approvals; and every
-printed command runnable. **Acceptance:** one internal email that triggers `confirm` takes one approval, with no
-re-prepare, no second preview, the agent learning of the approval itself, and no error asking for an approval already
-given.
+printed command runnable.
+
+**Acceptance, made exact:** one internal email that triggers `confirm` has one prepare and one person decision. The
+terminal approval prints the full content as the approval ceremony itself; there is no second preview in the chat.
+The agent learns that the approval happened by waiting, sends with the same record, and no result asks for an approval
+that was already given.
 
 **The outcome, recorded on the ticket 2026-10-05:** the email was never sent. The first approval was approved at the
 terminal at 22:48:22 and expired unused at 22:52:46 — ten minutes after it was *created*, four and a half after it was
@@ -32,92 +35,156 @@ full preview again**.
 
 | Fact | Source |
 |---|---|
-| Send and change approvals live `APPROVAL_TTL_MS` = 10 minutes; download questions (`kind: download`) already live 30. | `packages/core/src/approvals.ts:54, 401, 407, 921` |
-| Expiry is derived for `pending` **and `approved`** records, so an approved record expires unused. | `approvals.ts:512` |
-| Under the `chat` policy a pending send or change is claimable directly by the presenting process; under `confirm` it needs `approved` first. | `approvals.ts:725, 872` |
-| Core's state error maps an expired record to `APPROVAL_EXPIRED` and a revoked one to `APPROVAL_VOID`, but answers `APPROVAL_REQUIRED` ("the approval is <state>") for `used`, `sending`, `failed` and `unknown`; changes waiting for a person answer `APPROVAL_PENDING` (`change-flow.ts:219`). Gmail's execute turns every state other than pending/approved into `APPROVAL_VOID`, and the MCP send path's `needsConfirmation` routes an expired record to confirmation, so an untrusted client gets `APPROVAL_REQUIRED`. Other legitimate `APPROVAL_REQUIRED` cases: a missing or wrong confirmation code, a declined or cancelled form. There is no `APPROVAL_USED` code. | `approvals.ts:591, 682`; `packages/gmail/src/operations/send.ts:569`; `packages/gmail/src/mcp/server.ts:2274, 2411`; `packages/core/src/errors.ts:32` |
-| The shipped Gmail skill documents those wrong outcomes, and says to mention the trust list only when the person asks. | `skills/gmail-send/SKILL.md:129, 180` |
-| "Clients whose approval forms are known to reach a person" is `defaults.confirm.elicitationClients`: an empty-by-default list of MCP `clientInfo.name`s the person adds by an approved change after a four-character probe; only the name is checked at send time. | `packages/core/src/config.ts:103, 431`; `packages/gmail/src/mcp/server.ts:2285, 2388`; `packages/gmail/src/operations/confirm-clients.ts:27, 89, 111` |
-| `clientInfo` is self-reported (the SDK says not to use it for security); elicitation is answered by the client (no interaction model is mandated; Claude Code hooks can answer forms; this repository's own test answers the probe automatically). Only URL-mode elicitation keeps the person's input from the client and model. | MCP spec 2025-06-18 and 2026-07-28 (client/elicitation); ts.sdk.modelcontextprotocol.io migration notes; code.claude.com/docs/en/mcp; `packages/gmail/test/mcp-send.test.ts:168`; `SECURITY.md:67` |
-| The taint store is one store for every mailbox. It records the addresses (and non-public domains) in the headers and bodies of mail read in the last seven days, **leaving out the reading mailbox's own address and every address on that mailbox's `internalDomains`**, with per-message and total caps. Each entry keeps the last time seen, the strongest source (`header` over `body`) and the ids of the mailboxes that read it — no message id. `check()` answers two booleans. | `packages/core/src/taint.ts:11, 170, 203, 277, 299, 342` |
-| A new mailbox's `internalDomains` defaults to its own domain unless that is a public provider; widening it is a gated loosening. So an internal colleague is escalated today only through a sighting **in another mailbox** (where that domain is external) or a domain-only match — never through mail read in the sending mailbox itself. | `packages/core/src/config.ts:1293, 1443`; `packages/gmail/src/operations/read.ts:244` |
-| Send time escalates on `seen.address \|\| seen.domain` unless the sending mailbox has written to that exact address (`in:sent to:`, then an exact To/Cc/Bcc check); `external` (not own, not on the sending mailbox's `internalDomains`) is computed but not applied to taint. | `packages/gmail/src/operations/send.ts:209, 240, 263, 268, 274` |
-| Claude Code idles out a stdio MCP call after 30 minutes without progress, and moves a main-conversation call over two minutes into a background task. | code.claude.com/docs/en/mcp (read 2026-10-05) |
-| The base design treats a hostile process running as the same OS user as out of scope (it can read the tokens). | `docs/superpowers/specs/2026-09-18-agent-communications-design.md` (threat model); `SECURITY.md:55` |
+| Send and change approvals currently live `APPROVAL_TTL_MS` = 10 minutes; download questions (`kind: download`) live 30 minutes from creation. | `packages/core/src/approvals.ts:401-407, 535-562, 823-857, 921-969` |
+| Expiry is currently derived for `pending` **and `approved`** records. An ordinary `get` returns the derived record without writing it; a locked transition writes a derived state before deciding the transition. | `packages/core/src/approvals.ts:512-533, 565-588` |
+| Under an effective `chat` policy a pending send or change is directly claimable; `confirm` needs an `approved` record first, and a `confirm` change accepts terminal approval only. | `packages/core/src/approvals.ts:725-798, 860-910` |
+| Core's current send/change state error maps `expired` to `APPROVAL_EXPIRED`, `revoked` to `APPROVAL_VOID`, and other finished states to `APPROVAL_REQUIRED`. Downloads are different: `expired` is `APPROVAL_EXPIRED`, while `approved`, `used` and other non-revoked states that reach the state error are `APPROVAL_VOID`, not `APPROVAL_REQUIRED`. | `packages/core/src/approvals.ts:591-614` |
+| Gmail execute currently turns every state other than `pending`/`approved` into `APPROVAL_VOID` before claiming. Gmail's send form currently leaves both decline and cancel pending; its download form currently revokes both. | `packages/gmail/src/operations/send.ts:569-582`; `packages/gmail/src/mcp/server.ts:1001-1009, 2411-2418` |
+| A wrong challenge returns `APPROVAL_REQUIRED` on attempts one and two; attempt three atomically revokes and returns `APPROVAL_VOID`. | `packages/core/src/approvals.ts:682-717` |
+| The shipped Gmail skill documents the current inconsistent outcomes, and already tells the agent to cancel a record when the person says no. | `skills/gmail-send/SKILL.md:126-154` |
+| Trusted send forms are an empty-by-default list of MCP `clientInfo.name` values. A probe record becomes complete only when `completeProbe` is called; the send test does that directly at lines 144–145, while the later callback at lines 168–172 automatically answers the **send approval form**, not the probe. | `packages/core/src/config.ts:103-108, 420-432`; `packages/gmail/src/operations/confirm-clients.ts:67-95`; `packages/gmail/test/mcp-send.test.ts:138-172` |
+| `clientInfo` is self-reported and elicitation defines a client/server exchange, not a proof that a person answered. Only URL-mode elicitation keeps the person's answer from the client and model. | MCP elicitation specification 2026-07-28; TypeScript SDK migration notes; `SECURITY.md:67-68` |
+| The taint store is shared across mailboxes. It records canonical addresses and non-public domains from mail read in the last seven days, excluding the reading mailbox's own addresses and current `internalDomains`. An entry aggregates the newest timestamp, the strongest source ever seen (`header` over `body`) and the union of mailbox ids; it does not retain one coherent sighting. | `packages/core/src/taint.ts:260-270, 277-325, 341-349`; `packages/gmail/src/operations/read.ts:243-250` |
+| A new mailbox's `internalDomains` defaults to its own non-public domain, and widening it is a gated loosening. With static configuration, an exact internal address can enter the shared taint store only through a mailbox where it is external. An address recorded while external can nevertheless remain for the seven-day window after `internalDomains` is widened, because reads prune stored entries by time and `check()` does not reapply the recording exclusions. | `packages/core/src/config.ts:1293-1297, 1425-1446`; `packages/core/src/taint.ts:260-270, 296-325, 341-349` |
+| Send time currently escalates on `seen.address \|\| seen.domain` unless this mailbox has written to the exact address. The sent-history check currently asks only for five fuzzy `in:sent to:<address>` hits, then verifies their parsed To/Cc/Bcc fields exactly; it does not paginate. | `packages/gmail/src/operations/send.ts:202-221, 240-275` |
+| Terminal send approval currently re-renders the full preview, asks for the challenge, and only approves; it does not send. | `packages/gmail/src/cli/program.ts:1345-1356` |
+| Approval records currently carry `digestVersion: 1`; every locked transition refuses another version with “prepared by a different version of agent-communications,” after persisting any derived state it observed. | `packages/core/src/approvals.ts:292-306, 570-588` |
+| The existing update gate stops a non-exempt tool on an older server after a newer release is known, while deliberately allowing a call that carries an approval this machine already holds; the approval store's digest-version check remains the backstop for that allowed call. | `packages/core/src/update-gate.ts:126-154`; `packages/core/src/update-state.ts:273-302` |
+| The base design treats a hostile process running as the same OS user as out of scope: it can read the tokens and call the providers directly. | `docs/superpowers/specs/2026-09-18-agent-communications-design.md:547-555`; `SECURITY.md:53-59` |
+| Some MCP clients move long calls into the background or impose their own time limits, depending on client, version, configuration and call context. This design therefore does not use a client-specific timeout as a protocol rule; skills use repeated short waits. | Product constraint, not a claim about repository code |
 
 ## 3. Decisions
 
-### D1. Lifetimes: pending for 30 minutes, approved held for 24 hours, by record version
+### D1. Route-bound lifetimes: chat 10 minutes, confirm 30 minutes, approved 24 hours
 
-- **New records carry `lifetimeVersion: 2`** from creation. Only version-2 records get the new rules; a record
-  without it keeps exactly its old `expiresAt` semantics, whatever its state, so a mixed-release store or an
-  older record never gains time.
-- **Pending: 30 minutes**, for sends (Gmail, Resend, Slack posts, files and reactions) and changes (`comms_update`,
-  `comms_change_policy`, every gated change). The threat argument: under `chat`, the presenting process can already
-  prepare a fresh record and claim it at once, so a longer pending lifetime grants no capability the agent lacks; it
-  only stops a preview expiring while a person reads it. Under `confirm`, a pending record is useless to the agent
-  until a person approves it. Download questions keep 30 minutes.
-- **Approved: usable for 24 hours after approval** (`usableUntil = approvedAt + 24 h`), then expired unused. Still
-  single-use (state transition plus the exclusive claim marker), and still checked at claim against everything it is
-  bound to — the draft's message id and digest, the claimed-draft and final-draft rechecks, the inbox/account/workspace,
-  the expected recipients and subject, the change plan's effects — so an edit or a drifted plan voids it.
-- **Timestamps fail closed:** a version-2 record is expired when `approvedAt` is missing for an approved state,
-  unparseable, before `createdAt`, after now (clock moved back), or when `usableUntil` is not exactly `approvedAt` +
-  24 h; boundary equality counts as expired; `now < createdAt` stays expired as today.
-- **Accepted risk, stated:** an approved record can be claimed by any process sharing the store for up to 24 hours;
-  approvals are not bound to the process that prepared them. A hostile same-user process is out of the threat model
-  (it can read the tokens directly); within it, the content binding means whoever claims sends exactly what was
-  approved, once. `send cancel` revokes. The final Gmail read-to-send micro-race is pre-existing and unchanged.
-- **Not done:** the terminal `approve` does not send. That would put a second sending process outside the server that
-  prepared the draft, and the agent could not report the outcome.
+- **The route is fixed at creation and stored.** A send's route is the stricter of the live send policy and any risk
+  escalation at prepare; a change's route is its live change policy. A `chat` route means this record can be claimed on
+  a conversational yes. A `confirm` route means it needs a person outside the chat: the policy was `confirm`, or a send
+  was escalated to it. The route never changes when configuration later changes.
+- **Pending is route-bound.** A `chat`-route send or change expires ten minutes after creation. A `confirm`-route send
+  or change expires thirty minutes after creation. A `confirm`-route pending record is never directly claimable, even
+  if the policy later becomes `chat`. A `chat`-route record is directly claimable only while the effective live policy
+  is still `chat`; tightening to `confirm` makes that record wait for a terminal approval (or, for a send, a trusted
+  form) inside its original ten-minute window. Tightening to `never` still refuses it.
+- **Approval starts a new, bounded window.** A send or change approved through its permitted channel stores
+  `approvedAt` and `usableUntil = approvedAt + 24 h`. It remains single-use and content-bound: a changed draft,
+  account, expected recipients or subject, or a drifted change plan still voids it at claim. Boundary equality is
+  expired.
+- **Downloads do not adopt the new approval lifetime.** A download question expires thirty minutes after creation,
+  including after it is answered, and has no `usableUntil`; this is the existing model
+  (`packages/core/src/approvals.ts:921-1004`).
+- **A refusal has one stored meaning.** An explicit form `decline` revokes under the record lock with the exact reason
+  `declined`. A cancelled or dismissed form makes no decision and leaves the record pending. A conversational “no” is
+  invisible to the server: every send/change skill will tell the agent to call the revoke tool immediately. If it does
+  not, a chat-route record can remain claimable only for the same ten-minute window the store uses today
+  (`packages/core/src/approvals.ts:401-407, 535-562, 823-857`); that risk is explicit in §7.
 
-### D2. One classification of a record into an outcome, complete
+**Version and mixed releases.** There is no `lifetimeVersion`. `DIGEST_VERSION` moves from 1 to **2**. The version-2
+canonical approval binding includes the content/change digest plus the immutable route and its lifetime profile:
+`{route, pendingMs, approvedMs}` for sends and changes, and the fixed creation-relative download profile for downloads.
+That makes the bump a real change in what an approval authorises, not an advisory field an older binary can ignore.
+
+Released 0.13.0 code already refuses any record whose `digestVersion` differs from its own constant, with “the approval
+was prepared by a different version of agent-communications” (`packages/core/src/approvals.ts:292-293, 570-588`). An
+old binary therefore fails closed on v2, and new code refuses v1, an absent version and every unknown future version by
+the same path. Pending records from before the update must be prepared again; an old approved record cannot be claimed
+by new code either. The update gate also stops non-exempt calls once it knows a newer release is installed; its narrow
+already-approved-call exception is safe because the digest-version refusal still runs
+(`packages/core/src/update-gate.ts:126-154`; `packages/core/src/update-state.ts:273-302`).
+Because released 0.13.0 derives expiry before checking the version, an already-approved-call exception made through
+old code after the v2 pending deadline may conservatively persist `expired` and then refuse; it can destroy usability,
+but cannot send or extend the record (`packages/core/src/approvals.ts:512-530, 570-588`). Restarting into the installed
+release avoids that fail-closed mixed-process casualty.
+
+**Version-2 timestamps fail closed.** Every read validates these exact invariants before classifying the record:
+
+- `createdAt` and `expiresAt` are finite, and `expiresAt` equals `createdAt + 10 min` for a chat route,
+  `createdAt + 30 min` for a confirm route, or `createdAt + 30 min` for a download;
+- an approved send/change has finite `approvedAt`, with
+  `createdAt <= approvedAt <= expiresAt` and `approvedAt <= now`, and finite `usableUntil` exactly 24 hours after
+  `approvedAt`;
+- `now < createdAt` and, for an approved record, `now < approvedAt` are expired, as is any missing, unparseable or
+  inconsistent timestamp; a pending record expires at `now >= expiresAt`, and an approved send/change at
+  `now >= usableUntil`.
+
+Expiry is monotonic. Any read that derives `expired` takes the record lock and persists that state before returning;
+this extends the locked transition's existing write-back rule (`packages/core/src/approvals.ts:570-588`) to `get`,
+list, status and wait. A later clock correction cannot revive it. A wait is therefore read-only except that it persists
+an expiry it observes.
+
+**Accepted risk:** an approved record can be claimed by any process sharing the store for up to 24 hours. Approvals
+are not bound to the preparing process. A hostile same-user process is outside the existing threat model
+(`docs/superpowers/specs/2026-09-18-agent-communications-design.md:547-555`; `SECURITY.md:53-59`); inside it, the v2
+binding means whoever claims can perform exactly the approved send or change, once. The terminal `approve` still does
+not send (`packages/gmail/src/cli/program.ts:1345-1356`): making it send would put a second sending process outside
+the server that prepared the draft.
+
+### D2. One locked classification of every record into an outcome
 
 Core exports `approvalOutcome(record, context)`, where `context` is the action (approve, claim, wait, revoke,
-inspect), the caller's kind and ownership (account/workspace/inbox pin), the effective policy, whether the client is
-trusted, and any challenge given. Every surface uses it — Gmail terminal begin/finish, Gmail execute's precheck and
-`claimForSend`, the claimed-draft and final-draft rechecks, Gmail MCP routing (pin check, confirmation routing,
-untrusted refusal, form decline/cancel, finish, execute), Resend (ownership, precheck, claim, terminal), Slack post,
-file and reaction (precheck, claim), changes (`claimForChange`, every gated change, terminal begin/finish), and
-downloads — and checks ownership first, then finished and expired states, and only then confirmation routing:
+inspect), the caller's expected kind and ownership (account/workspace/inbox pin), the stored route, the effective live
+policy, whether a send client is trusted, and any challenge. Every surface uses it — Gmail terminal begin/finish,
+Gmail execute and both draft rechecks, Gmail MCP routing, Resend, Slack posts/files/reactions, changes, downloads,
+lists and waits. Ownership and kind are checked before state or routing. A nonexistent id and an existing id that is
+foreign, wrong-kind or pinned away all return the identical `NOT_FOUND` code, message and details.
 
-| Record state | Outcome (existing codes only) |
+| Record and context | Outcome |
 |---|---|
-| not found, or another account's/kind's | `APPROVAL_VOID` "no such approval here" (pinned callers learn nothing about other mailboxes' records) |
-| `pending`, `chat` | claimable |
-| `pending`, `confirm`, trusted client | form; declined/cancelled/wrong code → `APPROVAL_REQUIRED` with what to do |
-| `pending`, `confirm`, untrusted client | sends: `APPROVAL_REQUIRED`; changes: `APPROVAL_PENDING` (each as today) — with the resolved terminal command (CUE-403) and the wait tool (D3) |
-| `approved`, within `usableUntil` | claimable |
-| expired, never approved | `APPROVAL_EXPIRED`: prepared at …, expired at …; prepare it again |
-| approved, then expired unused | `APPROVAL_EXPIRED`: approved at …, expired unused at …; prepare it again |
-| `sending` (fresh) | `APPROVAL_VOID` "being used by another call since …" |
-| `unknown` (a `sending` record past the stale limit, `approvals.ts:530`) | `APPROVAL_VOID` "the send it approved may have gone out at …; check <Sent / the channel> before preparing it again" — never a retryable code, because a retry could send twice |
-| `used` | `APPROVAL_VOID` "already used at …" |
-| `failed` | `APPROVAL_VOID` "the send failed at … and nothing went out; prepare it again" |
-| `revoked` | `APPROVAL_VOID` with the recorded reason (draft changed, cancelled, plan drifted) |
+| nonexistent, foreign, wrong-kind or pinned-away id | `NOT_FOUND`, identically; no record detail |
+| pending send/change, `chat` route, effective live policy still `chat` | `claimable`; a wait returns that immediately |
+| pending send, `confirm` route (or a chat route tightened to `confirm`), trusted client | show the form; accepted correct code approves; explicit decline atomically revokes with reason `declined`; cancel/dismiss leaves pending and returns `APPROVAL_PENDING` |
+| pending send that needs `confirm`, untrusted client | `APPROVAL_REQUIRED`, with the resolved terminal command and matching wait tool |
+| pending `confirm` change | `APPROVAL_PENDING`, with the terminal command and wait tool; changes are terminal-only and never raise a form, as the current claim already enforces (`packages/core/src/approvals.ts:889-903`) |
+| wrong code, attempts one or two | record remains pending; `APPROVAL_REQUIRED` |
+| wrong code, attempt three | atomically revoked; `APPROVAL_VOID`, “too many wrong codes” (the existing transition has the same boundary at `packages/core/src/approvals.ts:704-716`) |
+| approved send/change, before `usableUntil` | `claimable` |
+| expired before approval | `APPROVAL_EXPIRED`: prepared at …, expired at …; prepare again |
+| approved, then expired unused | `APPROVAL_EXPIRED`: approved at …, expired unused at …; prepare again |
+| `sending`, inside the stale limit | `APPROVAL_VOID`: being used by another call since … |
+| `unknown` after the stale-send limit | `SEND_OUTCOME_UNKNOWN`: the send may have happened; check Sent/the channel before doing anything else |
+| `used` | `APPROVAL_VOID`: already used at …, with the sent message id where there is one |
+| `failed` | `APPROVAL_VOID` with channel-specific truth. Gmail/Resend certain failures say nothing was sent. A Slack file failure says **“nothing was posted”** and preserves `uploaded` and `possiblyUploaded` ids/names because bytes may already have reached Slack (`packages/slack/src/operations/send.ts:1016-1018, 1032-1035, 1088-1111, 1137-1172`) |
+| `revoked` | `APPROVAL_VOID` with its reason; an explicit decline is “declined”, while cancellation is not a revoke |
+| download pending | `pending` until answered, expired or a wait times out; under `chat` the answer may be relayed, under `confirm` it comes from the terminal or trusted form |
+| download `approved` or `used` | `answered`, with the recorded destination choice and original creation-relative expiry; never `approved` with a `usableUntil` |
+| download `expired` | `expired` / `APPROVAL_EXPIRED`: the question expired before it was answered or used; current download state handling is separate already (`packages/core/src/approvals.ts:591-607, 972-1004`) |
 
-`APPROVAL_REQUIRED` never answers an approved, expired, used, failed, sending, unknown or revoked record. The Gmail
-skill's outcome table and every channel's skill are corrected to match.
+`SEND_OUTCOME_UNKNOWN` is added to the one registry with exit **10**, `retryable: false`, and summary **“the send
+outcome is unknown; check before sending again”**. Exit 10 is the existing approval/send-refusal class, while the
+distinct code prevents consumers from following `APPROVAL_VOID`'s global “prepare again” summary
+(`packages/core/src/errors.ts:6-24, 58-115`). No skill or machine consumer may automatically prepare after it.
 
-### D3. Waiting for an approval: one read-only operation, a CLI and MCP pair on every surface
+The classifier runs **inside each locked transition**. Approve, claim, revoke and form resolution read, derive,
+validate, classify and write beneath the same record lock. Inspect/status/wait use the same locked read so that expiry
+write-back is atomic. There is no pre-lock state classification that a concurrent claim can contradict.
 
-`waitForApproval(approvalId, { waitSeconds, signal, owner })`: read-only — never claims, revokes or executes. It checks
-ownership first (the caller's account/workspace/inbox pin and kind; an id that is not the caller's is reported exactly
-as "not found"), then polls the record every second with an atomic read, and returns as soon as the record leaves
-`pending`, or after `waitSeconds` (default 30, maximum 110 — below Claude Code's two-minute move to the background).
-No file watchers. At most 8 concurrent waits per server process; a ninth is refused with `TRANSIENT` "too many
-waits". Progress is sent every 15 seconds when the caller gave a progress token. Cancellation stops the wait only;
-a final read decides a race between a state change and cancellation or timeout.
+### D3. Waiting for an approval: short, bounded and on every surface
 
-The result is one of: `approved` (with `usableUntil`), `expired`, `revoked`, `used`, `failed`, `unknown`,
-`not-found`, `pending` (timed out; same id), `cancelled` (the wait, not the approval).
+`waitForApproval(approvalId, { waitSeconds, signal, owner })` never claims, revokes or executes. It checks ownership
+and kind first, polls one small approval file at most once a second through D2's locked read, and stops at the earliest
+of a classified result, the requested duration, or the record's own pending/usable expiry. `waitSeconds` defaults to
+30, has a maximum of **300**, and `0` is status now. A pending, directly claimable chat-route send/change returns
+`claimable` immediately. A download returns `answered` when approved/used and `expired` when expired, not the
+send/change `approved` shape.
 
-Surfaces, each a CLI and MCP pair calling that operation, with `capabilities.json` rows: `agentcomms approval wait
-<id>` / `comms_approval_wait` (changes and every kind); `agent-gmail send wait <id>` / `gmail_send_wait`;
-`agent-resend send wait <id>` / `resend_send_wait`; `agent-slack approval wait <id>` / `slack_approval_wait` (posts,
-files and reactions). Every `APPROVAL_REQUIRED` that sends the person to a terminal names the matching wait tool.
+The result set is: `claimable`, `approved` (with `usableUntil`), `expired`, `revoked`, `used`, `failed`, `unknown`,
+`answered` (downloads), `not-found`, `pending` (timed out, with the same id) and, when it can be delivered,
+`cancelled` (the wait, not the approval). Progress is sent every 15 seconds when the caller supplied a progress token.
 
-### D4. `recipient-tainted`: an exact sighting still escalates; an own-domain match alone does not; it says why
+At most **8 waits per server or CLI process** run at once; a ninth gets `TRANSIENT` “too many waits”. This bounds one
+process's resources, not all processes sharing the store: each slot costs one small file read per second. Every exit
+path — success, timeout, cancellation, exception and client disconnect — releases its slot in `finally`. Cancellation
+guarantees only that the waiter is released and the record is untouched apart from an expiry that the final locked
+read observed and persisted. Delivery of a `cancelled` result to a client that disconnected is best effort.
+
+Surfaces, each a CLI and MCP pair calling that same operation, with `capabilities.json` rows naming it as their
+`operation`: `agentcomms approval wait <id>` / `comms_approval_wait` (changes and every kind);
+`agent-gmail send wait <id>` / `gmail_send_wait`; `agent-resend send wait <id>` / `resend_send_wait`;
+`agent-slack approval wait <id>` / `slack_approval_wait` (posts, files and reactions). Every refusal that sends a
+person to a terminal names the matching wait tool. Because clients may background or limit long calls, the skills
+recommend repeated default-length waits rather than one maximum-length call.
+
+### D4. `recipient-tainted`: exact still escalates, own-domain alone does not, and the explanation is honest
 
 The attack this flag stops is an instruction hidden in mail that names an address to send something to. The decision
 becomes:
@@ -128,49 +195,67 @@ tainted = (seen.address || (seen.domain && external)) && !hasWrittenTo(exact add
 
 that is:
 
-- an **exact address seen in mail read in any mailbox** still escalates, internal or not, unless the sending mailbox
-  has written to it before. A compromised, attacker-created or wrong internal address that reached the store — which,
-  by the recording rule, means it was read in a mailbox where that domain is not internal — is still caught. Whether
-  the address appeared as a sender or inside a message is not used: a colleague who wrote to you and a compromised
-  colleague account that wrote to you leave the same trace, and exempting senders would also remove today's
-  escalation of a first-time reply to an external sender on a public provider;
-- a **domain-only** match (another address at the same non-public domain was seen) escalates only when the recipient
-  is external to the sending mailbox. The sending mailbox's own `internalDomains` no longer escalate on a domain
-  match — consistent with the recording rule, which never records internal addresses read in that mailbox at all.
+- an **exact address** already in the store escalates, internal or external, unless the sending mailbox has written to
+  it. At a fixed configuration an internal address can have entered only through a mailbox where it was external
+  (`packages/core/src/taint.ts:277-305`; `packages/gmail/src/operations/read.ts:243-250`);
+- a **domain-only** match escalates only when the recipient is external to the sending mailbox. The sending mailbox's
+  own `internalDomains` do not escalate on a domain match.
 
-The ticket's ask ("no escalation for internal recipients on taint alone") is met for domain-only matches and stays
-deliberately unmet for an exact cross-mailbox sighting; that case is explained and made smooth (D1–D3, D5) instead —
-which is what the acceptance requires: when `confirm` triggers, it takes one approval.
+The ticket's “no escalation for internal recipients on taint alone” is met for domain-only matches and deliberately
+not for an exact stored address. That narrower departure is listed in §4.
 
-**Saying why, from trusted data only.** `TaintStore.check()` also returns, for whichever sighting matched, the
-entry's last-seen time, its source (`header` | `body`) and the reading mailboxes' ids — all already stored, all
-written by this software, none sender-controlled. No store schema change. The preview and result then say, in
-trusted words: "<address> appeared in <a header | the body> of mail read in <mailbox names>, last on <date>. An
-instruction hidden in a message can ask an agent to send to an address it contains, so this send needs your
-confirmation. Sending to it once from this mailbox means later sends to it are not flagged." For a domain-only match:
-"other addresses at <domain> appeared in mail read in …". A mailbox id that no longer resolves is named "a mailbox no
-longer connected". No message id, sender, subject or display name is shown, so nothing in the explanation needs the
-untrusted envelope. Every other risk flag (lookalike domain, attachment to a first-time recipient) is unchanged.
+**Saying why without trusting sender text.** The explanation describes each stored aggregate separately:
 
-### D5. The in-chat route: honest about what exists; no new trust is advertised
+- “seen in mail read in these mailboxes within the last seven days” — the union of mailbox ids;
+- “most recently on `<date>`” — the entry's latest timestamp;
+- “seen at least once in a header” only when its strongest stored source is `header`.
 
-- No MCP mechanism proves a person answered a form, so no client becomes "known to reach a person". The existing list
-  of client names **the person chooses to trust** stays exactly as it is, still a loosening that needs an approved
-  change, and is still mentioned only when the person asks (the Gmail skill's rule, kept).
-- The refusal for an untrusted client becomes clear and complete: "this needs your approval outside the chat: run
-  <resolved terminal command> in a terminal, and I will wait for it with <wait tool>". With CUE-403's working command
-  and D3's wait, that is one approval, no re-prepare, no second preview, and the agent learns of it itself — the
-  ticket's acceptance.
-- Wording: "known to reach a person" is replaced everywhere (code, results, skills, `SECURITY.md`) by "you have chosen
-  to trust", and the probe is described as a check that the client can show a form, not that a person saw it.
-- A fresh, untrusted Claude Code gets no in-chat confirmation in this release. The route that would be safe —
-  URL-mode elicitation to an authenticated local approval page the model cannot read — is a separate design (§5).
-- `requiresUserInteraction` is unchanged (§6).
+It never says those facts came from one message or one sighting: `touch()` unions ids, retains `header` forever once
+seen, and replaces the timestamp independently (`packages/core/src/taint.ts:307-313`). Mailbox ids are software data;
+a removed one is “a mailbox no longer connected”. The displayed address and domain are sender-controlled. They are
+strictly IDNA/case canonicalised, returned as structured untrusted fields, and never interpolated as trusted prose.
+The address goes through the existing `addressField`; the domain gets a sibling strict `domainField` with the same
+wrap-on-grammar-failure rule (`packages/gmail/src/domain/untrusted-fields.ts:39-42, 60-63`). Subject, display name,
+sender and message id are not added.
+
+**Previously mailed means exactly checked.** `hasWrittenTo` uses
+`in:sent {to:<canonical-address> cc:<canonical-address> bcc:<canonical-address>}` and paginates until it has checked
+exactly 50 hits or Gmail has no next page. Each hit still has its parsed To/Cc/Bcc compared to the exact canonical
+address because Gmail search is fuzzy. This replaces the current five-hit, unpaginated check
+(`packages/gmail/src/operations/send.ts:202-221`) and stays conservative: provider doubt or no exact hit means
+“not written”.
+
+Two limits remain explicit. First, an internal address read in the sending mailbox is discarded before it reaches the
+store (`packages/core/src/taint.ts:296-305`), so a compromised colleague who writes only to that mailbox leaves no
+exact-address tripwire. That protection is narrower than previously claimed and is pre-existing, not weakened here.
+Second, an address recorded while external remains until the seven-day prune even if an approved config change later
+adds its domain to `internalDomains` (`packages/core/src/taint.ts:260-270, 307-325, 341-349`). In that transition the
+exact stored address can still escalate; the explanation says why.
+
+### D5. The confirmation route: one decision, and honest about where it happens
+
+- No MCP mechanism proves a person answered a form, so no client becomes “known to reach a person”. The existing list
+  is described as clients **the person chose to trust**, and the probe proves only that the client can return a form
+  answer. It is mentioned only when the person asks about trusting a client
+  (`packages/core/src/config.ts:103-108, 420-432`; `skills/gmail-send/SKILL.md:165-186`).
+- An untrusted client's refusal is complete: “this needs your approval outside the chat: run `<resolved terminal
+  command>` in a terminal, and I will wait with `<wait tool>`.” CUE-403 makes the command runnable; D3 lets the agent
+  learn the result without asking the person to relay it.
+- The terminal approval prints the full content once and asks for the challenge: that rendering **is the approval**,
+  not a second chat preview. The current terminal already renders and then approves without sending
+  (`packages/gmail/src/cli/program.ts:1345-1356`). The agent does not prepare again or show the preview again in chat.
+- Therefore the acceptance is exactly: **one prepare; one person decision; no second chat preview; the agent learns of
+  approval by waiting; and no error asks for an approval already given.** A test counts all renderings and decisions
+  rather than pretending the terminal did not show the content.
+- A fresh, untrusted Claude Code still has no in-chat confirmation in this release. URL-mode elicitation to an
+  authenticated local page is the safe future route (§4 and §6). `requiresUserInteraction` remains policy-derived as
+  it is now (`packages/gmail/src/mcp/server.ts:2366-2374`).
 
 ### D6. Update and change approvals
 
-Changes follow D1 (version 2, 30 minutes pending, 24 hours once approved), D2 (the same outcomes) and D3
-(`agentcomms approval wait` / `comms_approval_wait`).
+Changes use D1's stored route: ten minutes pending on `chat`, thirty on `confirm`, and 24 hours after terminal
+approval. They use D2's outcomes and D3's `agentcomms approval wait` / `comms_approval_wait`. `confirm` changes remain
+terminal-only; no change form is added.
 
 ### D7. Printed commands
 
@@ -179,119 +264,184 @@ requires 0.13.1 (CUE-403).
 
 ### D8. Every send and status call says where the approval stands
 
-An approval record already keeps `sentMessageId` when used (`approvals.ts:330, 1069`) and records are never pruned
-(`approvals.ts` deletes none), so the state is always known; it is just not said.
+The current record stores `sentMessageId` when a send completes and its list reads the stored JSON records
+(`packages/core/src/approvals.ts:1068-1075, 1085-1103`). This design makes that state consistently visible:
 
-- Every send-path result — success and refusal, on every surface D2 lists — carries `approval: { id, state, … }`:
-  `pending` (with `expiresAt` and what is needed: the person's yes in chat, or the terminal command and the wait
-  tool), `approved` (`approvedAt`, `usableUntil`), `expired` (`expiredAt` and `approvedAt` if it had been approved —
-  "expired after approval" is said in those words), `used` (`sentAt`, `sentMessageId`), `failed`, `unknown` (with
-  where to check), `revoked` (reason). A success says "sent, message id …".
-- **Status at any time:** the wait tools (D3) with `waitSeconds: 0` answer at once with the same object; that is the
-  status call, on every surface, as a CLI and MCP pair. `send list` / `gmail_send_list` (and each channel's list) give
-  the same object per approval, with the drafts it belongs to.
-- The skills tell the agent to call the status or wait tool before telling the person anything about a send it did
-  not just complete, and never to say "sent" without a `sentMessageId`.
+- Every send-path result — success and refusal, on every surface D2 lists — carries
+  `approval: { id, state, route, … }`: `pending` (with `expiresAt` and what is needed), `claimable`, `approved`
+  (`approvedAt`, `usableUntil`), `expired` (`expiredAt` and `approvedAt` if it had been approved), `used` (`sentAt`,
+  `sentMessageId`), `failed`, `unknown` (with where to check), or `revoked` (reason). A success says “sent, message id
+  …”. A download uses `pending`, `answered`, `expired` and `revoked`, with no `usableUntil`.
+- **Status at any time:** a wait with `waitSeconds: 0` answers immediately with the same object. `send list` /
+  `gmail_send_list` and each channel's list return that object per approval, with the draft/prepared message it belongs
+  to.
+- Skills call status or wait before saying anything about a send they did not just complete. They never say “sent”
+  without a `sentMessageId`, and never turn `SEND_OUTCOME_UNKNOWN` into a new preparation.
 
 ### D9. A draft whose approvals all expired is reported as unsent
 
-A draft is **unsent** when it has at least one send approval, none `approved`, `sending`, `used` or `unknown`, and its
-newest one is `expired` (or `revoked` for an expired-unused reason). This is derived from the records, keyed by
-mailbox and draft id; nothing new is stored.
+A draft is **unsent** when it has at least one send approval, none is usable `approved`, `sending`, `used` or
+`unknown`, and its newest relevant record is `expired` (or was revoked only to persist an expiry reason). A declined,
+cancelled or otherwise revoked record does not masquerade as expiry. This is derived from retained records, keyed by
+mailbox and draft id.
 
-- `send list` / `gmail_send_list` gain an `unsent` section: each such draft with its recipients, subject (as the
-  existing untrusted fields), when it was last prepared, how its last approval ended, and the one call that prepares
-  it again (D10). `draft get` / `draft list` mark the draft "prepared to send, not sent — approval expired at …".
-- Every expiry the server reports — a refusal, a wait that ends `expired` — says "not sent; the draft is still in
-  Drafts" and gives the same one call. `doctor` counts unsent drafts from the last seven days, per mailbox, with the
-  list command.
-- Nothing is sent, re-prepared or deleted on the person's behalf; reporting is all this does.
-- Resend and Slack have no drafts in this sense; their prepared sends whose approvals expired are listed the same way
-  by their `send list` (their prepared-message store), and Slack drafts by `slack_draft_list`.
+- `send list` / `gmail_send_list` gain an `unsent` section: each such draft with its recipients and subject through the
+  existing untrusted-field mechanism (`packages/gmail/src/domain/untrusted-fields.ts:39-63`), last preparation, last
+  expiry, and the one call that prepares again. `draft get` / `draft list` mark it “prepared to send, not sent —
+  approval expired at …”.
+- Every reported send expiry says “not sent; the draft is still in Drafts” and gives the same one call. `doctor`
+  counts unsent drafts from the last seven days, per mailbox, with the list command.
+- Reporting creates, sends and deletes nothing.
+- Resend and Slack have no Gmail draft in this sense; their expired prepared sends appear in their send lists, and
+  Slack drafts in `slack_draft_list`.
 
-### D10. Preparing an identical digest again shows a short preview, and why it may
+### D10. A short repeat preview requires proof that a person saw the full content
 
-When `send prepare` produces a digest that equals the digest of an earlier approval **for the same mailbox and draft,
-prepared in the last 24 hours, never used and never `sending`/`unknown`**, the new approval is created as always (its
-own id, its own lifetimes, the policy and every risk check computed afresh — an escalation that now applies still
-applies), and the result adds `unchangedSince: { approvalId, preparedAt }` and a **short preview**: recipients, subject
-(untrusted fields as usual), attachment names and sizes, the digest's first 12 characters, and "the same content you
-were shown at <time>". The full preview stays in the result.
+When `send prepare` produces a v2 digest equal to an earlier approval for the same mailbox and draft, prepared in the
+last 24 hours, a short chat preview is allowed **only if** that earlier record:
 
-Why this is safe: the preview protects the person's decision, and the digest binds the new approval to exactly the
-content the earlier preview showed — any change in recipients, subject, body, attachments or headers gives a different
-digest and the full preview. Under `chat` the software never could force an agent to display anything; the short form
-changes what the agent is told it may show, not what is bound. Under `confirm`, the terminal approval prints the full
-content regardless — the short form is for the chat only. Exclusions, each shown in full with the reason:
+1. reached `approved` through a channel that rendered its full content to a person — terminal or a trusted send form;
+2. then expired unused, or was revoked solely to persist an expiry reason; and
+3. was never `used`, `sending` or `unknown`.
 
-- an earlier identical digest that was **used**: the result says "this exact message was already sent at … (message id
-  …)", `duplicateOf` is set, and it is never presented as a routine re-prepare;
-- an earlier one that is `sending` or `unknown`: refused as today until its outcome is known;
-- older than 24 hours, another draft, or another mailbox: full preview.
+The new approval is still created normally, with its own route and lifetimes and freshly computed policy/risk checks.
+Its result adds `unchangedSince: { approvalId, preparedAt, approvedAt }` and a short preview: recipients, subject
+(untrusted fields), attachment names and sizes, the digest's first 12 characters, and “the same content you approved
+at `<approvedAt>`”. The full preview remains in the result and is offered.
 
-The skill says: show the short preview, say it is unchanged since the earlier preview, and offer the full one.
+A record that merely expired pending is never a baseline: neither is one that was created but never displayed, was
+declined, came from a cancelled/dismissed form, or was revoked for any non-expiry reason. The digest proves sameness;
+the prior `approved` transition proves that a full terminal/form rendering was acted on. Exclusions keep their full
+preview and reason:
 
-## 4. Tests owed
+- an earlier identical digest that was **used** sets `duplicateOf`, says when and with which message id it was already
+  sent, and shows the full preview;
+- `sending` or `unknown` is refused until its outcome is known;
+- older than 24 hours, another draft/mailbox, v1/unknown version, or any ineligible end state gets the full preview.
+
+Terminal approval always prints the full content, even when the chat was allowed the short repeat preview. The skill
+may show the short preview only for the eligible case above, says which prior approval it repeats, and offers the full
+one.
+
+## 4. Departures from the ticket
+
+1. **No in-chat approval for a fresh, untrusted Claude Code yet.** It is deferred to a URL-mode design because no MCP
+   mechanism proves that a person, rather than the client or model, answered. The terminal-plus-wait route is honest
+   and testable now.
+2. **Exact-address escalation remains for internal recipients.** A stored exact address is a stronger signal than an
+   own-domain match and still catches cross-mailbox sightings and the `internalDomains`-widening transition. The
+   same-mailbox compromised-colleague gap is acknowledged, not used to claim broader protection.
+3. **Chat-route pending remains ten minutes.** A conversational refusal cannot be observed, so tripling that bearer
+   window would let a stale “no” be claimed. Confirm-route records get thirty minutes because they cannot be claimed
+   without the outside decision.
+
+## 5. Tests owed
 
 Each guard is watched failing under a mutation, then restored.
 
-- **D1:** version-2 pending expires at 30 minutes (boundary equality expired); approved does not expire at 30 minutes
-  and does at exactly 24 hours after approval; a version-1 record pending or approved keeps its old expiry after the
-  upgrade, including one approved after the upgrade; a mixed-release store; clock moved back, unparseable
-  `approvedAt`, `approvedAt` before `createdAt`, inconsistent `usableUntil` — each expired; two simultaneous claims
-  after the old 10-minute boundary — one wins; a changed draft or drifted plan voids at claim; downloads unchanged.
-- **D2:** every row of the table on every surface listed, Slack files included; `sending`, `failed`, `unknown`;
-  wrong-kind and foreign-account ids answered as not found, including on a pinned server before any confirmation
-  routing; declined/cancelled forms and wrong codes; `APPROVAL_REQUIRED` never for the excluded states.
-- **D3:** each result value; timeout returns pending with the same id; the record is byte-identical after any wait;
-  cancellation stops only the wait; a state change racing cancellation or timeout resolved by the final read; the
-  ninth concurrent wait refused; no progress token → no progress; foreign/pinned ids → not found; CLI/MCP parity on
-  every pair; a terminal approval while an agent waits ends the wait `approved`.
-- **D4:** an exact internal address seen in another mailbox escalates (header and body sightings); an exact
-  external address escalates; a domain-only internal match does not; a domain-only external match does;
-  written-before suppresses each; a public-provider domain never matches on domain; the explanation names the
-  mailboxes, source and date and contains no sender-controlled text (a sighting from a message with a hostile display
-  name and subject produces the same explanation as a plain one); a removed mailbox is named as no longer connected;
-  lookalike and attachment flags unchanged.
-- **D5:** the untrusted refusal names the resolved terminal command and the wait tool, and does not mention the trust
-  list; no surface says "known to reach a person".
-- **D8:** every send-path result, success and each refusal of D2, carries the approval object with the fields for its
-  state; "expired after approval" when `approvedAt` is set; a success carries `sentMessageId`; a wait with
-  `waitSeconds: 0` returns at once and equals the list's object for that id; CLI/MCP parity on the status pairs.
-- **D9:** a draft whose only approval expired pending is unsent; expired after approval is unsent; one with a later
-  approved, sending, used or unknown approval is not; listed in `send list` with the one re-prepare call; `draft get`
-  marks it; every expiry message says "not sent; the draft is still in Drafts"; `doctor` counts them; nothing is
-  created, sent or deleted by reporting; Resend prepared sends and Slack drafts the same way.
-- **D10:** an identical digest within 24 hours → `unchangedSince` and the short preview, with a new approval whose
-  policy and risk flags are recomputed (a recipient tainted since the first preview escalates); a one-character body
-  change, an added Bcc, a renamed or changed attachment → full preview; an earlier identical digest that was used →
-  `duplicateOf`, the full preview, and the already-sent wording; `sending`/`unknown` → refused; 24 hours and one
-  second → full preview; another draft or mailbox with the same content → full preview; the terminal `approve` prints
-  the full content whatever the chat was shown.
-- **Acceptance, end to end with the fake Gmail:** an internal colleague whose address was read in another mailbox,
-  from an untrusted client → `recipient-tainted` with its explanation, one terminal approval, the agent's
-  `gmail_send_wait` returns `approved`, the send goes out with no second prepare or preview, and the count of person
-  decisions is one; the same with the approval given 25 minutes after the preview and the claim 2 hours after the
-  approval; an internal recipient matched only by domain → no `recipient-tainted`, a `chat` send on the person's yes.
-  **The ticket's own timeline replayed** (prepare 22:42:46, terminal approval 22:48:22, the agent learning of it only
-  minutes later): the send goes out and its result carries `sentMessageId`; with no claim at all, the draft is listed
-  unsent after the approval's 24 hours, with "expired after approval"; a second prepare of the same draft gives
-  `unchangedSince` and the short preview.
+- **D1 — routes and time:** chat-route sends and changes expire at ten minutes; confirm-route sends/changes (including
+  escalated sends) at thirty; equality is expired. Route is stored and digest-bound. A confirm route never directly
+  claims after policy loosens; a chat route claims only while the effective policy stays chat and waits when tightened.
+  Approved sends/changes survive their pending deadline and expire exactly 24 hours after approval. Downloads expire
+  thirty minutes from creation before or after answer and never gain `usableUntil`.
+- **D1 — refusal races:** a conversational “no” that the server never receives, followed by claims at 11 and 29
+  minutes, is expired at both for a chat route; a skill evaluation requires the agent to call revoke on “no”. An
+  explicit form decline is atomically `revoked/declined` before claims at 11 or 29 minutes; cancel/dismiss stays pending
+  (and a confirm route remains so at minute 29). Revoke-versus-claim under two processes has one locked winner. A
+  cross-process list followed by claim, a claim across the hourly cap rollover (the current Gmail path reserves after
+  claim at `packages/gmail/src/operations/send.ts:596-633`), and pending chat change claims are exercised.
+- **D1 — versions and timestamps:** the new release's real create path writes a v2 fixture. A test imports a
+  **checked-in frozen unpacking of the published `@agentcomms/core@0.13.0` tarball**, records its npm integrity, opens
+  that v2 record with its exported `ApprovalStore` (`packages/core/src/index.ts:1-2`), attempts a real transition, and
+  asserts the exact “prepared by a different version” refusal. The reverse test writes v1 through that same released
+  module and has the new module refuse it. A v2 approved record presented to 0.13.0 after its pending deadline proves
+  the old module may persist `expired` before returning the same version refusal, and never claims it. Absent and
+  unknown versions; non-finite
+  `createdAt`/`expiresAt`; wrong exact pending lifetime; missing/non-finite `approvedAt`; approval before creation,
+  after pending expiry or in the future; inconsistent `usableUntil`; and boundary equality all fail closed. A read
+  that expires and persists a record followed by clock rollback, process restart and another read stays expired.
+- **D1 — content and concurrency:** two simultaneous claims after the former ten-minute boundary of a confirm route
+  have one winner; a changed draft, changed expected recipients/account or drifted plan voids at claim; old-server tool
+  calls stopped by the update gate and its already-approved exception both end closed on the digest version.
+- **D2:** every table row on every named surface, Slack files and reactions included; ownership is checked before
+  routing; nonexistent, foreign, wrong-kind and pinned-away ids have byte-identical `NOT_FOUND` envelopes. Confirm
+  changes never form-elicit. Wrong codes one/two remain pending and three revokes with `APPROVAL_VOID`; decline revokes,
+  cancel/dismiss does not. `APPROVAL_REQUIRED` never describes approved, expired, used, failed, sending, unknown or
+  revoked. Dedicated JSON/CLI/skill consumers branch on `SEND_OUTCOME_UNKNOWN`, exit 10/non-retryable, and prove they
+  never prepare automatically.
+- **D2 — provider truth:** inject a Slack failure before upload, during upload, after known upload and at the share
+  call. Before a successful share each error says “nothing was posted”, and details preserve exact `uploaded` and
+  `possiblyUploaded` disclosure; an ambiguous share is `unknown`, not failed. Gmail/Resend certain failures continue
+  to say nothing was sent.
+- **D3:** every result shape; `waitSeconds: 0`; default 30 and maximum 300; no poll beyond a pending or approved
+  record's deadline; immediate `claimable` for pending/chat; download `answered`/`expired` without `usableUntil`;
+  timeout returns pending with the same id. The only permitted byte change is persisted expiry. A terminal approval
+  ends a wait `approved`. State change versus timeout/cancellation is classified by the final locked read.
+- **D3 — resources and cancellation:** the ninth simultaneous wait in one process is refused. Success, timeout,
+  caller cancellation, thrown read/classification error and MCP disconnect each release the slot, proven by an eighth
+  replacement wait. Cancellation leaves the record untouched apart from persisted expiry; the disconnect test expects
+  no result delivery while still proving waiter cleanup. No progress token means no progress. Foreign/pinned ids are
+  not found. Every CLI/MCP pair passes parity against the same operation.
+- **D3 — client smoke matrix (manual, informational):** Claude Code main conversation, subagent, IDE, noninteractive
+  and a configured background threshold, recording whether calls foreground, background or limit. No observed timing
+  becomes a protocol constant; each scenario completes through repeated short waits.
+- **D4:** exact internal address from another mailbox (header and body), exact external, domain-only internal,
+  domain-only external, and both exact/domain present — exact wins the explanation; written-before suppresses each;
+  public-provider domains never match by domain. `hasWrittenTo` finds an exact address on hit 6 and hit 50 across
+  pages, stops at exactly 50, rejects fuzzy hits, and uses To/Cc/Bcc query terms.
+- **D4 — provenance and gaps:** same-mailbox internal addresses are omitted; another mailbox can record the same
+  address; widening `internalDomains` leaves an already-recorded exact address until day seven. An old header in
+  mailbox A plus a recent body sighting in mailbox B is described only as separate aggregate facts, never one
+  sighting. Address/domain payloads that look like instructions are canonicalised or wrapped as untrusted; mailbox
+  ids/date/template stay trusted. Removed mailbox, exact/domain precedence, public-domain behavior, lookalike and
+  attachment flags are covered.
+- **D5:** the untrusted refusal names the resolved terminal command and wait tool and does not advertise the trust
+  list. No surface says “known to reach a person”. The terminal test asserts the full preview bytes appear once there,
+  approval does not send, and the agent's wait observes `approved`.
+- **D8:** every send-path success/refusal carries the state object; “expired after approval” when `approvedAt` exists;
+  success carries `sentMessageId`; wait/status/list agree; downloads use their own state fields; CLI/MCP status pairs
+  have parity.
+- **D9:** only expired pending is unsent; expired after approval is unsent; a later usable approved, sending, used or
+  unknown approval prevents it; decline/cancel/non-expiry revoke is not relabelled expiry. Lists, draft get/list and
+  doctor report it without creating, sending or deleting; Resend prepared sends and Slack drafts match their design.
+- **D10:** eligible terminal and trusted-form baselines produce `unchangedSince` and the short chat preview after
+  expiring unused or an expiry-only revoke. A baseline merely created but never displayed, expired pending, declined,
+  cancelled/dismissed or otherwise revoked always gets the full preview. One-character body change, Bcc change, or
+  renamed/changed attachment gets full preview. Used sets `duplicateOf` and full preview; sending/unknown refuses;
+  24 hours and one second, another draft/mailbox and v1/unknown versions get full preview. Fresh risk/policy checks can
+  escalate the new record. Terminal approval always prints the full content.
+- **Acceptance, end to end with fake Gmail:** an internal colleague recorded in another mailbox, from an untrusted
+  client, produces `recipient-tainted`, one chat prepare/preview, one full terminal rendering and **one person
+  decision**. The agent's `gmail_send_wait` returns `approved`; execute uses that record, with no second prepare and no
+  second **chat** preview, and returns `sentMessageId`. Repeat with approval at minute 25 and claim two hours later. An
+  internal domain-only recipient does not taint and a chat route sends on the person's yes inside ten minutes.
+  Replay the ticket's 22:42:46 prepare and 22:48:22 approval: wait learns it, the send succeeds, and no error asks again.
+  With no claim, it becomes unsent 24 hours after approval; reprepare then gets D10's short preview only because that
+  prior terminal approval rendered the full content.
 
-## 5. Out of scope
+## 6. Out of scope
 
-URL-mode elicitation to an authenticated local approval page (the next step for a safe in-chat route on a fresh
-client); an OS-notification approval; making the terminal `approve` send; changing `requiresUserInteraction`; MCP
-Tasks; binding approvals to the preparing process.
+URL-mode elicitation to an authenticated local approval page; OS-notification approval; making terminal `approve`
+send; observing a natural-language “no” without the agent calling revoke; a cross-process/global wait semaphore;
+per-sighting taint provenance; changing download lifetimes; changing `requiresUserInteraction`; MCP Tasks; binding
+approvals to the preparing process.
 
-## 6. Risks
+## 7. Risks
 
-1. **Approved records held 24 hours** — accepted as stated in D1; bounded by explicit approval, content binding,
-   single use, `send cancel`, and the same-user threat model.
-2. **An internal colleague whose address was read in another mailbox is still flagged until you first write to them**
-   — kept on purpose (a compromised internal account is the case it catches); the flag now says where it was seen,
-   and the confirmation it needs is one terminal approval the agent waits for.
-3. **Fresh Claude Code has no in-chat confirmation** — the terminal route with a working command and a wait is the
-   honest path until an authenticated page exists.
-4. **`requiresUserInteraction`** stays computed from configured policies; a `chat` mailbox's escalated send reaches a
-   person through the `confirm` route; making it unconditional would add a prompt to every `chat` send.
+1. **Approved records live for 24 hours** — accepted, bounded by a person decision, v2 content/route/lifetime binding,
+   single use, revocation and the same-user threat model.
+2. **Conversational “no” is not observable** — the skills tell the agent to call revoke, but a failing or hostile
+   agent may not. The remaining bearer window is the current ten minutes, not thirty
+   (`packages/core/src/approvals.ts:401-407`).
+3. **Same-mailbox internal mail leaves no exact taint tripwire** — the recorder excludes current internal domains
+   before storage (`packages/core/src/taint.ts:296-305`). A compromised colleague writing only there is caught by
+   neither exact nor domain taint. This is pre-existing and unchanged; preview review and `confirm` remain the cover.
+4. **An `internalDomains` widening has a seven-day tail** — an address recorded while external remains exact-tainted
+   until pruned (`packages/core/src/taint.ts:260-270, 307-325, 341-349`). That conservative transition is explained.
+5. **Eight waits is per process** — several CLI/server processes can exceed eight in aggregate. Each wait is bounded to
+   one small read per second and at most its record's own lifetime; a global semaphore is out of scope.
+6. **Fresh Claude Code has no in-chat confirmation** — terminal approval plus a wait is the honest path until the
+   authenticated URL-mode design exists.
+7. **`requiresUserInteraction` stays policy-derived** — a chat mailbox's escalated send reaches a person through the
+   confirm route; making it unconditional would prompt every chat send
+   (`packages/gmail/src/mcp/server.ts:2366-2374`).
