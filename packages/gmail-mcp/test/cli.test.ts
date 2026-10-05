@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { gmailCommand, handoffText } from '@agentcomms/gmail';
+import { serverHelp } from '../src/help.ts';
 
 const ENTRY = fileURLToPath(new URL('../src/server.ts', import.meta.url));
 
@@ -169,4 +171,92 @@ test("Gmail's resolver URL is a module of Gmail's own package, never of this wra
   assert.match(gmail.RESOLVER_URL, /^file:/);
   assert.equal(owningPackage(fileURLToPath(gmail.RESOLVER_URL)), gmail.PACKAGE_NAME);
   assert.equal(owningPackage(ENTRY), '@agentcomms/gmail-mcp');
+});
+
+// ── The help's handoff: Gmail's own command, located from Gmail, never this wrapper or a bare name (CUE-403) ────────
+
+/** A suite command by its bare name, in any case and with a Windows extension, followed by something to run with it. */
+const BARE =
+  /(?:^|[\s`'"([,])(?:agent-gmail|agent-gmail-mcp|agentcomms|agent-slack|agent-resend|agent-whatsapp)(?:\.(?:cmd|exe|ps1|bat))?\s+[\w<[-]/i;
+
+/**
+ * The words of the backticked command in a help: its words as JSON where Windows has no line that every shell reads
+ * the same (a Node under `C:\\Program Files`), or the line, whose words here hold no spaces or quotes.
+ */
+function helpCommand(help: string): string[] {
+  const line = /`([^`]+)`/.exec(help)?.[1];
+  assert.ok(line, `no command in the help: ${help}`);
+  return line.startsWith('[') ? (JSON.parse(line) as string[]) : line.split(' ');
+}
+
+/** Gmail's built CLI, as the wrapper's dependency declares it: what a command located from Gmail runs. */
+function gmailBin(): string {
+  const gmailEntry = fileURLToPath(new URL(import.meta.resolve('@agentcomms/gmail')));
+  const root = dirname(dirname(gmailEntry));
+  const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as {
+    name: string;
+    bin: Record<string, string>;
+    agentcomms: { binary: string };
+  };
+  assert.equal(manifest.name, '@agentcomms/gmail');
+  return join(root, manifest.bin[manifest.agentcomms.binary] as string);
+}
+
+test("--help names Gmail's own setup, located from the Gmail dependency for this server's folders (7d-gmail)", async () => {
+  const env = binEnv();
+  const home = env.HOME as string;
+  const pinned = join(home, 'pinned');
+  for (const args of [['--help'], ['--config-dir', pinned, '--help']]) {
+    const result = await runBin(args, { env });
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(result.stdout, '');
+    assert.match(result.stderr, /Set up mailboxes with Gmail's own CLI, from @agentcomms\/gmail: `/);
+    const [program, entry, ...words] = helpCommand(result.stderr);
+    // This Node, then Gmail's checked CLI entry — the wrapper's dependency, never the wrapper itself.
+    assert.equal(program, process.execPath);
+    assert.equal(realpathSync(entry ?? ''), realpathSync(gmailBin()));
+    assert.equal(owningPackage(entry ?? ''), '@agentcomms/gmail');
+    assert.deepEqual(words.slice(-1), ['setup']);
+    // The folders this server would use, pinned: what it was given, or what its environment says.
+    const configDir = words[words.indexOf('--config-dir') + 1];
+    assert.equal(configDir, args.includes('--config-dir') ? pinned : join(home, 'config'));
+    for (const flag of ['--config-dir', '--state-dir', '--data-dir', '--secrets-dir']) {
+      assert.equal(words.filter((word) => word === flag).length, 1, `${flag}: ${words.join(' ')}`);
+    }
+    assert.doesNotMatch(result.stderr, BARE, 'a bare suite name');
+  }
+  // A usage error prints the same help, with the command located for the environment's folders.
+  const refused = await runBin(['--unknown'], { env });
+  assert.equal(refused.code, 64);
+  assert.deepEqual(helpCommand(refused.stderr).slice(-1), ['setup']);
+  assert.doesNotMatch(refused.stderr, BARE);
+});
+
+test('the help hands over a located Gmail command, or says why there is none — never a name in its place (7d-gmail)', () => {
+  const env = binEnv();
+  const located = gmailCommand(['setup'], { env, pathOverrides: { configDir: join(env.HOME as string, 'pinned') } });
+  const help = serverHelp(located);
+  assert.ok(help.includes(`\`${handoffText(located)}\``), help);
+  assert.doesNotMatch(help, BARE);
+
+  // Not locatable here — the Gmail package gone, say: the reason stands alone, with the other way to do it.
+  const missing = {
+    ok: false as const,
+    reason: 'entry' as const,
+    product: 'Gmail',
+    package: '@agentcomms/gmail',
+    version: '0.13.0',
+    detail: 'its CLI entry is not a readable file',
+    message:
+      'Gmail 0.13.0 (@agentcomms/gmail) is not locatable here: its CLI entry is not a readable file. Install or update it through your usual route, then try again.',
+  };
+  const without = serverHelp(missing);
+  assert.ok(
+    without.includes(`Set up mailboxes with the Gmail CLI from @agentcomms/gmail. ${missing.message}`),
+    without,
+  );
+  assert.doesNotMatch(without, /`/, 'no command, and nothing in its place');
+  assert.doesNotMatch(without, BARE);
+  // The rest of the help is the same either way.
+  assert.equal(without.split('\n').slice(0, 10).join('\n'), help.split('\n').slice(0, 10).join('\n'));
 });
