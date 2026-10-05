@@ -1,6 +1,6 @@
 # CUE-404 — approving a send without fighting the clock — design
 
-Status: **revised after round 14 (3 P2, all addressed)**, 2026-10-05, from Linear CUE-404 (High; the
+Status: **revised after round 15 (3 P2, all addressed)**, 2026-10-05, from Linear CUE-404 (High; the
 owner: "this is very not smooth") and a cited research pass over this repository, the MCP specification and the
 clients' documentation. Depends on CUE-403 (the CLIs on PATH,
 [its spec](2026-10-04-cli-path-shims-design.md)) for every printed terminal command to work; ships after it.
@@ -112,12 +112,18 @@ ever read for reporting.
 **Digest integrity.** Both fields are required on every version-2 record, each a lowercase hex SHA-256 (64
 characters). This is the **only** definition: one core helper, `bindingDigestOf(record)`, returns the SHA-256 of the
 canonical JSON (the existing `canonicalJson`) of `{ "v": 2, "kind", "contentDigest", "route", "pendingMs",
-"approvedMs", "groupKey" }` (downloads: `{ "v": 2, "kind": "download", "contentDigest", "profile", "groupKey" }`).
-`groupKey` uses only fields the record already stores: Gmail send `{ "inboxId", "draftId" }`; Slack post or file
-`{ "inboxId", "draftId", "revision" }` (the record's `inboxId` is the local Slack account id — no workspace id is
-stored or needed); Slack reaction `{ "inboxId", "channelId", "ts", "emoji" }`; Resend `{ "inboxId", "preparedId" }`;
-change `{ "planId" }`; download `{ "downloadId" }`. A stored identifier altered after creation therefore fails
-recomputation, and every read
+"approvedMs", "groupKind", "groupKey" }` (downloads: `{ "v": 2, "kind": "download", "contentDigest", "profile":
+{ "pendingMs": 1800000 }, "groupKind": "core.download", "groupKey": {} }`). Version-2 records **store** two new fields
+set once at creation: `groupKind`, a string naming the channel's grouping scheme, and `groupKey`, a JSON object of
+strings. The **channel** supplies both when it creates the approval (from values it already has: Gmail
+`"gmail.draft"` with `{ inboxId, draftId }`; Slack posts and files `"slack.post"` with `{ inboxId, draftId, revision }`
+— today's revision is stored as `draftMessageId`, `packages/slack/src/operations/send.ts:464`; Slack reactions
+`"slack.reaction"` with `{ inboxId, channel, ts, emoji }` taken from the values `send.ts:1224` already maps; Resend
+`"resend.prepared"` with `{ inboxId, preparedId }` from the `draftId` it stores, `packages/resend/src/operations/send.ts:308`);
+changes use `"core.change"` with `{}`. Core never decodes a `groupKey`: it only canonicalises and hashes it, and D9
+groups by `(groupKind, canonical groupKey, contentDigest)` — so a new channel defines its own scheme with no core edit
+(the channel-plugins contract). A stored identifier altered after creation therefore fails recomputation, and every
+read
 recomputes it from the record's own fields before classifying: a missing, malformed, non-canonical or mismatching value
 makes the record `corrupt` (never claimable). `contentDigest` is an opaque identity on reads that cannot reach the
 provider (status, wait, lists, D9): they validate only its encoding and the `bindingDigest` coherence, because its
@@ -131,7 +137,7 @@ record reaches `approved` only through the terminal or a trusted form — a chat
 |---|---|---|
 | send | `approvedVia` ∈ {`terminal`, `elicitation`}; `approvedBindingDigest` = `bindingDigest` | neither field |
 | change | `approvedVia` = `terminal` only (confirm changes are terminal-only, `approvals.ts:901`); `approvedBindingDigest` = `bindingDigest` | neither field |
-| download | today's evidence exactly — `approvedVia` and `approvedDigest`, **no** `approvedAt` — with `approvedDigest` = `contentDigest` | not applicable |
+| download | today's evidence exactly — `approvedVia` and `approvedDigest`, **no** `approvedAt` — with `approvedDigest` = `contentDigest` | a chat-policy answer claimed straight from `pending` to `used` (`approvals.ts:1017`) carries no `approvedAt`, `approvedVia` or `approvedDigest`, in `used`, `revoked` or `expired` alike |
 
 `approvedVia: chat` does not exist; "form" in prose means the stored `elicitation`. Any violation makes the record
 `corrupt`. Legacy (version-1) records,
@@ -816,6 +822,11 @@ lookup failures stay attached to their draft and do not raise the concurrency or
 
 ## 5. Tests owed
 
+- **Round-15 cases:** a chat-policy download claimed `pending → used` with no evidence stays valid through status,
+  listing and retention; create-path v2 round trips for every subtype prove the stored `groupKind`/`groupKey`; golden
+  vectors for the download profile and every `groupKind`; removed-account provider-free classification of Slack post,
+  file, reaction and Resend records; a synthetic new channel defines its own `groupKind` with no core edit; any binding
+  mismatch makes the whole report indeterminate across several drafts and accounts.
 - **Round-14 cases:** the per-kind evidence table, every row valid and invalid (a form-approved confirm change →
   `corrupt`); valid confirm downloads in `approved` and `used` without `approvedAt`; approved-then-revoked descendants
   keep valid evidence while direct-chat `failed`/`unknown` descendants carry none; golden canonical-JSON and SHA-256
@@ -826,12 +837,12 @@ lookup failures stay attached to their draft and do not raise the concurrency or
   record in every descendant state with missing, malformed or contradictory evidence → `corrupt`; direct-chat `sending`
   and `used` records with no evidence stay valid; a record claiming `approvedVia: chat` → `corrupt`; a Slack revision
   changed to another syntactically valid value with every digest left unchanged → `bindingDigest` mismatch → `corrupt`,
-  and D9 widens that draft's groups to indeterminate.
+  and the whole D9 report is indeterminate.
 - **Round-12 cases:** approved send, change and download records with absent, malformed or contradictory
   confirmation evidence → `corrupt`; a claimant suspended immediately after a successful fence starts its one step (the
   stated limit) but no later step; lease expiry between each Slack step stops further steps with the right failure
-  wording; D9 with attributable Gmail and Slack records in every missing/malformed/mismatched digest combination, and a
-  Slack record with an untrustworthy key widening to every group of its draft.
+  wording; D9 with Gmail and Slack records in every missing/malformed/mismatched digest combination makes the whole
+  report indeterminate.
 - **Round-11 cases:** missing, malformed, non-canonical and `bindingDigest`-mismatched records (structure and coherence
   only for `contentDigest` on provider-free reads; live comparison at approve and claim) → `corrupt`; a claimant suspended after claim and before each channel's
   first provider mutation, with another caller persisting `unknown`, makes no provider request and records
