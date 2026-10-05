@@ -337,7 +337,22 @@ inspect), the caller's expected kind and ownership (account/workspace/inbox pin)
 policy, the owner's live send epoch, whether a send client is trusted, and any challenge. A `pending` or `approved`
 send record whose stored epoch is behind the live epoch classifies as `revoked` with reason `sending was turned off
 since this was prepared (policy: never)` and `claimable: false` on every surface — status, wait, every list and D9 —
-whatever the live policy is now; an inspection derives this without writing, and the next locked action persists it. Every surface uses it — Gmail terminal begin/finish,
+whatever the live policy is now; an inspection derives this without writing, and the next locked action persists it.
+
+**A record whose owner was removed.** When a record's stored owner id (`inboxId`) no longer names a mailbox or account
+in config, there is no live policy or epoch to apply, and none is assumed (no default policy, no epoch 0). A `pending`
+or `approved` record then classifies as `revoked` with reason `its mailbox or account was removed`, `claimable: false`
+and `ownerRemoved: true`; a record already `sending`, `unknown`, `used`, `failed`, `revoked` or `expired` keeps that
+state and gains `ownerRemoved: true`. Re-adding a mailbox or account under the same name makes a new random id
+(`packages/core/src/config.ts:338, 343`), so no old record is ever owned again. Unpinned surfaces — core status,
+wait and lists, and unpinned channel lists — show these records with their stored channel (Gmail's list already shows
+a removed mailbox as `(removed)`, `packages/gmail/src/operations/send.ts:759`); a surface pinned to an owner cannot
+match a removed one and returns D2's identical `NOT_FOUND`; a wait on such a record returns at once with the derived
+outcome. Inspection derives this without writing; the next locked action persists `revoked`. D9 groups the record by
+its stored `channel` and reports a `pending`/`approved` one as revoked because its owner was removed — nothing will be
+sent with it — and never as ready to send.
+
+Every surface uses it — Gmail terminal begin/finish,
 Gmail execute and both draft rechecks, Gmail MCP routing, Resend, Slack posts/files/reactions, changes, downloads,
 lists and waits. Ownership and kind are checked before state or routing. A nonexistent id and an existing id that is
 foreign, wrong-kind or pinned away all return the identical `NOT_FOUND` code, message and details, with
@@ -971,6 +986,11 @@ lookup failures stay attached to their draft and do not raise the concurrency or
 
 ## 5. Tests owed
 
+- **Round-33 cases:** for each of a `pending`, an `approved` and a `used` v2 record whose mailbox or account is then
+  removed — Gmail, Slack and Resend — core status, a wait (which returns at once), the unpinned list and D9 show the
+  derived outcome with `ownerRemoved: true` (`revoked`, `claimable: false`, for the first two; `used` kept for the
+  third), a server pinned to that owner returns the identical `NOT_FOUND`, no default policy or epoch is applied, the
+  first locked action persists `revoked`, and re-adding an owner of the same name does not make any of them claimable.
 - **Round-32 cases:** a crash after the version-3 write and one failed revocation, then a restart: the stored tracked
   set survives, the next 0.14 epoch-governed operation retries it, and loosening stays refused until it closes; a v1
   record written by a paused 0.13 prepare after the conversion scan is added by the next rescan; the drain does not
