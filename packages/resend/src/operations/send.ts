@@ -1173,12 +1173,16 @@ async function recordAndAccount(
   approvalId: string,
 ): Promise<{ record: ApprovalRecord; named: NamedAccount }> {
   /*
-   * Classified under its lock for the approval a person is about to give (design 2026-10-05 §D2): a send's, or the one
-   * NOT_FOUND. One that cannot be approved is refused for what it is, with where it stands — corrupt, an earlier
-   * release's, expired, used, revoked (now, if its account was removed or sending turned off) — before the message is
-   * read again.
+   * Classified under its lock for the approval a person is about to give (design 2026-10-05 §D2): a Resend send's, or
+   * the one NOT_FOUND — another channel's is not found, as one nobody prepared is not. One that cannot be approved is
+   * refused for what it is, with where it stands — corrupt, an earlier release's, expired, used, revoked (now, if its
+   * account was removed or sending turned off) — before the message is read again.
    */
-  const { outcome } = await context.core.approvals.inspect(approvalId, { kind: 'send' }, { action: 'approve' });
+  const { outcome } = await context.core.approvals.inspect(
+    approvalId,
+    { kind: 'send', channel: 'resend' },
+    { action: 'approve' },
+  );
   if (outcome.error) throw outcome.error;
   const record = outcome.record;
   if (record === null) throw new CommsError('UNEXPECTED', 'a send approval read as no record');

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, test } from 'node:test';
-import { asV2, CommsError, stateOf } from '@agentcomms/core';
+import { asV2, CommsError, newInboxId, stateOf } from '@agentcomms/core';
 import { v1ChangeRecord, v1SendRecord, writeV1Record } from '../../core/test/fixtures/approval-v1-0.13.0.ts';
 import { APPROVAL_TAG } from '../src/api/guard.ts';
 import { renderPolicy } from '../src/cli/render.ts';
@@ -773,6 +773,62 @@ test('execute and status find an id nobody prepared, another account’s — exp
     files,
     'no record was written: none was classified',
   );
+});
+
+test('another channel’s send given to `agent-resend approve` is the one NOT_FOUND, byte for byte an id nobody prepared’s, with nothing written and Resend asked nothing (D2, CUE-404)', async () => {
+  harness = await newHarness();
+  await sendMode();
+  // A Gmail mailbox on the same machine, with a send waiting for a person: not Resend's.
+  const inboxId = newInboxId();
+  await harness.core.config.update((config) => ({
+    ...config,
+    inboxes: {
+      ...config.inboxes,
+      'acme/gmail': {
+        id: inboxId,
+        provider: 'gmail',
+        email: 'jo@acme.test',
+        identity: 'oidc',
+        client: 'desktop',
+        tier: 'send',
+        grantedScopes: [],
+        contacts: false,
+        secretRef: `gmail:refresh:${inboxId}`,
+        internalDomains: ['acme.test'],
+        createdAt: '2026-09-01T00:00:00.000Z',
+      },
+    },
+  }));
+  const gmail = await harness.core.approvals.create({
+    channel: 'gmail',
+    inboxId,
+    inboxSub: 'sub-9',
+    draftId: 'r-other',
+    draftMessageId: 'm-other',
+    contentDigest: 'b'.repeat(64),
+    sendEpoch: 0,
+    policy: 'chat',
+    requiredPolicy: 'confirm',
+    riskFlags: [],
+    expect: { to: ['sam@partner.test'], cc: [], bcc: [], subject: 'Other' },
+  });
+  const file = join(harness.core.approvals.directory, `${gmail.approvalId}.json`);
+  const before = readFileSync(file, 'utf8');
+  const nobody = `ap_${'7'.repeat(26)}`;
+  const asked = harness.fake.requests.length;
+
+  const unknown = await harness.cli(['approve', nobody], { tty: true });
+  const foreign = await harness.cli(['approve', gmail.approvalId], { tty: true });
+  assert.equal(unknown.code, 66, unknown.stdout + unknown.stderr);
+  assert.match(unknown.stderr, new RegExp(`nothing was sent: no approval ${nobody}`));
+  assert.deepEqual(
+    { code: foreign.code, stdout: foreign.stdout, stderr: foreign.stderr.replaceAll(gmail.approvalId, nobody) },
+    { code: unknown.code, stdout: unknown.stdout, stderr: unknown.stderr },
+    'the same refusal, but its id',
+  );
+  assert.doesNotMatch(foreign.stderr, /no longer connected/);
+  assert.equal(readFileSync(file, 'utf8'), before, 'not classified, so nothing of it was written');
+  assert.equal(harness.fake.requests.length, asked, 'Resend was asked nothing');
 });
 
 test('every Resend send result and refusal says where its approval stands; one refused before it exists says nothing (D8o-a, D8o-d, D2-c)', async () => {

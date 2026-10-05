@@ -110,24 +110,6 @@ const SURFACES = {
  * a TODO naming what it does instead.
  */
 const KNOWN = [
-  {
-    channel: 'gmail',
-    surface: 'approve (terminal)',
-    variant: 'another channel',
-    todo: 'Gmail’s terminal approval looks for any send, not only a Gmail one: another channel’s id is classified, then refused as “the mailbox this approval belongs to is no longer connected” — not D2’s one NOT_FOUND',
-  },
-  ...['a post', 'a post with a file', 'a reaction'].map((what) => ({
-    channel: 'slack',
-    surface: `approve (terminal, ${what})`,
-    variant: 'another channel',
-    todo: 'Slack’s terminal approval looks for any send, not only a Slack one: another channel’s id is classified, then refused as “the workspace this approval belongs to is no longer connected” — not D2’s one NOT_FOUND',
-  })),
-  {
-    channel: 'resend',
-    surface: 'approve (terminal)',
-    variant: 'another channel',
-    todo: 'Resend’s terminal approval looks for any send, not only a Resend one: another channel’s id is classified, then refused as “the Resend account this approval belongs to is no longer connected” — not D2’s one NOT_FOUND',
-  },
   ...['resend_send_execute', 'approve (terminal)'].map((surface) => ({
     channel: 'resend',
     surface,
