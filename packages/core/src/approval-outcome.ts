@@ -233,6 +233,30 @@ export function publicApproval(outcome: ApprovalOutcome): ApprovalObject {
 }
 
 /**
+ * D8's object for a version-2 record as a result reports it: the record a call has just written or claimed, classified
+ * as a look at it would be (`inspect`) against `live` — null when there is no configuration to read, which leaves
+ * nothing claimable. Pure: what decides is the store's locked classification, and this only says where it stands.
+ */
+export function approvalObjectOf(record: ApprovalRecord, live: LiveGate | null, now: Date): ApprovalObject {
+  return classifyV2(record, { action: 'inspect', live, now }).approval;
+}
+
+/**
+ * `error` saying where its approval stands (decision 8: a refusal carries its approval object in
+ * `CommsError.details.approval`) — unless it says so already, `approval: null` for a `NOT_FOUND` included, or it is
+ * not a refusal of ours at all. Everything else about the error is kept: its code, its words, its other details.
+ */
+export function withApproval(error: unknown, approval: ApprovalObject | null): unknown {
+  if (!(error instanceof CommsError)) return error;
+  if (error.details !== undefined && Object.hasOwn(error.details, 'approval')) return error;
+  return new CommsError(error.code, error.message, {
+    ...(error.hint === undefined ? {} : { hint: error.hint }),
+    details: { ...error.details, approval },
+    ...(error.cause === undefined ? {} : { cause: error.cause }),
+  });
+}
+
+/**
  * Classifies one stored approval for one action.
  *
  * A version-2 record arrives with its derived expiry already applied (the store's `#derive`). Then, in this order:
@@ -256,22 +280,23 @@ export function publicApproval(outcome: ApprovalOutcome): ApprovalObject {
 export function approvalOutcome(stored: StoredApproval, context: OutcomeContext): ApprovalOutcome {
   if (stored.form === 'legacy') {
     const view = stored.view;
+    const approval: ApprovalObject = {
+      id: view.approvalId,
+      kind: view.kind,
+      channel: view.channel ?? null,
+      state: view.state,
+      claimable: false,
+      legacy: true,
+      createdAt: view.createdAt,
+      expiresAt: view.expiresAt,
+    };
     return {
       state: view.state,
       claimable: false,
       record: null,
       revokes: false,
-      approval: {
-        id: view.approvalId,
-        kind: view.kind,
-        channel: view.channel ?? null,
-        state: view.state,
-        claimable: false,
-        legacy: true,
-        createdAt: view.createdAt,
-        expiresAt: view.expiresAt,
-      },
-      error: otherVersionRefusal(view),
+      approval,
+      error: withApproval(otherVersionRefusal(view), approval) as CommsError,
     };
   }
   if (stored.form === 'corrupt' || stored.form === 'unreadable') {

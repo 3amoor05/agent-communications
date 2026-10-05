@@ -1,4 +1,3 @@
-import { asV2, kindOf } from './approval-stored.ts';
 import type { ApprovalKind } from './approvals.ts';
 import { gatedChangeAtTerminal } from './change-flow.ts';
 import { CHANNEL_SNAPSHOT } from './channels.generated.ts';
@@ -89,16 +88,21 @@ export const DOWNLOAD_CLAIM: Readonly<ApprovalClaim> = Object.freeze({ kind: 'do
 export async function claimsApproval(core: Core, id: unknown, claim: ApprovalClaim = {}): Promise<boolean> {
   // No id at all, the usual call: nothing to look up.
   if (typeof id !== 'string') return false;
-  const stored = await core.approvals.get(id).catch(() => null);
-  if (stored === null) return false;
-  // A kind that cannot be known matches no kind asked for.
-  if (claim.kind !== undefined && kindOf(stored) !== claim.kind) return false;
-  // A look-up only reads: any record of the kind it asks about, an earlier release's included.
-  if (claim.lookup === true) return true;
-  // A claim, only for a valid version-2 record still waiting to be used. The store reads one past its deadline as
-  // `expired`, so a pending one here is one that can still be used.
-  const record = asV2(stored);
-  return record !== null && (record.state === 'pending' || record.state === 'approved');
+  /*
+   * Looked at under its lock and classified there, of the kind the call takes, before anything of its state counts
+   * (design 2026-10-05 §D2): an id of another kind is not found, as one nobody prepared is not, and claims nothing.
+   * The look writes only what reading derives — an expiry, a dead send's `unknown` — never anything a claim would.
+   */
+  const seen = await core.approvals.inspect(id, claim.kind === undefined ? {} : { kind: claim.kind }).catch(() => null);
+  if (seen === null) return false;
+  const { stored, outcome } = seen;
+  // A look-up only reads: any record it can read, of the kind it asks about — an earlier release's included. A file
+  // that cannot be read, or a record whose binding does not verify, is nothing to look up.
+  if (claim.lookup === true) return stored.form === 'v2' || stored.form === 'legacy';
+  // A claim, only for a valid version-2 record still waiting to be used: pending, or approved and claimable now. A
+  // corrupt, an earlier release's or an unreadable record claims nothing, and neither does one the classification
+  // reads as revoked — its owner removed, or prepared before a `never` — or expired.
+  return stored.form === 'v2' && (outcome.state === 'pending' || outcome.claimable);
 }
 
 // ── A server: every tool call ─────────────────────────────────────────────────────────────────────────────────

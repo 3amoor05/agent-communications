@@ -545,10 +545,10 @@ export async function listApprovals(
  * corrupt or unreadable record is refused, with only its stub, and nothing is written to it.
  */
 export async function revokeApproval(core: Core, approvalId: string, surface: 'cli' | 'mcp'): Promise<PublicApproval> {
-  const existing = await core.approvals.get(approvalId);
-  if (existing !== null && (existing.form === 'corrupt' || existing.form === 'unreadable')) {
-    throw integrityRefusal(existing);
-  }
+  // Looked at under its lock first, classified there: one nobody prepared is the one NOT_FOUND, and one that cannot be
+  // used is refused with only its stub, before anything is written or audited.
+  const { stored: existing } = await core.approvals.inspect(approvalId);
+  if (existing.form === 'corrupt' || existing.form === 'unreadable') throw integrityRefusal(existing);
   const reason = 'revoked by the user';
   const stored =
     kindOf(existing) === 'change'

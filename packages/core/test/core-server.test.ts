@@ -871,6 +871,48 @@ test('loosening the change policy from chat needs a code typed at a terminal, wh
   }
 });
 
+test('a change from chat says where its approval stands — prepared, refused, applied — and the command’s envelope says the same (D8o-a)', async () => {
+  const m = machine({ defaults: { changePolicy: 'confirm' }, accounts: { 'acme/slack': account() } });
+  const { ok, call, close } = await connect(m);
+  try {
+    const first = await ok('comms_change_policy', { set: 'chat' });
+    const approval = first.approval as Record<string, unknown>;
+    assert.equal(approval.id, first.approvalId);
+    assert.equal(approval.kind, 'change');
+    assert.equal(approval.channel, 'core');
+    assert.equal(approval.state, 'pending');
+    assert.equal(approval.route, 'confirm');
+    assert.equal(approval.claimable, false, 'waiting for a terminal');
+    assert.equal(approval.expiresAt, first.expiresAt);
+    assert.equal(approval.challengeHash, undefined);
+
+    const early = await call('comms_change_policy', { set: 'chat', approvalId: first.approvalId });
+    const refusal = (
+      early.structuredContent as { error: { code: string; details: { approval: Record<string, unknown> } } }
+    ).error;
+    assert.equal(refusal.code, 'APPROVAL_PENDING');
+    assert.equal(refusal.details.approval.state, 'pending');
+    assert.equal(refusal.details.approval.claimable, false);
+
+    // An id nobody prepared: the one NOT_FOUND, with approval null.
+    const missing = await call('comms_change_policy', { set: 'chat', approvalId: `ap_${'7'.repeat(26)}` });
+    const notFound = (missing.structuredContent as { error: { code: string; details: unknown } }).error;
+    assert.equal(notFound.code, 'NOT_FOUND');
+    assert.deepEqual(notFound.details, { approval: null });
+
+    // The command: an agent gets the same object in the envelope's details.
+    const again = machine({ defaults: { changePolicy: 'confirm' } });
+    const asked = cli(again, ['policy', 'chat', '--json'], { CLAUDECODE: '1' });
+    assert.equal(asked.status, 10, asked.stderr);
+    const details = asked.json().error.details;
+    assert.equal(details.approval.id, details.approvalId);
+    assert.equal(details.approval.state, 'pending');
+    assert.equal(details.approval.claimable, false);
+  } finally {
+    await close();
+  }
+});
+
 test('an approval is good only for the change the tool that prepared it plans: no tool claims another’s', async () => {
   /*
    * What makes a generic claim tool unnecessary is also what makes one impossible to fake: every tool computes its own

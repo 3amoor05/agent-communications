@@ -227,13 +227,19 @@ test('a question is never spent as a send or a change, nor either of those as a 
   assert.equal(asV2(await store.get(change.approvalId))?.state, 'pending');
 });
 
-test('a question is never approved at a terminal: `approve` says what it is, and leaves it waiting', async () => {
+test('a question is never approved at a terminal: `approve` finds no change by its id, and leaves it waiting', async () => {
   const { core } = machine();
   const question = await core.approvals.createDownload({ channel: 'gmail', download: binding(), policy: 'chat' });
-  await assert.rejects(
-    beginChangeApproval(core, question.approvalId, { surface: 'cli' }),
-    refusal(/is a question about where to save files, not a configuration change/, 'USAGE'),
-  );
+  // Another kind's id is the one NOT_FOUND (design 2026-10-05 §D2): byte for byte an id nobody prepared.
+  const envelope = async (id: string) => {
+    const error = await beginChangeApproval(core, id, { surface: 'cli' }).then(
+      () => assert.fail('refused'),
+      (refused: unknown) => refused as CommsError,
+    );
+    assert.equal(error.code, 'NOT_FOUND', error.message);
+    return JSON.stringify({ message: error.message, hint: error.hint, details: error.details }).replaceAll(id, 'ID');
+  };
+  assert.equal(await envelope(question.approvalId), await envelope(`ap_${'7'.repeat(26)}`));
   assert.equal(asV2(await core.approvals.get(question.approvalId))?.state, 'pending');
 });
 

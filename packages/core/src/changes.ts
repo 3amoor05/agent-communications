@@ -1,13 +1,11 @@
-import { asLegacy, asV2, integrityRefusal, kindOf, type StoredApproval } from './approval-stored.ts';
+import type { ApprovalObject } from './approval-outcome.ts';
+import { asLegacy, asV2, type StoredApproval } from './approval-stored.ts';
 import {
   type ApprovalRecord,
   type ChangeBinding,
   type ChangeTarget,
   changeDigest,
-  DOWNLOAD_ANSWER_HINT,
-  otherVersionRefusal,
   type RevokeDisposition,
-  sendApprovesHint,
   stricterPolicy,
 } from './approvals.ts';
 import type { AuditRecord } from './audit.ts';
@@ -99,6 +97,8 @@ export interface PreparedChange {
   expiresAt: string;
   /** What to do next, in words an agent can follow: ask and claim, or the command the person runs. */
   next: string;
+  /** Where its approval stands (design 2026-10-05 §D8): pending, and whether a yes in the chat can claim it. */
+  approval: ApprovalObject;
 }
 
 export interface ChangeApprovalPrompt {
@@ -201,6 +201,7 @@ export async function prepareChange(
       preview: renderChangePreview({ ...record, change: binding }),
       expiresAt: record.expiresAt,
       next: nextStep(record.approvalId, policy, core, options),
+      approval: await core.approvals.approvalOf(record),
     };
   } catch (error) {
     await auditRefusal(core, 'change.prepare', error, {
@@ -276,35 +277,19 @@ export async function claimChange(
   }
 }
 
-/** A change approval, checked to be one and to describe the change its digest binds. */
-async function changeRecord(
-  core: Core,
-  approvalId: string,
-  options: Pick<ChangeOptions, 'platform'> = {},
-): Promise<ApprovalRecord & { change: ChangeBinding }> {
-  const stored = await core.approvals.get(approvalId);
-  if (!stored) {
-    throw new CommsError('NOT_FOUND', `no approval ${approvalId}`, {
-      hint: 'Prepare the change again; an approval expires ten minutes after it is made.',
-    });
-  }
-  // A record that cannot be used is refused before anything of it is shown, and says only that it is corrupt.
-  if (stored.form === 'corrupt' || stored.form === 'unreadable') throw integrityRefusal(stored);
-  // A download's question is answered, never approved: there is no code for a person to type, and the command that
-  // answers it at a terminal is the approve of the channel the files come from.
-  if (kindOf(stored) === 'download') {
-    throw new CommsError('USAGE', `${approvalId} is a question about where to save files, not a configuration change`, {
-      hint: DOWNLOAD_ANSWER_HINT,
-    });
-  }
-  if (kindOf(stored) !== 'change') {
-    throw new CommsError('USAGE', `approval ${approvalId} is for a send, not a configuration change`, {
-      hint: sendApprovesHint(await requireHandoffs(core, options.platform).registered(), approvalId),
-    });
-  }
-  // One an earlier release prepared is never approved here: refused before anything of it is shown or checked.
-  if (stored.form === 'legacy') throw otherVersionRefusal(stored.view);
-  const record = stored.record;
+/**
+ * A change approval, classified under its lock for the approval a person is about to give (design 2026-10-05 §D2):
+ * checked to be a change before anything of it is looked at — an id of another kind is the one `NOT_FOUND`, as an id
+ * nobody prepared is — then refused by its state, its form or its owner as the approval itself would be, before a
+ * preview is shown; and checked to describe the change its digest binds.
+ */
+async function changeRecord(core: Core, approvalId: string): Promise<ApprovalRecord & { change: ChangeBinding }> {
+  const { outcome } = await core.approvals.inspect(approvalId, { kind: 'change' }, { action: 'approve' });
+  // Corrupt, an earlier release's, expired, used, revoked — or revoked now because its owner was removed: each is
+  // refused for what it is, with where it stands, before anything of it is shown.
+  if (outcome.error) throw outcome.error;
+  const record = outcome.record;
+  if (record === null) throw new CommsError('UNEXPECTED', 'a change approval read as no record');
   /*
    * What is shown is rendered from the record, and only believed once it reproduces the record's own digest — so the
    * lines a person reads are the change the approval permits, not a description that happens to sit beside it.
@@ -330,7 +315,7 @@ export async function beginChangeApproval(
 ): Promise<ChangeApprovalPrompt> {
   let record: (ApprovalRecord & { change: ChangeBinding }) | undefined;
   try {
-    record = await changeRecord(core, approvalId, options);
+    record = await changeRecord(core, approvalId);
     const challenge = await core.approvals.issueChallenge(approvalId, 'change', options.platform);
     return { approvalId, preview: renderChangePreview(record), challenge };
   } catch (error) {
@@ -353,7 +338,7 @@ export async function finishChangeApproval(
 ): Promise<ApprovalRecord> {
   let record: (ApprovalRecord & { change: ChangeBinding }) | undefined;
   try {
-    record = await changeRecord(core, approvalId, options);
+    record = await changeRecord(core, approvalId);
     const digest = changeDigest(record.change);
     const approved = await core.approvals.approve(
       approvalId,
@@ -398,8 +383,13 @@ export async function recordChangeApprovalRefused(
   error: unknown,
   options: ChangeOptions,
 ): Promise<void> {
-  // Only a valid version-2 change says what it was about: nothing is read from any other form.
-  const record = asV2(await core.approvals.get(approvalId).catch(() => null));
+  // Only a valid version-2 change says what it was about: nothing is read from any other form, nor of any other kind.
+  const record = asV2(
+    await core.approvals
+      .inspect(approvalId, { kind: 'change' })
+      .then(({ stored }) => stored)
+      .catch(() => null),
+  );
   const change = record?.kind === 'change' ? record.change : undefined;
   await auditRefusal(core, 'change.approve', error, {
     surface: options.surface,
@@ -421,8 +411,12 @@ export async function revokeChange(
   reason: string,
   options: ChangeOptions & { disposition: RevokeDisposition },
 ): Promise<StoredApproval> {
-  // A corrupt or unreadable record is refused by the store before anything is audited, and nothing is written to it.
-  const stored = await core.approvals.revoke(approvalId, reason, { disposition: options.disposition });
+  // A corrupt or unreadable record is refused by the store before anything is audited, and nothing is written to it;
+  // an id of another kind is the one NOT_FOUND, as one nobody prepared is.
+  const stored = await core.approvals.revoke(approvalId, reason, {
+    disposition: options.disposition,
+    expect: { kind: 'change' },
+  });
   // What it was about: from a version-2 change, or from what an earlier release stored on one.
   const record = asV2(stored) ?? asLegacy(stored);
   await auditChange(core, {

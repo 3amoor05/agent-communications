@@ -12,12 +12,15 @@ import {
 } from './approval-binding.ts';
 import { decodeLegacyV1, deriveLegacyV1State, type LegacyApprovalRecord } from './approval-legacy.ts';
 import {
+  type ApprovalObject,
   type ApprovalOutcome,
   approvalNotFound,
+  approvalObjectOf,
   approvalOutcome,
   type LiveGate,
   liveGateOf,
   type OutcomeAction,
+  withApproval,
 } from './approval-outcome.ts';
 import {
   corruptStubOf,
@@ -491,6 +494,8 @@ export interface SendClaim {
    * that claimed. Never in a record, a view, an approval object, an audit row, an error or a result.
    */
   readonly claimToken: string;
+  /** Where the approval stands now that it is claimed (design 2026-10-05 §D8): `sending`, never claimable. */
+  readonly approval: ApprovalObject;
 }
 
 /** A send's outcome, as only its claimant records it. */
@@ -510,6 +515,17 @@ function refuse(code: ErrorCode, reason: string, record?: Refused, hint?: string
     hint: hint ?? 'Prepare the send again and show the new preview to the user.',
     details: record ? { approvalId: record.approvalId, state: record.state } : {},
   });
+}
+
+/** What one locked transition leaves: the record as written, and where it stands, classified in that same lock. */
+interface Transitioned {
+  readonly record: ApprovalRecord;
+  readonly approval: ApprovalObject;
+}
+
+/** A refusal made after a transition wrote its record, carrying that record's object (decision 8). */
+function refusedAfter(error: CommsError, transitioned: Transitioned): CommsError {
+  return withApproval(error, transitioned.approval) as CommsError;
 }
 
 /** The same refusal for a change, which sends nothing and so must not say that it did not. */
@@ -844,6 +860,9 @@ export class ApprovalStore {
    * read; what it derives is written before `decide` runs — expiry and `unknown` always, a revocation the
    * classification derived only for an action, never for a look. `decide` gets the record as it now stands, its
    * outcome and the live gate, and returns the next record (written) or throws (nothing more written).
+   *
+   * What it returns, and every refusal thrown from inside it, says where the approval stands (decision 8): the object
+   * of the record as `decide` left it, or as it stood when `decide` refused — classified against the same live gate.
    */
   async #transition(
     approvalId: string,
@@ -851,7 +870,7 @@ export class ApprovalStore {
     action: OutcomeAction,
     decide: (current: ApprovalRecord, outcome: ApprovalOutcome, live: LiveGate | null) => ApprovalRecord,
     options: { claimToken?: string | undefined } = {},
-  ): Promise<ApprovalRecord> {
+  ): Promise<Transitioned> {
     const path = this.#path(approvalId);
     return withFileLock(`${path}.lock`, async () => {
       const config = await this.#config();
@@ -871,34 +890,70 @@ export class ApprovalStore {
       const stored = found.record;
       const current = outcome.revokes && action !== 'inspect' && action !== 'wait' ? outcome.record : derived.record;
       if (current.state !== stored.state) await this.#write({ ...current, updatedAt: this.#now().toISOString() });
-      const next = decide(current, outcome, live);
+      const objectOf = (record: ApprovalRecord) => approvalObjectOf(record, live, this.#now());
+      let next: ApprovalRecord;
+      try {
+        next = decide(current, outcome, live);
+      } catch (error) {
+        throw withApproval(error, objectOf(current));
+      }
       if (next !== current) await this.#write({ ...next, updatedAt: this.#now().toISOString() });
-      return next;
+      return { record: next, approval: objectOf(next) };
     });
   }
 
   /**
    * A look at one approval, under its lock: the record as it stands and its classification for `expect` — the same
-   * `NOT_FOUND` as every action for an id that is not what the caller expects. It writes only what reading derives
-   * (an expiry, a dead send's `unknown`), never a revocation: an owner removed or a stale epoch is shown as revoked
-   * here, and written by the next action.
+   * `NOT_FOUND` as every action for an id that is not what the caller expects, before anything of the record is
+   * classified. It writes only what reading derives (an expiry, a dead send's `unknown`), never a revocation: an owner
+   * removed or a stale epoch is shown as revoked here, and written by the next action.
+   *
+   * `action` is for a surface about to act on what it reads — a terminal about to show a preview, an execute about to
+   * read its draft — classified for that action (`approve`, `claim`, `revoke`), so the refusal is the one the action
+   * would get. A revocation the classification derives for it is written then, as the action itself would write it:
+   * the first locked action persists it, and this is that action's first step (design 2026-10-05 §D2).
    */
   async inspect(
     approvalId: string,
     expect: ApprovalExpectation = {},
+    options: { action?: OutcomeAction | undefined } = {},
   ): Promise<{ stored: StoredApproval; outcome: ApprovalOutcome }> {
+    const action = options.action ?? 'inspect';
     const path = this.#path(approvalId);
     return withFileLock(`${path}.lock`, async () => {
       const config = await this.#config();
       const found = await this.#read(approvalId, config);
       if (found === null || !matchesExpectation(found, expect)) throw approvalNotFound(approvalId, expect.kind);
       const derived = this.#derived(found);
-      if (found.form === 'v2' && derived.form === 'v2' && derived.record.state !== found.record.state) {
-        await this.#write({ ...derived.record, updatedAt: this.#now().toISOString() });
-      }
       const live = config === null || derived.form !== 'v2' ? null : liveGateOf(config, derived.record);
-      return { stored: derived, outcome: approvalOutcome(derived, { action: 'inspect', live, now: this.#now() }) };
+      const outcome = approvalOutcome(derived, { action, live, now: this.#now() });
+      if (found.form === 'v2' && derived.form === 'v2') {
+        const acting = outcome.revokes && action !== 'inspect' && action !== 'wait' && outcome.record !== null;
+        const current = acting && outcome.record !== null ? outcome.record : derived.record;
+        if (current.state !== found.record.state) {
+          await this.#write({ ...current, updatedAt: this.#now().toISOString() });
+        }
+        return { stored: { form: 'v2', record: current }, outcome };
+      }
+      return { stored: derived, outcome };
     });
+  }
+
+  /**
+   * D8's object for a record a call has just written, claimed or finished — what its result reports. Classified as a
+   * look at it would be, against a fresh read of the configuration, without the lock and writing nothing: what decided
+   * was the transition that wrote it. A configuration that cannot be read leaves only what the record says (nothing
+   * claimable): a report never fails the call it reports on, least of all one that has already sent.
+   */
+  async approvalOf(record: ApprovalRecord): Promise<ApprovalObject> {
+    let live: LiveGate | null = null;
+    try {
+      const config = await this.#config();
+      live = config === null ? null : liveGateOf(config, record);
+    } catch {
+      live = null;
+    }
+    return approvalObjectOf(this.#derive(record), live, this.#now());
   }
 
   /**
@@ -949,7 +1004,7 @@ export class ApprovalStore {
     _platform: NodeJS.Platform = process.platform,
   ): Promise<ApprovalRecord> {
     let failure: Failure | null = null;
-    const result = await this.#transition(approvalId, { kind }, 'approve', (current, outcome) => {
+    const done = await this.#transition(approvalId, { kind }, 'approve', (current, outcome) => {
       if (outcome.error) throw outcome.error;
       if (current.state !== 'pending') throw this.#alreadyApproved(current, outcome);
       if (!current.challengeHash)
@@ -999,8 +1054,8 @@ export class ApprovalStore {
       };
     });
     const failed = failure as Failure | null;
-    if (failed) throw refusalFor(result)(failed.code, failed.reason, result);
-    return result;
+    if (failed) throw refusedAfter(refusalFor(done.record)(failed.code, failed.reason, done.record), done);
+    return done.record;
   }
 
   /**
@@ -1018,7 +1073,7 @@ export class ApprovalStore {
     options: ClaimOptions = {},
   ): Promise<SendClaim> {
     let failure: Failure | null = null;
-    const result = await this.#transition(
+    const done = await this.#transition(
       approvalId,
       { kind: 'send', owner: live.inboxId },
       'claim',
@@ -1073,17 +1128,18 @@ export class ApprovalStore {
       },
     );
     const failed = failure as Failure | null;
-    if (failed) throw refuse(failed.code, failed.reason, result);
+    if (failed) throw refusedAfter(refuse(failed.code, failed.reason, done.record), done);
     const claimToken = randomBytes(16).toString('hex');
-    await this.#markClaimed(result, claimToken);
-    return { record: result, claimToken };
+    await this.#markClaimed(done, claimToken);
+    return { record: done.record, claimToken, approval: done.approval };
   }
 
   /**
    * The file system's O_EXCL is the single-use guarantee, independent of the lock. A send's marker also holds its
    * claim token, the one thing that lets the claimant — and nobody else — renew its lease and record its outcome.
    */
-  async #markClaimed(record: ApprovalRecord, claimToken?: string): Promise<void> {
+  async #markClaimed(done: Transitioned, claimToken?: string): Promise<void> {
+    const record = done.record;
     await ensurePrivateDir(this.directory);
     try {
       const marker = await open(this.#path(record.approvalId, '.claim'), 'wx', 0o600);
@@ -1097,7 +1153,10 @@ export class ApprovalStore {
       await marker.close();
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
-        throw refusalFor(record)('APPROVAL_VOID', 'this approval was already claimed by another process', record);
+        throw refusedAfter(
+          refusalFor(record)('APPROVAL_VOID', 'this approval was already claimed by another process', record),
+          done,
+        );
       }
       throw error;
     }
@@ -1219,7 +1278,7 @@ export class ApprovalStore {
   async claimForChange(approvalId: string, live: LiveChange, options: ClaimOptions = {}): Promise<ApprovalRecord> {
     const digest = changeDigest(live.change);
     let failure: Failure | null = null;
-    const result = await this.#transition(approvalId, { kind: 'change' }, 'claim', (current, outcome, gate) => {
+    const done = await this.#transition(approvalId, { kind: 'change' }, 'claim', (current, outcome, gate) => {
       if (outcome.error) throw outcome.error;
       // As for a send: a cancellation that landed while this waited for the lock writes nothing.
       if (options.signal?.aborted) throw cancelledClaim(current);
@@ -1253,9 +1312,9 @@ export class ApprovalStore {
       return { ...current, state: 'used', usedAt: at };
     });
     const failed = failure as Failure | null;
-    if (failed) throw refuseChange(failed.code, failed.reason, result);
-    await this.#markClaimed(result);
-    return result;
+    if (failed) throw refusedAfter(refuseChange(failed.code, failed.reason, done.record), done);
+    await this.#markClaimed(done);
+    return done.record;
   }
 
   /**
@@ -1347,7 +1406,7 @@ export class ApprovalStore {
   ): Promise<ApprovalRecord & { download: DownloadBinding }> {
     const recorded: RecordedSaveAnswer =
       answer.choice === 'other' ? { choice: 'other', folder: answer.folder } : { choice: answer.choice };
-    const result = await this.#transition(approvalId, { kind: 'download' }, 'approve', (current, outcome) => {
+    const done = await this.#transition(approvalId, { kind: 'download' }, 'approve', (current, outcome) => {
       if (outcome.error) throw outcome.error;
       if (current.state === 'approved') {
         throw refuseDownload('APPROVAL_VOID', 'the question was answered already, and it is answered once', current);
@@ -1364,7 +1423,7 @@ export class ApprovalStore {
         download: { ...current.download, answer: recorded },
       };
     });
-    return result as ApprovalRecord & { download: DownloadBinding };
+    return done.record as ApprovalRecord & { download: DownloadBinding };
   }
 
   /**
@@ -1399,7 +1458,7 @@ export class ApprovalStore {
   ): Promise<ApprovalRecord & { download: DownloadBinding }> {
     const digest = downloadDigest(live);
     let failure: Failure | null = null;
-    const result = await this.#transition(approvalId, { kind: 'download' }, 'claim', (current, outcome, gate) => {
+    const done = await this.#transition(approvalId, { kind: 'download' }, 'claim', (current, outcome, gate) => {
       if (outcome.error) throw outcome.error;
       if (options.signal?.aborted) throw cancelledClaim(current);
       const at = this.#now().toISOString();
@@ -1426,9 +1485,9 @@ export class ApprovalStore {
       return { ...current, state: 'used', usedAt: at };
     });
     const failed = failure as Failure | null;
-    if (failed) throw refuseDownload(failed.code, failed.reason, result);
-    await this.#markClaimed(result);
-    return result as ApprovalRecord & { download: DownloadBinding };
+    if (failed) throw refusedAfter(refuseDownload(failed.code, failed.reason, done.record), done);
+    await this.#markClaimed(done);
+    return done.record as ApprovalRecord & { download: DownloadBinding };
   }
 
   /**
@@ -1450,7 +1509,7 @@ export class ApprovalStore {
         details: { approvalId },
       });
     }
-    return this.#transition(
+    const done = await this.#transition(
       approvalId,
       { kind: 'send' },
       'claim',
@@ -1479,6 +1538,7 @@ export class ApprovalStore {
       },
       { claimToken },
     );
+    return done.record;
   }
 
   /**
@@ -1505,7 +1565,7 @@ export class ApprovalStore {
       return { form: 'legacy', view: decodeLegacyV1(retired, config, this.#now()), record: retired };
     }
     if (found.form !== 'v2') throw integrityRefusal(found);
-    const record = await this.#transition(approvalId, expect, 'revoke', (current) =>
+    const { record } = await this.#transition(approvalId, expect, 'revoke', (current) =>
       current.state === 'pending' || current.state === 'approved'
         ? { ...current, state: 'revoked', reason, revokedAt: this.#now().toISOString(), challengeHash: undefined }
         : current,

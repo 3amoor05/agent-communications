@@ -358,32 +358,28 @@ async function sendRecord(core: ReturnType<typeof openCore>) {
   });
 }
 
-test("a send's approval offered as a change names every sending channel's approve, located or why not (7d-core)", async () => {
-  const { core, entry } = machineWithGmail();
+test("a send's approval offered as a change is the one NOT_FOUND, at the terminal too, naming no command (7d-core)", async () => {
+  // It named every sending channel's approve; another kind's id is now the one NOT_FOUND wherever it is offered
+  // (design 2026-10-05 §D2) — the claim's store and the terminal's look alike — as an id that names nothing is, so it
+  // says nothing of the record, not even the command that would approve it.
+  const { core } = machineWithGmail();
   const send = await sendRecord(core);
-  const registered = await requireHandoffs(core).registered();
-  const gmail = registered.of('gmail', ['approve', send.approvalId]);
-  assert.ok(isCommand(gmail) && gmail.words.includes(entry), 'Gmail is found where it is registered');
   const config = await core.config.load();
-  // The claim goes to the store, where another kind's id is the one NOT_FOUND (design 2026-10-05 §D2): it names no
-  // record, and so no command.
-  await assert.rejects(
-    claimChange(core, send.approvalId, { before: config, after: config, effects: ['x'] }, { surface: 'mcp' }),
-    (error: unknown) =>
-      error instanceof CommsError && error.code === 'NOT_FOUND' && !/approve/.test(`${error.message} ${error.hint}`),
-  );
-  for (const attempt of [() => beginChangeApproval(core, send.approvalId, { surface: 'cli' })]) {
-    await assert.rejects(attempt(), (error: unknown) => {
-      assert.ok(error instanceof CommsError && error.code === 'USAGE', String(error));
-      assert.match(error.message, /is for a send, not a configuration change/);
-      const hint = error.hint ?? '';
-      assert.ok(hint.startsWith(`It is approved with the command that prepared it — ${inlineCommand(gmail)} (`), hint);
-      for (const label of ['Slack', 'Resend'])
-        assert.match(hint, new RegExp(`${label} \\S+ \\(@agentcomms/\\w+\\) is not locatable here`));
-      assert.doesNotMatch(hint, /WhatsApp/, 'only channels that send are named');
-      assertNoBareCommand(hint);
-      return true;
-    });
+  const unknown = `ap_${'7'.repeat(26)}`;
+  const envelope = async (attempt: (id: string) => Promise<unknown>, id: string) => {
+    const error = await attempt(id).then(
+      () => assert.fail('refused'),
+      (refused: unknown) => refused as CommsError,
+    );
+    assert.ok(error instanceof CommsError && error.code === 'NOT_FOUND', String(error));
+    assert.doesNotMatch(`${error.message} ${error.hint}`, /approve/);
+    return JSON.stringify({ message: error.message, hint: error.hint, details: error.details }).replaceAll(id, 'ID');
+  };
+  for (const attempt of [
+    (id: string) => claimChange(core, id, { before: config, after: config, effects: ['x'] }, { surface: 'mcp' }),
+    (id: string) => beginChangeApproval(core, id, { surface: 'cli' }),
+  ]) {
+    assert.equal(await envelope(attempt, send.approvalId), await envelope(attempt, unknown));
   }
 });
 

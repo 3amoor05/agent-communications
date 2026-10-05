@@ -7,9 +7,11 @@ import { asV2 } from '../src/approval-stored.ts';
 import { changeDigest } from '../src/approvals.ts';
 import {
   beginChangeApproval,
+  type ChangeRequest,
   type ChangeSpec,
   claimChange,
   finishChangeApproval,
+  type PreparedChange,
   prepareChange,
 } from '../src/changes.ts';
 import { inlineCommand, type Streams } from '../src/cli-runtime.ts';
@@ -22,6 +24,7 @@ import {
   emptyConfig,
   governingChangePolicy,
   type InboxConfig,
+  type LooseningConsent,
   parseConfig,
 } from '../src/config.ts';
 import { type Core, openCore } from '../src/core.ts';
@@ -806,10 +809,17 @@ test('the terminal shows only a change that reproduces its own digest, and only 
     riskFlags: [],
     expect: { to: ['sam@partner.test'], cc: [], bcc: [], subject: 'hi' },
   });
-  await assert.rejects(
-    beginChangeApproval(core, send.approvalId, { surface: 'cli' }),
-    refusedWith('USAGE', /is for a send, not a configuration change/),
-  );
+  // Another kind's id is the one NOT_FOUND (design 2026-10-05 §D2), byte for byte an id nobody prepared, before
+  // anything of the record is classified or shown — at the terminal too.
+  const envelope = async (id: string) => {
+    const error = await beginChangeApproval(core, id, { surface: 'cli' }).then(
+      () => assert.fail('refused'),
+      (refused: unknown) => refused as CommsError,
+    );
+    assert.equal(error.code, 'NOT_FOUND', error.message);
+    return JSON.stringify({ message: error.message, hint: error.hint, details: error.details }).replaceAll(id, 'ID');
+  };
+  assert.equal(await envelope(send.approvalId), await envelope(`ap_${'7'.repeat(26)}`));
   assert.equal(asV2(await core.approvals.get(send.approvalId))?.challengeHash, undefined, 'no challenge was issued');
 });
 
@@ -1004,4 +1014,261 @@ test('a v1 change is never approved at a terminal or claimed here, and nothing i
     assert.equal(readV1Record(core.paths.stateDir, approvalId), bytes, `${moment}: byte-identical`);
     assert.equal(existsSync(v1RecordPath(core.paths.stateDir, approvalId, '.claim')), false, `${moment}: no marker`);
   }
+});
+
+/* ---------------------------------------------------------------------------------------------------------------- */
+/* Every surface classifies before it acts, and says where the approval stands (CUE-404 Task 9; design §D2, §D8)      */
+/* ---------------------------------------------------------------------------------------------------------------- */
+
+/** A change as every surface runs it (`gatedChange`): `plan`, then `after` written with the consent its claim gave. */
+function applying(core: Core, plan: (config: Config) => ChangeRequest) {
+  return {
+    plan,
+    apply: async (consent: LooseningConsent | undefined, request: ChangeRequest) => {
+      await core.config.update(() => structuredClone(request.after), consent === undefined ? {} : { consent });
+      return 'applied';
+    },
+  };
+}
+
+test('a global or prospective change is never owner-removed: prepared pending, claimable by its route, approved and applied, under chat and under confirm (R34a)', async () => {
+  const { gatedChange } = await import('../src/change-flow.ts');
+  const cases: Record<
+    string,
+    { policy: 'chat' | 'confirm'; scope: 'global' | 'prospective'; plan: (c: Config) => ChangeRequest }
+  > = {
+    'the default change policy, confirm → chat': {
+      policy: 'confirm',
+      scope: 'global',
+      plan: (before) => {
+        const after = structuredClone(before);
+        after.defaults.changePolicy = 'chat';
+        return { before, after, summary: 'Let a yes in the chat loosen settings' };
+      },
+    },
+    'the daily update check, turned off': {
+      policy: 'chat',
+      scope: 'global',
+      plan: (before) => {
+        const after = structuredClone(before);
+        after.defaults.updateCheck = 'off';
+        return { before, after, summary: 'Stop asking npm for releases' };
+      },
+    },
+    ...Object.fromEntries(
+      (['chat', 'confirm'] as const).flatMap((policy) => [
+        [
+          `an installer change, under ${policy}`,
+          {
+            policy,
+            scope: 'global' as const,
+            plan: (before: Config) => ({
+              before,
+              after: structuredClone(before),
+              effects: ['registers the Gmail MCP server with cursor'],
+              summary: 'Register the Gmail server',
+            }),
+          },
+        ],
+        [
+          `a first connection, under ${policy}`,
+          {
+            policy,
+            scope: 'prospective' as const,
+            plan: (before: Config) => {
+              const after = structuredClone(before);
+              after.inboxes['new/gmail'] = inbox('ibx_NNNNNNNNNNNNNNNN');
+              return {
+                inbox: 'new/gmail',
+                before,
+                after,
+                effects: ['signs in to Gmail'],
+                summary: 'Connect new/gmail',
+              };
+            },
+          },
+        ],
+      ]),
+    ),
+  };
+  for (const [label, spec] of Object.entries(cases)) {
+    const { core } = coreWith({
+      defaults: { changePolicy: spec.policy },
+      accounts: { 'acme/slack': account(ACME) },
+    });
+    const change = applying(core, spec.plan);
+    const first = await gatedChange(core, change, { channel: 'core', surface: 'mcp' });
+    assert.equal(first.status, 'approval-required', label);
+    const prepared = (first as { prepared: PreparedChange }).prepared;
+    // Prepared: pending, on its route, claimable in the chat only on the chat route, and never owner-removed.
+    assert.equal(prepared.approval.state, 'pending', label);
+    assert.equal(prepared.approval.route, spec.policy, label);
+    assert.equal(prepared.approval.claimable, spec.policy === 'chat', label);
+    assert.equal(prepared.approval.ownerRemoved, undefined, label);
+    const looked = await core.approvals.inspect(prepared.approvalId, { kind: 'change' });
+    assert.deepEqual(looked.outcome.approval, prepared.approval, `${label}: status says the same`);
+    assert.equal(asV2(looked.stored)?.ownerScope, spec.scope, label);
+    if (spec.policy === 'confirm') {
+      await assert.rejects(
+        gatedChange(core, change, { channel: 'core', surface: 'mcp', approvalId: prepared.approvalId }),
+        (error: unknown) => {
+          assert.ok(error instanceof CommsError && error.code === 'APPROVAL_PENDING', `${label}: ${String(error)}`);
+          const approval = error.details?.approval as { state?: string; claimable?: boolean };
+          assert.equal(approval.state, 'pending', label);
+          assert.equal(approval.claimable, false, label);
+          return true;
+        },
+      );
+      const prompt = await beginChangeApproval(core, prepared.approvalId, { surface: 'cli' });
+      await finishChangeApproval(core, prepared.approvalId, prompt.challenge, { surface: 'cli' });
+      const approved = (await core.approvals.inspect(prepared.approvalId, { kind: 'change' })).outcome.approval;
+      assert.equal(approved.state, 'approved', label);
+      assert.equal(approved.claimable, true, label);
+      assert.equal(approved.ownerRemoved, undefined, label);
+    }
+    const second = await gatedChange(core, change, {
+      channel: 'core',
+      surface: 'mcp',
+      approvalId: prepared.approvalId,
+    });
+    assert.deepEqual(second, { status: 'applied', result: 'applied' }, label);
+    const used = (await core.approvals.inspect(prepared.approvalId, { kind: 'change' })).outcome.approval;
+    assert.equal(used.state, 'used', label);
+    assert.equal(used.ownerRemoved, undefined, label);
+  }
+});
+
+test('an owner change whose account is then removed is owner-removed: shown revoked, refused, and revoked by the first action (R34b)', async () => {
+  const { core, write } = coreWith({ accounts: { 'acme/slack': account(ACME) } });
+  const spec = await widening(core);
+  const prepared = await prepareChange(
+    core,
+    { ...spec, summary: 'Let acme/slack post' },
+    { channel: 'core', surface: 'mcp' },
+  );
+  assert.equal(prepared.approval.ownerRemoved, undefined);
+  write({});
+  const seen = await core.approvals.inspect(prepared.approvalId, { kind: 'change' });
+  assert.equal(seen.outcome.approval.state, 'revoked');
+  assert.equal(seen.outcome.approval.ownerRemoved, true);
+  assert.equal(seen.outcome.approval.claimable, false);
+  assert.equal(asV2(await core.approvals.get(prepared.approvalId))?.state, 'pending', 'a look writes no revocation');
+  // The terminal refuses it before showing it, and that first action writes the revocation.
+  await assert.rejects(beginChangeApproval(core, prepared.approvalId, { surface: 'cli' }), (error: unknown) => {
+    assert.ok(error instanceof CommsError && error.code === 'APPROVAL_VOID', String(error));
+    assert.match(error.message, /its mailbox or account was removed/);
+    assert.equal((error.details?.approval as { ownerRemoved?: boolean } | undefined)?.ownerRemoved, true);
+    return true;
+  });
+  assert.equal(asV2(await core.approvals.get(prepared.approvalId))?.state, 'revoked');
+});
+
+test('the change surfaces find another kind’s id, a corrupt one of another kind and an id nobody prepared as the one NOT_FOUND, with approval null, before classifying it (D2-b)', async () => {
+  const { core } = coreWith({ inboxes: { 'acme/gmail': inbox(MAIL) }, accounts: { 'acme/slack': account(ACME) } });
+  const spec = await widening(core);
+  const send = await core.approvals.create({
+    channel: 'gmail',
+    inboxId: MAIL,
+    draftId: 'r-1',
+    draftMessageId: 'm-1',
+    contentDigest: 'd'.repeat(64),
+    sendEpoch: 0,
+    policy: 'chat',
+    requiredPolicy: 'chat',
+    riskFlags: [],
+    expect: { to: ['sam@partner.test'], cc: [], bcc: [], subject: 'hi' },
+  });
+  // A send whose timestamps are wrong: corrupt, with its binding intact, so its kind is still known. Classified, it
+  // would be refused as corrupt — so a NOT_FOUND here is one given before it was classified.
+  const corrupt = await core.approvals.create({ ...send, sendEpoch: 0, inboxSub: undefined } as never);
+  const file = join(core.approvals.directory, `${corrupt.approvalId}.json`);
+  writeFileSync(
+    file,
+    JSON.stringify({ ...JSON.parse(readFileSync(file, 'utf8')), expiresAt: '2026-09-25T10:03:00.000Z' }),
+  );
+  const corruptBytes = readFileSync(file, 'utf8');
+  const unknown = `ap_${'7'.repeat(26)}`;
+  const attempts: Record<string, (id: string) => Promise<unknown>> = {
+    claim: (id) => claimChange(core, id, spec, { surface: 'mcp' }),
+    begin: (id) => beginChangeApproval(core, id, { surface: 'cli' }),
+    finish: (id) => finishChangeApproval(core, id, 'ABCD', { surface: 'cli' }),
+  };
+  for (const [step, attempt] of Object.entries(attempts)) {
+    const envelopes = [];
+    for (const id of [unknown, send.approvalId, corrupt.approvalId]) {
+      const error = await attempt(id).then(
+        () => assert.fail(`${step} refused`),
+        (refused: unknown) => refused as CommsError,
+      );
+      assert.equal(error.code, 'NOT_FOUND', `${step}: ${error.message}`);
+      assert.deepEqual(error.details, { approval: null }, step);
+      envelopes.push(JSON.stringify({ m: error.message, h: error.hint, d: error.details }).replaceAll(id, 'ID'));
+    }
+    assert.equal(new Set(envelopes).size, 1, `${step}: one envelope, byte for byte`);
+  }
+  assert.equal(asV2(await core.approvals.get(send.approvalId))?.state, 'pending', 'the send is as it was');
+  assert.equal(asV2(await core.approvals.get(send.approvalId))?.challengeHash, undefined, 'no challenge issued');
+  assert.equal(readFileSync(file, 'utf8'), corruptBytes, 'the corrupt record is as it was');
+});
+
+test('a change says where its approval stands on every result and refusal; one refused before it exists says nothing of one (D8o-a, D8o-b, D8o-d)', async () => {
+  const { core, time } = coreWith({ defaults: { changePolicy: 'confirm' }, accounts: { 'acme/slack': account(ACME) } });
+  const spec = await widening(core);
+  // Refused before any approval exists: no object.
+  for (const request of [
+    { ...spec, summary: '' },
+    { before: spec.before, after: spec.before, summary: 'nothing' },
+  ]) {
+    await assert.rejects(prepareChange(core, request, { channel: 'core', surface: 'mcp' }), (error: unknown) => {
+      assert.ok(error instanceof CommsError && error.code === 'USAGE', String(error));
+      assert.equal(error.details?.approval, undefined, 'no approval exists to say anything of');
+      return true;
+    });
+  }
+  const prepared = await prepareChange(
+    core,
+    { ...spec, summary: 'Let acme/slack post' },
+    { channel: 'core', surface: 'mcp' },
+  );
+  assert.equal(prepared.approval.id, prepared.approvalId);
+  assert.equal(prepared.approval.kind, 'change');
+  assert.equal(prepared.approval.state, 'pending');
+  assert.equal(prepared.approval.expiresAt, prepared.expiresAt);
+  // Waiting for the terminal: refused, with the record as it stands.
+  await assert.rejects(claimChange(core, prepared.approvalId, spec, { surface: 'mcp' }), (error: unknown) => {
+    assert.ok(error instanceof CommsError && error.code === 'APPROVAL_PENDING', String(error));
+    assert.equal((error.details?.approval as { state?: string } | undefined)?.state, 'pending');
+    return true;
+  });
+  const prompt = await beginChangeApproval(core, prepared.approvalId, { surface: 'cli' });
+  const approved = await finishChangeApproval(core, prepared.approvalId, prompt.challenge, { surface: 'cli' });
+  // Approved, and then a day passes unused: expired after approval, said so, with when it was approved.
+  time.advance(24 * 60 * 60 * 1000 + 60_000);
+  await assert.rejects(claimChange(core, prepared.approvalId, spec, { surface: 'mcp' }), (error: unknown) => {
+    assert.ok(error instanceof CommsError && error.code === 'APPROVAL_EXPIRED', String(error));
+    assert.match(
+      error.message,
+      /this approval expired; nothing was changed with it: approved at .*, expired unused at /,
+    );
+    const approval = error.details?.approval as { state?: string; approvedAt?: string; expiredAt?: string };
+    assert.equal(approval.state, 'expired');
+    assert.equal(approval.approvedAt, approved.approvedAt);
+    assert.equal(approval.expiredAt, approved.usableUntil);
+    return true;
+  });
+  // A voided claim says it is revoked, and why.
+  const again = await prepareChange(
+    core,
+    { ...spec, summary: 'Let acme/slack post' },
+    { channel: 'core', surface: 'mcp' },
+  );
+  const other = await widening(core);
+  other.effects = ['something else'];
+  await assert.rejects(claimChange(core, again.approvalId, other, { surface: 'mcp' }), (error: unknown) => {
+    assert.ok(error instanceof CommsError && error.code === 'APPROVAL_VOID', String(error));
+    const approval = error.details?.approval as { state?: string; reason?: string; revokedAt?: string };
+    assert.equal(approval.state, 'revoked');
+    assert.ok(approval.revokedAt);
+    return true;
+  });
 });

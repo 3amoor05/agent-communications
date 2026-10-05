@@ -62,8 +62,11 @@ import {
   updateVerdict,
 } from '../src/update-state.ts';
 import { VERSION } from '../src/version.ts';
+import { v1SendRecord } from './fixtures/approval-v1-0.13.0.ts';
 import { coreInline, locatedCoreLine } from './helpers/handoffs.ts';
+import { liveConfig } from './helpers/live-config.ts';
 import { tempDir } from './helpers/temp.ts';
+import { v2Record } from './helpers/v2-records.ts';
 
 /*
  * The daily update check (design 2026-09-28): once a day the machine asks npm for the latest release, and every
@@ -699,6 +702,137 @@ test("a look-up of a send goes past the stop by the approval it went under, used
   assert.equal(await gate('resend_send_status', { approvalId: send }), null);
   assert.notEqual(await gate('resend_send_status', { approvalId: later }), null);
   assert.notEqual(await gate('resend_send_execute', { approvalId: send }), null, 'a used approval claims nothing');
+});
+
+/**
+ * A record written where the store keeps it, under its own id, as a person's edit or another release would leave it:
+ * the classification is what is tested, not the transitions that would have made it.
+ */
+function plant(m: Machine, approvalId: string, record: object | string): string {
+  const dir = join(m.stateDir, 'approvals');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${approvalId}.json`), typeof record === 'string' ? record : JSON.stringify(record));
+  return approvalId;
+}
+const idOf = (n: number) => `ap_${String(n).padStart(26, '0')}`;
+
+test('what claims an approval is its classification under the lock: pending, or approved and claimable — never a corrupt, an earlier release’s, a revoked-by-reading or an unreadable one', async () => {
+  const m = machine();
+  const live = liveConfig(m.home, { inboxes: { 'acme/gmail': { id: SEND_OWNER } } });
+  const start = Date.now() - 60_000;
+  const send = { kind: 'send' as const };
+  const pending = plant(m, idOf(1), v2Record({ kind: 'send', state: 'pending', start, approvalId: idOf(1) }));
+  const approved = plant(
+    m,
+    idOf(2),
+    v2Record({ kind: 'send', state: 'approved', route: 'confirm', via: 'terminal', start, approvalId: idOf(2) }),
+  );
+  const legacy = plant(
+    m,
+    idOf(3),
+    v1SendRecord({
+      approvalId: idOf(3),
+      inboxId: SEND_OWNER,
+      draftId: 'r1',
+      draftMessageId: 'm1',
+      digest: 'b'.repeat(64),
+      expect: { to: ['sam@partner.test'], cc: [], bcc: [], subject: 'hi' },
+      createdAt: new Date(start).toISOString(),
+    }),
+  );
+  const tampered = { ...v2Record({ kind: 'send', state: 'pending', start, approvalId: idOf(4) }), draftId: 'r-other' };
+  const unverifiable = plant(m, idOf(4), tampered);
+  const unreadable = plant(m, idOf(5), '{"approvalId": "');
+  const verified = plant(m, idOf(6), {
+    ...v2Record({ kind: 'send', state: 'pending', start, approvalId: idOf(6) }),
+    expiresAt: new Date(start + 5 * 60_000).toISOString(),
+  });
+
+  // As the configuration stands: a pending send claims, and so does an approved one it lets be claimed.
+  assert.equal(await claimsApproval(m.core, pending, send), true, 'pending');
+  assert.equal(await claimsApproval(m.core, approved, send), true, 'approved, claimable');
+  for (const [label, id] of Object.entries({ legacy, unverifiable, unreadable, verified })) {
+    assert.equal(await claimsApproval(m.core, id, send), false, `${label} claims nothing`);
+    assert.equal(await claimsApproval(m.core, id), false, `${label} claims nothing, of any kind`);
+  }
+  // A look-up reads any record it can read — an earlier release's too — and nothing it cannot.
+  assert.equal(await claimsApproval(m.core, legacy, SEND_LOOKUP), true, 'an earlier release’s, looked up');
+  for (const id of [unverifiable, unreadable, verified])
+    assert.equal(await claimsApproval(m.core, id, SEND_LOOKUP), false);
+  // Of another kind: not found, and so nothing.
+  assert.equal(await claimsApproval(m.core, pending, { kind: 'change' }), false, 'a send, claimed as a change');
+
+  // Sending turned off, before the change's own revocation reached them: the pending one still goes past the stop —
+  // its claim is what revokes it, with POLICY_NEVER — and the approved one, which nothing can claim now, does not.
+  live.write({ inboxes: { 'acme/gmail': { id: SEND_OWNER, sendPolicy: 'never' } } });
+  assert.equal(await claimsApproval(m.core, pending, send), true, 'pending, under never');
+  assert.equal(await claimsApproval(m.core, approved, send), false, 'approved, not claimable under never');
+
+  // Prepared before a never: revoked by reading, whatever the policy is now — and nothing written by the look.
+  live.write({ inboxes: { 'acme/gmail': { id: SEND_OWNER } }, sendEpochs: { [SEND_OWNER]: 1 } });
+  for (const id of [pending, approved]) {
+    assert.equal(await claimsApproval(m.core, id, send), false, 'a stale epoch claims nothing');
+    assert.equal(await claimsApproval(m.core, id, SEND_LOOKUP), true, 'and is still there to look up');
+  }
+  // Its mailbox removed: revoked by reading too.
+  live.write({ inboxes: {} });
+  assert.equal(await claimsApproval(m.core, pending, send), false, 'an owner removed claims nothing');
+  for (const id of [pending, approved]) {
+    assert.equal(asV2(await m.core.approvals.get(id))?.state, id === pending ? 'pending' : 'approved', 'not written');
+  }
+});
+
+test('old-server calls end closed on the digest version: the stop holds an earlier release’s record, and its exception reaches only the version refusal (D1cc-c)', async () => {
+  const m = machine();
+  liveConfig(m.home, { inboxes: { 'acme/gmail': { id: SEND_OWNER } } });
+  const start = Date.now() - 60_000;
+  const expect = { to: ['sam@partner.test'], cc: [], bcc: [], subject: 'hi' };
+  const legacy = plant(
+    m,
+    idOf(7),
+    v1SendRecord({
+      approvalId: idOf(7),
+      inboxId: SEND_OWNER,
+      draftId: 'r1',
+      draftMessageId: 'm1',
+      digest: 'b'.repeat(64),
+      expect,
+      createdAt: new Date(start).toISOString(),
+    }),
+  );
+  const current = plant(m, idOf(8), v2Record({ kind: 'send', state: 'pending', start, approvalId: idOf(8) }));
+  await seed(m, { latest: LATEST, behind: true });
+  const gate = updateToolGate({
+    core: m.core,
+    env: m.env,
+    server: 'agent-gmail',
+    channel: 'gmail',
+    running: OLD,
+    exempt: [],
+    approvals: { gmail_draft_send: { kind: 'send' }, gmail_send_status: SEND_LOOKUP },
+  });
+  // Stopped: an earlier release's pending record claims nothing.
+  const stoppedCall = (await gate('gmail_draft_send', { approvalId: legacy })) as { structuredContent?: unknown };
+  assert.match(JSON.stringify(stoppedCall?.structuredContent), /UPDATE_REQUIRED/);
+  // Its exception: a look-up of it goes ahead — and whatever acts on it next is refused by the version, writing nothing.
+  assert.equal(await gate('gmail_send_status', { approvalId: legacy }), null);
+  const before = readFileSync(join(m.stateDir, 'approvals', `${legacy}.json`), 'utf8');
+  await assert.rejects(
+    m.core.approvals.claimForSend(legacy, {
+      inboxId: SEND_OWNER,
+      draftMessageId: 'm1',
+      contentDigest: 'b'.repeat(64),
+      expect,
+    }),
+    (error: unknown) =>
+      error instanceof CommsError &&
+      error.code === 'APPROVAL_VOID' &&
+      /prepared by a different version/.test(error.message) &&
+      (error.details?.approval as { legacy?: boolean } | undefined)?.legacy === true,
+  );
+  assert.equal(readFileSync(join(m.stateDir, 'approvals', `${legacy}.json`), 'utf8'), before, 'nothing written');
+  // The pending-or-approved exception: a version-2 record this machine holds goes ahead, to the store's own gate.
+  assert.equal(await gate('gmail_draft_send', { approvalId: current }), null);
 });
 
 test('a download’s answer goes past the stop by its question’s choiceId; the answer alone, or another kind’s id, does not', async () => {

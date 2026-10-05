@@ -378,7 +378,7 @@ async function collect(): Promise<Record<string, string>> {
       riskFlags: [],
       expect: { to: ['someone@example.test'], cc: [], bcc: [], subject: 'hello' },
     });
-    // At a terminal, where the person is shown what approves it; the store itself says only NOT_FOUND (D2).
+    // At a terminal too, another kind's id is the one NOT_FOUND (design 2026-10-05 §D2), as it is at the store.
     out['hint send approval used for a change'] = normalise(
       m,
       (await refusalAsync(() => beginChangeApproval(m.core, send.approvalId, { surface: 'cli' }))).replace(
@@ -438,7 +438,8 @@ test('every sentence the core builds about a channel is byte for byte what it wa
     'deletes the unused Gmail runtime',
     'registers the Slack MCP server with cursor as "slack" again',
     'it will be able to send, not only read',
-    'It is approved with the command that prepared it — and none is locatable here:',
+    // Another kind's id at the terminal: the one NOT_FOUND (design 2026-10-05 §D2), no longer the send's approvers.
+    'an approval is only found by the surface, the kind and the owner it was prepared for',
     "add one with Gmail's inbox add",
     'is not a Slack workspace',
     'is an option of the Gmail server; the Slack server has no such option',

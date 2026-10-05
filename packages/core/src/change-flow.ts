@@ -150,6 +150,8 @@ export function changeToolResult<T>(outcome: GatedOutcome<T>): Record<string, un
     preview: prepared.preview,
     expiresAt: prepared.expiresAt,
     next: prepared.next,
+    // Where the approval stands (design 2026-10-05 §D8): pending, and whether the person's yes in the chat claims it.
+    approval: prepared.approval,
   };
 }
 
@@ -227,6 +229,7 @@ export async function gatedChangeAtTerminal<T>(
         policy: prepared.policy,
         preview: prepared.preview,
         expiresAt: prepared.expiresAt,
+        approval: prepared.approval,
       },
     });
   }
