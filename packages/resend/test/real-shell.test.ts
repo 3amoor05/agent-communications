@@ -7,6 +7,7 @@ import {
   environmentAssignments,
   FOUR_FOLDERS,
   freshShell,
+  inWindowsShells,
   isCanonical,
   NEEDS_TERMINAL,
   PATH_OPTIONS,
@@ -142,4 +143,67 @@ test('a Resend change prepared through Resend’s server is approved at a fresh 
     assert.equal((await harness.core.config.load()).accounts[ACCOUNT]?.sendPolicy, 'chat');
   }
   assertClean(harness, person, before);
+});
+
+// ── D7: the wait a refusal names, pasted beside the approve ─────────────────────────────────────────────────────
+
+test('a send refused for want of the person names Resend’s own approve and send wait; pasted, the wait sees the person approve at a fresh terminal, and nothing is sent (D7-a)', async (t) => {
+  const harness = await newHarness();
+  t.after(() => harness.close());
+  await harness.addAccount({ name: ACCOUNT, mode: 'send', sendPolicy: 'confirm' });
+  const run = (argv: readonly string[]) => harness.cli(['--json', ...argv], { platform: process.platform });
+  const prepared = await run([
+    ...['send', 'prepare', '--account', ACCOUNT, '--from', 'Acme <hello@acme.test>'],
+    ...['--to', 'sam@partner.test', '--subject', 'Phase 2', '--text', 'The plan is in the thread.'],
+  ]);
+  assert.equal(prepared.code, 0, prepared.stdout);
+  const id = String((prepared.json().data as { approvalId?: string } | undefined)?.approvalId);
+  const refused = await run([
+    ...['send', 'execute', id, '--account', ACCOUNT],
+    ...[
+      '--expect-to',
+      'sam@partner.test',
+      '--expect-cc',
+      'none',
+      '--expect-bcc',
+      'none',
+      '--expect-subject',
+      'Phase 2',
+    ],
+  ]);
+  assert.equal(refused.code, 10, refused.stdout);
+  const { error } = refused.json();
+  assert.equal(error?.code, 'APPROVAL_PENDING');
+  const hint = String(error?.hint);
+  assert.deepEqual(environmentAssignments(hint), []);
+  const approve = commandEndingWith(hint, ['approve', id]);
+  const wait = commandEndingWith(hint, ['send', 'wait', id]);
+  const before = harness.fake.requests.length;
+
+  const person = shellFor(harness, 'person');
+  const agent = shellFor(harness, 'agent');
+  if (process.platform === 'win32') {
+    // No terminal for the person here: `approve` refuses for want of one. Withdrawn from the printing store, the wait
+    // pasted in each Windows shell finds it there, as only its pins could.
+    refusesWithoutATerminal(approve, person, ['approve', id]);
+    await harness.core.approvals.revoke(id, 'revoked by the user', { disposition: 'person' });
+    inWindowsShells(wait, agent, (result, name) => {
+      assert.equal(result.status, 0, `${name}: ${result.stdout}\n${result.stderr}`);
+      assert.match(result.stdout, new RegExp(`^${id}: revoked`, 'm'), name);
+    });
+  } else {
+    assertResendCommand(approve, harness, ['approve', id]);
+    assertResendCommand(wait, harness, ['send', 'wait', id]);
+    if (NEEDS_TERMINAL.skip === undefined) {
+      // The agent waits as it was told, and the person approves meanwhile, each in a shell of their own.
+      const waiting = posixShellAsync(wait, agent);
+      const approved = await posixTerminalAsync(approve, person);
+      assert.equal(approved.status, 0, approved.stdout);
+      const waited = await waiting;
+      assert.equal(waited.status, 0, `${waited.stdout}\n${waited.stderr}`);
+      assert.match(waited.stdout, new RegExp(`^${id}: approved, and can be used now`, 'm'));
+    }
+  }
+  assertClean(harness, person, before);
+  assertClean(harness, agent, before);
 });

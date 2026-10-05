@@ -8,6 +8,7 @@ the command's.
 
     python3 terminal.py challenge /bin/sh -c '<the printed line>'
     python3 terminal.py enter /bin/sh -c '<the printed line>'     # presses Enter at the prompt: cancels
+    python3 terminal.py save /bin/sh -c '<the printed line>'      # a download's question: Enter, its default folder
 
 POSIX only (Python's `pty`); test/helpers/real-shell.mjs skips where it is missing. Nothing here reads the code from
 anywhere but the screen.
@@ -19,6 +20,8 @@ import re
 import sys
 
 ASKED = re.compile(rb"Type (\S+) to ")
+# Where a download is saved, asked at the terminal (`approve` of a download's question): Enter takes the default.
+SAVE = re.compile(rb"Save them to ")
 
 
 def main() -> int:
@@ -40,7 +43,11 @@ def main() -> int:
         seen += chunk
         sys.stdout.buffer.write(chunk)
         sys.stdout.flush()
-        if not answered:
+        if not answered and answer == "save":
+            if SAVE.search(seen):
+                answered = True
+                os.write(fd, b"\r")
+        elif not answered:
             asked = ASKED.search(seen)
             if asked:
                 answered = True

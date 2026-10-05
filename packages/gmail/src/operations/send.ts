@@ -1,6 +1,7 @@
 import {
   type ApprovalObject,
   type ApprovalRecord,
+  approveAndWaitSentence,
   type Caps,
   CommsError,
   canonicalAddress,
@@ -781,20 +782,16 @@ export async function prepareSend(context: GmailContext, alias: string, draftId:
  * agent never asks the person to relay it, and never prepares again.
  */
 function confirmNextStep(context: GmailContext, approvalId: string): string {
-  const instead = 'Show the preview to the user; they can send it from Gmail. You cannot approve this yourself.';
-  return handoffSentence(
-    context.handoffs.own(['approve', approvalId]),
-    (approve) => {
+  return approveAndWaitSentence(
+    context.handoffs,
+    context.surface,
+    approvalId,
+    (approve, wait) => {
       const first = `Show the preview to the user, then have them run ${approve} in a terminal`;
       const last = 'or they can send it from Gmail. You cannot approve this yourself.';
-      if (context.surface === 'mcp') return `${first}; learn when they have with gmail_send_wait — ${last}`;
-      return handoffSentence(
-        context.handoffs.own(['send', 'wait', approvalId]),
-        (wait) => `${first}; learn when they have with ${wait} — ${last}`,
-        { instead: `${first} — ${last}` },
-      );
+      return wait === undefined ? `${first} — ${last}` : `${first}; learn when they have with ${wait} — ${last}`;
     },
-    { instead },
+    { instead: 'Show the preview to the user; they can send it from Gmail. You cannot approve this yourself.' },
   );
 }
 
@@ -963,11 +960,16 @@ export async function executeSend(
       expect,
     },
     {
-      // Gmail's own words, given here because the approval store is shared and no longer speaks for any product.
-      pendingHint: handoffSentence(
-        context.handoffs.own(['approve', options.approvalId]),
-        (command) =>
-          `Ask the user to approve it in the terminal (${command}) or in a trusted client form, or to send it from Gmail.`,
+      // Gmail's own words, given here because the approval store is shared and no longer speaks for any product: the
+      // person's `approve`, and the wait that learns when they have used it, as this surface takes it (§D7).
+      pendingHint: approveAndWaitSentence(
+        context.handoffs,
+        context.surface,
+        options.approvalId,
+        (command, wait) =>
+          `Ask the user to approve it in the terminal (${command}) or in a trusted client form, or to send it from Gmail${
+            wait === undefined ? '' : `; learn when they have with ${wait}`
+          }.`,
         { instead: 'Ask the user to approve it in a trusted client form, or to send it from Gmail.' },
       ),
       platform: context.platform,

@@ -624,6 +624,14 @@ test('under confirm, an answer to a form nobody raised is refused, even from a t
     const refused = toolError(forged);
     assert.equal(refused.code, 'APPROVAL_REQUIRED');
     assert.match(refused.message, /not to a form this asked/);
+    // Where the answer goes instead: the person's own `approve`, located, and the wait that learns of it (D7-b).
+    assert.ok(
+      refused.hint?.includes(
+        `Ask the person to run ${gmailInline(harness.core.paths, ['approve', String(asked.choiceId)])} in their own terminal and answer there; wait for their answer with gmail_send_wait, then call again`,
+      ),
+      String(refused.hint),
+    );
+    assertNoBareCommand(refused.hint ?? '');
     assert.equal(form.asked.length, 0, 'a form was raised');
     assert.equal(asV2(await harness.core.approvals.get(String(asked.choiceId)))?.state, 'pending');
     assert.deepEqual(await listing(cwd), []);

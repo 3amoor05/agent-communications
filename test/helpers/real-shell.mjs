@@ -362,7 +362,8 @@ export const NEEDS_TERMINAL = TERMINAL_PYTHON
 
 /**
  * `line` pasted into `/bin/sh` at a terminal, as the person runs their own commands: both ends are a terminal, and
- * when the command asks for its code it is typed back (`answer: 'challenge'`), or Enter is pressed (`'enter'`).
+ * when the command asks for its code it is typed back (`answer: 'challenge'`), or Enter is pressed (`'enter'`); asked
+ * where a download is saved, Enter takes its default folder (`'save'`).
  */
 export function posixTerminal(line, { env, cwd, answer = 'challenge' }) {
   if (!TERMINAL_PYTHON) throw new Error('no pseudo-terminal here: see NEEDS_TERMINAL');

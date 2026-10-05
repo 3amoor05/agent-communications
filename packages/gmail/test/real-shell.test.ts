@@ -12,6 +12,7 @@ import {
   type Folder,
   type Folders,
   freshShell,
+  inWindowsShells,
   isCanonical,
   NEEDS_TERMINAL,
   ON_POSIX,
@@ -29,6 +30,8 @@ import {
   suiteTraces,
   wordsOf,
 } from '../../../test/helpers/real-shell.mjs';
+import { GmailContext } from '../src/context.ts';
+import { createDraft } from '../src/operations/drafts.ts';
 import type { FakeMessage } from './support/fake-google.ts';
 import { type Harness, newHarness, tempDir } from './support/harness.ts';
 
@@ -304,4 +307,87 @@ test('a Gmail change prepared through Gmail’s server is approved at a fresh te
   assert.equal(p.harness.google.requests.length, before, 'Google was asked nothing');
   assert.deepEqual(sends(p.harness), []);
   assert.ok(existsSync(join(p.folders.stateDir, 'approvals', `${id}.json`)), 'the approval is in the pinned state');
+});
+
+// ── D7: the wait a refusal names, pasted beside the approve ─────────────────────────────────────────────────────
+
+/**
+ * Pastes the wait a refusal printed where the agent runs it, and what it then reports: on POSIX at once, while the
+ * person approves at a fresh terminal — the wait sees their approval; on Windows, where no test has a terminal to give
+ * the person, `approve` refuses for want of one, the approval is cancelled from the printing process, and the wait
+ * pasted in each Windows shell finds it there, cancelled. Either way the wait reached the printing process's store, by
+ * its pins: from the decoys it would find nothing.
+ */
+async function waitBesideApprove(
+  p: Printing,
+  { approve, wait, id, answer }: { approve: string; wait: string; id: string; answer: 'challenge' | 'save' },
+): Promise<void> {
+  const person = shellFor(p, 'person');
+  const agent = shellFor(p, 'agent');
+  if (process.platform === 'win32') {
+    refusesWithoutATerminal(approve, person, ['approve', id]);
+    const cancelled = await p.print(['send', 'cancel', id]);
+    assert.equal(cancelled.status, 0, `${cancelled.stdout}\n${cancelled.stderr}`);
+    inWindowsShells(wait, agent, (result, name) => {
+      assert.equal(result.status, 0, `${name}: ${result.stdout}\n${result.stderr}`);
+      assert.match(result.stdout, new RegExp(`^${id}: revoked`, 'm'), name);
+    });
+  } else if (NEEDS_TERMINAL.skip === undefined) {
+    // The agent waits as it was told, and the person approves meanwhile, each in a shell of their own.
+    const waiting = posixShellAsync(wait, agent);
+    const approved = await posixTerminalAsync(approve, { ...person, answer });
+    assert.equal(approved.status, 0, approved.stdout);
+    const waited = await waiting;
+    assert.equal(waited.status, 0, `${waited.stdout}\n${waited.stderr}`);
+    assert.match(
+      waited.stdout,
+      new RegExp(`^${id}: ${answer === 'save' ? 'answered' : 'approved'}, and can be used now`, 'm'),
+    );
+  }
+  assertClean(person);
+  assertClean(agent);
+}
+
+test('a send refused for want of the person names Gmail’s own approve and send wait; pasted, the wait sees the person approve at a fresh terminal, and nothing is sent (D7-a)', async () => {
+  const p = await printing();
+  const context = new GmailContext({ core: p.harness.core, env: p.harness.env });
+  const { draftId } = await createDraft(context, 'work', { to: ['sam@partner.test'], subject: 'Tuesday', text: 'hi' });
+  const prepared = envelope(await p.print(['send', 'prepare', draftId, '--inbox', 'work', '--json']));
+  const id = String(prepared.data?.approvalId);
+  const refused = envelope(
+    await p.print([
+      ...['send', 'execute', draftId, '--inbox', 'work', '--approval', id],
+      ...['--expect-to', 'sam@partner.test', '--expect-subject', 'Tuesday', '--json'],
+    ]),
+  );
+  assert.equal(refused.error?.code, 'APPROVAL_PENDING', JSON.stringify(refused));
+  const hint = String(refused.error?.hint);
+  assert.deepEqual(environmentAssignments(hint), []);
+  const approve = commandEndingWith(hint, ['approve', id]);
+  const wait = commandEndingWith(hint, ['send', 'wait', id]);
+  if (process.platform !== 'win32') {
+    assertGmailCommand(approve, p, FOUR_FOLDERS, ['approve', id]);
+    assertGmailCommand(wait, p, FOUR_FOLDERS, ['send', 'wait', id]);
+  }
+  await waitBesideApprove(p, { approve, wait, id, answer: 'challenge' });
+  assert.deepEqual(sends(p.harness), [], 'approving and waiting send nothing');
+  assert.deepEqual(sealAttempts(p.sealLog), [], 'the printing process reached nothing off the machine either');
+});
+
+test('a download under confirm names Gmail’s own approve and its wait; pasted, the wait sees the person answer at a fresh terminal (D7-b)', async () => {
+  const p = await printing();
+  assert.equal((await p.print(['inbox', 'policy', 'work', '--change', 'confirm'])).status, 0);
+  const asked = await p.print(['attachments', 'download', 'm1', '--inbox', 'work']);
+  assert.equal(asked.status, 10, asked.stderr);
+  const id = /--choice (ap_[0-9A-Z]+)/.exec(asked.stderr)?.[1] as string;
+  assert.ok(id, asked.stderr);
+  assert.deepEqual(environmentAssignments(`${asked.stdout}${asked.stderr}`), []);
+  const approve = commandEndingWith(asked.stderr, ['approve', id]);
+  const wait = commandEndingWith(asked.stderr, ['send', 'wait', id]);
+  if (process.platform !== 'win32') {
+    assertGmailCommand(approve, p, FOUR_FOLDERS, ['approve', id]);
+    assertGmailCommand(wait, p, FOUR_FOLDERS, ['send', 'wait', id]);
+  }
+  await waitBesideApprove(p, { approve, wait, id, answer: 'save' });
+  assert.deepEqual(sends(p.harness), []);
 });

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
+import { approveAndWaitSentence } from './approval-handoffs.ts';
 import type { PublicApprovalView } from './approval-outcome.ts';
 import { renderApprovalWait } from './approval-wait-surface.ts';
 import { approveChangeAtTerminal, gatedChangeAtTerminal, refuseUnclaimedApproval } from './change-flow.ts';
@@ -968,10 +969,14 @@ function hiddenPathApprovalHint(prepared: PreparedChange, handoffs: CliHandoffs)
   const carrying = `\`--approval ${prepared.approvalId}\``;
   const hidden = ' Its file path is not repeated here because it contains text this output neutralises.';
   return prepared.policy === 'confirm'
-    ? handoffSentence(
-        handoffs.own(['approve', prepared.approvalId]),
-        (approve) =>
-          `Show the person the preview. They run ${approve}; then run the same command again with ${carrying} added.${hidden}`,
+    ? approveAndWaitSentence(
+        handoffs,
+        'cli',
+        prepared.approvalId,
+        (approve, wait) =>
+          `Show the person the preview. They run ${approve}${
+            wait === undefined ? '' : `; learn when they have with ${wait},`
+          } then run the same command again with ${carrying} added.${hidden}`,
       )
     : `Show the person the preview. Once they say yes, run the same command again with ${carrying} added.${hidden}`;
 }

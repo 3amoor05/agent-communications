@@ -1,3 +1,4 @@
+import { approveAndWaitSentence, changePendingHint } from './approval-handoffs.ts';
 import type { ApprovalObject } from './approval-outcome.ts';
 import { asLegacy, asV2, type StoredApproval } from './approval-stored.ts';
 import {
@@ -21,7 +22,7 @@ import {
 } from './config.ts';
 import type { Core } from './core.ts';
 import { CommsError, toCommsError } from './errors.ts';
-import { handoffSentence, requireHandoffs } from './handoffs.ts';
+import { requireHandoffs } from './handoffs.ts';
 import { lookupName, resolveName } from './names.ts';
 import { truncateDisplay } from './render.ts';
 
@@ -240,10 +241,8 @@ export async function claimChange(
       approvalId,
       { change: binding, policy },
       {
-        pendingHint: handoffSentence(
-          requireHandoffs(core, options.platform).own(['approve', approvalId]),
-          (command) => `Ask the user to run ${command} in their own terminal, then try again with the same approval.`,
-        ),
+        // The person's `approve` and the wait that learns when they have used it, as this surface takes it (§D7).
+        pendingHint: changePendingHint(requireHandoffs(core, options.platform), options.surface, approvalId),
         platform: options.platform,
         handoffs: core.handoffs,
       },
@@ -438,10 +437,14 @@ function changePolicyOf(record: Pick<ApprovalRecord, 'requiredPolicy'>): ChangeP
 function nextStep(approvalId: string, policy: ChangePolicy, core: Core, options: ChangeOptions): string {
   return policy === 'chat'
     ? `Show this preview to the user and ask. If they say yes, claim approval ${approvalId} and apply the change; if not, revoke it.`
-    : handoffSentence(
-        requireHandoffs(core, options.platform).own(['approve', approvalId]),
-        (command) =>
-          `The change policy is confirm: ask the user to run ${command} in their own terminal and type the code it shows. Then claim approval ${approvalId} and apply the change.`,
+    : approveAndWaitSentence(
+        requireHandoffs(core, options.platform),
+        options.surface,
+        approvalId,
+        (approve, wait) =>
+          `The change policy is confirm: ask the user to run ${approve} in their own terminal and type the code it shows${
+            wait === undefined ? '' : `; learn when they have with ${wait}`
+          }. Then claim approval ${approvalId} and apply the change.`,
       );
 }
 

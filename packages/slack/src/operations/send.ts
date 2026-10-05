@@ -5,6 +5,7 @@ import {
   type ApprovalOutcome,
   type ApprovalRecord,
   type AttachPolicy,
+  approveAndWaitSentence,
   type CanonicalChannelMessage,
   type ChannelPreview,
   type ClaimOptions,
@@ -635,7 +636,7 @@ export function approveCommand(approvalId: string, handoffs: CliHandoffs): Hando
  * it may not have, to take a step its own tool takes. No input is echoed: the emoji and the channel are the caller's
  * own, and this may be printed at a terminal.
  */
-function waitingHint(
+export function waitingHint(
   kind: 'post' | 'reaction',
   surface: 'cli' | 'mcp' | undefined,
   approvalId: string,
@@ -651,10 +652,12 @@ function waitingHint(
       : kind === 'post'
         ? 'run the same post send command again'
         : `run the same react command again with \`--approval ${approvalId}\` added`;
-  // Terminal-only under `confirm`: with no command here, the sentence saying why, and no other way to approve it.
-  const ask = handoffSentence(
-    handoffs.own(['approve', approvalId]),
-    (command) => `${show} ask them to run ${command} in their own terminal. When they have, ${again}.`,
+  // Terminal-only under `confirm`: with no command here, the sentence saying why, and no other way to approve it. With
+  // one, the wait that learns when they have used it, as this surface takes it (design 2026-10-05 §D7).
+  const ask = approveAndWaitSentence(handoffs, surface ?? 'cli', approvalId, (command, wait) =>
+    wait === undefined
+      ? `${show} ask them to run ${command} in their own terminal. When they have, ${again}.`
+      : `${show} ask them to run ${command} in their own terminal; learn when they have with ${wait}, then ${again}.`,
   );
   return `${ask} You cannot approve this yourself.`;
 }

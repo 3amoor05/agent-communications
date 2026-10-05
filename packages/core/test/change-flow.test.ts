@@ -258,10 +258,12 @@ test('a terminal change handoff renders its approval command for the selected sh
       const windows = coreHandoffs(core.paths, 'win32');
       const approve = windows.own(['approve', approvalId]);
       const rerun = windows.own(['policy', '--account', 'acme/slack', 'chat', '--approval', approvalId]);
-      assert.ok(isCommand(approve) && isCommand(rerun));
+      // And the wait that learns when they have, quoted for Windows too (design 2026-10-05 §D7).
+      const wait = windows.own(['approval', 'wait', approvalId]);
+      assert.ok(isCommand(approve) && isCommand(rerun) && isCommand(wait));
       assert.equal(
         error.hint,
-        `Show the person the preview. They run ${inlineCommand(approve)}; then run ${inlineCommand(rerun)}.`,
+        `Show the person the preview. They run ${inlineCommand(approve)}; learn when they have with ${inlineCommand(wait)}, then run ${inlineCommand(rerun)}.`,
       );
       return true;
     },

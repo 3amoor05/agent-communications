@@ -10,6 +10,7 @@ import {
   environmentAssignments,
   FOUR_FOLDERS,
   freshShell,
+  inWindowsShells,
   isCanonical,
   NEEDS_TERMINAL,
   PATH_OPTIONS,
@@ -197,4 +198,56 @@ test('a Slack change prepared through Slack’s server is approved at a fresh te
     assert.equal((await m.harness.core.config.load()).accounts.acme?.sendPolicy, 'chat');
   }
   assertClean(m, person);
+});
+
+// ── D7: the wait a refusal names, pasted beside the approve ─────────────────────────────────────────────────────
+
+test('a reaction refused for want of the person names Slack’s own approve and approval wait; pasted, the wait sees the person approve at a fresh terminal, and Slack is asked nothing (D7-a)', async (t) => {
+  const m = await machine();
+  t.after(() => m.slack.close());
+  const held = await m.cli([
+    '--json',
+    'react',
+    '--workspace',
+    'acme',
+    '--channel',
+    'C1',
+    '--ts',
+    '1.1',
+    '--emoji',
+    'tada',
+  ]);
+  assert.equal(held.code, 10, held.stdout);
+  const { error } = JSON.parse(held.stdout) as { error: { hint: string; details: { approvalId: string } } };
+  const id = error.details.approvalId;
+  assert.deepEqual(environmentAssignments(error.hint), []);
+  const approve = commandEndingWith(error.hint, ['approve', id]);
+  const wait = commandEndingWith(error.hint, ['approval', 'wait', id]);
+
+  const person = shellFor(m, 'person');
+  const agent = shellFor(m, 'agent');
+  if (process.platform === 'win32') {
+    // No terminal for the person here: `approve` refuses for want of one. Withdrawn from the printing store, the wait
+    // pasted in each Windows shell finds it there, as only its pins could.
+    refusesWithoutATerminal(approve, person, ['approve', id]);
+    await m.harness.core.approvals.revoke(id, 'revoked by the user', { disposition: 'person' });
+    inWindowsShells(wait, agent, (result, name) => {
+      assert.equal(result.status, 0, `${name}: ${result.stdout}\n${result.stderr}`);
+      assert.match(result.stdout, new RegExp(`^${id}: revoked`, 'm'), name);
+    });
+  } else {
+    assertSlackCommand(approve, m, ['approve', id]);
+    assertSlackCommand(wait, m, ['approval', 'wait', id]);
+    if (NEEDS_TERMINAL.skip === undefined) {
+      // The agent waits as it was told, and the person approves meanwhile, each in a shell of their own.
+      const waiting = posixShellAsync(wait, agent);
+      const approved = await posixTerminalAsync(approve, person);
+      assert.equal(approved.status, 0, approved.stdout);
+      const waited = await waiting;
+      assert.equal(waited.status, 0, `${waited.stdout}\n${waited.stderr}`);
+      assert.match(waited.stdout, new RegExp(`^${id}: approved, and can be used now`, 'm'));
+    }
+  }
+  assertClean(m, person);
+  assertClean(m, agent);
 });

@@ -1,6 +1,7 @@
 import {
   agentMarker,
   approvalsOf,
+  approveAndWaitSentence,
   approveChangeAtTerminal,
   CommsError,
   canPrompt,
@@ -438,9 +439,15 @@ a macOS dialog may be waiting) · 77 permission needed (macOS privacy) · 78 con
         const marker = agentMarker(env);
         if (marker) {
           throw new CommsError('APPROVAL_REQUIRED', 'only a person can approve a change, not an agent', {
-            hint: handoffSentence(
-              context.handoffs.own(['approve', approvalId]),
-              (command) => `Ask the person to run ${command} in their own terminal.`,
+            /*
+             * And the wait that learns when they have (design 2026-10-05 §D7). WhatsApp has none of its own — it has no
+             * send, and its server approves nothing — so it is core's `approval wait`, located as the core this
+             * package has installed.
+             */
+            hint: approveAndWaitSentence(context.handoffs, 'cli', approvalId, (command, wait) =>
+              wait === undefined
+                ? `Ask the person to run ${command} in their own terminal.`
+                : `Ask the person to run ${command} in their own terminal; learn when they have with ${wait}.`,
             ),
             details: { marker },
           });

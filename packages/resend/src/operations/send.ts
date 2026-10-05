@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import {
   type ApprovalObject,
   type ApprovalRecord,
+  approveAndWaitSentence,
   type CliHandoffs,
   CommsError,
   canonicalAddress,
@@ -453,9 +454,15 @@ export async function prepareSend(context: ResendContext, name: string, input: S
     expiresAt: record.expiresAt,
     nextStep:
       effective === 'confirm'
-        ? `${handoffSentence(
-            approveCommand(context.handoffs, record.approvalId),
-            (command) => `Show the preview to the user, then have them run ${command} in their own terminal.`,
+        ? `${approveAndWaitSentence(
+            context.handoffs,
+            context.surface,
+            record.approvalId,
+            // The person's `approve`, and the wait that learns when they have used it, as this surface takes it (§D7).
+            (command, wait) =>
+              `Show the preview to the user, then have them run ${command} in their own terminal${
+                wait === undefined ? '' : `; learn when they have with ${wait}`
+              }.`,
             { instead: 'Show the preview to the user; they approve it at their own terminal.' },
           )} You cannot approve this yourself. Then execute it with the same approval id and the recipients and subject shown.`
         : 'Show the preview to the user verbatim and wait for an explicit yes. Then execute it with the same approval id and the recipients and subject shown above.',
@@ -712,10 +719,14 @@ async function claimAndSend(
       expect: options.expect,
     },
     {
-      pendingHint: `${handoffSentence(
-        approveCommand(context.handoffs, options.approvalId),
-        (command) =>
-          `Ask the user to run ${command} in their own terminal, then execute it again with the same approval.`,
+      pendingHint: `${approveAndWaitSentence(
+        context.handoffs,
+        context.surface,
+        options.approvalId,
+        (command, wait) =>
+          `Ask the user to run ${command} in their own terminal${
+            wait === undefined ? ',' : `; learn when they have with ${wait},`
+          } then execute it again with the same approval.`,
         { instead: 'Ask the user to approve it at their own terminal, then execute it again with the same approval.' },
       )} You cannot approve it yourself.`,
       platform: context.platform,

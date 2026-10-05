@@ -88,11 +88,11 @@ export const TERMINAL_PYTHON: string | null;
 export const NEEDS_TERMINAL: TestSkip;
 export function posixTerminal(
   line: string,
-  options: { env: NodeJS.ProcessEnv; cwd: string; answer?: 'challenge' | 'enter' },
+  options: { env: NodeJS.ProcessEnv; cwd: string; answer?: 'challenge' | 'enter' | 'save' },
 ): SpawnSyncReturns<string>;
 export function posixTerminalAsync(
   line: string,
-  options: { env: NodeJS.ProcessEnv; cwd: string; answer?: 'challenge' | 'enter' },
+  options: { env: NodeJS.ProcessEnv; cwd: string; answer?: 'challenge' | 'enter' | 'save' },
 ): Promise<Finished>;
 export const ON_WINDOWS: TestSkip;
 export const ON_POSIX: TestSkip;

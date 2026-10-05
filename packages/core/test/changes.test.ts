@@ -917,11 +917,16 @@ test("the terminal's approve renders its handoff for the selected shell platform
   const { core } = coreWith({});
   const approve = coreHandoffs(core.paths, 'win32').own(['approve', '7']);
   assert.ok(isCommand(approve) && / approve "7"$/.test(approve.line ?? ''), JSON.stringify(approve));
+  const wait = coreHandoffs(core.paths, 'win32').own(['approval', 'wait', '7']);
+  assert.ok(isCommand(wait) && / approval wait "7"$/.test(wait.line ?? ''), JSON.stringify(wait));
   await assert.rejects(
     approveChangeAtTerminal(core, '7', { CODEX_SANDBOX: '1' }, { color: false, platform: 'win32' }),
     (error: unknown) => {
       assert.ok(error instanceof CommsError);
-      assert.equal(error.hint, `Ask the user to run ${inlineCommand(approve)} in their own terminal.`);
+      assert.equal(
+        error.hint,
+        `Ask the user to run ${inlineCommand(approve)} in their own terminal; learn when they have with ${inlineCommand(wait)}.`,
+      );
       return true;
     },
   );
