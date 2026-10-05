@@ -10,6 +10,7 @@ import {
   collapseWhitespace,
   defaultAttachDeny,
   domainOf,
+  type HandoffMaker,
   homeDirectory,
   isControl,
   isInvisible,
@@ -181,6 +182,8 @@ export interface AttachPolicyInput {
   env: NodeJS.ProcessEnv;
   roots: readonly string[];
   deny: readonly string[];
+  /** The context's handoffs, for the command the jail's refusal names: core's `attach roots add`, located from here. */
+  handoffs: HandoffMaker;
 }
 
 /** Reads an attachment through core's attachment jail, and says exactly what it is. */
@@ -193,6 +196,7 @@ export async function readAttachment(
     roots: [...policy.roots],
     deny: [...defaultAttachDeny(policy.configDir, policy.env), ...policy.deny],
     home,
+    handoffs: policy.handoffs,
   });
   const info = await stat(real);
   if (info.size > MAX_ATTACHMENT_BASE64_BYTES) throw bad(`${basename(real)} is larger than Resend accepts`);

@@ -58,7 +58,8 @@ function codeFor(status: number, name: string): { code: ErrorCode; message: stri
     return {
       code: 'SCOPE_MISSING',
       message: 'this account’s key can only send email; Resend refuses everything else with it',
-      hint: 'Reads need a full-access key. Add one under another name with `agent-resend account add`.',
+      // Prose, not a command: this layer has no installation to name one from, and the operations above it say how.
+      hint: 'Reads need a full-access key. A person adds one under another account name, at their own terminal.',
     };
   }
   if (status === 401 || name === 'restricted_api_key' || name === 'suspended_api_key') {

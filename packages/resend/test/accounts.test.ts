@@ -4,6 +4,7 @@ import { CommsError } from '@agentcomms/core';
 import { secretRefFor } from '../src/accounts.ts';
 import { ResendContext } from '../src/context.ts';
 import { runDoctor } from '../src/operations/doctor.ts';
+import { assertNoBareCommand, resendInline, resendText } from './support/handoffs.ts';
 import { FULL, type Harness, LOCKED, newHarness, SENDING } from './support/harness.ts';
 
 /**
@@ -250,13 +251,17 @@ test('an invalid account renders its repair for the selected shell platform', as
     },
     { consent: { kind: 'loosening-consent', paths: ['accounts.7/resend.mode'] } },
   );
+  // Resend's own `account remove`, located and quoted for Windows: the name is quoted there, as `shellCommand` does.
+  const repair = `Remove it with ${resendInline(harness.core, ['account', 'remove', '7/resend'], 'win32')} and add it again, or fix it in the configuration file.`;
+  assert.match(repair, /"7\/resend"/);
   await assert.rejects(harness.context('cli', 'win32').accounts.require('7/resend'), (error: CommsError) => {
-    assert.match(error.hint ?? '', /agent-resend account remove "7\/resend"/);
+    assert.equal(error.hint, repair);
+    assertNoBareCommand(error.hint ?? '');
     return true;
   });
   const shown = await harness.cli(['--json', 'account', 'show', '7/resend'], { platform: 'win32' });
   assert.equal(shown.code, 78, shown.stdout);
-  assert.match(String(shown.json().error?.hint), /agent-resend account remove "7\/resend"/);
+  assert.equal(shown.json().error?.hint, repair);
 });
 
 test('show and doctor say plainly that read-only is this package’s promise, not the key’s', async () => {
@@ -291,5 +296,9 @@ test('doctor renders its repair commands for the selected shell platform', async
     { offline: true },
   );
   const missing = result.accounts[0]?.checks.find((check) => check.name === 'key stored');
-  assert.equal(missing?.fix, 'agent-resend account remove "7/resend", then agent-resend account add "7/resend"');
+  assert.equal(
+    missing?.fix,
+    `${resendText(harness.core, ['account', 'remove', '7/resend'], 'win32')}, then ${resendText(harness.core, ['account', 'add', '7/resend'], 'win32')}`,
+  );
+  assert.match(String(missing?.fix), /"7\/resend"/);
 });

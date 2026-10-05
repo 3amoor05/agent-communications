@@ -11,6 +11,7 @@ import {
   updateCheckPath,
   updateLaterChange,
 } from '@agentcomms/core';
+import { coreText } from './support/handoffs.ts';
 import { type Harness, newHarness, type ToolResult, tempDir } from './support/harness.ts';
 
 /*
@@ -142,8 +143,10 @@ test('agent-resend: with nobody to ask a command exits 11 naming both ways on, a
     assert.equal(listed.code, 11, listed.stdout + listed.stderr);
     const error = (listed.json() as { error: { code: string; message: string } }).error;
     assert.equal(error.code, 'UPDATE_REQUIRED');
-    assert.match(error.message, /`agentcomms update`/);
-    assert.match(error.message, /`agentcomms update --later`/);
+    // Core's own, through Resend's installed dependency on it: located, never `agentcomms` by name (CUE-403).
+    assert.ok(error.message.includes(`\`${coreText(harness.core, ['update'])}\``), error.message);
+    assert.ok(error.message.includes(`\`${coreText(harness.core, ['update', '--later'])}\``), error.message);
+    assert.doesNotMatch(error.message, /`agentcomms /);
     // Resend's package installed globally at the latest, and this copy older: stopped, and told to run the installed
     // one.
     updateOut(harness, { registered: [], global: ['resend'] });

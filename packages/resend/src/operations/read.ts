@@ -7,6 +7,7 @@ import {
   domainOf,
   ensurePrivateDir,
   expandHome,
+  handoffSentence,
   homeDirectory,
   newBoundary,
   relativeSubpath,
@@ -148,7 +149,7 @@ export async function listDomains(
   name: string,
   options: { domain?: string | undefined } = {},
 ): Promise<Readable<{ domains: DomainRow[]; records?: DomainRecord[] | undefined }>> {
-  return whenReadable(context, name, async (_named, transport) => {
+  return whenReadable(context, name, async (named, transport) => {
     const page = await resendRequest<Page<Record<string, unknown>>>(transport, 'GET', '/domains');
     const domains = (page.data ?? []).map(domainRow);
     if (options.domain === undefined) return { domains };
@@ -156,7 +157,10 @@ export async function listDomains(
     const found = domains.find((domain) => domain.name.toLowerCase() === wanted || domain.id === wanted);
     if (!found) {
       throw new CommsError('NOT_FOUND', `"${options.domain}" is not one of this team’s domains`, {
-        hint: 'List them with `agent-resend domains --account <org/resend>`.',
+        hint: handoffSentence(
+          context.handoffs.own(['domains', '--account', named.name]),
+          (command) => `List them with ${command}.`,
+        ),
       });
     }
     const detail = await resendRequest<Record<string, unknown>>(

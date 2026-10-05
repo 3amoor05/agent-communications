@@ -37,6 +37,7 @@ import {
 } from '@agentcomms/core';
 import { Command, CommanderError, InvalidArgumentError, Option } from 'commander';
 import { checkNewName } from '../accounts.ts';
+import { RESEND_CALLER } from '../caller.ts';
 import { ResendContext, type ResendContextOptions } from '../context.ts';
 import { RESEND_MCP } from '../mcp/install.ts';
 import {
@@ -189,7 +190,9 @@ is out: update first, or put it off (agentcomms update, agentcomms update --late
       Object.fromEntries(PATH_OPTIONS.map(({ key, option }) => [option, options[key] as string | undefined])),
     );
     invocationCore =
-      Object.keys(pathOverrides).length === 0 && deps.core ? deps.core : openCore({ env, platform, pathOverrides });
+      Object.keys(pathOverrides).length === 0 && deps.core
+        ? deps.core
+        : openCore({ env, platform, pathOverrides, caller: RESEND_CALLER });
     return invocationCore;
   };
 
@@ -315,7 +318,7 @@ is out: update first, or put it off (agentcomms update, agentcomms update --late
         platform,
       );
       // The name first: a name that cannot be taken is refused before anybody types a key for it.
-      checkNewName(await context.config(), name, context.platform);
+      checkNewName(await context.config(), name, context.handoffs);
       const key = await readApiKey(env, streams, { json: options.json, command });
       // Through the machine's one throttle, like every other request: the key is on some team's budget already.
       const inspection = await inspectKey(context, key);
@@ -345,7 +348,7 @@ is out: update first, or put it off (agentcomms update, agentcomms update --late
     .action(
       act(async (context, options) => {
         const result = await listAccounts(context);
-        writeResult(result, output(), (data) => renderAccounts(data, options.color), streams);
+        writeResult(result, output(), (data) => renderAccounts(data, options.color, context.handoffs), streams);
       }),
     );
 

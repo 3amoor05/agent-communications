@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { openCore } from '@agentcomms/core';
+import { RESEND_CALLER } from '../src/caller.ts';
 import { run } from '../src/cli/program.ts';
 import { ResendContext } from '../src/context.ts';
 
@@ -17,8 +18,9 @@ interface ErrorEnvelope {
 test('the Resend operation context carries an explicitly selected platform', () => {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'agent-resend-platform-')));
   const env = { AGENT_COMMS_CONFIG_DIR: join(root, 'config') };
-  const context = new ResendContext({ core: openCore({ env }), env, platform: 'win32' });
+  const context = new ResendContext({ core: openCore({ env, caller: RESEND_CALLER }), env, platform: 'win32' });
   assert.equal(context.platform, 'win32');
+  assert.equal(context.handoffs.platform, 'win32', 'its commands are quoted for that shell');
 });
 
 async function addAccount(domain: string, platform: NodeJS.Platform): Promise<string> {
@@ -34,7 +36,7 @@ async function addAccount(domain: string, platform: NodeJS.Platform): Promise<st
     NO_COLOR: '1',
     CLAUDECODE: '1',
   };
-  const core = openCore({ env });
+  const core = openCore({ env, caller: RESEND_CALLER });
   let stdout = '';
   const out = new PassThrough();
   out.on('data', (chunk) => {

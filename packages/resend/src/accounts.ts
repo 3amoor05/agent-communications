@@ -1,16 +1,17 @@
 import {
   type AccountConfig,
   type ChangePolicy,
+  type CliHandoffs,
   CommsError,
   type Config,
   findById,
-  inlineCommand,
+  handoffSentence,
+  handoffSentenceToFill,
   lookupName,
   nameAvailable,
   newAccountId,
   resolveName,
   type SendPolicy,
-  shellCommand,
 } from '@agentcomms/core';
 
 /**
@@ -33,6 +34,9 @@ import {
  * What stays here is what core cannot say about a Resend account: that its mode is one of the two words (a record
  * with any other is refused, never read as something narrower), what its key can do, and that its secret reference
  * is its own.
+ *
+ * A refusal here names the command that repairs it, made by `handoffs` — the context's, Resend's own CLI as this
+ * installation runs it (CUE-403) — or says why there is none here.
  */
 
 export const PLATFORM = 'resend';
@@ -79,11 +83,7 @@ export function keyPermissionOf(account: Pick<AccountConfig, 'grantedScopes'>): 
  * wrong. Core's schema reads any mode word so that one odd account cannot make the whole file unreadable; acting on
  * one is refused here, as Slack refuses its own.
  */
-export function checkedAccount(
-  name: string,
-  account: AccountConfig,
-  platform: NodeJS.Platform = process.platform,
-): ResendAccount {
+export function checkedAccount(name: string, account: AccountConfig, handoffs: CliHandoffs): ResendAccount {
   const problem = (() => {
     if (account.platform !== PLATFORM) return `it is a ${account.platform} account`;
     if (!(MODES as readonly string[]).includes(String(account.mode))) {
@@ -98,24 +98,34 @@ export function checkedAccount(
   })();
   if (problem !== null) {
     throw new CommsError('CONFIG', `"${name}" is not a Resend account this release can act on: ${problem}`, {
-      hint: `Remove it with ${inlineCommand(shellCommand(['agent-resend', 'account', 'remove', name], platform))} and add it again, or fix it in the configuration file.`,
+      hint: handoffSentence(
+        handoffs.own(['account', 'remove', name]),
+        (command) => `Remove it with ${command} and add it again, or fix it in the configuration file.`,
+        { instead: 'Fix it in the configuration file.' },
+      ),
     });
   }
   return account as ResendAccount;
 }
 
-function notFound(name: string): () => CommsError {
+function notFound(name: string, handoffs: CliHandoffs): () => CommsError {
   return () =>
     new CommsError('NOT_FOUND', `there is no Resend account called "${name}"`, {
-      hint: 'List them with `agent-resend account list`; a person adds one with `agent-resend account add <org/resend>`.',
+      hint: handoffSentence(handoffs.own(['account', 'list']), (listed) =>
+        handoffSentenceToFill(
+          handoffs.own(['account', 'add']),
+          ['<org/resend>'],
+          (adding) => `List them with ${listed}; a person adds one with ${adding}.`,
+        ),
+      ),
     });
 }
 
 /** Every Resend account in `config`, checked, by name. */
-export function resendAccounts(config: Config, platform: NodeJS.Platform = process.platform): NamedAccount[] {
+export function resendAccounts(config: Config, handoffs: CliHandoffs): NamedAccount[] {
   return Object.entries(config.accounts)
     .filter(([, account]) => account.platform === PLATFORM)
-    .map(([name, account]) => ({ name, account: checkedAccount(name, account, platform) }))
+    .map(([name, account]) => ({ name, account: checkedAccount(name, account, handoffs) }))
     .sort((a, b) => (a.name < b.name ? -1 : 1));
 }
 
@@ -123,48 +133,40 @@ export function resendAccounts(config: Config, platform: NodeJS.Platform = proce
  * The account by name, or a refusal that says what to do — through core's `resolveName`, so a name that was replaced
  * is refused with the one it has now rather than reported as unknown.
  */
-export function requireAccount(
-  config: Config,
-  name: string,
-  platform: NodeJS.Platform = process.platform,
-): NamedAccount {
-  const { alias, account } = resolveName(config, 'account', name, notFound(name));
-  if (account.platform !== PLATFORM) throw notFound(name)();
-  return { name: alias, account: checkedAccount(alias, account, platform) };
+export function requireAccount(config: Config, name: string, handoffs: CliHandoffs): NamedAccount {
+  const { alias, account } = resolveName(config, 'account', name, notFound(name, handoffs));
+  if (account.platform !== PLATFORM) throw notFound(name, handoffs)();
+  return { name: alias, account: checkedAccount(alias, account, handoffs) };
 }
 
 /** The account under exactly this name, or null: no former names, no refusal. */
-export function lookupAccount(
-  config: Config,
-  name: string,
-  platform: NodeJS.Platform = process.platform,
-): NamedAccount | null {
+export function lookupAccount(config: Config, name: string, handoffs: CliHandoffs): NamedAccount | null {
   const account = lookupName(config, 'account', name);
   if (!account || account.platform !== PLATFORM) return null;
-  return { name, account: checkedAccount(name, account, platform) };
+  return { name, account: checkedAccount(name, account, handoffs) };
 }
 
 /** The account by its immutable id, under whatever name it has now. */
-export function accountById(
-  config: Config,
-  id: string,
-  platform: NodeJS.Platform = process.platform,
-): NamedAccount | null {
+export function accountById(config: Config, id: string, handoffs: CliHandoffs): NamedAccount | null {
   const found = findById(config, 'account', id);
   if (!found || found.account.platform !== PLATFORM) return null;
-  return { name: found.alias, account: checkedAccount(found.alias, found.account, platform) };
+  return { name: found.alias, account: checkedAccount(found.alias, found.account, handoffs) };
 }
 
 /**
  * Refuses a name a new account cannot take — core's rule, for either config version: the grammar and the platform,
  * free in both maps, and never a former name — with this package's own hint for one already connected.
  */
-export function checkNewName(config: Config, name: string, platform: NodeJS.Platform = process.platform): void {
+export function checkNewName(config: Config, name: string, handoffs: CliHandoffs): void {
   const check = nameAvailable(config, 'account', name, PLATFORM);
   if (check.ok) return;
   if (lookupName(config, 'account', name) || lookupName(config, 'inbox', name)) {
     throw new CommsError('USAGE', `there is already an account called "${name}"`, {
-      hint: `Choose another name, or remove that one first with ${inlineCommand(shellCommand(['agent-resend', 'account', 'remove', name], platform))}.`,
+      hint: handoffSentence(
+        handoffs.own(['account', 'remove', name]),
+        (command) => `Choose another name, or remove that one first with ${command}.`,
+        { instead: 'Choose another name.' },
+      ),
     });
   }
   throw check.error;
@@ -198,26 +200,26 @@ export function changePolicyIn(config: Config, account: ResendAccount): ChangePo
  */
 export class AccountStore {
   readonly #load: () => Promise<Config>;
-  readonly #platform: NodeJS.Platform;
+  readonly #handoffs: CliHandoffs;
 
-  constructor(load: () => Promise<Config>, platform: NodeJS.Platform = process.platform) {
+  constructor(load: () => Promise<Config>, handoffs: CliHandoffs) {
     this.#load = load;
-    this.#platform = platform;
+    this.#handoffs = handoffs;
   }
 
   async list(): Promise<NamedAccount[]> {
-    return resendAccounts(await this.#load(), this.#platform);
+    return resendAccounts(await this.#load(), this.#handoffs);
   }
 
   async find(name: string): Promise<NamedAccount | null> {
-    return lookupAccount(await this.#load(), name, this.#platform);
+    return lookupAccount(await this.#load(), name, this.#handoffs);
   }
 
   async findById(id: string): Promise<NamedAccount | null> {
-    return accountById(await this.#load(), id, this.#platform);
+    return accountById(await this.#load(), id, this.#handoffs);
   }
 
   async require(name: string): Promise<NamedAccount> {
-    return requireAccount(await this.#load(), name, this.#platform);
+    return requireAccount(await this.#load(), name, this.#handoffs);
   }
 }

@@ -1,19 +1,21 @@
 import {
+  type CliHandoffs,
   CommsError,
   type Config,
   type Core,
-  inlineCommand,
+  handoffSentence,
   openCore,
   type PathOverrides,
+  requireHandoffs,
   type SecretStore,
   type SendPolicy,
   secretsStoreOf,
-  shellCommand,
 } from '@agentcomms/core';
 import { AccountStore, type NamedAccount } from './accounts.ts';
 import type { ResendTransport } from './api/client.ts';
 import type { FetchLike, WritePermit } from './api/guard.ts';
 import { Throttle, type ThrottleOptions } from './api/throttle.ts';
+import { PACKAGE_NAME, RESEND_CALLER } from './caller.ts';
 
 /**
  * What every Resend operation needs, assembled once — the same shape as the Gmail and Slack contexts.
@@ -22,6 +24,7 @@ import { Throttle, type ThrottleOptions } from './api/throttle.ts';
  */
 
 export interface ResendContextOptions {
+  /** Core, opened with this package as its caller (`RESEND_CALLER`); opened that way here when left out. */
   core?: Core | undefined;
   env?: NodeJS.ProcessEnv | undefined;
   /** Explicit suite directories, resolved before any store is constructed. */
@@ -38,12 +41,32 @@ export interface ResendContextOptions {
 
 const TEAM_DOMAINS_TTL_MS = 5 * 60 * 1000;
 
+/**
+ * The commands this package prints, located from it (CUE-403): core has to have been opened with Resend as its caller.
+ * A core opened without one — or as another package — would print bare names, or that package's commands for Resend's,
+ * so it is a programming error here rather than a sentence a person reads.
+ */
+function resendHandoffs(core: Core): CliHandoffs {
+  const handoffs = requireHandoffs(core);
+  if (handoffs.caller.packageName !== PACKAGE_NAME) {
+    throw new TypeError(
+      `core was opened as ${handoffs.caller.packageName}, so it would print that package's commands for Resend's: open it with RESEND_CALLER`,
+    );
+  }
+  return handoffs;
+}
+
 export class ResendContext {
   readonly core: Core;
   readonly env: NodeJS.ProcessEnv;
   readonly now: () => Date;
   readonly platform: NodeJS.Platform;
   readonly surface: 'cli' | 'mcp';
+  /**
+   * What every result, refusal and hint names for a person to run: Resend's own CLI as this installation runs it, or
+   * core's through its installed dependency (`own`, `core`), quoted for `platform` — or why there is none here.
+   */
+  readonly handoffs: CliHandoffs;
   readonly accounts: AccountStore;
   readonly #fetch: FetchLike | undefined;
   readonly #throttle: Throttle;
@@ -57,11 +80,13 @@ export class ResendContext {
         env: this.env,
         platform: options.platform ?? process.platform,
         ...(options.pathOverrides ? { pathOverrides: options.pathOverrides } : {}),
+        caller: RESEND_CALLER,
       });
     this.now = options.now ?? (() => new Date());
     this.platform = options.platform ?? process.platform;
     this.surface = options.surface ?? 'cli';
-    this.accounts = new AccountStore(() => this.core.config.load(), this.platform);
+    this.handoffs = resendHandoffs(this.core).on(this.platform);
+    this.accounts = new AccountStore(() => this.core.config.load(), this.handoffs);
     this.#fetch = options.fetch;
     this.#throttle = new Throttle(this.core.paths.stateDir, options.throttle);
   }
@@ -112,7 +137,10 @@ export class ResendContext {
     const key = await (await this.secrets()).get(named.account.secretRef);
     if (key === null || key.trim() === '') {
       throw new CommsError('AUTH_REQUIRED', `the key for "${named.name}" is not in the secret store`, {
-        hint: `A person removes the account and adds it again: ${inlineCommand(shellCommand(['agent-resend', 'account', 'add', named.name], this.platform))}.`,
+        hint: handoffSentence(
+          this.handoffs.own(['account', 'add', named.name]),
+          (command) => `A person removes the account and adds it again: ${command}.`,
+        ),
       });
     }
     return { fetch: this.#fetch, key, throttle: this.#throttle, permit };

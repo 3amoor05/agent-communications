@@ -10,9 +10,6 @@
  */
 import { VERSION } from './version.ts';
 
-export { VERSION };
-export const PACKAGE_NAME = '@agentcomms/resend';
-
 export {
   REFUSED,
   RESEND_API_ORIGIN,
@@ -21,4 +18,10 @@ export {
   type Route,
   type RouteKind,
 } from './api/routes.ts';
+/*
+ * This package as core's caller (CUE-403): a core handed to `createResendMcpServer` is opened with it, so every command
+ * the server hands a person is this installation's own. Left out, the server opens core that way itself.
+ */
+export { PACKAGE_NAME, RESEND_CALLER } from './caller.ts';
 export { createResendMcpServer, type ResendMcpOptions, type ResendMcpServer } from './mcp/server.ts';
+export { VERSION };

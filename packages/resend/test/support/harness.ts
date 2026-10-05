@@ -14,6 +14,7 @@ import {
   secretRefFor,
   withAccount,
 } from '../../src/accounts.ts';
+import { RESEND_CALLER } from '../../src/caller.ts';
 import { run } from '../../src/cli/program.ts';
 import { ResendContext } from '../../src/context.ts';
 import { createResendMcpServer } from '../../src/mcp/server.ts';
@@ -99,7 +100,8 @@ export async function newHarness(): Promise<Harness> {
     // not make. The gate's own tests turn it back on, with a registry and a clock of their own (design 2026-09-28).
     AGENT_COMMS_UPDATE_CHECK: 'off',
   };
-  const core = openCore({ env });
+  // Opened as this package's CLI and server open it, so every command they print is located from here (CUE-403).
+  const core = openCore({ env, caller: RESEND_CALLER });
   mkdirSync(join(dir, 'config'), { recursive: true, mode: 0o700 });
   writeFileSync(join(dir, 'config', 'config.json'), `${JSON.stringify({ version: 2, secrets: { store: 'file' } })}\n`);
   const fake = await startFakeResend();

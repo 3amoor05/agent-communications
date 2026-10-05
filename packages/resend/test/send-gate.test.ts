@@ -7,6 +7,7 @@ import { APPROVAL_TAG } from '../src/api/guard.ts';
 import { REACH_CONFIRM_THRESHOLD, type SendInput } from '../src/compose/message.ts';
 import { showReceived } from '../src/operations/read.ts';
 import { beginSendApproval, executeSend, finishSendApproval, prepareSend, sendStatus } from '../src/operations/send.ts';
+import { assertNoBareCommand, resendInline } from './support/handoffs.ts';
 import { type Harness, newHarness } from './support/harness.ts';
 
 /**
@@ -163,24 +164,29 @@ test('send hints render commands for the selected shell platform', async () => {
   await harness.addAccount({ name: '8/resend', mode: 'send', sendPolicy: 'never' });
   await harness.addAccount({ name: '9/resend', mode: 'send', sendPolicy: 'confirm' });
   const context = harness.context('mcp', 'win32');
+  // Resend's own commands, located and quoted for Windows: the account's name is quoted there.
+  const win = (words: string[]) => resendInline(harness.core, words, 'win32');
   await assert.rejects(prepareSend(context, '7/resend', message()), (error: unknown) => {
     assert.ok(error instanceof CommsError);
-    assert.match(String(error.hint), /agent-resend account policy "7\/resend" --mode send/);
+    assert.ok(String(error.hint).includes(win(['account', 'policy', '7/resend', '--mode', 'send'])), error.hint);
+    assert.match(String(error.hint), /"7\/resend"/, 'the name, quoted for Windows');
     return true;
   });
   await assert.rejects(prepareSend(context, '8/resend', message()), (error: unknown) => {
     assert.ok(error instanceof CommsError);
-    assert.match(String(error.hint), /agent-resend account policy "8\/resend" --send confirm/);
+    assert.ok(String(error.hint).includes(win(['account', 'policy', '8/resend', '--send', 'confirm'])), error.hint);
     return true;
   });
   const prepared = await prepareSend(context, '9/resend', message());
-  assert.match(prepared.preview, new RegExp(`agent-resend approve ${prepared.approvalId}`));
-  assert.match(prepared.nextStep, new RegExp(`agent-resend approve ${prepared.approvalId}`));
+  const approve = win(['approve', prepared.approvalId]);
+  assert.ok(prepared.preview.includes(approve), prepared.preview);
+  assert.ok(prepared.nextStep.includes(approve), prepared.nextStep);
   await assert.rejects(
     executeSend(context, '9/resend', { approvalId: prepared.approvalId, expect: prepared.expect }),
     (error: unknown) => {
       assert.ok(error instanceof CommsError);
-      assert.match(String(error.hint), new RegExp(`agent-resend approve ${prepared.approvalId}`));
+      assert.ok(String(error.hint).includes(approve), error.hint);
+      assertNoBareCommand(String(error.hint));
       return true;
     },
   );
@@ -195,7 +201,10 @@ test(`above ${REACH_CONFIRM_THRESHOLD} recipients a person approves at a termina
   const prepared = await prepareSend(context, 'acme/resend', message({ to: many }));
   assert.equal(prepared.effectivePolicy, 'confirm');
   assert.deepEqual(prepared.riskFlags, [`reach-above-${REACH_CONFIRM_THRESHOLD}`]);
-  assert.match(prepared.nextStep, /agent-resend approve/);
+  assert.ok(
+    prepared.nextStep.includes(resendInline(harness.core, ['approve', prepared.approvalId])),
+    prepared.nextStep,
+  );
   await assert.rejects(
     executeSend(context, 'acme/resend', { approvalId: prepared.approvalId, expect: prepared.expect }),
     refusal('APPROVAL_PENDING'),

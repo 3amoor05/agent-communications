@@ -1,15 +1,15 @@
 import { createHash } from 'node:crypto';
 import {
   type ChangePolicy,
+  type CliHandoffs,
   CommsError,
   type Config,
   classifyChange,
   type GatedChange,
-  inlineCommand,
+  handoffSentence,
   type SendPolicy,
   secretsStoreFor,
   secretsStoreOf,
-  shellCommand,
   withCredentialsLock,
 } from '@agentcomms/core';
 import {
@@ -143,12 +143,12 @@ export function viewOf(named: NamedAccount, config: Config): AccountView {
 
 export async function listAccounts(context: ResendContext): Promise<{ accounts: AccountView[] }> {
   const config = await context.config();
-  return { accounts: resendAccounts(config, context.platform).map((named) => viewOf(named, config)) };
+  return { accounts: resendAccounts(config, context.handoffs).map((named) => viewOf(named, config)) };
 }
 
 export async function showAccount(context: ResendContext, name: string): Promise<AccountView> {
   const config = await context.config();
-  return viewOf(requireAccount(config, name, context.platform), config);
+  return viewOf(requireAccount(config, name, context.handoffs), config);
 }
 
 /** A mode word checked by the operation, so both surfaces refuse it in the same words. */
@@ -171,11 +171,15 @@ export function changePolicyOf(raw: unknown): ChangePolicy | undefined {
 }
 
 /** Refuses a key that is already connected, under any name: one key, one account. */
-function refuseConnectedKey(config: Config, fingerprint: string, platform: NodeJS.Platform): void {
-  const same = resendAccounts(config, platform).find((named) => named.account.workspace === fingerprint);
+function refuseConnectedKey(config: Config, fingerprint: string, handoffs: CliHandoffs): void {
+  const same = resendAccounts(config, handoffs).find((named) => named.account.workspace === fingerprint);
   if (same) {
     throw new CommsError('USAGE', `this key is already connected as "${same.name}"`, {
-      hint: 'One key, one account. Change that one with `agent-resend account policy`.',
+      // The account named: `account policy` without one is a command commander refuses.
+      hint: handoffSentence(
+        handoffs.own(['account', 'policy', same.name]),
+        (command) => `One key, one account. Change that one with ${command}, adding --send, --mode or --change.`,
+      ),
     });
   }
 }
@@ -243,8 +247,8 @@ export function addAccountChange(
     ...(domainLock ? { domainLock } : {}),
   };
   const connect = (config: Config): Config => {
-    checkNewName(config, request.name, context.platform);
-    refuseConnectedKey(config, fingerprint, context.platform);
+    checkNewName(config, request.name, context.handoffs);
+    refuseConnectedKey(config, fingerprint, context.handoffs);
     return withAccount(config, request.name, account);
   };
 
@@ -263,7 +267,7 @@ export function addAccountChange(
     },
     apply: async (consent) => {
       const config = await context.config();
-      const { store, choosing } = secretsStoreFor(config, undefined, context.platform);
+      const { store, choosing } = secretsStoreFor(config, undefined, context.handoffs);
       const secrets = await context.core.secrets(store);
       await secrets.set(account.secretRef, request.key.trim());
       let written: Config;
@@ -311,7 +315,7 @@ export interface RemovedAccount {
 export function removeAccountChange(context: ResendContext, name: string): GatedChange<RemovedAccount> {
   return {
     plan: (config) => {
-      const found = requireAccount(config, name, context.platform);
+      const found = requireAccount(config, name, context.handoffs);
       return {
         account: found.name,
         before: config,
@@ -323,16 +327,19 @@ export function removeAccountChange(context: ResendContext, name: string): Gated
       };
     },
     apply: async (_consent, request) => {
-      const approved = requireAccount(request.before, name, context.platform).account;
+      const approved = requireAccount(request.before, name, context.handoffs).account;
       /*
        * Under the credentials lock, from reading the configuration to the last write, as Slack's removal is: a
        * `secrets migrate` running in between would copy a key this is deleting into a store nothing then names.
        */
       const removed = await withCredentialsLock(context.core.paths.configDir, async () => {
-        const found = requireAccount(await context.config(), name, context.platform);
+        const found = requireAccount(await context.config(), name, context.handoffs);
         if (found.account.id !== approved.id) {
           throw new CommsError('CONFIG', `"${name}" changed after its removal was approved, so nothing was removed`, {
-            hint: `Look at it with ${inlineCommand(shellCommand(['agent-resend', 'account', 'show', name], context.platform))}, and remove it again if you still want it gone.`,
+            hint: handoffSentence(
+              context.handoffs.own(['account', 'show', name]),
+              (command) => `Look at it with ${command}, and remove it again if you still want it gone.`,
+            ),
           });
         }
         // The key first: an entry whose key is gone is reported by `doctor`; a key nothing names is never found.
@@ -341,10 +348,13 @@ export function removeAccountChange(context: ResendContext, name: string): Gated
         await context.core.config.update((current) => {
           if (secretsStoreOf(current) !== secrets.kind) {
             throw new CommsError('TRANSIENT', `the secret store changed while "${name}" was being removed`, {
-              hint: `Run ${inlineCommand(shellCommand(['agent-resend', 'account', 'remove', name], context.platform))} again.`,
+              hint: handoffSentence(
+                context.handoffs.own(['account', 'remove', name]),
+                (command) => `Run ${command} again.`,
+              ),
             });
           }
-          const held = accountById(current, found.account.id, context.platform);
+          const held = accountById(current, found.account.id, context.handoffs);
           if (!held) return current;
           return withoutAccount(current, held.name);
         });
@@ -410,7 +420,7 @@ function reportOf(named: NamedAccount, config: Config): PolicyReport {
 
 export async function policyReport(context: ResendContext, name: string): Promise<PolicyReport> {
   const config = await context.config();
-  return reportOf(requireAccount(config, name, context.platform), config);
+  return reportOf(requireAccount(config, name, context.handoffs), config);
 }
 
 /**
@@ -460,7 +470,7 @@ export function policyChange(context: ResendContext, name: string, wanted: Polic
     .join(', ');
   return {
     plan: (config) => {
-      const found = checked(requireAccount(config, name, context.platform));
+      const found = checked(requireAccount(config, name, context.handoffs));
       return {
         account: found.name,
         before: config,
@@ -469,7 +479,7 @@ export function policyChange(context: ResendContext, name: string, wanted: Polic
       };
     },
     apply: async (consent, request) => {
-      const approved = requireAccount(request.before, name, context.platform).account;
+      const approved = requireAccount(request.before, name, context.handoffs).account;
       let written: NamedAccount | undefined;
       /*
        * By id, under whatever name it has at the write: a rename in between must not set the policy on an account
@@ -477,10 +487,13 @@ export function policyChange(context: ResendContext, name: string, wanted: Polic
        */
       const config = await context.core.config.update(
         (current) => {
-          const held = accountById(current, approved.id, context.platform);
+          const held = accountById(current, approved.id, context.handoffs);
           if (!held) {
             throw new CommsError('CONFIG', `"${name}" changed while its policy was being set, so nothing was set`, {
-              hint: 'Check it with `agent-resend account list`, then set the policy again.',
+              hint: handoffSentence(
+                context.handoffs.own(['account', 'list']),
+                (command) => `Check it with ${command}, then set the policy again.`,
+              ),
             });
           }
           written = { name: held.name, account: next(checked(held).account) };

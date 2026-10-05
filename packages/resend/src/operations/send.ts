@@ -2,16 +2,17 @@ import { readFile } from 'node:fs/promises';
 import {
   type ApprovalRecord,
   approvalKind,
+  type CliHandoffs,
   CommsError,
   canonicalAddress,
   type Expectation,
-  inlineCommand,
+  handoffSentence,
+  handoffSentenceToFill,
   type MessagePreview,
   publicView,
   renderMessagePreview,
   type SendPolicy,
   sha256Hex,
-  shellCommand,
   stricterPolicy,
 } from '@agentcomms/core';
 import { keyPermissionOf, type NamedAccount } from '../accounts.ts';
@@ -44,7 +45,7 @@ import type { ResendContext } from '../context.ts';
  *    address that arrived in mail read in the last seven days and never written to from here, the send needs a
  *    person at a terminal whatever the policy says.
  * 2. **Approval** is the account's send policy: under `chat` the person's yes in the conversation; under `confirm`
- *    `agent-resend approve <id>` and a typed code; under `never` nothing.
+ *    this CLI's `approve <id>` and a typed code; under `never` nothing.
  * 3. **Execute** re-reads the stored message and its attachments, claims the approval once (a lock and an O_EXCL
  *    marker), reserves a slot under the rate caps, records the attempt **before** the request leaves, and sends with
  *    `Idempotency-Key` = the approval id and the tag `agentcomms_approval=<id>`. It never retries. An outcome it cannot
@@ -93,14 +94,25 @@ async function ownRecord(context: ResendContext, named: NamedAccount, approvalId
   return record;
 }
 
-function requireSendMode(named: NamedAccount, platform: NodeJS.Platform): void {
+function requireSendMode(named: NamedAccount, handoffs: CliHandoffs): void {
   if (named.account.mode !== 'send') {
     throw new CommsError('SCOPE_MISSING', `"${named.name}" is in read mode, so it sends nothing`, {
-      hint: `A person can allow sending with ${inlineCommand(
-        shellCommand(['agent-resend', 'account', 'policy', named.name, '--mode', 'send'], platform),
-      )}, which is a change they approve.`,
+      hint: handoffSentence(
+        handoffs.own(['account', 'policy', named.name, '--mode', 'send']),
+        (command) => `A person can allow sending with ${command}, which is a change they approve.`,
+      ),
     });
   }
+}
+
+/** Resend's own `approve` for this send, located: what a person runs at their own terminal under `confirm`. */
+function approveCommand(handoffs: CliHandoffs, approvalId: string) {
+  return handoffs.own(['approve', approvalId]);
+}
+
+/** Resend's own `send status` for this send, located: how a send whose outcome is not known is checked. */
+function statusCommand(handoffs: CliHandoffs, approvalId: string, name: string) {
+  return handoffs.own(['send', 'status', approvalId, '--account', name]);
 }
 
 /**
@@ -128,13 +140,20 @@ async function checkFromDomain(context: ResendContext, named: NamedAccount, doma
       'BAD_DATA',
       `${domain} is not one of this Resend team's domains, so nothing can be sent from it`,
       {
-        hint: 'Send from an address at a verified domain: see `agent-resend domains`.',
+        // With the account: `domains` without `--account` is a command commander refuses.
+        hint: handoffSentence(
+          context.handoffs.own(['domains', '--account', named.name]),
+          (command) => `Send from an address at a verified domain: see ${command}.`,
+        ),
       },
     );
   }
   if (found.status !== 'verified') {
     throw new CommsError('BAD_DATA', `${domain} is not verified at Resend (status: ${String(found.status)})`, {
-      hint: 'A person finishes the DNS records for it first: `agent-resend domains --domain <name>` lists them.',
+      hint: handoffSentence(
+        context.handoffs.own(['domains', '--account', named.name, '--domain', domain]),
+        (command) => `A person finishes the DNS records for it first: ${command} lists them.`,
+      ),
     });
   }
   const sending = found.capabilities?.sending;
@@ -201,17 +220,23 @@ function expectationOf(message: OutboundMessage): Expectation {
   return { to: [...message.to], cc: [...message.cc], bcc: [...message.bcc], subject: message.subject };
 }
 
+/**
+ * The preview's policy line. Under `confirm` it names Resend's own `approve`, located by the process that renders it —
+ * the preparing one, then the approving one: a send's approval is bound to the message's digest, not to this line.
+ */
 function describePolicy(
   effective: SendPolicy,
   approvalId: string,
   flags: readonly string[],
-  platform: NodeJS.Platform,
+  handoffs: CliHandoffs,
 ): string {
   if (effective === 'confirm') {
     const why = flags.length > 0 ? ` (${flags.join(', ')})` : '';
-    return `Policy: confirm${why} — a person runs ${inlineCommand(
-      shellCommand(['agent-resend', 'approve', approvalId], platform),
-    )} at their own terminal before this can go.`;
+    return `Policy: confirm${why} — ${handoffSentence(
+      approveCommand(handoffs, approvalId),
+      (command) => `a person runs ${command} at their own terminal before this can go.`,
+      { instead: 'a person approves it at their own terminal before this can go.' },
+    )}`;
   }
   return 'Policy: chat — send only after the user approves this exact preview.';
 }
@@ -224,7 +249,7 @@ function previewOf(options: {
   domainNote: string;
   effective: SendPolicy;
   flags: readonly string[];
-  platform: NodeJS.Platform;
+  handoffs: CliHandoffs;
 }): string {
   const { message } = options.built;
   const reach = uniqueRecipients(message);
@@ -237,7 +262,17 @@ function previewOf(options: {
     options.domainNote,
     ...(message.bcc.length > 0 ? [`${message.bcc.length} blind recipient(s) — the others will not see them`] : []),
     ...(message.scheduledAt
-      ? [`Scheduled for ${message.scheduledAt}; until then it can be cancelled with \`agent-resend scheduled cancel\``]
+      ? [
+          // The id is Resend's, known once it is sent: a word to fill in, after the account, which is known now.
+          handoffSentenceToFill(
+            options.handoffs.own(['scheduled', 'cancel', '--account', options.name]),
+            ['<id>'],
+            (command) => `Scheduled for ${message.scheduledAt}; until then it can be cancelled with ${command}`,
+            {
+              instead: `Scheduled for ${message.scheduledAt}; until then it can be cancelled with resend_scheduled_cancel.`,
+            },
+          ),
+        ]
       : ['Sends as soon as it is approved and executed']),
     ...options.study.warnings,
     ...options.built.warnings,
@@ -268,7 +303,7 @@ function previewOf(options: {
       : undefined,
     links: options.built.links,
     warnings,
-    policy: describePolicy(options.effective, options.approvalId, options.flags, options.platform),
+    policy: describePolicy(options.effective, options.approvalId, options.flags, options.handoffs),
   };
   return renderMessagePreview(preview);
 }
@@ -280,6 +315,8 @@ async function attachPolicy(context: ResendContext) {
     env: context.env,
     roots: config.defaults.attachRoots,
     deny: config.defaults.attachDeny,
+    // For the command the jail's refusal names, core's `attach roots add`: located from here.
+    handoffs: context.handoffs,
   };
 }
 
@@ -289,14 +326,15 @@ async function attachPolicy(context: ResendContext) {
  */
 export async function prepareSend(context: ResendContext, name: string, input: SendInput): Promise<SendPreparation> {
   const named = await context.accounts.require(name);
-  requireSendMode(named, context.platform);
+  requireSendMode(named, context.handoffs);
   const config = await context.config();
   const livePolicy = named.account.sendPolicy ?? config.defaults.sendPolicy;
   if (livePolicy === 'never') {
     throw new CommsError('POLICY_NEVER', `sending from ${name} is turned off (policy: never)`, {
-      hint: `A person can change it with ${inlineCommand(
-        shellCommand(['agent-resend', 'account', 'policy', name, '--send', 'confirm'], context.platform),
-      )}.`,
+      hint: handoffSentence(
+        context.handoffs.own(['account', 'policy', name, '--send', 'confirm']),
+        (command) => `A person can change it with ${command}.`,
+      ),
     });
   }
   const built = await buildMessage(input, { now: context.now(), attach: await attachPolicy(context) });
@@ -351,7 +389,7 @@ export async function prepareSend(context: ResendContext, name: string, input: S
       domainNote,
       effective,
       flags: study.flags,
-      platform: context.platform,
+      handoffs: context.handoffs,
     }),
     policy: livePolicy,
     effectivePolicy: effective,
@@ -361,9 +399,11 @@ export async function prepareSend(context: ResendContext, name: string, input: S
     expiresAt: record.expiresAt,
     nextStep:
       effective === 'confirm'
-        ? `Show the preview to the user, then have them run ${inlineCommand(
-            shellCommand(['agent-resend', 'approve', record.approvalId], context.platform),
-          )} in their own terminal. You cannot approve this yourself. Then execute it with the same approval id and the recipients and subject shown.`
+        ? `${handoffSentence(
+            approveCommand(context.handoffs, record.approvalId),
+            (command) => `Show the preview to the user, then have them run ${command} in their own terminal.`,
+            { instead: 'Show the preview to the user; they approve it at their own terminal.' },
+          )} You cannot approve this yourself. Then execute it with the same approval id and the recipients and subject shown.`
         : 'Show the preview to the user verbatim and wait for an explicit yes. Then execute it with the same approval id and the recipients and subject shown above.',
   };
 }
@@ -519,15 +559,17 @@ export async function executeSend(
   options: { approvalId: string; expect: Expectation },
 ): Promise<SendResult> {
   const named = await context.accounts.require(name);
-  requireSendMode(named, context.platform);
+  requireSendMode(named, context.handoffs);
   const known = await ownRecord(context, named, options.approvalId);
   if (known.state !== 'pending' && known.state !== 'approved') {
     throw new CommsError('APPROVAL_VOID', `nothing was sent: ${describeState(known.state)}`, {
       hint:
         known.state === 'unknown'
-          ? `Check what happened with ${inlineCommand(
-              shellCommand(['agent-resend', 'send', 'status', options.approvalId, '--account', name], context.platform),
-            )} before anything else.`
+          ? handoffSentence(
+              statusCommand(context.handoffs, options.approvalId, name),
+              (command) => `Check what happened with ${command} before anything else.`,
+              { instead: 'Check what happened with resend_send_status before anything else.' },
+            )
           : 'Prepare the send again if it should still go.',
       details: { approvalId: options.approvalId, state: known.state },
     });
@@ -557,9 +599,12 @@ export async function executeSend(
       expect: options.expect,
     },
     {
-      pendingHint: `Ask the user to run ${inlineCommand(
-        shellCommand(['agent-resend', 'approve', options.approvalId], context.platform),
-      )} in their own terminal, then execute it again with the same approval. You cannot approve it yourself.`,
+      pendingHint: `${handoffSentence(
+        approveCommand(context.handoffs, options.approvalId),
+        (command) =>
+          `Ask the user to run ${command} in their own terminal, then execute it again with the same approval.`,
+        { instead: 'Ask the user to approve it at their own terminal, then execute it again with the same approval.' },
+      )} You cannot approve it yourself.`,
       platform: context.platform,
     },
   );
@@ -668,9 +713,15 @@ export async function executeSend(
     }
     throw new CommsError('TRANSIENT', `whether the email was sent is not known: ${said}`, {
       hint: [
-        `Do not send it again. Check the Resend dashboard or ask the recipient, and check with ${inlineCommand(
-          shellCommand(['agent-resend', 'send', 'status', options.approvalId, '--account', name], context.platform),
-        )}; this approval is not used again.`,
+        `Do not send it again. ${handoffSentence(
+          statusCommand(context.handoffs, options.approvalId, name),
+          (command) =>
+            `Check the Resend dashboard or ask the recipient, and check with ${command}; this approval is not used again.`,
+          {
+            instead:
+              'Check the Resend dashboard or ask the recipient, and check with resend_send_status; this approval is not used again.',
+          },
+        )}`,
         ...unrecorded,
       ].join(' '),
       details: {
@@ -881,7 +932,7 @@ export async function beginSendApproval(context: ResendContext, approvalId: stri
       domainNote: prepared.warnings[0] ?? '',
       effective,
       flags: record.riskFlags,
-      platform: context.platform,
+      handoffs: context.handoffs,
     }),
     challenge,
   };

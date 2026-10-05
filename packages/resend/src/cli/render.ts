@@ -1,4 +1,4 @@
-import { escapeForDisplay, paint, truncateDisplay } from '@agentcomms/core';
+import { type CliHandoffs, escapeForDisplay, handoffSentenceToFill, paint, truncateDisplay } from '@agentcomms/core';
 import type { AccountView, AddedAccount, PolicyReport, RemovedAccount } from '../operations/accounts.ts';
 import type { DoctorResult } from '../operations/doctor.ts';
 import type { Readable } from '../operations/read.ts';
@@ -24,9 +24,16 @@ export function renderAccount(view: AccountView, color: boolean): string {
   ].join('\n');
 }
 
-export function renderAccounts(result: { accounts: AccountView[] }, color: boolean): string {
-  if (result.accounts.length === 0)
-    return 'No Resend account yet. A person adds one with `agent-resend account add <org/resend>`.';
+/** The accounts; with none, how a person adds one — this installation's own command, `handoffs`'s, or why there is none. */
+export function renderAccounts(result: { accounts: AccountView[] }, color: boolean, handoffs: CliHandoffs): string {
+  if (result.accounts.length === 0) {
+    return handoffSentenceToFill(
+      handoffs.own(['account', 'add']),
+      ['<org/resend>'],
+      (command) => `No Resend account yet. A person adds one with ${command}.`,
+      { instead: 'No Resend account yet.' },
+    );
+  }
   return result.accounts.map((view) => renderAccount(view, color)).join('\n\n');
 }
 

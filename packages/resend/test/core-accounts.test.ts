@@ -13,6 +13,7 @@ import {
 // which only this function's `stores` argument keeps it from.
 import { migrateSecrets } from '../../core/src/operations/secrets-migrate.ts';
 import { secretRefFor } from '../src/accounts.ts';
+import { resendInline } from './support/handoffs.ts';
 import { FULL, type Harness, newHarness, ok, refused } from './support/harness.ts';
 
 /**
@@ -219,7 +220,8 @@ test('an account’s own change policy governs its changes: under confirm, a loo
     const early = refused(
       await call('resend_account_policy', { account: 'acme/resend', mode: 'send', approvalId: asked.approvalId }),
     );
-    assert.match(early.hint ?? '', /agent-resend approve/);
+    // Resend's own `approve`, located from the server that prepared it (CUE-403).
+    assert.ok((early.hint ?? '').includes(resendInline(harness.core, ['approve', asked.approvalId])), early.hint ?? '');
     assert.equal((await harness.context().accounts.require('acme/resend')).account.mode, 'read');
 
     // A person at a terminal types the code; then the same call applies it.

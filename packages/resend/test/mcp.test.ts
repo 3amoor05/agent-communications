@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 import { createResendMcpServer } from '../src/mcp/server.ts';
+import { resendInline } from './support/handoffs.ts';
 import { type Harness, newHarness, ok, refused, tempDir } from './support/harness.ts';
 
 /**
@@ -180,7 +181,10 @@ test('under confirm the tool hands over the command a person runs, and sends not
       }),
     );
     assert.equal(waiting.code, 'APPROVAL_PENDING');
-    assert.match(String(waiting.hint), new RegExp(`agent-resend approve ${prepared.approvalId}`));
+    assert.equal(
+      waiting.hint,
+      `Ask the user to run ${resendInline(harness.core, ['approve', prepared.approvalId])} in their own terminal, then execute it again with the same approval. You cannot approve it yourself.`,
+    );
     assert.equal(harness.fake.sends().length, 0);
   } finally {
     await close();

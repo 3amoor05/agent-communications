@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { afterEach, test } from 'node:test';
 import { CommsError, gatedChange, openCore, UNTRUSTED_NOTICE } from '@agentcomms/core';
+import { RESEND_CALLER } from '../src/caller.ts';
 import { ResendContext } from '../src/context.ts';
 import {
   downloadReceived,
@@ -196,7 +197,7 @@ test('an explicit downloads pin beats defaults.downloadsDir while an unpinned re
   );
   assert.equal(await downloadsRoot(harness.context()), configured);
 
-  const core = openCore({ env: harness.env, pathOverrides: { downloadsDir: pinned } });
+  const core = openCore({ env: harness.env, pathOverrides: { downloadsDir: pinned }, caller: RESEND_CALLER });
   const context = new ResendContext({
     core,
     env: harness.env,

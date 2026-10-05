@@ -1,4 +1,4 @@
-import { CommsError, commandText, secretsStoreOf, shellCommand, toCommsError } from '@agentcomms/core';
+import { CommsError, type Handoff, handoffText, isCommand, secretsStoreOf, toCommsError } from '@agentcomms/core';
 import { keyPermissionOf, type NamedAccount } from '../accounts.ts';
 import { resendRequest } from '../api/client.ts';
 import type { ResendContext } from '../context.ts';
@@ -19,7 +19,15 @@ export interface DoctorCheck {
   name: string;
   ok: boolean;
   detail: string;
+  /** What to run: a command located from this installation, or why there is none here. */
   fix?: string | undefined;
+}
+
+/** Two commands to run one after the other, as a fix: both located, or the reason there is none — said once. */
+function thenFix(first: Handoff, second: Handoff): string {
+  if (!isCommand(first)) return handoffText(first);
+  if (!isCommand(second)) return handoffText(second);
+  return `${handoffText(first)}, then ${handoffText(second)}`;
 }
 
 export interface AccountDoctor {
@@ -49,13 +57,19 @@ async function checkAccount(context: ResendContext, named: NamedAccount, offline
             name: 'key stored',
             ok: false,
             detail: 'the key is missing from the secret store',
-            fix: `${commandText(
-              shellCommand(['agent-resend', 'account', 'remove', named.name], context.platform),
-            )}, then ${commandText(shellCommand(['agent-resend', 'account', 'add', named.name], context.platform))}`,
+            fix: thenFix(
+              context.handoffs.own(['account', 'remove', named.name]),
+              context.handoffs.own(['account', 'add', named.name]),
+            ),
           },
     );
   } catch (error) {
-    checks.push({ name: 'key stored', ok: false, detail: toCommsError(error).message, fix: 'agentcomms doctor' });
+    checks.push({
+      name: 'key stored',
+      ok: false,
+      detail: toCommsError(error).message,
+      fix: handoffText(context.handoffs.core(['doctor'])),
+    });
   }
   const blocked = await context.throttle().blockedUntil();
   checks.push(
@@ -141,7 +155,12 @@ export async function runDoctor(
     store = secretsStoreOf(await context.config());
     checks.push({ name: 'config', ok: true, detail: `secrets are kept in the ${store} store` });
   } catch (error) {
-    checks.push({ name: 'config', ok: false, detail: toCommsError(error).message, fix: 'agentcomms doctor' });
+    checks.push({
+      name: 'config',
+      ok: false,
+      detail: toCommsError(error).message,
+      fix: handoffText(context.handoffs.core(['doctor'])),
+    });
   }
   let named: NamedAccount[] = [];
   try {
