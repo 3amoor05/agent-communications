@@ -7,6 +7,7 @@ import { TokenSource } from '../src/auth/session.ts';
 import { describeGoogleError, isRetryable, mapGoogleError, parseRetryAfter } from '../src/gmail-api/errors.ts';
 import { createLimiter, withRetry } from '../src/gmail-api/retry.ts';
 import { GoogleGmailTransport } from '../src/gmail-api/transport.ts';
+import { gmailHandoffs, locatedGmailLine } from './support/handoffs.ts';
 import { type Harness, newHarness, TEST_CLIENT_ID, TEST_CLIENT_SECRET } from './support/harness.ts';
 
 const REDIRECT = 'http://127.0.0.1:5123/';
@@ -53,6 +54,8 @@ async function connect(
     transport: new GoogleGmailTransport({
       tokens,
       endpoints: harness.endpoints,
+      // As a context builds it: its fixes name this installation's own commands, located (CUE-403).
+      handoffs: gmailHandoffs(harness.core.paths),
       retry: { sleep: async () => undefined },
     }),
     refreshToken: granted.refreshToken,
@@ -126,9 +129,17 @@ test('a disabled API names the console URL from the error; a missing scope names
     assert.ok(error instanceof CommsError);
     assert.equal(error.code, 'SCOPE_MISSING');
     assert.equal(error.exitCode, 77);
-    assert.match(error.hint ?? '', /inbox reauth limited/);
+    locatedGmailLine(error.hint ?? '', ['inbox', 'reauth', 'limited', '--tier', 'organize']);
     return true;
   });
+
+  // Mapped where no context is in reach, the same fix is said in words: never a bare name in a command's place.
+  const unlocated = mapGoogleError(
+    { response: { status: 403, data: { error: { code: 403, errors: [{ reason: 'insufficientPermissions' }] } } } },
+    { alias: 'limited' },
+  );
+  assert.equal(unlocated.code, 'SCOPE_MISSING');
+  assert.equal(unlocated.hint, 'Grant it: sign in to limited again at the organize tier.');
 });
 
 test('a revoked grant surfaces as re-authorise, not as an unexplained 401 loop', async () => {

@@ -1,12 +1,14 @@
 import {
   type ClientConfig,
+  type CliHandoffs,
   CommsError,
   type Core,
   clientSecretRef,
+  handoffSentence,
+  handoffSentenceToFill,
   type InboxConfig,
-  inlineCommand,
+  requireHandoffs,
   type SecretStore,
-  shellCommand,
 } from '@agentcomms/core';
 import type { GoogleEndpoints } from './endpoints.ts';
 import { oauthError } from './oauth.ts';
@@ -42,7 +44,8 @@ export interface TokenSourceOptions {
   alias: string;
   now?: () => number;
   fetchImpl?: typeof fetch;
-  platform?: NodeJS.Platform;
+  /** The commands a refusal names (`GmailContext.handoffs`): the core's own, `core.handoffs`, when left out. */
+  handoffs?: CliHandoffs | undefined;
 }
 
 /**
@@ -59,7 +62,7 @@ export class TokenSource {
   readonly #endpoints: GoogleEndpoints;
   readonly #now: () => number;
   readonly #fetch: typeof fetch;
-  readonly #platform: NodeJS.Platform;
+  readonly #handoffs: CliHandoffs | undefined;
   #cached: AccessToken | null = null;
   #inFlight: Promise<AccessToken> | null = null;
 
@@ -71,7 +74,12 @@ export class TokenSource {
     this.#endpoints = options.endpoints;
     this.#now = options.now ?? (() => Date.now());
     this.#fetch = options.fetchImpl ?? fetch;
-    this.#platform = options.platform ?? process.platform;
+    this.#handoffs = options.handoffs;
+  }
+
+  /** This installation's own command with these words, located — or why there is none here. */
+  #own(words: readonly string[]) {
+    return (this.#handoffs ?? requireHandoffs(this.#core)).own(words);
   }
 
   /** A valid access token, refreshed when the cached one is within a minute of expiry. */
@@ -100,8 +108,12 @@ export class TokenSource {
     throw new CommsError('AUTH_REQUIRED', `the ${what} for ${this.alias} is not in the secret store`, {
       hint:
         what === 'client secret'
-          ? 'Add the client again: `agent-gmail client add <client_secret.json>`.'
-          : `Sign in again: ${inlineCommand(shellCommand(['agent-gmail', 'inbox', 'reauth', this.alias], this.#platform))}.`,
+          ? handoffSentenceToFill(
+              this.#own(['client', 'add']),
+              ['<client_secret.json>'],
+              (command) => `Add the client again: ${command}.`,
+            )
+          : handoffSentence(this.#own(['inbox', 'reauth', this.alias]), (command) => `Sign in again: ${command}.`),
     });
   }
 
@@ -152,7 +164,11 @@ export class TokenSource {
       scope?: string;
     };
     if (!response.ok || !body.access_token) {
-      const error = oauthError(body.error ?? `http_${response.status}`, body.error_description);
+      const error = oauthError(
+        body.error ?? `http_${response.status}`,
+        body.error_description,
+        this.#handoffs ?? requireHandoffs(this.#core),
+      );
       throw body.error === 'invalid_grant' ? this.#explainInvalidGrant(error) : error;
     }
     const scopes = parseGrantedScopes(body.scope);
@@ -170,10 +186,18 @@ export class TokenSource {
   #explainInvalidGrant(error: CommsError): CommsError {
     const created = Date.parse(this.inbox.createdAt);
     const days = Number.isFinite(created) ? (this.#now() - created) / 86_400_000 : Number.NaN;
+    const reauth = this.#own(['inbox', 'reauth', this.alias]);
     const hint =
       days >= 6 && days <= 9
-        ? `This is about a week after consent, which is how long a Testing app's tokens last: publish the app (Google Auth Platform → Audience → Publish app), then ${inlineCommand(shellCommand(['agent-gmail', 'inbox', 'reauth', this.alias], this.#platform))}.`
-        : `The grant is gone — revoked, or unused for six months. Sign in again: ${inlineCommand(shellCommand(['agent-gmail', 'inbox', 'reauth', this.alias], this.#platform))}.`;
+        ? handoffSentence(
+            reauth,
+            (command) =>
+              `This is about a week after consent, which is how long a Testing app's tokens last: publish the app (Google Auth Platform → Audience → Publish app), then ${command}.`,
+          )
+        : handoffSentence(
+            reauth,
+            (command) => `The grant is gone — revoked, or unused for six months. Sign in again: ${command}.`,
+          );
     return new CommsError('AUTH_REQUIRED', `Google will not refresh the token for ${this.alias}`, {
       hint,
       cause: error,

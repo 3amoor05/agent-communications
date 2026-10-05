@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import { CommsError, openCore } from '@agentcomms/core';
 import { buildAuthUrl, exchangeCode, newPkce } from '../src/auth/oauth.ts';
 import { SCOPES } from '../src/auth/scopes.ts';
+import { GMAIL_CALLER } from '../src/caller.ts';
 import { GmailContext } from '../src/context.ts';
 import { addressField, mimeTypeField } from '../src/domain/untrusted-fields.ts';
 import { threadTimeline } from '../src/operations/analyse.ts';
@@ -376,7 +377,7 @@ test('an explicit downloads pin beats defaults.downloadsDir without changing the
   const unpinned = new GmailContext({ core: harness.core, env: { ...harness.env, HOME: home }, cwd });
   assert.equal(await downloadsRoot(unpinned), configured);
 
-  const core = openCore({ env: harness.env, pathOverrides: { downloadsDir: pinned } });
+  const core = openCore({ env: harness.env, pathOverrides: { downloadsDir: pinned }, caller: GMAIL_CALLER });
   const context = new GmailContext({ core, env: { ...harness.env, HOME: home }, cwd });
   assert.equal(await downloadsRoot(context), pinned);
   assert.equal((await core.config.load()).defaults.downloadsDir, configured);
@@ -439,7 +440,7 @@ test('a choiceId for other files, used already, or expired is refused, and nothi
   // Expired: an answer given too late — an hour on, here — is asked for again.
   const third = questionOf(await downloadAttachments(context, 'work', target));
   const expired = new GmailContext({
-    core: openCore({ env: harness.env, now: () => new Date(Date.now() + 60 * 60 * 1000) }),
+    core: openCore({ env: harness.env, now: () => new Date(Date.now() + 60 * 60 * 1000), caller: GMAIL_CALLER }),
     env: harness.env,
     cwd: context.cwd,
   });

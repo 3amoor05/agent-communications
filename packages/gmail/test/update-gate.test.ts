@@ -11,6 +11,7 @@ import {
   updateCheckPath,
   updateLaterChange,
 } from '@agentcomms/core';
+import { locatedCoreLine } from './support/handoffs.ts';
 import { type Harness, newHarness, tempDir } from './support/harness.ts';
 import { cli, connect, type ToolResult } from './support/surfaces.ts';
 
@@ -80,8 +81,9 @@ test('agent-gmail: with nobody to ask a command exits 11 naming both ways on, an
   assert.equal(listed.code, 11, listed.stdout + listed.stderr);
   const error = listed.envelope<unknown>().error as { code: string; message: string };
   assert.equal(error.code, 'UPDATE_REQUIRED');
-  assert.match(error.message, /`agentcomms update`/);
-  assert.match(error.message, /`agentcomms update --later`/);
+  // Core's own commands, located from Gmail through its runtime dependency on core (CUE-403).
+  locatedCoreLine(error.message, ['update']);
+  locatedCoreLine(error.message, ['update', '--later']);
   const doctor = await cli(harness, ['doctor', '--json']);
   assert.notEqual(doctor.code, 11, doctor.stdout);
   // The listener a sign-in starts is not stopped: stopping it would break the sign-in under way. (This flow does not

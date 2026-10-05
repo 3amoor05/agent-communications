@@ -94,6 +94,8 @@ async function attachmentsFor(
     // The home the rest of this process uses. Without it the jail falls back to the account's real home, and the
     // rule that never attaches from a dot-folder would be checked against the wrong one.
     home,
+    // What a refusal names to run — core's `attach roots add` — is this installation's, located (CUE-403).
+    handoffs: context.handoffs,
   };
 
   const attachments: ComposeAttachment[] = [];

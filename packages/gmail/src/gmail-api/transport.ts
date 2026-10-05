@@ -1,4 +1,4 @@
-import { CommsError } from '@agentcomms/core';
+import { type CliHandoffs, CommsError } from '@agentcomms/core';
 import { type gmail_v1, gmail as gmailApi } from '@googleapis/gmail';
 import { type people_v1, people as peopleApi } from '@googleapis/people';
 import { OAuth2Client } from 'google-auth-library';
@@ -154,7 +154,8 @@ export interface SendAsAddress {
 export interface TransportOptions {
   tokens: TokenSource;
   endpoints: GoogleEndpoints;
-  platform?: NodeJS.Platform | undefined;
+  /** The commands an error's fix names (`GmailContext.handoffs`); without them the fix is said in words. */
+  handoffs?: CliHandoffs | undefined;
   /** Concurrency cap per inbox: Gmail's per-user quota, not the network, is the limit worth respecting. */
   concurrency?: number;
   retry?: { attempts?: number; sleep?: (ms: number) => Promise<void>; random?: () => number };
@@ -242,7 +243,7 @@ export class GoogleGmailTransport implements GmailTransport {
   readonly #limit: <T>(task: () => Promise<T>) => Promise<T>;
   readonly #retry: TransportOptions['retry'];
   readonly #download: DownloadLimits;
-  readonly #platform: NodeJS.Platform;
+  readonly #handoffs: CliHandoffs | undefined;
   #gmail: gmail_v1.Gmail | null = null;
   #people: people_v1.People | null = null;
   #oauth: OAuth2Client | null = null;
@@ -254,7 +255,7 @@ export class GoogleGmailTransport implements GmailTransport {
     this.alias = options.tokens.alias;
     this.inboxId = options.tokens.inbox.id;
     this.#endpoints = options.endpoints;
-    this.#platform = options.platform ?? process.platform;
+    this.#handoffs = options.handoffs;
     this.#limit = createLimiter(options.concurrency ?? 5);
     this.#retry = options.retry;
     this.#download = {
@@ -325,7 +326,7 @@ export class GoogleGmailTransport implements GmailTransport {
           alias: this.alias,
           operation,
           api: options.api ?? 'gmail',
-          platform: this.#platform,
+          handoffs: this.#handoffs,
         });
       }
     });

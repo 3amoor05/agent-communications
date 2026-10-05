@@ -1,14 +1,16 @@
 import {
-  commandText,
+  type CliHandoffs,
+  handoffSentence,
+  handoffSentenceToFill,
+  handoffText,
   type InstallResult,
-  inlineCommand,
   paint,
   renderInstall,
   type ServerInstallResult,
-  shellCommand,
   sizeOf,
 } from '@agentcomms/core';
 import type { RegistrationIntent } from '../auth/flows.ts';
+import { handoffTextToFill } from '../handoffs.ts';
 import type { LabelSummary, SendAsSummary } from '../operations/analyse.ts';
 import type { DownloadQuestion, DownloadResult, FindAttachmentsResult } from '../operations/attachments.ts';
 import type { ClientAddResult, ClientView } from '../operations/clients.ts';
@@ -26,7 +28,12 @@ import { FINISH_WAIT_SECONDS, type StartedSignIn } from '../operations/signin.ts
 
 type ApprovalView = Awaited<ReturnType<typeof listApprovals>>[number];
 
-/** Human renderings. `--json` prints the data itself; these exist so a person is not made to read JSON. */
+/**
+ * Human renderings. `--json` prints the data itself; these exist so a person is not made to read JSON.
+ *
+ * A command one names is this installation's own, located from the handoffs it is given (`GmailContext.handoffs`,
+ * CUE-403), quoted for the shell of the output — or, with none here, the sentence saying why.
+ */
 
 function table(rows: string[][], color: boolean): string {
   const header = rows[0];
@@ -43,9 +50,14 @@ function table(rows: string[][], color: boolean): string {
     .join('\n');
 }
 
-export function renderClients(clients: ClientView[], color: boolean): string {
+export function renderClients(clients: ClientView[], color: boolean, handoffs: CliHandoffs): string {
   if (clients.length === 0) {
-    return 'No OAuth client registered yet. Add one with `agent-gmail client add <client_secret.json>`.';
+    return handoffSentenceToFill(
+      handoffs.own(['client', 'add']),
+      ['<client_secret.json>'],
+      (command) => `No OAuth client registered yet. Add one with ${command}.`,
+      { instead: 'No OAuth client registered yet.' },
+    );
   }
   return table(
     [
@@ -61,7 +73,7 @@ export function renderClients(clients: ClientView[], color: boolean): string {
   );
 }
 
-export function renderClientAdd(result: ClientAddResult, color: boolean): string {
+export function renderClientAdd(result: ClientAddResult, color: boolean, handoffs: CliHandoffs): string {
   const lines = [
     `Registered the OAuth client "${result.name}".`,
     `  client id: ${result.clientId}`,
@@ -69,7 +81,14 @@ export function renderClientAdd(result: ClientAddResult, color: boolean): string
   ];
   if (result.probeSkippedReason) lines.push(paint(color, 'yellow', `  note: ${result.probeSkippedReason}`));
   if (result.sourceRemoved) lines.push('  the downloaded file was deleted');
-  lines.push('', 'Next: connect a mailbox with `agent-gmail inbox add <name> --start`.');
+  lines.push(
+    '',
+    handoffSentenceToFill(
+      handoffs.own(['inbox', 'add', '--start']),
+      ['<name>'],
+      (command) => `Next: connect a mailbox with ${command}.`,
+    ),
+  );
   return lines.join('\n');
 }
 
@@ -77,13 +96,10 @@ export function renderSignInStarted(
   started: StartedSignIn,
   mode: 'add' | 'reauth',
   color: boolean,
-  platform: NodeJS.Platform = process.platform,
+  handoffs: CliHandoffs,
 ): string {
-  const finish = commandText(
-    shellCommand(
-      ['agent-gmail', 'inbox', mode, '--finish', started.flowId, '--wait', String(FINISH_WAIT_SECONDS)],
-      platform,
-    ),
+  const finish = handoffText(
+    handoffs.own(['inbox', mode, '--finish', started.flowId, '--wait', String(FINISH_WAIT_SECONDS)]),
   );
   return [
     paint(
@@ -180,7 +196,7 @@ function renderFinishRegistration(registration: FinishRegistration, color: boole
 export function renderSignedIn(
   result: ConsentResult & { registration?: FinishRegistration | undefined },
   color: boolean,
-  platform: NodeJS.Platform = process.platform,
+  handoffs: CliHandoffs,
 ): string {
   const lines = [
     paint(
@@ -196,19 +212,26 @@ export function renderSignedIn(
   if (result.missingScopes.length > 0) {
     lines.push(
       paint(color, 'yellow', `  not granted: ${result.missingScopes.join(', ')}`),
-      `  to grant it: ${inlineCommand(shellCommand(['agent-gmail', 'inbox', 'reauth', result.alias], platform))}`,
+      `  ${handoffSentence(handoffs.own(['inbox', 'reauth', result.alias]), (command) => `to grant it: ${command}`)}`,
     );
   }
   lines.push(
     '',
-    `Check it: ${inlineCommand(shellCommand(['agent-gmail', 'whoami', '--inbox', result.alias], platform))}`,
+    handoffSentence(handoffs.own(['whoami', '--inbox', result.alias]), (command) => `Check it: ${command}`),
   );
   if (result.registration) lines.push('', renderFinishRegistration(result.registration, color));
   return lines.join('\n');
 }
 
-export function renderInboxList(inboxes: InboxView[], color: boolean): string {
-  if (inboxes.length === 0) return 'No mailbox connected yet. Connect one with `agent-gmail inbox add <name>`.';
+export function renderInboxList(inboxes: InboxView[], color: boolean, handoffs: CliHandoffs): string {
+  if (inboxes.length === 0) {
+    return handoffSentenceToFill(
+      handoffs.own(['inbox', 'add']),
+      ['<name>'],
+      (command) => `No mailbox connected yet. Connect one with ${command}.`,
+      { instead: 'No mailbox connected yet.' },
+    );
+  }
   return table(
     [
       ['NAME', 'ADDRESS', 'ACCESS', 'CLIENT', 'SENDING', 'HEALTH'],
@@ -451,7 +474,7 @@ export function renderSendAs(addresses: SendAsSummary[], color: boolean): string
   );
 }
 
-export function renderAttachments(result: FindAttachmentsResult, color: boolean): string {
+export function renderAttachments(result: FindAttachmentsResult, color: boolean, handoffs: CliHandoffs): string {
   if (result.rows.length === 0) return 'No attachments matched.';
   // A block per attachment rather than a table: the file name, and an address or a type that is more than one, come
   // wrapped, several lines each — they cannot sit in a cell, and printed bare they would read as the tool's own words.
@@ -469,7 +492,12 @@ export function renderAttachments(result: FindAttachmentsResult, color: boolean)
   }
   lines.push(
     '',
-    `${result.rows.length} attachment(s). Download with \`agent-gmail attachments download <messageId> --inbox <name> --part <partId>\`.`,
+    handoffSentenceToFill(
+      handoffs.own(['attachments', 'download'], { downloads: true }),
+      ['<messageId>', '--inbox', '<name>', '--part', '<partId>'],
+      (command) => `${result.rows.length} attachment(s). Download with ${command}.`,
+      { instead: `${result.rows.length} attachment(s).` },
+    ),
   );
   if (result.driveLinks > 0) {
     lines.push(
@@ -633,11 +661,7 @@ export function renderDrafts(drafts: DraftSummary[], color: boolean): string {
   );
 }
 
-export function renderModify(
-  result: ModifyResult,
-  color: boolean,
-  platform: NodeJS.Platform = process.platform,
-): string {
+export function renderModify(result: ModifyResult, color: boolean, handoffs: CliHandoffs): string {
   const what = [
     result.addLabelIds.length > 0 ? `+${result.addLabelIds.join(' +')}` : '',
     result.removeLabelIds.length > 0 ? `-${result.removeLabelIds.join(' -')}` : '',
@@ -656,10 +680,10 @@ export function renderModify(
       paint(
         color,
         'dim',
-        `${result.undo.length} message(s) can be put back exactly as they were: ` +
-          `re-run with --json, then pipe its \`undo\` into ${inlineCommand(
-            shellCommand(['agent-gmail', 'organise-undo', '--inbox', result.inbox], platform),
-          )}.`,
+        `${result.undo.length} message(s) can be put back exactly as they were: ${handoffSentence(
+          handoffs.own(['organise-undo', '--inbox', result.inbox]),
+          (command) => `re-run with --json, then pipe its \`undo\` into ${command}.`,
+        )}`,
       ),
     );
   } else {
@@ -685,11 +709,7 @@ export function renderTrash(result: TrashResult, color: boolean): string {
   ].join('\n');
 }
 
-export function renderSendPreparation(
-  result: SendPreparation,
-  color: boolean,
-  platform: NodeJS.Platform = process.platform,
-): string {
+export function renderSendPreparation(result: SendPreparation, color: boolean, handoffs: CliHandoffs): string {
   // The preview verbatim, then what has to happen: reformatting the preview would mean the thing shown is not the
   // thing the digest was taken over.
   const lines = [result.preview, ''];
@@ -699,31 +719,31 @@ export function renderSendPreparation(
   lines.push(
     paint(color, 'dim', `Approval ${result.approvalId}, good until ${result.expiresAt.slice(11, 16)} UTC.`),
     result.nextStep,
-    paint(color, 'dim', `Then: ${commandText(sendExecuteCommand(result, platform))}`),
+    paint(color, 'dim', `Then: ${handoffText(handoffs.own(sendExecuteWords(result)))}`),
   );
   return lines.join('\n');
 }
 
-function sendExecuteCommand(result: SendPreparation, platform: NodeJS.Platform) {
+/**
+ * The words, after the program, of the command that sends what was prepared: a command to show, never one run here —
+ * only `send execute` sends, through `executeSend`, with the person's approval.
+ */
+function sendExecuteWords(result: SendPreparation): string[] {
   const recipients = (flag: string, values: readonly string[]) => [flag, ...(values.length > 0 ? values : ['none'])];
-  return shellCommand(
-    [
-      'agent-gmail',
-      'send',
-      'execute',
-      result.draftId,
-      '--inbox',
-      result.inbox,
-      '--approval',
-      result.approvalId,
-      ...recipients('--expect-to', result.expect.to),
-      ...recipients('--expect-cc', result.expect.cc),
-      ...recipients('--expect-bcc', result.expect.bcc),
-      '--expect-subject',
-      result.expect.subject || 'none',
-    ],
-    platform,
-  );
+  return [
+    'send',
+    'execute',
+    result.draftId,
+    '--inbox',
+    result.inbox,
+    '--approval',
+    result.approvalId,
+    ...recipients('--expect-to', result.expect.to),
+    ...recipients('--expect-cc', result.expect.cc),
+    ...recipients('--expect-bcc', result.expect.bcc),
+    '--expect-subject',
+    result.expect.subject || 'none',
+  ];
 }
 
 export function renderSent(result: SendResult, color: boolean): string {
@@ -819,7 +839,7 @@ export function renderSetupPlan(
   },
   steps: readonly { title: string; url: string; why: string; actions: readonly string[]; avoid: readonly string[] }[],
   color: boolean,
-  platform: NodeJS.Platform = process.platform,
+  handoffs: CliHandoffs,
 ): string {
   const lines: string[] = [];
 
@@ -875,7 +895,12 @@ export function renderSetupPlan(
 
   lines.push(paint(color, 'bold', 'Setup, for a terminal with a person at it'));
   lines.push('');
-  lines.push('Run `agent-gmail setup` where you can answer questions and open a browser — or supply the answers');
+  lines.push(
+    handoffSentence(
+      handoffs.own(['setup']),
+      (command) => `Run ${command} where you can answer questions and open a browser — or supply the answers`,
+    ),
+  );
   lines.push('as flags and it will run without one, as far as the consent screen.');
   lines.push('');
   if (state.done.length > 0) lines.push(`Already done: ${state.done.join(', ')}.`);
@@ -897,7 +922,7 @@ export function renderSetupPlan(
       for (const warning of step.avoid) lines.push(`       ! ${warning}`);
     }
     lines.push('');
-    lines.push('  Then: agent-gmail setup --client-json <the downloaded JSON>');
+    lines.push(`  Then: ${handoffTextToFill(handoffs.own(['setup', '--client-json']), ['<the downloaded JSON>'])}`);
     for (const candidate of state.candidates) {
       const note = CLIENT_KIND_LABEL[candidate.kind] ?? candidate.kind;
       lines.push(`  ${paint(color, 'dim', `found: ${candidate.path} (${note}, ${candidate.modifiedAt})`)}`);
@@ -911,12 +936,7 @@ export function renderSetupPlan(
     // but a different one, so the text told you to leave the thing you were running while `blocked.needs` beside
     // it correctly said `--inbox <alias>`. Two answers to one question, in the same document.
     lines.push(
-      `  ${commandText(
-        shellCommand(
-          ['agent-gmail', 'setup', '--inbox', state.nameExample ?? 'work', '--email', 'you@example.com'],
-          platform,
-        ),
-      )}`,
+      `  ${handoffText(handoffs.own(['setup', '--inbox', state.nameExample ?? 'work', '--email', 'you@example.com']))}`,
     );
     lines.push('  then run the --finish command it prints, after signing in.');
   }
@@ -924,7 +944,7 @@ export function renderSetupPlan(
   if (state.registeredWith.length === 0) {
     lines.push('');
     lines.push(paint(color, 'bold', 'The agent connection'));
-    lines.push('  agent-gmail mcp install --client claude-code');
+    lines.push(`  ${handoffText(handoffs.own(['mcp', 'install', '--client', 'claude-code']))}`);
   }
 
   return lines.join('\n').trimEnd();

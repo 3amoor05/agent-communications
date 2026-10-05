@@ -4,11 +4,13 @@ import { createServer } from 'node:net';
 import { dirname, join } from 'node:path';
 import { afterEach, test } from 'node:test';
 import { type CommsError, type ConfigV2, clientSecretRef, managedRuntimeEntry, openCore } from '@agentcomms/core';
+import { GMAIL_CALLER } from '../src/caller.ts';
 import { GmailContext } from '../src/context.ts';
 import { searchContacts } from '../src/operations/contacts.ts';
 import { createDraft, getDraft } from '../src/operations/drafts.ts';
 import { inboxPolicy, orphanedSecretsPath } from '../src/operations/inboxes.ts';
 import { prepareSend } from '../src/operations/send.ts';
+import { assertNoBareCommand, GMAIL_SOURCE_CLI, gmailInline } from './support/handoffs.ts';
 import {
   type Harness,
   migrateNamesForTest,
@@ -516,7 +518,8 @@ test('gmail_inbox_finish waits as long as the sign-in can, and stops waiting whe
     const pending = toolError(await call('gmail_inbox_finish', { flowId: link.flowId, waitSeconds: 0 }));
     assert.equal(pending.code, 'APPROVAL_PENDING');
     assert.match(pending.hint ?? '', /gmail_inbox_finish/);
-    assert.doesNotMatch(pending.hint ?? '', /agent-gmail/);
+    assert.ok(!(pending.hint ?? '').includes(GMAIL_SOURCE_CLI), 'a tool is told no command');
+    assertNoBareCommand(pending.hint ?? '');
 
     await assert.rejects(
       client.callTool(
@@ -703,9 +706,16 @@ test('an expired sign-in says how to start that one again: its own kind, in the 
    */
   const harness = await oneMailbox();
   // The next step each kind of sign-in names, by surface, and what it must never name instead.
+  // At a terminal: this installation's own command, located (CUE-403), as the CLI prints it for this POSIX run.
+  const own = (words: string[]) => gmailInline(harness.core.paths, words, 'darwin');
   const next = {
-    add: { alias: 'later', cli: '`agent-gmail inbox add later --start`', tool: 'gmail_inbox_add', not: /reauth/ },
-    reauth: { alias: 'work', cli: '`agent-gmail inbox reauth work --start`', tool: 'gmail_inbox_reauth', not: /add/ },
+    add: { alias: 'later', cli: own(['inbox', 'add', 'later', '--start']), tool: 'gmail_inbox_add', not: / reauth / },
+    reauth: {
+      alias: 'work',
+      cli: own(['inbox', 'reauth', 'work', '--start']),
+      tool: 'gmail_inbox_reauth',
+      not: / add /,
+    },
   } as const;
   type Refusal = { where: string; surface: 'cli' | 'mcp'; code?: string; message?: string; hint?: string | null };
   const byCommand = async (where: string, argv: string[]): Promise<Refusal> => {
@@ -744,8 +754,9 @@ test('an expired sign-in says how to start that one again: its own kind, in the 
         } else {
           assert.ok(hint?.includes(next[mode].tool), label);
           assert.ok(hint?.includes(`"${alias}"`), label);
-          assert.doesNotMatch(hint ?? '', /agent-gmail/, label);
+          assert.ok(!(hint ?? '').includes(GMAIL_SOURCE_CLI), `a tool is told no command: ${label}`);
         }
+        assertNoBareCommand(hint ?? '', label);
         assert.doesNotMatch(hint ?? '', next[mode].not, label);
       }
     }
@@ -774,11 +785,16 @@ test('a sign-in that is gone, or already finished, names the next step on the ca
     assert.equal(byCommand?.code, 'NOT_FOUND');
     assert.equal(byCommand?.message, byTool.message);
     assert.match(byTool.hint ?? '', /gmail_inbox_add\b.*gmail_inbox_reauth\b/);
-    assert.doesNotMatch(byTool.hint ?? '', /agent-gmail/);
-    assert.match(
+    assert.ok(!(byTool.hint ?? '').includes(GMAIL_SOURCE_CLI), 'a tool is told no command');
+    assertNoBareCommand(byTool.hint ?? '');
+    // This installation's own two, located, the name for the agent to fill in (CUE-403).
+    const startAgain = (mode: string) =>
+      `${gmailInline(harness.core.paths, ['inbox', mode, '--start'], 'darwin').slice(0, -1)} <alias>\``;
+    assert.ok(
+      (byCommand?.hint ?? '').includes(`Start again with ${startAgain('add')}, or ${startAgain('reauth')} for`),
       byCommand?.hint ?? '',
-      /`agent-gmail inbox add <alias> --start`.*`agent-gmail inbox reauth <alias> --start`/,
     );
+    assertNoBareCommand(byCommand?.hint ?? '');
     assert.doesNotMatch(byCommand?.hint ?? '', /gmail_inbox_/);
 
     // Already finished: the grant is in, and another finish holds the claim on it.
@@ -789,8 +805,16 @@ test('a sign-in that is gone, or already finished, names the next step on the ca
       return flowId;
     };
     for (const [mode, tool, command] of [
-      ['add', 'gmail_inbox_add with alias "later"', '`agent-gmail inbox add later --start`'],
-      ['reauth', 'gmail_inbox_reauth with inbox "work"', '`agent-gmail inbox reauth work --start`'],
+      [
+        'add',
+        'gmail_inbox_add with alias "later"',
+        gmailInline(harness.core.paths, ['inbox', 'add', 'later', '--start'], 'darwin'),
+      ],
+      [
+        'reauth',
+        'gmail_inbox_reauth with inbox "work"',
+        gmailInline(harness.core.paths, ['inbox', 'reauth', 'work', '--start'], 'darwin'),
+      ],
     ] as const) {
       const refused = toolError(await call('gmail_inbox_finish', { flowId: await claimed(mode), waitSeconds: 0 }));
       const run = await cli(harness, ['inbox', mode, '--finish', await claimed(mode), '--wait', '0', '--json']);
@@ -800,7 +824,8 @@ test('a sign-in that is gone, or already finished, names the next step on the ca
       assert.equal(error?.message, refused.message, mode);
       assert.match(refused.message, /already been finished/);
       assert.ok(refused.hint?.includes(tool), `${mode}: ${refused.hint}`);
-      assert.doesNotMatch(refused.hint ?? '', /agent-gmail/, mode);
+      assert.ok(!(refused.hint ?? '').includes(GMAIL_SOURCE_CLI), mode);
+      assertNoBareCommand(refused.hint ?? '', mode);
       assert.ok(error?.hint?.includes(command), `${mode}: ${error?.hint}`);
       assert.doesNotMatch(error?.hint ?? '', /gmail_inbox_/, mode);
     }
@@ -1843,7 +1868,7 @@ test('gmail_setup adds --profile through its own orgApproval, then reports the r
     NO_COLOR: '1',
     AGENT_COMMS_UPDATE_CHECK: 'off',
   };
-  const core = openCore({ env });
+  const core = openCore({ env, caller: GMAIL_CALLER });
   await core.config.update((config) => {
     if (config.version !== 2) throw new Error('the setup fixture starts at version 2');
     return {

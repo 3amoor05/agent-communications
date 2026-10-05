@@ -1,7 +1,14 @@
 import { randomInt } from 'node:crypto';
 import { open, readdir, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { CommsError, ensurePrivateDir, inlineCommand, shellCommand, writeFileAtomic } from '@agentcomms/core';
+import {
+  type CliHandoffs,
+  CommsError,
+  ensurePrivateDir,
+  handoffSentence,
+  handoffSentenceToFill,
+  writeFileAtomic,
+} from '@agentcomms/core';
 import type { LoopbackAbout } from './loopback.ts';
 
 /**
@@ -106,16 +113,21 @@ export function newFlowId(): string {
 function startAgain(
   flow: Pick<OAuthFlow, 'mode' | 'alias'>,
   surface: 'cli' | 'mcp',
-  platform: NodeJS.Platform,
+  handoffs: CliHandoffs,
+  say: (step: string) => string,
 ): string {
   if (surface === 'mcp') {
-    return flow.mode === 'reauth'
-      ? `call gmail_inbox_reauth with inbox "${flow.alias}"`
-      : `call gmail_inbox_add with alias "${flow.alias}"`;
+    return say(
+      flow.mode === 'reauth'
+        ? `call gmail_inbox_reauth with inbox "${flow.alias}"`
+        : `call gmail_inbox_add with alias "${flow.alias}"`,
+    );
   }
-  return `run ${inlineCommand(
-    shellCommand(['agent-gmail', 'inbox', flow.mode === 'reauth' ? 'reauth' : 'add', flow.alias, '--start'], platform),
-  )}`;
+  // This installation's own command, located; with none here, why — never another command in its place.
+  return handoffSentence(
+    handoffs.own(['inbox', flow.mode === 'reauth' ? 'reauth' : 'add', flow.alias, '--start']),
+    (command) => say(`run ${command}`),
+  );
 }
 
 /** Flow files, each usable exactly once. The claim is an `O_EXCL` marker, so two `--finish` calls cannot both win. */
@@ -124,18 +136,14 @@ export class FlowStore {
   readonly #now: () => Date;
   /** Who is asking, so a refusal names the next step as that surface takes it. */
   readonly #surface: 'cli' | 'mcp';
-  readonly #platform: NodeJS.Platform;
+  /** The commands a refusal names at a terminal: the context's, asked for only when one is printed. */
+  readonly #handoffs: () => CliHandoffs;
 
-  constructor(
-    stateDir: string,
-    now: () => Date = () => new Date(),
-    surface: 'cli' | 'mcp' = 'cli',
-    platform: NodeJS.Platform = process.platform,
-  ) {
+  constructor(stateDir: string, now: () => Date, surface: 'cli' | 'mcp', handoffs: () => CliHandoffs) {
     this.directory = join(stateDir, 'flows');
     this.#now = now;
     this.#surface = surface;
-    this.#platform = platform;
+    this.#handoffs = handoffs;
   }
 
   #path(flowId: string, suffix = '.json'): string {
@@ -212,7 +220,13 @@ export class FlowStore {
         hint: `A sign-in lasts ten minutes and can be finished once. ${
           this.#surface === 'mcp'
             ? 'Start again with gmail_inbox_add, or gmail_inbox_reauth for a mailbox already connected.'
-            : 'Start again with `agent-gmail inbox add <alias> --start`, or `agent-gmail inbox reauth <alias> --start` for a mailbox already connected.'
+            : handoffSentenceToFill(this.#handoffs().own(['inbox', 'add', '--start']), ['<alias>'], (add) =>
+                handoffSentenceToFill(
+                  this.#handoffs().own(['inbox', 'reauth', '--start']),
+                  ['<alias>'],
+                  (reauth) => `Start again with ${add}, or ${reauth} for a mailbox already connected.`,
+                ),
+              )
         }`,
       });
     }
@@ -220,7 +234,7 @@ export class FlowStore {
     if (Date.parse(flow.expiresAt) <= this.#now().getTime()) {
       await this.discard(flowId);
       throw new CommsError('AUTH_REQUIRED', 'that sign-in took longer than ten minutes and has expired', {
-        hint: `Start again: ${startAgain(flow, this.#surface, this.#platform)}.`,
+        hint: startAgain(flow, this.#surface, this.#handoffs(), (step) => `Start again: ${step}.`),
       });
     }
     return flow;
@@ -258,7 +272,12 @@ export class FlowStore {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       throw new CommsError('AUTH_REQUIRED', 'that sign-in has already been finished', {
-        hint: `Each sign-in completes once. To start another, ${startAgain(flow, this.#surface, this.#platform)}.`,
+        hint: startAgain(
+          flow,
+          this.#surface,
+          this.#handoffs(),
+          (step) => `Each sign-in completes once. To start another, ${step}.`,
+        ),
       });
     }
     return flow;

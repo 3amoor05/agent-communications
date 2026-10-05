@@ -12,6 +12,7 @@ import {
   revokeApproval,
 } from '../src/operations/send.ts';
 import type { FakeGoogle } from './support/fake-google.ts';
+import { gmailInline } from './support/handoffs.ts';
 import { type Harness, newHarness } from './support/harness.ts';
 
 /**
@@ -148,8 +149,11 @@ test('under confirm, no argument an agent can pass will send: only a typed appro
     (error: unknown) =>
       error instanceof CommsError &&
       error.code === 'APPROVAL_PENDING' &&
-      // Gmail's own words, which it passes itself: the approval store's default names no product.
-      /agent-gmail approve/.test(error.hint ?? '') &&
+      // Gmail's own words, which it passes itself: the approval store's default names no product. Its own `approve`,
+      // located for this approval (CUE-403).
+      (error.hint ?? '').includes(
+        gmailInline(context.core.paths, ['approve', prepared.approvalId], context.platform),
+      ) &&
       /send it from Gmail/.test(error.hint ?? ''),
   );
   assert.equal(google.requests.filter((request) => request.path.endsWith('/send')).length, 0);

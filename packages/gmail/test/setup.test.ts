@@ -5,12 +5,14 @@ import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { test } from 'node:test';
 import { CommsError, canPrompt, clientSecretRef, openCore } from '@agentcomms/core';
+import { GMAIL_CALLER } from '../src/caller.ts';
 import { renderSetupPlan } from '../src/cli/render.ts';
 import { interactionFor } from '../src/cli/tui.ts';
 import { GmailContext } from '../src/context.ts';
 import { clientAdd } from '../src/operations/clients.ts';
 import { CONSOLE_STEPS, findClientJson, requireSetupTarget, setupState } from '../src/operations/setup.ts';
 import { readBoundedStream } from '../src/operations/small-file.ts';
+import { testHandoffs } from './support/handoffs.ts';
 import { newHarness, TEST_CLIENT_ID, TEST_CLIENT_SECRET, tempDir } from './support/harness.ts';
 import { SETUP_MAIN_EQUIVALENCE, setupCompatibilityHarness } from './support/setup-compatibility.ts';
 
@@ -39,7 +41,7 @@ async function organisationSetup(options: { active?: boolean; forOtherAddresses?
     NO_COLOR: '1',
     AGENT_COMMS_UPDATE_CHECK: 'off',
   };
-  const core = openCore({ env });
+  const core = openCore({ env, caller: GMAIL_CALLER });
   await (await core.secrets('file')).set(clientSecretRef('acme-1'), TEST_CLIENT_SECRET);
   await core.config.update((config) => {
     if (config.version !== 2) throw new Error('a new config is version 2');
@@ -92,7 +94,7 @@ async function ordinarySetup() {
     NO_COLOR: '1',
     AGENT_COMMS_UPDATE_CHECK: 'off',
   };
-  const core = openCore({ env });
+  const core = openCore({ env, caller: GMAIL_CALLER });
   await core.config.update((config) => ({
     ...config,
     clients: {
@@ -272,6 +274,7 @@ test('a profile-provided setup says why and omits the Google Cloud walk', () => 
     },
     CONSOLE_STEPS,
     false,
+    testHandoffs(),
   );
   assert.match(rendered, /Your organisation, Acme Test Org, provides the Google client/);
   assert.doesNotMatch(rendered, /Create a project/);
@@ -290,7 +293,7 @@ test('profile text is flattened and neutralised before setup returns it to CLI o
 
   const state = await setupState(context, { alias: 'acme/gmail', email: 'jo@acme.test', scanDownloads: false });
   const label = state.clientChoice?.organisationLabel ?? '';
-  const rendered = renderSetupPlan(state, CONSOLE_STEPS, false);
+  const rendered = renderSetupPlan(state, CONSOLE_STEPS, false, context.handoffs);
   const organisationLine = rendered.split('\n').find((line) => line.includes('Your organisation')) ?? '';
   for (const surface of [label, organisationLine]) {
     for (const raw of ['<|im_start|>', '\n', '\r', '\t', String.fromCharCode(27), '\u202e', '\u200b']) {

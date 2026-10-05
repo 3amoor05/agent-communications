@@ -5,6 +5,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { GmailContext } from '../src/context.ts';
 import { createGmailMcpServer } from '../src/mcp/server.ts';
 import { createDraft } from '../src/operations/drafts.ts';
+import { locatedGmailLine } from './support/handoffs.ts';
 import { type Harness, newHarness } from './support/harness.ts';
 
 /**
@@ -123,7 +124,7 @@ test('under confirm, an un-allowlisted client is refused and told where to go', 
     assert.equal(refused.isError, true);
     const error = (refused.structuredContent as { error: { code: string; hint: string } }).error;
     assert.equal(error.code, 'APPROVAL_REQUIRED');
-    assert.match(error.hint, /agent-gmail approve/);
+    locatedGmailLine(error.hint, ['approve', preparation.approvalId]);
     assert.match(error.hint, /not on the list/);
 
     // And the approval is still there: being asked from the wrong client says nothing about the message.

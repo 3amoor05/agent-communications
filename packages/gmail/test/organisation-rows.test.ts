@@ -2,10 +2,11 @@ import assert from 'node:assert/strict';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { CommsError, gatedChange, inlineCommand, shellCommand } from '@agentcomms/core';
+import { CommsError, gatedChange, inlineCommand, isCommand, type ResolvedPaths } from '@agentcomms/core';
 import { clientSecretRef } from '../src/auth/session.ts';
 import { GmailContext } from '../src/context.ts';
 import { clientAdd, clientAddChange, clientRemove } from '../src/operations/clients.ts';
+import { gmailHandoffs, locatedCoreLine } from './support/handoffs.ts';
 import { newHarness, tempDir } from './support/harness.ts';
 import { connect, toolError } from './support/surfaces.ts';
 
@@ -81,7 +82,8 @@ function refusedFor(act: 'replace' | 'remove') {
     assert.ok(error instanceof CommsError, String(error));
     assert.equal(error.code, 'CONFIG');
     assert.match(error.message, /belongs to the organisation profile "acme"/);
-    assert.match(error.hint ?? '', act === 'replace' ? /agentcomms org update acme/ : /agentcomms org remove acme/);
+    // Core's own command, located through Gmail's dependency on core (CUE-403).
+    locatedCoreLine(error.hint ?? '', ['org', act === 'replace' ? 'update' : 'remove', 'acme']);
     return true;
   };
 }
@@ -102,10 +104,15 @@ test('client remove refuses a client an organisation profile owns, from the comm
 
 test('organisation-owned client refusals quote org update and remove for darwin and win32', async () => {
   for (const platform of ['darwin', 'win32'] as const) {
-    const update = inlineCommand(shellCommand(['agentcomms', 'org', 'update', '7'], platform));
-    const remove = inlineCommand(shellCommand(['agentcomms', 'org', 'remove', '7'], platform));
-
+    // Core's own commands, located from Gmail through its dependency on core and quoted for the platform (CUE-403).
+    const core = (paths: ResolvedPaths, words: string[]) => {
+      const handoff = gmailHandoffs(paths, platform).core(words);
+      assert.ok(isCommand(handoff), 'message' in handoff ? handoff.message : '');
+      return inlineCommand(handoff);
+    };
     const replacement = await withOrganisationRow({ record: true, organisation: '7', platform });
+    const update = core(replacement.harness.core.paths, ['org', 'update', '7']);
+
     await assert.rejects(
       clientAdd(replacement.context, {
         path: await clientFile(),
@@ -126,11 +133,12 @@ test('organisation-owned client refusals quote org update and remove for darwin 
     );
 
     const removal = await withOrganisationRow({ record: true, organisation: '7', platform });
+    const paths = removal.harness.core.paths;
     await assert.rejects(clientRemove(removal.context, 'acme-1'), (error: unknown) => {
       assert.ok(error instanceof CommsError);
       assert.equal(
         error.hint,
-        `To stop using the organisation's apps, run ${remove}; if the client has drifted from the profile, ${update} repairs it.`,
+        `To stop using the organisation's apps, run ${core(paths, ['org', 'remove', '7'])}; if the client has drifted from the profile, ${core(paths, ['org', 'update', '7'])} repairs it.`,
         platform,
       );
       return true;

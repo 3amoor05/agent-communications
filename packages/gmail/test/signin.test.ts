@@ -18,6 +18,7 @@ import {
   resolveListenerEntry,
   startSignIn,
 } from '../src/operations/signin.ts';
+import { testHandoffs } from './support/handoffs.ts';
 import { type Harness, newHarness, TEST_CLIENT_ID, TEST_CLIENT_SECRET, tempDir } from './support/harness.ts';
 
 const CLI_ENTRY = fileURLToPath(new URL('../src/cli.ts', import.meta.url));
@@ -260,12 +261,13 @@ test('a sign-in with no expected address says that anyone who opens the link dec
     redirectUri: 'http://127.0.0.1:5123/',
     expiresAt: '2026-09-19T10:10:00.000Z',
   };
-  assert.match(renderSignInStarted(base, 'add', false), /connects whichever Google account opens it/);
+  const handoffs = testHandoffs();
+  assert.match(renderSignInStarted(base, 'add', false, handoffs), /connects whichever Google account opens it/);
 
   // With an expected address the warning is unnecessary, because the check is real: `finishSignIn` refuses any
   // other account outright, which the test above this one proves.
   const bound = { ...base, expectedEmail: 'jo@example.test' };
-  assert.doesNotMatch(renderSignInStarted(bound, 'add', false), /whichever Google account/);
+  assert.doesNotMatch(renderSignInStarted(bound, 'add', false, handoffs), /whichever Google account/);
 });
 
 test('a reauth goes through the inbox own client, and records the one the token was issued to', async () => {

@@ -6,6 +6,7 @@ import { type TestContext, test } from 'node:test';
 import { type ApprovalStore, type AuditRecord, CommsError, type Core, openCore, withFileLock } from '@agentcomms/core';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
+import { GMAIL_CALLER } from '../src/caller.ts';
 import { GmailContext } from '../src/context.ts';
 import type { GmailTransport, RawMessage } from '../src/gmail-api/transport.ts';
 import { createGmailMcpServer } from '../src/mcp/server.ts';
@@ -115,7 +116,7 @@ function downloadWorld(): World {
       2,
     )}\n`,
   );
-  const core = openCore({ env });
+  const core = openCore({ env, caller: GMAIL_CALLER });
   const cwd = tempDir('agent-gmail-cancel-cwd-');
   const fetched: string[] = [];
   const transport = {

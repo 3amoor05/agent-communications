@@ -1,17 +1,21 @@
 import {
   type ClientConfig,
+  type CliHandoffs,
   CommsError,
   type Config,
   type Core,
+  handoffSentenceToFill,
   type InboxConfig,
   openCore,
   type PathOverrides,
+  requireHandoffs,
   requireInbox,
 } from '@agentcomms/core';
 import { type GoogleEndpoints, resolveEndpoints } from './auth/endpoints.ts';
 import { FlowStore } from './auth/flows.ts';
 import { type Capability, capabilitiesOf, grantHint } from './auth/scopes.ts';
 import { TokenSource } from './auth/session.ts';
+import { GMAIL_CALLER } from './caller.ts';
 import { type GmailTransport, GoogleGmailTransport } from './gmail-api/transport.ts';
 
 export interface ResolvedInbox {
@@ -27,6 +31,7 @@ export interface TransportRequest {
 }
 
 export interface GmailContextOptions {
+  /** Opened with Gmail's caller (`GMAIL_CALLER`), so the commands it prints are located; opened here when left out. */
   core?: Core;
   env?: NodeJS.ProcessEnv;
   /** Explicit suite directories, resolved before any store is constructed. */
@@ -61,6 +66,7 @@ export class GmailContext {
   readonly cwd: string;
   readonly #createTransport: (request: TransportRequest) => GmailTransport;
   readonly #transports = new Map<string, GmailTransport>();
+  #handoffs: CliHandoffs | undefined;
 
   constructor(options: GmailContextOptions = {}) {
     this.env = options.env ?? process.env;
@@ -70,14 +76,25 @@ export class GmailContext {
         env: this.env,
         platform: options.platform ?? process.platform,
         ...(options.pathOverrides ? { pathOverrides: options.pathOverrides } : {}),
+        caller: GMAIL_CALLER,
       });
     this.endpoints = resolveEndpoints(this.env);
     this.now = options.now ?? (() => new Date());
     this.platform = options.platform ?? process.platform;
     this.surface = options.surface ?? 'cli';
     this.cwd = options.cwd ?? process.cwd();
-    this.flows = new FlowStore(this.core.paths.stateDir, this.now, this.surface, this.platform);
+    this.flows = new FlowStore(this.core.paths.stateDir, this.now, this.surface, () => this.handoffs);
     this.#createTransport = options.createTransport ?? defaultTransport;
+  }
+
+  /**
+   * The commands this context tells a person to run — Gmail's own, core's — located from this installation for its
+   * folders, and quoted for its shell (CUE-403; CONTRIBUTING.md, "Telling a person what to run"). A core opened without
+   * Gmail's caller has none, and that is a programming error: every entry point opens it with `GMAIL_CALLER`.
+   */
+  get handoffs(): CliHandoffs {
+    this.#handoffs ??= requireHandoffs(this.core).on(this.platform);
+    return this.#handoffs;
   }
 
   config(): Promise<Config> {
@@ -95,7 +112,11 @@ export class GmailContext {
     const client = config.clients[name];
     if (client) return client;
     throw new CommsError('CONFIG', `no OAuth client called "${name}" is registered`, {
-      hint: 'Add one with `agent-gmail client add <client_secret.json>`.',
+      hint: handoffSentenceToFill(
+        this.handoffs.own(['client', 'add']),
+        ['<client_secret.json>'],
+        (command) => `Add one with ${command}.`,
+      ),
     });
   }
 
@@ -107,7 +128,7 @@ export class GmailContext {
   async requireCapability(resolved: ResolvedInbox, capability: Capability): Promise<void> {
     if (capabilitiesOf(resolved.inbox.grantedScopes).has(capability)) return;
     throw new CommsError('SCOPE_MISSING', `${resolved.alias} was not granted permission to ${describe(capability)}`, {
-      hint: `Grant it: ${grantHint(resolved.alias, capability, this.platform)}.`,
+      hint: grantHint(resolved.alias, capability, this.handoffs, (command) => `Grant it: ${command}.`),
       details: { alias: resolved.alias, capability },
     });
   }
@@ -152,10 +173,10 @@ function defaultTransport({ resolved, client, context }: TransportRequest): Gmai
       inbox: resolved.inbox,
       client,
       alias: resolved.alias,
-      platform: context.platform,
+      handoffs: context.handoffs,
     }),
     endpoints: context.endpoints,
-    platform: context.platform,
+    handoffs: context.handoffs,
   });
 }
 

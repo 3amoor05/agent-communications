@@ -4,8 +4,10 @@ import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { openCore } from '@agentcomms/core';
+import { GMAIL_CALLER } from '../src/caller.ts';
 import { run } from '../src/cli/program.ts';
 import { GmailContext } from '../src/context.ts';
+import { assertNoBareCommand, gmailRetryWords } from './support/handoffs.ts';
 import { tempDir } from './support/harness.ts';
 
 /** The command printed for a change has to be pasteable on the platform where this CLI is running (CUE-398). */
@@ -17,7 +19,7 @@ interface ErrorEnvelope {
 test('the Gmail operation context carries an explicitly selected platform', () => {
   const root = tempDir('agent-gmail-platform-');
   const env = { AGENT_COMMS_CONFIG_DIR: join(root, 'config') };
-  const context = new GmailContext({ core: openCore({ env }), env, platform: 'win32' });
+  const context = new GmailContext({ core: openCore({ env, caller: GMAIL_CALLER }), env, platform: 'win32' });
   assert.equal(context.platform, 'win32');
 });
 
@@ -53,7 +55,7 @@ async function addClient(
     USERPROFILE: root,
     NO_COLOR: '1',
   };
-  const core = openCore({ env });
+  const core = openCore({ env, caller: GMAIL_CALLER });
   let stdout = '';
   const out = new PassThrough();
   out.on('data', (chunk) => {
@@ -71,13 +73,17 @@ async function addClient(
 
 test('commands to run again quote a spaced word on POSIX and print words instead of an unsafe Windows line', async () => {
   const posix = await addClient('client secret.json', 'posix-client', 'darwin');
+  // This installation's own CLI, located (CUE-403), then the words as typed, quoted for the shell.
   assert.match(
     posix.hint,
-    new RegExp(`agent-gmail client add '${escapedForRegExp(posix.clientPath)}' --name posix-client --json --approval`),
+    new RegExp(` client add '${escapedForRegExp(posix.clientPath)}' --name posix-client --json --approval \\S+\``),
   );
+  gmailRetryWords(/run `([^`]+)`/.exec(posix.hint)?.[1] ?? '');
+  assertNoBareCommand(posix.hint);
 
   const windows = await addClient('client 100%.json', 'windows-client', 'win32');
-  assert.match(windows.hint, /\["agent-gmail","client","add",/);
+  assert.match(windows.hint, /\[[^\]]*"client","add",/);
+  assertNoBareCommand(windows.hint);
   assert.match(windows.hint, /client 100\\u0025\.json/);
   assert.match(windows.hint, /cannot be quoted the same way for cmd\.exe and for PowerShell/);
 });
@@ -89,11 +95,12 @@ test(
   process.platform === 'win32' ? { skip: 'needs a file name holding a drive letter and backslashes' } : {},
   async () => {
     const safe = await addClient('C:\\Profiles\\', 'safe-backslash', 'win32');
-    assert.doesNotMatch(safe.hint, /\["agent-gmail"/);
+    assert.doesNotMatch(safe.hint, /`\[/, 'a line, not words to type');
     assert.ok(safe.hint.includes(safe.clientPath), safe.hint);
 
     const refused = await addClient('C:\\Profiles\\First Last\\', 'refused-backslash', 'win32');
-    assert.match(refused.hint, /\["agent-gmail","client","add",/);
+    assert.match(refused.hint, /\[[^\]]*"client","add",/);
+    assertNoBareCommand(refused.hint);
     assert.match(refused.hint, /C:\\\\Profiles\\\\First Last\\\\/);
     assert.match(refused.hint, /cannot be quoted the same way for cmd\.exe and for PowerShell/);
   },

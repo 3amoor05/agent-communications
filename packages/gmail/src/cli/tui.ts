@@ -58,10 +58,13 @@ export function interactionFor(input: InteractionInput): Interaction {
   return isTTY(input.streams.stderr as unknown as Writable) ? 'tui' : 'plain';
 }
 
-/** Cancelling is a decision, not a crash: Ctrl-C leaves the setup where it was, and it can be resumed. */
+/**
+ * Cancelling is a decision, not a crash: Ctrl-C leaves the setup where it was, and it can be resumed — by the command
+ * the person just typed, so it is named as that rather than by a binary that may not be on their PATH (CUE-403).
+ */
 function cancelled(): never {
   throw new CommsError('USAGE', 'setup was cancelled; nothing was changed', {
-    hint: 'Run `agent-gmail setup` again to pick up where you left off.',
+    hint: 'Run the same setup command again to pick up where you left off.',
   });
 }
 

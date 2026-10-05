@@ -39,6 +39,7 @@ import { search } from '../src/operations/search.ts';
 import { listApprovals } from '../src/operations/send.ts';
 import { startSignIn } from '../src/operations/signin.ts';
 import type { FakeMessage } from './support/fake-google.ts';
+import { gmailCommand, testHandoffs } from './support/handoffs.ts';
 import {
   type Harness,
   migrateNamesForTest,
@@ -202,7 +203,8 @@ test('a former name is refused with the new one on every path that takes a mailb
     const report = await doctor(context, { inbox: name });
     const known = report.checks.find((check) => check.id === 'inbox-known');
     assert.match(known?.detail ?? '', /renamed to "acme\/gmail"/, `doctor --inbox ${name}`);
-    assert.equal(known?.fix, 'agent-gmail doctor --inbox acme/gmail');
+    // This installation's own doctor, for the name it has now, located (CUE-403).
+    assert.equal(known?.fix, gmailCommand(harness.core.paths, ['doctor', '--inbox', 'acme/gmail']));
   }
 });
 
@@ -1055,8 +1057,9 @@ test('a nested name cannot be used to write through a symlinked folder out of th
 
 test('setup’s examples name a mailbox the config will accept', () => {
   const state = { next: 'inbox', done: [], clients: ['desktop'], inboxes: [], registeredWith: [], candidates: [] };
-  assert.match(renderSetupPlan({ ...state, nameExample: 'acme/gmail' }, [], false), /--inbox acme\/gmail/);
-  assert.match(renderSetupPlan(state, [], false), /--inbox work/);
+  const handoffs = testHandoffs();
+  assert.match(renderSetupPlan({ ...state, nameExample: 'acme/gmail' }, [], false, handoffs), /--inbox acme\/gmail/);
+  assert.match(renderSetupPlan(state, [], false, handoffs), /--inbox work/);
 });
 
 test('doctor --inbox reports only that mailbox’s leftover folders', async () => {

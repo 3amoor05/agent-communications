@@ -3,6 +3,7 @@ import {
   CommsError,
   decodeHeaderWords,
   formerNameRefusal,
+  handoffSentenceToFill,
   neutralise,
   newBoundary,
   parseAddressList,
@@ -298,7 +299,11 @@ export async function resolveInboxes(
   if (requested === undefined || requested === 'all') {
     if (known.length === 0) {
       throw new CommsError('NOT_FOUND', 'no mailbox is connected yet', {
-        hint: 'Connect one with `agent-gmail inbox add <name> --start`.',
+        hint: handoffSentenceToFill(
+          context.handoffs.own(['inbox', 'add', '--start']),
+          ['<name>'],
+          (command) => `Connect one with ${command}.`,
+        ),
       });
     }
     // Sorted, so a cursor made today still matches the same set tomorrow whatever order the config file grew in.

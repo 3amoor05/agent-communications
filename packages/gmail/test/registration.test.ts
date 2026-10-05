@@ -11,6 +11,7 @@ import { GmailContext } from '../src/context.ts';
 import { clientServesInbox } from '../src/mcp/install.ts';
 import { clientAdd } from '../src/operations/clients.ts';
 import { VERSION } from '../src/version.ts';
+import { assertNoBareCommand, gmailCommand, gmailRetryWords, locatedGmailLine } from './support/handoffs.ts';
 import { type Harness, newHarness, TEST_CLIENT_ID, TEST_CLIENT_SECRET, tempDir } from './support/harness.ts';
 import {
   applied,
@@ -273,12 +274,18 @@ test('`setup --mcp-client` stops for approval without registering, and only `--m
   }>().data;
   assert.equal(report?.blocked.step, 'mcp');
   assert.match(String(report?.blocked.preview), /registers the Gmail MCP server with cursor as "gmail"/);
-  assert.match(
-    String(report?.blocked.hint),
-    new RegExp(
-      `agent-gmail setup --mcp-client cursor --launcher local --json --mcp-approval ${report?.blocked.approvalId}\``,
-    ),
-  );
+  // This installation's own `setup`, located (CUE-403), carrying the registration's approval.
+  const rerun = locatedGmailLine(String(report?.blocked.hint), [
+    'setup',
+    '--mcp-client',
+    'cursor',
+    '--launcher',
+    'local',
+    '--json',
+    '--mcp-approval',
+    String(report?.blocked.approvalId),
+  ]);
+  assert.ok(rerun);
   assert.deepEqual(report?.did, []);
   assert.equal(existsSync(cursor), false, 'nothing was registered');
 
@@ -397,11 +404,13 @@ test('an agent at a terminal that picked the client from the list is told to run
     ],
   });
   assert.equal(asked.code, 10, `${asked.stdout}${asked.stderr}`);
-  const rerun = /`(agent-gmail setup [^`]*--mcp-client cursor --mcp-approval (ap_[\w-]+))`/.exec(asked.stderr);
+  const rerun = /`([^`]* setup [^`]*--mcp-client cursor --mcp-approval (ap_[\w-]+))`/.exec(asked.stderr);
   assert.ok(rerun, `the command to run again names the client picked: ${asked.stderr}`);
+  assertNoBareCommand(asked.stderr);
   assert.equal(existsSync(join(home, '.cursor', 'mcp.json')), false);
 
-  const again = (rerun?.[1] ?? '').split(' ').slice(1);
+  // This installation's own command, located: the words after its entry are what the person runs again.
+  const again = gmailRetryWords(rerun?.[1] ?? '');
   const claimed = await cli(harness, again, { env: agentEnv, tty: true });
   assert.equal(claimed.code, 0, `${claimed.stdout}${claimed.stderr}`);
   assert.ok(existsSync(join(home, '.cursor', 'mcp.json')));
@@ -587,7 +596,8 @@ async function handedOff(machine: Awaited<ReturnType<typeof clientOnly>>, extra:
 }
 
 /** A printed command as the argv this CLI takes: without the binary. */
-const argvOf = (command: string) => command.split(' ').slice(1);
+/** The words after the program of a command Gmail printed for itself, located (CUE-403): what is run again here. */
+const argvOf = (command: string) => gmailRetryWords(command);
 
 /** The sign-in's record on disk, as the finish will read it. */
 async function flowRecord(harness: Harness, flowId: string): Promise<Record<string, unknown>> {
@@ -598,7 +608,8 @@ test('`setup --inbox --mcp-client` hands the registration on with the sign-in, a
   const machine = await clientOnly();
   const run = await cli(machine.harness, BOTH, { env: machine.env });
   assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
-  const finish = /agent-gmail inbox add --finish (fl_\w+) --wait (\d+)/.exec(run.stdout);
+  const finish = / inbox add --finish (fl_\w+) --wait (\d+)/.exec(run.stdout);
+  assertNoBareCommand(run.stdout);
   assert.ok(finish, run.stdout);
   // One wait, whoever prints the finish: `setup` said 120 where `inbox add --start` said 60.
   assert.equal(finish[2], '60');
@@ -640,9 +651,19 @@ test('finishing it without a terminal connects the mailbox and hands back the re
   assert.equal(registration?.status, 'approval-required');
   assert.match(String(registration?.approvalId), /^ap_/);
   assert.match(String(registration?.preview), /registers the Gmail MCP server with cursor as "gmail"/);
+  // This installation's own `mcp install`, located, carrying the approval (CUE-403).
   assert.equal(
     registration?.claim,
-    `agent-gmail mcp install --client cursor --launcher local --approval ${registration?.approvalId}`,
+    gmailCommand(machine.harness.core.paths, [
+      'mcp',
+      'install',
+      '--client',
+      'cursor',
+      '--launcher',
+      'local',
+      '--approval',
+      String(registration?.approvalId),
+    ]),
   );
   assert.equal(existsSync(machine.cursor), false, 'nothing is registered before the person agrees');
   // The mailbox is connected whatever the registration is waiting for.
@@ -668,7 +689,8 @@ test('finishing it without a terminal connects the mailbox and hands back the re
   assert.match(plain.stdout, /Connected sam@example\.test as "home"/);
   assert.match(plain.stdout, /register the Gmail server with cursor\. That waits for the person's approval/);
   assert.match(plain.stdout, /CHANGE PREVIEW[\s\S]*registers the Gmail MCP server with cursor/);
-  assert.match(plain.stdout, /run `agent-gmail mcp install --client cursor --launcher local --approval ap_\w+`/);
+  assert.match(plain.stdout, /run `[^`]* mcp install --client cursor --launcher local --approval ap_\w+`/);
+  assertNoBareCommand(plain.stdout);
 });
 
 test('a person finishing it at a terminal approves the registration there and then', async () => {
@@ -764,7 +786,18 @@ test('an entry of ours pinned to another mailbox does not serve this one: the fi
   // The way on is a second entry for the mailbox just connected (#47). It was `--inbox other … --force`: the command
   // that registers `other` again, and leaves `home` reached by nothing.
   const hint = String(finished.registration?.hint);
-  assert.match(hint, /`agent-gmail mcp install --client cursor --name gmail-home --inbox home --launcher local`/);
+  locatedGmailLine(hint, [
+    'mcp',
+    'install',
+    '--client',
+    'cursor',
+    '--name',
+    'gmail-home',
+    '--inbox',
+    'home',
+    '--launcher',
+    'local',
+  ]);
   assert.match(hint, /serves other/);
   assert.doesNotMatch(hint, /--inbox other|--force/);
   // The mailbox is connected, in an envelope that says the finish worked; the status is the registration's refusal.
@@ -900,7 +933,17 @@ test('`setup --replace-server` travels with the sign-in, and the finish replaces
   assert.match(written.mcpServers.gmail.args.join(' '), /packages[/\\]+gmail[/\\]+(src|dist)[/\\]+cli\./);
   assert.equal(
     finished.registration?.claim,
-    `agent-gmail mcp install --client cursor --launcher local --force --approval ${finished.registration?.approvalId}`,
+    gmailCommand(machine.harness.core.paths, [
+      'mcp',
+      'install',
+      '--client',
+      'cursor',
+      '--launcher',
+      'local',
+      '--force',
+      '--approval',
+      String(finished.registration?.approvalId),
+    ]),
   );
 });
 
@@ -923,7 +966,19 @@ test('`setup --replace-server` over an entry pinned to another mailbox pins the 
   assert.doesNotMatch(preview, /keeping --inbox other/);
   assert.equal(
     finished.registration?.claim,
-    `agent-gmail mcp install --client cursor --launcher local --inbox home --force --approval ${finished.registration?.approvalId}`,
+    gmailCommand(machine.harness.core.paths, [
+      'mcp',
+      'install',
+      '--client',
+      'cursor',
+      '--launcher',
+      'local',
+      '--inbox',
+      'home',
+      '--force',
+      '--approval',
+      String(finished.registration?.approvalId),
+    ]),
   );
 
   // The printed claim is the prepared change: it claims, and the entry serves `home`.
@@ -949,7 +1004,17 @@ test('gmail_inbox_finish hands the mailbox just connected back as the pin, when 
   const args = pending.arguments as Record<string, unknown>;
   assert.deepEqual(args, { channel: 'gmail', client: 'cursor', launcher: 'local', inbox: 'home', force: true });
   assert.match(String(pending.next), /it served the mailbox other/);
-  assert.match(String(pending.next), /`agent-gmail mcp install --client cursor --launcher local --inbox home --force`/);
+  locatedGmailLine(String(pending.next), [
+    'mcp',
+    'install',
+    '--client',
+    'cursor',
+    '--launcher',
+    'local',
+    '--inbox',
+    'home',
+    '--force',
+  ]);
 
   // The core server takes them as that replacement: pinned to `home`, saying what the old entry served.
   const server = await coreServer(machine.harness, machine.env);
@@ -1049,10 +1114,18 @@ test('gmail_inbox_finish decides `pendingRegistration` by the entry that serves 
     name: 'gmail-home',
   });
   assert.match(String(pending.next), /serves the mailbox other, not this one/);
-  assert.match(
-    String(pending.next),
-    /`agent-gmail mcp install --client cursor --launcher local --name gmail-home --inbox home`/,
-  );
+  locatedGmailLine(String(pending.next), [
+    'mcp',
+    'install',
+    '--client',
+    'cursor',
+    '--launcher',
+    'local',
+    '--name',
+    'gmail-home',
+    '--inbox',
+    'home',
+  ]);
   assert.equal(await readFile(pinned.cursor, 'utf8'), before);
   // The arguments work as they are given: passed on unchanged, they ask for the second entry, not the taken name.
   const env = { ...pinned.harness.env, ...pinned.env };
@@ -1093,7 +1166,7 @@ test('gmail_inbox_finish hands `--replace-server` back as `force`, which comms_s
   assert.ok(pending, 'replacing was asked for, so the registration is pending');
   const args = pending.arguments as Record<string, unknown>;
   assert.deepEqual(args, { channel: 'gmail', client: 'cursor', launcher: 'local', force: true });
-  assert.match(String(pending.next), /agent-gmail mcp install --client cursor --launcher local --force`/);
+  locatedGmailLine(String(pending.next), ['mcp', 'install', '--client', 'cursor', '--launcher', 'local', '--force']);
 
   // And the core server takes those arguments as the replacement they are, where without `force` it refuses.
   const server = await coreServer(machine.harness, machine.env);

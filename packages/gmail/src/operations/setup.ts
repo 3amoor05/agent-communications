@@ -402,7 +402,7 @@ export async function setupState(context: GmailContext, options: SetupStateOptio
           email: options.email,
           client: options.client,
           allowOwnClient: true,
-          platform: context.platform,
+          handoffs: context.handoffs,
         })
       : undefined;
   // Once a Gmail profile is installed, a registered row is not enough to finish this step: profile routing is

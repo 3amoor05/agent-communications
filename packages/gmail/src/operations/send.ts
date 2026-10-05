@@ -5,13 +5,12 @@ import {
   canonicalAddress,
   domainOf,
   type Expectation,
-  inlineCommand,
+  handoffSentence,
   type MessagePreview,
   publicView,
   renderMessagePreview,
   resolveName,
   type SendPolicy,
-  shellCommand,
   stricterPolicy,
 } from '@agentcomms/core';
 import type { GmailContext, ResolvedInbox } from '../context.ts';
@@ -322,7 +321,10 @@ async function readDraft(
   const draft = await transport.getDraft(draftId);
   if (!draft.message?.id) {
     throw new CommsError('NOT_FOUND', `there is no draft ${draftId} in this mailbox`, {
-      hint: 'List them with `agent-gmail draft list --inbox <alias>`.',
+      hint: handoffSentence(
+        context.handoffs.own(['draft', 'list', '--inbox', alias]),
+        (command) => `List them with ${command}.`,
+      ),
     });
   }
   const sendAs = await transport.listSendAs().catch(() => []);
@@ -394,9 +396,11 @@ export async function prepareSend(context: GmailContext, alias: string, draftId:
   const livePolicy: SendPolicy = resolved.inbox.sendPolicy ?? config.defaults.sendPolicy;
   if (livePolicy === 'never') {
     throw new CommsError('POLICY_NEVER', `sending from ${alias} is turned off (policy: never)`, {
-      hint: `The draft is in Gmail; send it from there, or change the policy with ${inlineCommand(
-        shellCommand(['agent-gmail', 'inbox', 'policy', alias, '--send', 'confirm'], context.platform),
-      )} in a terminal.`,
+      hint: handoffSentence(
+        context.handoffs.own(['inbox', 'policy', alias, '--send', 'confirm']),
+        (command) => `The draft is in Gmail; send it from there, or change the policy with ${command} in a terminal.`,
+        { instead: 'The draft is in Gmail; send it from there.' },
+      ),
     });
   }
 
@@ -446,11 +450,15 @@ export async function prepareSend(context: GmailContext, alias: string, draftId:
     expect: record.expect,
     digest: analysis.digest,
     expiresAt: record.expiresAt,
+    // Not in the approval's digest: the draft is. The command is this process's own, located where it is printed.
     nextStep:
       effectivePolicy === 'confirm'
-        ? `Show the preview to the user, then have them run ${inlineCommand(
-            shellCommand(['agent-gmail', 'approve', record.approvalId], context.platform),
-          )} in a terminal, or send it from Gmail. You cannot approve this yourself.`
+        ? handoffSentence(
+            context.handoffs.own(['approve', record.approvalId]),
+            (command) =>
+              `Show the preview to the user, then have them run ${command} in a terminal, or send it from Gmail. You cannot approve this yourself.`,
+            { instead: 'Show the preview to the user; they can send it from Gmail. You cannot approve this yourself.' },
+          )
         : 'Show the preview to the user verbatim and wait for an explicit yes. Then send it with the same approval id and the recipients and subject shown above.',
   };
 }
@@ -605,8 +613,12 @@ export async function executeSend(
     },
     {
       // Gmail's own words, given here because the approval store is shared and no longer speaks for any product.
-      pendingHint:
-        'Ask the user to approve it in the terminal (`agent-gmail approve <id>`) or in a trusted client form, or to send it from Gmail.',
+      pendingHint: handoffSentence(
+        context.handoffs.own(['approve', options.approvalId]),
+        (command) =>
+          `Ask the user to approve it in the terminal (${command}) or in a trusted client form, or to send it from Gmail.`,
+        { instead: 'Ask the user to approve it in a trusted client form, or to send it from Gmail.' },
+      ),
       platform: context.platform,
     },
   );

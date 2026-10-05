@@ -10,6 +10,7 @@ import { GmailContext } from '../src/context.ts';
 import { clientAdd } from '../src/operations/clients.ts';
 import { importLegacy } from '../src/operations/import-legacy.ts';
 import { CONSOLE_STEPS } from '../src/operations/setup.ts';
+import { gmailCommand } from './support/handoffs.ts';
 import {
   type Harness,
   migrateNamesForTest,
@@ -247,9 +248,10 @@ test('without an active Gmail generation interactive setup has main’s complete
       assert.equal(dialog.code, 0);
       assert.equal(
         finalOutput,
+        // This installation's own commands, located (CUE-403), the words to fill in printed as written.
         `Done. ${fixture.expected.inboxes.length} mailbox(es): ${fixture.expected.inboxes.join(', ')}\n` +
-          'Try: agent-gmail search newer_than:7d --inbox acme/gmail\n' +
-          'Add another with: agent-gmail inbox add <organisation>/gmail --email <address>\n',
+          `Try: ${gmailCommand(harness.core.paths, ['search', 'newer_than:7d', '--inbox', 'acme/gmail'])}\n` +
+          `Add another with: ${gmailCommand(harness.core.paths, ['inbox', 'add'])} <organisation>/gmail --email <address>\n`,
       );
     }
   }

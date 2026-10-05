@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { CommsError, isGoogleClientId } from '@agentcomms/core';
+import { type CliHandoffs, CommsError, handoffSentenceToFill, isGoogleClientId } from '@agentcomms/core';
 import type { GoogleEndpoints } from './endpoints.ts';
 import { parseGrantedScopes } from './scopes.ts';
 
@@ -82,8 +82,11 @@ function decodeIdToken(idToken: string | undefined): TokenResponse['idClaims'] {
   }
 }
 
-/** Maps an OAuth error to a CommsError with the fix the setup guide gives for it. */
-export function oauthError(error: string, description?: string): CommsError {
+/**
+ * Maps an OAuth error to a CommsError with the fix the setup guide gives for it. A fix that is a command of this
+ * installation names it through `handoffs`, located (CUE-403); without them it is said in words, with no command.
+ */
+export function oauthError(error: string, description?: string, handoffs?: CliHandoffs | undefined): CommsError {
   const detail = description ? ` (${description})` : '';
   switch (error) {
     case 'access_denied':
@@ -100,7 +103,14 @@ export function oauthError(error: string, description?: string): CommsError {
       });
     case 'redirect_uri_mismatch':
       return new CommsError('CONFIG', `the OAuth client is not a Desktop app${detail}`, {
-        hint: 'Create a client of type "Desktop app" and add it with `agent-gmail client add`.',
+        hint:
+          handoffs === undefined
+            ? 'Create a client of type "Desktop app" and register it as the OAuth client.'
+            : handoffSentenceToFill(
+                handoffs.own(['client', 'add']),
+                ['<client_secret.json>'],
+                (command) => `Create a client of type "Desktop app" and add it with ${command}.`,
+              ),
       });
     case 'invalid_client':
     case 'deleted_client':
@@ -117,7 +127,11 @@ export function oauthError(error: string, description?: string): CommsError {
   }
 }
 
-async function postForm(url: string, body: Record<string, string>): Promise<Record<string, unknown>> {
+async function postForm(
+  url: string,
+  body: Record<string, string>,
+  handoffs?: CliHandoffs | undefined,
+): Promise<Record<string, unknown>> {
   let response: Response;
   try {
     response = await fetch(url, {
@@ -130,7 +144,11 @@ async function postForm(url: string, body: Record<string, string>): Promise<Reco
   }
   const json = (await response.json().catch(() => ({}))) as Record<string, unknown>;
   if (!response.ok) {
-    throw oauthError(String(json.error ?? `http_${response.status}`), json.error_description as string | undefined);
+    throw oauthError(
+      String(json.error ?? `http_${response.status}`),
+      json.error_description as string | undefined,
+      handoffs,
+    );
   }
   return json;
 }
@@ -142,16 +160,22 @@ export async function exchangeCode(options: {
   code: string;
   codeVerifier: string;
   redirectUri: string;
+  /** The commands a refusal names (`GmailContext.handoffs`); without them its fix is said in words. */
+  handoffs?: CliHandoffs | undefined;
 }): Promise<TokenResponse> {
-  const json = await postForm(options.endpoints.tokenUrl, {
-    grant_type: 'authorization_code',
-    code: options.code,
-    code_verifier: options.codeVerifier,
-    redirect_uri: options.redirectUri,
-    client_id: options.client.clientId,
-    // Desktop clients are documented as unable to keep a secret, but Google still expects it; always send it.
-    client_secret: options.client.clientSecret,
-  });
+  const json = await postForm(
+    options.endpoints.tokenUrl,
+    {
+      grant_type: 'authorization_code',
+      code: options.code,
+      code_verifier: options.codeVerifier,
+      redirect_uri: options.redirectUri,
+      client_id: options.client.clientId,
+      // Desktop clients are documented as unable to keep a secret, but Google still expects it; always send it.
+      client_secret: options.client.clientSecret,
+    },
+    options.handoffs,
+  );
   const refreshToken = json.refresh_token;
   if (typeof refreshToken !== 'string' || !refreshToken) {
     throw new CommsError('AUTH_REQUIRED', 'Google returned no refresh token', {

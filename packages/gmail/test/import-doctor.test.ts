@@ -14,11 +14,13 @@ import {
 } from '@agentcomms/core';
 import { buildAuthUrl, exchangeCode, newPkce } from '../src/auth/oauth.ts';
 import { SCOPES } from '../src/auth/scopes.ts';
+import { GMAIL_CALLER } from '../src/caller.ts';
 import { GmailContext } from '../src/context.ts';
 import { doctor } from '../src/operations/doctor.ts';
 import { aliasFromCredentialsFile, importLegacy, parseLegacyCredentials } from '../src/operations/import-legacy.ts';
 import { inboxList, inboxRemove, orphanedSecretsPath } from '../src/operations/inboxes.ts';
 import { VERSION } from '../src/version.ts';
+import { assertNoBareCommand, gmailCommand, gmailRetryWords } from './support/handoffs.ts';
 import { type Harness, newHarness, TEST_CLIENT_ID, TEST_CLIENT_SECRET, tempDir } from './support/harness.ts';
 
 const CLIENT = { clientId: TEST_CLIENT_ID, clientSecret: TEST_CLIENT_SECRET };
@@ -39,7 +41,11 @@ test('doctor quotes a loose directory repair for the selected shell', {
     AGENT_COMMS_CLIENT_CLI_DIRS: '',
     AGENT_COMMS_UPDATE_CHECK: 'off',
   };
-  const context = new GmailContext({ core: openCore({ env, platform: 'darwin' }), env, platform: 'darwin' });
+  const context = new GmailContext({
+    core: openCore({ env, platform: 'darwin', caller: GMAIL_CALLER }),
+    env,
+    platform: 'darwin',
+  });
 
   const result = await doctor(context);
   const check = result.checks.find((candidate) => candidate.id === 'config-dir');
@@ -157,7 +163,14 @@ test('legacy import renders its re-authorisation step for the selected shell pla
   });
   const context = new GmailContext({ core: harness.core, env: harness.env, platform: 'win32' });
   const result = await importLegacy(context, { dir: directory, store: 'file' });
-  assert.ok(result.nextSteps.some((step) => step.startsWith('agent-gmail inbox reauth "7" --start')));
+  // This installation's own command, located and quoted for Windows (CUE-403).
+  const reauth = gmailCommand(harness.core.paths, ['inbox', 'reauth', '7', '--start'], 'win32');
+  assert.match(reauth, / inbox reauth "7" --start$/);
+  assert.ok(
+    result.nextSteps.some((step) => step.startsWith(reauth)),
+    JSON.stringify(result.nextSteps),
+  );
+  for (const step of result.nextSteps) assertNoBareCommand(step);
 });
 
 test('doctor renders a missing mailbox repair for the selected shell platform', async () => {
@@ -165,7 +178,9 @@ test('doctor renders a missing mailbox repair for the selected shell platform', 
   const result = await doctor(new GmailContext({ core: harness.core, env: harness.env, platform: 'win32' }), {
     inbox: '7',
   });
-  assert.equal(result.checks.find((check) => check.id === 'inbox-known')?.fix, 'agent-gmail inbox add "7" --start');
+  const add = gmailCommand(harness.core.paths, ['inbox', 'add', '7', '--start'], 'win32');
+  assert.match(add, / inbox add "7" --start$/);
+  assert.equal(result.checks.find((check) => check.id === 'inbox-known')?.fix, add);
 });
 
 test('an imported token Google will not renew is skipped with the reason, not written', async () => {
@@ -394,7 +409,9 @@ test('doctor with nothing registered says so, as something to look at — not as
   assert.equal(bare?.status, 'warn', bare?.detail);
   assert.match(bare?.detail ?? '', /^none registered: /);
   assert.doesNotMatch(bare?.detail ?? '', /this release/);
-  assert.equal(bare?.fix, 'agent-gmail mcp install --help');
+  // This installation's own help, which reads no folder: nothing pinned (CUE-403).
+  assert.equal(bare?.fix, gmailCommand(harness.core.paths, ['mcp', 'install', '--help'], 'darwin', { uses: [] }));
+  assert.equal(gmailRetryWords(bare?.fix ?? '').join(' '), 'mcp install --help');
 
   // Scoped to one mailbox, an entry pinned to another is not one that serves it — and is not named.
   await harness.addInbox({ alias: 'work', email: 'jo@example.test', refreshToken: 'rt_work' });

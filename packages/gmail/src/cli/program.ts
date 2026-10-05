@@ -7,9 +7,9 @@ import {
   approveChangeAtTerminal,
   CommsError,
   canPrompt,
+  cliHandoffs,
   colorEnabled,
   commandPathOf,
-  commandText,
   DOWNLOAD_CLAIM,
   downloadAtTerminal,
   EXIT_CODES,
@@ -17,10 +17,12 @@ import {
   type GatedChange,
   gatedChange,
   gatedChangeAtTerminal,
+  handoffSentence,
+  handoffSentenceToFill,
+  handoffText,
   homeDirectory,
-  inlineCommand,
+  insertWordsBeforeSentinel,
   installExitStatus,
-  normalizePathOptionWords,
   type OutputOptions,
   openCore,
   orgAddChange,
@@ -30,26 +32,26 @@ import {
   profileSourcePath,
   refuseRetiredOut,
   refuseUnclaimedApproval,
+  resolvePaths,
   runCommand,
   runUpdateCheckChild,
   type ServerInstallResult,
-  type ShellCommand,
   type Streams,
   serverInstallChange,
   serverPruneChange,
-  shellCommand,
   terminalUpdateHooks,
   toCommsError,
   UPDATE_CHECK_CHILD_COMMAND,
   updateGateAtTerminal,
   withoutOptionsBeforeSentinel,
-  withWords,
   writeResult,
 } from '@agentcomms/core';
 import { Command, CommanderError, InvalidArgumentError, Option } from 'commander';
 import type { RegistrationIntent } from '../auth/flows.ts';
 import { TIERS } from '../auth/scopes.ts';
+import { BRIDGE_APPROVE_COMMAND, GMAIL_CALLER } from '../caller.ts';
 import { GmailContext, type GmailContextOptions } from '../context.ts';
+import { handoffTextToFill } from '../handoffs.ts';
 import type { Launcher, SupportedClient } from '../mcp/install.ts';
 import { listLabels, listSendAs, threadTimeline } from '../operations/analyse.ts';
 import {
@@ -158,6 +160,9 @@ interface GlobalOptions {
 
 type Options = Record<string, unknown>;
 
+/** Where an undo receipt comes from: said in words, since it is the output of a run already made, not one to make. */
+const UNDO_HINT = 'Pipe in the `undo` array that an organise run printed with --json.';
+
 /**
  * The `agent-gmail` command. Both a person and an agent run it, so every command prints a readable summary by default
  * and the full result under `--json`, with the same exit codes either way (documented in `--help`).
@@ -185,9 +190,9 @@ export async function run(argv: readonly string[], deps: CliDeps = {}): Promise<
       'after',
       `
 Exit codes: 0 ok · 1 unexpected · 10 send refused or approval required · 11 an update is out:
-update first, or put it off (agentcomms update, agentcomms update --later) · 64 usage ·
-65 bad data · 66 not found · 69 provider or secret store unavailable · 75 temporary
-(retry later) · 77 sign-in or permission needed · 78 configuration problem.`,
+update first, or put it off (the stop names both commands) · 64 usage · 65 bad data ·
+66 not found · 69 provider or secret store unavailable · 75 temporary (retry later) ·
+77 sign-in or permission needed · 78 configuration problem.`,
     )
     .exitOverride();
 
@@ -207,10 +212,21 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
     const pathOverrides = pathOverridesFromCliOptions(
       Object.fromEntries(PATH_OPTIONS.map(({ key, option }) => [option, options[key] as string | undefined])),
     );
+    // Opened with Gmail's caller, so every command it prints — its own, core's — is this installation's, located.
     invocationCore =
-      Object.keys(pathOverrides).length === 0 && deps.core ? deps.core : openCore({ env, platform, pathOverrides });
+      Object.keys(pathOverrides).length === 0 && deps.core
+        ? deps.core
+        : openCore({ env, platform, pathOverrides, caller: GMAIL_CALLER });
     return invocationCore;
   };
+  /**
+   * This installation's own `--help`, which reads no folder: for a usage error, which can come before any folder is
+   * known — a path option that is not one — so it is located without opening core.
+   */
+  const help = () =>
+    cliHandoffs({ caller: GMAIL_CALLER, paths: resolvePaths({ env, platform }), platform, env }).own(['--help'], {
+      uses: [],
+    });
 
   const globals = (): GlobalOptions => {
     const options = program.opts();
@@ -256,11 +272,10 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
           output: output(),
           noInput: globals().noInput,
           streams,
-          approveCommand: 'agent-gmail approve',
           approvals: approvalsOf(command),
           // A download's `--choice` is the question the person just answered: held to that kind, as the tool's is.
           approvalClaim: path.join(' ') === 'attachments download' ? DOWNLOAD_CLAIM : undefined,
-          ...terminalUpdateHooks(core, env, { output: output(), streams, approveCommand: 'agent-gmail approve' }),
+          ...terminalUpdateHooks(core, env, { output: output(), streams }),
         });
       },
       streams,
@@ -395,18 +410,18 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
   });
 
   /**
-   * This command as it was typed, without an `--approval` it already carried: what to run again once a change it
-   * prepared has been approved.
+   * This command as it was typed, without an `--approval` it already carried: the words, after the program, to run
+   * again once a change it prepared has been approved.
    *
    * From the arguments themselves rather than rebuilt per command, so every flag the person or agent gave is in it
    * — `--rename`, `--dir`, `--revoke` — and running it again prepares nothing new: it claims the approval for the
-   * same change. `setup` leaves out its `--mcp-approval` too, the second approval it can carry.
+   * same change. `setup` leaves out its `--mcp-approval` too, the second approval it can carry. Only options before a
+   * `--` are removed: what follows one is positional data, kept word for word. Core's flow puts the approval back
+   * before any `--`, and the locator makes it this installation's command with this run's folders pinned, in place of
+   * any path option the words carried (CUE-403).
    */
-  const again = (approvalFlags: readonly string[] = ['--approval']): ShellCommand => {
-    const withoutApprovals = withoutOptionsBeforeSentinel(argv, approvalFlags);
-    const normalized = normalizePathOptionWords(withoutApprovals, coreForInvocation().pathOverrides, 0);
-    return shellCommand(['agent-gmail', ...normalized], platform);
-  };
+  const again = (approvalFlags: readonly string[] = ['--approval']): string[] =>
+    withoutOptionsBeforeSentinel(argv, approvalFlags);
 
   /**
    * A command that changes an account, asked the way every surface asks: through core's one flow.
@@ -429,8 +444,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
       // `--no-input` means nobody is asked anything. The flow's one way to hear that is `json`, which it reads only
       // to decide whether a person could answer a question — so both say the same thing to it.
       output: { json: globalOptions.json || globalOptions.noInput, color: globalOptions.color, platform },
-      command: again(),
-      approveCommand: 'agent-gmail approve',
+      rerun: again(),
       streams,
     });
 
@@ -504,20 +518,16 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
     }
     const pin = await pinFor(client, connected.alias);
     // `mcp install` with what `setup` was given: the request `setupRegistration` makes, and so the same change.
-    const install = shellCommand(
-      [
-        'agent-gmail',
-        'mcp',
-        'install',
-        '--client',
-        client,
-        ...(intent.launcher ? ['--launcher', intent.launcher] : []),
-        ...(pin ? ['--inbox', pin] : []),
-        // Without it the claim's own preflight refuses the entry the prepared change replaces: not the same change.
-        ...(replace ? ['--force'] : []),
-      ],
-      platform,
-    );
+    const install = [
+      'mcp',
+      'install',
+      '--client',
+      client,
+      ...(intent.launcher ? ['--launcher', intent.launcher] : []),
+      ...(pin ? ['--inbox', pin] : []),
+      // Without it the claim's own preflight refuses the entry the prepared change replaces: not the same change.
+      ...(replace ? ['--force'] : []),
+    ];
     const person =
       agentMarker(env) === null &&
       canPrompt(env, streams, { json: globalOptions.json, noInput: globalOptions.noInput });
@@ -537,20 +547,18 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
         result = await gatedChangeAtTerminal(context.core, change, {
           env,
           output: { json: globalOptions.json || globalOptions.noInput, color: globalOptions.color, platform },
-          command: install,
-          approveCommand: 'agent-gmail approve',
+          rerun: install,
           streams,
         });
       } else {
-        const outcome = await gatedChange(context.core, change, {
-          surface: 'cli',
-          approveCommand: 'agent-gmail approve',
-          platform,
-        });
+        const outcome = await gatedChange(context.core, change, { surface: 'cli', platform });
         if (outcome.status === 'approval-required') {
           const { prepared } = outcome;
-          const claimCommand = withWords(install, '--approval', prepared.approvalId);
-          const claim = commandText(claimCommand);
+          // This installation's own `mcp install`, located, carrying the approval: a result field, not in the digest.
+          const claimCommand = context.handoffs.own(
+            insertWordsBeforeSentinel(install, '--approval', prepared.approvalId),
+          );
+          const claim = handoffText(claimCommand);
           softExit = EXIT_CODES.APPROVAL;
           return {
             client,
@@ -561,7 +569,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
             preview: prepared.preview,
             expiresAt: prepared.expiresAt,
             claim,
-            hint: approvalHint(prepared, claimCommand, 'agent-gmail approve'),
+            hint: approvalHint(prepared, claimCommand, context.handoffs),
           };
         }
         result = outcome.result;
@@ -602,7 +610,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
           noProbe: options.probe === false,
         });
         const result = await changed(context, globalOptions, change, options.approval);
-        writeResult(result, output(), (data) => renderClientAdd(data, globalOptions.color), streams);
+        writeResult(result, output(), (data) => renderClientAdd(data, globalOptions.color, context.handoffs), streams);
       }),
     );
   client
@@ -610,7 +618,12 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
     .description('list the registered OAuth clients')
     .action(
       act(async (context, globalOptions) => {
-        writeResult(await clientList(context), output(), (data) => renderClients(data, globalOptions.color), streams);
+        writeResult(
+          await clientList(context),
+          output(),
+          (data) => renderClients(data, globalOptions.color, context.handoffs),
+          streams,
+        );
       }),
     );
   client
@@ -699,18 +712,21 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
         writeResult(
           { ...connected, registration },
           output(),
-          (data) => renderSignedIn(data, globalOptions.color, context.platform),
+          (data) => renderSignedIn(data, globalOptions.color, context.handoffs),
           streams,
         );
         return;
       }
-      writeResult(result, output(), (data) => renderSignedIn(data, globalOptions.color, context.platform), streams);
+      writeResult(result, output(), (data) => renderSignedIn(data, globalOptions.color, context.handoffs), streams);
       return;
     }
     if (!alias) {
       const example = (await context.config()).version === 2 ? 'acme/gmail' : 'work';
       throw new CommsError('USAGE', 'name the inbox', {
-        hint: `For example: ${inlineCommand(shellCommand(['agent-gmail', 'inbox', mode, example, '--start'], context.platform))}.`,
+        hint: handoffSentence(
+          context.handoffs.own(['inbox', mode, example, '--start']),
+          (command) => `For example: ${command}.`,
+        ),
       });
     }
 
@@ -739,15 +755,15 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
       writeResult(
         started,
         output(),
-        (data) => renderSignInStarted(data, mode, globalOptions.color, context.platform),
+        (data) => renderSignInStarted(data, mode, globalOptions.color, context.handoffs),
         streams,
       );
       return;
     }
-    streams.stderr.write(`${renderSignInStarted(started, mode, globalOptions.color, context.platform)}\n`);
+    streams.stderr.write(`${renderSignInStarted(started, mode, globalOptions.color, context.handoffs)}\n`);
     if (options.browser !== false) openInBrowser(started.authUrl);
     const result = await started.listener.result;
-    writeResult(result, output(), (data) => renderSignedIn(data, globalOptions.color, context.platform), streams);
+    writeResult(result, output(), (data) => renderSignedIn(data, globalOptions.color, context.handoffs), streams);
   };
 
   withSignInOptions(inbox.command('add [alias]').description('connect a mailbox (opens Google in a browser)')).action(
@@ -773,7 +789,12 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
     .description('list the connected mailboxes')
     .action(
       act(async (context, globalOptions) => {
-        writeResult(await inboxList(context), output(), (data) => renderInboxList(data, globalOptions.color), streams);
+        writeResult(
+          await inboxList(context),
+          output(),
+          (data) => renderInboxList(data, globalOptions.color, context.handoffs),
+          streams,
+        );
       }),
     );
 
@@ -855,7 +876,10 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
       act(async (context, globalOptions, source: string | undefined, options: Options) => {
         if (source && source !== 'artymclabin') {
           throw new CommsError('USAGE', `"${source}" is not a source this can import from`, {
-            hint: 'Only `artymclabin` (and the servers sharing its file layout) is supported: `agent-gmail inbox import`.',
+            hint: handoffSentence(
+              context.handoffs.own(['inbox', 'import']),
+              (command) => `Only \`artymclabin\` (and the servers sharing its file layout) is supported: ${command}.`,
+            ),
           });
         }
         // A dry run changes nothing and asks nobody; the import itself connects accounts, and is approved first.
@@ -894,7 +918,9 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
             (data.orphanedSecret
               ? `\nIts token could not be deleted from this machine: remove ${data.orphanedSecret} from the secret store${
                   data.orphanRecorded
-                    ? ' (`agent-gmail doctor` lists it).'
+                    ? handoffSentence(context.handoffs.own(['doctor']), (command) => ` (${command} lists it).`, {
+                        instead: '. The doctor lists it.',
+                      })
                     : '. It could not be recorded either, so nothing else will list it.'
                 }`
               : '\nIts token was deleted from this machine.'),
@@ -1010,7 +1036,12 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
           query: options.query ? String(options.query) : undefined,
           limit: options.limit,
         });
-        writeResult(result, output(), (data) => renderAttachments(data, globalOptions.color), streams);
+        writeResult(
+          result,
+          output(),
+          (data) => renderAttachments(data, globalOptions.color, context.handoffs),
+          streams,
+        );
       }),
     );
   attachments
@@ -1050,20 +1081,16 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
           env,
           output: output(),
           noInput: globalOptions.noInput,
-          command: shellCommand(
-            [
-              'agent-gmail',
-              'attachments',
-              'download',
-              ...messageIds,
-              '--inbox',
-              inbox,
-              ...(part === undefined ? [] : ['--part', part]),
-              ...(options.maxFiles === undefined ? [] : ['--max-files', String(options.maxFiles)]),
-            ],
-            platform,
-          ),
-          approveCommand: 'agent-gmail approve',
+          // Core makes it this installation's own command, located, with the downloads folder pinned beside the rest.
+          rerun: [
+            'attachments',
+            'download',
+            ...messageIds,
+            '--inbox',
+            inbox,
+            ...(part === undefined ? [] : ['--part', part]),
+            ...(options.maxFiles === undefined ? [] : ['--max-files', String(options.maxFiles)]),
+          ],
           render: (question) => renderDownloadQuestion(question, globalOptions.color),
           streams,
         });
@@ -1239,7 +1266,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
         writeResult(
           result,
           output(),
-          (data) => renderSendPreparation(data, globalOptions.color, context.platform),
+          (data) => renderSendPreparation(data, globalOptions.color, context.handoffs),
           streams,
         );
       }),
@@ -1312,13 +1339,20 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
         const marker = agentMarker(env);
         if (marker) {
           throw new CommsError('APPROVAL_REQUIRED', 'only a person can approve a send or a change, not an agent', {
-            hint: `Ask the user to run ${inlineCommand(shellCommand(['agent-gmail', 'approve', approvalId], context.platform))} in their own terminal.`,
+            hint: handoffSentence(
+              context.handoffs.own(['approve', approvalId]),
+              (command) => `Ask the user to run ${command} in their own terminal.`,
+            ),
             details: { marker },
           });
         }
         if (!canPrompt(env, streams, { json: globalOptions.json, noInput: globalOptions.noInput })) {
           throw new CommsError('APPROVAL_REQUIRED', 'approving a send or a change needs an interactive terminal', {
-            hint: `Run ${inlineCommand(shellCommand(['agent-gmail', 'approve', approvalId], context.platform))} directly in a terminal, or send the draft from Gmail.`,
+            hint: handoffSentence(
+              context.handoffs.own(['approve', approvalId]),
+              (command) => `Run ${command} directly in a terminal, or send the draft from Gmail.`,
+              { instead: 'Send the draft from Gmail.' },
+            ),
           });
         }
         /*
@@ -1352,7 +1386,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
             env,
             color: globalOptions.color,
             platform,
-            approveCommand: 'agent-gmail approve',
+            approveCommand: BRIDGE_APPROVE_COMMAND,
             streams,
           });
           streams.stdout.write(
@@ -1459,7 +1493,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
           unstar: Boolean(options.unstar),
           dryRun: Boolean(options.dryRun),
         });
-        writeResult(result, output(), (data) => renderModify(data, globalOptions.color, context.platform), streams);
+        writeResult(result, output(), (data) => renderModify(data, globalOptions.color, context.handoffs), streams);
       }),
     );
 
@@ -1483,7 +1517,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
                     piped.problem === 'too-large'
                       ? 'that is far larger than an undo receipt'
                       : 'the piped undo receipt could not be read to the end',
-                    { hint: 'Pipe in the `undo` array from `agent-gmail organise … --json`.' },
+                    { hint: UNDO_HINT },
                   );
                 }
                 return piped.text;
@@ -1497,7 +1531,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
                   throw new CommsError(
                     content.problem === 'missing' ? 'NOT_FOUND' : 'USAGE',
                     `cannot read the undo receipt at ${source}`,
-                    { hint: 'Pass the file `agent-gmail organise … --json` wrote, or pipe it in on stdin.' },
+                    { hint: 'Pass the file an organise run with --json wrote, or pipe it in on stdin.' },
                   );
                 }
                 return content.text;
@@ -1507,7 +1541,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
           parsed = JSON.parse(raw);
         } catch {
           throw new CommsError('BAD_DATA', 'that is not the undo from an organise result', {
-            hint: 'Pipe in the `undo` array from `agent-gmail organise … --json`.',
+            hint: UNDO_HINT,
           });
         }
         // The envelope or the array itself, because both are things a person plausibly pipes in.
@@ -1516,7 +1550,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
           : ((parsed as { data?: { undo?: unknown } })?.data?.undo ?? (parsed as { undo?: unknown })?.undo);
         if (!Array.isArray(entries)) {
           throw new CommsError('BAD_DATA', 'that JSON has no undo array in it', {
-            hint: 'Pipe in the `undo` array from `agent-gmail organise … --json`.',
+            hint: UNDO_HINT,
           });
         }
         const result = await applyUndo(context, String(options.inbox), entries as never);
@@ -1664,7 +1698,10 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
       act(async (context, globalOptions, options: Options) => {
         if (!options.client) {
           throw new CommsError('USAGE', 'name the client with --client', {
-            hint: 'For example: `agent-gmail mcp install --client claude-code`.',
+            hint: handoffSentence(
+              context.handoffs.own(['mcp', 'install', '--client', 'claude-code']),
+              (command) => `For example: ${command}.`,
+            ),
           });
         }
         /*
@@ -1843,13 +1880,16 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
         if (!options.profile) {
           refuseUnclaimedApproval(options.orgApproval, {
             message: '--org-approval goes with --profile: without it this run adds no organisation profile',
-            hint: `Run ${inlineCommand(shellCommand(['agent-gmail', 'setup', '--help'], platform))} and include the --profile file the preview named. Nothing was done.`,
+            hint: handoffSentence(
+              context.handoffs.own(['setup', '--help'], { uses: [] }),
+              (command) => `Run ${command} and include the --profile file the preview named. Nothing was done.`,
+            ),
           });
         }
 
         const configBeforeProfile = await context.config();
         const profilePath = options.profile
-          ? profileSourcePath(String(options.profile), context.env, context.cwd, platform)
+          ? profileSourcePath(String(options.profile), context.env, context.cwd, context.handoffs)
           : undefined;
         const incomingProfile = profilePath ? await loadSetupProfile(profilePath) : undefined;
         const incomingProfileHasGmail = incomingProfile?.profile.gmail !== undefined;
@@ -1882,7 +1922,10 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
         }
         if (clientChoiceNeedsMailbox && !options.inbox) {
           throw new CommsError('USAGE', 'name the mailbox with --inbox before setup can choose its client', {
-            hint: `Run ${inlineCommand(shellCommand(['agent-gmail', 'setup', '--inbox', 'acme/gmail'], platform))}, replacing acme/gmail with the name being added. Nothing was done.`,
+            hint: handoffSentence(
+              context.handoffs.own(['setup', '--inbox', 'acme/gmail']),
+              (command) => `Run ${command}, replacing acme/gmail with the name being added. Nothing was done.`,
+            ),
           });
         }
         if (clientChoiceNeedsMailbox && options.inbox) requireSetupTarget(configBeforeProfile, String(options.inbox));
@@ -1910,9 +1953,8 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
               approvalId: typeof options.orgApproval === 'string' ? options.orgApproval : undefined,
               env,
               output: { json: globalOptions.json || globalOptions.noInput, color: globalOptions.color },
-              command: again(['--org-approval']),
+              rerun: again(['--org-approval']),
               approvalFlag: '--org-approval',
-              approveCommand: 'agent-gmail approve',
               streams,
             },
           );
@@ -1958,7 +2000,12 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
                 }
               : {
                   message: 'an OAuth client is already registered, so this run registers none and takes no --approval',
-                  hint: 'Leave out --approval; `agent-gmail client add` registers another. Nothing was done.',
+                  hint: handoffSentenceToFill(
+                    context.handoffs.own(['client', 'add']),
+                    ['<client_secret.json>'],
+                    (command) => `Leave out --approval; ${command} registers another. Nothing was done.`,
+                    { instead: 'Leave out --approval. Nothing was done.' },
+                  ),
                 },
           );
         }
@@ -2069,11 +2116,15 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
               });
               handoff = {
                 authUrl: started.authUrl,
-                finish: commandText(
-                  shellCommand(
-                    ['agent-gmail', 'inbox', 'add', '--finish', started.flowId, '--wait', String(FINISH_WAIT_SECONDS)],
-                    context.platform,
-                  ),
+                finish: handoffText(
+                  context.handoffs.own([
+                    'inbox',
+                    'add',
+                    '--finish',
+                    started.flowId,
+                    '--wait',
+                    String(FINISH_WAIT_SECONDS),
+                  ]),
                 ),
                 ...(registerWith ? { registerWith } : {}),
               };
@@ -2104,7 +2155,6 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
               const outcome = await gatedChange(context.core, await registration(which), {
                 surface: 'cli',
                 approvalId: mcpApproval,
-                approveCommand: 'agent-gmail approve',
                 platform,
               });
               if (outcome.status === 'approval-required') {
@@ -2114,8 +2164,10 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
                   needs: `a person's approval to register the server with ${which}`,
                   hint: approvalHint(
                     prepared,
-                    withWords(againForMcp(), '--mcp-approval', prepared.approvalId),
-                    'agent-gmail approve',
+                    context.handoffs.own(
+                      insertWordsBeforeSentinel(againForMcp(), '--mcp-approval', prepared.approvalId),
+                    ),
+                    context.handoffs,
                   ),
                   approvalId: prepared.approvalId,
                   policy: prepared.policy,
@@ -2149,7 +2201,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
           writeResult(
             report,
             output(),
-            () => renderSetupPlan({ ...report, nameExample }, CONSOLE_STEPS, globalOptions.color, context.platform),
+            () => renderSetupPlan({ ...report, nameExample }, CONSOLE_STEPS, globalOptions.color, context.handoffs),
             streams,
           );
           return;
@@ -2217,7 +2269,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
           }
           out.write('\n');
         } else {
-          out.write(`${bold('Setting up agent-gmail')}\n\n`);
+          out.write(`${bold('Setting up Gmail')}\n\n`);
         }
 
         // ── 1. The Google client ──────────────────────────────────────────────────────────────────────────────
@@ -2376,11 +2428,11 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
             detached: false,
             ...(deps.listenerCommand ? { listenerCommand: deps.listenerCommand } : {}),
           });
-          out.write(`\n${renderSignInStarted(started, 'add', globalOptions.color, context.platform)}\n`);
+          out.write(`\n${renderSignInStarted(started, 'add', globalOptions.color, context.handoffs)}\n`);
           if (options.browser !== false) openInBrowser(started.authUrl);
           if (started.listener) {
             const signedIn = await started.listener.result;
-            out.write(`\n${renderSignedIn(signedIn, globalOptions.color, context.platform)}\n\n`);
+            out.write(`\n${renderSignedIn(signedIn, globalOptions.color, context.handoffs)}\n\n`);
           }
           state = await setupState(context, setupStateOptions(false));
           if (!(await askYesNo(mode, streams, { message: 'Connect another mailbox?', defaultYes: false }))) break;
@@ -2425,9 +2477,8 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
               output: { json: globalOptions.json || globalOptions.noInput, color: globalOptions.color },
               // The client picked from the list is named in the command to run again: `--mcp-approval` is claimed
               // only for a client named with `--mcp-client`, and refused without one.
-              command: named ? againForMcp() : withWords(againForMcp(), '--mcp-client', which),
+              rerun: named ? againForMcp() : insertWordsBeforeSentinel(againForMcp(), '--mcp-client', which),
               approvalFlag: '--mcp-approval',
-              approveCommand: 'agent-gmail approve',
               answered: named === '',
               streams,
             });
@@ -2442,12 +2493,15 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
         // made today will accept and was never a name this machine had.
         if (first) {
           out.write(
-            `${dim(`Try: ${commandText(shellCommand(['agent-gmail', 'search', 'newer_than:7d', '--inbox', first], context.platform))}`)}\n`,
+            `${dim(`Try: ${handoffText(context.handoffs.own(['search', 'newer_than:7d', '--inbox', first]))}`)}\n`,
           );
         }
-        out.write(
-          `${dim(`${first ? 'Add another' : 'Add one'} with: agent-gmail inbox add <organisation>/gmail --email <address>`)}\n`,
-        );
+        const another = handoffTextToFill(context.handoffs.own(['inbox', 'add']), [
+          '<organisation>/gmail',
+          '--email',
+          '<address>',
+        ]);
+        out.write(`${dim(`${first ? 'Add another' : 'Add one'} with: ${another}`)}\n`);
       }),
     );
 
@@ -2499,7 +2553,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
         output(),
         async () => {
           throw new CommsError('USAGE', error.message.replace(/^error: /, ''), {
-            hint: 'Run `agent-gmail --help` to see the commands.',
+            hint: handoffSentence(help(), (command) => `Run ${command} to see the commands.`),
           });
         },
         streams,
@@ -2508,7 +2562,13 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
     throw error;
   }
   if (!ran) {
-    streams.stderr.write(`${paint(globals().color, 'dim', 'Nothing to do. Try `agent-gmail --help`.')}\n`);
+    streams.stderr.write(
+      `${paint(
+        globals().color,
+        'dim',
+        handoffSentence(help(), (command) => `Nothing to do. Try ${command}.`, { instead: 'Nothing to do.' }),
+      )}\n`,
+    );
     return 64;
   }
   return exitCode;

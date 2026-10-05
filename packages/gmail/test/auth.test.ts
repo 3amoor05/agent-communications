@@ -5,6 +5,7 @@ import { GOOGLE_ENDPOINTS, isLoopbackHost, resolveEndpoints } from '../src/auth/
 import { buildAuthUrl, exchangeCode, newPkce, newState, parseClientJson, revokeToken } from '../src/auth/oauth.ts';
 import { capabilitiesOf, grantHint, parseGrantedScopes, SCOPES, scopesFor, tierOf } from '../src/auth/scopes.ts';
 import { clientSecretRef, refreshTokenRef, TokenSource } from '../src/auth/session.ts';
+import { assertNoBareCommand, testHandoffs } from './support/handoffs.ts';
 import { newHarness, TEST_CLIENT_ID, TEST_CLIENT_SECRET } from './support/harness.ts';
 
 const client = { clientId: TEST_CLIENT_ID, clientSecret: TEST_CLIENT_SECRET };
@@ -45,9 +46,14 @@ test('tiers map to scopes, and granted scopes map back to capabilities', () => {
     SCOPES.email,
     SCOPES.gmailReadonly,
   ]);
-  assert.match(grantHint('work', 'organize', 'darwin'), /inbox reauth work --tier organize/);
-  assert.match(grantHint('work', 'contacts', 'darwin'), /--contacts/);
-  assert.equal(grantHint('7', 'contacts', 'win32'), 'agent-gmail inbox reauth "7" --contacts');
+  // This installation's own `inbox reauth`, located (CUE-403): the words after the program, quoted for the shell.
+  const darwin = testHandoffs('darwin');
+  const said = (command: string) => command;
+  assert.match(grantHint('work', 'organize', darwin, said), /inbox reauth work --tier organize`$/);
+  assert.match(grantHint('work', 'contacts', darwin, said), /--contacts`$/);
+  const windows = grantHint('7', 'contacts', testHandoffs('win32'), said);
+  assert.match(windows, /inbox reauth "7" --contacts/);
+  assertNoBareCommand(windows);
 });
 
 test('the consent URL carries PKCE S256, a state and login_hint, and hd only when asked for', () => {

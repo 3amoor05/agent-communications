@@ -1,4 +1,4 @@
-import { commandText, shellCommand } from '@agentcomms/core';
+import { type CliHandoffs, handoffSentence } from '@agentcomms/core';
 
 /**
  * Permission tiers and what the granted scopes allow. Every tier also asks for `openid email`, which are non-sensitive
@@ -79,11 +79,22 @@ export function tierOf(granted: readonly string[]): Tier | null {
   return null;
 }
 
-/** The command that grants a missing capability, for SCOPE_MISSING hints. */
-export function grantHint(alias: string, needed: Capability, platform: NodeJS.Platform = process.platform): string {
-  if (needed === 'contacts') {
-    return commandText(shellCommand(['agent-gmail', 'inbox', 'reauth', alias, '--contacts'], platform));
-  }
+/** The words, after the program, of the command that grants a missing capability. */
+export function grantWords(alias: string, needed: Capability): string[] {
+  if (needed === 'contacts') return ['inbox', 'reauth', alias, '--contacts'];
   const tier: Tier = needed === 'read' ? 'read' : needed === 'draft' ? 'draft' : 'organize';
-  return commandText(shellCommand(['agent-gmail', 'inbox', 'reauth', alias, '--tier', tier], platform));
+  return ['inbox', 'reauth', alias, '--tier', tier];
+}
+
+/**
+ * The sentence, made by `say`, naming the command that grants a missing capability, for SCOPE_MISSING hints: this
+ * installation's own, located (CUE-403) — or, with none here, why there is none.
+ */
+export function grantHint(
+  alias: string,
+  needed: Capability,
+  handoffs: CliHandoffs,
+  say: (command: string) => string,
+): string {
+  return handoffSentence(handoffs.own(grantWords(alias, needed)), say);
 }

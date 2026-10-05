@@ -9,11 +9,13 @@ import { approveChangeAtTerminal, type Core, openCore } from '@agentcomms/core';
 import { buildAuthUrl, exchangeCode, newPkce } from '../src/auth/oauth.ts';
 import { SCOPES } from '../src/auth/scopes.ts';
 import { clientSecretRef, refreshTokenRef } from '../src/auth/session.ts';
+import { GMAIL_CALLER } from '../src/caller.ts';
 import { GmailContext } from '../src/context.ts';
 import { clientAdd, clientAddChange, clientRemove } from '../src/operations/clients.ts';
 import { completeProbe, startProbe } from '../src/operations/confirm-clients.ts';
 import { importLegacy, inboxImportChange } from '../src/operations/import-legacy.ts';
 import { inboxRemove } from '../src/operations/inboxes.ts';
+import { assertNoBareCommand, gmailRetryWords, locatedCoreLine, locatedGmailLine } from './support/handoffs.ts';
 import { type Harness, newHarness, TEST_CLIENT_ID, TEST_CLIENT_SECRET, tempDir } from './support/harness.ts';
 import {
   applied,
@@ -199,7 +201,8 @@ test('moving a mailbox off the confirm change policy is approved at a terminal, 
     // Loosening it back is governed by the policy in force before the change: confirm.
     const asked = approvalAsked(await call('gmail_inbox_policy', { inbox: 'work', changePolicy: 'chat' }));
     assert.equal(asked.policy, 'confirm');
-    assert.match(asked.next, new RegExp(`agent-gmail approve ${asked.approvalId}`));
+    // This installation's own `approve`, located (CUE-403): never a bare name the person may not have on PATH.
+    locatedGmailLine(asked.next, ['approve', asked.approvalId]);
     assert.match(asked.preview, /work change policy: confirm → chat/);
 
     // The agent cannot claim it on the person's behalf: refused, and the approval left for the person.
@@ -591,10 +594,11 @@ test('setup --client-json registers the client the same way client add does: app
   const asked = await cli(harness, ['setup', '--inbox', 'work', '--client-json', path, '--json']);
   pendingApproval(asked);
   assert.deepEqual((await harness.core.config.load()).clients, {}, 'setup registered a client nobody approved');
-  assert.match(
-    asked.envelope().error?.hint ?? '',
-    /agent-gmail setup --inbox work --client-json \S+ --json --approval/,
-  );
+  const hint = asked.envelope().error?.hint ?? '';
+  const rerun = /run `([^`]+)`\./.exec(hint)?.[1] ?? '';
+  assert.match(rerun, / setup --inbox work --client-json \S+ --json --approval \S+$/, hint);
+  gmailRetryWords(rerun);
+  assertNoBareCommand(hint);
 });
 
 test('removing an OAuth client is approved first, and refused while a mailbox signs in through it', async () => {
@@ -693,7 +697,8 @@ function refusedStore(
 ): void {
   assert.equal(refused?.code, 'CONFIG', JSON.stringify(refused));
   assert.match(refused?.message ?? '', new RegExp(`already keeps its secrets in the ${kept} store`));
-  assert.match(refused?.hint ?? '', new RegExp(`agentcomms secrets migrate --to ${asked}`));
+  // Core's own command, located through Gmail's dependency on core (CUE-403).
+  locatedCoreLine(refused?.hint ?? '', ['secrets', 'migrate', '--to', asked]);
 }
 
 test('client add refuses a store other than the one credentials are kept in, even where nothing records it', async () => {
@@ -952,7 +957,7 @@ test('inbox import keeps its same-client reuse and never applies organisation cl
     NO_COLOR: '1',
     AGENT_COMMS_UPDATE_CHECK: 'off',
   };
-  const core = openCore({ env });
+  const core = openCore({ env, caller: GMAIL_CALLER });
   const dir = join(tempDir(), '.gmail-mcp');
   await mkdir(dir, { recursive: true });
   await writeFile(

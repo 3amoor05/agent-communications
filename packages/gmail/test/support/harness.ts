@@ -17,6 +17,7 @@ import { resolveEndpoints } from '../../src/auth/endpoints.ts';
 import { buildAuthUrl, exchangeCode, newPkce } from '../../src/auth/oauth.ts';
 import { capabilitiesOf, SCOPES } from '../../src/auth/scopes.ts';
 import { clientSecretRef, refreshTokenRef } from '../../src/auth/session.ts';
+import { GMAIL_CALLER } from '../../src/caller.ts';
 import { type FakeGoogle, type FakeGoogleOptions, startFakeGoogle } from './fake-google.ts';
 
 export const TEST_CLIENT_ID = 'test-client.apps.googleusercontent.com';
@@ -89,7 +90,7 @@ export async function newHarness(options: FakeGoogleOptions = {}): Promise<Harne
     // not make. The gate's own tests turn it back on, with a registry and a clock of their own (design 2026-09-28).
     AGENT_COMMS_UPDATE_CHECK: 'off',
   };
-  const core = openCore({ env });
+  const core = openCore({ env, caller: GMAIL_CALLER });
   /*
    * The harness starts a mailbox at config version 1, and says so rather than relying on the default.
    *

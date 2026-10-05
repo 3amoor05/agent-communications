@@ -4,12 +4,22 @@ import { dirname, isAbsolute, join, relative } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { commandText, EXIT_CODES, inlineCommand, openCore, shellCommand } from '@agentcomms/core';
+import { commandText, EXIT_CODES, isCommand, openCore } from '@agentcomms/core';
+import { GMAIL_CALLER } from '../src/caller.ts';
 import { run } from '../src/cli/program.ts';
 import { renderDoctor, renderSendPreparation } from '../src/cli/render.ts';
 import { GmailContext } from '../src/context.ts';
 import { createDraft } from '../src/operations/drafts.ts';
 import type { SendPreparation } from '../src/operations/send.ts';
+import {
+  assertNoBareCommand,
+  gmailCommand,
+  gmailHandoffs,
+  gmailInline,
+  gmailRetryWords,
+  locatedGmailLine,
+  splitPosixWords,
+} from './support/handoffs.ts';
 import { type Harness, newHarness, TEST_CLIENT_ID, TEST_CLIENT_SECRET, tempDir } from './support/harness.ts';
 import { SETUP_MAIN_EQUIVALENCE, setupCompatibilityHarness } from './support/setup-compatibility.ts';
 
@@ -34,7 +44,7 @@ function offlineCliHarness(): CliHarness {
     AGENT_COMMS_CLIENT_CLI_DIRS: '',
     AGENT_COMMS_UPDATE_CHECK: 'off',
   };
-  return { core: openCore({ env }), env };
+  return { core: openCore({ env, caller: GMAIL_CALLER }), env };
 }
 
 /** Runs the CLI in-process with captured streams, which is what a caller sees minus the process boundary. */
@@ -157,62 +167,6 @@ interface Envelope<T> {
  * treats it as data. What matters here is that single quotes, the `'<close>\'<open>'` escape for a quote, double
  * quotes and backslashes reconstruct exactly the argv handed to the real CLI parser.
  */
-function splitPosixWords(line: string): string[] {
-  const words: string[] = [];
-  let word = '';
-  let started = false;
-  let quote: 'single' | 'double' | null = null;
-  for (let index = 0; index < line.length; index += 1) {
-    const character = line[index] ?? '';
-    if (quote === 'single') {
-      if (character === "'") quote = null;
-      else word += character;
-      continue;
-    }
-    if (quote === 'double') {
-      if (character === '"') {
-        quote = null;
-        continue;
-      }
-      if (character === '\\') {
-        const escaped = line[index + 1];
-        if (escaped === undefined) throw new Error('a POSIX command cannot end with a backslash');
-        if (escaped === '\n') {
-          index += 1;
-          continue;
-        }
-        if (['$', '`', '"', '\\'].includes(escaped)) {
-          word += escaped;
-          index += 1;
-          continue;
-        }
-      }
-      word += character;
-      continue;
-    }
-    if (/\s/.test(character)) {
-      if (started) {
-        words.push(word);
-        word = '';
-        started = false;
-      }
-      continue;
-    }
-    started = true;
-    if (character === "'") quote = 'single';
-    else if (character === '"') quote = 'double';
-    else if (character === '\\') {
-      const escaped = line[index + 1];
-      if (escaped === undefined) throw new Error('a POSIX command cannot end with a backslash');
-      index += 1;
-      if (escaped !== '\n') word += escaped;
-    } else word += character;
-  }
-  if (quote !== null) throw new Error(`an ${quote}-quoted word was not closed`);
-  if (started) words.push(word);
-  return words;
-}
-
 test('the POSIX test splitter reconstructs the quoting forms printed commands use', () => {
   assert.deepEqual(splitPosixWords("agent 'single quoted' 'it'\\''s'"), ['agent', 'single quoted', "it's"]);
   assert.deepEqual(splitPosixWords(String.raw`agent "a\$b\`c\"d\\e" back\ slash`), [
@@ -414,22 +368,34 @@ test('a raw retry normalizes path pins and approvals before -- while preserving 
       assert.equal(error?.code, 'APPROVAL_PENDING');
       const line = /run `([^`]+)`\./.exec(error?.hint ?? '')?.[1];
       assert.ok(line, error?.hint);
-      const [executable, ...retry] = splitPosixWords(line);
-      assert.equal(executable, 'agent-gmail');
+      assertNoBareCommand(error?.hint ?? '');
+      // This installation's own CLI, located (CUE-403): this Node, Gmail's entry, then the words.
+      const retry = gmailRetryWords(line);
       const sentinel = retry.indexOf('--');
       assert.ok(sentinel >= 0, JSON.stringify(retry));
       assert.deepEqual(retry.slice(sentinel + 1), [literal]);
       const beforeSentinel = retry.slice(0, sentinel);
-      for (const [flag, value] of [
-        ['--config-dir', paths.configDir],
-        ['--state-dir', paths.stateDir],
-        ['--data-dir', paths.dataDir],
-        ['--secrets-dir', paths.secretsDir],
-        ['--downloads-dir', paths.downloadsDir],
-      ] as const) {
+      // The folders `client add` opens, each pinned once, canonical, before the subcommand — whatever was typed.
+      assert.deepEqual(beforeSentinel.slice(0, 8), [
+        '--config-dir',
+        paths.configDir,
+        '--state-dir',
+        paths.stateDir,
+        '--data-dir',
+        paths.dataDir,
+        '--secrets-dir',
+        paths.secretsDir,
+      ]);
+      for (const flag of ['--config-dir', '--state-dir', '--data-dir', '--secrets-dir']) {
         assert.equal(beforeSentinel.filter((word) => word === flag).length, 1, `${flag}: ${JSON.stringify(retry)}`);
-        assert.equal(beforeSentinel[beforeSentinel.indexOf(flag) + 1], value, flag);
       }
+      // Downloads it never opens, so the typed pin is not carried: only the folders the command uses are (D2).
+      assert.equal(beforeSentinel.includes('--downloads-dir'), false, JSON.stringify(retry));
+      assert.equal(
+        beforeSentinel.some((word) => word.startsWith('--') && word.includes('-dir=')),
+        false,
+        JSON.stringify(retry),
+      );
       const approvalId = String(error?.details?.approvalId);
       assert.deepEqual(beforeSentinel.slice(-2), ['--approval', approvalId]);
 
@@ -555,7 +521,10 @@ test('tightening how sending is approved is free; loosening it waits for a chang
     const error = asked.json<Envelope<never>>().error;
     assert.equal(error?.code, 'APPROVAL_PENDING');
     assert.match(String(error?.details?.preview), /send policy: never → chat/);
-    assert.match(error?.hint ?? '', /agent-gmail inbox policy work --send chat --json --approval \S+/);
+    const rerun = /run `([^`]+)`\./.exec(error?.hint ?? '')?.[1] ?? '';
+    assert.match(rerun, / inbox policy work --send chat --json --approval \S+$/);
+    gmailRetryWords(rerun);
+    assertNoBareCommand(error?.hint ?? '');
   }
 
   const unchanged = await cli(harness, ['inbox', 'show', 'work', '--json']);
@@ -789,7 +758,7 @@ test('organising previews before it acts, and says how to put it back', async ()
   const done = await cli(harness, ['organise', '--inbox', 'work', '--message', 'm1', '--archive', '--read']);
   assert.match(done.stdout, /Changed 1 message/);
   assert.match(done.stdout, /can be put back exactly as they were/);
-  assert.match(done.stdout, /agent-gmail organise-undo/);
+  locatedGmailLine(done.stdout, ['organise-undo', '--inbox', 'work']);
   assert.deepEqual(harness.google.accounts.get('sub-1')?.messages?.m1?.labelIds, []);
 
   // The American spelling reaches the same command, because half the world types it.
@@ -929,7 +898,6 @@ test('send prepare prints every expectation as shell-safe words for the selected
     const approvalId = /\b(ap_[A-Za-z0-9]+)\b/.exec(prepared.stdout)?.[1];
     assert.ok(approvalId, prepared.stdout);
     const words = [
-      'agent-gmail',
       'send',
       'execute',
       draftId,
@@ -947,7 +915,9 @@ test('send prepare prints every expectation as shell-safe words for the selected
       '--expect-subject',
       subject,
     ];
-    assert.ok(prepared.stdout.includes(`Then: ${commandText(shellCommand(words, platform))}`), prepared.stdout);
+    // This installation's own `send execute`, located, for the shell asked for (CUE-403).
+    assert.ok(prepared.stdout.includes(`Then: ${gmailCommand(harness.core.paths, words, platform)}`), prepared.stdout);
+    assertNoBareCommand(prepared.stdout);
   };
 
   await prepare('$(whoami)', 'darwin');
@@ -983,7 +953,6 @@ test('send execute rendering preserves every subject and every recipient list on
         };
         const list = (flag: string, values: readonly string[]) => [flag, ...(values.length > 0 ? values : ['none'])];
         const words = [
-          'agent-gmail',
           'send',
           'execute',
           result.draftId,
@@ -997,19 +966,21 @@ test('send execute rendering preserves every subject and every recipient list on
           '--expect-subject',
           subject || 'none',
         ];
-        const command = shellCommand(words, platform);
-        const rendered = renderSendPreparation(result, false, platform);
+        const handoffs = gmailHandoffs(harness.core.paths, platform);
+        const command = handoffs.own(words);
+        assert.ok(isCommand(command), JSON.stringify(command));
+        const rendered = renderSendPreparation(result, false, handoffs);
         assert.ok(rendered.includes(`Then: ${commandText(command)}`), JSON.stringify({ platform, subject, rendered }));
+        assertNoBareCommand(rendered);
         if (platform === 'win32' && ['$(whoami)', '`whoami`', '%PATH%', '"', 'line\nbreak'].includes(subject)) {
           assert.equal(command.line, null, JSON.stringify({ subject, command }));
-          assert.match(rendered, /Then: \["agent-gmail","send","execute",/);
-        } else {
+          assert.match(rendered, /Then: \[[^\]]*"send","execute",/);
+        } else if (platform === 'darwin') {
           assert.notEqual(command.line, null, JSON.stringify({ subject, command }));
         }
         if (platform === 'darwin') {
-          assert.notEqual(command.line, null, JSON.stringify({ subject, command }));
-          const [executable, ...printedWords] = splitPosixWords(command.line as string);
-          assert.equal(executable, 'agent-gmail');
+          // The printed words run this checkout's own CLI, folders pinned; parsed in-process, with the send replaced.
+          const printedWords = gmailRetryWords(command.line as string);
           let parsed: { inbox: string; request: Record<string, unknown> } | undefined;
           const run = await cli(harness, [...printedWords, '--json'], {
             platform,
@@ -1392,7 +1363,9 @@ test('headless setup is exactly main-compatible without an active Gmail generati
       if (startsSignIn) {
         assert.deepEqual(Object.keys(report.handoff ?? {}).sort(), ['authUrl', 'finish']);
         assert.equal(new URL(report.handoff?.authUrl ?? '').pathname, '/o/oauth2/v2/auth');
-        assert.match(report.handoff?.finish ?? '', /^agent-gmail inbox add --finish fl_[A-Za-z0-9_-]+ --wait 60$/);
+        const finish = report.handoff?.finish ?? '';
+        assert.match(finish, / inbox add --finish fl_[A-Za-z0-9_-]+ --wait 60$/);
+        gmailRetryWords(finish);
       }
       const blocked =
         fixture.expected.next === 'client'
@@ -1503,8 +1476,9 @@ test('setup refuses --org-approval without --profile', async () => {
     assert.equal(result.code, EXIT_CODES.USAGE);
     const error = result.json<Envelope<never>>().error;
     assert.match(error?.message ?? '', /goes with --profile/);
-    const help = inlineCommand(shellCommand(['agent-gmail', 'setup', '--help'], platform));
-    assert.ok(error?.hint?.includes(help), platform);
+    const help = gmailInline(harness.core.paths, ['setup', '--help'], platform, { uses: [] });
+    assert.ok(error?.hint?.includes(help), `${platform}: ${error?.hint}`);
+    assertNoBareCommand(error?.hint ?? '', platform);
     assert.doesNotMatch(error?.hint ?? '', /<file>/, platform);
   }
 });

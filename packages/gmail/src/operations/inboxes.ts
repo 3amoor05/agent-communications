@@ -20,6 +20,7 @@ import {
 import { revokeToken } from '../auth/oauth.ts';
 import { type Capability, capabilitiesOf, tierOf } from '../auth/scopes.ts';
 import type { GmailContext } from '../context.ts';
+import { runInboxList } from '../handoffs.ts';
 import { organisationForClient } from './client-choice.ts';
 import { requireNewInboxName } from './inbox-names.ts';
 
@@ -104,13 +105,13 @@ export async function inboxRename(
   if (RESERVED_ALIASES.has(to)) {
     throw new CommsError('USAGE', `"${to}" is reserved: it means every inbox`, { hint: 'Choose another name.' });
   }
-  requireNewInboxName(await context.config(), to, 'Choose another name.', context.platform);
+  requireNewInboxName(await context.config(), to, 'Choose another name.', context.handoffs);
   await context.core.config.update((current) => {
     // By id, and the target checked again, under the lock: a rename is a write like any other, and the file may have
     // moved since it was read. In version 2 `renameEntry` also records the old name, for good.
     const now = findById(current, 'inbox', inbox.id);
     if (!now) throw new CommsError('NOT_FOUND', `no inbox called "${from}"`);
-    requireNewInboxName(current, to, 'Choose another name.', context.platform);
+    requireNewInboxName(current, to, 'Choose another name.', context.handoffs);
     return renameEntry(current, 'inbox', now.alias, to);
   });
   context.forgetTransports();
@@ -367,7 +368,7 @@ export async function inboxRemove(
       if (gone === 'absent') throw error;
       if (gone === 'unknown') {
         await recordOrphan(context, { secretRef: inbox.secretRef, alias: found.alias, inboxId: inbox.id }, error, true);
-        throw keepAndReport(error, inbox.secretRef, 'Run `agent-gmail inbox list`.');
+        throw keepAndReport(error, inbox.secretRef, runInboxList(context.handoffs));
       }
     }
     context.forgetTransports();

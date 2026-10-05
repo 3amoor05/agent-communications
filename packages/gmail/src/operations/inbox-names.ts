@@ -1,4 +1,11 @@
-import { CommsError, type Config, inlineCommand, lookupName, nameAvailable, shellCommand } from '@agentcomms/core';
+import {
+  type CliHandoffs,
+  CommsError,
+  type Config,
+  handoffSentence,
+  lookupName,
+  nameAvailable,
+} from '@agentcomms/core';
 
 /**
  * Refuses a name a new mailbox cannot take, under whichever version the config is.
@@ -11,8 +18,8 @@ import { CommsError, type Config, inlineCommand, lookupName, nameAvailable, shel
 export function requireNewInboxName(
   config: Config,
   alias: string,
-  whenTaken?: string,
-  platform: NodeJS.Platform = process.platform,
+  whenTaken: string | undefined,
+  handoffs: CliHandoffs,
 ): void {
   const check = nameAvailable(config, 'inbox', alias, 'gmail');
   if (check.ok) return;
@@ -20,7 +27,11 @@ export function requireNewInboxName(
     throw new CommsError('CONFIG', `an inbox called "${alias}" already exists`, {
       hint:
         whenTaken ??
-        `Re-authorise it with ${inlineCommand(shellCommand(['agent-gmail', 'inbox', 'reauth', alias], platform))}, or choose another name.`,
+        handoffSentence(
+          handoffs.own(['inbox', 'reauth', alias]),
+          (command) => `Re-authorise it with ${command}, or choose another name.`,
+          { instead: 'Choose another name, or re-authorise that mailbox.' },
+        ),
     });
   }
   throw check.error;

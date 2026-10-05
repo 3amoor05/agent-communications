@@ -1,20 +1,21 @@
 import {
   activeGeneration,
   type ClientConfig,
+  type CliHandoffs,
   CommsError,
   type Config,
   defaultInternalDomains,
   duplicateInbox,
   findById,
+  handoffSentence,
+  handoffSentenceToFill,
   type InboxConfig,
-  inlineCommand,
   keepAndReport,
   newInboxId,
   PUBLIC_MAILBOX_DOMAINS,
   recordOf,
   requireLiveOrganisationGeneration,
   secretsStoreOf,
-  shellCommand,
   withCredentialsLock,
   withdrawStaged,
   writeOutcome,
@@ -25,6 +26,7 @@ import { capabilitiesOf, tierOf } from '../auth/scopes.ts';
 import { refreshTokenRef, TokenSource } from '../auth/session.ts';
 import type { GmailContext } from '../context.ts';
 import { getProfileWithToken } from '../gmail-api/profile.ts';
+import { clientOptionHint, orgUpdateHint, runInboxList } from '../handoffs.ts';
 import { generationServes, organisationForClient } from './client-choice.ts';
 import { requireNewInboxName } from './inbox-names.ts';
 
@@ -53,7 +55,7 @@ export interface ConsentResult {
  */
 export async function completeConsent(context: GmailContext, flow: OAuthFlow, code: string): Promise<ConsentResult> {
   const starting = await context.config();
-  const expectedClientId = requireSameClient(starting, flow, undefined, context.platform);
+  const expectedClientId = requireSameClient(starting, flow, undefined, context.handoffs);
   const client = await context.client(flow.clientName);
   const tokens = await exchangeCode({
     client: { clientId: client.clientId, clientSecret: await clientSecret(context, client, flow.clientName) },
@@ -61,6 +63,7 @@ export async function completeConsent(context: GmailContext, flow: OAuthFlow, co
     code,
     codeVerifier: flow.codeVerifier,
     redirectUri: flow.redirectUri,
+    handoffs: context.handoffs,
   });
 
   const granted = tokens.grantedScopes;
@@ -88,7 +91,7 @@ export async function completeConsent(context: GmailContext, flow: OAuthFlow, co
         'CONFIG',
         `the organisation ${expectedGeneration.organisation} says its Google client "${flow.clientName}" does not serve ${identity.email}; nothing was saved`,
         {
-          hint: `Start the sign-in again through a client that serves this address; ${inlineCommand(shellCommand(['agent-gmail', 'inbox', 'add', '--help'], context.platform))} describes the --client option.`,
+          hint: clientOptionHint(context.handoffs, 'Start the sign-in again through a client that serves this address'),
           details: {
             alias: flow.alias,
             client: flow.clientName,
@@ -115,7 +118,11 @@ async function clientSecret(context: GmailContext, client: ClientConfig, name: s
   const secret = await store.get(client.secretRef);
   if (secret) return secret;
   throw new CommsError('CONFIG', `the secret for OAuth client "${name}" is not in the secret store`, {
-    hint: 'Add the client again: `agent-gmail client add <client_secret.json>`.',
+    hint: handoffSentenceToFill(
+      context.handoffs.own(['client', 'add']),
+      ['<client_secret.json>'],
+      (command) => `Add the client again: ${command}.`,
+    ),
   });
 }
 
@@ -165,10 +172,13 @@ async function addInbox(
   });
   if (duplicate) {
     throw new CommsError('CONFIG', `${identity.email} is already connected as "${duplicate}"`, {
-      hint: `Use it as "${duplicate}", rename it (${inlineCommand(shellCommand(['agent-gmail', 'inbox', 'rename', duplicate, flow.alias], context.platform))}), or remove it first.`,
+      hint: handoffSentence(
+        context.handoffs.own(['inbox', 'rename', duplicate, flow.alias]),
+        (command) => `Use it as "${duplicate}", rename it (${command}), or remove it first.`,
+      ),
     });
   }
-  requireNewInboxName(config, flow.alias, undefined, context.platform);
+  requireNewInboxName(config, flow.alias, undefined, context.handoffs);
 
   const id = newInboxId();
   const inbox: InboxConfig = {
@@ -204,8 +214,8 @@ async function addInbox(
          * can change. A deliberate refusal is marked so the staged grant can be withdrawn and revoked below.
          */
         refused = true;
-        requireNewInboxName(current, flow.alias, undefined, context.platform);
-        requireSameClient(current, flow, clientId, context.platform, identity.email);
+        requireNewInboxName(current, flow.alias, undefined, context.handoffs);
+        requireSameClient(current, flow, clientId, context.handoffs, identity.email);
         // The backend the token went into must still be the one in force: `secrets migrate` switches backends, and a
         // row written after the switch would name a credential that only exists in the store nothing reads any more.
         if (secretsStoreOf(current) !== secrets.kind) {
@@ -243,7 +253,7 @@ async function addInbox(
     const landed = await writeOutcome(
       async () => findById(await context.config(), 'inbox', id)?.inbox.secretRef === inbox.secretRef,
     );
-    if (landed === 'unknown') throw keepAndReport(error, inbox.secretRef, 'Run `agent-gmail inbox list`.');
+    if (landed === 'unknown') throw keepAndReport(error, inbox.secretRef, runInboxList(context.handoffs));
     if (landed === 'absent') {
       const withdrawn = await withdrawStaged(secrets, inbox.secretRef, error);
       await revokeGrantBestEffort(context, tokens.refreshToken);
@@ -289,7 +299,7 @@ async function reauthorise(
   // Whether the row still exists is decided inside the lock below, not on the snapshot `config` was read into.
   void config;
   const inboxId = flow.expect.inboxId;
-  if (!inboxId) throw inboxGone();
+  if (!inboxId) throw inboxGone(context.handoffs);
 
   /*
    * Under the credentials lock, taken only now that the code is spent.
@@ -315,7 +325,10 @@ async function reauthorise(
     if (!entered && error instanceof CommsError && error.code === 'LOCK_TIMEOUT') {
       await revokeGrantBestEffort(context, tokens.refreshToken);
       throw new CommsError('TRANSIENT', 'another operation on stored credentials is running, so nothing was saved', {
-        hint: `Run ${inlineCommand(shellCommand(['agent-gmail', 'inbox', 'reauth', flow.alias], context.platform))} again in a moment.`,
+        hint: handoffSentence(
+          context.handoffs.own(['inbox', 'reauth', flow.alias]),
+          (command) => `Run ${command} again in a moment.`,
+        ),
         cause: error,
       });
     }
@@ -345,9 +358,13 @@ async function reauthorise(
   };
 }
 
-function inboxGone(): CommsError {
+function inboxGone(handoffs: CliHandoffs): CommsError {
   return new CommsError('NOT_FOUND', 'the inbox this sign-in was for no longer exists', {
-    hint: 'Add it again with `agent-gmail inbox add <alias>`.',
+    hint: handoffSentenceToFill(
+      handoffs.own(['inbox', 'add']),
+      ['<alias>'],
+      (command) => `Add it again with ${command}.`,
+    ),
   });
 }
 
@@ -387,7 +404,7 @@ async function writeReauth(
   // Read inside the lock, by id: the row as it is now, under whatever name it has now.
   const config = await context.config();
   const existing = findById(config, 'inbox', inboxId);
-  if (!existing) throw inboxGone();
+  if (!existing) throw inboxGone(context.handoffs);
 
   // The same account, or nothing is written: a re-consent must not quietly point an alias at a different mailbox.
   //
@@ -438,8 +455,8 @@ async function writeReauth(
       // By id, under whatever key it holds now: a rename is followed rather than undone.
       const now = findById(current, 'inbox', inboxId);
       refused = true;
-      if (!now) throw inboxGone();
-      requireSameClient(current, flow, clientId, context.platform, identity.email);
+      if (!now) throw inboxGone(context.handoffs);
+      requireSameClient(current, flow, clientId, context.handoffs, identity.email);
       /*
        * And no other mailbox on this client is the same account.
        *
@@ -466,7 +483,9 @@ async function writeReauth(
   } catch (error) {
     // A check inside the write refused it: nothing was written, whatever the row and the store now look like.
     if (refused) {
-      const restored = await restorePrevious(secrets, existing.inbox.secretRef, previous, error);
+      const restored = await restorePrevious(secrets, existing.inbox.secretRef, previous, error, () =>
+        context.handoffs.own(['inbox', 'reauth', existing.alias]),
+      );
       await revokeGrantBestEffort(context, tokens.refreshToken);
       throw restored;
     }
@@ -477,7 +496,7 @@ async function writeReauth(
      * nothing and is taken back.
      */
     const landed = await writeOutcome(async () => findById(await context.config(), 'inbox', inboxId) !== null);
-    if (landed === 'unknown') throw keepAndReport(error, existing.inbox.secretRef, 'Run `agent-gmail inbox list`.');
+    if (landed === 'unknown') throw keepAndReport(error, existing.inbox.secretRef, runInboxList(context.handoffs));
     if (landed === 'absent') throw await withdrawStaged(secrets, existing.inbox.secretRef, error);
     /*
      * Present — but was it this write?
@@ -506,12 +525,14 @@ async function writeReauth(
       // write may well have committed and only its lock release failed.
       const settingsUpdated = Boolean(after && sameRow(after.inbox, written.inbox));
       const base = error instanceof CommsError ? error : new CommsError('UNEXPECTED', String(error));
+      const reauth = context.handoffs.own(['inbox', 'reauth', after?.alias ?? existing.alias]);
+      const doctor = context.handoffs.own(['doctor']);
       throw new CommsError(base.code, base.message, {
         hint:
           `${base.hint ? `${base.hint} ` : ''}Whether the new token reached the secret store could not be confirmed. ` +
-          `This mailbox's settings ${settingsUpdated ? 'were updated' : 'were not changed'}. Run ` +
-          `${inlineCommand(shellCommand(['agent-gmail', 'inbox', 'reauth', after?.alias ?? existing.alias], context.platform))} again when the store is available; ` +
-          '`agent-gmail doctor` says whether the mailbox still works.',
+          `This mailbox's settings ${settingsUpdated ? 'were updated' : 'were not changed'}. ` +
+          handoffSentence(reauth, (command) => `Run ${command} again when the store is available; `) +
+          handoffSentence(doctor, (command) => `${command} says whether the mailbox still works.`),
         details: {
           tokenStateUnknown: existing.inbox.secretRef,
           settingsUpdated,
@@ -521,7 +542,9 @@ async function writeReauth(
       });
     }
     if (!after || !sameRow(after.inbox, written.inbox) || !holdsNewToken)
-      throw await restorePrevious(secrets, existing.inbox.secretRef, previous, error);
+      throw await restorePrevious(secrets, existing.inbox.secretRef, previous, error, () =>
+        context.handoffs.own(['inbox', 'reauth', existing.alias]),
+      );
     // The row is exactly what this reauth wrote: the write is in and only the lock's cleanup failed.
   }
   return written;
@@ -538,6 +561,8 @@ async function restorePrevious(
   ref: string,
   previous: string | null,
   original: unknown,
+  /** This installation's own `inbox reauth` for the mailbox, located: what the person runs when it cannot be put back. */
+  reauth: () => ReturnType<CliHandoffs['own']>,
 ): Promise<unknown> {
   try {
     if (previous === null) await secrets.delete(ref);
@@ -546,7 +571,10 @@ async function restorePrevious(
   } catch (error) {
     const base = original instanceof CommsError ? original : new CommsError('UNEXPECTED', String(original));
     return new CommsError(base.code, base.message, {
-      hint: `${base.hint ? `${base.hint} ` : ''}The previous token could not be put back, so the mailbox may not renew: run \`agent-gmail inbox reauth\` for it again.`,
+      hint: `${base.hint ? `${base.hint} ` : ''}${handoffSentence(
+        reauth(),
+        (command) => `The previous token could not be put back, so the mailbox may not renew: run ${command} again.`,
+      )}`,
       details: { tokenNotRestored: ref, restoreError: (error as Error).message },
       cause: original,
     });
@@ -563,8 +591,8 @@ async function restorePrevious(
 function requireSameClient(
   config: Config,
   flow: OAuthFlow,
-  exchangedClientId?: string,
-  platform: NodeJS.Platform = process.platform,
+  exchangedClientId: string | undefined,
+  handoffs: CliHandoffs,
   actualEmail?: string,
 ): string {
   const name = flow.clientName;
@@ -579,17 +607,17 @@ function requireSameClient(
         'CONFIG',
         `the organisation ${expectedGeneration.organisation}'s Google client generation changed while this sign-in was being completed`,
         {
-          hint: `Run ${inlineCommand(shellCommand(['agentcomms', 'org', 'update', expectedGeneration.organisation], platform))}, then start the sign-in again.`,
+          hint: orgUpdateHint(handoffs, expectedGeneration.organisation, ', then start the sign-in again.'),
         },
       );
     }
-    requireLiveOrganisationGeneration(config, expectedGeneration.organisation, generation, platform);
+    requireLiveOrganisationGeneration(config, expectedGeneration.organisation, generation, handoffs);
     if (expectedGeneration.active && activeGeneration(record)?.name !== generation.name) {
       throw new CommsError(
         'CONFIG',
         `the organisation ${expectedGeneration.organisation}'s active Google client changed while this sign-in was being completed`,
         {
-          hint: `Run ${inlineCommand(shellCommand(['agentcomms', 'org', 'update', expectedGeneration.organisation], platform))}, then start the sign-in again.`,
+          hint: orgUpdateHint(handoffs, expectedGeneration.organisation, ', then start the sign-in again.'),
         },
       );
     }
@@ -598,7 +626,11 @@ function requireSameClient(
         'CONFIG',
         `the organisation ${expectedGeneration.organisation} no longer offers its Google client for other addresses; nothing was saved`,
         {
-          hint: `Choose another client, or run ${inlineCommand(shellCommand(['agentcomms', 'org', 'update', expectedGeneration.organisation, '--for-other-addresses', 'on'], platform))} and start the sign-in again.`,
+          hint: handoffSentence(
+            handoffs.core(['org', 'update', expectedGeneration.organisation, '--for-other-addresses', 'on']),
+            (command) => `Choose another client, or run ${command} and start the sign-in again.`,
+            { instead: 'Choose another client.' },
+          ),
         },
       );
     }
@@ -607,7 +639,7 @@ function requireSameClient(
         'CONFIG',
         `the organisation ${expectedGeneration.organisation} says its Google client "${flow.clientName}" does not serve ${actualEmail}; nothing was saved`,
         {
-          hint: `Start the sign-in again through a client that serves this address; ${inlineCommand(shellCommand(['agent-gmail', 'inbox', 'add', '--help'], platform))} describes the --client option.`,
+          hint: clientOptionHint(handoffs, 'Start the sign-in again through a client that serves this address'),
           details: {
             alias: flow.alias,
             client: flow.clientName,
@@ -627,8 +659,15 @@ function requireSameClient(
     return expectedClientId;
   throw new CommsError('CONFIG', `the OAuth client "${name}" changed while this sign-in was being completed`, {
     hint: held
-      ? `Run \`agent-gmail inbox reauth\` for this mailbox again, through the client it should use.`
-      : `Register it again with \`agent-gmail client add\`, then run the sign-in again.`,
+      ? handoffSentence(
+          handoffs.own(['inbox', 'reauth', flow.alias]),
+          (command) => `Run ${command} for this mailbox again, through the client it should use.`,
+        )
+      : handoffSentenceToFill(
+          handoffs.own(['client', 'add']),
+          ['<client_secret.json>'],
+          (command) => `Register it again with ${command}, then run the sign-in again.`,
+        ),
   });
 }
 
@@ -665,7 +704,7 @@ export async function checkInbox(context: GmailContext, alias: string): Promise<
     inbox: resolved.inbox,
     client,
     alias,
-    platform: context.platform,
+    handoffs: context.handoffs,
   });
   const token = await source.accessToken();
   const transport = await context.transport(alias);

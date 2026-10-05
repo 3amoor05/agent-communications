@@ -8,11 +8,11 @@ import {
   childEnvironment,
   findById,
   type GatedChange,
-  inlineCommand,
+  handoffSentence,
+  handoffSentenceToFill,
   lookupName,
   readWholeNumber,
   requireInbox,
-  shellCommand,
   wholeNumber,
 } from '@agentcomms/core';
 import type { OAuthFlow, RegistrationIntent } from '../auth/flows.ts';
@@ -21,6 +21,7 @@ import { startLoopback } from '../auth/loopback.ts';
 import { buildAuthUrl, newPkce, newState, oauthError } from '../auth/oauth.ts';
 import { capabilitiesOf, scopesFor, TIERS, type Tier, tierOf } from '../auth/scopes.ts';
 import type { GmailContext } from '../context.ts';
+import { orgUpdateHint } from '../handoffs.ts';
 import { chooseClientForNewInbox, type GmailClientChoice } from './client-choice.ts';
 import { type ConsentResult, completeConsent } from './consent.ts';
 import { requireNewInboxName } from './inbox-names.ts';
@@ -182,12 +183,12 @@ export async function startSignIn(context: GmailContext, options: StartOptions):
         alias: options.alias,
         email: expect.email,
         client: clientName,
-        platform: context.platform,
+        handoffs: context.handoffs,
       }) ?? undefined;
   } else {
     // Before the browser opens, not only when it comes back: a name the file cannot take would otherwise be refused
     // after the person has already been through Google's consent screens.
-    requireNewInboxName(config, options.alias, undefined, context.platform);
+    requireNewInboxName(config, options.alias, undefined, context.handoffs);
     // Setup's earlier snapshot says only that this is a setup flow. The freshly loaded configuration decides the
     // route in both directions: a newly active Gmail generation must enter §D6, and a deactivated last generation
     // must return to main's ordinary first-client rule. Inbox-add callers omit the flag and always use §D6.
@@ -199,7 +200,7 @@ export async function startSignIn(context: GmailContext, options: StartOptions):
           alias: options.alias,
           email: options.email,
           client: options.client,
-          platform: context.platform,
+          handoffs: context.handoffs,
         }) ?? undefined;
       if (!choice) throw new CommsError('UNEXPECTED', 'inbox add did not choose a Google client');
       clientName = choice.name;
@@ -210,7 +211,7 @@ export async function startSignIn(context: GmailContext, options: StartOptions):
   if (choice && client.clientId !== choice.clientId) {
     throw new CommsError('CONFIG', `the OAuth client "${clientName}" changed after it was selected for this sign-in`, {
       hint: choice.organisation
-        ? `Run ${inlineCommand(shellCommand(['agentcomms', 'org', 'update', choice.organisation], context.platform))}, then start the sign-in again.`
+        ? orgUpdateHint(context.handoffs, choice.organisation, ', then start the sign-in again.')
         : 'Choose the client again, then start the sign-in again.',
     });
   }
@@ -294,7 +295,7 @@ async function startInProcess(
     }
     if ('error' in outcome) {
       await context.flows.discard(flow.flowId);
-      throw oauthError(outcome.error, outcome.description);
+      throw oauthError(outcome.error, outcome.description, context.handoffs);
     }
     const claimed = await context.flows.claim(flow.flowId);
     try {
@@ -360,7 +361,7 @@ async function startDetached(
     // no listener and no command that can finish it, and the next run would not know it was dead.
     await context.flows.discard(flow.flowId);
     throw new CommsError('UNEXPECTED', `the sign-in listener could not be started: ${(error as Error).message}`, {
-      hint: 'Run the sign-in on a terminal instead: `agent-gmail inbox add <alias>`.',
+      hint: onATerminal(context),
       cause: error,
     });
   }
@@ -389,7 +390,7 @@ async function startDetached(
     child.kill();
     await context.flows.discard(flow.flowId);
     throw new CommsError('UNEXPECTED', String((error as Error).message), {
-      hint: 'Run the sign-in on a terminal instead: `agent-gmail inbox add <alias>`.',
+      hint: onATerminal(context),
       cause: error,
     });
   }
@@ -596,9 +597,10 @@ export async function finishSignIn(context: GmailContext, options: FinishOptions
       'USAGE',
       `that sign-in is ${flow.mode === 'reauth' ? 're-authorising an existing mailbox' : 'a new mailbox'}, and this can only finish ${wanted}`,
       {
-        hint: `Finish it where it was started: ${inlineCommand(
-          shellCommand(['agent-gmail', 'inbox', flow.mode, '--finish', options.flowId], context.platform),
-        )}.`,
+        hint: handoffSentence(
+          context.handoffs.own(['inbox', flow.mode, '--finish', options.flowId]),
+          (command) => `Finish it where it was started: ${command}.`,
+        ),
       },
     );
   }
@@ -620,21 +622,22 @@ export async function finishSignIn(context: GmailContext, options: FinishOptions
     if (!same) {
       const current = config && expected ? (findById(config, 'inbox', expected)?.alias ?? flow.alias) : flow.alias;
       throw new CommsError('USAGE', `that sign-in is for "${current}", not "${options.onlyAlias}"`, {
-        hint: `Finish it without a name — ${inlineCommand(
-          shellCommand(['agent-gmail', 'inbox', flow.mode, '--finish', options.flowId], context.platform),
-        )} — or start a sign-in for "${options.onlyAlias}".`,
+        hint: handoffSentence(
+          context.handoffs.own(['inbox', flow.mode, '--finish', options.flowId]),
+          (command) => `Finish it without a name — ${command} — or start a sign-in for "${options.onlyAlias}".`,
+        ),
       });
     }
   }
 
   let code: string;
   if (options.url) {
-    code = codeFromUrl(options.url, flow);
+    code = codeFromUrl(options.url, flow, context);
   } else {
     const outcome = await waitForOutcome(context, { ...options, waitSeconds }, flow);
     if ('error' in outcome) {
       await context.flows.discard(flow.flowId);
-      throw oauthError(outcome.error, outcome.description);
+      throw oauthError(outcome.error, outcome.description, context.handoffs);
     }
     code = outcome.code;
   }
@@ -675,20 +678,17 @@ async function waitForOutcome(
         hint:
           context.surface === 'mcp'
             ? `Open the link, choose the account, then call gmail_inbox_finish with flowId ${flow.flowId} again.`
-            : `Open the link, choose the account, then run ${inlineCommand(
-                shellCommand(
-                  [
-                    'agent-gmail',
-                    'inbox',
-                    flow.mode === 'reauth' ? 'reauth' : 'add',
-                    '--finish',
-                    flow.flowId,
-                    '--wait',
-                    String(FINISH_WAIT_SECONDS),
-                  ],
-                  context.platform,
-                ),
-              )} again.`,
+            : handoffSentence(
+                context.handoffs.own([
+                  'inbox',
+                  flow.mode === 'reauth' ? 'reauth' : 'add',
+                  '--finish',
+                  flow.flowId,
+                  '--wait',
+                  String(FINISH_WAIT_SECONDS),
+                ]),
+                (command) => `Open the link, choose the account, then run ${command} again.`,
+              ),
         details: { flowId: flow.flowId, expiresAt: flow.expiresAt },
       });
     }
@@ -696,7 +696,16 @@ async function waitForOutcome(
   }
 }
 
-function codeFromUrl(pasted: string, flow: OAuthFlow): string {
+/** "Sign in at a terminal instead": this installation's own `inbox add`, the name for the agent to fill in. */
+function onATerminal(context: GmailContext): string {
+  return handoffSentenceToFill(
+    context.handoffs.own(['inbox', 'add']),
+    ['<alias>'],
+    (command) => `Run the sign-in on a terminal instead: ${command}.`,
+  );
+}
+
+function codeFromUrl(pasted: string, flow: OAuthFlow, context: GmailContext): string {
   let url: URL;
   try {
     url = new URL(pasted.trim());
@@ -706,7 +715,7 @@ function codeFromUrl(pasted: string, flow: OAuthFlow): string {
     });
   }
   const error = url.searchParams.get('error');
-  if (error) throw oauthError(error, url.searchParams.get('error_description') ?? undefined);
+  if (error) throw oauthError(error, url.searchParams.get('error_description') ?? undefined, context.handoffs);
   const state = url.searchParams.get('state');
   const code = url.searchParams.get('code');
   if (!code) {

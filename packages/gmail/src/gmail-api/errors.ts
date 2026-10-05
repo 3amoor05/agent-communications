@@ -1,4 +1,4 @@
-import { CommsError, inlineCommand, shellCommand } from '@agentcomms/core';
+import { type CliHandoffs, CommsError, handoffSentence } from '@agentcomms/core';
 
 /** The parts of a Google API error this package reads, however the transport surfaced them. */
 export interface GoogleErrorShape {
@@ -120,7 +120,11 @@ export interface ErrorContext {
   operation?: string | undefined;
   /** `gmail` or `people`: which API a SERVICE_DISABLED error is about. */
   api?: 'gmail' | 'people' | undefined;
-  platform?: NodeJS.Platform | undefined;
+  /**
+   * The commands a fix names: this installation's own, located (`GmailContext.handoffs`, CUE-403). Without them — an
+   * error mapped where no context is in reach — the fix is said in words, with no command.
+   */
+  handoffs?: CliHandoffs | undefined;
 }
 
 /**
@@ -131,13 +135,18 @@ export function mapGoogleError(error: unknown, context: ErrorContext = {}): Comm
   if (error instanceof CommsError) return error;
   const shape = describeGoogleError(error);
   const alias = context.alias ?? '<alias>';
-  const platform = context.platform ?? process.platform;
+  const { handoffs } = context;
+  // This installation's `inbox reauth` with these words after the alias, in `say`; or the same said in words.
+  const reauth = (more: readonly string[], say: (command: string) => string, words: string): string =>
+    handoffs === undefined || context.alias === undefined
+      ? words
+      : handoffSentence(handoffs.own(['inbox', 'reauth', context.alias, ...more]), say);
   const where = context.operation ? ` while trying to ${context.operation}` : '';
   const reasons = new Set(shape.reasons);
 
   if (shape.status === 401) {
     return new CommsError('AUTH_REQUIRED', `Google rejected the credentials for ${alias}${where}`, {
-      hint: `Sign in again: ${inlineCommand(shellCommand(['agent-gmail', 'inbox', 'reauth', alias], platform))}.`,
+      hint: reauth([], (command) => `Sign in again: ${command}.`, `Sign in to ${alias} again.`),
       cause: error,
     });
   }
@@ -153,7 +162,11 @@ export function mapGoogleError(error: unknown, context: ErrorContext = {}): Comm
     }
     if (reasons.has('ACCESS_TOKEN_SCOPE_INSUFFICIENT') || reasons.has('insufficientPermissions')) {
       return new CommsError('SCOPE_MISSING', `${alias} was not granted the permission this needs${where}`, {
-        hint: `Grant it: ${inlineCommand(shellCommand(['agent-gmail', 'inbox', 'reauth', alias, '--tier', 'organize'], platform))}.`,
+        hint: reauth(
+          ['--tier', 'organize'],
+          (command) => `Grant it: ${command}.`,
+          `Grant it: sign in to ${alias} again at the organize tier.`,
+        ),
         cause: error,
       });
     }

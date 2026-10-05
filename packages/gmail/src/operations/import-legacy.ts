@@ -1,9 +1,9 @@
 import { readdir } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import {
+  type CliHandoffs,
   CommsError,
   type Config,
-  commandText,
   committedSecretsStore,
   defaultInternalDomains,
   duplicateInbox,
@@ -11,6 +11,8 @@ import {
   findById,
   findUngatedGmailServers,
   type GatedChange,
+  handoffSentenceToFill,
+  handoffText,
   homeDirectory,
   type InboxConfig,
   isValidAlias,
@@ -23,7 +25,6 @@ import {
   type SecretStore,
   type StoreKind,
   secretsStoreFor,
-  shellCommand,
   withCredentialsLock,
   withdrawStaged,
   writeOutcome,
@@ -33,6 +34,7 @@ import { capabilitiesOf, parseGrantedScopes, tierOf } from '../auth/scopes.ts';
 import { clientSecretRef, refreshTokenRef } from '../auth/session.ts';
 import type { GmailContext } from '../context.ts';
 import { getProfileWithToken } from '../gmail-api/profile.ts';
+import { runInboxList } from '../handoffs.ts';
 import { parseStore } from './clients.ts';
 import { requireNewInboxName } from './inbox-names.ts';
 import { clearSetupProgress } from './setup-progress.ts';
@@ -163,7 +165,7 @@ export function inboxImportChange(context: GmailContext, request: ImportRequest)
   return {
     plan: async (config) => {
       // Refused here, before anybody is asked, when it names a store other than the one credentials are kept in.
-      const { store } = secretsStoreFor(config, options.store, context.platform);
+      const { store } = secretsStoreFor(config, options.store, context.handoffs);
       const found = await importLegacy(context, { ...options, dryRun: true, approved: undefined });
       const client = found.client;
       approved = {
@@ -287,7 +289,7 @@ export async function importLegacy(context: GmailContext, options: ImportOptions
   // included, since that says what the import would do. It was silently ignored where a store was recorded, and
   // where none was but Slack had stored a token in the keychain, it was taken: the client's secret went into files,
   // and only the last write refused to record them.
-  const { store } = secretsStoreFor(config, options.store, context.platform);
+  const { store } = secretsStoreFor(config, options.store, context.handoffs);
   const secrets = dryRun ? null : await context.core.secrets(store);
   if (!dryRun && secrets && !existingClient) {
     const ref = clientSecretRef(clientKey);
@@ -307,6 +309,7 @@ export async function importLegacy(context: GmailContext, options: ImportOptions
         });
       }
       await storeThenRecord(
+        context.handoffs,
         secrets,
         ref,
         parsedClient.clientSecret,
@@ -339,9 +342,12 @@ export async function importLegacy(context: GmailContext, options: ImportOptions
           return row?.secretRef === ref && row.clientId === parsedClient.clientId;
         },
         // Another client's row naming the same reference: never withdraw it, whoever wrote last.
-        async () => {
-          const row = (await context.config()).clients[clientKey];
-          return row?.secretRef === ref && row.clientId !== parsedClient.clientId;
+        {
+          client: clientKey,
+          holds: async () => {
+            const row = (await context.config()).clients[clientKey];
+            return row?.secretRef === ref && row.clientId !== parsedClient.clientId;
+          },
         },
       );
     });
@@ -419,13 +425,14 @@ export async function importLegacy(context: GmailContext, options: ImportOptions
     };
     if (secrets) {
       await storeThenRecord(
+        context.handoffs,
         secrets,
         inbox.secretRef,
         credentials.refreshToken,
         () =>
           context.core.config.update((existing: Config) => {
             // Checked again under the lock: the names were chosen from a snapshot, before any network call.
-            requireNewInboxName(existing, alias, 'Run the import again.', context.platform);
+            requireNewInboxName(existing, alias, 'Run the import again.', context.handoffs);
             requireStore(existing, secrets.kind);
             // Re-checked under the lock: another add or import can connect the same account meanwhile, and two rows
             // for one account would share — and overwrite — one grant.
@@ -470,7 +477,7 @@ export async function importLegacy(context: GmailContext, options: ImportOptions
     imported,
     skipped,
     ungatedServers,
-    nextSteps: nextSteps(imported, ungatedServers, dryRun, context.platform),
+    nextSteps: nextSteps(imported, ungatedServers, dryRun, context.handoffs),
   };
 }
 
@@ -491,7 +498,7 @@ function nextSteps(
   imported: ImportCandidate[],
   ungated: LegacyServerFinding[],
   dryRun: boolean,
-  platform: NodeJS.Platform,
+  handoffs: CliHandoffs,
 ): string[] {
   const steps: string[] = [];
   if (dryRun) {
@@ -500,16 +507,15 @@ function nextSteps(
   }
   const needsUpgrade = imported.filter((candidate) => candidate.tier !== 'organize');
   for (const candidate of needsUpgrade) {
+    // Each step a value of its own: this installation's command, located — or why there is none here.
     steps.push(
-      `${commandText(
-        shellCommand(['agent-gmail', 'inbox', 'reauth', candidate.alias, '--start'], platform),
-      )}  (to label and archive, and to record which account it is)`,
+      `${handoffText(handoffs.own(['inbox', 'reauth', candidate.alias, '--start']))}  (to label and archive, and to record which account it is)`,
     );
   }
   for (const finding of ungated) {
     steps.push(`${finding.removal}  (while ${finding.packageName} is connected, an agent can send without approval)`);
   }
-  if (imported.length > 0) steps.push('agent-gmail doctor');
+  if (imported.length > 0) steps.push(handoffText(handoffs.own(['doctor'])));
   return steps;
 }
 
@@ -536,7 +542,11 @@ async function identify(
   const body = (await response.json().catch(() => ({}))) as { access_token?: string; error?: string };
   if (!response.ok || !body.access_token) {
     throw new CommsError('AUTH_REQUIRED', `Google will not renew this token (${body.error ?? response.status})`, {
-      hint: 'Connect the mailbox from scratch with `agent-gmail inbox add <name> --start`.',
+      hint: handoffSentenceToFill(
+        context.handoffs.own(['inbox', 'add', '--start']),
+        ['<name>'],
+        (command) => `Connect the mailbox from scratch with ${command}.`,
+      ),
     });
   }
   const profile = await getProfileWithToken(context.endpoints, body.access_token);
@@ -623,19 +633,21 @@ function requireStore(config: Config, kind: StoreKind): void {
  * back when it is not, and kept and reported when nobody can tell.
  */
 async function storeThenRecord(
+  handoffs: CliHandoffs,
   secrets: SecretStore,
   ref: string,
   value: string,
   record: () => Promise<unknown>,
   recorded: () => Promise<boolean>,
-  ownedByAnother?: () => Promise<boolean>,
+  /** For a client's secret: the client's name, and whether another client's row names the same reference. */
+  ownedByAnother?: { client: string; holds: () => Promise<boolean> },
 ): Promise<void> {
   try {
     await secrets.set(ref, value);
     await record();
   } catch (error) {
     const landed = await writeOutcome(recorded);
-    if (landed === 'unknown') throw keepAndReport(error, ref, 'Run `agent-gmail inbox list`.');
+    if (landed === 'unknown') throw keepAndReport(error, ref, runInboxList(handoffs));
     if (landed === 'absent') {
       /*
        * Not taken back if another row names it.
@@ -652,12 +664,16 @@ async function storeThenRecord(
          * Google shows once is not.
          */
         const base = error instanceof CommsError ? error : new CommsError('UNEXPECTED', String(error));
-        const contested = (await writeOutcome(ownedByAnother)) !== 'absent';
+        const contested = (await writeOutcome(ownedByAnother.holds)) !== 'absent';
         throw new CommsError(base.code, base.message, {
           hint: contested
             ? `${base.hint ? `${base.hint} ` : ''}Something else registered this client name while the import ran, and ` +
-              `both wrote \`${ref}\`, so it may now hold the wrong secret. Register that client again with ` +
-              '`agent-gmail client add <its JSON> --replace`.'
+              `both wrote \`${ref}\`, so it may now hold the wrong secret. ` +
+              handoffSentenceToFill(
+                handoffs.own(['client', 'add', '--name', ownedByAnother.client, '--replace']),
+                ['<its JSON>'],
+                (command) => `Register that client again with ${command}.`,
+              )
             : `${base.hint ? `${base.hint} ` : ''}The client's secret was stored as \`${ref}\` but not registered. ` +
               'Run the import again, or delete it from your secret store.',
           details: contested ? { contestedSecretRef: ref } : { strandedSecretRef: ref },

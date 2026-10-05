@@ -8,6 +8,7 @@ import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { createGmailMcpServer } from '../src/mcp/server.ts';
 import type { FakeMessage } from './support/fake-google.ts';
+import { assertNoBareCommand, gmailInline, locatedGmailLine } from './support/handoffs.ts';
 import { type Harness, newHarness, tempDir } from './support/harness.ts';
 import { cli, connect, type ToolResult, toolError, wire } from './support/surfaces.ts';
 
@@ -444,7 +445,10 @@ test('under confirm, an answer in the tool’s arguments or the command’s flag
     const asked = wire(await call('gmail_attachment_download', { inbox: 'work', messageIds: ['m1'] }));
     const choiceId = String(asked.choiceId);
     assert.equal(asked.policy, 'confirm');
-    assert.ok(String(asked.question).includes(`at your own terminal — \`agent-gmail approve ${choiceId}\``));
+    // This installation's own `approve`, located (CUE-403).
+    const approve = gmailInline(harness.core.paths, ['approve', choiceId]);
+    assert.ok(String(asked.question).includes(`at your own terminal — ${approve}`), String(asked.question));
+    assertNoBareCommand(String(asked.question));
     assert.match(String(asked.next), /you cannot answer it for them, and a saveTo you pass is refused/);
     for (const saveTo of ['downloads', 'current', undefined]) {
       const refused = toolError(
@@ -456,7 +460,7 @@ test('under confirm, an answer in the tool’s arguments or the command’s flag
         }),
       );
       assert.equal(refused.code, 'APPROVAL_PENDING', String(saveTo));
-      assert.ok((refused.hint ?? '').includes(`\`agent-gmail approve ${choiceId}\` in their own terminal`));
+      assert.ok((refused.hint ?? '').includes(`${approve} in their own terminal`), refused.hint ?? '');
     }
     // The command's flags are arguments too.
     const flagged = await cli(
@@ -640,7 +644,7 @@ test('under confirm, a declined form saves nothing; a client not trusted with fo
     const refused = toolError(await untrusted.call({ inbox: 'work', messageIds: ['m1'], choiceId: asked.choiceId }));
     assert.equal(untrusted.asked.length, 0, 'an untrusted client was handed a form');
     assert.equal(refused.code, 'APPROVAL_PENDING');
-    assert.match(refused.hint ?? '', /agent-gmail approve/);
+    locatedGmailLine(refused.hint ?? '', ['approve', String(asked.choiceId)]);
   } finally {
     await untrusted.close();
   }
