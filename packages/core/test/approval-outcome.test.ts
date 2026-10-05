@@ -96,7 +96,19 @@ test('under a live never a pending or approved send keeps its state and cannot b
       assert.equal(used.state, 'revoked');
       assert.equal(used.record?.revokedAt, NOW.toISOString());
       assert.equal(used.error?.code, 'POLICY_NEVER');
-      assert.match(used.error?.message ?? '', /sending is turned off for this inbox \(policy: never\)/);
+      assert.equal(used.error?.message, 'nothing was sent: sending is turned off for this mailbox (policy: never)');
+    }
+    // The owner named by its kind, from the channel that prepared the record (CUE-404): never "this inbox" for an
+    // account that is no mailbox.
+    for (const [channel, owner] of [
+      ['gmail', 'mailbox'],
+      ['slack', 'workspace'],
+      ['resend', 'account'],
+      ['whatsapp', 'account'],
+    ] as const) {
+      const theirs = classify({ ...record, channel }, PRESENT({ sendPolicy: 'never', sendEpoch: 1 }), 'claim');
+      assert.equal(theirs.error?.message, `nothing was sent: sending is turned off for this ${owner} (policy: never)`);
+      assert.equal(theirs.record?.reason, `sending is turned off for this ${owner} (policy: never)`, 'and revoked so');
     }
   }
   // `requiredPolicy: never` under a live chat: the same.

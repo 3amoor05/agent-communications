@@ -9,6 +9,7 @@ import {
   stricterPolicy,
 } from './approvals.ts';
 import { channelLabel, isChannel } from './channel-servers.ts';
+import { accountNoun } from './channel-words.ts';
 import {
   type ChangePolicy,
   type Config,
@@ -552,9 +553,10 @@ function classifyV2(read: ApprovalRecord, context: OutcomeContext): ApprovalOutc
   if (active && ownerRemoved) derived = OWNER_REMOVED_REASON;
   else if (active && never) {
     if (acting) {
+      // The owner by its kind, from the channel that prepared it: a mailbox, a workspace, an account.
       derived =
         live?.sendPolicy === 'never'
-          ? 'sending is turned off for this inbox (policy: never)'
+          ? `sending is turned off for this ${accountNoun(read.channel)} (policy: never)`
           : 'sending is turned off for this approval (policy: never)';
     }
   } else if (active && read.kind === 'send' && live?.owner === 'present' && (read.sendEpoch ?? 0) !== live.sendEpoch) {

@@ -237,6 +237,17 @@ function waitingForPerson(code) {
   });
 }
 
+/** A live never, refused naming the owner by its kind — the channel's own noun for it, never "this inbox" for all. */
+const OWNER_NOUN = { gmail: 'mailbox', slack: 'workspace', resend: 'account' };
+function turnedOff(channel) {
+  assert.ok(OWNER_NOUN[channel], `a noun for ${channel}'s owner`);
+  return refused(
+    'POLICY_NEVER',
+    new RegExp(`^nothing was sent: sending is turned off for this ${OWNER_NOUN[channel]} \\(policy: never\\)$`),
+    'revoked',
+  );
+}
+
 const VOIDED_BY_NEVER = /the approval was voided \(sending was turned off since this was prepared \(policy: never\)\)$/;
 const TIME = '\\d{4}-\\d{2}-\\d{2}T[\\d:.]+Z';
 
@@ -322,8 +333,8 @@ const SEND = {
     list: shows('pending', false, (o) =>
       assert.equal(o.approval.reason, 'sending is turned off (policy: never); any use revokes it'),
     ),
-    claim: refused('POLICY_NEVER', /sending is turned off for this \w+ \(policy: never\)$/, 'revoked'),
-    approve: refused('POLICY_NEVER', /sending is turned off for this \w+ \(policy: never\)$/, 'revoked'),
+    claim: (o, line) => turnedOff(line.channel)(o),
+    approve: (o, line) => turnedOff(line.channel)(o),
   },
   'revoked-by-never': {
     look: shows('revoked', false),
