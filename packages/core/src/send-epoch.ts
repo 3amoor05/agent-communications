@@ -42,8 +42,9 @@ export interface LegacyDrainReport {
   /** Still open: their revocation failed, or was not yet tried. Retried by the next operation that relies on the epoch. */
   couldNotRevoke: string[];
   /**
-   * Reached by an earlier release's send it had already admitted — the stated limit: under way, `unknown`, or already
-   * `used` or `failed` when the drain got there. Never revoked; listed so that window is never silent.
+   * Reached by an earlier release's send it had already admitted — the stated limit: under way when the conversion ran,
+   * or under way, `unknown`, or already `used` or `failed` when the drain got there. Never revoked; listed so that window
+   * is never silent.
    */
   inFlight: string[];
 }
@@ -54,11 +55,11 @@ export interface LegacyDrainReport {
  *
  * Run first by every send prepare, claim and approval, and every send-policy write. A version-1 or -2 configuration is
  * converted to version 3 in one locked write (`ConfigStore.convertToVersion3`), the scan of the approvals under the
- * same lock tracking every version-1 send record still `pending` or `approved` by its own rules. While that drain is
- * open, every call rescans for one written since, retries each open revocation under its record's lock
- * (`revokeLegacy`), records what became of each, and closes the drain only once every tracked record has an outcome,
- * the rescan finds nothing new, and `LEGACY_DRAIN_MS` has passed since it opened. The config lock and a record's lock
- * are never held together.
+ * same lock (`conversionScan`) tracking every version-1 send record still `pending` or `approved` by its own rules, and
+ * every one an earlier release is already sending, as such. While that drain is open, every call rescans for one
+ * written since, retries each open revocation under its record's lock (`revokeLegacy`), records what became of each,
+ * and closes the drain only once every tracked record has an outcome, the rescan finds nothing new, and
+ * `LEGACY_DRAIN_MS` has passed since it opened. The config lock and a record's lock are never held together.
  *
  * `legacyDrain` is the report, ids only, whenever a drain was open during the call.
  */

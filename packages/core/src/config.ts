@@ -322,13 +322,17 @@ export interface ConfigV2 extends ConfigBody {
 export type LegacyDrainOutcome = 'revoked' | 'expired' | 'used' | 'failed' | 'sending' | 'unknown';
 
 /**
- * The approvals an earlier release prepared that were still waiting when this configuration became version 3, and
- * what has become of each (design 2026-10-05 §D1, "Old releases are locked out before the fence is relied on").
+ * The approvals an earlier release prepared that were still waiting, or already being sent, when this configuration
+ * became version 3, and what has become of each (design 2026-10-05 §D1, "Old releases are locked out before the fence
+ * is relied on").
  */
 export interface LegacyDrain {
   /** When the conversion that opened the drain was written. */
   since: string;
-  /** Every tracked version-1 send record by id: `open` until it has an outcome. */
+  /**
+   * Every tracked version-1 send record by id: `open` until it has an outcome — or `sending` from the start, for one an
+   * earlier release was already sending when the conversion ran.
+   */
   tracked: Record<string, 'open' | LegacyDrainOutcome>;
 }
 
