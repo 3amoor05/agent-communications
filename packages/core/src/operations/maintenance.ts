@@ -7,7 +7,7 @@ import { type Channel, channelServer } from '../channel-servers.ts';
 import { listed, manifestOf } from '../channel-words.ts';
 import { inlineCommand } from '../cli-runtime.ts';
 import { externalCommand } from '../command-brands.ts';
-import { type Config, emptyConfig, secretsStoreOf } from '../config.ts';
+import { type Config, emptyConfig, hasNames, secretsStoreOf } from '../config.ts';
 import type { Core } from '../core.ts';
 import { CommsError } from '../errors.ts';
 import { isGroupOrWorldAccessible } from '../fs.ts';
@@ -152,7 +152,7 @@ export async function doctor(core: Core, env: NodeJS.ProcessEnv, options: Doctor
    * because the release requirement is the part people get wrong: one config is shared by everything on a machine,
    * and a program older than 0.2.0 refuses the migrated file outright.
    */
-  const toMigrate = readable && config.version === 1;
+  const toMigrate = readable && !hasNames(config);
   checks.push({
     name: 'account names',
     ok: true,
@@ -177,6 +177,30 @@ export async function doctor(core: Core, env: NodeJS.ProcessEnv, options: Doctor
   });
 
   if (readable) checks.push(...organisationChecks(config, handoffs));
+
+  /*
+   * An open legacy drain (design 2026-10-05 §D1): approvals an earlier release prepared, still being retired. Not a
+   * fault — the next send prepare, claim or approval retries each — but no send policy can be loosened until it
+   * closes, and a record it could not revoke is one an earlier release still running could use.
+   */
+  if (readable && config.version === 3 && config.legacyDrain !== undefined) {
+    const tracked = Object.entries(config.legacyDrain.tracked);
+    const open = tracked.filter(([, status]) => status === 'open').map(([approvalId]) => approvalId);
+    // What an earlier release's send it had already admitted reached — under way, unknown, or finished — as the drain
+    // reports it: never revoked, and named so that window is never silent.
+    const inFlight = tracked
+      .filter(([, status]) => ['sending', 'unknown', 'used', 'failed'].includes(status))
+      .map(([approvalId]) => approvalId);
+    checks.push({
+      name: 'earlier-release approvals',
+      ok: true,
+      warn: true,
+      detail: `being retired since ${config.legacyDrain.since}: ${tracked.length} tracked, ${open.length} still open${open.length > 0 ? ` (${open.join(', ')})` : ''}${inFlight.length > 0 ? `, ${inFlight.length} reached by an earlier release's send (${inFlight.join(', ')})` : ''}`,
+      fix: remedy(
+        'Nothing to do: the next send prepare, claim or approval retries them. Until they are retired, no send policy can be loosened.',
+      ),
+    });
+  }
 
   const keyring = options.keyring !== undefined ? options.keyring : await loadKeyringModule();
   // `probeKeychain` loads the real module when handed none, so a machine without it is answered here instead.

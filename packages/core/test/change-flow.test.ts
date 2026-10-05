@@ -12,6 +12,7 @@ import type { AccountConfig, SendPolicy } from '../src/config.ts';
 import { openCore } from '../src/core.ts';
 import { CommsError } from '../src/errors.ts';
 import { CORE_CALLER, isCommand } from '../src/handoffs.ts';
+import { ensureSendEpochConfig } from '../src/send-epoch.ts';
 import { coreHandoffs } from './helpers/handoffs.ts';
 import { tempDir } from './helpers/temp.ts';
 
@@ -53,6 +54,8 @@ function setSendPolicy(core: ReturnType<typeof openCore>, to: SendPolicy): Gated
       return { account: 'acme/slack', before: config, after, summary: `acme/slack posts under ${to}` };
     },
     apply: async (consent) => {
+      // A send-policy writer converts first, as every one does: the policy moves with its send epoch, on version 3.
+      await ensureSendEpochConfig(core);
       const written = await core.config.update(
         (config) => {
           (config.accounts['acme/slack'] as AccountConfig).sendPolicy = to;
