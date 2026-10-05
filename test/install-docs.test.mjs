@@ -168,3 +168,38 @@ test('no document promises that prune keeps whatever any client registers', asyn
   }
   assert.deepEqual(wrong, []);
 });
+
+test('troubleshooting gives 0.13.0’s bare commands a best-effort way to run, at that exact release and never latest (CUE-403)', async () => {
+  // Design 2026-10-04, D7: what a person can do with a command 0.13.0 or earlier printed by its bare name, and what
+  // that cannot recover. And D8 and §5: PATH shims are a follow-up, and on Windows a default Node gives words to type.
+  const page = await readFile(join(ROOT, 'docs', 'troubleshooting.md'), 'utf8');
+  const start = page.indexOf('### A command a result gave you is not found');
+  assert.notEqual(start, -1, 'the section is there');
+  const end = page.indexOf('\n### ', start + 4);
+  const section = page.slice(start, end === -1 ? undefined : end);
+  const prose = section.replace(/\s+/g, ' ');
+
+  // 0.13.1: the command, the words to type, or none here.
+  assert.match(prose, /names the Node and the file of the installation that printed it/);
+  assert.match(prose, /not locatable here/);
+  assert.match(prose, /C:\\Program Files/);
+  assert.match(prose, /words to type/);
+  // The two routes for an older result: a managed registration's own Node and entry, and npx at exactly that release.
+  assert.match(prose, /best effort/i);
+  assert.match(section, /runtime\/0\.13\.0-<product>\/node_modules\/@agentcomms\/<product>\/dist\/cli\.mjs/);
+  assert.match(section, /npx -y @agentcomms\/<product>@0\.13\.0 /);
+  // Every package spec — not a path through a package's folder — names that exact release.
+  for (const [spec] of section.matchAll(/@agentcomms\/[a-z<>-]+(?![\w/<>-])(?:@\S+)?/g)) {
+    assert.match(spec, /@0\.13\.0$/, `${spec}: the exact release that printed it, never latest or a range`);
+  }
+  assert.doesNotMatch(section, /latest/, 'never latest');
+  // What neither can do.
+  assert.match(prose, /global install or a checkout/);
+  assert.match(prose, /AGENT_COMMS_CONFIG_DIR/);
+  assert.match(prose, /`comms_paths`.*cannot/);
+  assert.match(prose, /npx may not be installed/i);
+  assert.match(prose, /may not name its Node/);
+  // PATH shims are not part of this.
+  assert.match(prose, /PATH shims/);
+  assert.match(prose, /follow-up/);
+});
