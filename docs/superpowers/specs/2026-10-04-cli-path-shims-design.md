@@ -1,717 +1,287 @@
-# CUE-403 — the CLIs on PATH after install and update — design
+# CUE-403 — runnable CLI handoffs from the running installation — design
 
-Status: **proposed 2026-10-04 against the 0.13.0 release (`6d4694e`), revised 2026-10-05 after adversarial review
-round 2 (3 P1, 4 P2, 1 P3, all addressed). No implementation is in this change.**
+Status: **proposed for 0.13.1; re-scoped 2026-10-05 after adversarial review round 3. No implementation is in this
+change.**
 
-## 1. What was asked
+## 1. What is being fixed
 
-The owner reproduced CUE-403 after a managed install. `agentcomms`, `agent-gmail`, `agent-slack`, `agent-resend` and
-`agent-whatsapp` existed only below their versioned runtimes, with no user bin directory in the path model
-(`packages/core/src/mcp-install.ts:299-321`, `packages/core/src/paths.ts:12-26`). A result that said “run
-`agent-gmail approve <id>` in a terminal” therefore handed the person a command their terminal answered with
-`command not found` (`packages/gmail/src/operations/send.ts:449-454`). Under `confirm`, and for some escalated sends,
-that terminal is the only approval route (`capabilities.json:241-246`).
+CUE-403's harm is not that a bare command is inconvenient. It is that a result can require a person to approve or
+repair something at a terminal, then print `agentcomms` or `agent-*` even though that CLI is not on the person's
+`PATH`. Gmail's send preparation does that for `agent-gmail approve`, for example
+(`packages/gmail/src/operations/send.ts:386-455`), and change approval does the same for the channel's approval
+command (`packages/core/src/changes.ts:73-98`, `packages/core/src/changes.ts:265-283`). Under `confirm`, terminal
+approval is deliberately not an MCP capability (`docs/superpowers/specs/2026-09-25-cli-mcp-parity-design.md:143-151`).
 
-Managed install and `comms_update` must publish the CLI belonging to each managed runtime in a per-user bin directory,
-repoint it on update, and remove it safely when prune removes that runtime. A managed core install publishes
-`agentcomms`; a managed channel install publishes that channel's CLI. A channel-only install does not manufacture a
-core runtime or publish `agentcomms`. The installer must check command discovery afterwards and give honest login and
-interactive-shell alternatives for zsh, bash, fish and Windows when this process does not see the directory. CLI and
-MCP doctor must diagnose missing, stale, shadowed, malformed and foreign shims.
+The 0.13.1 acceptance criterion is:
 
-The acceptance criterion is:
+> **Every agent-communications CLI command printed for a person to run is runnable without an
+> `agentcomms` or `agent-*` command on `PATH`, and reaches the same installation and paths as the process that
+> printed it.**
 
-> **Every terminal command a result prints works on this machine.**
+This covers approvals, handoffs, reruns and fixes in CLI and MCP results. It does not put commands on `PATH`, edit a
+shell profile or change the approval, send or change-policy models.
 
-It is not “every bare CLI name works immediately after install.” The program never edits a shell profile or the
-Windows user PATH. Every CLI and MCP handoff leads with an absolute command: the validated absolute shim path when
-one is safely published, otherwise validated absolute Node plus entry. A bare name is only a labelled convenience
-after the person verifies that their own terminal resolves it to that shim.
+## 2. What is true now
 
-## 2. What is true, and was checked
-
-### 2.1 The managed runtime contains the CLI, but no user command is published
-
-- The default data directory is `~/.local/share/agent-communications` on macOS and Linux and
-  `%LOCALAPPDATA%\agent-communications` on Windows. `ResolvedPaths` has config, state, secrets, data and downloads,
-  but no bin directory (`packages/core/src/paths.ts:12-26`, `packages/core/src/paths.ts:37-66`). Its home resolution
-  deliberately honours supplied `HOME` and `USERPROFILE` values, after real-home writes escaped earlier tests
-  (`packages/core/src/paths.ts:69-101`, `packages/core/src/paths.ts:139-153`).
-- A managed runtime is `<data>/runtime/<version>-<package>/`, and its CLI entry is
-  `node_modules/<package>/dist/cli.mjs` (`packages/core/src/mcp-install.ts:299-321`). The 0.13.0 installer creates that
-  final directory, writes its manifest and runs exact `npm install` directly in it; a failed install can therefore
-  leave a partial final-path runtime (`packages/core/src/mcp-install.ts:413-475`). A managed MCP entry runs an
-  absolute Node with the runtime entry and `mcp` (`packages/core/src/mcp-install.ts:518-580`).
-- Managed install also writes outside the runtime and client configuration: replacement backups and the
-  handed-out-runtime ledger are deliberate examples (`packages/core/src/mcp-install.ts:1247-1275`,
-  `packages/core/src/mcp-install.ts:1383-1399`). A per-user shim and installation receipt are therefore a new kind of
-  managed bookkeeping, not the first durable installer state outside those two locations.
-- npm creates a package-local `node_modules/.bin/<binary>`, but that directory is not on the person's PATH. Each
-  package repeats its user command in top-level `bin` and `agentcomms.binary`, for example core
-  (`packages/core/package.json:24-25`, `packages/core/package.json:57-63`) and Gmail
-  (`packages/gmail/package.json:24-25`, `packages/gmail/package.json:60-79`). The manifest schema checks the binary's
-  grammar but does not prove it equals the top-level `bin` key (`packages/core/src/channel-manifest.ts:166-181`,
-  `packages/core/src/channel-manifest.ts:254-261`). The implementation must validate that equality before publishing.
-  Server-only bins such as `agent-gmail-mcp` are not terminal CLIs.
-- Managed install calls `installManagedRuntime` for the one requested product; it does not add a core runtime beside a
-  channel runtime (`packages/core/src/mcp-install.ts:523-580`). The core package exposes only `agentcomms`, and each
-  channel package exposes only its own CLI, for example Gmail's `agent-gmail`
-  (`packages/core/package.json:24-25`, `packages/gmail/package.json:24-25`).
-- The install result reports the MCP entry, registration and handshake, but no CLI or PATH result
-  (`packages/core/src/mcp-install.ts:1383-1430`). Registration can pass while every printed bare command fails.
-
-### 2.2 Update and prune know runtimes, not terminal shims
-
-- `comms_update` derives channel packages from the manifest-backed registry rather than a hand-written channel list
-  (`packages/core/src/operations/update.ts:55-67`). It installs a runtime only when a registration needs it and the
-  exact runtime is absent (`packages/core/src/operations/update.ts:334-360`), then re-registers clients and updates
-  global packages (`packages/core/src/operations/update.ts:906-988`). There is no shim step, and a reusable latest
-  runtime causes no install step.
-- Prune lists version-shaped directories containing the package, keeps current, registered, handed-out and running
-  runtimes, then calls recursive `rm` directly on the rest (`packages/core/src/mcp-install.ts:1591-1627`,
-  `packages/core/src/mcp-install.ts:1629-1750`). Recursive deletion is not atomic. Adding a symlink or wrapper without
-  a quarantine protocol would leave it dangling or pointing into a partially deleted runtime.
-- Managed MCP registrations intentionally receive a minimal PATH containing the selected Node directory and system
-  locations, not `~/.local/bin` (`packages/core/src/mcp-install.ts:261-280`). A healthy login terminal and its MCP
-  server can therefore report different command discovery.
-- Existing file locking treats a holder as stale after 30 seconds unless renewal is requested and records a random
-  token in the lock (`packages/core/src/lock.ts:157-175`). Its renewer only touches the lock path without checking the
-  token; only final cleanup compares the current token before removing the lock
-  (`packages/core/src/lock.ts:219-232`). npm can exceed that interval. The filesystem layer also has a POSIX
-  directory-fsync helper, even though its ordinary atomic writer does not sync the directory after rename
-  (`packages/core/src/fs.ts:66-89`, `packages/core/src/fs.ts:135-147`).
-
-### 2.3 Doctor and terminal handoffs expose the gap
-
-- Core doctor checks Node, directories, config, secret storage, update state and registrations
-  (`packages/core/src/operations/maintenance.ts:69-171`). Registration health checks the absolute Node and entry, but
-  no check asks whether a person can run a CLI (`packages/core/src/operations/maintenance.ts:270-330`,
-  `packages/core/src/mcp-install.ts:392-410`). The same `doctor` operation backs `agentcomms doctor` and
-  `comms_doctor` (`capabilities.json:13-18`).
-- `shellCommand(words, platform)` safely prints POSIX words. On Windows it prints only the subset that cmd.exe and
-  PowerShell pass alike; a path containing whitespace is double-quoted, while unsafe words become inert JSON plus
-  instructions rather than a runnable line (`packages/core/src/cli-runtime.ts:67-129`,
-  `packages/core/src/cli-runtime.ts:145-191`). This repository-wide rendering was released in 0.12.3
-  (`CHANGELOG.md:50-61`). It does not resolve its first word: a safely rendered missing command is still missing.
-- Change approvals construct bare channel commands and repeat them in pending/next-step results
-  (`packages/core/src/changes.ts:73-98`, `packages/core/src/changes.ts:265-283`,
-  `packages/core/src/changes.ts:461-465`). The shared approval store and daily-update stop also print bare
-  `agentcomms approve`, `agentcomms update` and `agentcomms update --later`
-  (`packages/core/src/approvals.ts:889-897`, `packages/core/src/update-state.ts:305-347`,
-  `packages/core/src/update-gate.ts:383-414`).
-- Gmail, Slack and Resend send prepare/claim paths print bare approval commands
-  (`packages/gmail/src/operations/send.ts:386-455`, `packages/gmail/src/operations/send.ts:585-612`,
-  `packages/slack/src/operations/send.ts:573-605`, `packages/slack/src/operations/send.ts:640-671`,
-  `packages/resend/src/operations/send.ts:342-368`, `packages/resend/src/operations/send.ts:549-565`). Their CLI
-  refusal paths repeat them (`packages/gmail/src/cli/program.ts:1281-1302`,
-  `packages/slack/src/cli/program.ts:1315-1342`, `packages/resend/src/cli/program.ts:605-622`), as does Gmail's
-  untrusted-client MCP fallback (`packages/gmail/src/mcp/server.ts:2381-2393`).
-- The inventory is wider than send approvals. It includes Gmail confirm-client completion
-  (`packages/gmail/src/mcp/server.ts:2481-2487`), WhatsApp post-add sync
-  (`packages/whatsapp/src/operations/accounts.ts:107-112`), Slack reauthentication failures
-  (`packages/slack/src/auth/refresh.ts:168-170`), Resend unknown-outcome status
-  (`packages/resend/src/operations/send.ts:524-530`), save-destination approvals
-  (`packages/core/src/save-destination.ts:648-676`, `packages/core/src/save-destination.ts:744-756`), account,
-  sign-in, policy, doctor-fix, retry and post-install next steps, and every other runtime result/error/hint/`nextStep`
-  that currently passes an `agentcomms` or `agent-*` first word directly to `shellCommand`. Static help and usage
-  examples are grammar, not immediate machine-specific handoffs.
-
-### 2.4 The governing contracts and the 0.13.0 rollout constraint
-
-- A capability is one shared operation reached by CLI and MCP, with its row in `capabilities.json`
-  (`CONTRIBUTING.md:59-88`). Update, install and prune have both-surface rows at `capabilities.json:208-277`; doctor is
-  at `capabilities.json:13-18`. Terminal approval remains a deliberate CLI-only exception
-  (`capabilities.json:241-246`).
-- A channel is derived from the `agentcomms` field of its package manifest
-  (`docs/superpowers/specs/2026-09-26-channel-plugins-design.md:24-55`,
-  `docs/superpowers/specs/2026-09-26-channel-plugins-design.md:90-128`). A new channel must inherit shim and locator
-  behaviour without a core binary list.
-- The change policy binds an operation's approved effects into its preview and digest; destructive prune needs an
-  approval (`docs/superpowers/specs/2026-09-25-cli-mcp-parity-design.md:29-61`). Shim reconciliation is not a new
-  discretionary effect: it is bookkeeping that makes an already-approved managed runtime usable and keeps its moving
-  pointer honest. D7 defines why it is deliberately outside that digest.
-- The 0.13.0 updater cannot execute code that exists only in the release it is installing. It can publish and register
-  a new runtime, then exit with no shim. The first new process must therefore reconcile the installed base without a
-  second approval; putting shim effects into the old update plan cannot solve this rollout.
-- Worse, released 0.13.x change preparation and claims print a bare channel or core approval command
-  (`packages/core/src/changes.ts:73-98`, `packages/core/src/changes.ts:461-465`,
-  `packages/core/src/approvals.ts:889-897`). That released code cannot be changed in place, so under `confirm` the
-  person needs a runnable pre-update fallback before any new runtime exists. Skills are installed from this repository
-  separately from runtime packages, and current skill compatibility pins show the release they describe
-  (`docs/superpowers/specs/2026-09-18-agent-communications-design.md:981-983`,
-  `skills/comms-update/SKILL.md:1-5`).
-- The 0.13.0 update report already carries the answering core's version and the versions of managed runtimes
-  (`packages/core/src/operations/update.ts:116-149`); its human renderer says “This core is …”
-  (`packages/core/src/render.ts:453-458`). By contrast, `comms_paths` currently returns only `ResolvedPaths`, and the
-  doctor result has checks but no core-version field (`packages/core/src/operations/maintenance.ts:37-57`). D4 makes
-  all three discovery routes explicit for future releases, while the update preview is the route that exists during
-  a 0.13.0-to-0.13.1 bootstrap.
-- `pnpm verify:parity` currently substitutes recording stand-ins and checks that both surfaces reach the operation a
-  capability row names with its expected arguments (`scripts/parity.mjs:338-350`); its success message makes that
-  scope explicit (`scripts/parity.mjs:650-668`). It does not compare the returned result objects.
+- A managed runtime entry is
+  `<data>/runtime/<version>-<package>/node_modules/<package>/dist/cli.mjs`; the registered server starts an absolute
+  Node with that absolute entry (`packages/core/src/mcp-install.ts:299-321`,
+  `packages/core/src/mcp-install.ts:566-580`). Nothing there publishes a terminal command.
+- Local registrations already find the package's own `src/cli.ts` or built `dist/cli.mjs` and add
+  `--experimental-strip-types --disable-warning=ExperimentalWarning` for a TypeScript entry
+  (`packages/core/src/mcp-install.ts:523-559`, `packages/core/src/mcp-install.ts:583-603`). The hidden update-check
+  child likewise restarts the running CLI with `process.execPath`, `process.execArgv` and the real CLI entry rather
+  than an npm shim (`packages/core/src/update-check.ts:174-209`).
+- The path overrides this design must preserve are exactly `AGENT_COMMS_CONFIG_DIR`, `AGENT_COMMS_STATE_DIR`,
+  `AGENT_COMMS_DATA_DIR`, `XDG_CONFIG_HOME` and `XDG_DATA_HOME`; `resolvePaths` reads them when selecting config,
+  state and data (`packages/core/src/paths.ts:37-66`).
+- `shellCommand` renders argument words with POSIX single-quote escaping, or the subset that cmd.exe, Windows
+  PowerShell and PowerShell 7 pass alike; for an unsafe Windows word it emits no line, and `inlineCommand` /
+  `commandText` show inert JSON words instead (`packages/core/src/cli-runtime.ts:67-129`,
+  `packages/core/src/cli-runtime.ts:136-191`). It does not locate the first word or carry an environment.
+- Core and every channel declare their terminal binary in `package.json` (`packages/core/package.json:24-25`,
+  `packages/gmail/package.json:24-25`, `packages/slack/package.json:24-25`,
+  `packages/resend/package.json:24-25`, `packages/whatsapp/package.json:24-25`). Each channel currently names
+  `@agentcomms/core` as a workspace development dependency (`packages/gmail/package.json:44-45`,
+  `packages/slack/package.json:41-42`, `packages/resend/package.json:41-42`,
+  `packages/whatsapp/package.json:41-42`); the Gmail server-only package reaches Gmail through its own runtime
+  dependency (`packages/gmail-mcp/package.json:41-43`).
+- The present printed-command lint finds direct interpolation and concatenation but deliberately accepts a bare CLI
+  passed to `shellCommand` (`test/printed-command-construction.test.mjs:7-16`,
+  `test/printed-command-construction.test.mjs:61-99`). The channel registry already derives package and binary facts
+  from each package's `agentcomms` manifest (`scripts/channels.mjs:27-59`, `scripts/channels.mjs:114-150`).
 
 ## 3. Decisions
 
-### D1. Use one durable per-user bin directory, with an explicit opt-out
+### D1. One core locator prints the exact running installation
 
-The default bin directory is:
+Core owns one function, `locateCliCommand`, used wherever runtime output tells a person to run an
+agent-communications CLI. Its input names the calling package and resolver URL, the target manifest, argument words,
+the process environment and the requested shell. Its result is a structured command: absolute Node, retained Node
+flags, absolute CLI entry, arguments, carried environment and the runnable rendering or an explicit reason no line
+can be rendered. A caller never supplies a CLI name as the executable and never quotes a line itself.
 
-| Platform | Default |
+The executable is `process.execPath`. The retained `process.execArgv` allowlist is:
+
+- `--experimental-strip-types`, because Node 22.12–22.17 needs it to execute this repository's `.ts` CLI entries;
+- `--experimental-transform-types`, only when the running checkout used it, because a TypeScript entry using
+  transform-only syntax needs the same transform.
+
+Every other Node flag is dropped: debugger and profiler listeners, test/eval/input mode, preloaders and loaders,
+conditions, source-map and warning preferences, titles and memory tuning are properties of the parent invocation,
+not requirements of these CLIs. In particular, the checkout launcher's `--disable-warning=ExperimentalWarning` is
+cosmetic and is not copied. The existing launcher establishes why type stripping is needed here
+(`packages/core/src/mcp-install.ts:546-556`, `scripts/registries.mjs:21-22`). Flag spellings are kept as passed; the
+filter never copies a following word for an option it does not retain.
+
+The entry is resolved from package data, never from `PATH`:
+
+1. For the calling product's own CLI, the caller's module URL locates that package root; its top-level `bin` entry
+   for `agentcomms.binary` is resolved, contained under that root and made absolute. This also handles
+   `@agentcomms/gmail-mcp`: Gmail supplies a resolver URL from the Gmail package reached through the wrapper's
+   dependency, rather than treating the wrapper's server entry as `agent-gmail`.
+2. For another suite package — today, a channel printing core's `agentcomms` — resolution starts at the calling
+   package and follows its own `@agentcomms/core` dependency. In 0.13.1 every channel moves that existing workspace
+   edge into `dependencies`, published at the same exact lockstep version. The locator reads both package versions
+   and refuses a mismatch. It then resolves core's own `bin.agentcomms`, not a sibling path guessed by the channel.
+3. A missing package, missing or escaping bin entry, non-absolute `process.execPath`, or version mismatch produces no
+   substitute bare command. It is an installation error reported in the result.
+
+The resulting shapes are installation-independent:
+
+| Launcher that started the result | Command shape |
 |---|---|
-| macOS | `$HOME/.local/bin` |
-| Linux | `$HOME/.local/bin` |
-| Windows | `%LOCALAPPDATA%\agent-communications\bin`, falling back to `%USERPROFILE%\AppData\Local\agent-communications\bin` |
+| managed | `/absolute/node <data>/runtime/0.13.1-gmail/node_modules/@agentcomms/gmail/dist/cli.mjs …` |
+| npx | `/absolute/node <npx-cache>/node_modules/@agentcomms/gmail/dist/cli.mjs …` |
+| global | `/absolute/node <global-prefix>/node_modules/@agentcomms/gmail/dist/cli.mjs …` |
+| checkout | `/absolute/node --experimental-strip-types <repo>/packages/gmail/src/cli.ts …` |
 
-Windows has no `~/.local/bin` convention. The chosen location is per-user, non-roaming and beside the application's
-existing local data. The program never writes `/usr/local/bin`, `/etc/paths`, a shell profile, the registry, or the
-Windows user PATH.
+Thus npx output does not require `npx` to remain on `PATH`, a global output does not depend on the global bin
+directory, a managed output uses that managed runtime, and a checkout output keeps the flag which makes its source
+entry executable. POSIX and Windows differ only in rendering; all stored words are absolute.
 
-`AGENT_COMMS_BIN_DIR` may seed an absolute override for locked-down hosts and tests. The resolved directory is then
-stored in `<dataDir>/managed-install.json`, written atomically and owner-only, so a CLI and an MCP server with different
-environments still use the same directory. Once stored, that value is authoritative. A different later environment
-override is reported as `bin-directory-conflict` and does not create a second set of shims; relocation requires an
-explicit future migration, not ambient environment drift. The metadata also records the shim schema and completion of
-the one-time rollout reconciliation.
+### D2. Carry the server's path overrides into the command
 
-Shims default on. Either `defaults.cliShims: false` or `AGENT_COMMS_CLI_SHIMS=off` opts the process out; the environment
-value is the emergency/per-process override and only the ASCII case-insensitive word `off` has that meaning. With
-either opt-out, create, repoint, remove and startup reconciliation are skipped. Existing owned shims are left untouched
-rather than silently deleted, and doctor reports `disabled` without calling their absence a failure. The config field
-is the durable machine preference; the environment override is intentionally not persisted.
-
-The directory is created only when enabled bookkeeping applies to an existing managed runtime. `--print`, `--check`,
-`--dry-run`, npx and local launchers do not create it. Before creation or use, validation walks the absolute path with
-`lstat`-style, no-follow checks. Every existing component must be a real directory, not a symlink or reparse point,
-and must not be writable by another principal. A sticky world-writable ancestor such as `/tmp` is explicitly refused,
-not accepted because its sticky bit limits deletion. Missing components are created owner-only below the last safe
-ancestor and the whole path is then checked again.
-
-On POSIX the final bin directory must be owned by the current effective user and have no group- or world-write bit.
-On Windows its owner must be the current user's SID, and its effective ACL must grant write to no principal other than
-that user, SYSTEM and Administrators. The same no-other-principal-write rule applies to each existing ancestor; an
-inherited permissive ACE is still permissive. Validation never repairs ownership, mode or ACL in place. It reports
-the exact component and reason, tells the person to choose or create a private directory (or correct it themselves),
-and writes nothing anywhere under the refused path.
-
-The persisted choice is a location, not a trust decision: it is revalidated on every operation. While holding the
-installation lock, validation is repeated immediately before every shim publication and again before any result may
-call an absolute shim path runnable. A directory replaced, symlinked or made permissive between the earlier check and
-that point makes the operation abort without a shim write; it is never allowed to fall back to the untrusted directory.
-
-Every installed runtime also carries an owner-only `<runtime>/.agentcomms-runtime.json` receipt. It records receipt
-version, package, manifest binary, package version, package-manifest path, entry relative to the runtime, SHA-256 of
-the entry bytes, the absolute Node path and the Node version observed at install. An entry is never recovered from
-untrusted receipt text without revalidating that it stays under the runtime, that every named file exists, that the
-installed package manifest has the recorded version and that the entry hash matches.
-
-### D2. Publish owned wrappers, not symlinks
-
-The shared managed-runtime layer validates that `agentcomms.binary` names an executable top-level package `bin`, then
-publishes that one user CLI for that runtime. Server-only aliases are excluded. A managed core runtime therefore
-publishes `agentcomms`; Gmail, Slack, Resend and WhatsApp runtimes publish `agent-gmail`, `agent-slack`, `agent-resend`
-and `agent-whatsapp` respectively. All five exist only when all five product runtimes exist; a channel-only install
-publishes only its channel CLI. Those are the packages' current top-level bins
-(`packages/core/package.json:24-25`, `packages/gmail/package.json:24-25`, `packages/slack/package.json:24-25`,
-`packages/resend/package.json:24-25`, `packages/whatsapp/package.json:24-25`). Future channels inherit the rule.
-
-On macOS and Linux, `<binDir>/<binary>` is an executable `/bin/sh` wrapper which `exec`s the absolute Node and absolute
-runtime entry with `"$@"`. That preserves the argv the POSIX shell already produced and replaces the wrapper process.
-
-On Windows the owned unit has two files:
-
-- `<binDir>\<binary>.cmd`, an npm-style batch shim for cmd.exe, Windows PowerShell and PowerShell 7; and
-- extensionless `<binDir>\<binary>`, a POSIX shell wrapper for Git Bash/MSYS.
-
-The `.cmd` invokes the managed Node and entry followed by `%*`. It accepts cmd.exe's argument handling exactly as npm's
-global CLI shims do; it does **not** promise exact arbitrary argv preservation on Windows. In particular, `%*` is
-reparsed by cmd.exe, and callers must not use the shim for programmatic untrusted arguments. Commands this project
-prints already avoid that trap: `shellCommand` prints a line only for the cross-shell-safe subset and emits inert JSON
-for unsafe words. Internal programmatic execution uses absolute Node plus entry, never `.cmd`.
-
-The batch renderer begins with delayed expansion disabled and safely represents literal Node/entry paths, including
-spaces, `%`, `!`, `&`, `^` and parentheses. It uses no parenthesised command block: each path is assigned with
-`SET "_agentcomms_node=…"` / `SET "_agentcomms_entry=…"`, with each literal `%` doubled in the batch source, then the
-last line is `"%_agentcomms_node%" "%_agentcomms_entry%" %*`. Windows forbids a literal `"` in either path; delayed
-expansion is off for `!`, and the quoted assignment/invocation keeps the remaining metacharacters data. Ownership
-data never appears as raw JSON in batch syntax. The second line has this fixed prefix followed only by base64url
-characters encoding canonical JSON:
+The locator copies the five variables in §2 when they are present in the printing process's environment, including
+an explicitly empty value, in this fixed order:
 
 ```
-REM agent-communications managed-cli-shim v1 <base64url-json>
+AGENT_COMMS_CONFIG_DIR AGENT_COMMS_STATE_DIR AGENT_COMMS_DATA_DIR XDG_CONFIG_HOME XDG_DATA_HOME
 ```
 
-The extensionless/POSIX wrapper uses the same fixed marker in a shell comment; base64url is used there too so one
-parser and one canonical payload define ownership. The payload names binary, package, version, absolute Node, relative
-entry, data directory and a transaction generation. The complete bytes must equal the deterministic renderer.
+It does not replace them with resolved directories: preserving the original environment preserves precedence and
+lets the invoked CLI resolve paths by the same rules. An unset variable is omitted.
 
-No `.ps1` is created. PowerShell can prefer it over `.cmd`, after which execution policy may refuse it while ignoring
-the usable `.cmd`; it would also introduce a third sibling and another non-atomic recovery case without improving the
-npm-compatible command contract.
+Argument words still go through `shellCommand`, and prose still embeds the result through `inlineCommand` or
+`commandText`. The environment-aware renderer uses the same quote-or-refuse rules for values. POSIX gets assignment
+prefixes. Windows gets separate, labelled PowerShell and cmd.exe forms because their assignment and invocation
+syntax is not interchangeable. A Windows result never calls one line universal.
 
-Ownership fails closed:
-
-1. `lstat`, never `stat`, examines the expected path and both Windows siblings. A symlink, directory or device is not
-   ours.
-2. A regular file is ours only when the marker decodes, names the exact manifest binary/package and this `dataDir`,
-   its runtime/entry is valid, and all bytes equal the deterministic renderer.
-3. An existing path that is not ours is never overwritten, moved, chmodded or deleted. The result names the collision
-   and asks the person to inspect and move it; it never prints an `rm` or `del` command.
-4. Creation is exclusive. Replacement rechecks ownership while holding the shim lock, renames only the proved-owned
-   old file to its journalled backup, then publishes the flushed stage with a same-directory no-replace link. A file
-   arriving at the public name makes publication fail and is left untouched; the old owned file is restored only when
-   the name remains vacant. A filesystem without that atomic no-replace primitive is reported and refused rather than
-   weakened to an overwrite rename. One foreign Windows sibling blocks both.
-
-The marker prevents accidental ownership mistakes; it is not a boundary against the same hostile OS user, which the
-base threat model already excludes.
-
-### D3. Install, repoint and prune are recoverable transactions
-
-There is one renewing shim/runtime lock per managed installation, not separate unsynchronised locks per adapter. Every
-acquisition first reconciles owned transaction journals, stage files, quarantine directories and half-updated Windows
-pairs. Names contain an unguessable token and an owned journal; an unrecognised similarly named path is foreign and is
-not touched. The receipt, journals and staged shim files written by this protocol are flushed before publication, and
-the containing directory is fsynced after every final rename, link or unlink on platforms that support directory
-fsync. npm-created files inside a staged runtime are **not** individually fsynced; this design makes no stronger
-power-loss promise about npm's tree.
-
-The renewing lock is fenced. Acquisition records a random fencing token and gives the transaction an `assertHeld`
-operation. Immediately before every runtime publication, quarantine, restoration, shim publication/removal and
-journal commit, `assertHeld` reads the public lock and refuses unless it still carries this token, names the retained
-opened file identity and has a fresh lease. The renewal callback makes the same token-and-identity check, then renews
-only the retained handle; a stale takeover that renames the old file can therefore never make the original holder
-touch the replacement holder's lock. A mismatch marks the lease lost, stops the interval, and makes every later
-`assertHeld` abort without writing. The check is repeated after any asynchronous preparation and immediately before
-the filesystem mutation it fences.
-
-**Install and reuse.** A missing runtime is built in a private temporary directory under the final runtime's parent,
-on the same filesystem. The installer holds and renews the lock while npm runs. It verifies the exact dependency,
-installed version, manifest binary, entry, Node executable/version and minimum Node 22.12 contract, records the entry's
-SHA-256, writes and flushes the runtime receipt, then fences and publishes the complete directory with one atomic
-rename and fsyncs the runtime parent. Node 22.12 is the repository runtime floor
-(`docs/superpowers/specs/2026-09-18-agent-communications-design.md:76`,
-`packages/core/src/operations/maintenance.ts:82`). The final path must be absent; rename-across-filesystems is refused.
-A failed install never leaves a final-path runtime; the next lock acquisition removes a recognised abandoned stage.
-
-Before any startup, reuse, registration verification, shim publication or locator result uses a runtime, it validates
-the receipt against the named files: containment and existence, installed package version, entry SHA-256 and recorded
-Node identity/version. A failure takes the lock, fences and atomically moves the runtime to recognised quarantine,
-removes any owned shim still targeting it, and reports the reason plus the version-pinned `npx ... mcp install
---force` command for the affected product and registration. The invalid runtime is never selected or run. A foreign
-or unquarantinable path is left in place but still refused. Pre-receipt 0.13 runtimes are handled only by D4's bounded
-rollout migration.
-
-After a runtime is published or proved reusable, reconciliation creates or repoints its shim. POSIX uses one staged
-wrapper. Windows stages and flushes both siblings and records the intended generation before changing either; recovery
-finishes both to that generation or restores both old owned files. It never treats a mixed pair as healthy. A crash can
-make a command briefly absent, but a fresh process deterministically repairs it before other shim work. Each public
-name change is separately fenced and follows D1's under-lock bin-directory validation.
-
-**Update.** Runtime install remains an update step; shim reconciliation follows as bookkeeping even when the latest
-runtime was already reusable and no runtime step ran. For each manifest binary, it points to the highest compatible
-exact reusable runtime, preferring the version of the running release. Registrations follow. A runtime failure cannot
-repoint its shim; a shim collision does not undo a sound runtime or registration, and the result reports the collision
-plus an absolute command. Other products continue independently.
-
-**Prune.** Under the same lock, prune revalidates the approved runtime and any owned shim that still targets it. Apply
-then performs this order:
-
-1. fence, then atomically rename the whole runtime into a unique quarantine beneath the same runtime parent, refusing
-   `EXDEV` or any layout that cannot guarantee a same-filesystem rename; fsync the parent;
-2. remove only owned shim files which still target that runtime, transactionally remove both Windows siblings, and
-   fsync the bin directory, fencing before each public-name commit;
-3. recursively delete the quarantined directory.
-
-If shim removal cannot complete, recovery fences, restores the owned pair and atomically renames the intact quarantine
-back before any recursive deletion. Once recursive deletion begins, the shim is already gone and is never restored. A
-partial or failed recursive delete leaves reported debris only in quarantine, never a shim pointing into a partially
-deleted final runtime. A crash after quarantine can leave the old command temporarily missing; the next fresh process
-recovers that journal before doing anything else. Recognised quarantine is either restored when the shim transaction
-never committed or deletion is resumed after it did. No foreign path is removed.
-
-This transaction protocol, not the current 0.13.0 implementation, makes published versioned runtimes immutable and
-prevents a completed operation from exposing a half-installed or half-deleted target.
-
-### D4. Skills bridge the 0.13 confirm deadlock; the first new core then reconciles once
-
-The bare `agentcomms approve <id>` already printed by a released 0.13.x core
-(`packages/core/src/approvals.ts:889-897`) is not fixable: that process is the old code, and it runs before this release
-can be installed. The bootstrap is therefore in the repository-installed skills, which `npx skills add` updates
-independently of the installed runtime (`docs/superpowers/specs/2026-09-18-agent-communications-design.md:981-983`).
-Whenever a released result under `confirm`
-names a bare approval command and the person's terminal says it is not found, the skill gives the person a
-version-pinned npx form and waits; the agent never runs approval itself:
-
-```
-npx -y @agentcomms/core@<installed-core-version> approve <approvalId>
-```
-
-It must be the version actually running, never `@latest`: that version reads the same approval format and preserves
-the preview and challenge semantics the old server created. A result that names a channel approval uses the matching
-package and CLI instead — `@agentcomms/gmail@<running-version>`, `@agentcomms/slack@<running-version>`,
-`@agentcomms/resend@<running-version>` or `@agentcomms/whatsapp@<running-version>`, followed by `approve <id>`.
-Core changes use core; Gmail sends and Gmail-originated changes use Gmail; Slack posts/reactions and Slack-originated
-changes use Slack; Resend sends and Resend-originated changes use Resend; WhatsApp-originated changes use WhatsApp.
-
-The skill takes the version from the running product, not from its own compatibility line. During the 0.13.0
-bootstrap, the read-only `comms_update` check's `core` field is authoritative. This release also adds `coreVersion` to
-`comms_paths` and the core doctor result, repeats it in every prepared update preview, and makes each channel doctor
-expose its running package version. Later skills can therefore use doctor, `comms_paths` or the update preview without
-guessing. If no trusted result identifies the running version, the skill stops and asks the person to run the
-product's `--version`; it does not substitute `latest`.
-
-The npx process must see the exact `configDir` and `stateDir` the server reports. The skill therefore has the person
-set `AGENT_COMMS_CONFIG_DIR` and `AGENT_COMMS_STATE_DIR` in that same terminal for the command, even when one happens
-to be the default. With `/absolute/config` and `/absolute/state`, the POSIX form is:
+For a config directory containing a space, an apostrophe and a non-ASCII character, the exact forms are:
 
 ```sh
-export AGENT_COMMS_CONFIG_DIR='/absolute/config'
-export AGENT_COMMS_STATE_DIR='/absolute/state'
-npx -y @agentcomms/core@0.13.0 approve ap_example
+AGENT_COMMS_CONFIG_DIR='/opt/Agent'\''s café files/config' '/opt/Agent'\''s café files/node' '/opt/Agent'\''s café files/core/dist/cli.mjs' approve ap_example
 ```
-
-On Windows the skill asks which shell that terminal is using and prints separate lines. PowerShell gets:
 
 ```powershell
-$env:AGENT_COMMS_CONFIG_DIR = 'C:\absolute\config'
-$env:AGENT_COMMS_STATE_DIR = 'C:\absolute\state'
-npx -y @agentcomms/core@0.13.0 approve ap_example
+$env:AGENT_COMMS_CONFIG_DIR = "C:\Agent's café files\config"; & "C:\Agent's café files\node.exe" "C:\Agent's café files\core\dist\cli.mjs" approve ap_example
 ```
-
-cmd.exe gets:
 
 ```bat
-set "AGENT_COMMS_CONFIG_DIR=C:\absolute\config"
-set "AGENT_COMMS_STATE_DIR=C:\absolute\state"
-npx -y @agentcomms/core@0.13.0 approve ap_example
+set "AGENT_COMMS_CONFIG_DIR=C:\Agent's café files\config" && "C:\Agent's café files\node.exe" "C:\Agent's café files\core\dist\cli.mjs" approve ap_example
 ```
 
-The actual directories, version and id are rendered as words under the existing `shellCommand` safety rules; when a
-Windows word has no form that cmd.exe and PowerShell pass alike, the result shows inert JSON words and asks which
-shell the person uses instead of claiming a universal runnable line. The environment assignments are shell-specific,
-not joined with `&&`. Running through npx changes only command discovery: `approve` keeps the existing agent-marker,
-stdin/stdout TTY, preview and typed-challenge checks (`packages/core/src/cli-runtime.ts:36-60`,
-`packages/core/src/change-flow.ts:291-321`). The 0.13.1 changelog must state this same fallback, including the exact
-version pin and the requirement to use the server's config and state directories.
+Additional variables repeat the assignment segment in the fixed order. If an existing Windows safety rule cannot
+render a value or argument, the result contains the inert JSON words and names the shell-specific manual action; it
+does not print a partial line or call JSON a runnable command (`packages/core/src/cli-runtime.ts:117-121`,
+`packages/core/src/cli-runtime.ts:152-191`).
 
-Once that approval lets the old updater apply the release, post-apply reconciliation begins. Before dispatching
-**any** `agentcomms` command, and before the core MCP server starts accepting tools, the new core checks the durable
-bootstrap marker. If shims are enabled and the marker is absent, it takes the lock, recovers transactions, inventories
-every managed runtime, and reconciles one shim for every installed manifest product. This applies immediately and
-needs no approval. It performs no npm or network work and never creates a shim for a runtime that does not already
-exist.
+### D3. Every runtime handoff uses the locator, and a manifest-derived lint enforces it
 
-For each pre-receipt 0.13.0 runtime, migration validates the exact package manifest, installed version and entry and
-hashes the entry, then obtains Node from a matching managed registration when possible, otherwise from the validated
-current Node. It writes a receipt only after the Node exists, is executable, reports its version, and meets Node 22.12.
-If neither source is valid, it leaves that shim missing and records the reason. One shim per binary selects the running
-release's exact runtime when present, otherwise the highest reusable version; all runtimes are examined so obsolete
-and malformed ones are not mistaken for targets.
+The migration inventory is below. “Handoff” means runtime result, error, hint, fix, command or `nextStep` text that
+asks a person to run a suite CLI; static help syntax and prose explaining a command's grammar are not machine-specific
+handoffs.
 
-The atomic bootstrap marker is written only after every product has a recorded outcome, including foreign collision
-or no valid Node. A crash before it commits retries from transaction recovery; a completed-but-blocked outcome is not
-retried on every command, but install/update can reconcile again and doctor keeps reporting it. Pending 0.13.0
-approvals remain valid because shim bookkeeping is outside their effect digest.
+- **Core:** change approval and rerun, approval-kind correction, save-destination approval, daily update and
+  `update --later`, policy/attachment/organisation/secrets reruns and repairs, install/update registration repair and
+  doctor fixes (`packages/core/src/changes.ts:73-98`, `packages/core/src/changes.ts:265-283`,
+  `packages/core/src/changes.ts:461-465`, `packages/core/src/approvals.ts:635-655`,
+  `packages/core/src/approvals.ts:889-897`, `packages/core/src/change-flow.ts:272-302`,
+  `packages/core/src/save-destination.ts:648-676`, `packages/core/src/save-destination.ts:744-756`,
+  `packages/core/src/update-state.ts:305-347`, `packages/core/src/update-gate.ts:375-414`,
+  `packages/core/src/operations/update.ts:298-307`, `packages/core/src/operations/update.ts:740-750`,
+  `packages/core/src/config.ts:722`, `packages/core/src/organisations.ts:243-244`,
+  `packages/core/src/organisations.ts:506`, `packages/core/src/organisations.ts:698-718`,
+  `packages/core/src/organisations.ts:870`, `packages/core/src/operations/organisations.ts:205-407`,
+  `packages/core/src/operations/organisations.ts:578-730`,
+  `packages/core/src/operations/organisations.ts:1152-1376`,
+  `packages/core/src/operations/secrets-migrate.ts:250-376`,
+  `packages/core/src/operations/change-policy.ts:135-145`,
+  `packages/core/src/operations/maintenance.ts:217-220`,
+  `packages/core/src/operations/maintenance.ts:327-360`, `packages/core/src/channel-words.ts:39-52`,
+  `packages/core/src/channel-words.ts:75-82`, `packages/core/src/cli.ts:285-290`,
+  `packages/core/src/cli.ts:456-787`, `packages/core/src/cli.ts:863-900`,
+  `packages/core/src/cli.ts:948-950`).
+- **Gmail:** send approval and refusal, save-destination and confirm-client completion, sign-in/finish/reauth, client,
+  inbox, organisation and scope repair, setup/import, doctor and retry handoffs
+  (`packages/gmail/src/operations/send.ts:386-455`, `packages/gmail/src/operations/send.ts:585-612`,
+  `packages/gmail/src/operations/attachments.ts:374-375`, `packages/gmail/src/mcp/server.ts:160-162`,
+  `packages/gmail/src/mcp/server.ts:997`, `packages/gmail/src/mcp/server.ts:1388`,
+  `packages/gmail/src/mcp/server.ts:2381-2393`, `packages/gmail/src/mcp/server.ts:2481-2487`,
+  `packages/gmail/src/cli/program.ts:388-693`, `packages/gmail/src/cli/program.ts:1033-1046`,
+  `packages/gmail/src/cli/program.ts:1281-1302`, `packages/gmail/src/cli/program.ts:1823-2422`,
+  `packages/gmail/src/auth/flows.ts:117`,
+  `packages/gmail/src/auth/scopes.ts:85-88`, `packages/gmail/src/auth/session.ts:104-176`,
+  `packages/gmail/src/gmail-api/errors.ts:140-156`, `packages/gmail/src/operations/client-choice.ts:95-254`,
+  `packages/gmail/src/operations/clients.ts:134-511`, `packages/gmail/src/operations/consent.ts:91-610`,
+  `packages/gmail/src/operations/signin.ts:213-681`, `packages/gmail/src/operations/doctor.ts:269-565`,
+  `packages/gmail/src/operations/import-legacy.ts:505-512`, `packages/gmail/src/operations/inbox-names.ts:23`,
+  `packages/gmail/src/cli/render.ts:83-204`, `packages/gmail/src/cli/render.ts:661-916`).
+- **Slack:** post/reaction approval and refusal, workspace sign-in/finish/reauth/mode/removal, app/manifest, draft,
+  destination, file and doctor handoffs (`packages/slack/src/operations/send.ts:573-605`,
+  `packages/slack/src/auth/refresh.ts:168-170`, `packages/slack/src/operations/changes.ts:70-494`,
+  `packages/slack/src/operations/workspaces.ts:235-542`, `packages/slack/src/operations/signin.ts:120-1064`,
+  `packages/slack/src/operations/mode.ts:68-132`, `packages/slack/src/operations/app.ts:283-441`,
+  `packages/slack/src/operations/doctor.ts:152-760`, `packages/slack/src/compose/drafts.ts:206`,
+  `packages/slack/src/operations/destination.ts:20`, `packages/slack/src/operations/files.ts:100`,
+  `packages/slack/src/operations/session.ts:144`, `packages/slack/src/mcp/server.ts:1136-1151`,
+  `packages/slack/src/cli/render.ts:63-505`, `packages/slack/src/cli/program.ts:464-1541`).
+- **Resend:** send approval/refusal/status recovery, account/policy/key repair, scheduled cancellation, doctor and
+  rerun handoffs (`packages/resend/src/operations/send.ts:100-365`,
+  `packages/resend/src/operations/send.ts:516-565`, `packages/resend/src/operations/send.ts:669-675`,
+  `packages/resend/src/accounts.ts:101-167`, `packages/resend/src/context.ts:106`,
+  `packages/resend/src/operations/accounts.ts:335-344`, `packages/resend/src/operations/doctor.ts:53-54`,
+  `packages/resend/src/api/client.ts:115`, `packages/resend/src/cli/program.ts:279-770`).
+- **WhatsApp:** add/remove/sync, index/config repair, chat-list, approval refusal and rerun handoffs
+  (`packages/whatsapp/src/operations/accounts.ts:39-133`, `packages/whatsapp/src/config.ts:163`,
+  `packages/whatsapp/src/index-db.ts:310-322`, `packages/whatsapp/src/operations/chat-lists.ts:99-119`,
+  `packages/whatsapp/src/operations/status.ts:144`, `packages/whatsapp/src/cli/render.ts:73`,
+  `packages/whatsapp/src/cli/program.ts:416-604`).
 
-Startup reconciliation is distinct from the doctor operation. Thus a first `agentcomms doctor` may trigger the one-time
-upgrade bookkeeping before doctor runs, but doctor itself remains read-only.
+The expanded lint reads every manifest binary through the existing channel registry. It rejects a runtime
+`shellCommand` whose first word is a bare manifest binary, a raw/template command beginning with one, and any
+handoff renderer that did not receive the locator's structured result. Its narrow allowlist contains individual
+help/usage-only sites with a reason. Adding a channel automatically adds its binary to the rule. This tightens the
+existing lint rather than adding a hand-maintained list (`test/printed-command-construction.test.mjs:18-27`,
+`test/printed-command-construction.test.mjs:77-99`).
 
-### D5. Verify only this process's PATH and give shell-specific instructions
+### D4. Do not print a bare-name alternative
 
-After create or repoint, POSIX verification invokes a fixed `/bin/sh` with the binary in a positional parameter and
-runs `command -v` without `-l`, `-i` or interpolation. Windows applies normal filesystem/PATH/PATHEXT discovery with
-case-insensitive `Path`/`PATHEXT` handling and compares the canonical result with the owned `.cmd`. The result status is
-one of:
+0.13.1 prints no secondary “also works if it is on PATH” hint. It adds no correctness and makes a long absolute
+handoff easier to mistake for optional detail. A person may still type a bare command they already know works; the
+product does not recommend or verify it. If PATH shims are designed later, that release may add a secondary hint,
+never ahead of the absolute command.
 
-- `process-path-ready`: this process resolves the expected owned shim;
-- `process-path-missing`: the persisted bin directory is absent from this process's PATH;
-- `process-path-shadowed`: a different external command is found first;
-- `shim-blocked`, `shim-stale`, `shim-partial`, `bin-directory-unsafe` or `bin-directory-conflict`; and
-- `disabled`.
+### D5. Old released binaries get a documented best-effort escape hatch
 
-The object carries `pathScope: "process"`, bin directory, expected and resolved paths, runtime, Node and entry. It never
-calls this proof of the person's terminal. An MCP process commonly has the minimal registration PATH; `/bin/sh` also
-cannot observe a zsh/bash/fish function or alias, and filesystem search cannot observe a PowerShell alias/function.
+Already released 0.13.x binaries still print bare names and cannot be changed in place
+(`packages/core/src/changes.ts:91-98`, `packages/core/src/approvals.ts:889-897`,
+`packages/gmail/src/operations/send.ts:449-453`). `comms_paths` and `agentcomms paths` return the resolved data
+directory (`packages/core/src/operations/maintenance.ts:27-39`), and a
+managed registration contains the absolute Node command and runtime entry
+(`packages/core/src/mcp-install.ts:566-580`). The 0.13.1 changelog and the troubleshooting guide linked by the README
+(`README.md:328-343`) give two recovery routes:
 
-The program does not launch a login or interactive shell and does not parse startup files. Doing so could prompt,
-hang, mutate state or expose output from arbitrary user code. It may inspect `SHELL` and the existence of conventional
-profile files only to label instructions. It cannot know whether the person's next shell will be login, interactive
-non-login or neither, so it presents alternatives honestly instead of calling one exact:
+1. Read `dataDir` from `comms_paths` (or `agentcomms paths` where that CLI can already be started), read the registered
+   server's absolute Node command from the MCP client entry, and run the matching entry:
+   `<dataDir>/runtime/<version>-<package>/node_modules/<package>/dist/cli.mjs approve <id>`. For core 0.13.0 that is
+   `<dataDir>/runtime/0.13.0-core/node_modules/@agentcomms/core/dist/cli.mjs`; the path is derived by the managed
+   runtime helpers (`packages/core/src/mcp-install.ts:299-321`). Carry the same path environment as in D2.
+2. Where `npx` is on the person's `PATH`, run the package and version which printed the approval, never `latest`:
+   `npx -y @agentcomms/core@<version> approve <id>`, or the corresponding Gmail, Slack, Resend or WhatsApp package,
+   with the same path environment.
 
-- zsh: for login shells, add `export PATH="$HOME/.local/bin:$PATH"` to `~/.zprofile`; for interactive non-login
-  shells, add it to `~/.zshrc`;
-- bash: for login shells, add the same line to the first of `~/.bash_profile`, `~/.bash_login` or `~/.profile` that
-  bash will read; for interactive non-login shells, add it to `~/.bashrc`. A `.profile` change normally needs a new
-  login session, not merely another non-login terminal;
-- fish: run `fish_add_path --universal "$HOME/.local/bin"` once; and
-- PowerShell: add `$env:Path = '<binDir>;' + $env:Path` to the PowerShell profile named by `$PROFILE`, creating that
-  file if needed, then start a new PowerShell session. For cmd.exe and other Windows programs, the alternative is
-  Environment Variables → User variables → `Path` → New → the exact persisted bin directory, then a new
-  terminal. One-session `set "PATH=<binDir>;%PATH%"` and `$env:Path = '<binDir>;' + $env:Path` forms may also be
-  shown, but are never run.
+The release's approval, update, onboarding, setup, attachment and sending skills teach the same fallback and never
+run a terminal approval for the person. This is explicitly best effort: skills are installed separately from the
+runtime (`docs/superpowers/specs/2026-09-18-agent-communications-design.md:979-984`), the current update skill still
+names bare `agentcomms approve` (`skills/comms-update/SKILL.md:80-86`), an old result may not identify its Node path,
+and `npx` may itself be absent. New 0.13.1 results do not depend on this bridge.
 
-An overridden POSIX path is shell-quoted as a literal rather than substituted into the `$HOME` example. The result
-also gives `command -v <binary>` for POSIX shells, `Get-Command <binary>` for PowerShell and `where <binary>` for
-cmd.exe as person-run checks. It says explicitly that these were not run in the person's terminal.
+### D6. PATH shims move to a follow-up design
 
-### D6. Every runtime handoff goes through one terminal-command locator
+Publishing `agentcomms` and `agent-*` into a user bin directory is out of scope for 0.13.1. It is a convenience, not
+the fix: the absolute command already makes every new handoff runnable. Three reviews kept finding lifecycle and
+security work unrelated to the approval deadlock.
 
-Core provides one asynchronous locator, shared by every package. It takes the manifest product, argument words,
-surface (`cli` or `mcp`) and platform, and returns structured primary/alternative commands. Every runnable form is
-constructed as words and passed through `shellCommand(words, platform)`; no caller quotes or concatenates a line.
+The follow-up starts with these known requirements:
 
-The primary command is the same on CLI and MCP and its first word is always absolute. After taking the lock and
-revalidating D1's directory boundary, the owned shim bytes and D3's runtime receipt, the locator uses the absolute
-shim path. A command word containing a path separator bypasses POSIX aliases/functions and PowerShell command-name
-precedence; cmd.exe's current-directory lookup does not apply to an absolute path. If no safely published and currently
-validated shim exists, the locator leads with absolute `<node> <entry> ...` instead. Its Node must still be an
-executable regular file whose `--version` identifies Node at least 22.12, and the entry must pass the receipt's
-containment, package-version and SHA-256 checks. If the receipt's Node is invalid, the current resolved Node is tried
-under the same checks. A non-Node `process.execPath` is not accepted. If neither form is valid, the result says that no
-runnable terminal command is available and prints no pretend command.
+- safe bin-directory ownership, modes and ACLs on Linux, macOS and Windows, including macOS extended ACLs;
+- receipts, startup validation and recovery for installed runtimes and their published commands;
+- one rule for prune while shim publication is opted out, so no dangling command survives;
+- one authoritative data root across CLI and stripped MCP environments; and
+- CLI–MCP parity for any durable shim preference, plus migration from an unsafe or obsolete choice.
 
-On Windows the result is shell-aware when an absolute first word needs quoting. It uses the quoted path produced by
-the existing `shellCommand` word rule in PowerShell's call-operator form
-(`packages/core/src/cli-runtime.ts:145-149`). For the words
-`C:\Program Files\agent-communications\bin\agentcomms.cmd`, `approve`, `ap_example`, PowerShell gets exactly:
+No part of 0.13.1 creates, repoints, removes or diagnoses a shim, edits `PATH`, writes a profile or the Windows
+registry, adds a shim preference, or changes install/prune approval effects.
 
-```powershell
-& "C:\Program Files\agent-communications\bin\agentcomms.cmd" approve ap_example
-```
+## 4. Tests
 
-cmd.exe gets exactly:
+1. **Locator matrix.** On POSIX and Windows, fixtures for a managed runtime, an npx cache path, a global install and a
+   checkout resolve `process.execPath` plus the exact package entry. The checkout keeps only the two D1 flags under
+   their stated conditions; debugger, test, eval, preload, loader and unrelated flags are absent. Symlinked npm bins
+   and the Gmail server-only wrapper still resolve the owning channel package.
+2. **Same package graph.** A channel result which prints core's command resolves `@agentcomms/core` from that channel's
+   dependency. The fixture places another core elsewhere and proves it is not selected; caller and target versions
+   must be equal, and a mismatch returns no bare fallback.
+3. **Environment carriage.** Each of the five variables, all together, absent values and explicitly empty values are
+   covered. Executing the result reports the same config, state and data directories as the printing process.
+4. **Rendering.** Assert the exact POSIX, PowerShell and cmd.exe forms in D2 for paths containing spaces, an
+   apostrophe and non-ASCII text. Existing unsafe-Windows cases remain inert JSON, never a partial runnable line.
+5. **Lint.** A fixture channel added only by manifest makes its binary subject to the rule. Bare names in
+   `shellCommand`, template strings, errors, hints, fixes and `nextStep` fail; a locator result passes; each documented
+   help-only allowlist entry passes for its stated reason.
+6. **End to end.** Prepare a harmless change approval through the CLI and through MCP, take the printed command, and
+   execute it in a fresh real shell whose `PATH` contains Node and system tools but no agent-communications CLI. The
+   command approves the record in the same temporary state directory. Run the POSIX shell test on POSIX and the two
+   labelled Windows forms on Windows. No provider transport is called.
+7. **Inventory.** Exercise at least one CLI and one MCP result from every D3 inventory group, plus every approval
+   producer, and assert its primary runnable form begins with the absolute Node/entry command and carries the path
+   environment.
+8. Run full `pnpm verify`. No test contacts Gmail, Slack or Resend, posts to Slack, uses a real Resend key, writes the
+   real home, or contains a real address, token or client secret.
 
-```bat
-"C:\Program Files\agent-communications\bin\agentcomms.cmd" approve ap_example
-```
+## 5. Departures from the ticket
 
-An unquoted absolute first word needs no PowerShell call operator. These are separate labelled renderings; no line is
-claimed to work in both shells when their invocation syntax differs.
-
-The bare name is never primary, even when this process found the owned shim. It may follow only as information:
-“or, if `command -v agent-gmail` shows `<absolute shim>`, `agent-gmail approve <id>`” on POSIX;
-“or, if `Get-Command agent-gmail` reports an Application whose Path is `<absolute shim>`, …” on PowerShell; and the
-equivalent first exact result from `where agent-gmail` on cmd.exe. An alias, function, current-directory executable,
-earlier PATH entry or any other answer does not satisfy that condition, so the person keeps using the absolute form.
-The result says those checks are for the person's terminal and were not performed by this process.
-
-On Windows, if `shellCommand` returns no cross-shell-safe line, the existing JSON-word rendering explains that the
-person must type it for their shell. The JSON is not described as a runnable line. This keeps the acceptance statement
-literal: every line identified as a terminal command is safe and resolves; otherwise the result truthfully reports
-words or reports that no command is available.
-
-The migration inventory is grouped below; the lint, rather than this prose list, is the guard against a missed or new
-site:
-
-- core change approval/rerun, daily update and `update --later`, save-destination approval, organisation/secrets
-  repair and doctor fixes;
-- Gmail send approval/refusal, confirm-client completion, sign-in/reauth, client and inbox repair, and retry commands;
-- Slack post approval/refusal, workspace sign-in/reauth/mode, app/manifest, draft and doctor commands;
-- Resend send approval/refusal/status recovery, account/policy/key repair and doctor commands; and
-- WhatsApp add/remove/sync, index/config repair, chat-list and approval commands.
-
-That includes the four review-found sites cited in §2.3 and every runtime `hint`, `fix`, `next`, `nextStep` or error
-that tells a person to run a CLI. Static help/usage grammar with placeholders may remain bare, but must not be
-presented as the command that will work on this machine.
-
-The source lint rejects a `shellCommand([...])` whose statically known first word is a manifest CLI binary outside the
-locator. A short, commented allowlist names individual help/usage-only call sites and why each is non-runnable; there
-is no directory-wide or package-wide exemption. The lint also rejects a raw template/string handoff such as
-`agent-gmail approve ${id}`. Adding a new manifest binary automatically adds it to the rule.
-
-### D7. Shim lifecycle is audited bookkeeping, not an approved effect
-
-Creating, repointing or removing an owned shim for a managed runtime that already exists is bookkeeping of that
-managed installation. It applies at once, is skipped under D1's opt-out, and never touches a foreign file. It is
-**not** an approved effect and neither the persisted bin directory, shim bytes nor process PATH status participates in
-an install, update or prune approval digest. A PATH difference between CLI and MCP therefore cannot invalidate an
-otherwise identical plan, and a pending pre-shim approval remains claimable.
-
-Install, update and prune invoke this bookkeeping during their apply phase. Startup performs D4's one-time repair;
-doctor only reports. Shim failure does not rewrite the approved outcome: the operation returns its applied runtime or
-registration result plus a non-healthy shim result and a valid absolute handoff where one exists.
-
-Every create, repoint, remove, recovery, skip and refusal appends a core audit record naming operation, surface,
-binary, package, runtime, bin path, old/new generation, outcome and reason, never command arguments or secrets. The
-durable transaction journal records intent before filesystem mutation. If intent/audit cannot be recorded, the shim
-mutation is skipped; after-effect audit failure leaves the owned journal for fresh-process recovery to append the
-outcome before cleanup. `agentcomms audit tail` can therefore account for startup repairs as well as requested applies.
-
-There is no new command, MCP tool or approval. Existing CLI and MCP adapters continue to call the same shared
-operations:
-
-- `mcp install` / `comms_server_install` → `serverInstallChange`;
-- `update` / `comms_update` → `updateChange`;
-- `mcp prune` / `comms_server_prune` → `serverPruneChange`; and
-- `doctor` / `comms_doctor` → `doctor`.
-
-Those command/tool rows are the current capability table (`capabilities.json:13-18`,
-`capabilities.json:208-277`).
-
-Their typed results gain the same installation/shim facts. `pnpm verify:parity` continues to prove that each command
-and tool reaches the operation named by its capability row with the expected arguments; it does not compare result
-objects. A separate result-equivalence test runs each installation, update, prune and doctor operation through both
-adapters and deep-compares the installation/shim facts after removing presentation-only fields. The CLI-only terminal
-approval exception is unchanged.
-
-### D8. Core doctor reports shim, receipt and recovery health
-
-Core doctor enumerates manifest products, durable installation metadata and exact reusable runtimes. Channel doctors
-do not duplicate this. For each managed product, CLI and MCP doctor report:
-
-- enabled/disabled state, persisted bin directory, selected runtime and receipt;
-- unsafe bin-directory component, owner, POSIX mode or Windows ACL, including a persisted choice that has become
-  unsafe since it was stored;
-- missing, foreign, malformed, stale or half-paired shim, including a target older than the selected runtime;
-- missing/non-executable/non-Node/too-old recorded Node, invalid entry containment, missing package manifest or entry,
-  installed-version mismatch or entry SHA-256 mismatch;
-- unresolved owned transaction stages, quarantine debris or an incomplete bootstrap marker;
-- `process-path-missing`, `process-path-shadowed` or `process-path-ready`; and
-- the absolute runnable command, or the exact reason none can be produced, plus the shell-specific PATH instruction.
-
-Missing, malformed, stale, partial, foreign, unsafe-directory and invalid-receipt states are failed checks. A corrupt
-runtime that startup validation quarantined is named with its reinstall command. Quarantine debris after a completed
-prune is a failed cleanup check without a dangling-shim claim. A valid shim absent or shadowed only in this process is
-a warning because it says nothing conclusive about the person's terminal. Disabled is informational.
-
-After D4's startup hook has run, doctor is read-only: it does not repair, delete debris, edit PATH or claim an
-approval. Its normal fix is the locator-produced absolute update command; a foreign collision is for the person to
-inspect and move, never for doctor to delete.
-
-## 4. Tests owed
-
-Every new guard is watched failing under a named mutation, then restored.
-
-1. **Paths, metadata and opt-out.** Table-test macOS, Linux and Windows with `HOME`, `USERPROFILE`, `LOCALAPPDATA`,
-   `XDG_DATA_HOME` and `AGENT_COMMS_BIN_DIR` pinned/cleared in a temporary root. Prove the persisted bin directory wins
-   across different CLI/MCP environments, conflict is reported, config false and env `off` skip every mutation, and
-   unknown env values do not opt out. Refuse a group/world-writable directory or parent, a sticky `/tmp`-style parent,
-   a symlinked parent or final component, a directory swapped between the first check and the under-lock commit, a
-   Windows parent/final directory with a permissive write ACE, the wrong owner/SID, and an `AGENT_COMMS_BIN_DIR`
-   override naming any such place. Assert the reason and private-directory fix, no write beneath the refused path and
-   revalidation of a persisted choice on every run. Mutation: fall back to `homedir()`, re-resolve the override per
-   process, trust persisted metadata, follow a symlink or skip the final under-lock check; the sandbox, race or
-   cross-surface test fails.
-2. **POSIX wrapper.** Golden bytes/marker, mode and execution from zsh, bash and fish. Preserve empty arguments,
-   embedded quotes, `$`, `%NAME%`, `!NAME!`, `^`, metacharacters, trailing backslashes and CR/LF exactly as the invoking
-   POSIX shell delivers them; propagate signal/exit status. Exercise Node/data/bin paths with spaces, `%`, `!`, `&`,
-   `^` and parentheses. Mutation: use `env node`, omit `exec`/`"$@"`, or use a symlink; a test fails.
-3. **Windows wrapper contract.** Golden `.cmd` and Git Bash bytes, base64url metadata and no `.ps1`. Run from cmd.exe
-   with delayed expansion both on and off, Windows PowerShell 5.1, PowerShell 7 and Git Bash/MSYS. Compare `.cmd`
-   argument behaviour for empty strings, quotes, `%NAME%`, `!NAME!`, `^`, metacharacters, trailing slashes and CR/LF
-   to an npm-generated control shim; do not assert impossible exact argv. Prove `shellCommand` emits no runnable line
-   for unsafe cases. Cover Node/data/bin paths containing spaces, `%`, `!`, `&`, `^` and parentheses without executing
-   marker data. Node `spawn`/`execFile` tests document that direct `.cmd` execution is rejected/unsupported and prove
-   internal execution instead uses absolute Node plus entry. Mutation: raw JSON after `REM`, enabled delayed expansion,
-   unescaped path text, a `.ps1`, or a false exact-argv assertion fails.
-4. **Ownership.** Foreign regular files, symlinks, directories, devices, malformed markers, wrong package/runtime/data
-   markers and one foreign Windows sibling remain byte-for-byte untouched by install, update, startup, doctor and
-   prune. Race an exclusive create. Mutation: trust a marker without canonical bytes, overwrite a foreign target or
-   restore into a now-occupied name; the test fails.
-5. **Atomic install and fenced lease.** Kill the process after every temp creation, npm completion, receipt
-   write/fsync, fenced rename and directory-fsync boundary; start a fresh process and prove recovery. npm failure leaves
-   no final runtime. Hold npm beyond the stale interval and prove normal renewal prevents takeover. Then force the
-   original holder's renewal to pause past that interval, let a second process take over, resume the original and
-   prove it performs no publication, quarantine, restoration, shim or journal write. Refuse cross-filesystem publish.
-   Mutation: run npm in the final directory, omit receipt verification/fsync, renew a path without checking its token,
-   or mutate after `assertHeld` reports lease loss; a test fails.
-6. **Isolated fresh-install topology.** With both `HOME` and `USERPROFILE` pinned, start from a fresh root five times:
-   Gmail-only has exactly `agent-gmail`; Slack-only exactly `agent-slack`; Resend-only exactly `agent-resend`;
-   WhatsApp-only exactly `agent-whatsapp`; core-only exactly `agentcomms`. Then install all five and prove the five
-   manifest CLIs, and no server-only bin, exist. With only the sandbox bin on PATH, prove `command -v` (plus Windows
-   `where`/`Get-Command`) resolves each installed binary through its owned shim and `<binary> --version` runs. Assert
-   no real-home file changed. `--print`, npx and local launchers create nothing. Mutation: publish `agentcomms` from a
-   channel install, omit the requested product or publish a server-only bin; an exact-set assertion fails.
-7. **Update, pair recovery and repair.** Start every CLI at A, update to B and prove the same names report B before A
-   is pruned. Cover absent B, reusable B with missing/stale shim, removed A Node, foreign collision and independent
-   product failure. Terminate after every journal, stage, file fsync, rename, Windows first-sibling, second-sibling and
-   directory-fsync step; a fresh process must produce one generation, never accept a mixed pair. Mutation: couple shim
-   work only to runtime install or leave the A entry; a test fails. `--check` is read-only but reports drift.
-8. **Prune and partial deletion.** Dry run/approval continue to bind runtime deletion, not shim bookkeeping. Apply
-   quarantines by same-filesystem rename, fsyncs, removes an owned target only if it still names that runtime, then
-   deletes quarantine. Inject termination after every quarantine, shim and fsync step and after each recursive-delete
-   child; fresh recovery either restores the intact runtime before deletion or leaves/retries reported quarantine
-   debris with no shim. Mutation: recursively delete the final path, restore a shim after partial deletion, omit
-   directory fsync or remove by filename without ownership; a test fails.
-9. **0.13.0 confirm bootstrap and old approvals.** Run a simulated 0.13.0 core under `changePolicy=confirm`: prepare an
-   update, prove its bare `agentcomms approve` is unavailable, obtain `0.13.0` from the update report, and approve it
-   through `npx -y @agentcomms/core@0.13.0 approve <id>` in the person's simulated TTY. Use non-default
-   `AGENT_COMMS_CONFIG_DIR` and `AGENT_COMMS_STATE_DIR` and prove the fallback reads that approval, not the defaults.
-   Assert the POSIX, PowerShell and cmd.exe forms byte-for-byte, including spaces and every word the existing
-   `shellCommand` rules accept or refuse; repeat for each channel package's approval equivalent. Then have 0.13.0
-   install the new runtimes with no receipts/shims; start the new `agentcomms` and core MCP server separately and prove
-   each one-time path reconciles all installed products without a second approval. Cover Node recovered from
-   registration, validated current Node, no valid Node, collision, opt-out, crash before bootstrap commit and an
-   already-pending 0.13 install/update/prune approval whose digest remains valid. A content test keeps the skills and
-   0.13.1 changelog on the exact-version, same-directories fallback. Mutation: use `@latest`, omit either environment
-   directory, require a shim-only approved update or mark bootstrap before all outcomes are durable; a test fails.
-10. **Receipt, corruption and absolute fallback.** Cover recorded Node healthy, removed, replaced by a non-Node
-    executable, below minimum or reporting another version; current Node healthy/invalid; orphan runtime; non-Node
-    `process.execPath`; escaped relative entry; and no available command. Separately truncate the entry after install,
-    remove the installed package's `package.json`, and change the receipt hash: startup must quarantine the recognised
-    runtime, remove its owned shim, report the reason and version-pinned reinstall command, and never run it. Assert
-    only the receipt and final directory entries are promised flushed; no test assumes npm's files were individually
-    fsynced. Mutation: trust receipt text, package version, hash or executable bit alone; a test fails.
-11. **Process PATH and guidance.** Cover ready, missing directory, earlier executable, alias/function shadowing and
-    stale/foreign states with an MCP minimal PATH and a different simulated terminal PATH. Cover `Path`/`PATHEXT`
-    casing on Windows. Assert exact zsh login (`.zprofile`) and interactive non-login (`.zshrc`) alternatives; bash
-    login-file and `.bashrc` alternatives; the new-login warning for `.profile`; universal `fish_add_path`;
-    PowerShell-profile and cmd.exe/User-PATH instructions; and that no profile/registry is edited. Use login and
-    non-login fixture layouts for the text, while startup fixtures that prompt, write a sentinel or print a fake token
-    prove no login/interactive shell is run. Mutation: claim the process knows the next shell mode, call the status
-    `ready`, launch `-l`/`-i`, or use the POSIX export line for fish; a test fails without printing the fixture token.
-12. **Every handoff and the locator lint.** Exercise CLI and MCP forms for approvals, update/`--later`, save
-    destinations, Gmail/Slack/Resend sends and refusals, Gmail confirm-client completion, WhatsApp sync, Slack reauth,
-    Resend status recovery, account/sign-in/policy/doctor/retry results and every call site found by the lint. On both
-    surfaces assert the first runnable form starts with the validated absolute shim, otherwise absolute Node and entry;
-    assert POSIX, cmd.exe and the exact PowerShell `& "<quoted absolute path>" ...` rendering. A bare alternative appears
-    only behind a person-run `command -v`/`Get-Command`/`where` equality check. Document a manual alias/function-shadow
-    check, explicitly not executable in CI; the CI fixture still proves output stays absolute-first when process PATH
-    finds the shim. Execute safe printed lines against harmless fake entries and verify their words. The source lint
-    enforces absolute-first and rejects direct `shellCommand(['agent-…'])`, raw template handoffs and a new manifest
-    binary; documented help/usage allowlist entries pass. Mutation: promote a bare name, omit the PowerShell call
-    operator or bypass the locator at any inventoried site; lint or its site test fails.
-13. **Audit, doctor and parity.** Prove each bookkeeping outcome is durable/audited, an audit failure prevents or leaves
-    a recoverable journal around the mutation, and no shim/PATH fact changes an approval digest. CLI and MCP return the
-    same unsafe-directory/missing/stale/malformed/foreign/partial/receipt/quarantine/process-PATH facts. Keep
-    `pnpm verify:parity` for command/tool-to-operation names and expected arguments, and add a separate adapter
-    result-equivalence suite which deep-compares those typed facts for install, update, prune and doctor. Mutation: do
-    shim work in an adapter, return different facts from the two adapters, omit an audit outcome or include PATH in the
-    digest; the result-equivalence, parity or state test fails for its own reason.
-14. Run full `pnpm verify`. No test contacts Gmail, Slack, Resend or a real npm registry, reads/writes the real home,
-    edits a profile/registry/keychain, or contains a real address, token or client secret.
-
-## 5. Out of scope
-
-- Installing a managed runtime solely to provide a CLI for an npx, global or checkout-only product.
-- Changing the bare approval text already shipped inside released 0.13.x packages; the independently updated skills
-  can teach the pinned npx bootstrap, but cannot rewrite old executable code.
-- Publishing `agent-gmail-mcp` or another server-only bin.
-- Editing shell profiles, macOS path-helper configuration, `/usr/local/bin`, `/etc/paths`, the Windows registry or
-  user PATH.
-- Executing or parsing login-shell configuration, or proving how aliases/functions in an unseen terminal resolve.
-- Exact arbitrary argv preservation through Windows `.cmd`, a native Windows launcher, or programmatic `.cmd` spawn.
-- Relocating an already persisted bin directory; that needs an explicit migration with ownership checks.
-- A general package manager/uninstaller redesign, system-wide install, shell completions or Windows installer.
-- Changing send policy, change policy, approval meaning, the send gate or terminal-only approval exception.
-
-## 6. Risks and handling
-
-| Risk | Handling |
-|---|---|
-| The process PATH differs from the person's terminal, or an alias/function shadows the binary | Status is explicitly `process-path-*`; both surfaces lead with a validated absolute shim or absolute Node+entry, and a bare form is conditional on a person-run exact resolution check |
-| `~/.local/bin` is not initially on PATH | Acceptance attaches to returned commands, not bare discovery; give login and interactive-session alternatives for zsh/bash, universal fish guidance and a PowerShell-profile option without editing them |
-| A bin directory lets another principal replace a shim | Walk every component without following links, reject sticky or otherwise other-writable ancestors, require current-user ownership and a private final mode/ACL, and revalidate under the lock before publication and use |
-| A pre-existing command is destroyed | Canonical ownership, `lstat`, exclusive creation and recheck under the lock; foreign files and symlinks are never changed |
-| Windows metadata or target paths become batch syntax | Base64url marker, delayed expansion disabled and a tested literal-path renderer; no raw metadata is interpreted by cmd.exe |
-| Windows `.cmd` changes arbitrary arguments | Promise npm-compatible `%*` behaviour only; print just the existing safe subset, use PowerShell's `& "<absolute path>"` form where needed and use absolute Node+entry for programmatic execution |
-| Install dies during npm | Build/verify/receipt in a private same-filesystem stage, renew the lock, atomically publish and recover owned stages |
-| A suspended holder resumes after its lease was taken over | Token-checked renewal and an `assertHeld` fence immediately before every publication, quarantine, restoration and commit make the old holder abort without writing |
-| Update dies between Windows siblings | Durable generation journal and recovery on every lock acquisition converge both siblings or restore both old owned files |
-| Prune partially deletes a runtime | Atomic quarantine comes first and shim removal precedes recursive deletion; failed deletion leaves reported quarantine debris, never a restored shim |
-| A power loss corrupts npm-created runtime files | Promise only flushed receipts/final directory entries, validate package version and entry SHA-256 before use, and quarantine with a reinstall command on mismatch |
-| A 0.13.0 `confirm` update cannot reach apply because its bare approval command is missing | Repository-installed skills hand the person the exact-version npx approval with the server's config/state directories; after apply, the first new CLI/core MCP start reconciles once outside approval |
-| A channel-only install appears to promise `agentcomms` | Publish exactly the CLI of each managed runtime; isolated exact-set tests make the product topology visible |
-| CLI and MCP choose different custom bin directories | Persist the first resolved directory in installation metadata; later conflicting environment is diagnosed, not followed |
-| Recorded Node, package or entry disappears or is replaced | Receipt records Node path/version and entry hash; startup and locator revalidate all of them, then quarantine or print no command |
-| A same-user hostile process forges ownership | Not a security boundary; exact bytes/target checks prevent accidents while retaining the base design's same-user threat boundary |
+CUE-403's title asks for the CLIs on `PATH`. Version 0.13.1 instead fixes the user-visible failure the ticket exposed:
+every new terminal approval, handoff and fix is runnable from the exact installation that printed it, even when no
+suite CLI is on `PATH`. PATH convenience is a separate follow-up with the lifecycle, ownership and parity work in D6.
