@@ -50,6 +50,7 @@ export function openCore(options: OpenCoreOptions = {}): Core {
       ? undefined
       : cliHandoffs({ caller: options.caller, paths, platform: options.platform, env: options.env });
   const config = new ConfigStore(paths.configDir, { handoffs });
+  const audit = new AuditLog(paths.stateDir, now);
   let cached: { kind: SecretStoreKind; store: SecretStore } | null = null;
   return {
     paths,
@@ -58,11 +59,12 @@ export function openCore(options: OpenCoreOptions = {}): Core {
     states: new InboxStateStore(paths.stateDir),
     // The store's one window on the configuration — bound to this `ConfigStore`, whose `load` reads private state and
     // so must never be passed loose.
-    approvals: new ApprovalStore(paths.stateDir, { now, handoffs, loadConfig: () => config.load() }),
+    // Its daily retention records each deletion in this same audit log (design 2026-10-05 §D9).
+    approvals: new ApprovalStore(paths.stateDir, { now, handoffs, loadConfig: () => config.load(), audit }),
     ledger: new SendLedger(paths.stateDir, now),
     plans: new PlanStore(paths.stateDir, now),
     taint: new TaintStore(paths.stateDir, now),
-    audit: new AuditLog(paths.stateDir, now),
+    audit,
     handoffs,
     async secrets(kind?: SecretStoreKind): Promise<SecretStore> {
       const chosen = kind ?? secretsStoreOf(await config.load());
