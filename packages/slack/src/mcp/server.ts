@@ -1205,9 +1205,7 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
       platform: context.platform,
     });
     return changeToolResult(
-      outcome.status === 'applied'
-        ? { status: 'applied', result: signInStarted(context, outcome.result, reauth) }
-        : outcome,
+      outcome.status === 'applied' ? { ...outcome, result: signInStarted(context, outcome.result, reauth) } : outcome,
     );
   };
 

@@ -263,9 +263,13 @@ test('connecting in send is approved before any sign-in starts, and the approval
     assert.equal(harness.calls.length, 0);
 
     // The person said yes in the conversation.
-    const started = applied<Started>(await call('slack_workspace_add', { ...args, approvalId: asked.approvalId }));
+    const claimed = await call('slack_workspace_add', { ...args, approvalId: asked.approvalId });
+    const started = applied<Started>(claimed);
     await track(harness, started.flowId);
     assert.match(started.authUrl, /chat%3Awrite/);
+    // The link, and where the approval that made it stands: used (design 2026-10-05 §D8; CUE-404).
+    const spent = ok<{ approval?: { id?: string; state?: string } }>(claimed).approval;
+    assert.deepEqual([spent?.id, spent?.state], [asked.approvalId, 'used']);
     await approveInSlack(started);
     ok(await call('slack_workspace_finish', { workspace: 'acme', flowId: started.flowId, waitSeconds: 20 }));
     assert.equal(await modeOf(harness, 'acme'), 'send');
