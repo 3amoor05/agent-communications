@@ -4,6 +4,10 @@ import type { CommsError } from '@agentcomms/core';
 import { buildAuthorizeUrl, readCallback, readExchange, redirectUrlFor, scopeMismatch } from '../src/auth/authorize.ts';
 import { sameState } from '../src/auth/pkce.ts';
 import { scopesForMode } from '../src/manifest.ts';
+import { assertNoBareCommand, slackHandoffs, slackInlineToFill, TEST_PATHS } from './support/handoffs.ts';
+
+/** Slack's own commands, located from this checkout, for the refusals that name one. */
+const HANDOFFS = slackHandoffs();
 
 /**
  * The authorisation request and what comes back.
@@ -93,7 +97,7 @@ function reply(over: Record<string, unknown> = {}) {
 }
 
 test('a good reply is read into the fields the account needs', () => {
-  const token = readExchange(reply());
+  const token = readExchange(reply(), HANDOFFS);
   assert.equal(token.accessToken, 'fake-access-1');
   assert.equal(token.refreshToken, 'fake-refresh-1');
   assert.equal(token.expiresInSeconds, 43_200);
@@ -105,13 +109,14 @@ test('a good reply is read into the fields the account needs', () => {
 });
 
 test('the exchange keeps a raw app id for the profile validator and accepts an own-app reply without one', () => {
-  assert.equal(readExchange(reply({ app_id: 'not-an-app-id' })).appId, 'not-an-app-id');
-  assert.equal(readExchange(reply({ app_id: undefined })).appId, undefined);
+  assert.equal(readExchange(reply({ app_id: 'not-an-app-id' }), HANDOFFS).appId, 'not-an-app-id');
+  assert.equal(readExchange(reply({ app_id: undefined }), HANDOFFS).appId, undefined);
 });
 
 test('an exchange refusal preserves Slack error and description as structured details', () => {
   assert.throws(
-    () => readExchange({ ok: false, error: 'app_not_approved', error_description: 'Admin approval required' }),
+    () =>
+      readExchange({ ok: false, error: 'app_not_approved', error_description: 'Admin approval required' }, HANDOFFS),
     (error: CommsError) => {
       assert.deepEqual(error.details, { slackError: 'app_not_approved', slackDescription: 'Admin approval required' });
       return true;
@@ -125,7 +130,7 @@ test('a bot token in the reply is refused, not quietly dropped', () => {
    * is that no token exists which can post. Dropping it would leave it in existence and unmentioned.
    */
   assert.throws(
-    () => readExchange(reply({ access_token: 'fake-bot-1' })),
+    () => readExchange(reply({ access_token: 'fake-bot-1' }), HANDOFFS),
     (error: CommsError) => {
       assert.equal(error.code, 'AUTH_REQUIRED');
       assert.match(error.message, /bot token/);
@@ -135,22 +140,32 @@ test('a bot token in the reply is refused, not quietly dropped', () => {
 });
 
 test('a reply with no user token, or the wrong type, is refused', () => {
-  assert.throws(() => readExchange(reply({ authed_user: { id: 'U1' } })), /no user token/);
+  assert.throws(() => readExchange(reply({ authed_user: { id: 'U1' } }), HANDOFFS), /no user token/);
   assert.throws(
-    () => readExchange(reply({ authed_user: { ...reply().authed_user, token_type: 'bot' } })),
+    () => readExchange(reply({ authed_user: { ...reply().authed_user, token_type: 'bot' } }), HANDOFFS),
     /not a user token/,
   );
 });
 
 test('a failure from Slack keeps its reason', () => {
-  assert.throws(() => readExchange({ ok: false, error: 'invalid_code' }), /invalid_code/);
-  assert.throws(() => readExchange(undefined), /no reason given/);
+  assert.throws(() => readExchange({ ok: false, error: 'invalid_code' }, HANDOFFS), /invalid_code/);
+  assert.throws(() => readExchange(undefined, HANDOFFS), /no reason given/);
 });
 
 test('a reply that does not name the workspace is refused', () => {
   // Every id this account will ever see is only meaningful inside one workspace. Storing it without one would
   // make every later lookup ambiguous.
-  assert.throws(() => readExchange(reply({ team: {} })), /which workspace/);
+  assert.throws(
+    () => readExchange(reply({ team: {} }), HANDOFFS),
+    (error: CommsError) => {
+      assert.match(error.message, /which workspace/);
+      // Slack's own `workspace add`, located from this installation, the name left for the agent to fill in.
+      const add = slackInlineToFill(TEST_PATHS, ['workspace', 'add'], ['<name>']);
+      assert.equal(error.hint, `Start again with ${add}.`);
+      assertNoBareCommand(error.hint ?? '');
+      return true;
+    },
+  );
 });
 
 test('extra scopes are a mismatch, not a bonus', () => {

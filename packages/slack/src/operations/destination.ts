@@ -1,4 +1,4 @@
-import { CommsError, inlineCommand, shellCommand } from '@agentcomms/core';
+import { type CliHandoffs, CommsError, handoffSentence } from '@agentcomms/core';
 import { USER_ID } from '../compose/blocks.ts';
 
 /**
@@ -10,14 +10,14 @@ import { USER_ID } from '../compose/blocks.ts';
  * three operations that take a destination — `createDraft`, `updateDraft`, and `prepareDraftPost` given a new message —
  * and again by `viewPost`, so a draft stored before 0.12.0, or written by hand, is refused at prepare and at send.
  */
-export function requireConversation(
-  channel: string,
-  alias: string,
-  platform: NodeJS.Platform = process.platform,
-): void {
+export function requireConversation(channel: string, alias: string, handoffs: CliHandoffs): void {
   if (!USER_ID.test(channel)) return;
   throw new CommsError('USAGE', `"${channel}" is a user id: a post goes to a conversation id`, {
-    hint: `For a direct message use the DM’s id (D…), which ${inlineCommand(shellCommand(['agent-slack', 'channels', '--workspace', alias], platform))} and slack_channels list.`,
+    hint: handoffSentence(
+      handoffs.own(['channels', '--workspace', alias]),
+      (command) => `For a direct message use the DM’s id (D…), which ${command} and slack_channels list.`,
+      { instead: 'For a direct message use the DM’s id (D…), which slack_channels lists.' },
+    ),
     details: { channel, reason: 'user-id' },
   });
 }

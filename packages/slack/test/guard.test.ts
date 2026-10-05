@@ -711,8 +711,8 @@ test('an app-configuration method is refused without a grant, whatever token rid
   const { calls, inner } = recorder();
   const fetch = guardSlackRequests(inner, closedPermit());
   for (const method of CONFIGURE) {
-    await assert.rejects(fetch(`${API}/${method}`), /only `agent-slack app` may call it/, method);
-    await assert.rejects(fetch(`${API}/${method}?pretty=1`), /only `agent-slack app` may call it/, method);
+    await assert.rejects(fetch(`${API}/${method}`), /only this package's `app` commands may call it/, method);
+    await assert.rejects(fetch(`${API}/${method}?pretty=1`), /only this package's `app` commands may call it/, method);
   }
   assert.equal(calls.length, 0);
 });
@@ -723,7 +723,7 @@ test('a workspace session cannot reach apps.manifest.update, because nothing on 
   for (const method of CONFIGURE) {
     await assert.rejects(
       callSlack({ token: 'fake-user-token', fetch: inner, baseUrl: 'https://slack.com' }, method, { manifest: '{}' }),
-      /only `agent-slack app` may call it/,
+      /only this package's `app` commands may call it/,
     );
   }
   assert.equal(calls.length, 0);
@@ -736,14 +736,14 @@ test('a configuration grant opens one request of one method, and closes behind i
 
   await configureWith(permit, 'apps.manifest.validate', async () => {
     // A grant for validation is not a grant for the update.
-    await assert.rejects(fetch(`${API}/apps.manifest.update`), /only `agent-slack app` may call it/);
+    await assert.rejects(fetch(`${API}/apps.manifest.update`), /only this package's `app` commands may call it/);
     await fetch(`${API}/apps.manifest.validate`);
     // Spent: a second request inside the same grant finds the door shut.
-    await assert.rejects(fetch(`${API}/apps.manifest.validate`), /only `agent-slack app` may call it/);
+    await assert.rejects(fetch(`${API}/apps.manifest.validate`), /only this package's `app` commands may call it/);
   });
   assert.deepEqual(calls, [`${API}/apps.manifest.validate`]);
   assert.equal(permit.configuring, null);
-  await assert.rejects(fetch(`${API}/apps.manifest.validate`), /only `agent-slack app` may call it/);
+  await assert.rejects(fetch(`${API}/apps.manifest.validate`), /only this package's `app` commands may call it/);
 });
 
 test('a configuration grant opens no post, and a post’s permit opens no configuration', async () => {
@@ -761,7 +761,7 @@ test('a configuration grant opens no post, and a post’s permit opens no config
     }
   });
   await spendOn(permit, 'ap_1', 'chat.postMessage', async () => {
-    await assert.rejects(fetch(`${API}/apps.manifest.update`), /only `agent-slack app` may call it/);
+    await assert.rejects(fetch(`${API}/apps.manifest.update`), /only this package's `app` commands may call it/);
     // And a grant cannot be opened inside a post's permit either.
     await assert.rejects(
       configureWith(permit, 'apps.manifest.update', async () => undefined),
@@ -797,7 +797,7 @@ test('a configuration grant closes when the call inside it throws, and grants do
     /network died/,
   );
   assert.equal(permit.configuring, null, 'a failed update left a grant open behind it');
-  await assert.rejects(fetch(`${API}/apps.manifest.update`), /only `agent-slack app` may call it/);
+  await assert.rejects(fetch(`${API}/apps.manifest.update`), /only this package's `app` commands may call it/);
 
   await assert.rejects(
     configureWith(permit, 'apps.manifest.validate', async () =>
@@ -936,7 +936,7 @@ test('a download grant lends nothing, borrows nothing, and does not nest', async
 
   await downloadWith(permit, { teamId: TEAM, fileId: FILE }, async () => {
     await assert.rejects(fetch(`${API}/chat.postMessage`), /no approval is open/);
-    await assert.rejects(fetch(`${API}/apps.manifest.update`), /only `agent-slack app` may call it/);
+    await assert.rejects(fetch(`${API}/apps.manifest.update`), /only this package's `app` commands may call it/);
     await assert.rejects(
       downloadWith(permit, { teamId: TEAM, fileId: 'F0CCC3' }, async () => undefined),
       /already open; they do not nest/,
@@ -1639,7 +1639,7 @@ test('an upload grant lends nothing, borrows only the post it is part of, and do
     await uploadWith(permit, UPLOAD_URL, async () => {
       // The post's permit is for publishing the file, not for any other act.
       await assert.rejects(fetch(`${API}/chat.postMessage`), /the open approval is for files\.completeUploadExternal/);
-      await assert.rejects(fetch(`${API}/apps.manifest.update`), /only `agent-slack app` may call it/);
+      await assert.rejects(fetch(`${API}/apps.manifest.update`), /only this package's `app` commands may call it/);
       await assert.rejects(fetch(FILE_URL), /no download is open/);
       for (const opening of [
         () => uploadWith(permit, `${SLACK_FILES_ORIGIN}/upload/v1/other`, async () => undefined),

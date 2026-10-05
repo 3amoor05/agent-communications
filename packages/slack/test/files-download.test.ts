@@ -5,6 +5,7 @@ import { dirname, join, relative, sep } from 'node:path';
 import { test } from 'node:test';
 import { CommsError, downloadRecordPath, openCore } from '@agentcomms/core';
 import type { SlackFileRequest } from '../src/api/download.ts';
+import { SLACK_CALLER } from '../src/caller.ts';
 import { SlackContext } from '../src/context.ts';
 import {
   downloadFiles,
@@ -16,6 +17,7 @@ import {
   MAX_FILE_BYTES,
 } from '../src/operations/files.ts';
 import { openWorkspace } from '../src/operations/session.ts';
+import { slackHandoffs } from './support/handoffs.ts';
 import { newHarness, tempDir } from './support/harness.ts';
 
 /**
@@ -472,7 +474,7 @@ test('an explicit downloads pin beats defaults.downloadsDir while an unpinned qu
   const unpinned = question(await ready.call({ fileIds: ['F0AAA1'] }, { download: bytes.download }));
   assert.equal(unpinned.options[0]?.path, configured);
 
-  const core = openCore({ env: ready.harness.env, pathOverrides: { downloadsDir: pinned } });
+  const core = openCore({ env: ready.harness.env, pathOverrides: { downloadsDir: pinned }, caller: SLACK_CALLER });
   const context = new SlackContext({
     core,
     env: ready.harness.env,
@@ -950,7 +952,7 @@ test('exactly one way of naming files, refused in the words of the surface that 
     for (const { request, ...words } of cases) {
       const label = `${surface} ${JSON.stringify(request)}`;
       assert.throws(
-        () => downloadSelection({ ...request, surface }),
+        () => downloadSelection({ ...request, surface }, slackHandoffs()),
         (error: CommsError) => error.code === 'USAGE' && words[surface].test(error.message),
         label,
       );

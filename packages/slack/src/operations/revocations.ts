@@ -241,7 +241,7 @@ async function prepareToken(
           issue: { code: 'NOT_FOUND', message: 'the pending credential bundle is missing from its recorded store' },
         };
       }
-      const bundle = parseBundle(raw);
+      const bundle = parseBundle(raw, context.handoffs);
       if (bundle === null) {
         return {
           entry,

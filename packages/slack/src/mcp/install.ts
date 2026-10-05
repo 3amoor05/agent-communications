@@ -45,7 +45,7 @@ export async function mcpInstall(context: SlackContext, options: InstallOptions)
    * only in a client's log. `requireWorkspace` also resolves a former name, so a pin written before the rename
    * is refused with the name the workspace has now rather than reported as missing.
    */
-  if (options.workspace) requireWorkspace(await context.config(), options.workspace);
+  if (options.workspace) requireWorkspace(await context.config(), options.workspace, context.handoffs);
   return install(context, SLACK_MCP, options);
 }
 

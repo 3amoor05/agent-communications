@@ -1,6 +1,6 @@
 import { createInterface } from 'node:readline/promises';
 import { Writable } from 'node:stream';
-import { CommsError, canPrompt, inlineCommand, type ShellCommand, type Streams } from '@agentcomms/core';
+import { CommsError, canPrompt, type Handoff, handoffSentence, type Streams } from '@agentcomms/core';
 
 /**
  * Getting a Slack app configuration token from a person, for one command.
@@ -61,7 +61,8 @@ export async function askHidden(streams: Streams, question: string): Promise<str
 export async function readConfigurationToken(
   env: NodeJS.ProcessEnv,
   streams: Streams,
-  options: { json: boolean; command: ShellCommand },
+  /** `command`: this command again, located from this installation (`SlackContext.handoffs`), or why there is none. */
+  options: { json: boolean; command: Handoff },
 ): Promise<string> {
   const fromEnv = env[CONFIG_TOKEN_ENV];
   if (fromEnv !== undefined && fromEnv.trim() !== '') return fromEnv.trim();
@@ -70,7 +71,14 @@ export async function readConfigurationToken(
       'AUTH_REQUIRED',
       'an app configuration token is needed, and there is no terminal to ask for it',
       {
-        hint: `A person runs ${inlineCommand(options.command)} in a terminal, which asks for the token without showing it, or sets ${CONFIG_TOKEN_ENV} for that one command. Never paste the token into a chat: the transcript keeps it.`,
+        hint: handoffSentence(
+          options.command,
+          (command) =>
+            `A person runs ${command} in a terminal, which asks for the token without showing it, or sets ${CONFIG_TOKEN_ENV} for that one command. Never paste the token into a chat: the transcript keeps it.`,
+          {
+            instead: `A person runs this command in a terminal, which asks for the token without showing it, or sets ${CONFIG_TOKEN_ENV} for that one command. Never paste the token into a chat: the transcript keeps it.`,
+          },
+        ),
       },
     );
   }

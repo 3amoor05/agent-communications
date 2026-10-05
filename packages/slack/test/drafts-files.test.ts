@@ -19,6 +19,7 @@ import { openDraftStore, type SlackDraft } from '../src/compose/drafts.ts';
 import { MAX_FILE_BYTES, MAX_FILES, TEST_ONLY_HOOKS } from '../src/compose/files.ts';
 import { SlackContext } from '../src/context.ts';
 import { createDraft, updateDraft } from '../src/operations/drafts.ts';
+import { assertNoBareCommand, coreInlineToFill, slackHandoffs } from './support/handoffs.ts';
 import { type Harness, newHarness, tempDir } from './support/harness.ts';
 
 /**
@@ -138,7 +139,11 @@ test('at most ten files go on one draft, and the eleventh is refused before any 
   const eleven = await refusal(createDraft(context, 'acme', { channel: 'C1', text: 'pages', files: paths }));
   assert.equal(eleven.code, 'USAGE');
   assert.match(eleven.message, /at most 10 files/);
-  assert.deepEqual(await openDraftStore(harness.core.paths.stateDir, NOW).list(), [], 'a draft was written anyway');
+  assert.deepEqual(
+    await openDraftStore(harness.core.paths.stateDir, NOW, slackHandoffs(harness.core.paths)).list(),
+    [],
+    'a draft was written anyway',
+  );
 
   const ten = await createDraft(context, 'acme', { channel: 'C1', text: 'pages', files: paths.slice(0, 10) });
   assert.equal(ten.files?.length, 10);
@@ -155,7 +160,10 @@ test('a file over 100 MiB is refused by its size, without being read', async () 
   const over = await refusal(createDraft(context, 'acme', { channel: 'C1', text: 'the video', files: [huge] }));
   assert.equal(over.code, 'BAD_DATA');
   assert.match(over.message, /huge\.mov is larger than 100 MiB/);
-  assert.deepEqual(await openDraftStore(harness.core.paths.stateDir, NOW).list(), []);
+  assert.deepEqual(
+    await openDraftStore(harness.core.paths.stateDir, NOW, slackHandoffs(harness.core.paths)).list(),
+    [],
+  );
 
   // The limit itself is allowed.
   truncateSync(huge, MAX_FILE_BYTES);
@@ -202,7 +210,11 @@ test('anything but a regular file under the home folder is refused, and nothing 
     assert.match(error.message, message, what);
     assert.notEqual(error.code, 'UNEXPECTED', what);
   }
-  assert.deepEqual(await openDraftStore(harness.core.paths.stateDir, NOW).list(), [], 'a refused file left a draft');
+  assert.deepEqual(
+    await openDraftStore(harness.core.paths.stateDir, NOW, slackHandoffs(harness.core.paths)).list(),
+    [],
+    'a refused file left a draft',
+  );
 });
 
 test('a file outside the allowed folders is refused with the rule and what to do: copy it, or allow its folder', async () => {
@@ -213,7 +225,14 @@ test('a file outside the allowed folders is refused with the rule and what to do
   assert.match(error.message, /must come from an allowed folder/);
   assert.match(error.hint ?? '', /Copy the file under your home folder/);
   // The command that exists, and that it is the person's to approve — not a setting to edit by hand.
-  assert.match(error.hint ?? '', /`agentcomms attach roots add <folder>` \(needs your approval\)/);
+  // Core's command, found through the core Slack has installed, located: never a bare `agentcomms` (CUE-403).
+  assert.ok(
+    error.hint?.includes(
+      `allow its folder with ${coreInlineToFill(context.core.paths, ['attach', 'roots', 'add'], ['<folder>'])} (needs your approval)`,
+    ),
+    error.hint,
+  );
+  assertNoBareCommand(error.hint ?? '');
   assert.doesNotMatch(error.hint ?? '', /with the CLI|attachRoots/);
 });
 
@@ -274,7 +293,7 @@ test('an update that would go past a limit, or name a file that is refused, chan
   const nothing = await refusal(updateDraft(context, 'acme', bare.draftId, { files: [] }));
   assert.equal(nothing.code, 'USAGE');
 
-  const store = openDraftStore(context.core.paths.stateDir, NOW);
+  const store = openDraftStore(context.core.paths.stateDir, NOW, context.handoffs);
   assert.equal((await store.get(draft.draftId)).revision, draft.revision, 'a refused update was saved');
   assert.equal((await store.get(bare.draftId)).revision, bare.revision, 'a refused update was saved');
 });
@@ -335,7 +354,7 @@ test('an update reaches only this workspace’s drafts, and not one changed outs
   assert.equal(absent.code, 'NOT_FOUND');
 
   // A draft whose blocks say something its text does not is refused here as the gate refuses it.
-  const store = openDraftStore(harness.core.paths.stateDir, NOW);
+  const store = openDraftStore(harness.core.paths.stateDir, NOW, slackHandoffs(harness.core.paths));
   const mine = await createDraft(context, 'acme', { channel: 'C1', text: 'hello' });
   await store.update(
     mine.draftId,
@@ -498,7 +517,7 @@ test('a stored draft with more files than a post may carry is refused when it is
     `${JSON.stringify({ ...stored, files: [...stored.files, stored.files[0]] }, null, 2)}\n`,
   );
 
-  const store = openDraftStore(harness.core.paths.stateDir, NOW);
+  const store = openDraftStore(harness.core.paths.stateDir, NOW, slackHandoffs(harness.core.paths));
   const error = await refusal(store.get(draft.draftId));
   assert.equal(error.code, 'BAD_DATA');
   assert.equal(error.details?.reason, 'unreadable');

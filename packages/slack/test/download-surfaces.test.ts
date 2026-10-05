@@ -10,6 +10,7 @@ import type { SlackFileRequest } from '../src/api/download.ts';
 import { run } from '../src/cli/program.ts';
 import { createSlackMcpServer } from '../src/mcp/server.ts';
 import type { FileDownloader, FileDownloadQuestion, FileDownloadResult } from '../src/operations/files.ts';
+import { assertNoBareCommand, slackInline } from './support/handoffs.ts';
 import { type Harness, newHarness, tempDir } from './support/harness.ts';
 
 /**
@@ -565,7 +566,7 @@ async function confirmPolicy(harness: Harness): Promise<void> {
   });
 }
 
-test('under confirm, the person answers with `agent-slack approve` at their terminal; an answer in the arguments is refused', async () => {
+test('under confirm, the person answers with this installation’s approve at their terminal; an answer in the arguments is refused', async () => {
   const harness = await newHarness();
   await harness.addWorkspace({ alias: 'acme' });
   await confirmPolicy(harness);
@@ -575,12 +576,16 @@ test('under confirm, the person answers with `agent-slack approve` at their term
   try {
     const asked = ok<FileDownloadQuestion>(await tool.call({ workspace: 'acme', fileIds: ['F0AAA2'] }));
     assert.equal(asked.policy, 'confirm');
-    assert.ok(asked.question.includes(`\`agent-slack approve ${asked.choiceId}\``), asked.question);
+    // Slack's own approve, located from this installation: never a bare `agent-slack` (CUE-403).
+    const approve = slackInline(harness.core.paths, ['approve', asked.choiceId]);
+    assert.ok(asked.question.includes(approve), asked.question);
+    assertNoBareCommand(asked.question);
     const refused = failed(
       await tool.call({ workspace: 'acme', fileIds: ['F0AAA2'], saveTo: 'current', choiceId: asked.choiceId }),
     );
     assert.equal(refused.code, 'APPROVAL_PENDING');
-    assert.ok((refused.hint ?? '').includes(`\`agent-slack approve ${asked.choiceId}\` in their own terminal`));
+    assert.ok((refused.hint ?? '').includes(`${approve} in their own terminal`), refused.hint ?? undefined);
+    assertNoBareCommand(refused.hint ?? '');
     assert.deepEqual(bytes.asked, [], 'fetched before the person answered');
 
     // An agent cannot answer it; the person at their terminal can.

@@ -10,6 +10,7 @@ import { exitAfterRefreshes } from '../src/auth/exit.ts';
 import { accessTokenFor, settleRefreshes } from '../src/auth/refresh.ts';
 import { run } from '../src/cli/program.ts';
 import { openWorkspace } from '../src/operations/session.ts';
+import { slackHandoffs } from './support/handoffs.ts';
 import { newHarness, slackOk } from './support/harness.ts';
 import {
   contextFor,
@@ -229,6 +230,7 @@ test('a kept result is written over the refresh-uncertain another process made o
         configDir: harness.core.paths.configDir,
         stateDir: harness.core.paths.stateDir,
         now: () => new Date(Date.now() + 5 * 60_000),
+        handoffs: slackHandoffs(harness.core.paths),
         exchange: async () => assert.fail('the other process refreshed a marker it found stale'),
       },
       'acc_OTHERPROCESS0000',

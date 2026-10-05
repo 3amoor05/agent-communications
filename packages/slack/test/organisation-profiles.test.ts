@@ -17,8 +17,12 @@ import { type InstallMode, scopesForMode } from '../src/manifest.ts';
 import { connectWorkspace } from '../src/operations/changes.ts';
 import { completeSignIn } from '../src/operations/signin.ts';
 import { listWorkspaces, showWorkspace } from '../src/operations/workspaces.ts';
+import { slackHandoffs } from './support/handoffs.ts';
 import { slackOk } from './support/harness.ts';
 import { newOrganisationHarness, PROFILE_SHA, READ_CLIENT_ID, SEND_CLIENT_ID } from './support/organisation.ts';
+
+/** Slack's own commands, located from this checkout, for the refusals that name one. */
+const HANDOFFS = slackHandoffs();
 
 async function freePort(): Promise<number> {
   const server = createServer();
@@ -166,7 +170,7 @@ test('a profile add records provenance and app id in one config update; workspac
   assert.equal(config.accounts['rgc/slack']?.profileApp, 'read');
   assert.equal(view.organisation, 'rgc');
   assert.equal(view.profileApp, 'read');
-  assert.equal(showWorkspace(config, 'rgc/slack').organisation, 'rgc');
+  assert.equal(showWorkspace(config, 'rgc/slack', HANDOFFS).organisation, 'rgc');
   assert.equal(listWorkspaces(config)[0]?.profileApp, 'read');
 });
 
@@ -189,7 +193,7 @@ test('profile read and send workspace views carry the current displayed organisa
     const connected = await completeSignIn(context, flow.flowId, 'ok');
     const config = await harness.core.config.load();
     const displayed = mode === 'read' ? 'North Culture' : 'Human (quoted): [control token removed]Studio';
-    for (const view of [connected, showWorkspace(config, 'rgc/slack'), listWorkspaces(config)[0]]) {
+    for (const view of [connected, showWorkspace(config, 'rgc/slack', HANDOFFS), listWorkspaces(config)[0]]) {
       assert.equal(view?.organisationLabel, displayed);
       assert.equal(view?.profileApp, mode);
       assert.doesNotMatch(view?.organisationLabel ?? '', /<\|im_start\|>|^Human:/);
@@ -207,7 +211,7 @@ test('an explicit client remains unmanaged even when its client and app ids matc
   const config = await harness.core.config.load();
   assert.equal(view.organisation, undefined);
   assert.equal(view.profileApp, undefined);
-  assert.equal(showWorkspace(config, 'rgc/slack').organisation, undefined);
+  assert.equal(showWorkspace(config, 'rgc/slack', HANDOFFS).organisation, undefined);
   assert.equal(config.accounts['rgc/slack']?.organisation, undefined);
   assert.equal(config.accounts['rgc/slack']?.profileApp, undefined);
 });

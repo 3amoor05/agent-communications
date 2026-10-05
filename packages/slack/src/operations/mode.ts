@@ -1,4 +1,5 @@
-import { type AccountConfig, inlineCommand, shellCommand } from '@agentcomms/core';
+import { type AccountConfig, type CliHandoffs, handoffSentence } from '@agentcomms/core';
+import { handoffsSentence } from '../handoffs.ts';
 import { appManifestUrl, type InstallMode, parseMode, scopesForMode } from '../manifest.ts';
 
 /**
@@ -32,11 +33,15 @@ export interface ModeReport {
   readonly toRead: readonly string[];
 }
 
+/**
+ * What a workspace can do, and the steps each way. `handoffs` make the commands the steps name, located from the
+ * installation printing them, or say why there are none here.
+ */
 export function modeReport(
   alias: string,
   account: AccountConfig,
+  handoffs: CliHandoffs,
   requested?: number,
-  platform: NodeJS.Platform = process.platform,
 ): ModeReport {
   // The port asked for, else the one the workspace was signed in with; neither, and the steps say `<port>`.
   const port = requested ?? account.redirectPort;
@@ -52,20 +57,24 @@ export function modeReport(
       mode === 'send'
         ? []
         : account.organisation
-          ? profileMoveSteps(alias, 'send', platform)
-          : wideningSteps(alias, port, account.appId, platform),
+          ? profileMoveSteps(alias, 'send', handoffs)
+          : wideningSteps(alias, handoffs, port, account.appId),
     toRead:
       mode === 'read' && outwardScopes.length === 0
         ? []
         : account.organisation
-          ? profileMoveSteps(alias, 'read', platform)
-          : narrowingSteps(alias, port, { knowsItsApp: account.oauthClientId !== undefined }, platform),
+          ? profileMoveSteps(alias, 'read', handoffs)
+          : narrowingSteps(alias, handoffs, port, { knowsItsApp: account.oauthClientId !== undefined }),
   };
 }
 
-export function profileMoveSteps(alias: string, mode: InstallMode, platform: NodeJS.Platform): string[] {
+export function profileMoveSteps(alias: string, mode: InstallMode, handoffs: CliHandoffs): string[] {
   return [
-    `Sign in through the organisation's ${mode} app with ${inlineCommand(shellCommand(['agent-slack', 'workspace', 'mode', alias, mode], platform))}.`,
+    handoffSentence(
+      handoffs.own(['workspace', 'mode', alias, mode]),
+      (command) => `Sign in through the organisation's ${mode} app with ${command}.`,
+      { instead: `Sign in through the organisation's ${mode} app with slack_mode_set from a chat.` },
+    ),
   ];
 }
 
@@ -85,23 +94,41 @@ const portText = (port: number | undefined): string => (port === undefined ? '<p
  */
 export function wideningSteps(
   alias: string,
+  handoffs: CliHandoffs,
   port?: number,
   appId?: string | undefined,
-  platform: NodeJS.Platform = process.platform,
 ): string[] {
   const p = portText(port);
-  const manifest = inlineCommand(shellCommand(['agent-slack', 'manifest', '--mode', 'send', '--port', p], platform));
-  const appUpdate = inlineCommand(
-    shellCommand(['agent-slack', 'app', 'update', alias, '--mode', 'send', '--port', p], platform),
-  );
-  const move = inlineCommand(
-    shellCommand(['agent-slack', 'workspace', 'mode', alias, 'send', '--app-updated', '--port', p], platform),
-  );
+  const manifest = handoffs.own(['manifest', '--mode', 'send', '--port', p]);
+  const appUpdate = handoffs.own(['app', 'update', alias, '--mode', 'send', '--port', p]);
+  const move = handoffs.own(['workspace', 'mode', alias, 'send', '--app-updated', '--port', p]);
+  // With no command here, the manifest slack_manifest prints, and the move from a chat.
+  const fromChat = 'the send manifest slack_manifest prints';
   return [
     appId
-      ? `Open ${appManifestUrl(appId)} — the manifest of the app "${alias}" signed in through — replace it with ${manifest}, and save: the same app, not a new one. With an app configuration token, ${appUpdate} does this at a terminal instead.`
-      : `Open the workspace's existing app at https://api.slack.com/apps → App Manifest, and replace it with ${manifest} — the same app, not a new one.`,
-    `Then move it: ${move} at a terminal, or slack_mode_set with appUpdated from a chat. Either asks for the change to be approved first, then for the sign-in to be approved in Slack.`,
+      ? handoffsSentence(
+          [manifest, appUpdate],
+          ([shown, update]) =>
+            `Open ${appManifestUrl(appId)} — the manifest of the app "${alias}" signed in through — replace it with ${shown}, and save: the same app, not a new one. With an app configuration token, ${update} does this at a terminal instead.`,
+          `Open ${appManifestUrl(appId)} — the manifest of the app "${alias}" signed in through — replace it with ${fromChat}, and save: the same app, not a new one.`,
+        )
+      : handoffSentence(
+          manifest,
+          (shown) =>
+            `Open the workspace's existing app at https://api.slack.com/apps → App Manifest, and replace it with ${shown} — the same app, not a new one.`,
+          {
+            instead: `Open the workspace's existing app at https://api.slack.com/apps → App Manifest, and replace it with ${fromChat} — the same app, not a new one.`,
+          },
+        ),
+    handoffSentence(
+      move,
+      (shown) =>
+        `Then move it: ${shown} at a terminal, or slack_mode_set with appUpdated from a chat. Either asks for the change to be approved first, then for the sign-in to be approved in Slack.`,
+      {
+        instead:
+          'Then move it: slack_mode_set with appUpdated from a chat. It asks for the change to be approved first, then for the sign-in to be approved in Slack.',
+      },
+    ),
   ];
 }
 
@@ -115,27 +142,40 @@ export function wideningSteps(
  */
 export function narrowingSteps(
   alias: string,
+  handoffs: CliHandoffs,
   port?: number,
   options: { knowsItsApp?: boolean } = {},
-  platform: NodeJS.Platform = process.platform,
 ): string[] {
   const p = portText(port);
-  const manifest = inlineCommand(shellCommand(['agent-slack', 'manifest', '--mode', 'read', '--port', p], platform));
-  const remove = inlineCommand(shellCommand(['agent-slack', 'workspace', 'remove', alias], platform));
-  const add = inlineCommand(
-    shellCommand(
-      ['agent-slack', 'workspace', 'add', alias, '--client-id', "<the app's Client ID>", '--port', p],
-      platform,
-    ),
-  );
-  const reauth = inlineCommand(
-    shellCommand(['agent-slack', 'workspace', 'reauth', alias, '--mode', 'read', '--port', p], platform),
-  );
+  const manifest = handoffs.own(['manifest', '--mode', 'read', '--port', p]);
+  const remove = handoffs.own(['workspace', 'remove', alias]);
+  const add = handoffs.own(['workspace', 'add', alias, '--client-id', "<the app's Client ID>", '--port', p]);
+  const reauth = handoffs.own(['workspace', 'reauth', alias, '--mode', 'read', '--port', p]);
   return [
-    `(Recommended) Open the workspace's existing app at https://api.slack.com/apps → App Manifest, and replace it with ${manifest}, so the app itself can no longer offer posting.`,
+    handoffSentence(
+      manifest,
+      (shown) =>
+        `(Recommended) Open the workspace's existing app at https://api.slack.com/apps → App Manifest, and replace it with ${shown}, so the app itself can no longer offer posting.`,
+      {
+        instead:
+          "(Recommended) Open the workspace's existing app at https://api.slack.com/apps → App Manifest, and replace it with the read manifest slack_manifest prints, so the app itself can no longer offer posting.",
+      },
+    ),
     'In Slack, remove the app from the workspace: Workspace settings → Manage apps → the app → Remove app. That revokes every token it holds, which is the only way Slack takes a scope back.',
     options.knowsItsApp === false
-      ? `Then ${remove}, and ${add}. This record predates the one that remembers its app, so it cannot be re-authorised in place.`
-      : `Then: ${reauth} — a reauth, which keeps the name, the app and every former name.`,
+      ? handoffsSentence(
+          [remove, add],
+          ([removing, adding]) =>
+            `Then ${removing}, and ${adding}. This record predates the one that remembers its app, so it cannot be re-authorised in place.`,
+          'Then slack_workspace_remove, and slack_workspace_add with its Client ID, from a chat. This record predates the one that remembers its app, so it cannot be re-authorised in place.',
+        )
+      : handoffSentence(
+          reauth,
+          (shown) => `Then: ${shown} — a reauth, which keeps the name, the app and every former name.`,
+          {
+            instead:
+              'Then: slack_workspace_reauth with mode read, from a chat — a reauth, which keeps the name, the app and every former name.',
+          },
+        ),
   ];
 }

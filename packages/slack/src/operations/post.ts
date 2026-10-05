@@ -103,13 +103,13 @@ export async function prepareDraftPost(
   slack: SessionDeps = {},
 ): Promise<PreparedPost> {
   const writing = draftToWrite(request);
-  if (writing !== undefined) requireConversation(writing.channel, alias, context.platform);
+  if (writing !== undefined) requireConversation(writing.channel, alias, context.handoffs);
   const composed = writing === undefined ? undefined : { payload: draftPayload(writing), source: writing.text ?? '' };
   const paths = writing?.files ?? [];
   checkFileCount(paths.length);
   const files = paths.length === 0 ? [] : await recordFiles(paths, await attachPolicyOf(context));
   const gate = await gateDepsFor(context, alias, slack);
-  const store = openDraftStore(context.core.paths.stateDir, context.now, context.platform);
+  const store = openDraftStore(context.core.paths.stateDir, context.now, context.handoffs);
   const draft =
     composed === undefined
       ? // Another workspace's draft is absent here: drafts share one directory, and the id alone proves nothing.
@@ -143,7 +143,7 @@ export async function sendPost(
   slack: SessionDeps = {},
 ): Promise<PostedMessage | PostedFiles> {
   const gate = await gateDepsFor(context, alias, slack);
-  const store = openDraftStore(context.core.paths.stateDir, context.now, context.platform);
+  const store = openDraftStore(context.core.paths.stateDir, context.now, context.handoffs);
   // Another workspace's draft is absent here: drafts share one directory, and the id alone proves nothing.
   const draft = await ownDraft(store, gate.accountId, input.draftId);
   return postPrepared({ ...gate, signal: input.signal }, draft, input.approvalId, input.expectChannel, new NameBook());

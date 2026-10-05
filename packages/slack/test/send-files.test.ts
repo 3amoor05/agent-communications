@@ -25,6 +25,7 @@ import { scopesForMode } from '../src/manifest.ts';
 import { createDraft } from '../src/operations/drafts.ts';
 import { prepareDraftPost, sendPost } from '../src/operations/post.ts';
 import { type FakeSlack, type FakeUploads, startFakeSlack, UPLOADS } from './support/fake-slack.ts';
+import { assertNoBareCommand, slackCommand, slackHandoffs, slackInline } from './support/handoffs.ts';
 import { type Harness, newHarness } from './support/harness.ts';
 
 /**
@@ -204,7 +205,14 @@ test('a file that changed after the draft was written is refused at prepare, and
   assert.equal(error.code, 'BAD_DATA');
   assert.match(error.message, /notes\.md is not the file the draft recorded/);
   assert.equal(error.details?.file, 'notes.md');
-  assert.match(error.hint ?? '', new RegExp(`agent-slack draft update ${draft.draftId} --workspace acme --file`));
+  // The command that puts the files back is this installation's own, located: the context's shell (CUE-403).
+  const refile = ['draft', 'update', draft.draftId, '--workspace', 'acme', '--file', '<path…>'];
+  assert.ok(
+    error.hint?.includes(`with ${slackInline(context.core.paths, refile, context.platform)} (every one`),
+    error.hint,
+  );
+  assert.equal(error.details?.command, slackCommand(context.core.paths, refile, context.platform));
+  assertNoBareCommand(error.hint ?? '');
   assert.deepEqual(await context.core.approvals.list(), [], 'an approval was made for bytes nobody was shown');
   assert.deepEqual(asked(fake), [], 'Slack was asked something about a post that was refused');
 });
@@ -216,7 +224,13 @@ test('a workspace connected to read cannot prepare a file post', async (t) => {
   const error = await refusal(prepareDraftPost(context, 'acme', { draftId: draft.draftId }, slack));
   assert.equal(error.code, 'SCOPE_MISSING');
   assert.match(error.message, /connected to read, and cannot send files/);
-  assert.match(error.hint ?? '', /agent-slack workspace mode acme/);
+  assert.ok(
+    error.hint?.includes(
+      `${slackInline(context.core.paths, ['workspace', 'mode', 'acme'], context.platform)} shows the steps, as slack_mode does from a chat`,
+    ),
+    error.hint,
+  );
+  assertNoBareCommand(error.hint ?? '');
   assert.deepEqual(await context.core.approvals.list(), []);
   assert.deepEqual(asked(fake), []);
 });
@@ -229,9 +243,19 @@ test('a grant without files:write cannot prepare a file post, and is told the co
   const error = await refusal(prepareDraftPost(context, 'acme', { draftId: draft.draftId }, slack));
   assert.equal(error.code, 'SCOPE_MISSING');
   assert.match(error.message, /was not granted files:write/);
-  assert.match(error.hint ?? '', /`agent-slack workspace reauth acme --mode send`/);
+  const reauth = ['workspace', 'reauth', 'acme', '--mode', 'send'];
+  assert.ok(
+    error.hint?.includes(`Sign in again to grant it: ${slackInline(context.core.paths, reauth, context.platform)}.`),
+    error.hint,
+  );
+  // And the app's own manifest, for an app that does not offer the scope: located too, never a bare name.
+  assert.ok(
+    error.hint?.includes(slackInline(context.core.paths, ['manifest', '--mode', 'send'], context.platform)),
+    error.hint,
+  );
+  assertNoBareCommand(error.hint ?? '');
   assert.equal(error.details?.scope, 'files:write');
-  assert.equal(error.details?.command, 'agent-slack workspace reauth acme --mode send');
+  assert.equal(error.details?.command, slackCommand(context.core.paths, reauth, context.platform));
   assert.deepEqual(await context.core.approvals.list(), []);
   assert.deepEqual(asked(fake), []);
 
@@ -311,7 +335,7 @@ test('a file post whose words hold a bare URL and a link span lists both, flags 
     files: [file(w.docs, 'plan.zip', 'PK the plan')],
   });
   const words = 'the plan: https://docs.example.com/plan?v=2&amp;x=1, and <https://notes.example.org/q3|the notes>';
-  const store = openDraftStore(w.harness.core.paths.stateDir, () => new Date());
+  const store = openDraftStore(w.harness.core.paths.stateDir, () => new Date(), slackHandoffs(w.harness.core.paths));
   await store.update(draft.draftId, payloadOf(words, 'C1', undefined), words, draft.files);
 
   const prepared = await prepareDraftPost(w.context, 'acme', { draftId: draft.draftId }, w.slack);
@@ -544,7 +568,10 @@ test('under confirm, a file post waits for the person, and nothing is uploaded m
   const { prepared, send } = await prepareAndSend(w, draft.draftId);
   const error = await refusal(send());
   assert.equal(error.code, 'APPROVAL_PENDING');
-  assert.equal(error.details?.command, `agent-slack approve ${prepared.approvalId}`);
+  assert.equal(
+    error.details?.command,
+    slackCommand(w.context.core.paths, ['approve', prepared.approvalId], w.context.platform),
+  );
   assert.deepEqual(w.uploads.issued, [], 'an upload URL was asked for before the person approved');
   assert.deepEqual(w.uploads.received, {});
   assert.deepEqual(w.uploads.completed, []);
@@ -566,7 +593,12 @@ test('a grant narrowed after prepare refuses the send, before anything is upload
   }));
   const error = await refusal(send());
   assert.equal(error.code, 'SCOPE_MISSING');
-  assert.match(error.hint ?? '', /agent-slack workspace reauth acme --mode send/);
+  assert.ok(
+    error.hint?.includes(
+      slackInline(w.context.core.paths, ['workspace', 'reauth', 'acme', '--mode', 'send'], w.context.platform),
+    ),
+    error.hint,
+  );
   assert.deepEqual(w.uploads.issued, []);
   assert.equal((await w.context.core.approvals.get(prepared.approvalId))?.state, 'pending');
 });

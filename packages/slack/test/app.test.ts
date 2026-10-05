@@ -11,6 +11,7 @@ import { run } from '../src/cli/program.ts';
 import { buildManifest } from '../src/manifest.ts';
 import { createSlackMcpServer } from '../src/mcp/server.ts';
 import { type FakeSlack, startFakeSlack } from './support/fake-slack.ts';
+import { assertNoBareCommand, slackCommand, slackInline } from './support/handoffs.ts';
 import { type Harness, newHarness } from './support/harness.ts';
 
 /**
@@ -212,10 +213,17 @@ test('app update validates first, then updates the recorded app, with the config
   assert.equal(data?.permissionsUpdated, true);
   assert.equal(data?.manifestPage, 'https://api.slack.com/apps/A0001/app-manifest');
   // The app is updated now, so the next step says so: without `--app-updated` the move would hand back the app step.
-  assert.match(
-    String((data?.next as string[] | undefined)?.[0]),
-    /agent-slack workspace mode acme send --app-updated --port 51234/,
-  );
+  const move = slackInline(harness.core.paths, [
+    'workspace',
+    'mode',
+    'acme',
+    'send',
+    '--app-updated',
+    '--port',
+    '51234',
+  ]);
+  assert.ok(String((data?.next as string[] | undefined)?.[0]).startsWith(`${move} (slack_mode_set from a chat)`));
+  assertNoBareCommand(JSON.stringify(data?.next));
 
   // Nothing local changed: the workspace's mode and port describe its token and its last sign-in, and neither moved.
   assert.equal(await configText(harness), before);
@@ -233,7 +241,12 @@ test('updating an app to send says it changes no token, and names the sign-in th
   });
   assert.equal(result.code, EXIT_CODES.OK, result.stderr);
   assert.match(result.stdout, /not what any token already issued can do: "acme" is still in read mode/);
-  assert.match(result.stdout, /agent-slack workspace mode acme send --app-updated --port 51234/);
+  assert.ok(
+    result.stdout.includes(
+      slackInline(harness.core.paths, ['workspace', 'mode', 'acme', 'send', '--app-updated', '--port', '51234']),
+    ),
+    result.stdout,
+  );
   // Said before the token is taken, because Slack's update replaces the app's name and description too.
   assert.match(result.stderr, /replaces the whole configuration of Slack app A0001/);
   await assertNoToken(harness, result);
@@ -252,7 +265,13 @@ test('updating a send workspace’s app to read leaves the two steps only a pers
   const next = (result.json<{ next: string[] }>().data?.next ?? []).join('\n');
   // The app step is done; what remains is removing the installation in Slack, then a narrowing reauth.
   assert.match(next, /Remove app/);
-  assert.match(next, /agent-slack workspace reauth acme --mode read --port 51234/);
+  assert.ok(
+    next.includes(
+      slackInline(harness.core.paths, ['workspace', 'reauth', 'acme', '--mode', 'read', '--port', '51234']),
+    ),
+    next,
+  );
+  assertNoBareCommand(next);
   assert.doesNotMatch(next, /App Manifest/, 'the step just done is not listed again');
 });
 
@@ -504,10 +523,20 @@ test('app create validates, creates, and prints the app id, the Client ID and th
   }
   assert.match(result.stdout, /A0NEWAPP1/);
   assert.match(result.stdout, /1111111111\.2222222222/);
-  assert.match(
-    result.stdout,
-    /agent-slack workspace add zeta --client-id "1111111111\.2222222222" --port "51234" --mode send/,
-  );
+  const connect = [
+    'workspace',
+    'add',
+    'zeta',
+    '--client-id',
+    '1111111111.2222222222',
+    '--port',
+    '51234',
+    '--mode',
+    'send',
+  ];
+  assert.ok(result.stdout.includes(slackCommand(harness.core.paths, connect, 'win32')), result.stdout);
+  assert.match(result.stdout, /workspace add zeta --client-id "1111111111\.2222222222" --port "51234" --mode send$/m);
+  assertNoBareCommand(result.stdout);
   assert.match(result.stdout, /client_secret, signing_secret, verification_token\. None was kept or shown/);
   assert.equal(await configText(harness), before, 'creating an app connects nothing');
   await assertNoToken(harness, result, [TOKEN, TAIL, CLIENT_SECRET, VERIFICATION, SIGNING]);
@@ -527,7 +556,15 @@ test('app create under --json returns the ids and the names of what it dropped, 
   assert.equal(data?.clientId, '1111111111.2222222222');
   assert.equal(data?.mode, 'read');
   assert.deepEqual(data?.secretsDiscarded, ['client_secret', 'signing_secret', 'verification_token']);
-  assert.equal(data?.next, "agent-slack workspace add '<name>' --client-id 1111111111.2222222222 --port 51234");
+  assert.equal(
+    data?.next,
+    slackCommand(
+      harness.core.paths,
+      ['workspace', 'add', '<name>', '--client-id', '1111111111.2222222222', '--port', '51234'],
+      'darwin',
+    ),
+  );
+  assert.ok(String(data?.next).endsWith(" workspace add '<name>' --client-id 1111111111.2222222222 --port 51234"));
   assert.deepEqual(Object.keys(data ?? {}).sort(), [
     'appId',
     'clientId',

@@ -9,6 +9,7 @@ import { exitAfterRefreshes } from '../src/auth/exit.ts';
 import { settleRefreshes } from '../src/auth/refresh.ts';
 import { run } from '../src/cli/program.ts';
 import { createSlackMcpServer, serveUntilClosed } from '../src/mcp/server.ts';
+import { assertNoBareCommand, slackInline } from './support/handoffs.ts';
 import { newHarness, slackOk, tempDir } from './support/harness.ts';
 import { expired, fakeProcess, flakyStore, markerLandsLate, QUICK, stored, until } from './support/refresh.ts';
 
@@ -119,7 +120,12 @@ test('a CLI command that cannot write down its renewed token says so on stderr, 
     assert.equal(code, 0);
     assert.equal(JSON.parse(stdout.text()).ok, true, '--json still prints exactly one envelope');
     assert.match(stderr.text(), /could not save the renewed Slack credential for “acme”/);
-    assert.match(stderr.text(), /agent-slack workspace reauth acme/);
+    // This installation's own reauth, located, for the shell the command printed for (CUE-403).
+    assert.ok(
+      stderr.text().includes(`Run ${slackInline(harness.core.paths, ['workspace', 'reauth', 'acme'], 'darwin')}.`),
+      stderr.text(),
+    );
+    assertNoBareCommand(stderr.text());
     assert.doesNotMatch(stderr.text(), /fake-new-access|fake-new-refresh|fake-refresh-token/, 'a token was printed');
   } finally {
     // Nothing is left behind for the next test in this process.
@@ -413,7 +419,12 @@ test('an MCP server that cannot write down its renewed token at the end says so 
   await serving;
   try {
     assert.match(stderr.text(), /could not save the renewed Slack credential for “acme”/);
-    assert.match(stderr.text(), /agent-slack workspace reauth acme/);
+    // This installation's own reauth, located, for the shell the command printed for (CUE-403).
+    assert.ok(
+      stderr.text().includes(`Run ${slackInline(harness.core.paths, ['workspace', 'reauth', 'acme'], 'darwin')}.`),
+      stderr.text(),
+    );
+    assertNoBareCommand(stderr.text());
     assert.doesNotMatch(stderr.text(), /fake-new-access|fake-new-refresh|fake-refresh-token/, 'a token was printed');
   } finally {
     store.failing = false;

@@ -62,7 +62,9 @@ export async function manifestFor(
 ): Promise<ManifestResult> {
   const mode = modeWanted(options.mode) ?? 'read';
   const found =
-    options.workspace === undefined ? undefined : requireWorkspace(await context.config(), options.workspace);
+    options.workspace === undefined
+      ? undefined
+      : requireWorkspace(await context.config(), options.workspace, context.handoffs);
   /*
    * The port is decided here, before any sign-in exists.
    *

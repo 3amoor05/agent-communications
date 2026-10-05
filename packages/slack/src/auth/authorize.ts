@@ -1,4 +1,11 @@
-import { CommsError, neutralise, sanitizeHtmlToText } from '@agentcomms/core';
+import {
+  type CliHandoffs,
+  CommsError,
+  handoffSentence,
+  handoffSentenceToFill,
+  neutralise,
+  sanitizeHtmlToText,
+} from '@agentcomms/core';
 import { SLACK_ORIGIN } from '../api/methods.ts';
 import type { InstallMode } from '../manifest.ts';
 import { scopesForMode } from '../manifest.ts';
@@ -191,9 +198,10 @@ interface OAuthResponse {
  *
  * Every refusal here happens **before** anything reaches the config or the secret store. `--mode read` is only
  * trustworthy if the token physically cannot post, and the only moment to establish that is now: afterwards the
- * label is a claim about a token nobody re-examined.
+ * label is a claim about a token nobody re-examined. `handoffs` make the commands a refusal names, located from the
+ * installation printing them, or say why there is none here.
  */
-export function readExchange(body: unknown): ExchangedToken {
+export function readExchange(body: unknown, handoffs: CliHandoffs): ExchangedToken {
   const response = body as OAuthResponse;
   if (response?.ok !== true) {
     const shown = safeSlackFailureText;
@@ -251,7 +259,12 @@ export function readExchange(body: unknown): ExchangedToken {
 
   if (!response.team?.id) {
     throw new CommsError('AUTH_REQUIRED', 'Slack did not say which workspace this token is for', {
-      hint: 'Start again with `agent-slack workspace add`.',
+      hint: handoffSentenceToFill(
+        handoffs.own(['workspace', 'add']),
+        ['<name>'],
+        (command) => `Start again with ${command}.`,
+        { instead: 'Start again with slack_workspace_add from a chat.' },
+      ),
     });
   }
 
@@ -268,9 +281,15 @@ export function readExchange(body: unknown): ExchangedToken {
    */
   if (!user.refresh_token || typeof user.expires_in !== 'number' || user.expires_in <= 0) {
     throw new CommsError('AUTH_REQUIRED', 'Slack issued a token that cannot be renewed', {
-      hint:
-        'The app must have token rotation enabled — check it at https://api.slack.com/apps, or re-create it ' +
-        'from `agent-slack manifest`, which asks for it.',
+      hint: handoffSentence(
+        handoffs.own(['manifest']),
+        (command) =>
+          `The app must have token rotation enabled — check it at https://api.slack.com/apps, or re-create it from ${command}, which asks for it.`,
+        {
+          instead:
+            'The app must have token rotation enabled — check it at https://api.slack.com/apps, or re-create it from the manifest slack_manifest prints, which asks for it.',
+        },
+      ),
     });
   }
 

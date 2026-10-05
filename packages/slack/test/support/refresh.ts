@@ -5,6 +5,7 @@ import { parseBundle, type TokenBundle } from '../../src/auth/bundle.ts';
 import type { ExitSignal, SignalHost } from '../../src/auth/exit.ts';
 import type { PersistPolicy } from '../../src/auth/refresh.ts';
 import { SlackContext } from '../../src/context.ts';
+import { slackHandoffs } from './handoffs.ts';
 import type { Harness } from './harness.ts';
 
 /** Shared by the refresh suites, which are split only so each stays inside the per-file timeout. */
@@ -26,7 +27,7 @@ export function contextFor(harness: Harness): SlackContext {
 
 export async function stored(harness: Harness, secretRef: string): Promise<TokenBundle | null> {
   const secrets = await harness.core.secrets('file');
-  return parseBundle(await secrets.get(secretRef));
+  return parseBundle(await secrets.get(secretRef), slackHandoffs(harness.core.paths));
 }
 
 /** `fetch` failing the way undici does: a `TypeError` whose `cause` carries the system error's code. */

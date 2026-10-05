@@ -14,6 +14,10 @@ import {
   validateExchange,
   viewOf,
 } from '../src/operations/workspaces.ts';
+import { assertNoBareCommand, slackHandoffs, slackInline, TEST_PATHS } from './support/handoffs.ts';
+
+/** Slack's own commands, located from this checkout, for the refusals that name one. */
+const HANDOFFS = slackHandoffs();
 
 /**
  * What must be true before a credential is written down.
@@ -81,7 +85,7 @@ function configWith(accounts: Record<string, AccountConfig> = {}): Config {
 }
 
 test('an exactly-right install passes', () => {
-  validateExchange({ token: token(), mode: 'read', flow: flow(), config: configWith() });
+  validateExchange({ handoffs: HANDOFFS, token: token(), mode: 'read', flow: flow(), config: configWith() });
 });
 
 test('a write scope in a read install is refused before anything is stored', () => {
@@ -93,6 +97,7 @@ test('a write scope in a read install is refused before anything is stored', () 
   assert.throws(
     () =>
       validateExchange({
+        handoffs: HANDOFFS,
         token: token({ scopes: [...scopesForMode('read'), 'chat:write'] }),
         mode: 'read',
         flow: flow(),
@@ -110,6 +115,7 @@ test('a missing scope names what Slack did not grant', () => {
   assert.throws(
     () =>
       validateExchange({
+        handoffs: HANDOFFS,
         token: token({ scopes: scopesForMode('read').filter((s) => s !== 'search:read') }),
         mode: 'read',
         flow: flow(),
@@ -126,7 +132,14 @@ test('a missing scope names what Slack did not grant', () => {
 test('the same account cannot be connected twice under two names', () => {
   // Two credentials for one person, two send ledgers, and no way to tell which an agent used.
   assert.throws(
-    () => validateExchange({ token: token(), mode: 'read', flow: flow(), config: configWith({ acme: account() }) }),
+    () =>
+      validateExchange({
+        handoffs: HANDOFFS,
+        token: token(),
+        mode: 'read',
+        flow: flow(),
+        config: configWith({ acme: account() }),
+      }),
     (error: CommsError) => {
       assert.match(error.message, /already connected as "acme"/);
       assert.match(error.hint ?? '', /reauth acme/);
@@ -144,6 +157,7 @@ test('a reauth that authorises a different person is refused', () => {
   assert.throws(
     () =>
       validateExchange({
+        handoffs: HANDOFFS,
         token: token({ userId: 'U-SOMEBODY-ELSE' }),
         mode: 'read',
         flow: flow(),
@@ -161,6 +175,7 @@ test('a reauth against a different workspace is refused', () => {
   assert.throws(
     () =>
       validateExchange({
+        handoffs: HANDOFFS,
         token: token({ workspaceId: 'T-OTHER' }),
         mode: 'read',
         flow: flow(),
@@ -177,6 +192,7 @@ test('a reauth through a different app is refused, which is the Gmail bug in Sla
   assert.throws(
     () =>
       validateExchange({
+        handoffs: HANDOFFS,
         token: token(),
         mode: 'read',
         flow: flow({ clientId: '9.9' }),
@@ -190,6 +206,7 @@ test('a reauth through a different app is refused, which is the Gmail bug in Sla
   assert.throws(
     () =>
       validateExchange({
+        handoffs: HANDOFFS,
         token: token({ appId: 'A-OTHER' }),
         mode: 'read',
         flow: flow(),
@@ -202,6 +219,7 @@ test('a reauth through a different app is refused, which is the Gmail bug in Sla
 
 test('a reauth by the same person, workspace and app is allowed', () => {
   validateExchange({
+    handoffs: HANDOFFS,
     token: token(),
     mode: 'read',
     flow: flow(),
@@ -214,18 +232,18 @@ test('an alias is checked against mailboxes as well as workspaces', () => {
   // S1 kept `inboxes` and added `accounts` beside it, sharing one namespace — so a mailbox and a workspace
   // cannot both be called `work` and leave every later lookup ambiguous.
   const config = configWith({ acme: account() });
-  assert.throws(() => checkAliasFree(config, 'acme'), /already connected/);
+  assert.throws(() => checkAliasFree(config, 'acme', HANDOFFS), /already connected/);
   // `core`'s rule allows a leading digit, so `1nvalid` is fine — the first version of this test assumed it was
   // not, and the error's hint said so too. Both were describing a stricter rule than the code has.
-  checkAliasFree(config, '1nvalid');
+  checkAliasFree(config, '1nvalid', HANDOFFS);
   assert.throws(
-    () => checkAliasFree(config, 'Not An Alias'),
+    () => checkAliasFree(config, 'Not An Alias', HANDOFFS),
     (error: CommsError) => {
       assert.equal(error.code, 'USAGE');
       return true;
     },
   );
-  checkAliasFree(config, 'other');
+  checkAliasFree(config, 'other', HANDOFFS);
 });
 
 test('the bundle records the 30-day refresh expiry Slack does not report', () => {
@@ -252,23 +270,31 @@ test('a grant with no refresh half is refused at the exchange, not stored withou
   for (const half of [{ refresh_token: undefined }, { expires_in: undefined }, { expires_in: 0 }]) {
     assert.throws(
       () =>
-        readExchange({
-          ok: true,
-          team: { id: 'T0001', name: 'Acme' },
-          authed_user: {
-            id: 'U0001',
-            access_token: 'fake-user-token-1',
-            refresh_token: 'fake-refresh-token-1',
-            expires_in: 43_200,
-            token_type: 'user',
-            scope: scopesForMode('read').join(','),
-            ...half,
+        readExchange(
+          {
+            ok: true,
+            team: { id: 'T0001', name: 'Acme' },
+            authed_user: {
+              id: 'U0001',
+              access_token: 'fake-user-token-1',
+              refresh_token: 'fake-refresh-token-1',
+              expires_in: 43_200,
+              token_type: 'user',
+              scope: scopesForMode('read').join(','),
+              ...half,
+            },
           },
-        }),
+          HANDOFFS,
+        ),
       (error: CommsError) => {
         assert.equal(error.code, 'AUTH_REQUIRED');
         assert.match(error.message, /cannot be renewed/);
         assert.match(error.hint ?? '', /token rotation/);
+        // The manifest that asks for it is this installation's own command, located (CUE-403).
+        assert.ok(
+          error.hint?.includes(`re-create it from ${slackInline(TEST_PATHS, ['manifest'])}, which asks for it`),
+        );
+        assertNoBareCommand(error.hint ?? '');
         return true;
       },
       `a grant missing ${Object.keys(half)[0]} was accepted`,
@@ -308,7 +334,7 @@ test('listing is alphabetical and ignores mailboxes', () => {
 
 test('an unknown workspace says how to find the real ones', () => {
   assert.throws(
-    () => requireWorkspace(configWith(), 'nope'),
+    () => requireWorkspace(configWith(), 'nope', HANDOFFS),
     (error: CommsError) => {
       assert.equal(error.code, 'NOT_FOUND');
       assert.match(error.hint ?? '', /workspace list/);
@@ -329,6 +355,7 @@ test('removing deletes the credential before the entry that names it', async () 
   const stored = account();
   await removeWorkspace(
     {
+      handoffs: HANDOFFS,
       config: { ...emptyConfig(), accounts: { acme: stored } },
       secrets: {
         async delete(ref) {
@@ -353,6 +380,7 @@ test('a secret store that refuses leaves the workspace listed, not orphaned', as
   await assert.rejects(
     removeWorkspace(
       {
+        handoffs: HANDOFFS,
         config,
         secrets: {
           delete: () => Promise.reject(new Error('the keychain said no')),
@@ -394,6 +422,7 @@ test('a reauth is bound to the account the sign-in set out to renew, not to what
   assert.throws(
     () =>
       validateExchange({
+        handoffs: HANDOFFS,
         token: token({ userId: 'U-SOMEBODY-ELSE' }),
         mode: 'read',
         flow: started,
@@ -408,6 +437,7 @@ test('a reauth is bound to the account the sign-in set out to renew, not to what
   assert.throws(
     () =>
       validateExchange({
+        handoffs: HANDOFFS,
         token: token({ workspaceId: 'T-OTHER' }),
         mode: 'read',
         flow: started,
@@ -421,6 +451,7 @@ test('a reauth is bound to the account the sign-in set out to renew, not to what
   assert.throws(
     () =>
       validateExchange({
+        handoffs: HANDOFFS,
         token: token({ appId: 'A-OTHER' }),
         mode: 'read',
         flow: started,
@@ -443,6 +474,7 @@ test('an app id recorded at sign-in must be matched, not merely not contradicted
   assert.throws(
     () =>
       validateExchange({
+        handoffs: HANDOFFS,
         token: token({ appId: undefined }),
         mode: 'read',
         flow: started,
@@ -470,6 +502,7 @@ test('a sign-in that changed which app it goes through cannot renew an account',
   assert.throws(
     () =>
       validateExchange({
+        handoffs: HANDOFFS,
         token: token(),
         mode: 'read',
         flow: flow({
@@ -499,6 +532,7 @@ test('removing does not delete a workspace that was renewed in the meantime', as
   await assert.rejects(
     removeWorkspace(
       {
+        handoffs: HANDOFFS,
         config: { ...emptyConfig(), accounts: { acme: stale } },
         secrets: {
           async delete(ref) {
@@ -534,6 +568,7 @@ test('removing does not delete a renewal that kept the account’s id, and stran
   await assert.rejects(
     removeWorkspace(
       {
+        handoffs: HANDOFFS,
         config: { ...emptyConfig(), accounts: { acme: stale } },
         secrets: {
           async delete(ref) {
@@ -567,6 +602,7 @@ test('removing refuses a workspace that is not the account whose removal was app
   await assert.rejects(
     removeWorkspace(
       {
+        handoffs: HANDOFFS,
         config: { ...emptyConfig(), accounts: { acme: held } },
         secrets: {
           async delete(ref) {
@@ -590,6 +626,7 @@ test('removing refuses a workspace that is not the account whose removal was app
   // The account that was approved is removed as before.
   const removed = await removeWorkspace(
     {
+      handoffs: HANDOFFS,
       config: { ...emptyConfig(), accounts: { acme: held } },
       secrets: { delete: async () => true },
       update: async (mutator) => mutator({ ...emptyConfig(), accounts: { acme: held } }),
@@ -611,6 +648,7 @@ test('removing refuses when a migration switched backends underneath it', async 
   await assert.rejects(
     removeWorkspace(
       {
+        handoffs: HANDOFFS,
         config: { ...emptyConfig(), secrets: { store: 'file' }, accounts: { acme: stored } },
         secrets: { kind: 'file', delete: async () => true },
         async update(mutator) {

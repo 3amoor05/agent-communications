@@ -8,6 +8,7 @@ import { CommsError, resolveProfileSlackTarget } from '@agentcomms/core';
 import type { FlowOutcome } from '../src/auth/flow.ts';
 import { SlackContext } from '../src/context.ts';
 import { finishSignIn, startSignIn } from '../src/operations/signin.ts';
+import { assertNoBareCommand, slackInline } from './support/handoffs.ts';
 import { slackOk } from './support/harness.ts';
 import { fetchListener, LISTENER_COMMAND, running, stopListeners } from './support/listener.ts';
 import { newOrganisationHarness } from './support/organisation.ts';
@@ -61,14 +62,17 @@ test('a detached callback already exchanging is unaffected by the foreground int
   assert.equal(await f.context.flows.peek(f.flow.flowId), null);
 });
 
-function cancelled(error: unknown, flowId: string) {
+function cancelled(error: unknown, flowId: string, context: SlackContext) {
   assert.ok(error instanceof CommsError);
   assert.equal(error.code, 'APPROVAL_PENDING');
   assert.match(error.message, /still open/);
   assert.doesNotMatch(`${error.message} ${error.hint}`, /did not complete|declined|administrator/);
+  // This installation's own command, located, for the shell the context prints for (CUE-403).
+  const command = slackInline(context.core.paths, ['workspace', 'add', '--finish', flowId], context.platform);
+  assert.equal(error.hint, `Finish signing in in the browser, then run ${command}.`);
   // All these words are shell-safe on both pinned platforms, including the generated flow id.
-  const command = `agent-slack workspace add --finish ${flowId}`;
-  assert.equal(error.hint, `Finish signing in in the browser, then run \`${command}\`.`);
+  assert.match(error.hint ?? '', new RegExp(` workspace add --finish ${flowId}\`\\.$`));
+  assertNoBareCommand(error.hint ?? '');
   assert.equal(error.details?.flowId, flowId);
   return true;
 }
@@ -87,7 +91,7 @@ for (const platform of ['darwin', 'win32'] as const) {
     };
     await assert.rejects(
       finishSignIn(f.context, { flowId: f.flow.flowId, waitSeconds: 0, signal: controller.signal }),
-      (error) => cancelled(error, f.flow.flowId),
+      (error) => cancelled(error, f.flow.flowId, f.context),
     );
     assert.equal(reads, 0, 'an aborted wait polled the outcome');
     assert.deepEqual(await f.context.flows.get(f.flow.flowId), f.flow);
@@ -129,7 +133,7 @@ test('abort during a long polling sleep promptly leaves the detached sign-in ope
     pollMs: 1000,
     signal: controller.signal,
   });
-  const rejected = assert.rejects(waiting, (error) => cancelled(error, f.flow.flowId));
+  const rejected = assert.rejects(waiting, (error) => cancelled(error, f.flow.flowId, f.context));
   await firstPoll;
   await new Promise((done) => setTimeout(done, 30));
   controller.abort();
@@ -160,7 +164,7 @@ for (const outcome of [{ code: 'fake-code' }, { error: 'access_denied' }] satisf
     };
     await assert.rejects(
       finishSignIn(f.context, { flowId: f.flow.flowId, waitSeconds: 0, signal: controller.signal }),
-      (error) => cancelled(error, f.flow.flowId),
+      (error) => cancelled(error, f.flow.flowId, f.context),
     );
     assert.deepEqual(await f.context.flows.get(f.flow.flowId), f.flow);
     assert.deepEqual(await read(f.flow.flowId), saved);
@@ -229,7 +233,7 @@ for (const when of ['during mkdir', 'after atomic open'] as const) {
     });
     const finishing = finishSignIn(f.context, { flowId: f.flow.flowId, waitSeconds: 0, signal: controller.signal });
     if (when === 'during mkdir') {
-      await assert.rejects(finishing, (error) => cancelled(error, f.flow.flowId));
+      await assert.rejects(finishing, (error) => cancelled(error, f.flow.flowId, f.context));
       assert.equal(f.harness.calls.length, 0);
       assert.deepEqual(await f.context.flows.get(f.flow.flowId), f.flow);
       assert.deepEqual(await f.context.flows.readOutcome(f.flow.flowId), saved);

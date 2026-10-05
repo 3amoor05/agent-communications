@@ -26,14 +26,14 @@ export interface GateDeps extends PostDeps {
 
 export async function gateDepsFor(context: SlackContext, alias: string, deps: SessionDeps = {}): Promise<GateDeps> {
   const config = await context.config();
-  const { alias: name, account } = requireWorkspace(config, alias);
+  const { alias: name, account } = requireWorkspace(config, alias, context.handoffs);
   const { call, teamId } = await openWorkspace(context, name, deps);
   return {
     call,
     accountId: account.id,
     workspaceId: teamId,
     workspaceName: name,
-    platform: context.platform,
+    handoffs: context.handoffs,
     postingAs: account.userId,
     policy: effectiveAccountSendPolicy(config, name),
     // What a post with files is checked against, at prepare and again at send: the mode, the grant, and the folders.

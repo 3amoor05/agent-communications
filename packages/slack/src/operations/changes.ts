@@ -2,20 +2,20 @@ import {
   type AccountConfig,
   type ChangePolicy,
   type ChangeRequest,
+  type CliHandoffs,
   CommsError,
   type Config,
-  commandText,
   defaultChangePolicy,
   findById,
   type GatedChange,
-  inlineCommand,
+  handoffSentence,
+  handoffText,
   neutralise,
   type ProfileSlackTarget,
   parseName,
   refuseUnclaimedApproval,
   resolveProfileSlackTarget,
   type SendPolicy,
-  shellCommand,
   withCredentialsLock,
 } from '@agentcomms/core';
 import type { SlackContext } from '../context.ts';
@@ -66,11 +66,13 @@ export function signInStarted(context: SlackContext, started: StartedSignIn, rea
     expiresAt: started.expiresAt,
     finish: {
       tool: 'slack_workspace_finish',
-      command: commandText(
-        shellCommand(
-          ['agent-slack', 'workspace', ...(reauth ? ['reauth', started.alias] : ['add']), '--finish', started.flowId],
-          context.platform,
-        ),
+      command: handoffText(
+        context.handoffs.own([
+          'workspace',
+          ...(reauth ? ['reauth', started.alias] : ['add']),
+          '--finish',
+          started.flowId,
+        ]),
       ),
     },
   };
@@ -151,21 +153,22 @@ export function connectWorkspace(context: SlackContext, input: ConnectInput): Ga
   const mode = modeWanted(input.mode) ?? 'read';
   type Selection = { clientId: string; port: number; profile?: ProfileSlackTarget };
   type ConnectRequest = ChangeRequest & { readonly selection: Selection };
+  const { handoffs } = context;
+  const createTheApp = () =>
+    new CommsError('USAGE', 'the Slack app’s Client ID is needed', {
+      hint: `${handoffSentence(
+        handoffs.own(['manifest', '--port', '51234']),
+        (command) => `Create the app first: ${command}.`,
+        { instead: 'Create the app first, from the manifest slack_manifest prints.' },
+      )} The Client ID is not a secret.`,
+    });
   const checked = (config: Config): Selection => {
-    checkAliasFree(config, input.alias);
+    checkAliasFree(config, input.alias, handoffs);
     if (input.clientId !== undefined) {
-      if (!input.clientId) {
-        throw new CommsError('USAGE', 'the Slack app’s Client ID is needed', {
-          hint: 'Create the app first: `agent-slack manifest --port 51234`. The Client ID is not a secret.',
-        });
-      }
+      if (!input.clientId) throw createTheApp();
       return { clientId: input.clientId, port: checkedPort(input.port) };
     }
-    if (config.version !== 2) {
-      throw new CommsError('USAGE', 'the Slack app’s Client ID is needed', {
-        hint: 'Create the app first: `agent-slack manifest --port 51234`. The Client ID is not a secret.',
-      });
-    }
+    if (config.version !== 2) throw createTheApp();
     if (input.port !== undefined) {
       throw new CommsError('USAGE', 'a profile sign-in uses the profile port; --port needs an explicit --client-id', {
         hint: 'Leave out --port to use the organisation app, or pass --client-id and --port for your own app.',
@@ -173,7 +176,7 @@ export function connectWorkspace(context: SlackContext, input: ConnectInput): Ga
     }
     const organisation = parseName(input.alias)?.org;
     if (!organisation) throw new CommsError('USAGE', 'a profile sign-in needs an organisation/slack name');
-    const target = resolveProfileSlackTarget(config, organisation, mode, context.platform);
+    const target = resolveProfileSlackTarget(config, organisation, mode, handoffs);
     const profile = {
       ...target,
       label: neutralise(target.label).text,
@@ -233,14 +236,21 @@ export interface ReauthInput extends SignInSurface {
   readonly port?: unknown;
 }
 
-function reauthTarget(config: Config, input: ReauthInput, platform: NodeJS.Platform) {
-  const found = requireWorkspace(config, input.alias);
+/** A workspace that does not record its app, refused with the one way back: removed, and added again. */
+function noRecordedApp(alias: string, handoffs: CliHandoffs): CommsError {
+  return new CommsError('CONFIG', `"${alias}" does not record which Slack app it was connected through`, {
+    hint: handoffSentence(
+      handoffs.own(['workspace', 'remove', alias]),
+      (command) => `Remove and add it again: ${command}.`,
+      { instead: 'Remove and add it again: slack_workspace_remove, then slack_workspace_add, from a chat.' },
+    ),
+  });
+}
+
+function reauthTarget(config: Config, input: ReauthInput, handoffs: CliHandoffs) {
+  const found = requireWorkspace(config, input.alias, handoffs);
   const clientId = found.account.oauthClientId;
-  if (!clientId) {
-    throw new CommsError('CONFIG', `"${found.alias}" does not record which Slack app it was connected through`, {
-      hint: `Remove and add it again: ${inlineCommand(shellCommand(['agent-slack', 'workspace', 'remove', found.alias], platform))}.`,
-    });
-  }
+  if (!clientId) throw noRecordedApp(found.alias, handoffs);
   // Checked, not assumed: a stored mode that is neither would otherwise be read as `send`, or skip the approval.
   const was = parseMode(found.account.mode ?? found.account.tier, `"${found.alias}"`);
   if (found.account.organisation) {
@@ -249,7 +259,7 @@ function reauthTarget(config: Config, input: ReauthInput, platform: NodeJS.Platf
     if (input.port !== undefined) {
       throw new CommsError('USAGE', 'a profile sign-in uses the profile port');
     }
-    const target = resolveProfileSlackTarget(config, found.account.organisation, role, platform);
+    const target = resolveProfileSlackTarget(config, found.account.organisation, role, handoffs);
     const profile = {
       ...target,
       label: neutralise(target.label).text,
@@ -279,7 +289,7 @@ export function reauthWorkspace(context: SlackContext, input: ReauthInput): Gate
   modeWanted(input.mode);
   return {
     plan: (config) => {
-      const { found, was, mode, profile } = reauthTarget(config, input, context.platform);
+      const { found, was, mode, profile } = reauthTarget(config, input, context.handoffs);
       const after = structuredClone(config);
       after.accounts = { ...after.accounts, [found.alias]: { ...found.account, tier: mode, mode } };
       const widens = was === 'read' && mode === 'send';
@@ -293,7 +303,7 @@ export function reauthWorkspace(context: SlackContext, input: ReauthInput): Gate
     },
     apply: async (consent, request) => {
       // From the configuration the approval was claimed against, so the account signed in is the one approved.
-      const { found, clientId, mode, port, profile } = reauthTarget(request.before, input, context.platform);
+      const { found, clientId, mode, port, profile } = reauthTarget(request.before, input, context.handoffs);
       const { account } = found;
       return startSignIn(context, {
         alias: found.alias,
@@ -394,7 +404,7 @@ export async function planModeSet(
 ): Promise<ModeSetPlan> {
   const planned = await modeSetPlan(context, alias, wanted, options);
   if (planned.kind !== 'change') {
-    refuseUnclaimedApproval(options.approvalId, modeApprovalRefusal(planned, context.surface, context.platform));
+    refuseUnclaimedApproval(options.approvalId, modeApprovalRefusal(planned, context.surface, context.handoffs));
   }
   return planned;
 }
@@ -407,13 +417,14 @@ async function modeSetPlan(
 ): Promise<ModeSetPlan> {
   const target = modeWanted(wanted);
   const config = await context.config();
-  const found = requireWorkspace(config, alias);
+  const { handoffs } = context;
+  const found = requireWorkspace(config, alias, handoffs);
   const asked = options.port === undefined ? undefined : checkedPort(options.port);
-  const report = modeReport(found.alias, found.account, asked, context.platform);
+  const report = modeReport(found.alias, found.account, handoffs, asked);
   if (target === undefined || target === report.mode) return { kind: 'report', report };
   if (found.account.organisation) {
     const input = { alias: found.alias, mode: target, ...options };
-    reauthTarget(config, input, context.platform);
+    reauthTarget(config, input, handoffs);
     return {
       kind: 'change',
       change: reauthWorkspace(context, input),
@@ -421,25 +432,18 @@ async function modeSetPlan(
         alias: found.alias,
         mode: report.mode,
         changed: false,
-        steps: profileMoveSteps(found.alias, target, context.platform),
+        steps: profileMoveSteps(found.alias, target, handoffs),
       },
     };
   }
   if (target === 'read') {
     // The port is in two of the steps: the one asked for, else the one this workspace last signed in with.
-    const steps = narrowingSteps(
-      found.alias,
-      checkedPort(options.port, found.account.redirectPort),
-      { knowsItsApp: found.account.oauthClientId !== undefined },
-      context.platform,
-    );
+    const steps = narrowingSteps(found.alias, handoffs, checkedPort(options.port, found.account.redirectPort), {
+      knowsItsApp: found.account.oauthClientId !== undefined,
+    });
     return { kind: 'steps', result: { alias: found.alias, mode: report.mode, changed: false, steps } };
   }
-  if (!found.account.oauthClientId) {
-    throw new CommsError('CONFIG', `"${found.alias}" does not record which Slack app it was connected through`, {
-      hint: `Remove and add it again: ${inlineCommand(shellCommand(['agent-slack', 'workspace', 'remove', found.alias], context.platform))}.`,
-    });
-  }
+  if (!found.account.oauthClientId) throw noRecordedApp(found.alias, handoffs);
   // Both steps name the port: the one asked for, else the one this workspace last signed in with — never a guess.
   const port = checkedPort(options.port, found.account.redirectPort);
   if (report.outwardScopes.length === 0 && options.appUpdated !== true) {
@@ -450,15 +454,10 @@ async function modeSetPlan(
         mode: report.mode,
         changed: false,
         appUpdateNeeded: true,
-        steps: wideningSteps(found.alias, port, found.account.appId, context.platform),
+        steps: wideningSteps(found.alias, handoffs, port, found.account.appId),
         manifest: await manifestFor(context, { mode: 'send', port, workspace: found.alias }),
         terminalAlternative: found.account.appId
-          ? commandText(
-              shellCommand(
-                ['agent-slack', 'app', 'update', found.alias, '--mode', 'send', '--port', String(port)],
-                context.platform,
-              ),
-            )
+          ? handoffText(handoffs.own(['app', 'update', found.alias, '--mode', 'send', '--port', String(port)]))
           : null,
       },
     };
@@ -476,7 +475,7 @@ async function modeSetPlan(
       alias: found.alias,
       mode: report.mode,
       changed: false,
-      steps: wideningSteps(found.alias, port, found.account.appId, context.platform),
+      steps: wideningSteps(found.alias, handoffs, port, found.account.appId),
     },
   };
 }
@@ -485,19 +484,23 @@ async function modeSetPlan(
 function modeApprovalRefusal(
   planned: Exclude<ModeSetPlan, { kind: 'change' }>,
   surface: 'cli' | 'mcp',
-  platform: NodeJS.Platform,
+  handoffs: CliHandoffs,
 ): { message: string; hint: string } {
   const alias = planned.kind === 'report' ? planned.report.alias : planned.result.alias;
   const flag = surface === 'cli' ? '--approval' : 'approvalId';
-  const widen =
+  const tool = 'slack_mode_set with `mode: "send"` and `appUpdated: true`';
+  // The command at a terminal, located; with none here, the tool from a chat and why there is no command.
+  const widen = (say: (how: string) => string): string =>
     surface === 'cli'
-      ? inlineCommand(shellCommand(['agent-slack', 'workspace', 'mode', alias, 'send', '--app-updated'], platform))
-      : 'slack_mode_set with `mode: "send"` and `appUpdated: true`';
+      ? handoffSentence(handoffs.own(['workspace', 'mode', alias, 'send', '--app-updated']), say, {
+          instead: say(tool),
+        })
+      : say(tool);
   switch (planned.kind) {
     case 'report':
       return {
         message: `this only reports ${alias}'s mode, so it takes no ${flag}`,
-        hint: `An approval goes with the move to send it was prepared for: ${widen}, with it.`,
+        hint: widen((how) => `An approval goes with the move to send it was prepared for: ${how}, with it.`),
       };
     case 'steps':
       return {
@@ -507,7 +510,10 @@ function modeApprovalRefusal(
     case 'app-update-needed':
       return {
         message: `${alias}'s app has to ask for the send scopes first, so this starts nothing and takes no ${flag}`,
-        hint: `Once the person says its manifest does, ${widen} — with ${flag} if they have already approved the move.`,
+        hint: widen(
+          (how) =>
+            `Once the person says its manifest does, ${how} — with ${flag} if they have already approved the move.`,
+        ),
       };
   }
 }
@@ -524,7 +530,7 @@ function modeApprovalRefusal(
 export function removeWorkspaceChange(context: SlackContext, alias: string): GatedChange<RemovedWorkspace> {
   return {
     plan: (config) => {
-      const found = requireWorkspace(config, alias);
+      const found = requireWorkspace(config, alias, context.handoffs);
       const { [found.alias]: _removed, ...rest } = config.accounts;
       return {
         account: found.alias,
@@ -535,8 +541,8 @@ export function removeWorkspaceChange(context: SlackContext, alias: string): Gat
       };
     },
     apply: async (_consent, request) => {
-      const expectId = requireWorkspace(request.before, alias).account.id;
-      const current = requireWorkspace(await context.config(), alias);
+      const expectId = requireWorkspace(request.before, alias, context.handoffs).account.id;
+      const current = requireWorkspace(await context.config(), alias, context.handoffs);
       if (current.account.id !== expectId) {
         throw new CommsError('CONFIG', `"${alias}" changed after its removal was approved, so nothing was removed`);
       }
@@ -562,7 +568,7 @@ export function removeWorkspaceChange(context: SlackContext, alias: string): Gat
             config: await context.config(),
             secrets: await context.secrets(),
             update: (mutator) => context.core.config.update(mutator),
-            platform: context.platform,
+            handoffs: context.handoffs,
           },
           alias,
           { expectId, cleanup },
@@ -611,8 +617,8 @@ function policiesOf(config: Config, alias: string, account: AccountConfig): Work
 }
 
 /** The policies in force for a workspace, as a result that changed nothing: `workspace policy <name>`. */
-export function policyReport(config: Config, alias: string): PolicyResult {
-  const found = requireWorkspace(config, alias);
+export function policyReport(config: Config, alias: string, handoffs: CliHandoffs): PolicyResult {
+  const found = requireWorkspace(config, alias, handoffs);
   const now = policiesOf(config, found.alias, found.account);
   return { ...now, changed: false, previous: { sendPolicy: now.sendPolicy, changePolicy: now.changePolicy } };
 }
@@ -669,13 +675,13 @@ export function policyChange(context: SlackContext, alias: string, wanted: Polic
     .join(', ');
   return {
     plan: (config) => {
-      const found = requireWorkspace(config, alias);
+      const found = requireWorkspace(config, alias, context.handoffs);
       const after = structuredClone(config);
       after.accounts = { ...after.accounts, [found.alias]: setOn(found.account) };
       return { account: found.alias, before: config, after, summary: `${found.alias}: ${said}` };
     },
     apply: async (consent, request) => {
-      const { alias: name, account } = requireWorkspace(request.before, alias);
+      const { alias: name, account } = requireWorkspace(request.before, alias, context.handoffs);
       const previous = policiesOf(request.before, name, account);
       // The account as it was written, and the name it was written under: set inside the write, which is the one
       // place nothing can move between the read and the result.
@@ -689,7 +695,11 @@ export function policyChange(context: SlackContext, alias: string, wanted: Polic
           const held = findById(current, 'account', account.id);
           if (!held) {
             throw new CommsError('CONFIG', `"${name}" changed while its policy was being set, so nothing was set`, {
-              hint: 'Check it with `agent-slack workspace list`, then set the policy again.',
+              hint: handoffSentence(
+                context.handoffs.own(['workspace', 'list']),
+                (command) => `Check it with ${command}, then set the policy again.`,
+                { instead: 'Check it with slack_workspaces_list from a chat, then set the policy again.' },
+              ),
             });
           }
           written = { alias: held.alias, account: setOn(held.account) };

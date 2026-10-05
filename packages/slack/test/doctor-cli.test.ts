@@ -14,6 +14,7 @@ import { removeWorkspaceChange } from '../src/operations/changes.ts';
 import { runDoctor } from '../src/operations/doctor.ts';
 import { createPendingRevocation } from '../src/operations/revocations.ts';
 import { startFakeSlack } from './support/fake-slack.ts';
+import { assertNoBareCommand, slackCommand } from './support/handoffs.ts';
 import { type Harness, newHarness, slackOk } from './support/harness.ts';
 
 /**
@@ -168,7 +169,7 @@ test('workspace remove retries matching old tokens before deleting the current c
     );
     assert.equal(removed.cleanup?.[0]?.tokens[0]?.status, 'pending');
     assert.equal(removed.cleanup?.[0]?.tokens[1]?.status, 'pending');
-    const text = renderRemoved(removed);
+    const text = renderRemoved(removed, context.handoffs);
     assert.match(text, /access pending/);
     assert.match(text, /refresh pending/);
     assert.match(text, new RegExp(old.accessExpiresAt));
@@ -349,8 +350,12 @@ test('removal reports a retained ledger entry honestly when its old bundle is mi
       );
       const issue = removed.cleanup[0]?.issue;
       assert.ok(issue, damaged);
-      const text = renderRemoved(removed);
-      assert.match(text, /ledger entry remains for agent-slack doctor to retry/);
+      const text = renderRemoved(removed, context.handoffs);
+      assert.ok(
+        text.includes(`ledger entry remains for ${slackCommand(harness.core.paths, ['doctor'])} to retry`),
+        text,
+      );
+      assertNoBareCommand(text);
       assert.ok(text.includes(issue.message), `${damaged}: the cleanup issue was omitted`);
       assert.doesNotMatch(text, /old credential bundle remains/);
       assert.match(text, damaged === 'missing' ? /missing from its recorded store/ : /could not be read/);

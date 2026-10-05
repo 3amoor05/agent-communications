@@ -8,6 +8,7 @@ import type { CommsError } from '@agentcomms/core';
 import { buildAuthorizeUrl } from '../src/auth/authorize.ts';
 import { type FlowStore, fillMarker, newFlowId, openFlowStore, type SlackFlow } from '../src/auth/flow.ts';
 import { startLoopback } from '../src/auth/listener.ts';
+import { slackHandoffs } from './support/handoffs.ts';
 import { fetchListener } from './support/listener.ts';
 
 /**
@@ -47,7 +48,7 @@ for (const access of ['peek', 'get', 'claim', 'pending'] as const) {
 
 async function store(now: () => Date = () => NOW): Promise<{ dir: string; flows: FlowStore }> {
   const dir = await mkdtemp(join(tmpdir(), 'slack-flow-'));
-  return { dir, flows: openFlowStore(dir, now) };
+  return { dir, flows: openFlowStore(dir, now, slackHandoffs()) };
 }
 
 function flow(over: Partial<SlackFlow> = {}): SlackFlow {
@@ -73,7 +74,7 @@ test('a saved flow is readable by another process, which is the whole point', as
   await flows.save(original);
 
   // A different store object over the same directory — the stand-in for `--finish` in a later process.
-  const later = openFlowStore(dir, () => NOW);
+  const later = openFlowStore(dir, () => NOW, slackHandoffs());
   assert.deepEqual(await later.peek(original.flowId), original);
 });
 
@@ -286,7 +287,7 @@ test('the outcome the listener leaves is readable by the process that finishes',
   assert.equal(await flows.readOutcome(original.flowId), null, 'an outcome existed before anything wrote one');
 
   await flows.recordOutcome(original.flowId, { code: 'fake-authorisation-code' });
-  const later = openFlowStore(dir, () => NOW);
+  const later = openFlowStore(dir, () => NOW, slackHandoffs());
   const outcome = await later.readOutcome(original.flowId);
   assert.equal((outcome as { code: string }).code, 'fake-authorisation-code');
 });
@@ -330,7 +331,7 @@ test('a claim survives across processes, because it is a file and not a variable
   await flows.claim(original.flowId);
 
   // A different store object over the same directory — the stand-in for a second `--finish`.
-  const later = openFlowStore(dir, () => NOW);
+  const later = openFlowStore(dir, () => NOW, slackHandoffs());
   await assert.rejects(later.claim(original.flowId), (error: CommsError) => {
     assert.match(error.message, /already been finished/);
     return true;

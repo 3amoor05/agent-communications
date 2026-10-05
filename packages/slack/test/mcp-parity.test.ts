@@ -15,6 +15,7 @@ import { scopesForMode } from '../src/manifest.ts';
 import { createSlackMcpServer } from '../src/mcp/server.ts';
 import { createDraft } from '../src/operations/drafts.ts';
 import { checkedWait } from '../src/operations/signin.ts';
+import { locatedSlackLine, slackHandoffs, slackInlineToFill } from './support/handoffs.ts';
 import { type Harness, newHarness, TEST_CLIENT_ID } from './support/harness.ts';
 import { LISTENER_COMMAND, stopListeners } from './support/listener.ts';
 import { newOrganisationHarness, READ_CLIENT_ID, SEND_CLIENT_ID } from './support/organisation.ts';
@@ -163,11 +164,16 @@ afterEach(async () => {
 });
 
 async function track(harness: Harness, flowId: string): Promise<void> {
-  const flow = await openFlowStore(harness.core.paths.stateDir, () => new Date()).peek(flowId);
+  const flow = await openFlowStore(
+    harness.core.paths.stateDir,
+    () => new Date(),
+    slackHandoffs(harness.core.paths),
+  ).peek(flowId);
   if (flow?.listenerPid) strays.push(flow.listenerPid);
 }
 
-const draftsOf = async (harness: Harness) => openDraftStore(harness.core.paths.stateDir, () => new Date()).list();
+const draftsOf = async (harness: Harness) =>
+  openDraftStore(harness.core.paths.stateDir, () => new Date(), slackHandoffs(harness.core.paths)).list();
 
 // ── Preparing a draft already written (P1-4) ─────────────────────────────────────────────────────────────────────
 
@@ -356,7 +362,8 @@ test('the wait is checked by the operation: the same refusal, with a code, and t
 
     const pendingAtTerminal = await cliError(harness, ['workspace', 'add', '--finish', started.flowId, '--wait', '0']);
     assert.equal(pendingAtTerminal.code, 'APPROVAL_PENDING');
-    assert.match(pendingAtTerminal.hint ?? '', new RegExp(`agent-slack workspace add --finish ${started.flowId}`));
+    // At a terminal, this installation's own command, located (CUE-403).
+    locatedSlackLine(pendingAtTerminal.hint ?? '', ['workspace', 'add', '--finish', started.flowId, '--wait', '60']);
 
     // The schema a client reads still states the bounds.
     const tool = (await client.listTools()).tools.find((entry) => entry.name === 'slack_workspace_finish');
@@ -389,12 +396,12 @@ test('a sign-in for another workspace is refused in the words of the surface tha
 
     const fromCli = await cliError(harness, ['workspace', 'reauth', 'zeta', '--finish', renewal.flowId, '--wait', '0']);
     assert.equal(fromCli.message, fromTool.message, 'the same refusal');
-    assert.match(fromCli.hint ?? '', new RegExp(`agent-slack workspace reauth acme --finish ${renewal.flowId}`));
+    locatedSlackLine(fromCli.hint ?? '', ['workspace', 'reauth', 'acme', '--finish', renewal.flowId]);
 
     // And a renewal still waiting names the workspace at the terminal, which `reauth` cannot run without.
     const pending = await cliError(harness, ['workspace', 'reauth', 'acme', '--finish', renewal.flowId, '--wait', '0']);
     assert.equal(pending.code, 'APPROVAL_PENDING');
-    assert.match(pending.hint ?? '', new RegExp(`agent-slack workspace reauth acme --finish ${renewal.flowId}`));
+    locatedSlackLine(pending.hint ?? '', ['workspace', 'reauth', 'acme', '--finish', renewal.flowId, '--wait', '60']);
   } finally {
     await close();
   }
@@ -505,7 +512,7 @@ test('a mention the preview cannot count — a user group, an unknown special �
    */
   const harness = await newHarness();
   const account = await harness.addWorkspace({ alias: 'acme', mode: 'send' });
-  const store = openDraftStore(harness.core.paths.stateDir, () => new Date());
+  const store = openDraftStore(harness.core.paths.stateDir, () => new Date(), slackHandoffs(harness.core.paths));
   const { call, close } = await connect(harness);
   try {
     for (const [mention, shown] of [
@@ -727,7 +734,10 @@ test('a word that is not one is refused with USAGE by the operation, and the sch
       assert.deepEqual([fromTool.code, fromTool.message], ['USAGE', '"loud" is not a mode'], tool);
     }
     assert.deepEqual(await harness.core.approvals.list(), [], 'nothing was prepared for a word that is not one');
-    assert.deepEqual(await openFlowStore(harness.core.paths.stateDir, () => new Date()).pending(), []);
+    assert.deepEqual(
+      await openFlowStore(harness.core.paths.stateDir, () => new Date(), slackHandoffs(harness.core.paths)).pending(),
+      [],
+    );
 
     // What a client and a model read is unchanged: each field still lists exactly its words.
     const tools = (await client.listTools()).tools;
@@ -1051,11 +1061,9 @@ test('a draft is shown as what it would post, by `draft show` and `slack_draft_g
     assert.equal(shown.source, undefined, 'words it does not post are not offered as its own');
     assert.equal(shown.problem?.code, 'BAD_DATA');
     assert.equal(shown.problem?.reason, 'source-differs');
-    assert.match(
-      shown.problem?.hint ?? '',
-      new RegExp(
-        `^It was changed outside agent-slack\\..*\`agent-slack draft delete ${draftId} --workspace '<name>'\``,
-      ),
+    assert.equal(
+      shown.problem?.hint,
+      `It was changed outside agent-slack. Delete it with ${slackInlineToFill(harness.core.paths, ['draft', 'delete', draftId, '--workspace'], ['<name>'])} and compose it again.`,
     );
     assert.doesNotMatch(JSON.stringify(shown), /lunch/);
 
@@ -1178,7 +1186,7 @@ test('a draft whose thread_ts is not a string is refused by show, list, prepare 
     );
     return room(input, init);
   };
-  const store = openDraftStore(harness.core.paths.stateDir, () => new Date());
+  const store = openDraftStore(harness.core.paths.stateDir, () => new Date(), slackHandoffs(harness.core.paths));
   const { call, close } = await connect(harness, { fetch: read });
   try {
     for (const threadTs of [1700000000.0001, null, true, { ts: '1700000000.000100' }, ['1700000000.000100']]) {
@@ -1335,7 +1343,7 @@ test('a draft the composer wrote, in this version or an older one, is not taken 
    */
   const harness = await newHarness();
   const acme = await harness.addWorkspace({ alias: 'acme' });
-  const store = openDraftStore(harness.core.paths.stateDir, () => new Date());
+  const store = openDraftStore(harness.core.paths.stateDir, () => new Date(), slackHandoffs(harness.core.paths));
   const { call, close } = await connect(harness);
   try {
     for (const [text, source, shownAs, changed] of [

@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
-import { commandText, shellCommand } from '@agentcomms/core';
 import {
   renderConnected,
   renderCreatedDraft,
@@ -15,12 +14,17 @@ import {
 } from '../src/cli/render.ts';
 import type { SlackDraft } from '../src/compose/drafts.ts';
 import type { WorkspaceView } from '../src/operations/workspaces.ts';
+import { assertNoBareCommand, slackCommand, slackHandoffs, TEST_PATHS } from './support/handoffs.ts';
+
+/** Slack's own commands, located from this checkout, for the renderers that name one. */
+const HANDOFFS = slackHandoffs();
 
 test('removal retry commands are constructed instead of embedded as shell text', () => {
   const source = readFileSync(new URL('../src/cli/render.ts', import.meta.url), 'utf8');
   const removal = source.slice(source.indexOf('export function renderRemoved('), source.indexOf('function draftCell('));
-  assert.doesNotMatch(removal, /agent-slack doctor/, 'printed commands must be built with shellCommand');
-  assert.match(removal, /shellCommand\([\s\S]*?, platform\)/, 'the renderer must pass its selected platform');
+  assert.doesNotMatch(removal, /agent-slack doctor/, 'printed commands must be located, never written as text');
+  // Located from the handoffs it is given, which carry the shell the output is for (CUE-403).
+  assert.match(removal, /handoffs\.own\(\['doctor'\]\)/, 'the renderer must locate the command it names');
 });
 
 for (const platform of ['darwin', 'win32'] as const) {
@@ -45,16 +49,17 @@ for (const platform of ['darwin', 'win32'] as const) {
             },
           ],
         },
-        platform,
+        slackHandoffs(TEST_PATHS, platform),
       );
+      const doctor = slackCommand(TEST_PATHS, ['doctor'], platform);
       assert.equal(
         text,
         [
           'Disconnected "acme" from this machine. The stored credential is gone.',
           'Old credential for T0001: access pending (deadline 2026-10-05T12:00:00.000Z).',
           issue
-            ? 'The pending revocation ledger entry remains for agent-slack doctor to retry: the old credential bundle is missing from its recorded store.'
-            : 'The old credential bundle remains for agent-slack doctor to retry.',
+            ? `The pending revocation ledger entry remains for ${doctor} to retry: the old credential bundle is missing from its recorded store.`
+            : `The old credential bundle remains for ${doctor} to retry.`,
           '',
           'The Slack app is still installed in your workspace. Remove it there through Slack’s own app settings —',
           'nothing here will do that for you.',
@@ -95,7 +100,7 @@ test('a newline in a workspace name cannot forge the row beneath it', () => {
    * say what each workspace may do, a name carrying a newline prints a second line that looks exactly like the
    * scopes row under it.
    */
-  const printed = renderWorkspaces([view({ workspaceName: 'Acme\n  read · T0002 · 14 scopes' })], false);
+  const printed = renderWorkspaces([view({ workspaceName: 'Acme\n  read · T0002 · 14 scopes' })], false, HANDOFFS);
   const lines = printed.split('\n');
   assert.equal(lines.length, 2, `a name added a line:\n${printed}`);
   // Flattened onto the alias row, not dropped: the name is still readable, it just cannot be a row of its own.
@@ -104,7 +109,7 @@ test('a newline in a workspace name cannot forge the row beneath it', () => {
 });
 
 test('a tab in a workspace name cannot pad it into a neighbouring column', () => {
-  const printed = renderWorkspaces([view({ workspaceName: 'Acme\t\tread' })], false);
+  const printed = renderWorkspaces([view({ workspaceName: 'Acme\t\tread' })], false, HANDOFFS);
   assert.doesNotMatch(printed, /\t/, 'a tab reached the terminal');
 });
 
@@ -112,7 +117,7 @@ test('the escape sequences stripInvisible handles do not reach the terminal eith
   // Not this layer's work, but it is what a reader of a workspace list would assume, so it is held here too.
   const nasty = `Acme${String.fromCharCode(27)}[2J${String.fromCharCode(13)}overwritten${String.fromCharCode(7)}`;
   for (const printed of [
-    renderWorkspaces([view({ workspaceName: nasty })], false),
+    renderWorkspaces([view({ workspaceName: nasty })], false, HANDOFFS),
     renderWorkspace(view({ workspaceName: nasty }), false),
   ]) {
     for (const code of [27, 13, 7]) {
@@ -122,19 +127,21 @@ test('the escape sequences stripInvisible handles do not reach the terminal eith
 });
 
 test('a very long workspace name is bounded rather than allowed to push the row apart', () => {
-  const printed = renderWorkspaces([view({ workspaceName: 'A'.repeat(500) })], false);
+  const printed = renderWorkspaces([view({ workspaceName: 'A'.repeat(500) })], false, HANDOFFS);
   for (const line of printed.split('\n')) assert.ok(line.length < 120, `a line ran to ${line.length} characters`);
 });
 
 test('a workspace with no name shows its id rather than an empty gap', () => {
-  const printed = renderWorkspaces([view({ workspaceName: undefined })], false);
+  const printed = renderWorkspaces([view({ workspaceName: undefined })], false, HANDOFFS);
   assert.match(printed, /T0001/);
   assert.doesNotMatch(printed, / — \n/);
 });
 
 test('empty workspace guidance builds its command for the selected shell', () => {
-  const expected = commandText(shellCommand(['agent-slack', 'workspace', 'add', '<organisation>/slack'], 'win32'));
-  assert.match(renderWorkspaces([], false, 'win32'), new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  const expected = slackCommand(TEST_PATHS, ['workspace', 'add', '<organisation>/slack'], 'win32');
+  const printed = renderWorkspaces([], false, slackHandoffs(TEST_PATHS, 'win32'));
+  assert.ok(printed.includes(`With an organisation profile: ${expected}`), printed);
+  assertNoBareCommand(printed);
 });
 
 test('list, show and connected output name the organisation app role', () => {
@@ -146,9 +153,9 @@ test('list, show and connected output name the organisation app role', () => {
       profileApp: mode,
     });
     for (const rendered of [
-      renderWorkspaces([profile], false),
+      renderWorkspaces([profile], false, HANDOFFS),
       renderWorkspace(profile, false),
-      renderConnected(profile, false, false),
+      renderConnected(profile, false, false, HANDOFFS),
     ]) {
       assert.match(rendered, new RegExp(`North Culture's ${mode} app`));
       assert.doesNotMatch(rendered, /Really Good Culture|your own app/);
@@ -158,36 +165,42 @@ test('list, show and connected output name the organisation app role', () => {
   assert.match(renderWorkspace(missingProfile, false), /the rgc organisation's read app/);
   const own = renderWorkspace(view({ oauthClientId: '1111.2222' }), false);
   assert.match(own, /your own app/);
-  assert.match(renderWorkspaces([view({ oauthClientId: '1111.2222' })], false), /your own app/);
+  assert.match(renderWorkspaces([view({ oauthClientId: '1111.2222' })], false, HANDOFFS), /your own app/);
 });
 
 test('renderer commands use the explicitly selected shell platform', () => {
   const draft = { draftId: 'draft one' } as SlackDraft;
-  assert.match(
-    renderCreatedDraft(draft, 'two words', 'win32'),
-    new RegExp(
-      commandText(
-        shellCommand(['agent-slack', 'post', 'prepare', '--workspace', 'two words', '--draft', 'draft one'], 'win32'),
-      ).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+  const windows = slackHandoffs(TEST_PATHS, 'win32');
+  const created = renderCreatedDraft(draft, 'two words', windows);
+  assert.ok(
+    created.endsWith(
+      `Preview it with: ${slackCommand(TEST_PATHS, ['post', 'prepare', '--workspace', 'two words', '--draft', 'draft one'], 'win32')}`,
     ),
+    created,
   );
-  assert.match(
-    renderSignInStarted(
-      {
-        flowId: 'flow one',
-        alias: 'two words',
-        mode: 'read',
-        authUrl: 'https://example.test',
-        redirectUrl: 'http://localhost',
-        expiresAt: '2026-10-04T12:00:00.000Z',
-      },
-      true,
-      false,
-      'win32',
-    ),
-    /agent-slack workspace reauth "two words" --finish "flow one"/,
+  assertNoBareCommand(created);
+  const started = renderSignInStarted(
+    {
+      flowId: 'flow one',
+      alias: 'two words',
+      mode: 'read',
+      authUrl: 'https://example.test',
+      redirectUrl: 'http://localhost',
+      expiresAt: '2026-10-04T12:00:00.000Z',
+    },
+    true,
+    false,
+    windows,
   );
-  assert.match(renderManifestHelp('read', 60426, false, undefined, 'win32'), /--port "60426"/);
+  assert.ok(
+    started.includes(slackCommand(TEST_PATHS, ['workspace', 'reauth', 'two words', '--finish', 'flow one'], 'win32')),
+    started,
+  );
+  assert.match(started, /workspace reauth "two words" --finish "flow one"$/m);
+  assertNoBareCommand(started);
+  const help = renderManifestHelp('read', 60426, false, undefined, windows);
+  assert.match(help, /--port "60426"/);
+  assertNoBareCommand(help);
 });
 
 test('doctor prefixes every command in a multi-line repair', () => {

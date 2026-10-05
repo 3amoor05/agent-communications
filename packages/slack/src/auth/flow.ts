@@ -1,7 +1,13 @@
 import { randomInt } from 'node:crypto';
 import { mkdir, open, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { CommsError, type LooseningConsent, type ProfileSlackTarget } from '@agentcomms/core';
+import {
+  type CliHandoffs,
+  CommsError,
+  handoffSentenceToFill,
+  type LooseningConsent,
+  type ProfileSlackTarget,
+} from '@agentcomms/core';
 import type { InstallMode } from '../manifest.ts';
 import { safeSlackFailureText } from './authorize.ts';
 
@@ -170,7 +176,16 @@ export interface FlowStore {
   pending(): Promise<SlackFlow[]>;
 }
 
-export function openFlowStore(stateDir: string, now: () => Date): FlowStore {
+/**
+ * The sign-ins waiting in `stateDir`. `handoffs` make the command a refusal names — a sign-in started again — located
+ * from the installation printing it (`SlackContext.handoffs`), or say why there is none here.
+ */
+export function openFlowStore(stateDir: string, now: () => Date, handoffs: CliHandoffs): FlowStore {
+  // The workspace's name is the person's to give again: the agent fills it in.
+  const startAgain = (before: string): string =>
+    handoffSentenceToFill(handoffs.own(['workspace', 'add']), ['<name>'], (command) => `${before} ${command}.`, {
+      instead: `${before} slack_workspace_add from a chat.`,
+    });
   return {
     async save(flow) {
       await mkdir(flowDir(stateDir), { recursive: true, mode: 0o700 });
@@ -209,7 +224,7 @@ export function openFlowStore(stateDir: string, now: () => Date): FlowStore {
       const flow = await this.peek(flowId);
       if (!flow) {
         throw new CommsError('NOT_FOUND', 'that sign-in is not waiting to be finished', {
-          hint: 'It may have been completed already, or expired. Start again with `agent-slack workspace add`.',
+          hint: `It may have been completed already, or expired. ${startAgain('Start again with')}`,
         });
       }
       return flow;
@@ -270,7 +285,7 @@ export function openFlowStore(stateDir: string, now: () => Date): FlowStore {
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
         throw new CommsError('NOT_FOUND', 'that sign-in has already been finished', {
-          hint: 'Each sign-in completes once. Start another with `agent-slack workspace add`.',
+          hint: `Each sign-in completes once. ${startAgain('Start another with')}`,
         });
       }
       /*
@@ -294,13 +309,13 @@ export function openFlowStore(stateDir: string, now: () => Date): FlowStore {
         // Nothing to claim after all — let the marker go, so it does not stand as a claim on nothing.
         await rm(marker, { force: true });
         throw new CommsError('NOT_FOUND', 'that sign-in is not waiting to be finished', {
-          hint: 'It may have been completed already, or expired. Start again with `agent-slack workspace add`.',
+          hint: `It may have been completed already, or expired. ${startAgain('Start again with')}`,
         });
       }
       if (Date.parse(flow.expiresAt) <= now().getTime()) {
         await this.discard(flowId);
         throw new CommsError('NOT_FOUND', 'that sign-in expired before it was finished', {
-          hint: 'Sign-ins last ten minutes. Start again with `agent-slack workspace add`.',
+          hint: `Sign-ins last ten minutes. ${startAgain('Start again with')}`,
         });
       }
       return flow;

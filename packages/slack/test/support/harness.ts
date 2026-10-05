@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { type AccountConfig, type Core, isInside, newAccountId, openCore, type ResolvedPaths } from '@agentcomms/core';
 import { BUNDLE_VERSION, serialiseBundle, type TokenBundle } from '../../src/auth/bundle.ts';
+import { SLACK_CALLER } from '../../src/caller.ts';
 import { SlackContext, type SlackContextOptions } from '../../src/context.ts';
 import { type InstallMode, scopesForMode } from '../../src/manifest.ts';
 import { secretRefFor } from '../../src/operations/workspaces.ts';
@@ -151,7 +152,8 @@ export async function newHarness(options: { version?: 1 | 2 } = {}): Promise<Har
     // not make. The gate's own tests turn it back on, with a registry and a clock of their own (design 2026-09-28).
     AGENT_COMMS_UPDATE_CHECK: 'off',
   };
-  const core = openCore({ env });
+  // With this package's caller, as its CLI and server open core: every command printed is located, never bare.
+  const core = openCore({ env, caller: SLACK_CALLER });
   assertInsideHome(core.paths, home);
   /*
    * Version 1, said rather than assumed.

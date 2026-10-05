@@ -17,6 +17,7 @@ import {
   reactionOfApproval,
   reactPrepared,
 } from '../src/operations/send.ts';
+import { slackHandoffs } from './support/handoffs.ts';
 
 /**
  * The gate.
@@ -68,7 +69,7 @@ async function setUp(
   } = {},
 ) {
   const state = temp();
-  const drafts = openDraftStore(state, NOW);
+  const drafts = openDraftStore(state, NOW, slackHandoffs());
   const approvals = new ApprovalStore(state, { now: NOW });
   const draft = await drafts.create(
     'acc_1',
@@ -84,6 +85,7 @@ async function setUp(
     workspaceId: 'T0001',
     workspaceName: 'acme/slack',
     postingAs: 'U0',
+    handoffs: slackHandoffs(),
     policy: options.policy ?? ('chat' as const),
     approvals,
     permit: closedPermit(),
@@ -190,7 +192,7 @@ test('a mention nobody can count — a user group, an unknown special — needs 
 
 test('a room whose size cannot be read says so rather than reporting a small one', async () => {
   const state = temp();
-  const drafts = openDraftStore(state, NOW);
+  const drafts = openDraftStore(state, NOW, slackHandoffs());
   const draft = await drafts.create(
     'acc_1',
     compose({ channel: 'C1', text: 'hi', mentions: [{ kind: 'broadcast', who: 'channel' }] }),
@@ -204,6 +206,7 @@ test('a room whose size cannot be read says so rather than reporting a small one
       workspaceId: 'T0001',
       workspaceName: 'acme/slack',
       postingAs: 'U0',
+      handoffs: slackHandoffs(),
       policy: 'chat',
       approvals: new ApprovalStore(state, { now: NOW }),
     },
@@ -460,7 +463,7 @@ test('a room that grew between the preview and the post voids the approval', asy
    * agreed to interrupt eight people did not agree to interrupt four hundred.
    */
   const state = temp();
-  const drafts = openDraftStore(state, NOW);
+  const drafts = openDraftStore(state, NOW, slackHandoffs());
   const approvals = new ApprovalStore(state, { now: NOW });
   const draft = await drafts.create(
     'acc_1',
@@ -487,6 +490,7 @@ test('a room that grew between the preview and the post voids the approval', asy
     workspaceId: 'T0001',
     workspaceName: 'acme/slack',
     postingAs: 'U0',
+    handoffs: slackHandoffs(),
     policy: 'chat' as const,
     approvals,
     permit: closedPermit(),

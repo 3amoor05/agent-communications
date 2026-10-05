@@ -6,12 +6,13 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import {
   type AccountConfig,
+  type CliHandoffs,
   CommsError,
   type Config,
   childEnvironment,
   configCommittedBeforeAbort,
   findById,
-  inlineCommand,
+  handoffSentence,
   type LooseningConsent,
   learnProfileSlackAppId,
   newAccountId,
@@ -20,7 +21,6 @@ import {
   readWholeNumber,
   type SecretStore,
   secretsStoreOf,
-  shellCommand,
   withCredentialsLock,
   wrapUntrusted,
 } from '@agentcomms/core';
@@ -101,9 +101,9 @@ export interface StartedSignIn {
 export async function startSignIn(context: SlackContext, options: StartOptions): Promise<StartedSignIn> {
   const config = await context.config();
   if (options.expect) {
-    requireWorkspace(config, options.alias);
+    requireWorkspace(config, options.alias, context.handoffs);
   } else {
-    checkAliasFree(config, options.alias);
+    checkAliasFree(config, options.alias, context.handoffs);
     /*
      * Connecting a workspace in `send` mode is a widening, and this is the earliest place it is refused.
      *
@@ -118,14 +118,26 @@ export async function startSignIn(context: SlackContext, options: StartOptions):
         'LOOSENING_REFUSED',
         `connecting "${options.alias}" able to post needs a person to confirm it`,
         {
-          hint: `Connect it with ${inlineCommand(shellCommand(['agent-slack', 'workspace', 'add', options.alias, '--mode', 'send'], context.platform))}, or slack_workspace_add from a chat: both ask the person to approve it first. Or connect it in read mode.`,
+          hint: handoffSentence(
+            context.handoffs.own(['workspace', 'add', options.alias, '--mode', 'send']),
+            (command) =>
+              `Connect it with ${command}, or slack_workspace_add from a chat: both ask the person to approve it first. Or connect it in read mode.`,
+            {
+              instead:
+                'Connect it with slack_workspace_add from a chat, which asks the person to approve it first. Or connect it in read mode.',
+            },
+          ),
         },
       );
     }
   }
   if (!options.clientId) {
     throw new CommsError('USAGE', 'the Slack app’s Client ID is needed', {
-      hint: 'Create the app first, with `agent-slack manifest --mode read --port 51234`.',
+      hint: handoffSentence(
+        context.handoffs.own(['manifest', '--mode', 'read', '--port', '51234']),
+        (command) => `Create the app first, with ${command}.`,
+        { instead: 'Create the app first, from the read manifest slack_manifest prints.' },
+      ),
     });
   }
   if (!Number.isInteger(options.port) || options.port < 1 || options.port > 65535) {
@@ -529,29 +541,47 @@ export function checkedWait(raw: unknown, surface: 'cli' | 'mcp'): number {
   return seconds;
 }
 
-/** How the caller finishes this sign-in, in the words of the surface it is using. */
-function finishStep(context: SlackContext, flow: SlackFlow): string {
-  return context.surface === 'mcp'
-    ? `call \`slack_workspace_finish\` with flowId ${flow.flowId}`
-    : `run ${inlineCommand(
-        shellCommand(
-          ['agent-slack', 'workspace', ...(flow.expect ? ['reauth', flow.alias] : ['add']), '--finish', flow.flowId],
-          context.platform,
-        ),
-      )}`;
+/** The words that finish a sign-in at a terminal, after the program: `workspace reauth <name>|add --finish <id>`. */
+function finishWords(kind: 'reauth' | 'add', alias: string, flowId: string): string[] {
+  return ['workspace', ...(kind === 'reauth' ? ['reauth', alias] : ['add']), '--finish', flowId];
+}
+
+/**
+ * The sentence `say` makes with how the caller finishes this sign-in, in the words of the surface it is using: the tool
+ * from a chat, the command — located, with `more` words after it — at a terminal. With no command here, the tool, and
+ * why there is no command.
+ */
+function finishStep(
+  context: SlackContext,
+  flow: SlackFlow,
+  say: (step: string) => string,
+  more: readonly string[] = [],
+): string {
+  const tool = `call \`slack_workspace_finish\` with flowId ${flow.flowId}`;
+  if (context.surface === 'mcp') return say(tool);
+  return handoffSentence(
+    context.handoffs.own([...finishWords(flow.expect ? 'reauth' : 'add', flow.alias, flow.flowId), ...more]),
+    (command) => say(`run ${command}`),
+    { instead: say(`${tool} from a chat`) },
+  );
 }
 
 function checkFinishCancellation(context: SlackContext, flow: SlackFlow, signal?: AbortSignal): void {
   if (!signal?.aborted) return;
   throw new CommsError('APPROVAL_PENDING', 'the wait was cancelled; the sign-in is still open', {
-    hint: `Finish signing in in the browser, then ${finishStep(context, flow)}.`,
+    hint: finishStep(context, flow, (step) => `Finish signing in in the browser, then ${step}.`),
     details: { flowId: flow.flowId, expiresAt: flow.expiresAt },
   });
 }
 
-/** How the caller lists what is connected, in the words of the surface it is using. */
-function listStep(context: SlackContext): string {
-  return context.surface === 'mcp' ? '`slack_workspaces_list`' : '`agent-slack workspace list`';
+/**
+ * The sentence `say` makes with how the caller lists what is connected, in the words of the surface it is using: the
+ * tool, or the command, located. With no command here, the tool, and why there is no command.
+ */
+function listStep(context: SlackContext, say: (step: string) => string): string {
+  const tool = '`slack_workspaces_list`';
+  if (context.surface === 'mcp') return say(tool);
+  return handoffSentence(context.handoffs.own(['workspace', 'list']), say, { instead: say(`${tool} from a chat`) });
 }
 
 /**
@@ -588,18 +618,11 @@ export async function finishSignIn(context: SlackContext, options: FinishOptions
       hint:
         context.surface === 'mcp'
           ? `Finish it with \`slack_workspace_finish\`, flowId ${options.flowId}, on a server that serves "${flow.alias}".`
-          : `Finish it as ${inlineCommand(
-              shellCommand(
-                [
-                  'agent-slack',
-                  'workspace',
-                  ...(kind === 'reauth' ? ['reauth', flow.alias] : ['add']),
-                  '--finish',
-                  options.flowId,
-                ],
-                context.platform,
-              ),
-            )}.`,
+          : handoffSentence(
+              context.handoffs.own(finishWords(kind, flow.alias, options.flowId)),
+              (command) => `Finish it as ${command}.`,
+              { instead: `Finish it with \`slack_workspace_finish\`, flowId ${options.flowId}, from a chat.` },
+            ),
     });
   }
   if (options.only && kind !== options.only) {
@@ -608,7 +631,7 @@ export async function finishSignIn(context: SlackContext, options: FinishOptions
       `that sign-in is ${kind === 'reauth' ? 're-authorising an existing workspace' : 'a new workspace'}, and this can only finish ${
         options.only === 'add' ? 'a new workspace' : 're-authorising an existing workspace'
       }`,
-      { hint: `Finish it where it was started: ${finishStep(context, flow)}.` },
+      { hint: finishStep(context, flow, (step) => `Finish it where it was started: ${step}.`) },
     );
   }
 
@@ -663,7 +686,7 @@ async function waitForOutcome(
     checkFinishCancellation(context, flow, options.signal);
     if (flow.profile) {
       try {
-        profileTargetFor(flow, await context.config(), context.platform);
+        profileTargetFor(flow, await context.config(), context.handoffs);
       } catch (error) {
         await context.flows.discard(flow.flowId);
         stopListener(flow, context.now());
@@ -684,21 +707,16 @@ async function waitForOutcome(
       throw new CommsError('APPROVAL_PENDING', 'nobody has finished signing in yet', {
         hint:
           context.surface === 'mcp'
-            ? `Open the link, approve it in Slack, then ${finishStep(context, flow)} again. The link is good until ${flow.expiresAt}.`
-            : `Open the link, approve it in Slack, then run ${inlineCommand(
-                shellCommand(
-                  [
-                    'agent-slack',
-                    'workspace',
-                    ...(flow.expect ? ['reauth', flow.alias] : ['add']),
-                    '--finish',
-                    flow.flowId,
-                    '--wait',
-                    '60',
-                  ],
-                  context.platform,
-                ),
-              )} again.`,
+            ? finishStep(
+                context,
+                flow,
+                (step) =>
+                  `Open the link, approve it in Slack, then ${step} again. The link is good until ${flow.expiresAt}.`,
+              )
+            : finishStep(context, flow, (step) => `Open the link, approve it in Slack, then ${step} again.`, [
+                '--wait',
+                '60',
+              ]),
         details: { flowId: flow.flowId, expiresAt: flow.expiresAt },
       });
     }
@@ -726,7 +744,7 @@ async function namesThisFlow(context: SlackContext, flow: SlackFlow, name: strin
   if (!flow.expect) return name === flow.alias;
   let named: { alias: string; account: AccountConfig };
   try {
-    named = requireWorkspace(await context.config(), name);
+    named = requireWorkspace(await context.config(), name, context.handoffs);
   } catch (error) {
     // A former name is refused with what it is called now. A name that is nothing at all is not this flow's, and
     // the caller says so in the words it always used: "that sign-in is for X, not Y".
@@ -826,7 +844,7 @@ function consentUnder(consent: LooseningConsent, flow: SlackFlow, current: strin
  * what to do: ask for the change again. Whether the token could be taken back is the caller's to add, since only it
  * knows.
  */
-function explainRefusedConsent(error: unknown, flow: SlackFlow, platform: NodeJS.Platform): unknown {
+function explainRefusedConsent(error: unknown, flow: SlackFlow, handoffs: CliHandoffs): unknown {
   if (!(error instanceof CommsError) || error.code !== 'LOOSENING_REFUSED' || flow.consent?.changes === undefined) {
     return error;
   }
@@ -834,18 +852,17 @@ function explainRefusedConsent(error: unknown, flow: SlackFlow, platform: NodeJS
     'LOOSENING_REFUSED',
     `"${flow.alias}" changed after this was approved, so the sign-in was not saved`,
     {
-      hint: `Nothing was saved for it. Ask for the change again — ${inlineCommand(
-        shellCommand(
-          [
-            'agent-slack',
-            'workspace',
-            ...(flow.expect ? ['reauth', flow.alias] : ['add', flow.alias]),
-            '--mode',
-            flow.mode,
-          ],
-          platform,
-        ),
-      )}, or the same tool from a chat — and approve what it shows now.`,
+      hint: `Nothing was saved for it. ${handoffSentence(
+        handoffs.own([
+          'workspace',
+          ...(flow.expect ? ['reauth', flow.alias] : ['add', flow.alias]),
+          '--mode',
+          flow.mode,
+        ]),
+        (command) =>
+          `Ask for the change again — ${command}, or the same tool from a chat — and approve what it shows now.`,
+        { instead: 'Ask for the change again with the same tool from a chat, and approve what it shows now.' },
+      )}`,
       details: { ...(error.details ?? {}), refused: error.message },
       cause: error,
     },
@@ -896,7 +913,7 @@ async function profileFailure(
   error?: unknown,
   description?: unknown,
 ): Promise<CommsError> {
-  profileTargetFor(flow, await context.config(), context.platform);
+  profileTargetFor(flow, await context.config(), context.handoffs);
   const profile = flow.profile as ProfileSlackTarget;
   const identity = `${displaySlackFailureText(profile.label)}; workspace ${displaySlackFailureText(profile.workspaceName)} (${profile.workspace}); ${profile.role} app, client id ${profile.clientId}.`;
   const slackError = displaySlackFailureText(error);
@@ -974,15 +991,24 @@ async function committed(
 }
 
 /** The original error, with the credential it may have left behind named — and deliberately not deleted. */
-function keepAndReport(original: unknown, ref: string, recovery?: { code: string; message: string }): CommsError {
+function keepAndReport(
+  original: unknown,
+  ref: string,
+  handoffs: CliHandoffs,
+  recovery?: { code: string; message: string },
+): CommsError {
   const base = original instanceof CommsError ? original : new CommsError('UNEXPECTED', String(original));
+  const ifGone = `if the workspace is not there, delete \`${ref}\` from your secret store.`;
   return new CommsError(base.code, base.message, {
     hint:
       `${base.hint ? `${base.hint} ` : ''}` +
       `${recovery ? 'Credential ownership could not be checked because the credentials lock could not be acquired. ' : ''}` +
       'Whether the sign-in was saved could not be confirmed, so the credential ' +
-      `stored for it was kept rather than risk deleting a live one. Run \`agent-slack workspace list\`: if the ` +
-      `workspace is not there, delete \`${ref}\` from your secret store.`,
+      `stored for it was kept rather than risk deleting a live one. ${handoffSentence(
+        handoffs.own(['workspace', 'list']),
+        (command) => `Run ${command}: ${ifGone}`,
+        { instead: `Call slack_workspaces_list from a chat: ${ifGone}` },
+      )}`,
     details: { possiblyStrandedSecretRef: ref, ...(recovery ? { recoveryError: recovery } : {}) },
     cause: original,
   });
@@ -1040,7 +1066,7 @@ function renewing(context: SlackContext, config: Config, flow: SlackFlow): { ali
     // The same refusal as the check inside the lock: the account this set out to renew is not the one there now —
     // renewed by another sign-in, or removed.
     throw new CommsError('CONFIG', `"${flow.alias}" changed while this sign-in was being completed`, {
-      hint: `Check it with ${listStep(context)}, then re-authorise if it is still yours.`,
+      hint: listStep(context, (step) => `Check it with ${step}, then re-authorise if it is still yours.`),
     });
   }
   return found;
@@ -1068,21 +1094,26 @@ export async function completeSignIn(
         'LOOSENING_REFUSED',
         `connecting "${flow.alias}" able to post needs a person to confirm it`,
         {
-          hint: `Start again with ${inlineCommand(shellCommand(['agent-slack', 'workspace', 'add', flow.alias, '--mode', 'send'], context.platform))}, or slack_workspace_add from a chat: both ask the person to approve it first.`,
+          hint: handoffSentence(
+            context.handoffs.own(['workspace', 'add', flow.alias, '--mode', 'send']),
+            (command) =>
+              `Start again with ${command}, or slack_workspace_add from a chat: both ask the person to approve it first.`,
+            { instead: 'Start again with slack_workspace_add from a chat, which asks the person to approve it first.' },
+          ),
         },
       );
     }
-    if (flow.profile) profileTargetFor(flow, await context.config(), context.platform);
+    if (flow.profile) profileTargetFor(flow, await context.config(), context.handoffs);
     const exchanged = await context.exchange({
       client_id: flow.clientId,
       code,
       redirect_uri: flow.redirectUrl,
       code_verifier: flow.verifier,
     });
-    if (flow.profile) profileTargetFor(flow, await context.config(), context.platform);
+    if (flow.profile) profileTargetFor(flow, await context.config(), context.handoffs);
     let token: ReturnType<typeof readExchange>;
     try {
-      token = readExchange(exchanged);
+      token = readExchange(exchanged, context.handoffs);
     } catch (error) {
       if (flow.profile && error instanceof CommsError && error.details) {
         throw await profileFailure(
@@ -1114,8 +1145,8 @@ export async function completeSignIn(
      * rather than be refused for using the old one.
      */
     const existing = flow.expect ? renewing(context, config, flow) : undefined;
-    if (!existing) checkAliasFree(config, flow.alias);
-    validateExchange({ token, mode: flow.mode, flow, config, existing, platform: context.platform });
+    if (!existing) checkAliasFree(config, flow.alias, context.handoffs);
+    validateExchange({ token, mode: flow.mode, flow, config, existing, handoffs: context.handoffs });
 
     const at = context.now();
     /*
@@ -1189,7 +1220,7 @@ export async function completeSignIn(
         ) {
           const source = renewing(context, await context.config(), flow);
           secrets.invalidate(source.account.secretRef);
-          const bundle = parseBundle(await secrets.get(source.account.secretRef));
+          const bundle = parseBundle(await secrets.get(source.account.secretRef), context.handoffs);
           if (!bundle)
             throw new CommsError('CONFIG', 'the source credential is missing; the profile sign-in was not saved');
           // An unresolved refresh can have issued replacement tokens that another process still holds because
@@ -1248,7 +1279,7 @@ export async function completeSignIn(
                 flow,
                 config: current,
                 existing: flow.expect ? renewing(context, current, flow) : undefined,
-                platform: context.platform,
+                handoffs: context.handoffs,
               });
             }
             const held = flow.expect ? findById(current, 'account', flow.expect.accountId)?.account : undefined;
@@ -1268,7 +1299,7 @@ export async function completeSignIn(
                 throw new CommsError('CONFIG', `"${flow.alias}" changed while this sign-in was being completed`, {
                   // `list`, not `show <the name it started with>`: after a migration that name is refused, so the
                   // command in the hint would answer with a second refusal rather than with the workspace.
-                  hint: `Check it with ${listStep(context)}, then re-authorise if it is still yours.`,
+                  hint: listStep(context, (step) => `Check it with ${step}, then re-authorise if it is still yours.`),
                 });
               }
             } else {
@@ -1279,8 +1310,8 @@ export async function completeSignIn(
                * one namespace with `accounts`, and `validateExchange` refuses the same workspace-and-person
                * under a second name — both of which a concurrent command can make true in the gap.
                */
-              checkAliasFree(current, flow.alias);
-              validateExchange({ token, mode: flow.mode, flow, config: current, platform: context.platform });
+              checkAliasFree(current, flow.alias, context.handoffs);
+              validateExchange({ token, mode: flow.mode, flow, config: current, handoffs: context.handoffs });
             }
             /*
              * The grant owns what it sets; everything else carries over.
@@ -1295,9 +1326,9 @@ export async function completeSignIn(
             const next = flow.profile
               ? learnProfileSlackAppId(
                   current,
-                  profileTargetFor(flow, current, context.platform),
+                  profileTargetFor(flow, current, context.handoffs),
                   token.appId as string,
-                  context.platform,
+                  context.handoffs,
                 )
               : current;
             if (held && flow.expect) {
@@ -1350,16 +1381,16 @@ export async function completeSignIn(
           recoveryEntered = true;
           const landed = await committed(context, accountId, secretRef);
           if (landed === 'unknown' || (landed === 'present' && completionSignal?.aborted && !configCommitted)) {
-            throw keepAndReport(error, secretRef);
+            throw keepAndReport(error, secretRef, context.handoffs);
           }
           if (landed === 'absent') {
-            throw await withdrawStaged(secrets, secretRef, explainRefusedConsent(error, flow, context.platform));
+            throw await withdrawStaged(secrets, secretRef, explainRefusedConsent(error, flow, context.handoffs));
           }
           if (landed === 'present') configCommitted = true;
         });
       } catch (recoveryError) {
         if (!recoveryEntered) {
-          throw keepAndReport(error, secretRef, {
+          throw keepAndReport(error, secretRef, context.handoffs, {
             code: recoveryError instanceof CommsError ? recoveryError.code : 'UNEXPECTED',
             message: recoveryError instanceof Error ? recoveryError.message : String(recoveryError),
           });

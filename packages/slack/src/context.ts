@@ -1,9 +1,11 @@
 import {
+  type CliHandoffs,
   CommsError,
   type Config,
   type Core,
   openCore,
   type PathOverrides,
+  requireHandoffs,
   type SecretStore,
   secretsStoreOf,
 } from '@agentcomms/core';
@@ -11,6 +13,7 @@ import { closedPermit, type FetchLike, guardSlackRequests } from './api/guard.ts
 import { SLACK_ORIGIN } from './api/methods.ts';
 import { type FlowStore, openFlowStore } from './auth/flow.ts';
 import type { PersistPolicy } from './auth/refresh.ts';
+import { SLACK_CALLER } from './caller.ts';
 
 /**
  * What every Slack operation needs, assembled once.
@@ -135,17 +138,29 @@ export class SlackContext {
         env: this.env,
         platform: options.platform ?? process.platform,
         ...(options.pathOverrides ? { pathOverrides: options.pathOverrides } : {}),
+        caller: SLACK_CALLER,
       });
     this.now = options.now ?? (() => new Date());
     this.foregroundSignIn = options.foregroundSignIn;
     this.platform = options.platform ?? process.platform;
     this.surface = options.surface ?? 'cli';
     this.cwd = options.cwd ?? process.cwd();
-    this.flows = openFlowStore(this.core.paths.stateDir, this.now);
+    // Made now, so a core without this package's caller is refused where the context is made, not at a refusal.
+    this.flows = openFlowStore(this.core.paths.stateDir, this.now, this.handoffs);
     this.exchange = options.exchange ?? postExchange;
     this.fetch = options.fetch;
     this.slackBaseUrl = options.slackBaseUrl;
     this.persist = options.persist;
+  }
+
+  /**
+   * The commands this process tells a person to run, quoted for its shell: Slack's own, core's, another product's, each
+   * located from this installation with its folders pinned, or why there is none here (CONTRIBUTING.md, "Telling a
+   * person what to run"). A core given without Slack's caller is a programming error, refused here rather than printing
+   * a bare `agent-slack` nobody's PATH has.
+   */
+  get handoffs(): CliHandoffs {
+    return requireHandoffs(this.core).on(this.platform);
   }
 
   config(): Promise<Config> {

@@ -6,6 +6,7 @@ import {
   approveChangeAtTerminal,
   CommsError,
   canPrompt,
+  cliHandoffs,
   colorEnabled,
   commandPathOf,
   DOWNLOAD_CLAIM,
@@ -14,7 +15,7 @@ import {
   exemptFromUpdateGate,
   type GatedChange,
   gatedChangeAtTerminal,
-  inlineCommand,
+  handoffSentence,
   installExitStatus,
   type OutputOptions,
   openCore,
@@ -26,13 +27,12 @@ import {
   refuseUnclaimedApproval,
   renderChannelPreview,
   renderPrune,
+  resolvePaths,
   runCommand,
   runUpdateCheckChild,
-  type ShellCommand,
   type Streams,
   serverInstallChange,
   serverPruneChange,
-  shellCommand,
   terminalUpdateHooks,
   UPDATE_CHECK_CHILD_COMMAND,
   updateGateAtTerminal,
@@ -43,9 +43,11 @@ import {
 import { Command, CommanderError, InvalidArgumentError, Option } from 'commander';
 import type { FetchLike } from '../api/guard.ts';
 import { exitAfterRefreshes, type SignalHost, settleBeforeExit } from '../auth/exit.ts';
+import { SLACK_CALLER } from '../caller.ts';
 import { BROADCASTS } from '../compose/blocks.ts';
 import { openDraftStore } from '../compose/drafts.ts';
 import { SlackContext, type SlackContextOptions } from '../context.ts';
+import { handoffsSentence } from '../handoffs.ts';
 import { type InstallMode, parseMode, renderManifest } from '../manifest.ts';
 import { SLACK_MCP, type SupportedClient } from '../mcp/install.ts';
 import { createApp, updateApp } from '../operations/app.ts';
@@ -64,6 +66,7 @@ import {
 import { runDoctor } from '../operations/doctor.ts';
 import { createDraft, deleteOwnDraft, listDrafts, showDraft, updateDraft } from '../operations/drafts.ts';
 import {
+  BRIDGE_APPROVE_COMMAND,
   downloadFiles,
   downloadSelection,
   type FileDownloader,
@@ -235,10 +238,9 @@ Getting started:
   agent-slack read <channel> --workspace acme/slack
 
 Exit codes: 0 ok · 1 unexpected · 10 a post or a change was refused or needs approval, or a
-sign-in is still waiting · 11 an update is out: update first, or put it off (agentcomms update,
-agentcomms update --later) · 64 usage · 65 bad data · 66 not found · 69 provider or secret store
-unavailable · 75 temporary (retry later) · 77 sign-in or permission needed · 78
-configuration problem.`,
+sign-in is still waiting · 11 an update is out: update first, or put it off, with the commands
+it names · 64 usage · 65 bad data · 66 not found · 69 provider or secret store unavailable · 75
+temporary (retry later) · 77 sign-in or permission needed · 78 configuration problem.`,
     )
     .exitOverride();
 
@@ -258,10 +260,22 @@ configuration problem.`,
     const pathOverrides = pathOverridesFromCliOptions(
       Object.fromEntries(PATH_OPTIONS.map(({ key, option }) => [option, options[key] as string | undefined])),
     );
+    // With this package's caller, so every command it prints is this installation's own, located.
     invocationCore =
-      Object.keys(pathOverrides).length === 0 && deps.core ? deps.core : openCore({ env, platform, pathOverrides });
+      Object.keys(pathOverrides).length === 0 && deps.core
+        ? deps.core
+        : openCore({ env, platform, pathOverrides, caller: SLACK_CALLER });
     return invocationCore;
   };
+
+  /*
+   * This installation's own help, for a usage error before the folders are known: it reads none of them, so none is
+   * pinned, and a path option that would not parse cannot stop it being named.
+   */
+  const help = cliHandoffs({ caller: SLACK_CALLER, paths: resolvePaths({ env, platform }), platform, env }).own(
+    ['--help'],
+    { uses: [] },
+  );
 
   const globals = (): GlobalOptions => {
     const options = program.opts();
@@ -305,11 +319,10 @@ configuration problem.`,
           output: output(),
           noInput: false,
           streams,
-          approveCommand: 'agent-slack approve',
           approvals: approvalsOf(command),
           // A download's `--choice` is the question the person just answered: held to that kind, as the tool's is.
           approvalClaim: path.join(' ') === 'files download' ? DOWNLOAD_CLAIM : undefined,
-          ...terminalUpdateHooks(core, env, { output: output(), streams, approveCommand: 'agent-slack approve' }),
+          ...terminalUpdateHooks(core, env, { output: output(), streams }),
         });
       },
       streams,
@@ -429,7 +442,7 @@ configuration problem.`,
           result,
           output(),
           (data) =>
-            `${renderManifestHelp(data.mode, data.port, options.color, data, context.platform)}\n\n${renderManifest(data.mode, data.redirectUrl)}`,
+            `${renderManifestHelp(data.mode, data.port, options.color, data, context.handoffs)}\n\n${renderManifest(data.mode, data.redirectUrl)}`,
           streams,
         );
       }),
@@ -451,7 +464,7 @@ configuration problem.`,
 
   app
     .command('update <alias>')
-    .description("replace a connected workspace's Slack app manifest with the one `agent-slack manifest` prints")
+    .description("replace a connected workspace's Slack app manifest with the one the `manifest` command prints")
     .addOption(
       new Option('--mode <mode>', "which manifest to apply; the workspace's own mode if left out").choices([
         'read',
@@ -461,7 +474,7 @@ configuration problem.`,
     .option('--port <port>', "the loopback port for the app's redirect; the workspace's recorded one if left out")
     .action(
       act(async (context, options, alias: string, flags: Options) => {
-        const found = requireWorkspace(await context.config(), alias);
+        const found = requireWorkspace(await context.config(), alias, context.handoffs);
         const mode =
           flags.mode === undefined
             ? parseMode(found.account.mode ?? found.account.tier, `"${found.alias}"`)
@@ -482,16 +495,13 @@ configuration problem.`,
             );
             return readConfigurationToken(env, streams, {
               json: globals().json,
-              command: shellCommand(
-                ['agent-slack', 'app', 'update', found.alias, '--mode', mode, '--port', String(port)],
-                platform,
-              ),
+              command: context.handoffs.own(['app', 'update', found.alias, '--mode', mode, '--port', String(port)]),
             });
           },
           transport: { fetch: deps.appConfig, baseUrl: deps.slackBaseUrl },
           audit: context.core.audit,
           surface: 'cli',
-          platform: context.platform,
+          handoffs: context.handoffs,
         });
         writeResult(result, output(), () => renderAppUpdated(result, options.color), streams);
       }),
@@ -500,7 +510,7 @@ configuration problem.`,
   app
     .command('create [alias]')
     .description(
-      'create a new Slack app from the manifest `agent-slack manifest` prints, and print the command that connects it',
+      'create a new Slack app from the manifest the `manifest` command prints, and print the command that connects it',
     )
     .addOption(modeOption())
     .option('--port <port>', 'the loopback port its redirect will use')
@@ -510,7 +520,7 @@ configuration problem.`,
         const port = portOf(flags);
         // The name is only printed, in the command to run next — but a name that command would refuse is better
         // refused now, before a token is typed and an app is made.
-        if (alias !== undefined) checkAliasFree(await context.config(), alias);
+        if (alias !== undefined) checkAliasFree(await context.config(), alias, context.handoffs);
         const result = await createApp({
           mode,
           port,
@@ -518,24 +528,20 @@ configuration problem.`,
           askToken: () =>
             readConfigurationToken(env, streams, {
               json: globals().json,
-              command: shellCommand(
-                [
-                  'agent-slack',
-                  'app',
-                  'create',
-                  ...(alias === undefined ? [] : [alias]),
-                  '--mode',
-                  mode,
-                  '--port',
-                  String(port),
-                ],
-                platform,
-              ),
+              command: context.handoffs.own([
+                'app',
+                'create',
+                ...(alias === undefined ? [] : [alias]),
+                '--mode',
+                mode,
+                '--port',
+                String(port),
+              ]),
             }),
           transport: { fetch: deps.appConfig, baseUrl: deps.slackBaseUrl },
           audit: context.core.audit,
           surface: 'cli',
-          platform: context.platform,
+          handoffs: context.handoffs,
         });
         writeResult(result, output(), () => renderAppCreated(result, options.color), streams);
       }),
@@ -559,7 +565,7 @@ configuration problem.`,
   const approvalOption = (command: Command): Command =>
     command.option(
       '--approval <approvalId>',
-      'apply a change a person approved: said yes to in chat, or approved with `agent-slack approve`',
+      'apply a change a person approved: said yes to in chat, or approved at a terminal with `approve`',
     );
 
   /**
@@ -574,14 +580,14 @@ configuration problem.`,
     context: SlackContext,
     change: GatedChange<T>,
     flags: Options,
-    command: ShellCommand,
+    /** This command's words after the program, run again with `--approval <id>`: located by core from Slack's caller. */
+    rerun: readonly string[],
   ): Promise<T> =>
     gatedChangeAtTerminal(context.core, change, {
       approvalId: flags.approval === undefined ? undefined : String(flags.approval),
       env,
       output: output(),
-      command,
-      approveCommand: 'agent-slack approve',
+      rerun,
       streams,
     });
 
@@ -611,19 +617,19 @@ configuration problem.`,
           // Checked in `finishSignIn`, as `slack_workspace_finish` is: see `checkedWait`.
           waitSeconds: flags.wait,
         });
-        writeResult(view, output(), () => renderConnected(view, false, options.color), streams);
+        writeResult(view, output(), () => renderConnected(view, false, options.color, context.handoffs), streams);
         return;
       }
       if (!alias) {
-        const profile = inlineCommand(shellCommand(['agent-slack', 'workspace', 'add', 'acme/slack'], platform));
-        const own = inlineCommand(
-          shellCommand(
-            ['agent-slack', 'workspace', 'add', 'acme/slack', '--client-id', '<id>', '--port', '51234'],
-            platform,
-          ),
-        );
         throw new CommsError('USAGE', 'a name for the workspace is needed', {
-          hint: `e.g. ${profile}, or use your own app with ${own}.`,
+          hint: handoffsSentence(
+            [
+              context.handoffs.own(['workspace', 'add', 'acme/slack']),
+              context.handoffs.own(['workspace', 'add', 'acme/slack', '--client-id', '<id>', '--port', '51234']),
+            ],
+            ([profile, own]) => `e.g. ${profile}, or use your own app with ${own}.`,
+            'Name it as organisation/slack, e.g. acme/slack.',
+          ),
         });
       }
       const mode = String(flags.mode) as InstallMode;
@@ -639,19 +645,15 @@ configuration problem.`,
           listenerCommand: deps.listenerCommand,
         }),
         flags,
-        shellCommand(
-          [
-            'agent-slack',
-            'workspace',
-            'add',
-            alias,
-            '--mode',
-            mode,
-            ...(flags.clientId === undefined ? [] : ['--client-id', String(flags.clientId)]),
-            ...given(flags, ['port', 'start']),
-          ],
-          platform,
-        ),
+        [
+          'workspace',
+          'add',
+          alias,
+          '--mode',
+          mode,
+          ...(flags.clientId === undefined ? [] : ['--client-id', String(flags.clientId)]),
+          ...given(flags, ['port', 'start']),
+        ],
       );
       await presentSignIn(context, started, false, options, {
         start: flags.start === true,
@@ -666,7 +668,7 @@ configuration problem.`,
     .action(
       act(async (context, options) => {
         const workspaces = listWorkspaces(await context.config());
-        writeResult(workspaces, output(), () => renderWorkspaces(workspaces, options.color, context.platform), streams);
+        writeResult(workspaces, output(), () => renderWorkspaces(workspaces, options.color, context.handoffs), streams);
       }),
     );
 
@@ -675,7 +677,7 @@ configuration problem.`,
     .description('everything known about one workspace')
     .action(
       act(async (context, options, alias: string) => {
-        const view = showWorkspace(await context.config(), alias);
+        const view = showWorkspace(await context.config(), alias, context.handoffs);
         writeResult(view, output(), () => renderWorkspace(view, options.color), streams);
       }),
     );
@@ -730,28 +732,19 @@ configuration problem.`,
           writeResult(
             planned.result,
             output(),
-            () => renderAppUpdateNeeded(planned.result, options.color, context.platform),
+            () => renderAppUpdateNeeded(planned.result, options.color, context.handoffs),
             streams,
           );
           return;
         case 'change': {
-          const started = await changeAt(
-            context,
-            planned.change,
-            flags,
-            shellCommand(
-              [
-                'agent-slack',
-                'workspace',
-                'mode',
-                alias,
-                'send',
-                ...(flags.appUpdated === true ? ['--app-updated'] : []),
-                ...given(flags, ['port', 'start']),
-              ],
-              platform,
-            ),
-          );
+          const started = await changeAt(context, planned.change, flags, [
+            'workspace',
+            'mode',
+            alias,
+            'send',
+            ...(flags.appUpdated === true ? ['--app-updated'] : []),
+            ...given(flags, ['port', 'start']),
+          ]);
           await presentSignIn(context, started, true, options, {
             start: flags.start === true,
             browser: flags.browser !== false,
@@ -768,13 +761,12 @@ configuration problem.`,
   ).action(
     act(async (context, _options, alias: string, flags: Options) => {
       // The same operation as `slack_workspace_remove`: approved, because a deleted token cannot be taken back.
-      const removed = await changeAt(
-        context,
-        removeWorkspaceChange(context, alias),
-        flags,
-        shellCommand(['agent-slack', 'workspace', 'remove', alias], platform),
-      );
-      writeResult(removed, output(), () => renderRemoved(removed, context.platform), streams);
+      const removed = await changeAt(context, removeWorkspaceChange(context, alias), flags, [
+        'workspace',
+        'remove',
+        alias,
+      ]);
+      writeResult(removed, output(), () => renderRemoved(removed, context.handoffs), streams);
     }),
   );
 
@@ -805,7 +797,7 @@ configuration problem.`,
           // Checked in `finishSignIn`, as `slack_workspace_finish` is: see `checkedWait`.
           waitSeconds: flags.wait,
         });
-        writeResult(view, output(), () => renderConnected(view, true, options.color), streams);
+        writeResult(view, output(), () => renderConnected(view, true, options.color, context.handoffs), streams);
         return;
       }
       /*
@@ -824,17 +816,13 @@ configuration problem.`,
           listenerCommand: deps.listenerCommand,
         }),
         flags,
-        shellCommand(
-          [
-            'agent-slack',
-            'workspace',
-            'reauth',
-            alias,
-            ...(mode === undefined ? [] : ['--mode', mode]),
-            ...given(flags, ['port', 'start']),
-          ],
-          platform,
-        ),
+        [
+          'workspace',
+          'reauth',
+          alias,
+          ...(mode === undefined ? [] : ['--mode', mode]),
+          ...given(flags, ['port', 'start']),
+        ],
       );
       await presentSignIn(context, started, true, options, {
         start: flags.start === true,
@@ -862,23 +850,14 @@ configuration problem.`,
       const reporting = wanted.send === undefined && wanted.change === undefined;
       if (reporting) refuseUnclaimedApproval(flags.approval, policyApprovalRefusal('cli'));
       const result = reporting
-        ? policyReport(await context.config(), alias)
-        : await changeAt(
-            context,
-            policyChange(context, alias, wanted),
-            flags,
-            shellCommand(
-              [
-                'agent-slack',
-                'workspace',
-                'policy',
-                alias,
-                ...(wanted.send ? ['--send', wanted.send] : []),
-                ...(wanted.change ? ['--change', wanted.change] : []),
-              ],
-              platform,
-            ),
-          );
+        ? policyReport(await context.config(), alias, context.handoffs)
+        : await changeAt(context, policyChange(context, alias, wanted), flags, [
+            'workspace',
+            'policy',
+            alias,
+            ...(wanted.send ? ['--send', wanted.send] : []),
+            ...(wanted.change ? ['--change', wanted.change] : []),
+          ]);
       writeResult(result, output(), () => renderPolicies(result, options.color), streams);
     }),
   );
@@ -923,7 +902,12 @@ configuration problem.`,
       act(async (context, options, flags: Options) => {
         const { call } = await session(context, String(flags.workspace));
         const result = await listChannels(call, { all: flags.all === true, limit: limitOf(flags) });
-        writeResult(result, output(), () => renderChannels(result, options.color), streams);
+        writeResult(
+          result,
+          output(),
+          () => renderChannels(result, options.color, context.handoffs, String(flags.workspace)),
+          streams,
+        );
       }),
     );
 
@@ -1082,12 +1066,15 @@ configuration problem.`,
         const choice = flags.choice === undefined ? undefined : String(flags.choice);
         // Checked before the workspace is opened, as `slack_file_download` checks it: see `downloadSelection`. The
         // answer is checked with it, in the form the command will pass it.
-        downloadSelection({
-          ...request,
-          saveTo: to,
-          choiceId: choice,
-          personChose: choice === undefined && personAtTerminal(env, streams, { json: options.json }),
-        });
+        downloadSelection(
+          {
+            ...request,
+            saveTo: to,
+            choiceId: choice,
+            personChose: choice === undefined && personAtTerminal(env, streams, { json: options.json }),
+          },
+          context.handoffs,
+        );
         const opened = await session(context, workspace);
         const result = await downloadAtTerminal<FileDownloadQuestion>({
           core: context.core,
@@ -1097,22 +1084,18 @@ configuration problem.`,
           choice,
           env,
           output: output(),
-          command: shellCommand(
-            [
-              'agent-slack',
-              'files',
-              'download',
-              '--workspace',
-              workspace,
-              ...(request.fileIds === undefined ? [] : ['--file', ...request.fileIds]),
-              ...(message === undefined ? [] : ['--message', ...message]),
-              ...(message === undefined && channel !== undefined ? ['--channel', channel] : []),
-              ...(request.since === undefined ? [] : ['--since', request.since]),
-              ...(request.maxFiles === undefined ? [] : ['--max-files', String(request.maxFiles)]),
-            ],
-            platform,
-          ),
-          approveCommand: 'agent-slack approve',
+          // Run again with the answer: located by core from Slack's caller, the downloads folder pinned with the rest.
+          rerun: [
+            'files',
+            'download',
+            '--workspace',
+            workspace,
+            ...(request.fileIds === undefined ? [] : ['--file', ...request.fileIds]),
+            ...(message === undefined ? [] : ['--message', ...message]),
+            ...(message === undefined && channel !== undefined ? ['--channel', channel] : []),
+            ...(request.since === undefined ? [] : ['--since', request.since]),
+            ...(request.maxFiles === undefined ? [] : ['--max-files', String(request.maxFiles)]),
+          ],
           render: (question) => renderFileDownloadQuestion(question, options.color),
           streams,
         });
@@ -1168,7 +1151,7 @@ configuration problem.`,
         writeResult(
           created,
           output(),
-          (data) => renderCreatedDraft(data, String(flags.workspace), context.platform),
+          (data) => renderCreatedDraft(data, String(flags.workspace), context.handoffs),
           streams,
         );
       }),
@@ -1209,7 +1192,7 @@ configuration problem.`,
         writeResult(
           updated,
           output(),
-          (data) => renderUpdatedDraft(data, String(flags.workspace), context.platform),
+          (data) => renderUpdatedDraft(data, String(flags.workspace), context.handoffs),
           streams,
         );
       }),
@@ -1239,8 +1222,8 @@ configuration problem.`,
     .description('throw a draft away')
     .action(
       act(async (context, _options, draftId: string, flags: Options) => {
-        const { account } = requireWorkspace(await context.config(), String(flags.workspace));
-        const store = openDraftStore(context.core.paths.stateDir, context.now, context.platform);
+        const { account } = requireWorkspace(await context.config(), String(flags.workspace), context.handoffs);
+        const store = openDraftStore(context.core.paths.stateDir, context.now, context.handoffs);
         const deleted = await deleteOwnDraft(store, account.id, draftId);
         writeResult(deleted, output(), renderDeletedDraft, streams);
       }),
@@ -1292,7 +1275,7 @@ configuration problem.`,
     .requiredOption('--ts <ts>', 'the message timestamp')
     .requiredOption('--emoji <name>', 'the emoji name, without colons')
     .option('--remove', 'remove your reaction instead', false)
-    .option('--approval <approvalId>', 'the approval a person gave with `agent-slack approve`, under `confirm`')
+    .option('--approval <approvalId>', 'the approval a person gave with `approve`, under `confirm`')
     .action(
       act(async (context, options, flags: Options) => {
         const wanted = {
@@ -1349,7 +1332,11 @@ configuration problem.`,
             'APPROVAL_REQUIRED',
             'only a person can approve a post, a reaction or a change, not an agent',
             {
-              hint: `Ask the user to run ${inlineCommand(shellCommand(['agent-slack', 'approve', approvalId], context.platform))} in their own terminal.`,
+              // Terminal-only: with no command here, the sentence saying why, and no other way to approve it.
+              hint: handoffSentence(
+                context.handoffs.own(['approve', approvalId]),
+                (command) => `Ask the user to run ${command} in their own terminal.`,
+              ),
               details: { marker },
             },
           );
@@ -1359,7 +1346,10 @@ configuration problem.`,
             'APPROVAL_REQUIRED',
             'approving a post, a reaction or a change needs an interactive terminal',
             {
-              hint: `Run ${inlineCommand(shellCommand(['agent-slack', 'approve', approvalId], context.platform))} directly in a terminal.`,
+              hint: handoffSentence(
+                context.handoffs.own(['approve', approvalId]),
+                (command) => `Run ${command} directly in a terminal.`,
+              ),
             },
           );
         }
@@ -1394,7 +1384,8 @@ configuration problem.`,
             env,
             color: globalOptions.color,
             platform,
-            approveCommand: 'agent-slack approve',
+            // Read by core only without this package's caller, which it always has: see `BRIDGE_APPROVE_COMMAND`.
+            approveCommand: BRIDGE_APPROVE_COMMAND,
             streams,
           });
           streams.stdout.write(
@@ -1475,7 +1466,11 @@ configuration problem.`,
          */
         if (!flags.client) {
           throw new CommsError('USAGE', 'name the client with --client', {
-            hint: 'For example: `agent-slack mcp install --client claude-code`.',
+            hint: handoffSentence(
+              context.handoffs.own(['mcp', 'install', '--client', 'claude-code']),
+              (example) => `For example: ${example}.`,
+              { instead: 'For example, --client claude-code.' },
+            ),
           });
         }
         /*
@@ -1493,21 +1488,17 @@ configuration problem.`,
          * operation, refused on one surface and not the other. An approval from the tool is claimed here with
          * `--approval`, and one from here by the tool. `--print` and `--client json` write nothing, and ask nobody.
          */
-        const again = shellCommand(
-          [
-            'agent-slack',
-            'mcp',
-            'install',
-            '--client',
-            String(flags.client),
-            ...(name !== undefined && name !== 'slack' ? ['--name', name] : []),
-            ...(pinned !== undefined ? ['--workspace', pinned] : []),
-            ...(launcher !== undefined ? ['--launcher', launcher] : []),
-            ...(flags.verify === false ? ['--no-verify'] : []),
-            ...(flags.force === true ? ['--force'] : []),
-          ],
-          platform,
-        );
+        const again = [
+          'mcp',
+          'install',
+          '--client',
+          String(flags.client),
+          ...(name !== undefined && name !== 'slack' ? ['--name', name] : []),
+          ...(pinned !== undefined ? ['--workspace', pinned] : []),
+          ...(launcher !== undefined ? ['--launcher', launcher] : []),
+          ...(flags.verify === false ? ['--no-verify'] : []),
+          ...(flags.force === true ? ['--force'] : []),
+        ];
         const result = await changeAt(
           context,
           serverInstallChange(
@@ -1561,10 +1552,7 @@ configuration problem.`,
             SLACK_MCP,
           ),
           flags,
-          shellCommand(
-            ['agent-slack', 'mcp', 'prune', ...(flags.includePrinted === true ? ['--include-printed'] : [])],
-            platform,
-          ),
+          ['mcp', 'prune', ...(flags.includePrinted === true ? ['--include-printed'] : [])],
         );
         writeResult(result, output(), () => renderPrune(result, options.color), streams);
       }),
@@ -1614,19 +1602,19 @@ configuration problem.`,
       writeResult(
         signInStarted(context, started, reauth),
         output(),
-        () => renderSignInStarted(started, reauth, options.color, context.platform),
+        () => renderSignInStarted(started, reauth, options.color, context.handoffs),
         streams,
       );
       return;
     }
     context.foregroundSignIn?.signal.throwIfAborted();
-    streams.stderr.write(`${renderSignInStarted(started, reauth, options.color, context.platform)}\n\n`);
+    streams.stderr.write(`${renderSignInStarted(started, reauth, options.color, context.handoffs)}\n\n`);
     if (how.browser) tryOpen(started.authUrl);
     const listener = started.listener;
     if (!listener) throw new CommsError('UNEXPECTED', 'the sign-in listener did not start');
     try {
       const view = await listener.result;
-      writeResult(view, output(), () => renderConnected(view, reauth, options.color), streams);
+      writeResult(view, output(), () => renderConnected(view, reauth, options.color, context.handoffs), streams);
     } finally {
       await listener.close();
     }
@@ -1643,7 +1631,7 @@ configuration problem.`,
         output(),
         async () => {
           throw new CommsError('USAGE', message, {
-            hint: 'Run `agent-slack --help` to see the commands.',
+            hint: handoffSentence(help, (command) => `Run ${command} to see the commands.`),
           });
         },
         streams,
@@ -1652,7 +1640,8 @@ configuration problem.`,
     throw error;
   }
   if (!ran) {
-    streams.stderr.write(`${paint(globals().color, 'dim', 'Nothing to do. Try `agent-slack --help`.')}\n`);
+    const tryHelp = handoffSentence(help, (command) => `Nothing to do. Try ${command}.`, { instead: 'Nothing to do.' });
+    streams.stderr.write(`${paint(globals().color, 'dim', tryHelp)}\n`);
     return 64;
   }
   return exitCode;

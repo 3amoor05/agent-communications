@@ -1,10 +1,11 @@
 import { randomBytes } from 'node:crypto';
 import {
   type AccountConfig,
+  type CliHandoffs,
   CommsError,
   type Config,
   findById,
-  inlineCommand,
+  handoffSentence,
   lookupName,
   nameAvailable,
   neutralise,
@@ -14,7 +15,6 @@ import {
   resolveName,
   resolveProfileSlackTarget,
   secretsStoreOf,
-  shellCommand,
   shownText,
 } from '@agentcomms/core';
 import { type ExchangedToken, safeSlackFailureText, scopeMismatch } from '../auth/authorize.ts';
@@ -96,15 +96,25 @@ export function listWorkspaces(config: Config): WorkspaceView[] {
 }
 
 /** Everything known about one workspace — `workspace show` and `slack_workspace_show`. */
-export function showWorkspace(config: Config, alias: string): WorkspaceView {
-  const found = requireWorkspace(config, alias);
+export function showWorkspace(config: Config, alias: string, handoffs: CliHandoffs): WorkspaceView {
+  const found = requireWorkspace(config, alias, handoffs);
   return viewOf(found.alias, found.account, profileLabelOf(config, found.account));
 }
 
-export function requireWorkspace(config: Config, alias: string): { alias: string; account: AccountConfig } {
+/**
+ * The workspace a name means, or why there is none. `handoffs` make the command its refusal names — the list of them —
+ * located from the installation printing it, or say why there is none here.
+ */
+export function requireWorkspace(
+  config: Config,
+  alias: string,
+  handoffs: CliHandoffs,
+): { alias: string; account: AccountConfig } {
   const notFound = () =>
     new CommsError('NOT_FOUND', `no Slack workspace called "${alias}"`, {
-      hint: 'List them with `agent-slack workspace list`.',
+      hint: handoffSentence(handoffs.own(['workspace', 'list']), (command) => `List them with ${command}.`, {
+        instead: 'List them with slack_workspaces_list from a chat.',
+      }),
     });
   // Through core, so a former name is refused with what it is called now rather than reported as unknown.
   const { account } = resolveName(config, 'account', alias, notFound);
@@ -118,7 +128,7 @@ export function requireWorkspace(config: Config, alias: string): { alias: string
  * `inboxes` and `accounts` share one namespace — S1 decided that rather than renaming `inboxes`, so a mailbox
  * called `work` and a workspace called `work` cannot both exist and leave every later lookup ambiguous.
  */
-export function checkAliasFree(config: Config, alias: string): void {
+export function checkAliasFree(config: Config, alias: string, handoffs: CliHandoffs): void {
   /*
    * The rule is core's — for either config version — and so is its wording, except for a name that is already
    * connected, where the fix is one only this package can suggest.
@@ -130,7 +140,11 @@ export function checkAliasFree(config: Config, alias: string): void {
   if (check.ok) return;
   if (lookupName(config, 'account', alias) || lookupName(config, 'inbox', alias)) {
     throw new CommsError('CONFIG', `"${alias}" is already connected`, {
-      hint: 'Choose another name, or disconnect it first with `agent-slack workspace remove`.',
+      hint: handoffSentence(
+        handoffs.own(['workspace', 'remove', alias]),
+        (command) => `Choose another name, or disconnect it first with ${command}.`,
+        { instead: 'Choose another name, or disconnect it first with slack_workspace_remove from a chat.' },
+      ),
     });
   }
   throw check.error;
@@ -149,10 +163,10 @@ export function validateExchange(options: {
   config: Config;
   /** The account being replaced, on a reauth. */
   existing?: { alias: string; account: AccountConfig } | undefined;
-  platform?: NodeJS.Platform | undefined;
+  /** The commands a refusal names, located from the installation printing them (`SlackContext.handoffs`). */
+  handoffs: CliHandoffs;
 }): void {
-  const { token, mode, flow, existing } = options;
-  const platform = options.platform ?? process.platform;
+  const { token, mode, flow, existing, handoffs } = options;
   const profileTransition = flow.transition === 'profile-app';
   if (
     profileTransition &&
@@ -190,7 +204,7 @@ export function validateExchange(options: {
         hint: 'Nothing was saved. Start the sign-in again from the organisation profile.',
       });
     }
-    const live = profileTargetFor(flow, options.config, platform);
+    const live = profileTargetFor(flow, options.config, handoffs);
     if ((profile.appId && token.appId !== profile.appId) || (live.appId && token.appId !== live.appId)) {
       throw new CommsError('CONFIG', 'Slack returned a token for another app than the organisation profile names', {
         hint: 'Nothing was saved. Check the organisation app and sign in again.',
@@ -234,8 +248,16 @@ export function validateExchange(options: {
         `Slack granted no posting scope, so the app's manifest was not updated to send: it did not grant ${missing.join(', ')}`,
         {
           hint: existing
-            ? `Nothing was saved, and "${alias}" is as it was. Update the app it signed in through: ${inlineCommand(shellCommand(['agent-slack', 'manifest', '--workspace', alias, '--mode', 'send'], platform))} (slack_manifest from a chat) prints the manifest and the link to its page, or ${inlineCommand(shellCommand(['agent-slack', 'app', 'update', alias, '--mode', 'send', '--port', String(flow.port)], platform))} does it at a terminal with an app configuration token. Then sign in again.`
-            : `Nothing was saved. Update the app first: paste ${inlineCommand(shellCommand(['agent-slack', 'manifest', '--mode', 'send', '--port', String(flow.port)], platform))} on its App Manifest page at https://api.slack.com/apps, and save. Then connect it again.`,
+            ? `Nothing was saved, and "${alias}" is as it was. ${updateTheApp(alias, flow.port, handoffs)} Then sign in again.`
+            : `Nothing was saved. ${handoffSentence(
+                handoffs.own(['manifest', '--mode', 'send', '--port', String(flow.port)]),
+                (command) =>
+                  `Update the app first: paste ${command} on its App Manifest page at https://api.slack.com/apps, and save.`,
+                {
+                  instead:
+                    'Update the app first: paste the manifest slack_manifest prints for send on its App Manifest page at https://api.slack.com/apps, and save.',
+                },
+              )} Then connect it again.`,
           details: { missing },
         },
       );
@@ -254,13 +276,21 @@ export function validateExchange(options: {
     if (mode === 'read' && extra.every((scope) => OUTWARD_SCOPES.includes(scope))) {
       throw new CommsError('CONFIG', `Slack returned posting scopes it granted this app before: ${extra.join(', ')}`, {
         hint: existing
-          ? `Slack never takes a scope back from a token. ${inlineCommand(shellCommand(['agent-slack', 'workspace', 'mode', existing.alias, 'read', '--port', String(flow.port)], platform))} says how to remove the app's installation first.`
+          ? `Slack never takes a scope back from a token. ${handoffSentence(
+              handoffs.own(['workspace', 'mode', existing.alias, 'read', '--port', String(flow.port)]),
+              (command) => `${command} says how to remove the app's installation first.`,
+              { instead: "slack_mode_narrow says how to remove the app's installation first, from a chat." },
+            )}`
           : 'Slack never takes a scope back from a token. Remove the app from the workspace in Slack (Workspace settings → Manage apps → the app → Remove app), then connect it again.',
         details: { returned: extra },
       });
     }
     throw new CommsError('CONFIG', `Slack granted more than "${mode}" asks for: ${extra.join(', ')}`, {
-      hint: `The app requests more than this mode allows. Re-create it from ${inlineCommand(shellCommand(['agent-slack', 'manifest', '--mode', mode], platform))}.`,
+      hint: `The app requests more than this mode allows. ${handoffSentence(
+        handoffs.own(['manifest', '--mode', mode]),
+        (command) => `Re-create it from ${command}.`,
+        { instead: `Re-create it from the manifest slack_manifest prints for ${mode}.` },
+      )}`,
     });
   }
 
@@ -346,21 +376,62 @@ export function validateExchange(options: {
   );
   if (duplicate) {
     throw new CommsError('CONFIG', `that account is already connected as "${duplicate[0]}"`, {
-      hint: `To renew it, use ${inlineCommand(shellCommand(['agent-slack', 'workspace', 'reauth', duplicate[0]], platform))}.`,
+      hint: handoffSentence(
+        handoffs.own(['workspace', 'reauth', duplicate[0]]),
+        (command) => `To renew it, use ${command}.`,
+        { instead: 'To renew it, use slack_workspace_reauth from a chat.' },
+      ),
     });
   }
 }
 
+/**
+ * "Run <core's org update>, then start the sign-in again." — core's command, from this installation's own core, located;
+ * with no command, comms_org_update from a chat and why.
+ */
+function reconcileProfile(organisation: string, handoffs: CliHandoffs): string {
+  return handoffSentence(
+    handoffs.core(['org', 'update', organisation]),
+    (command) => `Run ${command}, then start the sign-in again.`,
+    { instead: 'Call comms_org_update from a chat, then start the sign-in again.' },
+  );
+}
+
+/**
+ * "Update the app it signed in through: …" — the manifest and the terminal's `app update`, located; with no command,
+ * slack_manifest from a chat and why.
+ */
+function updateTheApp(alias: string, port: number, handoffs: CliHandoffs): string {
+  const manifest = handoffs.own(['manifest', '--workspace', alias, '--mode', 'send']);
+  const appUpdate = handoffs.own(['app', 'update', alias, '--mode', 'send', '--port', String(port)]);
+  return handoffSentence(
+    manifest,
+    (shown) =>
+      handoffSentence(
+        appUpdate,
+        (update) =>
+          `Update the app it signed in through: ${shown} (slack_manifest from a chat) prints the manifest and the link to its page, or ${update} does it at a terminal with an app configuration token.`,
+        {
+          instead: `Update the app it signed in through: ${shown} (slack_manifest from a chat) prints the manifest and the link to its page.`,
+        },
+      ),
+    {
+      instead:
+        'Update the app it signed in through: slack_manifest from a chat prints the manifest and the link to its page.',
+    },
+  );
+}
+
 /** Re-resolve the whole selected profile target, accepting only a concurrent learning of the same app id. */
-export function profileTargetFor(flow: SlackFlow, config: Config, platform: NodeJS.Platform): ProfileSlackTarget {
+export function profileTargetFor(flow: SlackFlow, config: Config, handoffs: CliHandoffs): ProfileSlackTarget {
   const expected = flow.profile;
   if (!expected) throw new CommsError('CONFIG', 'this is not a profile sign-in');
   let live: ProfileSlackTarget;
   try {
-    live = resolveProfileSlackTarget(config, expected.organisation, expected.role, platform);
+    live = resolveProfileSlackTarget(config, expected.organisation, expected.role, handoffs);
   } catch {
     throw new CommsError('CONFIG', 'the organisation profile changed during the Slack sign-in', {
-      hint: `Run ${inlineCommand(shellCommand(['agentcomms', 'org', 'update', expected.organisation], platform))}, then start the sign-in again.`,
+      hint: reconcileProfile(expected.organisation, handoffs),
     });
   }
   const selected = {
@@ -385,7 +456,7 @@ export function profileTargetFor(flow: SlackFlow, config: Config, platform: Node
   };
   if (JSON.stringify(selected) !== JSON.stringify(snapshot) || (expected.appId && expected.appId !== live.appId)) {
     throw new CommsError('CONFIG', 'the organisation profile changed during the Slack sign-in', {
-      hint: `Run ${inlineCommand(shellCommand(['agentcomms', 'org', 'update', expected.organisation], platform))}, then start the sign-in again.`,
+      hint: reconcileProfile(expected.organisation, handoffs),
     });
   }
   return live;
@@ -482,7 +553,8 @@ export interface RemovalDeps {
   /** `kind` so the removal can tell whether the backend it deleted from is still the one in force. */
   readonly secrets: { readonly kind?: string; delete(ref: string): Promise<boolean> };
   readonly update: (mutator: (config: Config) => Config) => Promise<Config>;
-  readonly platform?: NodeJS.Platform | undefined;
+  /** The commands a refusal names, located from the installation printing them (`SlackContext.handoffs`). */
+  readonly handoffs: CliHandoffs;
 }
 
 /**
@@ -500,7 +572,7 @@ export async function removeWorkspace(
   alias: string,
   options: { expectId?: string | undefined; cleanup?: readonly PendingRevocationResult[] | undefined } = {},
 ): Promise<RemovedWorkspace> {
-  const found = requireWorkspace(deps.config, alias);
+  const found = requireWorkspace(deps.config, alias, deps.handoffs);
   /*
    * The workspace a person approved removing, and no other.
    *
@@ -512,7 +584,11 @@ export async function removeWorkspace(
    */
   if (options.expectId !== undefined && found.account.id !== options.expectId) {
     throw new CommsError('CONFIG', `"${alias}" changed after its removal was approved, so nothing was removed`, {
-      hint: `Look at it with ${inlineCommand(shellCommand(['agent-slack', 'workspace', 'show', alias], deps.platform))}, and remove it again if you still want it gone.`,
+      hint: handoffSentence(
+        deps.handoffs.own(['workspace', 'show', alias]),
+        (command) => `Look at it with ${command}, and remove it again if you still want it gone.`,
+        { instead: 'Look at it with slack_workspace_show from a chat, and remove it again if you still want it gone.' },
+      ),
     });
   }
   await deps.secrets.delete(found.account.secretRef);
@@ -534,14 +610,20 @@ export async function removeWorkspace(
      */
     if (deps.secrets.kind && secretsStoreOf(config) !== deps.secrets.kind) {
       throw new CommsError('TRANSIENT', `the secret store changed while "${alias}" was being removed`, {
-        hint: `Run ${inlineCommand(shellCommand(['agent-slack', 'workspace', 'remove', alias], deps.platform))} again.`,
+        hint: handoffSentence(deps.handoffs.own(['workspace', 'remove', alias]), (command) => `Run ${command} again.`, {
+          instead: 'Call slack_workspace_remove again from a chat.',
+        }),
       });
     }
     // By id, under whatever key it holds now: nothing may depend on the name staying put between the read and here.
     const held = findById(config, 'account', found.account.id);
     if (!held || held.account.secretRef !== found.account.secretRef) {
       throw new CommsError('CONFIG', `"${alias}" was renewed while it was being removed`, {
-        hint: `It is connected again. Run ${inlineCommand(shellCommand(['agent-slack', 'workspace', 'remove', alias], deps.platform))} once more if you still want it gone.`,
+        hint: `It is connected again. ${handoffSentence(
+          deps.handoffs.own(['workspace', 'remove', alias]),
+          (command) => `Run ${command} once more if you still want it gone.`,
+          { instead: 'Call slack_workspace_remove once more from a chat if you still want it gone.' },
+        )}`,
       });
     }
     const { [held.alias]: _removed, ...rest } = config.accounts;

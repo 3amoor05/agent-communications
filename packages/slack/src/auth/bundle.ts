@@ -1,4 +1,4 @@
-import { CommsError } from '@agentcomms/core';
+import { type CliHandoffs, CommsError, handoffSentenceToFill } from '@agentcomms/core';
 
 /**
  * The credential for one workspace, as one value.
@@ -106,22 +106,32 @@ export const REFRESH_SKEW_MS: number = 10 * 60_000;
 /** Warn this long before the refresh token expires, while re-authorising is still a choice rather than a surprise. */
 export const REFRESH_EXPIRY_WARNING_MS: number = 5 * 24 * 60 * 60_000;
 
-export function parseBundle(raw: string | null): TokenBundle | null {
+/**
+ * A stored credential, read. `handoffs` make the command a refusal names — the workspace signed in again — located from
+ * the installation printing it, or say why there is none here.
+ */
+export function parseBundle(raw: string | null, handoffs: CliHandoffs): TokenBundle | null {
   if (raw === null) return null;
+  // The workspace is not known here, so the agent fills its name in.
+  const replace = (): string =>
+    handoffSentenceToFill(
+      handoffs.own(['workspace', 'reauth']),
+      ['<name>'],
+      (command) => `Run ${command} to replace it.`,
+      { instead: 'Sign the workspace in again with slack_workspace_reauth from a chat to replace it.' },
+    );
   let value: unknown;
   try {
     value = JSON.parse(raw);
   } catch {
     // A secret store holding something that is not a bundle is a broken install, not a missing one — and saying
     // "no credential" would send somebody to `workspace add` when the truthful answer is `reauth`.
-    throw new CommsError('BAD_DATA', 'the stored Slack credential is not readable', {
-      hint: 'Run `agent-slack workspace reauth <name>` to replace it.',
-    });
+    throw new CommsError('BAD_DATA', 'the stored Slack credential is not readable', { hint: replace() });
   }
   const bundle = value as Partial<TokenBundle>;
   if (bundle.v !== BUNDLE_VERSION || typeof bundle.accessToken !== 'string' || !bundle.state) {
     throw new CommsError('BAD_DATA', 'the stored Slack credential is from a version this cannot read', {
-      hint: 'Run `agent-slack workspace reauth <name>` to replace it.',
+      hint: replace(),
     });
   }
   return bundle as TokenBundle;

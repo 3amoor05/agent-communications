@@ -5,15 +5,16 @@ import {
   type CanonicalChannelMessage,
   type ChannelPreview,
   type ClaimOptions,
+  type CliHandoffs,
   CommsError,
   canonicalJson,
-  commandText,
   type Expectation,
-  inlineCommand,
+  handoffSentence,
+  handoffSentenceToFill,
+  handoffText,
   messageDigest,
   type SendPolicy,
   sha256Hex,
-  shellCommand,
   stricterPolicy,
   truncateDisplay,
 } from '@agentcomms/core';
@@ -98,7 +99,11 @@ export interface PrepareDeps {
   readonly accountId: string;
   readonly workspaceId: string;
   readonly workspaceName: string;
-  readonly platform?: NodeJS.Platform | undefined;
+  /**
+   * The commands a refusal or a wait names — Slack's own `approve`, `draft update`, `workspace mode` — located from this
+   * installation and quoted for the shell the output is for (`SlackContext.handoffs`). Never in the digest.
+   */
+  readonly handoffs: CliHandoffs;
   /** The user id this posts as. In the digest: two accounts in one workspace are two different people speaking. */
   readonly postingAs: string;
   readonly policy: SendPolicy;
@@ -166,7 +171,7 @@ function requireMember(channel: Channel, channelId: string): void {
   const name = channel.name?.text;
   const named = name ? `#${truncateDisplay(name, 80)} (${channelId})` : channelId;
   throw new CommsError('SCOPE_MISSING', `nothing was sent: this account is not a member of ${named}`, {
-    hint: 'Join the channel in Slack yourself, then prepare the post again: agent-slack never joins a channel for you.',
+    hint: 'Join the channel in Slack yourself, then prepare the post again: nothing here joins a channel for you.',
     details: { channel: channelId, reason: 'not-a-member' },
   });
 }
@@ -234,21 +239,21 @@ export interface PostView {
  * prepare as a message outside any thread. The composer writes a string or nothing; anything else was written by hand.
  * (`text` and `channel` are checked to be strings when the file is read — see `isDraftShaped`.)
  */
-export function postedPayload(draft: SlackDraft, platform: NodeJS.Platform = process.platform): ComposedPayload {
+export function postedPayload(draft: SlackDraft, handoffs: CliHandoffs): ComposedPayload {
   const stored = draft.payload;
   const threadTs: unknown = stored.thread_ts;
-  if (threadTs !== undefined && typeof threadTs !== 'string') throw notComposed(draft, platform);
+  if (threadTs !== undefined && typeof threadTs !== 'string') throw notComposed(draft, handoffs);
   const posted = payloadOf(stored.text, stored.channel, threadTs);
-  if (canonicalJson(stored) !== canonicalJson(posted)) throw notComposed(draft, platform);
+  if (canonicalJson(stored) !== canonicalJson(posted)) throw notComposed(draft, handoffs);
   return posted;
 }
 
 /** The gate's refusal of a draft that is not what its text composes to — one wording, whichever part of it differs. */
-function notComposed(draft: SlackDraft, platform: NodeJS.Platform): CommsError {
+function notComposed(draft: SlackDraft, handoffs: CliHandoffs): CommsError {
   return new CommsError(
     'BAD_DATA',
     `nothing was sent: draft "${draft.draftId}" is not what its text composes to, so its preview would not be what posts`,
-    { hint: changedOutsideHint(draft.draftId, platform), details: { draftId: draft.draftId, reason: 'not-composed' } },
+    { hint: changedOutsideHint(draft.draftId, handoffs), details: { draftId: draft.draftId, reason: 'not-composed' } },
   );
 }
 
@@ -258,10 +263,14 @@ function notComposed(draft: SlackDraft, platform: NodeJS.Platform): CommsError {
  * One sentence for every place that finds one — the gate, and `draft show` and `slack_draft_get`, which show a draft as
  * the gate would post it — so the advice cannot differ between showing a draft and trying to post it.
  */
-export function changedOutsideHint(draftId: string, platform: NodeJS.Platform = process.platform): string {
-  return `It was changed outside agent-slack. Delete it with ${inlineCommand(
-    shellCommand(['agent-slack', 'draft', 'delete', draftId, '--workspace', '<name>'], platform),
-  )} and compose it again.`;
+export function changedOutsideHint(draftId: string, handoffs: CliHandoffs): string {
+  const remove = handoffSentenceToFill(
+    handoffs.own(['draft', 'delete', draftId, '--workspace']),
+    ['<name>'],
+    (command) => `Delete it with ${command} and compose it again.`,
+    { instead: 'Delete it with slack_draft_delete from a chat and compose it again.' },
+  );
+  return `It was changed outside agent-slack. ${remove}`;
 }
 
 /**
@@ -273,14 +282,14 @@ export function changedOutsideHint(draftId: string, platform: NodeJS.Platform = 
  * what is bound cannot drift apart between the three.
  */
 export async function viewPost(
-  deps: Pick<PrepareDeps, 'call' | 'workspaceId' | 'workspaceName' | 'postingAs' | 'platform'>,
+  deps: Pick<PrepareDeps, 'call' | 'workspaceId' | 'workspaceName' | 'postingAs' | 'handoffs'>,
   draft: SlackDraft,
   book: NameBook,
 ): Promise<PostView> {
   // Before Slack is asked anything: a draft that is not what its text composes to is shown to nobody.
-  const payload = postedPayload(draft, deps.platform);
+  const payload = postedPayload(draft, deps.handoffs);
   // A draft stored before 0.12.0, or written by hand, may name a user: refused here too, before Slack is asked.
-  requireConversation(payload.channel, deps.workspaceName, deps.platform);
+  requireConversation(payload.channel, deps.workspaceName, deps.handoffs);
   const { channel, members, why } = await roomOf(deps.call, payload.channel);
   // Here, so preparing, the approval screen and posting all refuse it — and posting before the approval is claimed.
   if (channel) requireMember(channel, payload.channel);
@@ -339,23 +348,34 @@ export async function viewPost(
  * gone to it, and in words that do not say what to do. A post of text alone never comes here.
  */
 export function requireFileSending(
-  deps: Pick<PrepareDeps, 'mode' | 'grantedScopes' | 'workspaceName' | 'platform'>,
+  deps: Pick<PrepareDeps, 'mode' | 'grantedScopes' | 'workspaceName' | 'handoffs'>,
 ): void {
   const alias = deps.workspaceName;
+  const { handoffs } = deps;
   if (deps.mode !== 'send') {
     throw new CommsError('SCOPE_MISSING', `"${alias}" is connected to read, and cannot send files`, {
-      hint: `Nothing was sent. Moving it to send takes a person: ${inlineCommand(shellCommand(['agent-slack', 'workspace', 'mode', alias], deps.platform))} shows the steps, as slack_mode does from a chat.`,
+      hint: `Nothing was sent. Moving it to send takes a person: ${handoffSentence(
+        handoffs.own(['workspace', 'mode', alias]),
+        (command) => `${command} shows the steps, as slack_mode does from a chat.`,
+        { instead: 'slack_mode shows the steps, from a chat.' },
+      )}`,
       details: { mode: deps.mode ?? null },
     });
   }
   if (!(deps.grantedScopes ?? []).includes('files:write')) {
-    const command = shellCommand(
-      ['agent-slack', 'workspace', 'reauth', alias, '--mode', 'send'],
-      deps.platform ?? process.platform,
+    const reauth = handoffs.own(['workspace', 'reauth', alias, '--mode', 'send']);
+    const manifest = handoffSentence(
+      handoffs.own(['manifest', '--mode', 'send']),
+      (command) => `If the app itself does not offer files:write, update it with ${command} first.`,
+      {
+        instead: 'If the app itself does not offer files:write, update it first: slack_manifest prints what it needs.',
+      },
     );
     throw new CommsError('SCOPE_MISSING', `"${alias}" was not granted files:write, which sending a file needs`, {
-      hint: `Nothing was sent. Sign in again to grant it: ${inlineCommand(command)}. If the app itself does not offer files:write, update it with \`agent-slack manifest --mode send\` first.`,
-      details: { scope: 'files:write', command: commandText(command) },
+      hint: `Nothing was sent. ${handoffSentence(reauth, (command) => `Sign in again to grant it: ${command}.`, {
+        instead: 'Sign in again to grant it, with slack_workspace_reauth from a chat.',
+      })} ${manifest}`,
+      details: { scope: 'files:write', command: handoffText(reauth) },
     });
   }
 }
@@ -375,14 +395,13 @@ function attachPolicyFor(deps: Pick<PrepareDeps, 'attachPolicy'>): AttachPolicy 
  * only the paths left to fill in. `draft update` takes nothing without `--workspace`, and a refusal whose one step
  * leaves it out offers a command that fails.
  */
-export function refileCommand(
-  workspace: string,
-  draftId: string,
-  platform: NodeJS.Platform = process.platform,
-): string {
-  return commandText(
-    shellCommand(['agent-slack', 'draft', 'update', draftId, '--workspace', workspace, '--file', '<path…>'], platform),
-  );
+export function refileCommand(workspace: string, draftId: string, handoffs: CliHandoffs): string {
+  return handoffText(refile(workspace, draftId, handoffs));
+}
+
+/** `draft update <id> --workspace <name> --file <path…>`, located: what {@link refileCommand} says as a value. */
+function refile(workspace: string, draftId: string, handoffs: CliHandoffs) {
+  return handoffs.own(['draft', 'update', draftId, '--workspace', workspace, '--file', '<path…>']);
 }
 
 /**
@@ -393,7 +412,7 @@ export function refileCommand(
  * refused here rather than shown as its old self.
  */
 async function filesAsRecorded(
-  deps: Pick<PrepareDeps, 'attachPolicy' | 'workspaceName' | 'platform'>,
+  deps: Pick<PrepareDeps, 'attachPolicy' | 'workspaceName' | 'handoffs'>,
   draft: SlackDraft,
 ): Promise<void> {
   const files = draft.files ?? [];
@@ -406,18 +425,18 @@ async function filesAsRecorded(
         'BAD_DATA',
         `nothing was prepared: ${file.name} is not the file the draft recorded — ${check.why}`,
         {
-          hint: `Put the files on the draft again with ${inlineCommand(
-            shellCommand(
-              ['agent-slack', 'draft', 'update', draft.draftId, '--workspace', deps.workspaceName, '--file', '<path…>'],
-              deps.platform ?? process.platform,
-            ),
-          )} (every one: --file replaces the list) or slack_draft_update, then prepare it again.`,
+          hint: handoffSentence(
+            refile(deps.workspaceName, draft.draftId, deps.handoffs),
+            (command) =>
+              `Put the files on the draft again with ${command} (every one: --file replaces the list) or slack_draft_update, then prepare it again.`,
+            { instead: 'Put the files on the draft again with slack_draft_update, then prepare it again.' },
+          ),
           details: {
             draftId: draft.draftId,
             file: file.name,
             path: file.path,
             reason: 'file-changed',
-            command: refileCommand(deps.workspaceName, draft.draftId, deps.platform),
+            command: refileCommand(deps.workspaceName, draft.draftId, deps.handoffs),
           },
         },
       );
@@ -570,9 +589,12 @@ export interface PostedFiles {
   readonly note?: string | undefined;
 }
 
-/** The command a person runs to approve at their own terminal. The same whichever surface asked. */
-export function approveCommand(approvalId: string, platform: NodeJS.Platform = process.platform): string {
-  return commandText(shellCommand(['agent-slack', 'approve', approvalId], platform));
+/**
+ * The command a person runs to approve at their own terminal, located: the same whichever surface asked. With no
+ * command here, the sentence saying why — never a bare `approve` nobody's PATH has.
+ */
+export function approveCommand(approvalId: string, handoffs: CliHandoffs): string {
+  return handoffText(handoffs.own(['approve', approvalId]));
 }
 
 /**
@@ -588,7 +610,7 @@ function waitingHint(
   kind: 'post' | 'reaction',
   surface: 'cli' | 'mcp' | undefined,
   approvalId: string,
-  platform: NodeJS.Platform,
+  handoffs: CliHandoffs,
 ): string {
   const show =
     kind === 'post' ? 'Show the user the preview, then' : 'Tell the user which emoji and which message, then';
@@ -598,11 +620,14 @@ function waitingHint(
         ? 'call `slack_post_send` again with the same arguments'
         : `call \`slack_react_send\` with approvalId ${approvalId} and the same channel, ts and emoji`
       : kind === 'post'
-        ? 'run the same `agent-slack post send` again'
-        : `run the same \`agent-slack react\` command again with \`--approval ${approvalId}\` added`;
-  return `${show} ask them to run ${inlineCommand(
-    shellCommand(['agent-slack', 'approve', approvalId], platform),
-  )} in their own terminal. When they have, ${again}. You cannot approve this yourself.`;
+        ? 'run the same post send command again'
+        : `run the same react command again with \`--approval ${approvalId}\` added`;
+  // Terminal-only under `confirm`: with no command here, the sentence saying why, and no other way to approve it.
+  const ask = handoffSentence(
+    handoffs.own(['approve', approvalId]),
+    (command) => `${show} ask them to run ${command} in their own terminal. When they have, ${again}.`,
+  );
+  return `${ask} You cannot approve this yourself.`;
 }
 
 /**
@@ -660,14 +685,14 @@ async function claimOrHandOver(
     await deps.approvals.claimForSend(approvalId, live, {
       pendingHint,
       signal: deps.signal,
-      platform: deps.platform,
+      platform: deps.handoffs.platform,
     });
   } catch (error) {
     if (isCancelledPost(error)) throw cancelledPost(NOT_USED);
     if (!(error instanceof CommsError) || error.code !== 'APPROVAL_PENDING') throw error;
     throw new CommsError(error.code, error.message, {
       ...(error.hint === undefined ? {} : { hint: error.hint }),
-      details: { ...error.details, command: approveCommand(approvalId, deps.platform) },
+      details: { ...error.details, command: approveCommand(approvalId, deps.handoffs) },
     });
   }
 }
@@ -742,7 +767,7 @@ export async function postPrepared(
       // Built from the live values, the same way `preparePost` built the stored one — one source, so they agree.
       expect: expectationFor(payload, preview.notifies),
     },
-    waitingHint('post', deps.surface, approvalId, deps.platform ?? process.platform),
+    waitingHint('post', deps.surface, approvalId, deps.handoffs),
   );
 
   if (policy !== undefined) return postFiles(deps, approvalId, draft.draftId, payload, files, policy);
@@ -1042,7 +1067,7 @@ async function postFiles(
    * signal in place of its thirty-second limit — and one of those calls is the one that shares the files.
    */
   const transfer: SlackCall = deps.signal === undefined ? call : { ...call, signal: deps.signal };
-  const refile = refileCommand(deps.workspaceName, draftId, deps.platform);
+  const refile = refileCommand(deps.workspaceName, draftId, deps.handoffs);
   // Widened, not narrowed to its first value: it moves on inside the permit's callback, which no narrowing follows.
   let stage = 'check' as 'check' | 'upload' | 'complete';
   try {
@@ -1253,7 +1278,7 @@ export function reactionOfApproval(record: ApprovalRecord, workspaceId: string):
   };
   if (!what || reactionDigest({ workspaceId, postingAs: record.inboxSub ?? '' }, options) !== record.digest) {
     throw new CommsError('BAD_DATA', 'this approval does not describe the reaction it is bound to', {
-      hint: 'Nothing was approved. Run the `agent-slack react` command again for a new approval.',
+      hint: 'Nothing was approved. Ask for the reaction again, for a new approval.',
       details: { approvalId: record.approvalId },
     });
   }
@@ -1434,7 +1459,7 @@ export async function reactPrepared(
       policy: deps.policy,
       expect: reactionExpectation(options),
     },
-    waitingHint('reaction', deps.surface, approvalId, deps.platform ?? process.platform),
+    waitingHint('reaction', deps.surface, approvalId, deps.handoffs),
   );
   const method: PostingMethod = options.remove ? 'reactions.remove' : 'reactions.add';
   try {

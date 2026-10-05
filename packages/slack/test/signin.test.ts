@@ -17,6 +17,7 @@ import {
   type StartedSignIn,
   startSignIn,
 } from '../src/operations/signin.ts';
+import { assertNoBareCommand, slackInline } from './support/handoffs.ts';
 import { newHarness, slackOk, TEST_CLIENT_ID, tempDir } from './support/harness.ts';
 import { fetchListener, running, stopListeners } from './support/listener.ts';
 
@@ -90,8 +91,9 @@ test('an own-app reauth cancelled before a pasted callback keeps its flow and pr
       assert.equal(error.code, 'APPROVAL_PENDING');
       assert.equal(
         error.hint,
-        `Finish signing in in the browser, then run \`agent-slack workspace reauth acme --finish ${flow.flowId}\`.`,
+        `Finish signing in in the browser, then run ${slackInline(harness.core.paths, ['workspace', 'reauth', 'acme', '--finish', flow.flowId], 'darwin')}.`,
       );
+      assertNoBareCommand(error.hint ?? '');
       return true;
     },
   );
@@ -958,7 +960,8 @@ test('a widening whose approval names another account is not saved, says why, an
     assert.equal(error.code, 'LOOSENING_REFUSED');
     assert.match(error.message, /"acme" changed after this was approved, so the sign-in was not saved/);
     assert.match(error.hint ?? '', /Nothing was saved for it/);
-    assert.match(error.hint ?? '', /agent-slack workspace reauth acme --mode send/);
+    assert.match(error.hint ?? '', / workspace reauth acme --mode send`, or the same tool from a chat/);
+    assertNoBareCommand(error.hint ?? '');
     assert.match(String(error.details?.refused), /this is not the change that was approved/);
     return true;
   });

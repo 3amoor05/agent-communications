@@ -75,7 +75,7 @@ agent-slack app [options] [command]
 
 ### `agent-slack app update`
 
-replace a connected workspace's Slack app manifest with the one `agent-slack manifest` prints
+replace a connected workspace's Slack app manifest with the one the `manifest` command prints
 
 ```
 agent-slack app update [options] <alias>
@@ -88,7 +88,7 @@ agent-slack app update [options] <alias>
 
 ### `agent-slack app create`
 
-create a new Slack app from the manifest `agent-slack manifest` prints, and print the command that connects it
+create a new Slack app from the manifest the `manifest` command prints, and print the command that connects it
 
 ```
 agent-slack app create [options] [alias]
@@ -125,7 +125,7 @@ agent-slack workspace add [options] [alias]
 | `--url <url>` | with --finish, the address-bar URL, pasted back by hand | — |
 | `--no-browser` | print the link instead of opening it | — |
 | `--client-id <id>` | use your own app’s Client ID; also requires --port | — |
-| `--approval <approvalId>` | apply a change a person approved: said yes to in chat, or approved with `agent-slack approve` | — |
+| `--approval <approvalId>` | apply a change a person approved: said yes to in chat, or approved at a terminal with `approve` | — |
 
 ### `agent-slack workspace list`
 
@@ -157,7 +157,7 @@ agent-slack workspace mode [options] <alias> [mode]
 | `--app-updated` | for your own app with send: its manifest already asks for the send scopes | `false` |
 | `--start` | print the sign-in link and return, instead of waiting | `false` |
 | `--no-browser` | print the link instead of opening it | — |
-| `--approval <approvalId>` | apply a change a person approved: said yes to in chat, or approved with `agent-slack approve` | — |
+| `--approval <approvalId>` | apply a change a person approved: said yes to in chat, or approved at a terminal with `approve` | — |
 
 ### `agent-slack workspace remove`
 
@@ -169,7 +169,7 @@ agent-slack workspace remove [options] <alias>
 
 | Option | What it does | Default |
 |---|---|---|
-| `--approval <approvalId>` | apply a change a person approved: said yes to in chat, or approved with `agent-slack approve` | — |
+| `--approval <approvalId>` | apply a change a person approved: said yes to in chat, or approved at a terminal with `approve` | — |
 
 ### `agent-slack workspace reauth`
 
@@ -188,7 +188,7 @@ agent-slack workspace reauth [options] <alias>
 | `--wait <seconds>` | with --finish, how long to wait for the browser | `"60"` |
 | `--url <url>` | with --finish, the address-bar URL, pasted back by hand | — |
 | `--no-browser` | print the link instead of opening it | — |
-| `--approval <approvalId>` | apply a change a person approved: said yes to in chat, or approved with `agent-slack approve` | — |
+| `--approval <approvalId>` | apply a change a person approved: said yes to in chat, or approved at a terminal with `approve` | — |
 
 ### `agent-slack workspace policy`
 
@@ -202,7 +202,7 @@ agent-slack workspace policy [options] <alias>
 |---|---|---|
 | `--send <policy>` | how a post or reaction is approved: chat, confirm or never | — |
 | `--change <policy>` | how a change that loosens or removes it is approved: chat or confirm | — |
-| `--approval <approvalId>` | apply a change a person approved: said yes to in chat, or approved with `agent-slack approve` | — |
+| `--approval <approvalId>` | apply a change a person approved: said yes to in chat, or approved at a terminal with `approve` | — |
 
 ### `agent-slack doctor`
 
@@ -455,7 +455,7 @@ agent-slack react [options]
 | `--ts <ts>` | the message timestamp | — |
 | `--emoji <name>` | the emoji name, without colons | — |
 | `--remove` | remove your reaction instead | `false` |
-| `--approval <approvalId>` | the approval a person gave with `agent-slack approve`, under `confirm` | — |
+| `--approval <approvalId>` | the approval a person gave with `approve`, under `confirm` | — |
 
 ### `agent-slack approve`
 

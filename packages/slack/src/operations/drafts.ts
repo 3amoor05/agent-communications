@@ -1,4 +1,12 @@
-import { type AttachPolicy, CommsError, defaultAttachDeny, expandHome, homeDirectory } from '@agentcomms/core';
+import {
+  type AttachPolicy,
+  type CliHandoffs,
+  CommsError,
+  defaultAttachDeny,
+  expandHome,
+  handoffSentenceToFill,
+  homeDirectory,
+} from '@agentcomms/core';
 import {
   type Broadcast,
   type ComposedPayload,
@@ -68,6 +76,8 @@ export async function attachPolicyOf(context: SlackContext): Promise<AttachPolic
     roots: config.defaults.attachRoots.map((root) => expandHome(root, home)),
     deny: [...defaultAttachDeny(context.core.paths.configDir, context.env), ...config.defaults.attachDeny],
     home,
+    // The jail's refusal names core's `attach roots add`, located from this installation.
+    handoffs: context.handoffs,
   };
 }
 
@@ -85,14 +95,14 @@ function nothingToPost(): CommsError {
  * checked and recorded, and the draft is written only once every one of them has been.
  */
 export async function createDraft(context: SlackContext, alias: string, input: DraftInput): Promise<SlackDraft> {
-  const { account } = requireWorkspace(await context.config(), alias);
-  requireConversation(input.channel, alias, context.platform);
+  const { account } = requireWorkspace(await context.config(), alias, context.handoffs);
+  requireConversation(input.channel, alias, context.handoffs);
   const paths = input.files ?? [];
   if (input.text === undefined && paths.length === 0) throw nothingToPost();
   const payload = draftPayload(input);
   checkFileCount(paths.length);
   const files = paths.length === 0 ? [] : await recordFiles(paths, await attachPolicyOf(context));
-  return openDraftStore(context.core.paths.stateDir, context.now, context.platform).create(
+  return openDraftStore(context.core.paths.stateDir, context.now, context.handoffs).create(
     account.id,
     payload,
     input.text ?? '',
@@ -126,12 +136,12 @@ export interface DraftChange {
 function mentionsOf(
   draft: SlackDraft,
   text: string,
-  platform: NodeJS.Platform,
+  handoffs: CliHandoffs,
 ): { users: string[]; broadcast: string | undefined } {
   const body = escapeForSlack(draft.source);
   const changed = (): CommsError =>
     new CommsError('BAD_DATA', `draft "${draft.draftId}" is not what its source composes to, so it cannot be edited`, {
-      hint: changedOutsideHint(draft.draftId, platform),
+      hint: changedOutsideHint(draft.draftId, handoffs),
       details: { draftId: draft.draftId, reason: 'source-differs' },
     });
   if (!composedFrom(draft.source, text)) throw changed();
@@ -163,12 +173,12 @@ export async function updateDraft(
   draftId: string,
   change: DraftChange,
 ): Promise<SlackDraft> {
-  const { account } = requireWorkspace(await context.config(), alias);
-  const store = openDraftStore(context.core.paths.stateDir, context.now, context.platform);
+  const { account } = requireWorkspace(await context.config(), alias, context.handoffs);
+  const store = openDraftStore(context.core.paths.stateDir, context.now, context.handoffs);
   const draft = await ownDraft(store, account.id, draftId);
   // As the gate would post it, or its refusal: a draft changed outside agent-slack is composed again, not edited.
-  const posted = postedPayload(draft, context.platform);
-  const kept = mentionsOf(draft, posted.text, context.platform);
+  const posted = postedPayload(draft, context.handoffs);
+  const kept = mentionsOf(draft, posted.text, context.handoffs);
   const next: DraftInput = {
     channel: change.channel ?? posted.channel,
     text: change.text ?? draft.source,
@@ -176,7 +186,7 @@ export async function updateDraft(
     mentionUsers: change.mentionUsers ?? kept.users,
     broadcast: change.broadcast ?? kept.broadcast,
   };
-  requireConversation(next.channel, alias, context.platform);
+  requireConversation(next.channel, alias, context.handoffs);
   const payload = draftPayload(next);
 
   const staying = change.files === undefined ? (draft.files ?? []) : [];
@@ -209,17 +219,22 @@ export async function ownDraft(store: DraftStore, accountId: string, draftId: st
     // A damaged draft of another workspace is absent here too; "could not be read" would say that it exists.
     if (isUnreadableDraft(error)) {
       const owner = await store.ownerOf(draftId);
-      if (owner !== undefined && owner !== accountId) throw notHere(draftId);
+      if (owner !== undefined && owner !== accountId) throw notHere(draftId, store.handoffs);
     }
     throw error;
   }
-  if (found.accountId !== accountId) throw notHere(draftId);
+  if (found.accountId !== accountId) throw notHere(draftId, store.handoffs);
   return found;
 }
 
-function notHere(draftId: string): CommsError {
+function notHere(draftId: string, handoffs: CliHandoffs): CommsError {
   return new CommsError('NOT_FOUND', `no draft "${draftId}" in this workspace`, {
-    hint: 'List this workspace’s drafts with `agent-slack draft list --workspace <name>`.',
+    hint: handoffSentenceToFill(
+      handoffs.own(['draft', 'list', '--workspace']),
+      ['<name>'],
+      (command) => `List this workspace’s drafts with ${command}.`,
+      { instead: 'List this workspace’s drafts with slack_draft_list from a chat.' },
+    ),
   });
 }
 
@@ -252,7 +267,7 @@ export async function deleteOwnDraft(store: DraftStore, accountId: string, draft
   } catch (error) {
     if (!isUnreadableDraft(error)) throw error;
     const owner = await store.ownerOf(draftId);
-    if (owner !== undefined && owner !== accountId) throw notHere(draftId);
+    if (owner !== undefined && owner !== accountId) throw notHere(draftId, store.handoffs);
     await store.remove(draftId);
     return { draftId, deleted: true, unreadable: true, workspaceConfirmed: owner !== undefined };
   }
@@ -344,8 +359,8 @@ function kept(draft: SlackDraft): Pick<DraftView, 'revision' | 'accountId' | 'cr
  * `postPrepared` sends, so a draft is refused here exactly when preparing or posting it would be, and is shown as
  * exactly what they would send.
  */
-export function viewDraft(draft: SlackDraft, platform: NodeJS.Platform = process.platform): DraftView {
-  const payload = postedPayload(draft, platform);
+export function viewDraft(draft: SlackDraft, handoffs: CliHandoffs): DraftView {
+  const payload = postedPayload(draft, handoffs);
   const written = composedFrom(draft.source, payload.text);
   return {
     ...heading(draft),
@@ -357,7 +372,7 @@ export function viewDraft(draft: SlackDraft, platform: NodeJS.Platform = process
             code: 'BAD_DATA',
             reason: 'source-differs',
             message: `draft "${draft.draftId}" is not what its source composes to, so the words it keeps as typed are not what it posts`,
-            hint: changedOutsideHint(draft.draftId, platform),
+            hint: changedOutsideHint(draft.draftId, handoffs),
           },
         }),
     payload,
@@ -368,14 +383,14 @@ export function viewDraft(draft: SlackDraft, platform: NodeJS.Platform = process
 
 /** One draft of this workspace, as it would post: `agent-slack draft show` and `slack_draft_get`. */
 export async function showDraft(context: SlackContext, alias: string, draftId: string): Promise<DraftView> {
-  const { account } = requireWorkspace(await context.config(), alias);
+  const { account } = requireWorkspace(await context.config(), alias, context.handoffs);
   // Whose it is before what it says: another workspace's draft is absent here, refused or not.
   const draft = await ownDraft(
-    openDraftStore(context.core.paths.stateDir, context.now, context.platform),
+    openDraftStore(context.core.paths.stateDir, context.now, context.handoffs),
     account.id,
     draftId,
   );
-  return viewDraft(draft, context.platform);
+  return viewDraft(draft, context.handoffs);
 }
 
 /**
@@ -386,11 +401,11 @@ export async function showDraft(context: SlackContext, alias: string, draftId: s
  * needs to delete; failing the list for it would hide all the others.
  */
 export async function listDrafts(context: SlackContext, alias: string): Promise<DraftView[]> {
-  const { account } = requireWorkspace(await context.config(), alias);
-  const drafts = await openDraftStore(context.core.paths.stateDir, context.now, context.platform).list(account.id);
+  const { account } = requireWorkspace(await context.config(), alias, context.handoffs);
+  const drafts = await openDraftStore(context.core.paths.stateDir, context.now, context.handoffs).list(account.id);
   return drafts.map((draft) => {
     try {
-      return viewDraft(draft, context.platform);
+      return viewDraft(draft, context.handoffs);
     } catch (error) {
       if (!(error instanceof CommsError) || error.details?.reason !== 'not-composed') throw error;
       return {

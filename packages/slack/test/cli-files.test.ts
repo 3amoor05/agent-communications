@@ -4,9 +4,9 @@ import { mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { type TestContext, test } from 'node:test';
-import { commandText, shellCommand } from '@agentcomms/core';
 import { run } from '../src/cli/program.ts';
 import { type FakeSlack, startFakeSlack } from './support/fake-slack.ts';
+import { assertNoBareCommand, SLACK_SOURCE_CLI, slackCommand } from './support/handoffs.ts';
 import { type Harness, newHarness } from './support/harness.ts';
 
 /**
@@ -375,18 +375,22 @@ test('the command a changed-file refusal names can be run as it is written, at p
   const { harness, fake, docs } = await world(t);
   const real = file(docs, 'totals.csv', 'a,b\n1,2\n');
   const created = await data<Drafted>(harness, fake, ['draft', 'create', ...W, '--channel', 'C1', '--file', real]);
-  const expected = commandText(
-    shellCommand(
-      ['agent-slack', 'draft', 'update', created.draftId, '--workspace', 'acme', '--file', '<path…>'],
-      'darwin',
-    ),
+  // This installation's own command, located: this Node, Slack's entry here, its folders pinned (CUE-403).
+  const expected = slackCommand(
+    harness.core.paths,
+    ['draft', 'update', created.draftId, '--workspace', 'acme', '--file', '<path…>'],
+    'darwin',
   );
+  assertNoBareCommand(expected);
   const runAsWritten = async (command: string): Promise<void> => {
-    const argv = command
+    const words = command
       .replace('<path…>', real)
       .split(' ')
-      .slice(1)
       .map((word) => (word.startsWith("'") && word.endsWith("'") ? word.slice(1, -1) : word));
+    // The program is this Node running Slack's entry; what follows it, the folder pins included, is the CLI's.
+    assert.equal(words[0], process.execPath, command);
+    const argv = words.slice(words.indexOf(SLACK_SOURCE_CLI) + 1);
+    assert.deepEqual(argv.slice(0, 2), ['--config-dir', harness.core.paths.configDir], command);
     const ran = await cli(harness, fake, argv);
     assert.equal(ran.code, 0, `${command}: ${ran.stdout}${ran.stderr}`);
   };

@@ -11,6 +11,7 @@ import { compose } from '../src/compose/blocks.ts';
 import { openDraftStore } from '../src/compose/drafts.ts';
 import { createSlackMcpServer } from '../src/mcp/server.ts';
 import { approveCommand, changedOutsideHint, refileCommand } from '../src/operations/send.ts';
+import { assertNoBareCommand, slackCommand, slackHandoffs, slackInlineToFill, TEST_PATHS } from './support/handoffs.ts';
 import { type Harness, newHarness } from './support/harness.ts';
 
 /**
@@ -84,12 +85,25 @@ async function connect(harness: Harness, fetch: FakeFetch, options: { workspace?
 
 const failure = (result: ToolResult): Failure => (result.structuredContent as { error: Failure }).error;
 
-test('send handoff commands use the selected shell platform', () => {
-  assert.equal(approveCommand('7', 'win32'), 'agent-slack approve "7"');
-  const refile = refileCommand('8/slack', '9', 'win32');
-  assert.match(refile, /^\["agent-slack","draft","update","9","--workspace","8\/slack","--file",/);
+test('send handoff commands use the selected shell platform, located from this installation (7d)', () => {
+  const windows = slackHandoffs(TEST_PATHS, 'win32');
+  assert.equal(approveCommand('7', windows), slackCommand(TEST_PATHS, ['approve', '7'], 'win32'));
+  const refile = refileCommand('8/slack', '9', windows);
+  assert.equal(
+    refile,
+    slackCommand(TEST_PATHS, ['draft', 'update', '9', '--workspace', '8/slack', '--file', '<path…>'], 'win32'),
+  );
+  // `<path…>` has no line every Windows shell reads alike, so it is the command's words, to be typed.
+  assert.ok(refile.includes('"draft","update","9","--workspace","8/slack","--file","<path\\u2026>"]'), refile);
   assert.match(refile, /the command's words, written as JSON/);
-  assert.match(changedOutsideHint('10', 'win32'), /\["agent-slack","draft","delete","10","--workspace","<name>"\]/);
+  const changed = changedOutsideHint('10', windows);
+  assert.equal(
+    changed,
+    `It was changed outside agent-slack. Delete it with ${slackInlineToFill(TEST_PATHS, ['draft', 'delete', '10', '--workspace'], ['<name>'], 'win32')} and compose it again.`,
+  );
+  // The name for the agent to fill in is left as written, outside the quoting: `--workspace <name>`.
+  assert.match(changed, / draft delete "10" --workspace <name>` and compose it again\.$/);
+  for (const text of [approveCommand('7', windows), refile, changed]) assertNoBareCommand(text);
 });
 
 /** The CLI, as a person at a terminal runs it: the approval code is read off the prompt and typed back. */
@@ -200,10 +214,13 @@ test('under `confirm`, slack_post_send waits for a person, hands over the termin
     const error = failure(held);
     assert.equal(error.code, 'APPROVAL_PENDING', 'waiting, not refused');
     assert.equal(error.details?.approvalId, approvalId);
-    assert.equal(error.details?.command, `agent-slack approve ${approvalId}`, 'the one command a person runs');
-    assert.match(error.hint ?? '', new RegExp(`agent-slack approve ${approvalId}`));
+    // This installation's own approve, located: the one command a person runs (CUE-403).
+    const approve = slackCommand(harness.core.paths, ['approve', approvalId], 'darwin');
+    assert.equal(error.details?.command, approve, 'the one command a person runs');
+    assert.ok(error.hint?.includes(`\`${approve}\``), error.hint ?? undefined);
+    assertNoBareCommand(error.hint ?? '');
     assert.match(error.hint ?? '', /slack_post_send/, 'and what the agent does once they have');
-    assert.doesNotMatch(error.hint ?? '', /agent-slack post send/, 'not a command for a shell the agent is not in');
+    assert.doesNotMatch(error.hint ?? '', /post send command/, 'not a command for a shell the agent is not in');
     assert.equal(fake.count('chat.postMessage'), 0, 'nothing is posted while it waits');
 
     const record = await harness.core.approvals.get(approvalId);
@@ -273,7 +290,7 @@ test('slack_post_send refuses what `post send` refuses: another channel, an edit
 
     // The approval binds the bytes the person read.
     const second = await prepared(call);
-    await openDraftStore(harness.core.paths.stateDir, () => new Date()).update(
+    await openDraftStore(harness.core.paths.stateDir, () => new Date(), slackHandoffs(harness.core.paths)).update(
       second.draftId,
       compose({ channel: 'C1', text: 'something else' }),
       'something else',
@@ -370,7 +387,8 @@ test('a post held for a person is the same refusal on both surfaces, each naming
     assert.equal(error?.code, tool.code);
     assert.equal(error?.message, tool.message);
     assert.deepEqual(error?.details, tool.details, 'the same approval, and the same command for the person');
-    assert.match(error?.hint ?? '', /agent-slack post send/);
+    assert.match(error?.hint ?? '', /run the same post send command again/);
+    assertNoBareCommand(error?.hint ?? '');
     assert.match(tool.hint ?? '', /slack_post_send/);
   } finally {
     await close();
@@ -384,7 +402,9 @@ function refusedAsUserId(error: { code?: string; message?: string; hint?: string
   assert.equal(error?.code, 'USAGE', JSON.stringify(error));
   assert.match(error?.message ?? '', new RegExp(`^"${id}" is a user id: a post goes to a conversation id`));
   assert.match(error?.hint ?? '', /use the DM’s id \(D…\)/);
-  assert.match(error?.hint ?? '', /`agent-slack channels --workspace acme`/);
+  // Slack's own channel list, located: never a bare `agent-slack` (CUE-403).
+  assert.match(error?.hint ?? '', / channels --workspace acme` and slack_channels list/);
+  assertNoBareCommand(error?.hint ?? '');
   assert.match(error?.hint ?? '', /slack_channels/);
 }
 
@@ -431,7 +451,7 @@ test('a user id is refused as where a post goes: on draft create, draft update a
       refusedAsUserId(failure(await call('slack_post_prepare', { workspace: 'acme', channel: id, text: 'hi' })), id);
     }
 
-    const store = openDraftStore(harness.core.paths.stateDir, () => new Date());
+    const store = openDraftStore(harness.core.paths.stateDir, () => new Date(), slackHandoffs(harness.core.paths));
     const kept = await store.list();
     assert.deepEqual(
       kept.map((one) => [one.draftId, one.revision, one.payload.channel]),
@@ -546,7 +566,7 @@ test('under `confirm`, slack_react adds nothing and hands over the command; slac
     assert.equal(error.code, 'APPROVAL_PENDING');
     const approvalId = String(error.details?.approvalId);
     assert.match(approvalId, /^ap_/);
-    assert.equal(error.details?.command, `agent-slack approve ${approvalId}`);
+    assert.equal(error.details?.command, slackCommand(harness.core.paths, ['approve', approvalId], 'darwin'));
     assert.match(error.hint ?? '', /slack_react_send/, 'the tool that uses the approval once it is given');
     assert.doesNotMatch(error.hint ?? '', /--approval/, 'not a flag for a command the agent is not running');
     assert.equal(fake.count('reactions.add'), 0);
@@ -612,7 +632,7 @@ test('under `never`, slack_react refuses before an approval is made', async () =
   }
 });
 
-test('a reaction held for a person is the same refusal from `agent-slack react` and slack_react', async () => {
+test('a reaction held for a person is the same refusal from the react command and slack_react', async () => {
   const harness = await newHarness();
   await harness.addWorkspace({ alias: 'acme', mode: 'send', sendPolicy: 'confirm' });
   const fake = slack();
@@ -627,7 +647,10 @@ test('a reaction held for a person is the same refusal from `agent-slack react` 
     const error = terminal.json<Envelope<never>>().error;
     assert.equal(error?.code, tool.code);
     assert.equal(error?.message, tool.message);
-    assert.equal(error?.details?.command, `agent-slack approve ${String(error?.details?.approvalId)}`);
+    assert.equal(
+      error?.details?.command,
+      slackCommand(harness.core.paths, ['approve', String(error?.details?.approvalId)], 'darwin'),
+    );
     assert.deepEqual(Object.keys(error?.details ?? {}).sort(), Object.keys(tool.details ?? {}).sort());
     assert.match(error?.hint ?? '', /--approval/, 'the CLI names its own next step');
   } finally {

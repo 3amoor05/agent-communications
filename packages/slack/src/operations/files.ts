@@ -4,6 +4,7 @@ import { basename } from 'node:path';
 import {
   askWhereToSave,
   type CheckedAnswer,
+  type CliHandoffs,
   CommsError,
   checkDownloadAnswer,
   createSavedFile,
@@ -14,11 +15,13 @@ import {
   effectiveChangePolicy,
   fileRisks,
   fileWarnings,
+  handoffSentence,
   type InternetMark,
   type InternetMarkKind,
   isPlainFileName,
   markFromInternet,
   newBoundary,
+  requireChannelManifest,
   type SaveChoice,
   savedName,
   saveFailure,
@@ -96,8 +99,13 @@ function capsOf(deps: FileDownloadDeps): Caps {
   return { perFile: lower(deps.caps?.perFile, MAX_FILE_BYTES), perRun: lower(deps.caps?.perRun, MAX_RUN_BYTES) };
 }
 
-/** The command that answers a download's question at a person's own terminal, under a `confirm` change policy. */
-const APPROVE_COMMAND = 'agent-slack approve';
+/**
+ * This package's `approve`, as its manifest names it, for core's deprecated bridge only: core reads it when it was
+ * opened without this package's caller, which this package never does — the command a question names is located from
+ * `core.handoffs` (CUE-403). The field goes with the bridge (task 15).
+ */
+// Slack's manifest declares it.
+export const BRIDGE_APPROVE_COMMAND = requireChannelManifest('slack').approve as string;
 
 /** How many files one run saves at most: `--max-files` on the command line, `maxFiles` in a tool call. */
 export const MAX_FILES: NumberOption = { flag: '--max-files', arg: 'maxFiles', min: 1, max: 200 };
@@ -161,8 +169,11 @@ export interface FileDownloadPlan {
   readonly answer: CheckedAnswer;
 }
 
-/** How each surface spells the ways of naming files, so a refusal reads as the caller wrote the call. */
-function selectors(surface: 'cli' | 'mcp' | undefined) {
+/**
+ * How each surface spells the ways of naming files, so a refusal reads as the caller wrote the call. The command line's
+ * example is this installation's own command, located (`handoffs`), or says why there is none here.
+ */
+function selectors(surface: 'cli' | 'mcp' | undefined, handoffs: CliHandoffs) {
   return surface === 'mcp'
     ? {
         all: '`fileIds`, or `channel` with `ts` for one message, or `channel` alone for a conversation',
@@ -178,8 +189,16 @@ function selectors(surface: 'cli' | 'mcp' | undefined) {
         ts: '`--message`',
         since: '`--since`',
         channel: '`--channel`',
-        example:
-          'For example `agent-slack files download --workspace acme/slack --message C024BE7LR 1700000000.000100`.',
+        example: handoffSentence(
+          handoffs.own(
+            ['files', 'download', '--workspace', 'acme/slack', '--message', 'C024BE7LR', '1700000000.000100'],
+            {
+              downloads: true,
+            },
+          ),
+          (command) => `For example ${command}.`,
+          { instead: 'For example, one message’s files: `--message` with its conversation id and its `ts`.' },
+        ),
       };
 }
 
@@ -201,8 +220,8 @@ function quoted(value: string): string {
  * reads the credential from the secret store and may renew a token with Slack, and a refusal that needs nothing but
  * the arguments should cost neither. {@link downloadFiles} checks again for a caller that did not.
  */
-export function downloadSelection(request: FileDownloadRequest): FileDownloadPlan {
-  const words = selectors(request.surface);
+export function downloadSelection(request: FileDownloadRequest, handoffs: CliHandoffs): FileDownloadPlan {
+  const words = selectors(request.surface, handoffs);
   const refuse = (message: string, hint = `Name the files one way: ${words.all}.`): never => {
     throw new CommsError('USAGE', message, { hint });
   };
@@ -425,7 +444,7 @@ async function findMessage(call: SlackCall, channel: string, ts: string): Promis
   if (top) return top;
   const missing = () =>
     new CommsError('NOT_FOUND', `no message ${ts} in ${channel}`, {
-      hint: 'Check the timestamp: it is the message’s own `ts`, as `agent-slack read` shows it.',
+      hint: 'Check the timestamp: it is the message’s own `ts`, as reading the conversation shows it.',
     });
   let replies: Awaited<ReturnType<typeof callSlack>>;
   try {
@@ -727,7 +746,7 @@ export async function downloadFiles(
   request: FileDownloadRequest,
   deps: FileDownloadDeps = {},
 ): Promise<FileDownloadQuestion | FileDownloadResult> {
-  const plan = downloadSelection({ ...request, surface: request.surface ?? context.surface });
+  const plan = downloadSelection({ ...request, surface: request.surface ?? context.surface }, context.handoffs);
   const download = deps.download ?? slackFileDownload;
   const caps = capsOf(deps);
   const { signal } = deps;
@@ -775,7 +794,7 @@ export async function downloadFiles(
         flags: [...(described.files[index]?.riskFlags ?? [])],
       })),
       policy,
-      approveCommand: APPROVE_COMMAND,
+      approveCommand: BRIDGE_APPROVE_COMMAND,
       surface: context.surface,
       tool: 'slack_file_download',
       env: context.env,
@@ -810,7 +829,7 @@ export async function downloadFiles(
     request: binding,
     folders,
     policy,
-    approveCommand: APPROVE_COMMAND,
+    approveCommand: BRIDGE_APPROVE_COMMAND,
     surface: context.surface,
     env: context.env,
     signal,

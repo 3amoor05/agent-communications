@@ -18,6 +18,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { run } from '../src/cli/program.ts';
 import { createSlackMcpServer } from '../src/mcp/server.ts';
 import type { FileDownloader, FileDownloadQuestion, FileDownloadResult } from '../src/operations/files.ts';
+import { assertNoBareCommand, coreInline } from './support/handoffs.ts';
 import { type Harness, newHarness, tempDir } from './support/harness.ts';
 
 /*
@@ -125,8 +126,10 @@ test('agent-slack: with nobody to ask a command exits 11 naming both ways on, an
   assert.equal(listed.exit, 11, listed.stdout);
   const error = (JSON.parse(listed.stdout) as { error: { code: string; message: string } }).error;
   assert.equal(error.code, 'UPDATE_REQUIRED');
-  assert.match(error.message, /`agentcomms update`/);
-  assert.match(error.message, /`agentcomms update --later`/);
+  // Core's update, found through the core Slack has installed and located: never a bare `agentcomms` (CUE-403).
+  assert.ok(error.message.includes(coreInline(harness.core.paths, ['update'])), error.message);
+  assert.ok(error.message.includes(coreInline(harness.core.paths, ['update', '--later'])), error.message);
+  assertNoBareCommand(error.message);
   const doctor = await command(['doctor', '--offline', '--json']);
   assert.notEqual(doctor.exit, 11, doctor.stdout);
   // A command carrying an approval this machine holds goes past the stop, as `slack_post_send` does over MCP — to
@@ -467,8 +470,9 @@ test('agent-slack files download: with no terminal an update that is out exits 1
       const error = (JSON.parse(stopped.stdout) as { error: { code: string; message: string } }).error;
       assert.equal(error.code, 'UPDATE_REQUIRED');
       assert.ok(error.message.startsWith(UPDATE_FIRST), error.message);
-      assert.match(error.message, /`agentcomms update`/);
-      assert.match(error.message, /`agentcomms update --later`/);
+      assert.ok(error.message.includes(coreInline(harness.core.paths, ['update'])), error.message);
+      assert.ok(error.message.includes(coreInline(harness.core.paths, ['update', '--later'])), error.message);
+      assertNoBareCommand(error.message);
     } else {
       assert.ok(stopped.stderr.includes(UPDATE_FIRST), `${label}: ${stopped.stderr}`);
       assert.doesNotMatch(stopped.stdout, /numbers|F0AAA1/, `${label}: the command reported a download`);

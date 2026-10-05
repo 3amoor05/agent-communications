@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import { type CommsError, type SecretStore, withCredentialsLock } from '@agentcomms/core';
 import { BUNDLE_VERSION, parseBundle, serialiseBundle, type TokenBundle } from '../src/auth/bundle.ts';
 import { accessTokenFor, type RefreshDeps } from '../src/auth/refresh.ts';
+import { assertNoBareCommand, slackHandoffs, slackInline, TEST_PATHS } from './support/handoffs.ts';
 
 /**
  * The refresh path, which is where a mistake costs a credential rather than a request.
@@ -38,7 +39,7 @@ function store(initial?: string): SecretStore & { writes: string[]; failNextSet:
         throw new Error('the store is unavailable');
       }
       values.set(ref, value);
-      self.writes.push(parseBundle(value)?.state ?? '?');
+      self.writes.push(parseBundle(value, slackHandoffs())?.state ?? '?');
     },
     async delete(ref: string) {
       return values.delete(ref);
@@ -70,7 +71,15 @@ function bundle(over: Partial<TokenBundle> = {}): TokenBundle {
 
 async function deps(secrets: SecretStore, exchange: RefreshDeps['exchange']): Promise<RefreshDeps> {
   const stateDir = await mkdtemp(join(tmpdir(), 'slack-refresh-'));
-  return { secrets, openSecrets: async () => secrets, configDir: stateDir, stateDir, now: () => NOW, exchange };
+  return {
+    secrets,
+    openSecrets: async () => secrets,
+    configDir: stateDir,
+    stateDir,
+    now: () => NOW,
+    exchange,
+    handoffs: slackHandoffs(),
+  };
 }
 
 /**
@@ -108,7 +117,7 @@ test('the refreshing marker is written before the request, not after', async () 
   const secrets = store(serialiseBundle(bundle({ accessExpiresAt: '2026-09-22T12:01:00.000Z' })));
   let markerAtCallTime: string | undefined;
   const d = await deps(secrets, async () => {
-    markerAtCallTime = parseBundle(await secrets.get(REF))?.state;
+    markerAtCallTime = parseBundle(await secrets.get(REF), slackHandoffs())?.state;
     return {
       accessToken: 'fake-access-new',
       accessExpiresAt: '2026-09-23T00:00:00.000Z',
@@ -123,7 +132,7 @@ test('the refreshing marker is written before the request, not after', async () 
   assert.equal(token, 'fake-access-new');
   assert.deepEqual(secrets.writes, ['refreshing', 'ready']);
   assert.equal(
-    parseBundle(await secrets.get(REF))?.refreshToken,
+    parseBundle(await secrets.get(REF), slackHandoffs())?.refreshToken,
     'fake-refresh-2',
     'the new refresh token was not kept',
   );
@@ -144,7 +153,7 @@ test('a refresh that does not come back leaves the credential uncertain, never r
   });
   assert.equal(calls, 1, 'an ambiguous refresh was retried, which can spend the token twice');
 
-  const after = parseBundle(await secrets.get(REF));
+  const after = parseBundle(await secrets.get(REF), slackHandoffs());
   assert.equal(after?.state, 'refresh-uncertain');
   // The old access token is kept: it may still have hours on it, and refusing to use it helps nobody.
   assert.equal(after?.accessToken, 'fake-access-old');
@@ -209,7 +218,7 @@ test('a marker left by a dead process becomes uncertain, not a second refresh', 
   const d = await deps(secrets, guard.exchange);
   await assert.rejects(accessTokenFor(d, ACCOUNT, REF), /interrupted/);
   assert.equal(guard.calls(), 0, 'it retried a refresh token that may already be spent');
-  assert.equal(parseBundle(await secrets.get(REF))?.state, 'refresh-uncertain');
+  assert.equal(parseBundle(await secrets.get(REF), slackHandoffs())?.state, 'refresh-uncertain');
 });
 
 test('an expired refresh token sends you to reauth instead of trying', async () => {
@@ -235,9 +244,15 @@ test('an expired refresh token renders reauth for the selected shell platform', 
   );
   const d = await deps(secrets, async () => assert.fail('it tried to use an expired refresh token'));
   d.alias = '7';
-  d.platform = 'win32';
+  d.handoffs = slackHandoffs(TEST_PATHS, 'win32');
   await assert.rejects(accessTokenFor(d, ACCOUNT, REF), (error: CommsError) => {
-    assert.match(error.hint ?? '', /agent-slack workspace reauth "7"/);
+    // This installation's own reauth, located, quoted for Windows: never a bare `agent-slack` (CUE-403).
+    assert.equal(
+      error.hint,
+      `Slack expires them 30 days after they are issued. Run ${slackInline(TEST_PATHS, ['workspace', 'reauth', '7'], 'win32')}.`,
+    );
+    assert.match(error.hint ?? '', /workspace reauth "7"`\.$/);
+    assertNoBareCommand(error.hint ?? '');
     return true;
   });
 });
@@ -435,7 +450,7 @@ test('a refresh waits for a credential migration, and writes to the store the mi
   const { token } = await refreshing;
   assert.equal(token, 'fake-access-new');
   assert.equal(
-    parseBundle(await after.get(REF))?.refreshToken,
+    parseBundle(await after.get(REF), slackHandoffs())?.refreshToken,
     'fake-refresh-2',
     'the rotated token is where it lives now',
   );

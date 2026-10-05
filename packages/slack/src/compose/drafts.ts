@@ -1,7 +1,7 @@
 import { randomInt } from 'node:crypto';
 import { readdir, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { CommsError, inlineCommand, shellCommand, writeFileAtomic } from '@agentcomms/core';
+import { type CliHandoffs, CommsError, handoffSentenceToFill, writeFileAtomic } from '@agentcomms/core';
 import type { ComposedPayload } from './blocks.ts';
 import { MAX_FILES, type SlackDraftFile } from './files.ts';
 
@@ -89,6 +89,8 @@ function pathFor(stateDir: string, draftId: string): string {
 }
 
 export interface DraftStore {
+  /** The commands its refusals name, and a caller's refusals about its drafts: the ones it was opened with. */
+  readonly handoffs: CliHandoffs;
   create(
     accountId: string,
     payload: ComposedPayload,
@@ -163,11 +165,21 @@ export function isUnreadableDraft(error: unknown): boolean {
   return error instanceof CommsError && error.code === 'BAD_DATA' && error.details?.reason === 'unreadable';
 }
 
-export function openDraftStore(
-  stateDir: string,
-  now: () => Date,
-  platform: NodeJS.Platform = process.platform,
-): DraftStore {
+/**
+ * The drafts in `stateDir`. `handoffs` make the commands its refusals name — `draft list`, `draft delete` — located
+ * from the installation printing them (`SlackContext.handoffs`), or say why there is none here.
+ */
+export function openDraftStore(stateDir: string, now: () => Date, handoffs: CliHandoffs): DraftStore {
+  // A refusal names this workspace's drafts, by a name only the caller knows: the agent fills it in.
+  const listThem = (): string =>
+    handoffSentenceToFill(
+      handoffs.own(['draft', 'list', '--workspace']),
+      ['<name>'],
+      (command) => `List them with ${command}.`,
+      {
+        instead: 'List them with slack_draft_list from a chat.',
+      },
+    );
   const read = async (draftId: string): Promise<SlackDraft> => {
     /*
      * Outside the try, deliberately.
@@ -181,9 +193,7 @@ export function openDraftStore(
     try {
       raw = await readFile(path, 'utf8');
     } catch {
-      throw new CommsError('NOT_FOUND', `no draft "${draftId}"`, {
-        hint: 'List them with `agent-slack draft list --workspace <name>`.',
-      });
+      throw new CommsError('NOT_FOUND', `no draft "${draftId}"`, { hint: listThem() });
     }
     let parsed: unknown;
     try {
@@ -203,7 +213,12 @@ export function openDraftStore(
      */
     if (!isDraftShaped(parsed)) {
       throw new CommsError('BAD_DATA', `draft "${draftId}" could not be read`, {
-        hint: `Delete it with ${inlineCommand(shellCommand(['agent-slack', 'draft', 'delete', draftId, '--workspace', '<name>'], platform))} and compose it again.`,
+        hint: handoffSentenceToFill(
+          handoffs.own(['draft', 'delete', draftId, '--workspace']),
+          ['<name>'],
+          (command) => `Delete it with ${command} and compose it again.`,
+          { instead: 'Delete it with slack_draft_delete from a chat and compose it again.' },
+        ),
         details: { reason: 'unreadable' },
       });
     }
@@ -216,6 +231,7 @@ export function openDraftStore(
   };
 
   return {
+    handoffs,
     async create(accountId, payload, source, files) {
       const at = now().toISOString();
       return write({
@@ -270,9 +286,7 @@ export function openDraftStore(
       try {
         raw = await readFile(path, 'utf8');
       } catch {
-        throw new CommsError('NOT_FOUND', `no draft "${draftId}"`, {
-          hint: 'List them with `agent-slack draft list --workspace <name>`.',
-        });
+        throw new CommsError('NOT_FOUND', `no draft "${draftId}"`, { hint: listThem() });
       }
       /*
        * Read off the raw text, because a draft that got here would not parse. Drafts are written with `accountId` on

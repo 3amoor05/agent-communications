@@ -1,13 +1,14 @@
 import {
   type AccountConfig,
+  type CliHandoffs,
   CommsError,
-  commandText,
-  inlineCommand,
-  shellCommand,
+  handoffSentence,
+  handoffText,
   toCommsError,
 } from '@agentcomms/core';
 import { callSlack, type SlackCall, type SlackProblem, type SlackResponse } from '../api/call.ts';
 import { closedPermit, configureWith, type FetchLike } from '../api/guard.ts';
+import { handoffsSentence } from '../handoffs.ts';
 import { appManifestUrl, buildManifest, type InstallMode, parseMode, type SlackManifest } from '../manifest.ts';
 import { narrowingSteps } from './mode.ts';
 import type { AuditSink } from './send.ts';
@@ -52,7 +53,8 @@ export interface AppUpdateInput {
   readonly transport?: AppTransport | undefined;
   readonly audit?: AuditSink | undefined;
   readonly surface?: 'cli' | 'mcp' | undefined;
-  readonly platform?: NodeJS.Platform | undefined;
+  /** The commands its refusals and next steps name, located from the installation printing them. */
+  readonly handoffs: CliHandoffs;
 }
 
 export interface AppUpdated {
@@ -88,7 +90,8 @@ export interface AppCreateInput {
   readonly transport?: AppTransport | undefined;
   readonly audit?: AuditSink | undefined;
   readonly surface?: 'cli' | 'mcp' | undefined;
-  readonly platform?: NodeJS.Platform | undefined;
+  /** The commands its refusals and next step name, located from the installation printing them. */
+  readonly handoffs: CliHandoffs;
 }
 
 export interface AppCreated {
@@ -173,7 +176,7 @@ export function withoutToken(error: unknown, token: string): CommsError {
  * one here: this token is not a sign-in, it is a twelve-hour credential from the app settings page. Each case says
  * what to go and get instead.
  */
-function inTermsOfTheApp(error: unknown, appId?: string): CommsError {
+function inTermsOfTheApp(error: unknown, handoffs: CliHandoffs, appId?: string): CommsError {
   const failure = toCommsError(error);
   const slackError = failure.details?.slackError;
   const problems = failure.details?.slackProblems as SlackProblem[] | undefined;
@@ -212,7 +215,13 @@ function inTermsOfTheApp(error: unknown, appId?: string): CommsError {
         hint:
           problems && problems.length > 0
             ? problems.map((problem) => `${problem.pointer ?? '(manifest)'}: ${problem.message}`).join('; ')
-            : 'Slack gave no reason. Compare it with `agent-slack manifest`, and please report this.',
+            : handoffSentence(
+                handoffs.own(['manifest']),
+                (command) => `Slack gave no reason. Compare it with ${command}, and please report this.`,
+                {
+                  instead: 'Slack gave no reason. Compare it with what slack_manifest prints, and please report this.',
+                },
+              ),
         details: { slackError, ...(problems ? { slackProblems: problems } : {}) },
       });
     default:
@@ -255,6 +264,7 @@ async function validate(
   token: string,
   transport: AppTransport | undefined,
   manifest: SlackManifest,
+  handoffs: CliHandoffs,
   appId?: string,
 ): Promise<void> {
   const reply = await configure(token, transport, 'apps.manifest.validate', {
@@ -263,7 +273,13 @@ async function validate(
   });
   if (Array.isArray(reply.errors) && reply.errors.length > 0) {
     throw new CommsError('BAD_DATA', 'Slack refused the manifest, so nothing was changed', {
-      hint: 'Slack listed problems with it while calling it valid. Compare it with `agent-slack manifest`.',
+      hint: handoffSentence(
+        handoffs.own(['manifest']),
+        (command) => `Slack listed problems with it while calling it valid. Compare it with ${command}.`,
+        {
+          instead: 'Slack listed problems with it while calling it valid. Compare it with what slack_manifest prints.',
+        },
+      ),
       details: { slackError: 'invalid_manifest' },
     });
   }
@@ -275,29 +291,34 @@ function stepsAfterUpdate(
   account: AccountConfig,
   mode: InstallMode,
   port: number,
-  platform: NodeJS.Platform,
+  handoffs: CliHandoffs,
 ): string[] {
   const workspaceMode = parseMode(account.mode ?? account.tier, `"${alias}"`);
   if (mode === 'send' && workspaceMode === 'read') {
+    const posting = `a person approves the change, then approves the sign-in in Slack. That sign-in is what gives "${alias}" a token that can post.`;
     return [
-      `${inlineCommand(
-        shellCommand(
-          ['agent-slack', 'workspace', 'mode', alias, 'send', '--app-updated', '--port', String(port)],
-          platform,
-        ),
-      )} (slack_mode_set from a chat): a person approves the change, then approves the sign-in in Slack. That sign-in is what gives "${alias}" a token that can post.`,
+      handoffSentence(
+        handoffs.own(['workspace', 'mode', alias, 'send', '--app-updated', '--port', String(port)]),
+        (command) => `${command} (slack_mode_set from a chat): ${posting}`,
+        { instead: `slack_mode_set with appUpdated, from a chat: ${posting}` },
+      ),
     ];
   }
   if (mode === 'read' && workspaceMode === 'send') {
     // The first of the narrowing steps is the one just done — putting the `read` manifest on the app — so only
     // what follows it is left. Taken from `narrowingSteps` rather than rewritten, so both say the same thing.
-    return narrowingSteps(alias, port, { knowsItsApp: account.oauthClientId !== undefined }, platform).slice(1);
+    return narrowingSteps(alias, handoffs, port, { knowsItsApp: account.oauthClientId !== undefined }).slice(1);
   }
   if (account.redirectPort !== port) {
     const was =
       account.redirectPort === undefined ? 'a port this record does not keep' : `port ${account.redirectPort}`;
+    const mustUse = `The app now redirects to port ${port}, and "${alias}" last signed in on ${was}: its next sign-in must use \`--port ${port}\``;
     return [
-      `The app now redirects to port ${port}, and "${alias}" last signed in on ${was}: its next sign-in must use \`--port ${port}\`, e.g. ${inlineCommand(shellCommand(['agent-slack', 'workspace', 'reauth', alias, '--port', String(port)], platform))}.`,
+      handoffSentence(
+        handoffs.own(['workspace', 'reauth', alias, '--port', String(port)]),
+        (command) => `${mustUse}, e.g. ${command}.`,
+        { instead: `${mustUse} (slack_workspace_reauth from a chat uses the port it last signed in with).` },
+      ),
     ];
   }
   return [];
@@ -314,12 +335,19 @@ function stepsAfterUpdate(
  * the token and the last sign-in, and this touched neither.
  */
 export async function updateApp(input: AppUpdateInput): Promise<AppUpdated> {
-  const { alias, account, mode, port, transport } = input;
-  const platform = input.platform ?? process.platform;
+  const { alias, account, mode, port, transport, handoffs } = input;
   const appId = account.appId;
   if (!appId) {
     throw new CommsError('CONFIG', `"${alias}" does not record which Slack app it was connected through`, {
-      hint: `Re-authorising records it: ${inlineCommand(shellCommand(['agent-slack', 'workspace', 'reauth', alias], platform))}. Or paste ${inlineCommand(shellCommand(['agent-slack', 'manifest', '--mode', mode, '--port', String(port)], platform))} on the app's page at https://api.slack.com/apps.`,
+      hint: handoffsSentence(
+        [
+          handoffs.own(['workspace', 'reauth', alias]),
+          handoffs.own(['manifest', '--mode', mode, '--port', String(port)]),
+        ],
+        ([reauth, manifest]) =>
+          `Re-authorising records it: ${reauth}. Or paste ${manifest} on the app's page at https://api.slack.com/apps.`,
+        `Re-authorising records it: slack_workspace_reauth from a chat. Or paste the ${mode} manifest slack_manifest prints on the app's page at https://api.slack.com/apps.`,
+      ),
     });
   }
   const workspaceMode = parseMode(account.mode ?? account.tier, `"${alias}"`);
@@ -339,13 +367,13 @@ export async function updateApp(input: AppUpdateInput): Promise<AppUpdated> {
 
   let reply: SlackResponse;
   try {
-    await validate(token, transport, manifest, appId);
+    await validate(token, transport, manifest, handoffs, appId);
     reply = await configure(token, transport, 'apps.manifest.update', {
       app_id: appId,
       manifest: JSON.stringify(manifest),
     });
   } catch (error) {
-    const failure = withoutToken(inTermsOfTheApp(error, appId), token);
+    const failure = withoutToken(inTermsOfTheApp(error, handoffs, appId), token);
     await record(failure.code === 'BAD_DATA' ? 'refused' : 'failed', failure.code);
     throw failure;
   }
@@ -360,7 +388,7 @@ export async function updateApp(input: AppUpdateInput): Promise<AppUpdated> {
     ...(typeof reply.permissions_updated === 'boolean' ? { permissionsUpdated: reply.permissions_updated } : {}),
     tokenChanged: false,
     workspaceMode,
-    next: stepsAfterUpdate(alias, account, mode, port, platform),
+    next: stepsAfterUpdate(alias, account, mode, port, handoffs),
   };
 }
 
@@ -375,8 +403,7 @@ const PRINTABLE_ID = /^[A-Za-z0-9._-]{1,100}$/;
  * app id and the Client ID are kept; every secret in it is dropped here, before anything else can see the object.
  */
 export async function createApp(input: AppCreateInput): Promise<AppCreated> {
-  const { mode, port, transport } = input;
-  const platform = input.platform ?? process.platform;
+  const { mode, port, transport, handoffs } = input;
   const manifest = buildManifest(mode, redirectUrlFor(port));
   const token = await input.askToken();
   checkConfigurationToken(token);
@@ -394,7 +421,7 @@ export async function createApp(input: AppCreateInput): Promise<AppCreated> {
   let clientId: unknown;
   let secretsDiscarded: string[];
   try {
-    await validate(token, transport, manifest);
+    await validate(token, transport, manifest, handoffs);
     const reply = await configure(token, transport, 'apps.manifest.create', { manifest: JSON.stringify(manifest) });
     appId = reply.app_id;
     const credentials = (reply.credentials ?? {}) as Record<string, unknown>;
@@ -404,7 +431,7 @@ export async function createApp(input: AppCreateInput): Promise<AppCreated> {
       .filter((key) => key !== 'client_id')
       .sort();
   } catch (error) {
-    const failure = withoutToken(inTermsOfTheApp(error), token);
+    const failure = withoutToken(inTermsOfTheApp(error, handoffs), token);
     await record(failure.code === 'BAD_DATA' ? 'refused' : 'failed', {}, failure.code);
     throw failure;
   }
@@ -418,12 +445,11 @@ export async function createApp(input: AppCreateInput): Promise<AppCreated> {
   await record('ok', { appId });
   if (typeof clientId !== 'string' || !PRINTABLE_ID.test(clientId)) {
     throw new CommsError('PROVIDER_UNAVAILABLE', `Slack created app ${appId} but its reply carried no Client ID`, {
-      hint: `Copy the Client ID from https://api.slack.com/apps/${encodeURIComponent(appId)}/general, then ${inlineCommand(
-        shellCommand(
-          ['agent-slack', 'workspace', 'add', '<name>', '--client-id', '<it>', '--port', String(port)],
-          platform,
-        ),
-      )}. Do not create another app.`,
+      hint: `Copy the Client ID from https://api.slack.com/apps/${encodeURIComponent(appId)}/general, then ${handoffSentence(
+        handoffs.own(['workspace', 'add', '<name>', '--client-id', '<it>', '--port', String(port)]),
+        (command) => `${command}.`,
+        { instead: 'connect it with slack_workspace_add from a chat, with that Client ID and this port.' },
+      )} Do not create another app.`,
     });
   }
   const name = input.alias ?? '<name>';
@@ -435,21 +461,17 @@ export async function createApp(input: AppCreateInput): Promise<AppCreated> {
     redirectUrl: redirectUrlFor(port),
     manifestPage: manifestPageFor(appId),
     secretsDiscarded,
-    next: commandText(
-      shellCommand(
-        [
-          'agent-slack',
-          'workspace',
-          'add',
-          name,
-          '--client-id',
-          clientId,
-          '--port',
-          String(port),
-          ...(mode === 'send' ? ['--mode', 'send'] : []),
-        ],
-        platform,
-      ),
+    next: handoffText(
+      handoffs.own([
+        'workspace',
+        'add',
+        name,
+        '--client-id',
+        clientId,
+        '--port',
+        String(port),
+        ...(mode === 'send' ? ['--mode', 'send'] : []),
+      ]),
     ),
   };
 }

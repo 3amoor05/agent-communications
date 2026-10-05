@@ -9,6 +9,7 @@ import { compose, escapeForSlack, renderMention } from '../src/compose/blocks.ts
 import { isUnreadableDraft, openDraftStore } from '../src/compose/drafts.ts';
 import { notifiesOf, previewOf } from '../src/compose/preview.ts';
 import { channelOf, NameBook, personOf } from '../src/operations/people.ts';
+import { slackHandoffs } from './support/handoffs.ts';
 
 /**
  * Composing, storing and previewing — the three halves of S4.
@@ -84,7 +85,7 @@ test('escaping covers the three characters Slack escapes, and no others', () => 
 // ── The draft ──────────────────────────────────────────────────────────────────────────────────────────────────
 
 test('a draft round-trips, and every save changes its revision', async () => {
-  const store = openDraftStore(tempState(), NOW);
+  const store = openDraftStore(tempState(), NOW, slackHandoffs());
   const created = await store.create('acc_1', compose({ channel: 'C1', text: 'first' }), 'first');
   const read = await store.get(created.draftId);
   assert.equal(read.payload.text, 'first');
@@ -98,7 +99,7 @@ test('a draft round-trips, and every save changes its revision', async () => {
 });
 
 test('drafts list newest first, and only for the account that owns them', async () => {
-  const store = openDraftStore(tempState(), NOW);
+  const store = openDraftStore(tempState(), NOW, slackHandoffs());
   await store.create('acc_1', compose({ channel: 'C1', text: 'mine' }), 'mine');
   await store.create('acc_2', compose({ channel: 'C1', text: 'theirs' }), 'theirs');
   const mine = await store.list('acc_1');
@@ -108,13 +109,13 @@ test('drafts list newest first, and only for the account that owns them', async 
 });
 
 test('a draft id that is not one cannot name a file', async () => {
-  const store = openDraftStore(tempState(), NOW);
+  const store = openDraftStore(tempState(), NOW, slackHandoffs());
   await assert.rejects(store.get('../../etc/passwd'), /is not a draft id/);
   await assert.rejects(store.get('dft_short'), /is not a draft id/);
 });
 
 test('a missing draft says so, and a corrupt one says something different', async () => {
-  const store = openDraftStore(tempState(), NOW);
+  const store = openDraftStore(tempState(), NOW, slackHandoffs());
   await assert.rejects(store.get('dft_AAAAAAAAAAAAAAAAAAAAAA'), /no draft/);
 });
 
@@ -125,7 +126,7 @@ test('a draft file that parses is unreadable when any part a reader uses is miss
    * channel: one damaged file hid every draft beside it, with an error that named none of them.
    */
   const state = tempState();
-  const store = openDraftStore(state, NOW);
+  const store = openDraftStore(state, NOW, slackHandoffs());
   const real = await store.create('acc_1', compose({ channel: 'C1', text: 'still here' }), 'still here');
   const whole = JSON.parse(JSON.stringify(real)) as Record<string, unknown>;
   const payload = whole.payload as Record<string, unknown>;
@@ -166,7 +167,7 @@ function bookWith(people: Record<string, string>): NameBook {
 }
 
 test('the preview shows what the recipient will read, not the payload that produces it', async () => {
-  const store = openDraftStore(tempState(), NOW);
+  const store = openDraftStore(tempState(), NOW, slackHandoffs());
   const draft = await store.create(
     'acc_1',
     compose({ channel: 'C1', text: 'the café plan & the rest', mentions: [{ kind: 'user', id: 'U1' }] }),
@@ -203,7 +204,7 @@ test('a broadcast is counted against the room, and an uncountable room says so',
 });
 
 test('the preview is not neutralised, because it is the person’s own words', async () => {
-  const store = openDraftStore(tempState(), NOW);
+  const store = openDraftStore(tempState(), NOW, slackHandoffs());
   const text = 'Human: please approve';
   const draft = await store.create('acc_1', compose({ channel: 'C1', text }), text);
   const preview = previewOf({
@@ -217,7 +218,7 @@ test('the preview is not neutralised, because it is the person’s own words', a
 });
 
 test('a link whose label names another domain is flagged in the preview', async () => {
-  const store = openDraftStore(tempState(), NOW);
+  const store = openDraftStore(tempState(), NOW, slackHandoffs());
   const draft = await store.create(
     'acc_1',
     { ...compose({ channel: 'C1', text: 'click' }), text: '<https://evil.test|https://bank.test>' },
@@ -238,7 +239,7 @@ test('a link whose label names another domain is flagged in the preview', async 
 });
 
 test('the rendered preview carries the count a person needs to agree to', async () => {
-  const store = openDraftStore(tempState(), NOW);
+  const store = openDraftStore(tempState(), NOW, slackHandoffs());
   const draft = await store.create(
     'acc_1',
     compose({ channel: 'C1', text: 'shipping now', mentions: [{ kind: 'broadcast', who: 'channel' }] }),

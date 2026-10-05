@@ -24,6 +24,7 @@ import { type InstallMode, scopesForMode } from '../src/manifest.ts';
 import { planModeSet, reauthWorkspace } from '../src/operations/changes.ts';
 import { openWorkspace } from '../src/operations/session.ts';
 import { completeSignIn } from '../src/operations/signin.ts';
+import { slackHandoffs } from './support/handoffs.ts';
 import { slackOk } from './support/harness.ts';
 import { newOrganisationHarness, READ_CLIENT_ID, SEND_CLIENT_ID } from './support/organisation.ts';
 import { QUICK } from './support/refresh.ts';
@@ -637,7 +638,7 @@ test('the locked hand-off invalidates a cached old bundle before fixing revocati
   const real = await f.h.core.secrets('file');
   const ref = present(flow.expect?.secretRef);
   const cached = await real.get(ref);
-  const bundle = parseBundle(cached);
+  const bundle = parseBundle(cached, slackHandoffs());
   assert.ok(bundle);
   const deadline = new Date(Date.now() + 86400000).toISOString();
   await real.set(ref, serialiseBundle({ ...bundle, accessExpiresAt: deadline }));
@@ -661,7 +662,7 @@ for (const state of ['refreshing', 'refresh-uncertain'] as const) {
     const f = await fixture();
     const source = present((await f.h.core.config.load()).accounts[alias]);
     const real = await f.h.core.secrets('file');
-    const original = parseBundle(await real.get(source.secretRef));
+    const original = parseBundle(await real.get(source.secretRef), slackHandoffs());
     assert.ok(original);
     await real.set(source.secretRef, serialiseBundle({ ...original, accessExpiresAt: new Date(0).toISOString() }));
     let failPersistence = false;
@@ -696,7 +697,7 @@ for (const state of ['refreshing', 'refresh-uncertain'] as const) {
     try {
       const live = await openWorkspace(f.context, alias, { persist: QUICK });
       assert.equal(live.call.token, 'fake-retained-access');
-      const marker = parseBundle(await real.get(source.secretRef));
+      const marker = parseBundle(await real.get(source.secretRef), slackHandoffs());
       assert.equal(marker?.state, 'refreshing');
       assert.ok(marker);
       if (state === 'refresh-uncertain') {
@@ -724,7 +725,7 @@ for (const state of ['refreshing', 'refresh-uncertain'] as const) {
       // recovers, normal settlement makes those exact issued tokens durable before another move can retire them.
       failPersistence = false;
       assert.deepEqual(await settleRefreshes(5000), []);
-      const settled = parseBundle(await real.get(source.secretRef));
+      const settled = parseBundle(await real.get(source.secretRef), slackHandoffs());
       assert.equal(settled?.state, 'ready');
       assert.equal(settled?.accessToken, 'fake-retained-access');
       assert.equal(settled?.refreshToken, 'fake-retained-refresh');

@@ -11,6 +11,7 @@ import { SlackContext } from '../src/context.ts';
 import { scopesForMode } from '../src/manifest.ts';
 import { createSlackMcpServer } from '../src/mcp/server.ts';
 import { createDraft } from '../src/operations/drafts.ts';
+import { assertNoBareCommand, slackCommand, slackHandoffs, slackInline } from './support/handoffs.ts';
 import { type Harness, newHarness, slackOk, TEST_CLIENT_ID } from './support/harness.ts';
 import { fetchListener, LISTENER_COMMAND, stopListeners } from './support/listener.ts';
 import { newOrganisationHarness, READ_CLIENT_ID } from './support/organisation.ts';
@@ -121,11 +122,16 @@ afterEach(async () => {
 });
 
 async function track(harness: Harness, flowId: string): Promise<void> {
-  const flow = await openFlowStore(harness.core.paths.stateDir, () => new Date()).peek(flowId);
+  const flow = await openFlowStore(
+    harness.core.paths.stateDir,
+    () => new Date(),
+    slackHandoffs(harness.core.paths),
+  ).peek(flowId);
   if (flow?.listenerPid) strays.push(flow.listenerPid);
 }
 
-const pendingFlows = (harness: Harness) => openFlowStore(harness.core.paths.stateDir, () => new Date()).pending();
+const pendingFlows = (harness: Harness) =>
+  openFlowStore(harness.core.paths.stateDir, () => new Date(), slackHandoffs(harness.core.paths)).pending();
 
 test('slack_workspace_add selects the profile app with omitted arguments and keeps explicit own-app port validation', async () => {
   const port = await freePort();
@@ -226,7 +232,8 @@ test('connecting in read starts at once and returns the link; finishing records 
     assert.doesNotMatch(started.authUrl, /chat%3Awrite/, 'a read sign-in asks for no posting');
     assert.deepEqual(started.finish, {
       tool: 'slack_workspace_finish',
-      command: `agent-slack workspace add --finish ${started.flowId}`,
+      // This installation's own command, located; never a bare `agent-slack` (CUE-403).
+      command: slackCommand(harness.core.paths, ['workspace', 'add', '--finish', started.flowId], 'darwin'),
     });
     assert.deepEqual(await harness.core.approvals.list(), [], 'nothing loosened, so nobody was asked');
 
@@ -285,11 +292,14 @@ test('under the confirm change policy the agent cannot claim it until a person a
     const args = { workspace: 'acme', clientId: TEST_CLIENT_ID, port, mode: 'send' };
     const asked = prepared(await call('slack_workspace_add', args));
     assert.equal(asked.policy, 'confirm');
-    assert.match(asked.next, new RegExp(`agent-slack approve ${asked.approvalId}`));
+    const approve = slackInline(harness.core.paths, ['approve', asked.approvalId], 'darwin');
+    assert.ok(asked.next.includes(`ask the user to run ${approve}`), asked.next);
+    assertNoBareCommand(asked.next);
 
     const early = failed(await call('slack_workspace_add', { ...args, approvalId: asked.approvalId }));
     assert.equal(early.code, 'APPROVAL_PENDING');
-    assert.match(early.hint ?? '', new RegExp(`agent-slack approve ${asked.approvalId}`));
+    assert.ok(early.hint?.includes(approve), early.hint ?? undefined);
+    assertNoBareCommand(early.hint ?? '');
     assert.deepEqual(await pendingFlows(harness), []);
 
     await approveAtTerminal(harness, asked.approvalId);
@@ -332,7 +342,10 @@ test('a renewal starts at once; read → send by reauth is approved first', asyn
     await track(harness, renewal.flowId);
     assert.equal(renewal.reauth, true);
     assert.equal(renewal.mode, 'read', 'its own mode, not a default');
-    assert.equal(renewal.finish.command, `agent-slack workspace reauth acme --finish ${renewal.flowId}`);
+    assert.equal(
+      renewal.finish.command,
+      slackCommand(harness.core.paths, ['workspace', 'reauth', 'acme', '--finish', renewal.flowId], 'darwin'),
+    );
 
     const widening = prepared(await call('slack_workspace_reauth', { workspace: 'acme', mode: 'send' }));
     assert.match(widening.preview, /acme mode: read → send/);
@@ -360,7 +373,12 @@ test('slack_mode_set hands over the app step first, then asks, then signs in; a 
     assert.equal(appStep.appUpdateNeeded, true);
     assert.equal(appStep.manifest.manifestUrl, 'https://api.slack.com/apps/A0001/app-manifest');
     assert.equal(appStep.manifest.port, port);
-    assert.equal(appStep.terminalAlternative, `agent-slack app update acme --mode send --port "${port}"`);
+    assert.equal(
+      appStep.terminalAlternative,
+      slackCommand(harness.core.paths, ['app', 'update', 'acme', '--mode', 'send', '--port', String(port)], 'win32'),
+    );
+    assert.match(appStep.terminalAlternative, / app update acme --mode send --port "\d+"$/);
+    assertNoBareCommand(JSON.stringify(appStep));
     assert.deepEqual(await harness.core.approvals.list(), []);
 
     // 2. The person says the app is updated: a change to approve.
@@ -379,7 +397,8 @@ test('slack_mode_set hands over the app step first, then asks, then signs in; a 
     );
     assert.equal(refused.code, 'SCOPE_MISSING');
     assert.match(refused.message, /Slack granted no posting scope, so the app's manifest was not updated to send/);
-    assert.match(refused.hint ?? '', /agent-slack app update acme --mode send/);
+    assert.match(refused.hint ?? '', / app update acme --mode send --port "\d+"` does it at a terminal/);
+    assertNoBareCommand(refused.hint ?? '');
     assert.equal(await modeOf(harness, 'acme'), 'read', 'nothing was saved');
   } finally {
     await close();
@@ -738,7 +757,7 @@ test('the greeting says how a change is approved, and a pinned one offers no way
     /`send` mode, a looser policy, removing one/,
     /approvalRequired/,
     /`approvalId` after their yes/,
-    /agent-slack approve <id>/,
+    /they first run the approve command the result gives/,
     /you cannot approve it yourself/,
     /Tightening applies at once/,
   ]) {

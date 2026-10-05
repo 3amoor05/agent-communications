@@ -5,6 +5,7 @@ import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { EXIT_CODES } from '@agentcomms/core';
 import { run } from '../src/cli/program.ts';
+import { assertNoBareCommand, slackInlineToFill } from './support/handoffs.ts';
 import { type Harness, newHarness } from './support/harness.ts';
 
 /**
@@ -238,10 +239,10 @@ test('an unreadable draft can be deleted as its refusal says, and the result say
 
   const shown = await cli(harness, ['--json', 'draft', 'show', DAMAGED, '--workspace', 'acme']);
   assert.equal(shown.code, EXIT_CODES.BAD_DATA);
-  assert.match(
-    shown.json<Envelope<never>>().error?.hint ?? '',
-    new RegExp(`agent-slack draft delete ${DAMAGED}`),
-    'the refusal names the draft to delete',
+  assert.equal(
+    shown.json<Envelope<never>>().error?.hint,
+    `Delete it with ${slackInlineToFill(harness.core.paths, ['draft', 'delete', DAMAGED, '--workspace'], ['<name>'])} and compose it again.`,
+    'the refusal names the draft to delete, with this installation’s own command',
   );
 
   const deleted = await cli(harness, ['--json', 'draft', 'delete', DAMAGED, '--workspace', 'acme']);
@@ -307,7 +308,12 @@ test('a draft that names its workspace and nothing else is skipped by the list, 
   ]) {
     const refused = await cli(harness, ['--json', ...argv]);
     assert.equal(refused.code, EXIT_CODES.BAD_DATA, `${argv.join(' ')}: ${refused.stdout}`);
-    assert.match(refused.json<Envelope<never>>().error?.hint ?? '', new RegExp(`agent-slack draft delete ${DAMAGED}`));
+    const hint = refused.json<Envelope<never>>().error?.hint ?? '';
+    assert.ok(
+      hint.includes(slackInlineToFill(harness.core.paths, ['draft', 'delete', DAMAGED, '--workspace'], ['<name>'])),
+      hint,
+    );
+    assertNoBareCommand(hint);
   }
 
   const deleted = await cli(harness, ['--json', 'draft', 'delete', DAMAGED, '--workspace', 'acme']);

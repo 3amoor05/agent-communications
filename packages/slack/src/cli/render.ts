@@ -1,15 +1,17 @@
 import {
+  type CliHandoffs,
   commandText,
   describeSize,
   escapeForDisplay,
-  inlineCommand,
+  handoffText,
+  isCommand,
   paint,
-  shellCommand,
   sizeOf,
   stripInvisible,
   truncateDisplay,
 } from '@agentcomms/core';
 import type { SlackDraft } from '../compose/drafts.ts';
+import { handoffsSentence } from '../handoffs.ts';
 import { renderManifest } from '../manifest.ts';
 import type { AppCreated, AppUpdated } from '../operations/app.ts';
 import type { AppUpdateNeeded, PolicyResult } from '../operations/changes.ts';
@@ -54,22 +56,26 @@ function cell(value: string, width = 40): string {
   return flat.length > width ? `${flat.slice(0, width - 1)}…` : flat;
 }
 
-export function renderWorkspaces(
-  workspaces: readonly WorkspaceView[],
-  color: boolean,
-  platform: NodeJS.Platform = process.platform,
-): string {
+/**
+ * The workspaces connected. With none, how to connect one: this installation's own commands, located (`handoffs`), or
+ * the tool from a chat and why there is no command here.
+ */
+export function renderWorkspaces(workspaces: readonly WorkspaceView[], color: boolean, handoffs: CliHandoffs): string {
   if (workspaces.length === 0) {
-    const profile = commandText(shellCommand(['agent-slack', 'workspace', 'add', '<organisation>/slack'], platform));
-    const manifest = commandText(shellCommand(['agent-slack', 'manifest', '--port', '51234'], platform));
-    const own = commandText(
-      shellCommand(['agent-slack', 'workspace', 'add', '<name>', '--client-id', '<id>', '--port', '51234'], platform),
-    );
     return [
       'No workspace connected yet.',
       '',
-      `With an organisation profile: ${profile}`,
-      `With your own app: create it with ${manifest}, then connect with ${own}.`,
+      handoffsSentence(
+        [
+          handoffs.own(['workspace', 'add', '<organisation>/slack']),
+          handoffs.own(['manifest', '--port', '51234']),
+          handoffs.own(['workspace', 'add', '<name>', '--client-id', '<id>', '--port', '51234']),
+        ],
+        ([profile, manifest, own]) =>
+          `With an organisation profile: ${profile}\nWith your own app: create it with ${manifest}, then connect with ${own}.`,
+        'Connect one with slack_workspace_add from a chat.',
+        commandText,
+      ),
     ].join('\n');
   }
   return workspaces
@@ -116,7 +122,12 @@ function appRoute(workspace: WorkspaceView): string {
  * and it is the only place that should: naming the workspace and the person is what turns a sign-in somebody
  * clicked through into one they can check.
  */
-export function renderConnected(workspace: WorkspaceView, reauth: boolean, color: boolean): string {
+export function renderConnected(
+  workspace: WorkspaceView,
+  reauth: boolean,
+  color: boolean,
+  handoffs: CliHandoffs,
+): string {
   const what = workspace.workspaceName
     ? `${cell(workspace.workspaceName)} (${workspace.workspaceId})`
     : workspace.workspaceId;
@@ -126,7 +137,16 @@ export function renderConnected(workspace: WorkspaceView, reauth: boolean, color
     renderWorkspace(workspace, color),
     ...(workspace.committedBeforeAbort ? ['', 'The sign-in was saved before the interrupt took effect.'] : []),
     '',
-    paint(color, 'dim', `Access is "${workspace.mode}". Check everything with: agent-slack doctor`),
+    paint(
+      color,
+      'dim',
+      handoffsSentence(
+        [handoffs.own(['doctor'])],
+        ([doctor]) => `Access is "${workspace.mode}". Check everything with: ${doctor}`,
+        `Access is "${workspace.mode}". Check everything with slack_doctor from a chat.`,
+        commandText,
+      ),
+    ),
   ].join('\n');
 }
 
@@ -137,8 +157,11 @@ export function renderConnected(workspace: WorkspaceView, reauth: boolean, color
  * looking. Uninstalling it for them is not this command's to do: `apps.uninstall` is refused by the transport
  * precisely because an agent quietly removing an app for a whole workspace is not a local change.
  */
-export function renderRemoved(removed: RemovedWorkspace, platform: NodeJS.Platform = process.platform): string {
-  const retry = commandText(shellCommand(['agent-slack', 'doctor'], platform));
+export function renderRemoved(removed: RemovedWorkspace, handoffs: CliHandoffs): string {
+  // What retries the cleanup: this installation's doctor, located, or with none here, the tool and why not.
+  const doctor = handoffs.own(['doctor']);
+  const retry = isCommand(doctor) ? handoffText(doctor) : 'slack_doctor (from a chat)';
+  const why = isCommand(doctor) ? [] : [doctor.message];
   const cleanup = removed.cleanup.flatMap((entry) => [
     `Old credential for ${entry.workspace}: ${entry.tokens.map((token) => `${token.kind} ${token.status} (deadline ${token.deadline})`).join('; ')}.`,
     ...(entry.cleaned
@@ -147,6 +170,7 @@ export function renderRemoved(removed: RemovedWorkspace, platform: NodeJS.Platfo
         ? [`The pending revocation ledger entry remains for ${retry} to retry: ${entry.issue.message}.`]
         : [`The old credential bundle remains for ${retry} to retry.`]),
   ]);
+  if (cleanup.length > 0) cleanup.push(...why);
   return [
     `Disconnected "${removed.alias}" from this machine. The stored credential is gone.`,
     ...cleanup,
@@ -222,32 +246,29 @@ export function renderDrafts(drafts: readonly DraftView[], color: boolean): stri
     .join('\n');
 }
 
+/** "Preview it with: <post prepare>", located; with no command here, the tool from a chat and why. */
+function previewIt(draft: SlackDraft, workspace: string, handoffs: CliHandoffs): string {
+  return handoffsSentence(
+    [handoffs.own(['post', 'prepare', '--workspace', workspace, '--draft', draft.draftId])],
+    ([command]) => `Preview it with: ${command}`,
+    `Preview it with slack_post_prepare from a chat, draftId ${draft.draftId}.`,
+    commandText,
+  );
+}
+
 /** What `draft create` wrote, and what to run next: nothing has gone anywhere yet. */
-export function renderCreatedDraft(
-  draft: SlackDraft,
-  workspace: string,
-  platform: NodeJS.Platform = process.platform,
-): string {
+export function renderCreatedDraft(draft: SlackDraft, workspace: string, handoffs: CliHandoffs): string {
   const count = draft.files?.length ?? 0;
   const files = count === 0 ? '' : ` with ${count} file${count === 1 ? '' : 's'}`;
-  const preview = commandText(
-    shellCommand(['agent-slack', 'post', 'prepare', '--workspace', workspace, '--draft', draft.draftId], platform),
-  );
-  return `Draft ${draft.draftId}${files}. Nothing has reached Slack.\nPreview it with: ${preview}`;
+  return `Draft ${draft.draftId}${files}. Nothing has reached Slack.\n${previewIt(draft, workspace, handoffs)}`;
 }
 
 /** What `draft update` saved: a new revision, which no approval made before it covers. */
-export function renderUpdatedDraft(
-  draft: SlackDraft,
-  workspace: string,
-  platform: NodeJS.Platform = process.platform,
-): string {
+export function renderUpdatedDraft(draft: SlackDraft, workspace: string, handoffs: CliHandoffs): string {
   const count = draft.files?.length ?? 0;
   return [
     `Draft ${draft.draftId} saved${count === 0 ? '' : ` with ${count} file${count === 1 ? '' : 's'}`}, as a new revision: any approval it had no longer holds.`,
-    `Preview it with: ${commandText(
-      shellCommand(['agent-slack', 'post', 'prepare', '--workspace', workspace, '--draft', draft.draftId], platform),
-    )}`,
+    previewIt(draft, workspace, handoffs),
   ].join('\n');
 }
 
@@ -328,7 +349,7 @@ export function renderSignInStarted(
   started: StartedSignIn,
   reauth: boolean,
   color: boolean,
-  platform: NodeJS.Platform = process.platform,
+  handoffs: CliHandoffs,
 ): string {
   const lines = [
     paint(color, 'bold', `${reauth ? 'Re-authorise' : 'Connect'} ${started.alias} (${started.mode})`),
@@ -342,13 +363,12 @@ export function renderSignInStarted(
   if (!started.listener) {
     lines.push(
       '',
-      'Then finish it with:',
-      `  ${commandText(
-        shellCommand(
-          ['agent-slack', 'workspace', ...(reauth ? ['reauth', started.alias] : ['add']), '--finish', started.flowId],
-          platform,
-        ),
-      )}`,
+      handoffsSentence(
+        [handoffs.own(['workspace', ...(reauth ? ['reauth', started.alias] : ['add']), '--finish', started.flowId])],
+        ([command]) => `Then finish it with:\n  ${command}`,
+        `Then finish it with slack_workspace_finish from a chat, flowId ${started.flowId}.`,
+        commandText,
+      ),
     );
   } else {
     lines.push('', paint(color, 'dim', 'Waiting for the browser…'));
@@ -389,11 +409,7 @@ export function renderSteps(title: string, steps: readonly string[], color: bool
  * The manifest is printed whole, because pasting it is the step; and the reason comes first, because "nothing
  * happened" is otherwise read as a fault rather than as the order Slack requires.
  */
-export function renderAppUpdateNeeded(
-  result: AppUpdateNeeded,
-  color: boolean,
-  platform: NodeJS.Platform = process.platform,
-): string {
+export function renderAppUpdateNeeded(result: AppUpdateNeeded, color: boolean, handoffs: CliHandoffs): string {
   const { manifest } = result;
   return [
     paint(color, 'bold', `"${result.alias}" cannot post yet, and its app comes first.`),
@@ -404,7 +420,7 @@ export function renderAppUpdateNeeded(
       manifest.port,
       color,
       { workspace: result.alias, manifestUrl: manifest.manifestUrl },
-      platform,
+      handoffs,
     ),
     '',
     renderManifest('send', manifest.redirectUrl).trimEnd(),
@@ -419,13 +435,12 @@ export function renderAppUpdateNeeded(
           ),
           '',
         ]),
-    'Once it is saved:',
-    `  ${commandText(
-      shellCommand(
-        ['agent-slack', 'workspace', 'mode', result.alias, 'send', '--app-updated', '--port', String(manifest.port)],
-        platform,
-      ),
-    )}`,
+    handoffsSentence(
+      [handoffs.own(['workspace', 'mode', result.alias, 'send', '--app-updated', '--port', String(manifest.port)])],
+      ([command]) => `Once it is saved:\n  ${command}`,
+      'Once it is saved, move it with slack_mode_set and appUpdated, from a chat.',
+      commandText,
+    ),
   ].join('\n');
 }
 
@@ -448,16 +463,17 @@ export function renderManifestHelp(
   mode: string,
   port: number,
   color: boolean,
-  target: { workspace: string | null; manifestUrl: string | null } = { workspace: null, manifestUrl: null },
-  platform: NodeJS.Platform = process.platform,
+  target: { workspace: string | null; manifestUrl: string | null } | undefined,
+  handoffs: CliHandoffs,
 ): string {
+  const { workspace, manifestUrl } = target ?? { workspace: null, manifestUrl: null };
   /*
    * For a workspace already connected, the app to change is the one it signed in through — so the steps are to edit
    * that app, never to create one. A new app is a new installation, and the workspace would go on behaving exactly as
    * before under the old one.
    */
   const steps =
-    target.workspace === null
+    workspace === null
       ? [
           '1. Open https://api.slack.com/apps and choose "Create New App" → "From a manifest".',
           '   (Changing the mode of a workspace already connected? Open its existing app → "App Manifest" instead,',
@@ -468,18 +484,17 @@ export function renderManifestHelp(
           paint(color, 'dim', 'The Client ID is the only thing you need from that page. It is not a secret, and there'),
           paint(color, 'dim', 'is no client secret to copy: this signs in with PKCE, which replaces one.'),
           '',
-          'Then connect it:',
-          `  ${commandText(
-            shellCommand(
-              ['agent-slack', 'workspace', 'add', '<name>', '--client-id', '<the Client ID>', '--port', String(port)],
-              platform,
-            ),
-          )}`,
+          handoffsSentence(
+            [handoffs.own(['workspace', 'add', '<name>', '--client-id', '<the Client ID>', '--port', String(port)])],
+            ([command]) => `Then connect it:\n  ${command}`,
+            `Then connect it with slack_workspace_add from a chat, with the Client ID and port ${port}.`,
+            commandText,
+          ),
         ]
       : [
-          target.manifestUrl === null
-            ? `1. Open https://api.slack.com/apps and the app "${target.workspace}" was connected through → "App Manifest". (It signed in before its app was recorded, so there is no direct link.)`
-            : `1. Open ${target.manifestUrl} — the manifest of the app "${target.workspace}" was connected through.`,
+          manifestUrl === null
+            ? `1. Open https://api.slack.com/apps and the app "${workspace}" was connected through → "App Manifest". (It signed in before its app was recorded, so there is no direct link.)`
+            : `1. Open ${manifestUrl} — the manifest of the app "${workspace}" was connected through.`,
           '2. Replace the manifest there with the JSON below, and save — the same app, not a new one.',
         ];
   return [
@@ -493,30 +508,33 @@ export function renderManifestHelp(
       ? paint(
           color,
           'dim',
-          `This app can read, search and draft, and Slack itself refuses it any post. For one that can post after your approval, print ${inlineCommand(
-            shellCommand(['agent-slack', 'manifest', '--mode', 'send', '--port', String(port)], platform),
-          )} — and for a workspace already connected, update this same app with it first: a token can only be granted what its app offers.`,
+          handoffsSentence(
+            [handoffs.own(['manifest', '--mode', 'send', '--port', String(port)])],
+            ([send]) =>
+              `This app can read, search and draft, and Slack itself refuses it any post. For one that can post after your approval, print ${send} — and for a workspace already connected, update this same app with it first: a token can only be granted what its app offers.`,
+            'This app can read, search and draft, and Slack itself refuses it any post. For one that can post after your approval, slack_manifest prints it for send — and for a workspace already connected, update this same app with it first: a token can only be granted what its app offers.',
+          ),
         )
       : paint(
           color,
           'dim',
-          `This app can post, upload and react, each only after your approval. ${inlineCommand(
-            shellCommand(['agent-slack', 'manifest', '--mode', 'read', '--port', String(port)], platform),
-          )} prints one that cannot post at all. To move an existing workspace from read, update its app with this manifest first, then run ${inlineCommand(
-            shellCommand(
-              [
-                'agent-slack',
+          handoffsSentence(
+            [
+              handoffs.own(['manifest', '--mode', 'read', '--port', String(port)]),
+              handoffs.own([
                 'workspace',
                 'mode',
-                target.workspace ?? '<name>',
+                workspace ?? '<name>',
                 'send',
                 '--app-updated',
                 '--port',
                 String(port),
-              ],
-              platform,
-            ),
-          )}.`,
+              ]),
+            ],
+            ([read, move]) =>
+              `This app can post, upload and react, each only after your approval. ${read} prints one that cannot post at all. To move an existing workspace from read, update its app with this manifest first, then run ${move}.`,
+            'This app can post, upload and react, each only after your approval. slack_manifest prints one for read that cannot post at all. To move an existing workspace from read, update its app with this manifest first, then call slack_mode_set with appUpdated from a chat.',
+          ),
         ),
   ].join('\n');
 }
@@ -594,9 +612,26 @@ export function renderAppCreated(result: AppCreated, color: boolean): string {
  * that mismatch is the shape an instruction takes when it is meant for a model and not for the room.
  */
 
-export function renderChannels(result: ChannelsResult, color: boolean): string {
+/**
+ * The channels a workspace can see. With none, the same list with the ones it is not in: this installation's own
+ * command for `workspace`, located (`handoffs`), or the tool from a chat and why there is no command here.
+ */
+export function renderChannels(
+  result: ChannelsResult,
+  color: boolean,
+  handoffs: CliHandoffs,
+  workspace: string,
+): string {
   if (result.channels.length === 0) {
-    return paint(color, 'dim', 'No channels. `agent-slack channels --all` includes ones you are not in.');
+    return paint(
+      color,
+      'dim',
+      handoffsSentence(
+        [handoffs.own(['channels', '--workspace', workspace, '--all'])],
+        ([command]) => `No channels. ${command} includes ones you are not in.`,
+        'No channels. slack_channels with `all` includes ones you are not in.',
+      ),
+    );
   }
   const lines = [paint(color, 'bold', `${'CHANNEL'.padEnd(30)} ${'KIND'.padEnd(9)} MEMBERS  TOPIC`)];
   for (const channel of result.channels) {

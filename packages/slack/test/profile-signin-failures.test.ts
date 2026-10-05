@@ -169,14 +169,14 @@ test('bounded control-token display remains canonical through patch, resave and 
   assert.ok(first.profile.workspaceName.length <= 512);
   assert.doesNotMatch(first.profile.workspaceName, /<s>|&(?:amp|lt|gt)?$/);
   const live = await f.context.config();
-  assert.doesNotThrow(() => profileTargetFor(first, live, f.context.platform), 'an unchanged profile was invalidated');
+  assert.doesNotThrow(() => profileTargetFor(first, live, f.context.handoffs), 'an unchanged profile was invalidated');
   await f.context.flows.patch(flow.flowId, { listenerPid: process.pid });
   const patched = await f.context.flows.get(flow.flowId);
   assert.deepEqual(patched.profile, first.profile, 'patch changed the bounded display');
   await f.context.flows.save(patched);
   const saved = await f.context.flows.get(flow.flowId);
   assert.deepEqual(saved.profile, first.profile, 'resave changed the bounded display');
-  assert.equal(profileTargetFor(saved, await f.context.config(), f.context.platform).workspaceName, workspaceName);
+  assert.equal(profileTargetFor(saved, await f.context.config(), f.context.handoffs).workspaceName, workspaceName);
   f.harness.reply = () => slackOk({ team: { id: 'TRGC0001', name: 'RGC' }, app_id: 'A0READ' });
   await f.context.flows.recordOutcome(flow.flowId, { code: 'fake-code' });
   const view = await finishSignIn(f.context, { flowId: flow.flowId, waitSeconds: 0 });

@@ -5,6 +5,7 @@ import { test } from 'node:test';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { createSlackMcpServer } from '../src/mcp/server.ts';
+import { assertNoBareCommand } from './support/handoffs.ts';
 import { type Harness, newHarness, tempDir } from './support/harness.ts';
 
 /**
@@ -161,7 +162,7 @@ test('the tools that reach people say what approval they need, and the one that 
     for (const outward of ['slack_post_send', 'slack_react', 'slack_react_send']) {
       const tool = tools.find((candidate) => candidate.name === outward);
       assert.ok(tool, `${outward} is part of the agent's surface`);
-      assert.match(String(tool.description), /agent-slack approve/, `${outward} names the command a person runs`);
+      assert.match(String(tool.description), /approve command/, `${outward} says a person runs the approve command`);
       assert.match(String(tool.description), /cannot approve/i, `${outward} says the agent cannot approve`);
     }
     for (const reacting of ['slack_react', 'slack_react_send']) {
@@ -222,7 +223,14 @@ test('the greeting says how a post is approved under each policy, and that the a
   await Promise.all([client.close(), server.close()]);
 
   assert.doesNotMatch(greeting, /no tool here posts/i);
-  for (const said of [/slack_post_send/, /`chat`/, /`confirm`/, /`never`/, /agent-slack approve/, /cannot approve/i]) {
+  for (const said of [
+    /slack_post_send/,
+    /`chat`/,
+    /`confirm`/,
+    /`never`/,
+    /the approve command the result gives/,
+    /cannot approve/i,
+  ]) {
     assert.match(greeting, said);
   }
 });
@@ -270,7 +278,7 @@ test('the greeting stays under 2 KB with many workspaces, and what must not be l
     /`mismatch`/,
     /`unrenderable`/,
     /@channel, @here or a room of 50 or more/,
-    /agent-slack approve <id>/,
+    /the person runs the approve command the result gives/,
     /you cannot approve it yourself/,
     /Under `never` nothing posts/,
     /Workspaces that could post/,
@@ -287,6 +295,30 @@ test('the greeting stays under 2 KB with many workspaces, and what must not be l
     [...order].sort((a, b) => a - b),
     'the lines a model must not lose come before the ones it can do without',
   );
+});
+
+test('the greeting and every tool say to run the command a result gives, and name no CLI of their own (7d)', async () => {
+  /*
+   * A greeting or a description is written once, for every machine; the command that runs here is not the same on any
+   * two (CUE-403). So they say what to do — run the approve command the result gives — and the result carries the
+   * command, located where it is printed. A bare `agent-slack approve <id>` is on most people's PATH nowhere.
+   */
+  const harness = await newHarness();
+  await harness.addWorkspace({ alias: 'acme', mode: 'send' });
+  for (const options of [{}, { workspace: 'acme' }]) {
+    const { client, close } = await connect(harness, options);
+    try {
+      assertNoBareCommand(client.getInstructions() ?? '', 'the greeting');
+      const { tools } = await client.listTools();
+      assert.ok(tools.length > 10, `${tools.length} tools`);
+      for (const tool of tools) {
+        assertNoBareCommand(tool.description ?? '', `${tool.name}'s description`);
+        assertNoBareCommand(JSON.stringify(tool.inputSchema), `${tool.name}'s arguments`);
+      }
+    } finally {
+      await close();
+    }
+  }
 });
 
 test('a pinned server refuses another workspace by name rather than quietly using its own', async () => {

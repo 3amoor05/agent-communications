@@ -92,7 +92,7 @@ async function currentPost(
   deps: SessionDeps,
 ): Promise<{ draft: SlackDraft; view: PostView }> {
   const approvalId = record.approvalId;
-  const drafts = openDraftStore(context.core.paths.stateDir, context.now, context.platform);
+  const drafts = openDraftStore(context.core.paths.stateDir, context.now, context.handoffs);
   const draft = await drafts.get(record.draftId);
   const gate = await gateDepsFor(context, workspace, deps);
   const view = await viewPost(gate, draft, new NameBook());
@@ -229,6 +229,6 @@ export async function workspaceForApproval(context: SlackContext, approvalId: st
   const config = await context.config();
   const entry = Object.entries(config.accounts).find(([, account]) => account.id === record.inboxId);
   if (!entry) throw new CommsError('NOT_FOUND', 'the workspace this approval belongs to is no longer connected');
-  requireWorkspace(config, entry[0]);
+  requireWorkspace(config, entry[0], context.handoffs);
   return entry[0];
 }

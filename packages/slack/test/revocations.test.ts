@@ -20,6 +20,7 @@ import {
   revokePendingEntry,
 } from '../src/operations/revocations.ts';
 import { DROP, type HttpReply, startFakeSlack } from './support/fake-slack.ts';
+import { slackHandoffs } from './support/handoffs.ts';
 import { type Harness, newHarness } from './support/harness.ts';
 
 const CREATED = '2026-10-04T12:00:00.000Z';
@@ -965,7 +966,10 @@ test('retrying all entries continues past one bad bundle and returns plain state
     );
     assert.equal(fake.requests.length, 1);
     assert.equal(JSON.stringify(results).includes('fake-'), false, 'a plain result carried a token');
-    assert.equal(parseBundle(await (await machine.harness.core.secrets('file')).get(machine.ref))?.state, 'ready');
+    assert.equal(
+      parseBundle(await (await machine.harness.core.secrets('file')).get(machine.ref), slackHandoffs())?.state,
+      'ready',
+    );
   } finally {
     await fake.close();
   }

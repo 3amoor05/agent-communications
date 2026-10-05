@@ -13,6 +13,7 @@ import { BUNDLE_VERSION, type TokenBundle } from '../src/auth/bundle.ts';
 import { scopesForMode } from '../src/manifest.ts';
 import { doctor } from '../src/operations/doctor.ts';
 import { VERSION } from '../src/version.ts';
+import { assertNoBareCommand, slackCommand, slackHandoffs, TEST_PATHS } from './support/handoffs.ts';
 
 /**
  * `doctor` is what somebody runs when something is wrong and the reason is not obvious, so every check has to
@@ -58,12 +59,24 @@ function config(accounts: Record<string, AccountConfig>): Config {
   return { ...emptyConfig(), accounts };
 }
 
+/** Slack's own commands, located from this checkout, for the fixes the report names. */
+const HANDOFFS = slackHandoffs();
+
 const find = (result: ReturnType<typeof doctor>, id: string) => result.checks.find((check) => check.id === id);
 
 test('a missing workspace gives two executable repair steps without argument placeholders', () => {
-  const result = doctor({ config: config({}), now: NOW, platform: 'darwin', bundles: new Map() });
+  const result = doctor({
+    config: config({}),
+    now: NOW,
+    handoffs: slackHandoffs(TEST_PATHS, 'darwin'),
+    bundles: new Map(),
+  });
   const fix = find(result, 'workspaces')?.fix;
-  assert.equal(fix, 'agent-slack manifest --port 51234\nagent-slack workspace add --help');
+  assert.equal(
+    fix,
+    `${slackCommand(TEST_PATHS, ['manifest', '--port', '51234'], 'darwin')}\n${slackCommand(TEST_PATHS, ['workspace', 'add', '--help'], 'darwin', { uses: [] })}`,
+  );
+  assertNoBareCommand(fix ?? '');
   assert.doesNotMatch(fix ?? '', /<name>|<id>/);
 });
 
@@ -71,7 +84,7 @@ test('a healthy install is healthy, and nothing asks to be fixed', () => {
   const result = doctor({
     config: config({ acme: account() }),
     now: NOW,
-    platform: 'darwin',
+    handoffs: slackHandoffs(TEST_PATHS, 'darwin'),
     bundles: new Map([['acme', bundle()]]),
   });
   assert.equal(result.healthy, true);
@@ -82,12 +95,13 @@ test('a healthy install is healthy, and nothing asks to be fixed', () => {
 });
 
 test('no workspaces is a warning with the command that connects one', () => {
-  const result = doctor({ config: config({}), now: NOW, bundles: new Map() });
+  const result = doctor({ config: config({}), now: NOW, handoffs: HANDOFFS, bundles: new Map() });
   const check = find(result, 'workspaces');
   assert.equal(check?.status, 'warn');
   // Both halves: `workspace add` needs a Client ID that does not exist until an app does, so a fix naming only
   // the second command is one nobody can run.
-  assert.match(check?.fix ?? '', /agent-slack manifest/);
+  assert.match(check?.fix ?? '', / manifest --port 51234$/m);
+  assertNoBareCommand(check?.fix ?? '');
   assert.match(check?.fix ?? '', /workspace add/);
   // An empty install is not broken.
   assert.equal(result.healthy, true);
@@ -102,6 +116,7 @@ test('an interrupted refresh is a failure that says reauth, not a retry', () => 
   const result = doctor({
     config: config({ acme: account() }),
     now: NOW,
+    handoffs: HANDOFFS,
     bundles: new Map([['acme', bundle({ state: 'refresh-uncertain' })]]),
   });
   const check = find(result, 'credential-state');
@@ -119,6 +134,7 @@ test('a refresh Slack refused by name says so, with the code, rather than "inter
   const dead = doctor({
     config: config({ acme: account() }),
     now: NOW,
+    handoffs: HANDOFFS,
     bundles: new Map([
       [
         'acme',
@@ -137,6 +153,7 @@ test('a refresh Slack refused by name says so, with the code, rather than "inter
   const lost = doctor({
     config: config({ acme: account() }),
     now: NOW,
+    handoffs: HANDOFFS,
     bundles: new Map([
       [
         'acme',
@@ -154,6 +171,7 @@ test('a secret store that will not answer is its own finding, and its fix is not
   const result = doctor({
     config: config({ acme: account() }),
     now: NOW,
+    handoffs: HANDOFFS,
     bundles: new Map([['acme', { storeUnavailable: 'the system keychain did not answer within 12s' }]]),
   });
   const check = find(result, 'credential');
@@ -170,6 +188,7 @@ test('an expiring refresh token warns while reauthorising is still a choice', ()
   const result = doctor({
     config: config({ acme: account() }),
     now: NOW,
+    handoffs: HANDOFFS,
     bundles: new Map([['acme', bundle({ refreshExpiresAt: soon })]]),
   });
   const check = find(result, 'refresh-expiry');
@@ -182,6 +201,7 @@ test('an expired refresh token is a failure that names the 30 days', () => {
   const result = doctor({
     config: config({ acme: account() }),
     now: NOW,
+    handoffs: HANDOFFS,
     bundles: new Map([['acme', bundle({ refreshExpiresAt: '2026-09-01T00:00:00.000Z' })]]),
   });
   const check = find(result, 'refresh-expiry');
@@ -195,13 +215,23 @@ test('scope drift is a failure, in both directions', () => {
    * asked for. A `read` install claiming it cannot post is only true while this holds.
    */
   const widened = account({ grantedScopes: [...scopesForMode('read'), 'chat:write'] });
-  const result = doctor({ config: config({ acme: widened }), now: NOW, bundles: new Map([['acme', bundle()]]) });
+  const result = doctor({
+    config: config({ acme: widened }),
+    now: NOW,
+    handoffs: HANDOFFS,
+    bundles: new Map([['acme', bundle()]]),
+  });
   const check = find(result, 'scopes');
   assert.equal(check?.status, 'fail');
   assert.match(check?.detail ?? '', /more than "read" allows: chat:write/);
 
   const narrowed = account({ grantedScopes: scopesForMode('read').filter((s) => s !== 'search:read') });
-  const second = doctor({ config: config({ acme: narrowed }), now: NOW, bundles: new Map([['acme', bundle()]]) });
+  const second = doctor({
+    config: config({ acme: narrowed }),
+    now: NOW,
+    handoffs: HANDOFFS,
+    bundles: new Map([['acme', bundle()]]),
+  });
   assert.match(find(second, 'scopes')?.detail ?? '', /missing search:read/);
 });
 
@@ -211,7 +241,7 @@ test('whether each workspace can send files: off by choice in read mode, and a s
       doctor({
         config: config({ acme: account(over) }),
         now: NOW,
-        platform: 'darwin',
+        handoffs: slackHandoffs(TEST_PATHS, 'darwin'),
         bundles: new Map([['acme', bundle()]]),
       }),
       'files',
@@ -233,7 +263,7 @@ test('whether each workspace can send files: off by choice in read mode, and a s
   });
   assert.equal(noFiles?.status, 'fail');
   assert.match(noFiles?.detail ?? '', /files:write/);
-  assert.equal(noFiles?.fix, 'agent-slack workspace reauth acme --mode send');
+  assert.equal(noFiles?.fix, slackCommand(TEST_PATHS, ['workspace', 'reauth', 'acme', '--mode', 'send'], 'darwin'));
 });
 
 test('a stored credential that cannot be read is a different finding from one that is not there', () => {
@@ -242,7 +272,12 @@ test('a stored credential that cannot be read is a different finding from one th
    * token" for a credential that is very much stored sends somebody to `workspace add` — which then refuses it
    * as already connected, in a command they ran precisely because they did not know what was wrong.
    */
-  const missing = doctor({ config: config({ acme: account() }), now: NOW, bundles: new Map([['acme', null]]) });
+  const missing = doctor({
+    config: config({ acme: account() }),
+    now: NOW,
+    handoffs: HANDOFFS,
+    bundles: new Map([['acme', null]]),
+  });
   assert.equal(find(missing, 'credential')?.status, 'fail');
   assert.match(find(missing, 'credential')?.detail ?? '', /no stored token/);
   assert.match(find(missing, 'credential')?.fix ?? '', /reauth acme/);
@@ -250,6 +285,7 @@ test('a stored credential that cannot be read is a different finding from one th
   const corrupt = doctor({
     config: config({ acme: account() }),
     now: NOW,
+    handoffs: HANDOFFS,
     bundles: new Map([['acme', 'unreadable']]),
   });
   assert.equal(find(corrupt, 'credential')?.status, 'fail');
@@ -261,10 +297,10 @@ test('repair commands use the selected shell platform', () => {
   const result = doctor({
     config: config({ '7/slack': account() }),
     now: NOW,
-    platform: 'win32',
+    handoffs: slackHandoffs(TEST_PATHS, 'win32'),
     bundles: new Map([['7/slack', null]]),
   });
-  assert.equal(find(result, 'credential')?.fix, 'agent-slack workspace reauth "7/slack"');
+  assert.equal(find(result, 'credential')?.fix, slackCommand(TEST_PATHS, ['workspace', 'reauth', '7/slack'], 'win32'));
 });
 
 test('an expired access token is not reported as valid until the moment it expired', () => {
@@ -273,6 +309,7 @@ test('an expired access token is not reported as valid until the moment it expir
   const stale = doctor({
     config: config({ acme: account() }),
     now: NOW,
+    handoffs: HANDOFFS,
     bundles: new Map([['acme', bundle({ accessExpiresAt: '2026-09-22T00:00:00.000Z' })]]),
   });
   const check = find(stale, 'credential-state');
@@ -283,6 +320,7 @@ test('an expired access token is not reported as valid until the moment it expir
   const broken = doctor({
     config: config({ acme: account() }),
     now: NOW,
+    handoffs: HANDOFFS,
     bundles: new Map([['acme', bundle({ accessExpiresAt: 'whenever' })]]),
   });
   assert.equal(find(broken, 'credential-state')?.status, 'fail');
@@ -296,7 +334,12 @@ test('the rate-limit check reports expected versus observed, and never probes', 
    * when more remain — so a short page proves nothing and one 429 proves throttling, not a tier. The only way to
    * observe the cap is to spend the budget being measured.
    */
-  const quiet = doctor({ config: config({ acme: account() }), now: NOW, bundles: new Map([['acme', bundle()]]) });
+  const quiet = doctor({
+    config: config({ acme: account() }),
+    now: NOW,
+    handoffs: HANDOFFS,
+    bundles: new Map([['acme', bundle()]]),
+  });
   const check = find(quiet, 'rate-limit');
   // Not `ok`: nothing has been observed, and green reads as "checked, and fine".
   assert.equal(check?.status, 'unknown');
@@ -306,6 +349,7 @@ test('the rate-limit check reports expected versus observed, and never probes', 
   const throttled = doctor({
     config: config({ acme: account() }),
     now: NOW,
+    handoffs: HANDOFFS,
     bundles: new Map([['acme', bundle()]]),
     rateEvidence: { lastThrottledAt: '2026-09-22T11:00:00.000Z', retryAfterSeconds: 30 },
   });
@@ -317,7 +361,12 @@ test('the rate-limit check reports expected versus observed, and never probes', 
 test('not having looked for other Slack servers is reported as not having looked', () => {
   // "None registered" for a scan that never ran is a clean bill of health nobody earned, so absent and empty
   // have to read differently.
-  const result = doctor({ config: config({ acme: account() }), now: NOW, bundles: new Map([['acme', bundle()]]) });
+  const result = doctor({
+    config: config({ acme: account() }),
+    now: NOW,
+    handoffs: HANDOFFS,
+    bundles: new Map([['acme', bundle()]]),
+  });
   const check = find(result, 'other-slack-servers');
   assert.equal(check?.status, 'unknown');
   assert.equal(check?.detail, 'not checked on this machine');
@@ -326,6 +375,7 @@ test('not having looked for other Slack servers is reported as not having looked
   const scanned = doctor({
     config: config({ acme: account() }),
     now: NOW,
+    handoffs: HANDOFFS,
     bundles: new Map([['acme', bundle()]]),
     registeredServers: [],
   });
@@ -351,7 +401,7 @@ test('another Slack server on this machine is reported, because it is a second r
   const result = doctor({
     config: config({ acme: account() }),
     now: NOW,
-    platform: 'win32',
+    handoffs: slackHandoffs(TEST_PATHS, 'win32'),
     bundles: new Map([['acme', bundle()]]),
     registeredServers: [
       ours,
@@ -399,6 +449,7 @@ test('a registered Slack server older than this release is reported, with a repa
   const result = doctor({
     config: config({ acme: account() }),
     now: NOW,
+    handoffs: HANDOFFS,
     bundles: new Map([['acme', bundle()]]),
     registeredServers: [stale, oldLayout, viaNpx],
   });
@@ -418,7 +469,7 @@ test('a registered Slack server older than this release is reported, with a repa
   const current = doctor({
     config: config({ acme: account() }),
     now: NOW,
-    platform: 'darwin',
+    handoffs: slackHandoffs(TEST_PATHS, 'darwin'),
     bundles: new Map([['acme', bundle()]]),
     registeredServers: [
       server({ name: 'slack', args: [managedRuntimeEntry('/data', '@agentcomms/slack', VERSION), 'mcp'] }),
@@ -443,7 +494,7 @@ test('a scan that finds none of our servers says so, as something to look at —
     const result = doctor({
       config: config({ acme: account() }),
       now: NOW,
-      platform: 'darwin',
+      handoffs: slackHandoffs(TEST_PATHS, 'darwin'),
       bundles: new Map([['acme', bundle()]]),
       registeredServers,
     });
@@ -451,7 +502,7 @@ test('a scan that finds none of our servers says so, as something to look at —
     assert.equal(check?.status, 'warn', check?.detail);
     assert.match(check?.detail ?? '', /^none registered: /);
     assert.doesNotMatch(check?.detail ?? '', /this release/);
-    assert.equal(check?.fix, 'agent-slack mcp install --help');
+    assert.equal(check?.fix, slackCommand(TEST_PATHS, ['mcp', 'install', '--help'], 'darwin', { uses: [] }));
   }
 });
 
@@ -460,7 +511,7 @@ test('a registered entry whose runtime is gone is a failure with the command tha
   const result = doctor({
     config: config({ acme: account() }),
     now: NOW,
-    platform: 'darwin',
+    handoffs: slackHandoffs(TEST_PATHS, 'darwin'),
     bundles: new Map([['acme', bundle()]]),
     registeredServers: [gone],
     missingFiles: new Map([[gone, gone.args[0] ?? '']]),
@@ -468,7 +519,10 @@ test('a registered entry whose runtime is gone is a failure with the command tha
   const check = find(result, 'mcp-command');
   assert.equal(check?.status, 'fail');
   assert.match(check?.detail ?? '', /is not there any more/);
-  assert.match(check?.fix ?? '', /agent-slack mcp install --client claude-code --force/);
+  assert.equal(
+    check?.fix,
+    slackCommand(TEST_PATHS, ['mcp', 'install', '--client', 'claude-code', '--force'], 'darwin'),
+  );
 });
 
 test('every check names its workspace, or says it is not about one', () => {
@@ -476,6 +530,7 @@ test('every check names its workspace, or says it is not about one', () => {
   const result = doctor({
     config: config({ acme: account(), zed: account({ userId: 'U0002' }) }),
     now: NOW,
+    handoffs: HANDOFFS,
     bundles: new Map([
       ['acme', bundle()],
       ['zed', bundle()],
@@ -493,6 +548,7 @@ test('our own server started by its published command is ours, not another route
   const result = doctor({
     config: config({ acme: account() }),
     now: NOW,
+    handoffs: HANDOFFS,
     bundles: new Map([['acme', bundle()]]),
     registeredServers: [
       server({ name: 'slack', command: 'agent-slack', args: ['mcp', '--workspace', 'acme'] }),
@@ -508,6 +564,7 @@ test("another server's URL is shown by host and path, never with what its query 
   const result = doctor({
     config: config({ acme: account() }),
     now: NOW,
+    handoffs: HANDOFFS,
     bundles: new Map([['acme', bundle()]]),
     registeredServers: [
       server({

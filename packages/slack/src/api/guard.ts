@@ -281,7 +281,7 @@ export function guardSlackRequests(
       if (permit.configuring !== method) {
         throw new CommsError(
           'SEND_REFUSED',
-          `${method} changes a Slack app, and only \`agent-slack app\` may call it`,
+          `${method} changes a Slack app, and only this package's \`app\` commands may call it`,
           {
             hint: 'This is a bug — please report it.',
           },

@@ -6,19 +6,20 @@ import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, test } from 'node:test';
-import {
-  EXIT_CODES,
-  gatedChange,
-  inlineCommand,
-  shellCommand,
-  updateLaterChange,
-  withCredentialsLock,
-} from '@agentcomms/core';
+import { EXIT_CODES, gatedChange, updateLaterChange, withCredentialsLock } from '@agentcomms/core';
 import { parseBundle } from '../src/auth/bundle.ts';
 import { openFlowStore } from '../src/auth/flow.ts';
 import { run } from '../src/cli/program.ts';
 import { scopesForMode } from '../src/manifest.ts';
 import { finishSignIn, startSignIn } from '../src/operations/signin.ts';
+import {
+  argvAfterEntry,
+  assertNoBareCommand,
+  locatedSlackLine,
+  slackCommand,
+  slackHandoffs,
+  slackInline,
+} from './support/handoffs.ts';
 import { type Harness, newHarness, slackOk, TEST_CLIENT_ID, tempDir } from './support/harness.ts';
 import { fetchListener, LISTENER_COMMAND, running, stopListeners } from './support/listener.ts';
 import { newOrganisationHarness, READ_CLIENT_ID } from './support/organisation.ts';
@@ -414,7 +415,11 @@ async function startDetached(harness: Harness, argv: string[]): Promise<{ flowId
     flowId: string;
     authUrl: string;
   };
-  const flow = await openFlowStore(harness.core.paths.stateDir, () => new Date()).peek(data.flowId);
+  const flow = await openFlowStore(
+    harness.core.paths.stateDir,
+    () => new Date(),
+    slackHandoffs(harness.core.paths),
+  ).peek(data.flowId);
   if (flow?.listenerPid) strays.push(flow.listenerPid);
   return data;
 }
@@ -423,7 +428,11 @@ test('workspace add uses the profile read app without client-id or port, while a
   const port = await freePort();
   const harness = await newOrganisationHarness({ port, readAppId: 'A0READ', sendAppId: 'A0SEND' });
   const started = await startDetached(harness, ['workspace', 'add', 'rgc/slack']);
-  const flow = await openFlowStore(harness.core.paths.stateDir, () => new Date()).peek(started.flowId);
+  const flow = await openFlowStore(
+    harness.core.paths.stateDir,
+    () => new Date(),
+    slackHandoffs(harness.core.paths),
+  ).peek(started.flowId);
   assert.equal(flow?.clientId, READ_CLIENT_ID);
   assert.equal(flow?.port, port);
   assert.equal(flow?.profile?.role, 'read');
@@ -561,7 +570,14 @@ test('an empty install says how to connect one, not that something is wrong', as
   const result = await cli(harness, ['workspace', 'list']);
   assert.equal(result.code, EXIT_CODES.OK);
   assert.match(result.stdout, /No workspace connected yet/);
-  assert.match(result.stdout, /agent-slack manifest/);
+  // This installation's own commands, located: the manifest first, as the app comes first (CUE-403).
+  assert.ok(
+    result.stdout.includes(
+      `create it with ${slackCommand(harness.core.paths, ['manifest', '--port', '51234'], 'darwin')}`,
+    ),
+    result.stdout,
+  );
+  assertNoBareCommand(result.stdout);
 });
 
 test('removing is approved first, takes the credential with it, and says what it did not remove', async () => {
@@ -657,7 +673,7 @@ test('a sign-in stores what the grant actually said, and never sends a client se
   assert.equal(call?.params.client_id, TEST_CLIENT_ID);
 
   const secrets = await harness.core.secrets('file');
-  const bundle = parseBundle(await secrets.get(account?.secretRef as string));
+  const bundle = parseBundle(await secrets.get(account?.secretRef as string), slackHandoffs());
   assert.equal(bundle?.accessToken, 'fake-user-token-1');
   assert.ok(bundle?.refreshExpiresAt, 'the 30-day expiry was not recorded');
 });
@@ -722,10 +738,12 @@ test('a scope beyond both modes still points at the app, which is where it came 
     browserOn(),
   );
   assert.equal(result.code, EXIT_CODES.CONFIG);
-  assert.match(
-    result.json<Envelope<never>>().error?.hint ?? '',
-    /Re-create it from `agent-slack manifest --mode read`/,
+  const hint = result.json<Envelope<never>>().error?.hint ?? '';
+  assert.ok(
+    hint.includes(`Re-create it from ${slackInline(harness.core.paths, ['manifest', '--mode', 'read'], 'darwin')}`),
+    hint,
   );
+  assertNoBareCommand(hint);
 });
 
 test('workspace mode counts each posting scope on its own, and none as none', async () => {
@@ -835,7 +853,11 @@ test('workspace mode read changes nothing and says what does; mode send needs a 
   assert.equal(appStep?.manifest.manifestUrl, 'https://api.slack.com/apps/A0001/app-manifest');
   assert.ok(appStep?.manifest.manifest.oauth_config.scopes.user.includes('chat:write'), 'the send manifest');
   assert.match(appStep?.steps[0] ?? '', /apps\/A0001\/app-manifest/, 'the step links the app’s own page');
-  assert.equal(appStep?.terminalAlternative, `agent-slack app update acme --mode send --port ${port}`);
+  assert.equal(
+    appStep?.terminalAlternative,
+    slackCommand(harness.core.paths, ['app', 'update', 'acme', '--mode', 'send', '--port', port], 'darwin'),
+  );
+  assertNoBareCommand(JSON.stringify(appStep?.steps));
   assert.equal(JSON.stringify(await harness.core.config.load()), before);
 
   // Once the person says the app is updated, it is a change they approve before any sign-in starts.
@@ -867,10 +889,18 @@ test('workspace mode read changes nothing and says what does; mode send needs a 
 test('the manifest names the other mode and what switching to it takes', async () => {
   const harness = await newHarness();
   const read = await cli(harness, ['manifest', '--port', '51234']);
-  assert.match(read.stdout, /agent-slack manifest --mode send --port 51234/);
+  const paths = harness.core.paths;
+  assert.ok(read.stdout.includes(slackInline(paths, ['manifest', '--mode', 'send', '--port', '51234'])), read.stdout);
   assert.match(read.stdout, /update this same app with it first/);
   const send = await cli(harness, ['manifest', '--mode', 'send', '--port', '51234']);
-  assert.match(send.stdout, /agent-slack workspace mode '<name>' send --app-updated --port 51234/);
+  assert.ok(
+    send.stdout.includes(
+      slackInline(paths, ['workspace', 'mode', '<name>', 'send', '--app-updated', '--port', '51234']),
+    ),
+    send.stdout,
+  );
+  assert.match(send.stdout, / workspace mode '<name>' send --app-updated --port 51234`/);
+  for (const printed of [read.stdout, send.stdout]) assertNoBareCommand(printed);
 });
 
 test('a bot token in the reply is refused, not dropped', async () => {
@@ -989,7 +1019,10 @@ test('a successful reauth replaces the credential and removes the old one', asyn
   assert.notEqual(after?.secretRef, before.secretRef, 'the new credential was written over the old reference');
   const secrets = await harness.core.secrets('file');
   assert.equal(await secrets.get(before.secretRef), null, 'the superseded credential was left behind');
-  assert.equal(parseBundle(await secrets.get(after?.secretRef as string))?.accessToken, 'fake-user-token-1');
+  assert.equal(
+    parseBundle(await secrets.get(after?.secretRef as string), slackHandoffs())?.accessToken,
+    'fake-user-token-1',
+  );
 });
 
 test('reauth that comes back from a different Slack app is refused', async () => {
@@ -1290,10 +1323,10 @@ test('under the confirm change policy, an agent cannot claim its own widening be
   const asked = await cli(harness, argv, { env: { CLAUDECODE: '1' } });
   const pending = pendingOf(asked);
   assert.equal(pending.policy, 'confirm');
-  assert.match(
-    asked.json<Envelope<never>>().error?.hint ?? '',
-    new RegExp(`agent-slack approve ${pending.approvalId}`),
-  );
+  // Approved under `confirm` at the person's own terminal, with this installation's own approve, located.
+  const hint = asked.json<Envelope<never>>().error?.hint ?? '';
+  assert.ok(hint.includes(slackInline(harness.core.paths, ['approve', pending.approvalId])), hint);
+  assertNoBareCommand(hint);
 
   const claimed = await cli(harness, [...argv, '--approval', pending.approvalId], { env: { CLAUDECODE: '1' } });
   assert.equal(claimed.code, EXIT_CODES.APPROVAL);
@@ -1302,7 +1335,11 @@ test('under the confirm change policy, an agent cannot claim its own widening be
   assert.match(error?.message ?? '', /needs a person to approve it at a terminal first/);
   assert.equal(harness.calls.length, 0);
   assert.equal((await harness.core.config.load()).accounts.acme?.mode, 'read');
-  assert.deepEqual(await openFlowStore(harness.core.paths.stateDir, () => new Date()).pending(), [], 'no sign-in');
+  assert.deepEqual(
+    await openFlowStore(harness.core.paths.stateDir, () => new Date(), slackHandoffs(harness.core.paths)).pending(),
+    [],
+    'no sign-in',
+  );
 });
 
 test('reauth send → send renews without asking anybody anything', async () => {
@@ -1802,14 +1839,15 @@ test('missing workspace name builds both suggested commands for the selected she
   for (const platform of ['darwin', 'win32'] as const) {
     const result = await cli(harness, ['workspace', 'add', '--json'], { platform });
     assert.equal(result.code, EXIT_CODES.USAGE);
-    const profile = inlineCommand(shellCommand(['agent-slack', 'workspace', 'add', 'acme/slack'], platform));
-    const own = inlineCommand(
-      shellCommand(
-        ['agent-slack', 'workspace', 'add', 'acme/slack', '--client-id', '<id>', '--port', '51234'],
-        platform,
-      ),
+    const profile = slackInline(harness.core.paths, ['workspace', 'add', 'acme/slack'], platform);
+    const own = slackInline(
+      harness.core.paths,
+      ['workspace', 'add', 'acme/slack', '--client-id', '<id>', '--port', '51234'],
+      platform,
     );
-    assert.equal(result.json<Envelope<never>>().error?.hint, `e.g. ${profile}, or use your own app with ${own}.`);
+    const hint = result.json<Envelope<never>>().error?.hint ?? '';
+    assert.equal(hint, `e.g. ${profile}, or use your own app with ${own}.`);
+    assertNoBareCommand(hint);
   }
 });
 
@@ -1849,7 +1887,11 @@ test('an agent cannot turn a read workspace into one that can post by removing i
     env: { CLAUDECODE: '1' },
   });
   assert.equal(borrowed.code, EXIT_CODES.APPROVAL, borrowed.stdout);
-  assert.deepEqual(await openFlowStore(harness.core.paths.stateDir, () => new Date()).pending(), [], 'no sign-in');
+  assert.deepEqual(
+    await openFlowStore(harness.core.paths.stateDir, () => new Date(), slackHandoffs(harness.core.paths)).pending(),
+    [],
+    'no sign-in',
+  );
 
   // Read mode is still anybody's to connect.
   await startDetached(harness, ['workspace', 'add', 'acme', '--client-id', TEST_CLIENT_ID, '--port', port]);
@@ -1922,9 +1964,9 @@ test('the command a narrowing refusal prints is one that works', async () => {
     browserOn(),
   );
   const hint = refused.json<Envelope<never>>().error?.hint ?? '';
-  const printed = /`agent-slack (workspace mode loud read --port \d+)`/.exec(hint)?.[1];
-  assert.ok(printed, hint);
-  const followed = await cli(harness, ['--json', ...printed.split(' ')]);
+  const printed = locatedSlackLine(hint, ['workspace', 'mode', 'loud', 'read', '--port', String(port)]);
+  // Run as a person pastes it: the words after Slack's entry, the folder pins first.
+  const followed = await cli(harness, ['--json', ...argvAfterEntry(printed)]);
   assert.equal(followed.code, EXIT_CODES.OK, followed.stderr);
   assert.match(followed.json<Envelope<{ steps: string[] }>>().data?.steps.join('\n') ?? '', /Remove app/);
 });
@@ -1957,11 +1999,28 @@ test('the command a widening waiting for approval names is one that works as pri
   });
   const { approvalId } = pendingOf(refused);
   const hint = refused.json<Envelope<never>>().error?.hint ?? '';
-  const printed = /`agent-slack (workspace reauth [^`]+)`/.exec(hint)?.[1];
-  assert.equal(printed, `workspace reauth acme --mode send --port ${port} --approval ${approvalId}`, hint);
+  const printed = locatedSlackLine(hint, [
+    'workspace',
+    'reauth',
+    'acme',
+    '--mode',
+    'send',
+    '--port',
+    port,
+    '--approval',
+    approvalId,
+  ]);
+  assert.equal(
+    `\`${printed}\``,
+    slackInline(
+      harness.core.paths,
+      ['workspace', 'reauth', 'acme', '--mode', 'send', '--port', port, '--approval', approvalId],
+      'darwin',
+    ),
+  );
 
   // The person said yes; the command, run exactly as printed, widens the workspace.
-  const followed = await cli(harness, (printed as string).split(' '), { ...browserOn(), env: { CLAUDECODE: '1' } });
+  const followed = await cli(harness, argvAfterEntry(printed), { ...browserOn(), env: { CLAUDECODE: '1' } });
   assert.equal(followed.code, EXIT_CODES.OK, followed.stderr);
   assert.equal((await harness.core.config.load()).accounts.acme?.mode, 'send');
 });
@@ -1975,10 +2034,18 @@ test('the widening command uses the explicitly selected Windows quoting', async 
   });
   const { approvalId } = pendingOf(refused);
   const hint = refused.json<Envelope<never>>().error?.hint ?? '';
-  assert.match(
+  assert.ok(
+    hint.includes(
+      slackInline(
+        harness.core.paths,
+        ['workspace', 'reauth', 'acme', '--mode', 'send', '--port', port, '--approval', approvalId],
+        'win32',
+      ),
+    ),
     hint,
-    new RegExp(`agent-slack workspace reauth acme --mode send --port "${port}" --approval ${approvalId}`),
   );
+  assert.match(hint, new RegExp(` workspace reauth acme --mode send --port "${port}" --approval ${approvalId}\``));
+  assertNoBareCommand(hint);
 });
 
 // ── Reading, through the command a person actually runs ────────────────────────────────────────────────────────

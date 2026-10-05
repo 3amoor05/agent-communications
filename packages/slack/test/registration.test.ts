@@ -10,6 +10,7 @@ import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { run } from '../src/cli/program.ts';
 import { VERSION } from '../src/version.ts';
+import { assertNoBareCommand, locatedSlackLine } from './support/handoffs.ts';
 import { type Harness, newHarness, tempDir } from './support/harness.ts';
 
 /*
@@ -174,12 +175,11 @@ test('an approval from comms_server_install registers from `agent-slack mcp inst
     const fromCommand = pending(await cli(harness, command, env));
     assert.equal(body(fromCommand.preview), body(asked.preview), 'the same words from either surface');
     // The command an agent is told to run again carries the pin: without it, it would ask for a wider server.
-    assert.match(
-      fromCommand.hint,
-      new RegExp(
-        `agent-slack mcp install --client cursor --workspace acme --launcher npx --no-verify --approval ${fromCommand.approvalId}`,
-      ),
-    );
+    // This installation's own command, located (CUE-403).
+    locatedSlackLine(fromCommand.hint, [
+      ...['mcp', 'install', '--client', 'cursor', '--workspace', 'acme', '--launcher', 'npx', '--no-verify'],
+      ...['--approval', fromCommand.approvalId],
+    ]);
     assert.equal(await readFile(cursor, 'utf8'), before, 'nothing is written while it is only asked');
 
     const claimed = await cli(harness, [...command, '--approval', asked.approvalId], env);
@@ -243,12 +243,10 @@ test('`agent-slack mcp install` asks before it writes; `--print` and `--client j
   assert.match(preview, /registers the Slack MCP server with cursor as "team-slack"/);
   assert.match(preview, /not pinned: it reaches every workspace on this machine/);
   // The command to run again repeats every flag the registration was asked with.
-  assert.match(
-    String(asked.envelope().error?.hint),
-    new RegExp(
-      `agent-slack mcp install --client cursor --name team-slack --launcher npx --no-verify --approval ${approvalId}`,
-    ),
-  );
+  locatedSlackLine(String(asked.envelope().error?.hint), [
+    ...['mcp', 'install', '--client', 'cursor', '--name', 'team-slack', '--launcher', 'npx', '--no-verify'],
+    ...['--approval', approvalId],
+  ]);
   assert.equal(existsSync(cursor), false);
   const done = await cli(harness, [...command, '--json', '--approval', approvalId], env);
   assert.equal(done.code, 0, done.stdout);
@@ -285,10 +283,10 @@ test('commands to run again are quoted for the named POSIX or Windows platform (
     first.env,
     'darwin',
   );
-  assert.match(
-    String(posix.envelope().error?.hint),
-    /agent-slack workspace add other --mode send --client-id 'client id' --port 51234 --approval/,
-  );
+  const posixHint = String(posix.envelope().error?.hint);
+  assert.match(posixHint, / workspace add other --mode send --client-id 'client id' --port 51234 --approval ap_\w+`/);
+  assert.ok(posixHint.includes(`\`${process.execPath} `), posixHint);
+  assertNoBareCommand(posixHint);
 
   const second = await machine();
   const windows = await cli(
@@ -298,7 +296,11 @@ test('commands to run again are quoted for the named POSIX or Windows platform (
     'win32',
   );
   const hint = String(windows.envelope().error?.hint);
-  assert.match(hint, /\["agent-slack","workspace","add","other","--mode","send","--client-id","client\\u0025id"/);
+  // This Node first, then Slack's entry here and its folders, then the words: as JSON, `%` escaped, to be typed.
+  assert.ok(hint.startsWith('Show the person the preview.'), hint);
+  assert.ok(hint.includes(`[${JSON.stringify(process.execPath)},`), hint);
+  assert.match(hint, /"workspace","add","other","--mode","send","--client-id","client\\u0025id"/);
+  assertNoBareCommand(hint);
   assert.match(hint, /cannot be quoted the same way for cmd\.exe and for PowerShell/);
 });
 
@@ -415,7 +417,7 @@ test(
     const asked = await cli(harness, ['mcp', 'prune', '--json'], env);
     const { approvalId, preview } = pending(asked);
     assert.match(preview, /deletes the unused Slack runtime 0\.0\.1/);
-    assert.match(String(asked.envelope().error?.hint), new RegExp(`agent-slack mcp prune --approval ${approvalId}`));
+    locatedSlackLine(String(asked.envelope().error?.hint), ['mcp', 'prune', '--approval', approvalId]);
     assert.ok(existsSync(old), 'asking removed nothing');
 
     const done = await cli(harness, ['mcp', 'prune', '--json', '--approval', approvalId], env);

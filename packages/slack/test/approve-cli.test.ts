@@ -5,6 +5,7 @@ import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { EXIT_CODES } from '@agentcomms/core';
 import { run } from '../src/cli/program.ts';
+import { assertNoBareCommand, slackInline } from './support/handoffs.ts';
 import { type Harness, newHarness } from './support/harness.ts';
 
 /**
@@ -110,7 +111,14 @@ test('a reaction under `confirm` waits for a person, and the approval they give 
   assert.equal(error?.code, 'APPROVAL_PENDING', 'waiting, not refused');
   const approvalId = String(error?.details?.approvalId);
   assert.match(approvalId, /^ap_/, 'and it says which approval a person has to give');
-  assert.match(error?.hint ?? '', new RegExp(`agent-slack approve ${approvalId}`), 'the command that approves it');
+  // This installation's own approve, located: the program is this Node and Slack's entry here, never a bare name.
+  assert.ok(
+    error?.hint?.includes(
+      `ask them to run ${slackInline(harness.core.paths, ['approve', approvalId])} in their own terminal`,
+    ),
+    'the command that approves it',
+  );
+  assertNoBareCommand(error?.hint ?? '');
   assert.match(error?.hint ?? '', new RegExp(`--approval ${approvalId}`), 'and the one that then uses it');
   assert.doesNotMatch(error?.hint ?? '', /gmail/i, 'never another product’s');
   assert.equal(slack.count('reactions.add'), 0, 'nothing is added while it waits');
@@ -186,8 +194,9 @@ test('a post held for approval names agent-slack’s commands, never Gmail’s',
   assert.equal(held.code, EXIT_CODES.APPROVAL, held.stdout);
   const error = held.json<Envelope<never>>().error;
   assert.equal(error?.code, 'APPROVAL_PENDING');
-  assert.match(error?.hint ?? '', new RegExp(`agent-slack approve ${approvalId}`));
-  assert.match(error?.hint ?? '', /agent-slack post send/);
+  assert.ok(error?.hint?.includes(slackInline(harness.core.paths, ['approve', approvalId])), error?.hint);
+  assert.match(error?.hint ?? '', /run the same post send command again/);
+  assertNoBareCommand(error?.hint ?? '');
   assert.doesNotMatch(error?.hint ?? '', /gmail|trusted client form/i, 'there is no Gmail and no form here');
   assert.equal(slack.count('chat.postMessage'), 0);
 });

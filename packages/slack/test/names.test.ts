@@ -21,8 +21,12 @@ import { reauthWorkspace } from '../src/operations/changes.ts';
 import { doctor } from '../src/operations/doctor.ts';
 import { finishSignIn, type StartedSignIn, startSignIn } from '../src/operations/signin.ts';
 import { listWorkspaces, removeWorkspace, requireWorkspace } from '../src/operations/workspaces.ts';
+import { slackHandoffs } from './support/handoffs.ts';
 import { type Harness, newHarness, slackOk, TEST_CLIENT_ID } from './support/harness.ts';
 import { fetchListener } from './support/listener.ts';
+
+/** Slack's own commands, located from this checkout, for the refusals that name one. */
+const HANDOFFS = slackHandoffs();
 
 /**
  * Organisation/platform names through the Slack package.
@@ -162,7 +166,7 @@ test('of two renewals started together, the one finishing second is refused, tho
   const now = (await harness.core.config.load()).accounts.acme;
   assert.deepEqual(now, kept, 'the renewal that finished first is the one kept');
   const secrets = await harness.core.secrets('file');
-  assert.equal(parseBundle(await secrets.get(kept.secretRef))?.accessToken, 'fake-user-token-2');
+  assert.equal(parseBundle(await secrets.get(kept.secretRef), slackHandoffs())?.accessToken, 'fake-user-token-2');
   const refs = (await readdir(harness.core.paths.secretsDir)).filter((name) => name.endsWith('.json')).length;
   assert.equal(refs, 1, 'and the refused one took back the credential it staged');
 });
@@ -224,8 +228,8 @@ test('a former name is refused with the new one when a workspace is looked up', 
   await harness.addWorkspace({ alias: 'live' });
   await migrate(harness, ['live=cue/slack']);
   const config = await harness.core.config.load();
-  assert.throws(() => requireWorkspace(config, 'live'), is('NOT_FOUND', /renamed to "cue\/slack"/));
-  assert.equal(requireWorkspace(config, 'cue/slack').alias, 'cue/slack');
+  assert.throws(() => requireWorkspace(config, 'live', HANDOFFS), is('NOT_FOUND', /renamed to "cue\/slack"/));
+  assert.equal(requireWorkspace(config, 'cue/slack', HANDOFFS).alias, 'cue/slack');
 });
 
 test('on a migrated config, a new workspace needs an organisation/slack name that nothing ever had', async () => {
@@ -305,6 +309,7 @@ test('removal finds the workspace by id, whatever it is called by the time it wr
   };
   const removed = await removeWorkspace(
     {
+      handoffs: HANDOFFS,
       config: await context.config(),
       secrets: store,
       update: (mutator) => harness.core.config.update(mutator),
@@ -494,14 +499,15 @@ test('the everyday commands work under an organisation/platform name', async () 
     listWorkspaces(config).map((view) => view.alias),
     ['cue/slack'],
   );
-  assert.equal(requireWorkspace(config, 'cue/slack').account.platform, 'slack');
-  assert.throws(() => requireWorkspace(config, 'live'), is('NOT_FOUND', /renamed to "cue\/slack"/));
+  assert.equal(requireWorkspace(config, 'cue/slack', HANDOFFS).account.platform, 'slack');
+  assert.throws(() => requireWorkspace(config, 'live', HANDOFFS), is('NOT_FOUND', /renamed to "cue\/slack"/));
   const secrets = await context.secrets();
   const account = config.accounts['cue/slack'] as AccountConfig;
   const report = doctor({
+    handoffs: HANDOFFS,
     config,
     now: new Date('2026-09-22T12:00:00.000Z'),
-    bundles: new Map([['cue/slack', parseBundle(await secrets.get(account.secretRef))]]),
+    bundles: new Map([['cue/slack', parseBundle(await secrets.get(account.secretRef), slackHandoffs())]]),
   });
   assert.ok(
     report.checks.some((check) => check.title.includes('cue/slack')),
