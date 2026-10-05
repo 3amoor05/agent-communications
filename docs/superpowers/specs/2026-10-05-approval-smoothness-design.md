@@ -101,6 +101,20 @@ implement the first two. The short repeat preview is dropped for this release an
   `packages/resend/src/operations/send.ts:293`), or a record a sweep failed to revoke, can never send after the policy
   is loosened: its epoch is behind for good. Loosening never decrements the epoch.
 
+  **Old releases are locked out before the fence is relied on.** A 0.13 process does not know the epoch: it would
+  claim its own v1 approval, or write `never → chat` without incrementing anything, while keeping the unknown key
+  (`packages/core/src/config.ts:459`, `packages/core/src/approvals.ts:725`). So the send epoch exists only in **config
+  version 3**. 0.13 reads versions 1 and 2 and refuses every other version before it acts — “this release reads
+  versions 1 and 2”, with an upgrade hint (`packages/core/src/config.ts:30, 823-826`) — and every prepare, claim and
+  policy change it makes reads config first. 0.14 reads 1, 2 and 3 and converts a version-1 or -2 config to version 3,
+  in one atomic write under the config lock, before its first operation that relies on the epoch: a send-policy
+  write, and a send prepare, claim or approval. From that write on, no 0.13 process can prepare, claim, approve or
+  change a policy through this config, and every v1 record is unclaimable by every process (D1's version gate in
+  0.14, the config refusal in 0.13). While every process sharing the config is still 0.13, nothing changes from today:
+  that is the old release's own guarantee, not this design's. This deliberately departs from the suite's two-step
+  config-version rule — one release reads a version before the next writes it (`packages/core/src/config-version.ts`)
+  — because here an old reader is exactly what must be stopped; §4 records the cost.
+
   **Order between a claim and a `never` change.** The two never hold each other's lock, so they cannot deadlock. A
   claim (and a terminal/form approval) takes the record lock and then reads the live epoch from config afresh — a
   config read is an atomic read of the committed file, not a snapshot taken before the lock — and that read is its
@@ -890,6 +904,12 @@ lookup failures stay attached to their draft and do not raise the concurrency or
 
 ## 4. Departures from the ticket
 
+0. **Config version 3 stops 0.13 processes at once (D1).** The first 0.14 operation that relies on the send epoch
+   converts the shared config to version 3, which 0.13 refuses to read. An MCP server still running 0.13 then fails
+   every call with the upgrade hint until its client restarts it on 0.14 — the update flow already asks for that
+   restart. This breaks the suite's usual rule that a release reads a config version before any release writes it;
+   the alternative, letting a 0.13 process keep claiming, is the no-revival hole the epoch exists to close.
+
 1. **No in-chat approval for a fresh, untrusted Claude Code yet.** It is deferred to a URL-mode design because no MCP
    mechanism proves that a person, rather than the client or model, answered. The terminal-plus-wait route is honest
    and testable now.
@@ -915,6 +935,13 @@ lookup failures stay attached to their draft and do not raise the concurrency or
 
 ## 5. Tests owed
 
+- **Round-28 cases:** with the frozen 0.13 tarball the release tests already use, against one shared config and
+  approvals store: (a) a 0.14 `never` change converts a version-2 config to version 3 and increments the epoch, after
+  which the frozen process's prepare, claim, approve and send-policy commands each refuse with “this release reads
+  versions 1 and 2” and the provider stand-in records no call — including for a v1 approval the frozen process
+  prepared itself before the conversion, and after `never → chat` with a forced failed sweep; (b) the conversion
+  happens before a 0.14 send prepare, claim or approval on a version-2 config, in the same locked write, and is
+  idempotent; (c) a version-3 config is never rewritten as version 2 by any 0.14 path, and its unknown keys survive.
 - **Round-27 cases:** with barriers, (a) a claim that takes the record lock and reads epoch N, then a `never` change
   commits N+1 before the claim writes `sending`: the claim proceeds and the change lists that record as already being
   sent; (b) the `never` change commits N+1 before the claim takes the record lock: the claim revokes and the provider
