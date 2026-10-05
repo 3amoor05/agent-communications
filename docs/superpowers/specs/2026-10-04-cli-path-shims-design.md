@@ -1,27 +1,32 @@
 # CUE-403 — the CLIs on PATH after install and update — design
 
 Status: **proposed 2026-10-04 against the 0.13.0 release (`6d4694e`), revised 2026-10-05 after adversarial review
-round 1. No implementation is in this change.**
+round 2 (3 P1, 4 P2, 1 P3, all addressed). No implementation is in this change.**
 
 ## 1. What was asked
 
 The owner reproduced CUE-403 after a managed install. `agentcomms`, `agent-gmail`, `agent-slack`, `agent-resend` and
-`agent-whatsapp` existed only below their versioned runtimes, not on `PATH`. A result that said “run
+`agent-whatsapp` existed only below their versioned runtimes, with no user bin directory in the path model
+(`packages/core/src/mcp-install.ts:299-321`, `packages/core/src/paths.ts:12-26`). A result that said “run
 `agent-gmail approve <id>` in a terminal” therefore handed the person a command their terminal answered with
-`command not found`. Under `confirm`, and for some escalated sends, that terminal is the only approval route.
+`command not found` (`packages/gmail/src/operations/send.ts:449-454`). Under `confirm`, and for some escalated sends,
+that terminal is the only approval route (`capabilities.json:241-246`).
 
-Managed install and `comms_update` must publish the core CLI and each installed channel CLI in a per-user bin
-directory, repoint them on update, and remove them safely when prune removes their runtime. The installer must check
-command discovery afterwards and explain exactly how to add the directory for zsh, bash, fish or Windows when this
-process does not see it. CLI and MCP doctor must diagnose missing, stale, shadowed, malformed and foreign shims.
+Managed install and `comms_update` must publish the CLI belonging to each managed runtime in a per-user bin directory,
+repoint it on update, and remove it safely when prune removes that runtime. A managed core install publishes
+`agentcomms`; a managed channel install publishes that channel's CLI. A channel-only install does not manufacture a
+core runtime or publish `agentcomms`. The installer must check command discovery afterwards and give honest login and
+interactive-shell alternatives for zsh, bash, fish and Windows when this process does not see the directory. CLI and
+MCP doctor must diagnose missing, stale, shadowed, malformed and foreign shims.
 
 The acceptance criterion is:
 
 > **Every terminal command a result prints works on this machine.**
 
 It is not “every bare CLI name works immediately after install.” The program never edits a shell profile or the
-Windows user PATH. A CLI result may use a verified bare command; an MCP result always leads with a validated absolute
-Node-plus-entry command because the server process cannot prove what the person's terminal resolves.
+Windows user PATH. Every CLI and MCP handoff leads with an absolute command: the validated absolute shim path when
+one is safely published, otherwise validated absolute Node plus entry. A bare name is only a labelled convenience
+after the person verifies that their own terminal resolves it to that shim.
 
 ## 2. What is true, and was checked
 
@@ -48,6 +53,10 @@ Node-plus-entry command because the server process cannot prove what the person'
   grammar but does not prove it equals the top-level `bin` key (`packages/core/src/channel-manifest.ts:166-181`,
   `packages/core/src/channel-manifest.ts:254-261`). The implementation must validate that equality before publishing.
   Server-only bins such as `agent-gmail-mcp` are not terminal CLIs.
+- Managed install calls `installManagedRuntime` for the one requested product; it does not add a core runtime beside a
+  channel runtime (`packages/core/src/mcp-install.ts:523-580`). The core package exposes only `agentcomms`, and each
+  channel package exposes only its own CLI, for example Gmail's `agent-gmail`
+  (`packages/core/package.json:24-25`, `packages/gmail/package.json:24-25`).
 - The install result reports the MCP entry, registration and handshake, but no CLI or PATH result
   (`packages/core/src/mcp-install.ts:1383-1430`). Registration can pass while every printed bare command fails.
 
@@ -65,10 +74,12 @@ Node-plus-entry command because the server process cannot prove what the person'
 - Managed MCP registrations intentionally receive a minimal PATH containing the selected Node directory and system
   locations, not `~/.local/bin` (`packages/core/src/mcp-install.ts:261-280`). A healthy login terminal and its MCP
   server can therefore report different command discovery.
-- Existing file locking treats a holder as stale after 30 seconds unless renewal is requested; renewal is already a
-  supported option (`packages/core/src/lock.ts:157-163`, `packages/core/src/lock.ts:219-229`). npm can exceed that
-  interval. The filesystem layer also has a POSIX directory-fsync helper, even though its ordinary atomic writer does
-  not sync the directory after rename (`packages/core/src/fs.ts:66-89`, `packages/core/src/fs.ts:135-147`).
+- Existing file locking treats a holder as stale after 30 seconds unless renewal is requested and records a random
+  token in the lock (`packages/core/src/lock.ts:157-175`). Its renewer only touches the lock path without checking the
+  token; only final cleanup compares the current token before removing the lock
+  (`packages/core/src/lock.ts:219-232`). npm can exceed that interval. The filesystem layer also has a POSIX
+  directory-fsync helper, even though its ordinary atomic writer does not sync the directory after rename
+  (`packages/core/src/fs.ts:66-89`, `packages/core/src/fs.ts:135-147`).
 
 ### 2.3 Doctor and terminal handoffs expose the gap
 
@@ -78,9 +89,10 @@ Node-plus-entry command because the server process cannot prove what the person'
   `packages/core/src/mcp-install.ts:392-410`). The same `doctor` operation backs `agentcomms doctor` and
   `comms_doctor` (`capabilities.json:13-18`).
 - `shellCommand(words, platform)` safely prints POSIX words. On Windows it prints only the subset that cmd.exe and
-  PowerShell pass alike; unsafe words become inert JSON plus instructions rather than a runnable line
-  (`packages/core/src/cli-runtime.ts:67-129`, `packages/core/src/cli-runtime.ts:145-191`). This command rendering has
-  existed since 0.12.3. It does not resolve its first word: a safely rendered missing command is still missing.
+  PowerShell pass alike; a path containing whitespace is double-quoted, while unsafe words become inert JSON plus
+  instructions rather than a runnable line (`packages/core/src/cli-runtime.ts:67-129`,
+  `packages/core/src/cli-runtime.ts:145-191`). This repository-wide rendering was released in 0.12.3
+  (`CHANGELOG.md:50-61`). It does not resolve its first word: a safely rendered missing command is still missing.
 - Change approvals construct bare channel commands and repeat them in pending/next-step results
   (`packages/core/src/changes.ts:73-98`, `packages/core/src/changes.ts:265-283`,
   `packages/core/src/changes.ts:461-465`). The shared approval store and daily-update stop also print bare
@@ -121,6 +133,22 @@ Node-plus-entry command because the server process cannot prove what the person'
 - The 0.13.0 updater cannot execute code that exists only in the release it is installing. It can publish and register
   a new runtime, then exit with no shim. The first new process must therefore reconcile the installed base without a
   second approval; putting shim effects into the old update plan cannot solve this rollout.
+- Worse, released 0.13.x change preparation and claims print a bare channel or core approval command
+  (`packages/core/src/changes.ts:73-98`, `packages/core/src/changes.ts:461-465`,
+  `packages/core/src/approvals.ts:889-897`). That released code cannot be changed in place, so under `confirm` the
+  person needs a runnable pre-update fallback before any new runtime exists. Skills are installed from this repository
+  separately from runtime packages, and current skill compatibility pins show the release they describe
+  (`docs/superpowers/specs/2026-09-18-agent-communications-design.md:981-983`,
+  `skills/comms-update/SKILL.md:1-5`).
+- The 0.13.0 update report already carries the answering core's version and the versions of managed runtimes
+  (`packages/core/src/operations/update.ts:116-149`); its human renderer says “This core is …”
+  (`packages/core/src/render.ts:453-458`). By contrast, `comms_paths` currently returns only `ResolvedPaths`, and the
+  doctor result has checks but no core-version field (`packages/core/src/operations/maintenance.ts:37-57`). D4 makes
+  all three discovery routes explicit for future releases, while the update preview is the route that exists during
+  a 0.13.0-to-0.13.1 bootstrap.
+- `pnpm verify:parity` currently substitutes recording stand-ins and checks that both surfaces reach the operation a
+  capability row names with its expected arguments (`scripts/parity.mjs:338-350`); its success message makes that
+  scope explicit (`scripts/parity.mjs:650-668`). It does not compare the returned result objects.
 
 ## 3. Decisions
 
@@ -152,19 +180,39 @@ rather than silently deleted, and doctor reports `disabled` without calling thei
 is the durable machine preference; the environment override is intentionally not persisted.
 
 The directory is created only when enabled bookkeeping applies to an existing managed runtime. `--print`, `--check`,
-`--dry-run`, npx and local launchers do not create it. POSIX creation is owner-only; an existing directory's mode is
-reported but not changed. Windows inherits the user's ACL.
+`--dry-run`, npx and local launchers do not create it. Before creation or use, validation walks the absolute path with
+`lstat`-style, no-follow checks. Every existing component must be a real directory, not a symlink or reparse point,
+and must not be writable by another principal. A sticky world-writable ancestor such as `/tmp` is explicitly refused,
+not accepted because its sticky bit limits deletion. Missing components are created owner-only below the last safe
+ancestor and the whole path is then checked again.
+
+On POSIX the final bin directory must be owned by the current effective user and have no group- or world-write bit.
+On Windows its owner must be the current user's SID, and its effective ACL must grant write to no principal other than
+that user, SYSTEM and Administrators. The same no-other-principal-write rule applies to each existing ancestor; an
+inherited permissive ACE is still permissive. Validation never repairs ownership, mode or ACL in place. It reports
+the exact component and reason, tells the person to choose or create a private directory (or correct it themselves),
+and writes nothing anywhere under the refused path.
+
+The persisted choice is a location, not a trust decision: it is revalidated on every operation. While holding the
+installation lock, validation is repeated immediately before every shim publication and again before any result may
+call an absolute shim path runnable. A directory replaced, symlinked or made permissive between the earlier check and
+that point makes the operation abort without a shim write; it is never allowed to fall back to the untrusted directory.
 
 Every installed runtime also carries an owner-only `<runtime>/.agentcomms-runtime.json` receipt. It records receipt
-version, package, manifest binary, package version, entry relative to the runtime, the absolute Node path and the Node
-version observed at install. An entry is never recovered from untrusted receipt text without revalidating that it
-stays under the runtime and matches the installed package.
+version, package, manifest binary, package version, package-manifest path, entry relative to the runtime, SHA-256 of
+the entry bytes, the absolute Node path and the Node version observed at install. An entry is never recovered from
+untrusted receipt text without revalidating that it stays under the runtime, that every named file exists, that the
+installed package manifest has the recorded version and that the entry hash matches.
 
 ### D2. Publish owned wrappers, not symlinks
 
 The shared managed-runtime layer validates that `agentcomms.binary` names an executable top-level package `bin`, then
-publishes that one user CLI. Server-only aliases are excluded. Current manifests therefore produce the five commands
-in §1; future channels inherit the rule.
+publishes that one user CLI for that runtime. Server-only aliases are excluded. A managed core runtime therefore
+publishes `agentcomms`; Gmail, Slack, Resend and WhatsApp runtimes publish `agent-gmail`, `agent-slack`, `agent-resend`
+and `agent-whatsapp` respectively. All five exist only when all five product runtimes exist; a channel-only install
+publishes only its channel CLI. Those are the packages' current top-level bins
+(`packages/core/package.json:24-25`, `packages/gmail/package.json:24-25`, `packages/slack/package.json:24-25`,
+`packages/resend/package.json:24-25`, `packages/whatsapp/package.json:24-25`). Future channels inherit the rule.
 
 On macOS and Linux, `<binDir>/<binary>` is an executable `/bin/sh` wrapper which `exec`s the absolute Node and absolute
 runtime entry with `"$@"`. That preserves the argv the POSIX shell already produced and replaces the wrapper process.
@@ -222,23 +270,42 @@ base threat model already excludes.
 There is one renewing shim/runtime lock per managed installation, not separate unsynchronised locks per adapter. Every
 acquisition first reconciles owned transaction journals, stage files, quarantine directories and half-updated Windows
 pairs. Names contain an unguessable token and an owned journal; an unrecognised similarly named path is foreign and is
-not touched. Each file is flushed before publication, and the containing directory is fsynced after every rename,
-link or unlink on platforms that support directory fsync.
+not touched. The receipt, journals and staged shim files written by this protocol are flushed before publication, and
+the containing directory is fsynced after every final rename, link or unlink on platforms that support directory
+fsync. npm-created files inside a staged runtime are **not** individually fsynced; this design makes no stronger
+power-loss promise about npm's tree.
+
+The renewing lock is fenced. Acquisition records a random fencing token and gives the transaction an `assertHeld`
+operation. Immediately before every runtime publication, quarantine, restoration, shim publication/removal and
+journal commit, `assertHeld` reads the public lock and refuses unless it still carries this token, names the retained
+opened file identity and has a fresh lease. The renewal callback makes the same token-and-identity check, then renews
+only the retained handle; a stale takeover that renames the old file can therefore never make the original holder
+touch the replacement holder's lock. A mismatch marks the lease lost, stops the interval, and makes every later
+`assertHeld` abort without writing. The check is repeated after any asynchronous preparation and immediately before
+the filesystem mutation it fences.
 
 **Install and reuse.** A missing runtime is built in a private temporary directory under the final runtime's parent,
 on the same filesystem. The installer holds and renews the lock while npm runs. It verifies the exact dependency,
-installed version, manifest binary, entry, Node executable/version and minimum Node 22.12 contract, writes and flushes
-the runtime receipt, then publishes the complete directory with one atomic rename and fsyncs the runtime parent. Node
-22.12 is the repository runtime floor (`docs/superpowers/specs/2026-09-18-agent-communications-design.md:76`,
+installed version, manifest binary, entry, Node executable/version and minimum Node 22.12 contract, records the entry's
+SHA-256, writes and flushes the runtime receipt, then fences and publishes the complete directory with one atomic
+rename and fsyncs the runtime parent. Node 22.12 is the repository runtime floor
+(`docs/superpowers/specs/2026-09-18-agent-communications-design.md:76`,
 `packages/core/src/operations/maintenance.ts:82`). The final path must be absent; rename-across-filesystems is refused.
-A failed install never leaves a final-path runtime;
-the next lock acquisition removes a recognised abandoned stage. An existing exact runtime is reused only after the
-same validations; pre-0.13 receipts are handled by D4's rollout migration.
+A failed install never leaves a final-path runtime; the next lock acquisition removes a recognised abandoned stage.
+
+Before any startup, reuse, registration verification, shim publication or locator result uses a runtime, it validates
+the receipt against the named files: containment and existence, installed package version, entry SHA-256 and recorded
+Node identity/version. A failure takes the lock, fences and atomically moves the runtime to recognised quarantine,
+removes any owned shim still targeting it, and reports the reason plus the version-pinned `npx ... mcp install
+--force` command for the affected product and registration. The invalid runtime is never selected or run. A foreign
+or unquarantinable path is left in place but still refused. Pre-receipt 0.13 runtimes are handled only by D4's bounded
+rollout migration.
 
 After a runtime is published or proved reusable, reconciliation creates or repoints its shim. POSIX uses one staged
 wrapper. Windows stages and flushes both siblings and records the intended generation before changing either; recovery
 finishes both to that generation or restores both old owned files. It never treats a mixed pair as healthy. A crash can
-make a command briefly absent, but a fresh process deterministically repairs it before other shim work.
+make a command briefly absent, but a fresh process deterministically repairs it before other shim work. Each public
+name change is separately fenced and follows D1's under-lock bin-directory validation.
 
 **Update.** Runtime install remains an update step; shim reconciliation follows as bookkeeping even when the latest
 runtime was already reusable and no runtime step ran. For each manifest binary, it points to the highest compatible
@@ -249,14 +316,14 @@ plus an absolute command. Other products continue independently.
 **Prune.** Under the same lock, prune revalidates the approved runtime and any owned shim that still targets it. Apply
 then performs this order:
 
-1. atomically rename the whole runtime into a unique quarantine beneath the same runtime parent, refusing `EXDEV` or
-   any layout that cannot guarantee a same-filesystem rename; fsync the parent;
+1. fence, then atomically rename the whole runtime into a unique quarantine beneath the same runtime parent, refusing
+   `EXDEV` or any layout that cannot guarantee a same-filesystem rename; fsync the parent;
 2. remove only owned shim files which still target that runtime, transactionally remove both Windows siblings, and
-   fsync the bin directory;
+   fsync the bin directory, fencing before each public-name commit;
 3. recursively delete the quarantined directory.
 
-If shim removal cannot complete, recovery restores the owned pair and atomically renames the intact quarantine back
-before any recursive deletion. Once recursive deletion begins, the shim is already gone and is never restored. A
+If shim removal cannot complete, recovery fences, restores the owned pair and atomically renames the intact quarantine
+back before any recursive deletion. Once recursive deletion begins, the shim is already gone and is never restored. A
 partial or failed recursive delete leaves reported debris only in quarantine, never a shim pointing into a partially
 deleted final runtime. A crash after quarantine can leave the old command temporarily missing; the next fresh process
 recovers that journal before doing anything else. Recognised quarantine is either restored when the shim transaction
@@ -265,19 +332,81 @@ never committed or deletion is resumed after it did. No foreign path is removed.
 This transaction protocol, not the current 0.13.0 implementation, makes published versioned runtimes immutable and
 prevents a completed operation from exposing a half-installed or half-deleted target.
 
-### D4. The first new core reconciles the 0.13.0 installed base once
+### D4. Skills bridge the 0.13 confirm deadlock; the first new core then reconciles once
 
-Before dispatching **any** `agentcomms` command, and before the core MCP server starts accepting tools, the new core
-checks the durable bootstrap marker. If shims are enabled and the marker is absent, it takes the lock, recovers
-transactions, inventories every managed runtime, and reconciles one shim for every installed manifest product. This
-applies immediately and needs no approval. It performs no npm or network work and never creates a shim for a runtime
-that does not already exist.
+The bare `agentcomms approve <id>` already printed by a released 0.13.x core
+(`packages/core/src/approvals.ts:889-897`) is not fixable: that process is the old code, and it runs before this release
+can be installed. The bootstrap is therefore in the repository-installed skills, which `npx skills add` updates
+independently of the installed runtime (`docs/superpowers/specs/2026-09-18-agent-communications-design.md:981-983`).
+Whenever a released result under `confirm`
+names a bare approval command and the person's terminal says it is not found, the skill gives the person a
+version-pinned npx form and waits; the agent never runs approval itself:
 
-For each pre-receipt 0.13.0 runtime, migration validates the exact package and entry, then obtains Node from a matching
-managed registration when possible, otherwise from the validated current Node. It writes a receipt only after the
-Node exists, is executable, reports its version, and meets Node 22.12. If neither source is valid, it leaves that shim
-missing and records the reason. One shim per binary selects the running release's exact runtime when present, otherwise
-the highest reusable version; all runtimes are examined so obsolete and malformed ones are not mistaken for targets.
+```
+npx -y @agentcomms/core@<installed-core-version> approve <approvalId>
+```
+
+It must be the version actually running, never `@latest`: that version reads the same approval format and preserves
+the preview and challenge semantics the old server created. A result that names a channel approval uses the matching
+package and CLI instead — `@agentcomms/gmail@<running-version>`, `@agentcomms/slack@<running-version>`,
+`@agentcomms/resend@<running-version>` or `@agentcomms/whatsapp@<running-version>`, followed by `approve <id>`.
+Core changes use core; Gmail sends and Gmail-originated changes use Gmail; Slack posts/reactions and Slack-originated
+changes use Slack; Resend sends and Resend-originated changes use Resend; WhatsApp-originated changes use WhatsApp.
+
+The skill takes the version from the running product, not from its own compatibility line. During the 0.13.0
+bootstrap, the read-only `comms_update` check's `core` field is authoritative. This release also adds `coreVersion` to
+`comms_paths` and the core doctor result, repeats it in every prepared update preview, and makes each channel doctor
+expose its running package version. Later skills can therefore use doctor, `comms_paths` or the update preview without
+guessing. If no trusted result identifies the running version, the skill stops and asks the person to run the
+product's `--version`; it does not substitute `latest`.
+
+The npx process must see the exact `configDir` and `stateDir` the server reports. The skill therefore has the person
+set `AGENT_COMMS_CONFIG_DIR` and `AGENT_COMMS_STATE_DIR` in that same terminal for the command, even when one happens
+to be the default. With `/absolute/config` and `/absolute/state`, the POSIX form is:
+
+```sh
+export AGENT_COMMS_CONFIG_DIR='/absolute/config'
+export AGENT_COMMS_STATE_DIR='/absolute/state'
+npx -y @agentcomms/core@0.13.0 approve ap_example
+```
+
+On Windows the skill asks which shell that terminal is using and prints separate lines. PowerShell gets:
+
+```powershell
+$env:AGENT_COMMS_CONFIG_DIR = 'C:\absolute\config'
+$env:AGENT_COMMS_STATE_DIR = 'C:\absolute\state'
+npx -y @agentcomms/core@0.13.0 approve ap_example
+```
+
+cmd.exe gets:
+
+```bat
+set "AGENT_COMMS_CONFIG_DIR=C:\absolute\config"
+set "AGENT_COMMS_STATE_DIR=C:\absolute\state"
+npx -y @agentcomms/core@0.13.0 approve ap_example
+```
+
+The actual directories, version and id are rendered as words under the existing `shellCommand` safety rules; when a
+Windows word has no form that cmd.exe and PowerShell pass alike, the result shows inert JSON words and asks which
+shell the person uses instead of claiming a universal runnable line. The environment assignments are shell-specific,
+not joined with `&&`. Running through npx changes only command discovery: `approve` keeps the existing agent-marker,
+stdin/stdout TTY, preview and typed-challenge checks (`packages/core/src/cli-runtime.ts:36-60`,
+`packages/core/src/change-flow.ts:291-321`). The 0.13.1 changelog must state this same fallback, including the exact
+version pin and the requirement to use the server's config and state directories.
+
+Once that approval lets the old updater apply the release, post-apply reconciliation begins. Before dispatching
+**any** `agentcomms` command, and before the core MCP server starts accepting tools, the new core checks the durable
+bootstrap marker. If shims are enabled and the marker is absent, it takes the lock, recovers transactions, inventories
+every managed runtime, and reconciles one shim for every installed manifest product. This applies immediately and
+needs no approval. It performs no npm or network work and never creates a shim for a runtime that does not already
+exist.
+
+For each pre-receipt 0.13.0 runtime, migration validates the exact package manifest, installed version and entry and
+hashes the entry, then obtains Node from a matching managed registration when possible, otherwise from the validated
+current Node. It writes a receipt only after the Node exists, is executable, reports its version, and meets Node 22.12.
+If neither source is valid, it leaves that shim missing and records the reason. One shim per binary selects the running
+release's exact runtime when present, otherwise the highest reusable version; all runtimes are examined so obsolete
+and malformed ones are not mistaken for targets.
 
 The atomic bootstrap marker is written only after every product has a recorded outcome, including foreign collision
 or no valid Node. A crash before it commits retries from transaction recovery; a completed-but-blocked outcome is not
@@ -297,7 +426,7 @@ one of:
 - `process-path-ready`: this process resolves the expected owned shim;
 - `process-path-missing`: the persisted bin directory is absent from this process's PATH;
 - `process-path-shadowed`: a different external command is found first;
-- `shim-blocked`, `shim-stale`, `shim-partial` or `bin-directory-conflict`; and
+- `shim-blocked`, `shim-stale`, `shim-partial`, `bin-directory-unsafe` or `bin-directory-conflict`; and
 - `disabled`.
 
 The object carries `pathScope: "process"`, bin directory, expected and resolved paths, runtime, Node and entry. It never
@@ -306,16 +435,20 @@ cannot observe a zsh/bash/fish function or alias, and filesystem search cannot o
 
 The program does not launch a login or interactive shell and does not parse startup files. Doing so could prompt,
 hang, mutate state or expose output from arbitrary user code. It may inspect `SHELL` and the existence of conventional
-profile files only to label instructions. When the bin directory is missing from the process PATH, install, update and
-doctor return the exact applicable instruction:
+profile files only to label instructions. It cannot know whether the person's next shell will be login, interactive
+non-login or neither, so it presents alternatives honestly instead of calling one exact:
 
-- zsh: add `export PATH="$HOME/.local/bin:$PATH"` to `~/.zprofile`;
-- bash: add the same line to the first login file bash will use (`~/.bash_profile`, `~/.bash_login` or `~/.profile`),
-  naming that exact file; if none exists, name `~/.bash_profile` on macOS and `~/.profile` on Linux;
-- fish: run `fish_add_path "$HOME/.local/bin"` once; and
-- Windows: Environment Variables → User variables → `Path` → New → the exact persisted bin directory, then open a
-  new terminal. It may also show safely rendered one-session `set "PATH=<binDir>;%PATH%"` and
-  `$env:Path = '<binDir>;' + $env:Path` forms, but never runs them.
+- zsh: for login shells, add `export PATH="$HOME/.local/bin:$PATH"` to `~/.zprofile`; for interactive non-login
+  shells, add it to `~/.zshrc`;
+- bash: for login shells, add the same line to the first of `~/.bash_profile`, `~/.bash_login` or `~/.profile` that
+  bash will read; for interactive non-login shells, add it to `~/.bashrc`. A `.profile` change normally needs a new
+  login session, not merely another non-login terminal;
+- fish: run `fish_add_path --universal "$HOME/.local/bin"` once; and
+- PowerShell: add `$env:Path = '<binDir>;' + $env:Path` to the PowerShell profile named by `$PROFILE`, creating that
+  file if needed, then start a new PowerShell session. For cmd.exe and other Windows programs, the alternative is
+  Environment Variables → User variables → `Path` → New → the exact persisted bin directory, then a new
+  terminal. One-session `set "PATH=<binDir>;%PATH%"` and `$env:Path = '<binDir>;' + $env:Path` forms may also be
+  shown, but are never run.
 
 An overridden POSIX path is shell-quoted as a literal rather than substituted into the `$HOME` example. The result
 also gives `command -v <binary>` for POSIX shells, `Get-Command <binary>` for PowerShell and `where <binary>` for
@@ -327,19 +460,40 @@ Core provides one asynchronous locator, shared by every package. It takes the ma
 surface (`cli` or `mcp`) and platform, and returns structured primary/alternative commands. Every runnable form is
 constructed as words and passed through `shellCommand(words, platform)`; no caller quotes or concatenates a line.
 
-The locator validates a receipt's Node on every absolute fallback: the path must still be an executable regular file,
-`--version` must identify Node at least 22.12, and the entry must still be the exact reusable runtime entry. If the
-receipt's Node is invalid, it tries the current resolved Node and subjects it to the same checks. A non-Node
-`process.execPath` is not accepted. If neither Node is valid, the result says that no runnable terminal command is
-available and prints no pretend command.
+The primary command is the same on CLI and MCP and its first word is always absolute. After taking the lock and
+revalidating D1's directory boundary, the owned shim bytes and D3's runtime receipt, the locator uses the absolute
+shim path. A command word containing a path separator bypasses POSIX aliases/functions and PowerShell command-name
+precedence; cmd.exe's current-directory lookup does not apply to an absolute path. If no safely published and currently
+validated shim exists, the locator leads with absolute `<node> <entry> ...` instead. Its Node must still be an
+executable regular file whose `--version` identifies Node at least 22.12, and the entry must pass the receipt's
+containment, package-version and SHA-256 checks. If the receipt's Node is invalid, the current resolved Node is tried
+under the same checks. A non-Node `process.execPath` is not accepted. If neither form is valid, the result says that no
+runnable terminal command is available and prints no pretend command.
 
-Surface rules are intentionally different:
+On Windows the result is shell-aware when an absolute first word needs quoting. It uses the quoted path produced by
+the existing `shellCommand` word rule in PowerShell's call-operator form
+(`packages/core/src/cli-runtime.ts:145-149`). For the words
+`C:\Program Files\agent-communications\bin\agentcomms.cmd`, `approve`, `ap_example`, PowerShell gets exactly:
 
-- **MCP handoff:** always print the validated absolute `<node> <entry> ...` command as the command to run, followed by
-  the short form: “or `agent-gmail approve <id>` if `<binDir>` is on your PATH.” The same pattern applies to every
-  product/argument set. The server's own PATH status never promotes the short form.
-- **CLI handoff:** print the bare manifest binary only when this process resolves it to the current owned shim.
-  Otherwise print the validated absolute Node-plus-entry form.
+```powershell
+& "C:\Program Files\agent-communications\bin\agentcomms.cmd" approve ap_example
+```
+
+cmd.exe gets exactly:
+
+```bat
+"C:\Program Files\agent-communications\bin\agentcomms.cmd" approve ap_example
+```
+
+An unquoted absolute first word needs no PowerShell call operator. These are separate labelled renderings; no line is
+claimed to work in both shells when their invocation syntax differs.
+
+The bare name is never primary, even when this process found the owned shim. It may follow only as information:
+“or, if `command -v agent-gmail` shows `<absolute shim>`, `agent-gmail approve <id>`” on POSIX;
+“or, if `Get-Command agent-gmail` reports an Application whose Path is `<absolute shim>`, …” on PowerShell; and the
+equivalent first exact result from `where agent-gmail` on cmd.exe. An alias, function, current-directory executable,
+earlier PATH entry or any other answer does not satisfy that condition, so the person keeps using the absolute form.
+The result says those checks are for the person's terminal and were not performed by this process.
 
 On Windows, if `shellCommand` returns no cross-shell-safe line, the existing JSON-word rendering explains that the
 person must type it for their shell. The JSON is not described as a runnable line. This keeps the acceptance statement
@@ -391,8 +545,14 @@ operations:
 - `mcp prune` / `comms_server_prune` → `serverPruneChange`; and
 - `doctor` / `comms_doctor` → `doctor`.
 
-Their typed results gain the same installation/shim facts, and `pnpm verify:parity` compares them. The CLI-only
-terminal approval exception is unchanged.
+Those command/tool rows are the current capability table (`capabilities.json:13-18`,
+`capabilities.json:208-277`).
+
+Their typed results gain the same installation/shim facts. `pnpm verify:parity` continues to prove that each command
+and tool reaches the operation named by its capability row with the expected arguments; it does not compare result
+objects. A separate result-equivalence test runs each installation, update, prune and doctor operation through both
+adapters and deep-compares the installation/shim facts after removing presentation-only fields. The CLI-only terminal
+approval exception is unchanged.
 
 ### D8. Core doctor reports shim, receipt and recovery health
 
@@ -400,19 +560,23 @@ Core doctor enumerates manifest products, durable installation metadata and exac
 do not duplicate this. For each managed product, CLI and MCP doctor report:
 
 - enabled/disabled state, persisted bin directory, selected runtime and receipt;
+- unsafe bin-directory component, owner, POSIX mode or Windows ACL, including a persisted choice that has become
+  unsafe since it was stored;
 - missing, foreign, malformed, stale or half-paired shim, including a target older than the selected runtime;
-- missing/non-executable/non-Node/too-old recorded Node, invalid entry containment, missing entry or receipt mismatch;
+- missing/non-executable/non-Node/too-old recorded Node, invalid entry containment, missing package manifest or entry,
+  installed-version mismatch or entry SHA-256 mismatch;
 - unresolved owned transaction stages, quarantine debris or an incomplete bootstrap marker;
 - `process-path-missing`, `process-path-shadowed` or `process-path-ready`; and
 - the absolute runnable command, or the exact reason none can be produced, plus the shell-specific PATH instruction.
 
-Missing, malformed, stale, partial, foreign and invalid-receipt states are failed checks. Quarantine debris after a
-completed prune is a failed cleanup check without a dangling-shim claim. A valid shim absent or shadowed only in this
-process is a warning because it says nothing conclusive about the person's terminal. Disabled is informational.
+Missing, malformed, stale, partial, foreign, unsafe-directory and invalid-receipt states are failed checks. A corrupt
+runtime that startup validation quarantined is named with its reinstall command. Quarantine debris after a completed
+prune is a failed cleanup check without a dangling-shim claim. A valid shim absent or shadowed only in this process is
+a warning because it says nothing conclusive about the person's terminal. Disabled is informational.
 
 After D4's startup hook has run, doctor is read-only: it does not repair, delete debris, edit PATH or claim an
-approval. Its normal fix is the locator-produced `agentcomms update`; a foreign collision is for the person to inspect
-and move, never for doctor to delete.
+approval. Its normal fix is the locator-produced absolute update command; a foreign collision is for the person to
+inspect and move, never for doctor to delete.
 
 ## 4. Tests owed
 
@@ -421,8 +585,13 @@ Every new guard is watched failing under a named mutation, then restored.
 1. **Paths, metadata and opt-out.** Table-test macOS, Linux and Windows with `HOME`, `USERPROFILE`, `LOCALAPPDATA`,
    `XDG_DATA_HOME` and `AGENT_COMMS_BIN_DIR` pinned/cleared in a temporary root. Prove the persisted bin directory wins
    across different CLI/MCP environments, conflict is reported, config false and env `off` skip every mutation, and
-   unknown env values do not opt out. Mutation: fall back to `homedir()` or re-resolve the override per process; the
-   sandbox or cross-surface test fails.
+   unknown env values do not opt out. Refuse a group/world-writable directory or parent, a sticky `/tmp`-style parent,
+   a symlinked parent or final component, a directory swapped between the first check and the under-lock commit, a
+   Windows parent/final directory with a permissive write ACE, the wrong owner/SID, and an `AGENT_COMMS_BIN_DIR`
+   override naming any such place. Assert the reason and private-directory fix, no write beneath the refused path and
+   revalidation of a persisted choice on every run. Mutation: fall back to `homedir()`, re-resolve the override per
+   process, trust persisted metadata, follow a symlink or skip the final under-lock check; the sandbox, race or
+   cross-surface test fails.
 2. **POSIX wrapper.** Golden bytes/marker, mode and execution from zsh, bash and fish. Preserve empty arguments,
    embedded quotes, `$`, `%NAME%`, `!NAME!`, `^`, metacharacters, trailing backslashes and CR/LF exactly as the invoking
    POSIX shell delivers them; propagate signal/exit status. Exercise Node/data/bin paths with spaces, `%`, `!`, `&`,
@@ -437,16 +606,22 @@ Every new guard is watched failing under a named mutation, then restored.
    unescaped path text, a `.ps1`, or a false exact-argv assertion fails.
 4. **Ownership.** Foreign regular files, symlinks, directories, devices, malformed markers, wrong package/runtime/data
    markers and one foreign Windows sibling remain byte-for-byte untouched by install, update, startup, doctor and
-   prune. Race an exclusive create. Mutation: trust a marker without canonical bytes or overwrite a foreign target;
-   the test fails.
-5. **Atomic install.** Kill the process after every temp creation, npm completion, receipt write/fsync, rename and
-   directory-fsync boundary; start a fresh process and prove recovery. npm failure leaves no final runtime. Hold npm
-   beyond the stale interval and prove lock renewal prevents takeover. Refuse cross-filesystem publish. Mutation: run
-   npm in the final directory, omit receipt verification/fsync or omit renewal; a test fails.
-6. **Sandboxed install, every CLI.** With both `HOME` and `USERPROFILE` pinned, install core, Gmail, Slack, Resend and
-   WhatsApp from the manifest registry, prepend only the sandbox bin directory to PATH, and prove `command -v` (plus
-   Windows `where`/`Get-Command`) resolves every binary through its owned shim and `<binary> --version` runs. Assert no
-   real-home file changed. `--print`, npx and local launchers create nothing.
+   prune. Race an exclusive create. Mutation: trust a marker without canonical bytes, overwrite a foreign target or
+   restore into a now-occupied name; the test fails.
+5. **Atomic install and fenced lease.** Kill the process after every temp creation, npm completion, receipt
+   write/fsync, fenced rename and directory-fsync boundary; start a fresh process and prove recovery. npm failure leaves
+   no final runtime. Hold npm beyond the stale interval and prove normal renewal prevents takeover. Then force the
+   original holder's renewal to pause past that interval, let a second process take over, resume the original and
+   prove it performs no publication, quarantine, restoration, shim or journal write. Refuse cross-filesystem publish.
+   Mutation: run npm in the final directory, omit receipt verification/fsync, renew a path without checking its token,
+   or mutate after `assertHeld` reports lease loss; a test fails.
+6. **Isolated fresh-install topology.** With both `HOME` and `USERPROFILE` pinned, start from a fresh root five times:
+   Gmail-only has exactly `agent-gmail`; Slack-only exactly `agent-slack`; Resend-only exactly `agent-resend`;
+   WhatsApp-only exactly `agent-whatsapp`; core-only exactly `agentcomms`. Then install all five and prove the five
+   manifest CLIs, and no server-only bin, exist. With only the sandbox bin on PATH, prove `command -v` (plus Windows
+   `where`/`Get-Command`) resolves each installed binary through its owned shim and `<binary> --version` runs. Assert
+   no real-home file changed. `--print`, npx and local launchers create nothing. Mutation: publish `agentcomms` from a
+   channel install, omit the requested product or publish a server-only bin; an exact-set assertion fails.
 7. **Update, pair recovery and repair.** Start every CLI at A, update to B and prove the same names report B before A
    is pruned. Cover absent B, reusable B with missing/stale shim, removed A Node, foreign collision and independent
    product failure. Terminate after every journal, stage, file fsync, rename, Windows first-sibling, second-sibling and
@@ -458,38 +633,59 @@ Every new guard is watched failing under a named mutation, then restored.
    child; fresh recovery either restores the intact runtime before deletion or leaves/retries reported quarantine
    debris with no shim. Mutation: recursively delete the final path, restore a shim after partial deletion, omit
    directory fsync or remove by filename without ownership; a test fails.
-9. **0.13.0 rollout and old approvals.** Have 0.13.0 update install the new runtimes with no receipts/shims; start the
-   new `agentcomms` and core MCP server separately and prove each one-time path reconciles all products without a second
-   approval. Cover Node recovered from registration, validated current Node, no valid Node, collision, opt-out, crash
-   before bootstrap commit and an already-pending 0.13 install/update/prune approval whose digest remains valid.
-   Mutation: require a shim-only approved update or mark bootstrap before all outcomes are durable; a test fails.
-10. **Receipt and absolute fallback.** Cover recorded Node healthy, removed, replaced by a non-Node executable, below
-    minimum or reporting another version; current Node healthy/invalid; orphan runtime; non-Node `process.execPath`;
-    escaped relative entry; and no available command. Mutation: trust receipt text or executable bit alone; a test
-    fails.
+9. **0.13.0 confirm bootstrap and old approvals.** Run a simulated 0.13.0 core under `changePolicy=confirm`: prepare an
+   update, prove its bare `agentcomms approve` is unavailable, obtain `0.13.0` from the update report, and approve it
+   through `npx -y @agentcomms/core@0.13.0 approve <id>` in the person's simulated TTY. Use non-default
+   `AGENT_COMMS_CONFIG_DIR` and `AGENT_COMMS_STATE_DIR` and prove the fallback reads that approval, not the defaults.
+   Assert the POSIX, PowerShell and cmd.exe forms byte-for-byte, including spaces and every word the existing
+   `shellCommand` rules accept or refuse; repeat for each channel package's approval equivalent. Then have 0.13.0
+   install the new runtimes with no receipts/shims; start the new `agentcomms` and core MCP server separately and prove
+   each one-time path reconciles all installed products without a second approval. Cover Node recovered from
+   registration, validated current Node, no valid Node, collision, opt-out, crash before bootstrap commit and an
+   already-pending 0.13 install/update/prune approval whose digest remains valid. A content test keeps the skills and
+   0.13.1 changelog on the exact-version, same-directories fallback. Mutation: use `@latest`, omit either environment
+   directory, require a shim-only approved update or mark bootstrap before all outcomes are durable; a test fails.
+10. **Receipt, corruption and absolute fallback.** Cover recorded Node healthy, removed, replaced by a non-Node
+    executable, below minimum or reporting another version; current Node healthy/invalid; orphan runtime; non-Node
+    `process.execPath`; escaped relative entry; and no available command. Separately truncate the entry after install,
+    remove the installed package's `package.json`, and change the receipt hash: startup must quarantine the recognised
+    runtime, remove its owned shim, report the reason and version-pinned reinstall command, and never run it. Assert
+    only the receipt and final directory entries are promised flushed; no test assumes npm's files were individually
+    fsynced. Mutation: trust receipt text, package version, hash or executable bit alone; a test fails.
 11. **Process PATH and guidance.** Cover ready, missing directory, earlier executable, alias/function shadowing and
     stale/foreign states with an MCP minimal PATH and a different simulated terminal PATH. Cover `Path`/`PATHEXT`
-    casing on Windows. Assert exact zsh, bash-file-selection, fish `fish_add_path`, PowerShell and cmd.exe instructions,
-    and that no profile/registry is edited. Startup fixtures that prompt, write a sentinel or print a fake token prove
-    no login/interactive shell is run. Mutation: call the status `ready`, launch `-l`/`-i`, or use the POSIX export line
-    for fish; a test fails without printing the fixture token.
+    casing on Windows. Assert exact zsh login (`.zprofile`) and interactive non-login (`.zshrc`) alternatives; bash
+    login-file and `.bashrc` alternatives; the new-login warning for `.profile`; universal `fish_add_path`;
+    PowerShell-profile and cmd.exe/User-PATH instructions; and that no profile/registry is edited. Use login and
+    non-login fixture layouts for the text, while startup fixtures that prompt, write a sentinel or print a fake token
+    prove no login/interactive shell is run. Mutation: claim the process knows the next shell mode, call the status
+    `ready`, launch `-l`/`-i`, or use the POSIX export line for fish; a test fails without printing the fixture token.
 12. **Every handoff and the locator lint.** Exercise CLI and MCP forms for approvals, update/`--later`, save
     destinations, Gmail/Slack/Resend sends and refusals, Gmail confirm-client completion, WhatsApp sync, Slack reauth,
-    Resend status recovery, account/sign-in/policy/doctor/retry results and every call site found by the lint. MCP always
-    leads with executable absolute Node+entry and conditional short form; CLI uses bare only for the resolved owned
-    shim. Execute safe printed lines against harmless fake entries and verify their words. Lint fixtures reject direct
-    `shellCommand(['agent-…'])`, raw template handoffs and a new manifest binary; documented help/usage allowlist entries
-    pass. Mutation: bypass locator at any inventoried site; lint or its site test fails.
+    Resend status recovery, account/sign-in/policy/doctor/retry results and every call site found by the lint. On both
+    surfaces assert the first runnable form starts with the validated absolute shim, otherwise absolute Node and entry;
+    assert POSIX, cmd.exe and the exact PowerShell `& "<quoted absolute path>" ...` rendering. A bare alternative appears
+    only behind a person-run `command -v`/`Get-Command`/`where` equality check. Document a manual alias/function-shadow
+    check, explicitly not executable in CI; the CI fixture still proves output stays absolute-first when process PATH
+    finds the shim. Execute safe printed lines against harmless fake entries and verify their words. The source lint
+    enforces absolute-first and rejects direct `shellCommand(['agent-…'])`, raw template handoffs and a new manifest
+    binary; documented help/usage allowlist entries pass. Mutation: promote a bare name, omit the PowerShell call
+    operator or bypass the locator at any inventoried site; lint or its site test fails.
 13. **Audit, doctor and parity.** Prove each bookkeeping outcome is durable/audited, an audit failure prevents or leaves
     a recoverable journal around the mutation, and no shim/PATH fact changes an approval digest. CLI and MCP return the
-    same missing/stale/malformed/foreign/partial/receipt/quarantine/process-PATH checks and shared-operation results.
-    Mutation: do shim work in an adapter, omit an audit outcome or include PATH in the digest; parity/state tests fail.
+    same unsafe-directory/missing/stale/malformed/foreign/partial/receipt/quarantine/process-PATH facts. Keep
+    `pnpm verify:parity` for command/tool-to-operation names and expected arguments, and add a separate adapter
+    result-equivalence suite which deep-compares those typed facts for install, update, prune and doctor. Mutation: do
+    shim work in an adapter, return different facts from the two adapters, omit an audit outcome or include PATH in the
+    digest; the result-equivalence, parity or state test fails for its own reason.
 14. Run full `pnpm verify`. No test contacts Gmail, Slack, Resend or a real npm registry, reads/writes the real home,
     edits a profile/registry/keychain, or contains a real address, token or client secret.
 
 ## 5. Out of scope
 
 - Installing a managed runtime solely to provide a CLI for an npx, global or checkout-only product.
+- Changing the bare approval text already shipped inside released 0.13.x packages; the independently updated skills
+  can teach the pinned npx bootstrap, but cannot rewrite old executable code.
 - Publishing `agent-gmail-mcp` or another server-only bin.
 - Editing shell profiles, macOS path-helper configuration, `/usr/local/bin`, `/etc/paths`, the Windows registry or
   user PATH.
@@ -503,16 +699,19 @@ Every new guard is watched failing under a named mutation, then restored.
 
 | Risk | Handling |
 |---|---|
-| The MCP PATH differs from the person's terminal | Status is explicitly `process-path-*`; MCP always leads with validated absolute Node+entry and labels the bare form conditional |
-| `~/.local/bin` is not initially on PATH | Acceptance attaches to returned commands, not bare discovery; give exact zsh/bash/fish instructions without editing profiles |
+| The process PATH differs from the person's terminal, or an alias/function shadows the binary | Status is explicitly `process-path-*`; both surfaces lead with a validated absolute shim or absolute Node+entry, and a bare form is conditional on a person-run exact resolution check |
+| `~/.local/bin` is not initially on PATH | Acceptance attaches to returned commands, not bare discovery; give login and interactive-session alternatives for zsh/bash, universal fish guidance and a PowerShell-profile option without editing them |
+| A bin directory lets another principal replace a shim | Walk every component without following links, reject sticky or otherwise other-writable ancestors, require current-user ownership and a private final mode/ACL, and revalidate under the lock before publication and use |
 | A pre-existing command is destroyed | Canonical ownership, `lstat`, exclusive creation and recheck under the lock; foreign files and symlinks are never changed |
 | Windows metadata or target paths become batch syntax | Base64url marker, delayed expansion disabled and a tested literal-path renderer; no raw metadata is interpreted by cmd.exe |
-| Windows `.cmd` changes arbitrary arguments | Promise npm-compatible `%*` behaviour only; print just the existing safe subset and use absolute Node+entry for programmatic execution |
+| Windows `.cmd` changes arbitrary arguments | Promise npm-compatible `%*` behaviour only; print just the existing safe subset, use PowerShell's `& "<absolute path>"` form where needed and use absolute Node+entry for programmatic execution |
 | Install dies during npm | Build/verify/receipt in a private same-filesystem stage, renew the lock, atomically publish and recover owned stages |
+| A suspended holder resumes after its lease was taken over | Token-checked renewal and an `assertHeld` fence immediately before every publication, quarantine, restoration and commit make the old holder abort without writing |
 | Update dies between Windows siblings | Durable generation journal and recovery on every lock acquisition converge both siblings or restore both old owned files |
 | Prune partially deletes a runtime | Atomic quarantine comes first and shim removal precedes recursive deletion; failed deletion leaves reported quarantine debris, never a restored shim |
-| A power loss forgets a rename | Flush files and fsync the containing directory after each rename where supported; fresh-process crash tests cover each boundary |
-| The 0.13.0 updater cannot create shims | First new CLI command/core MCP start reconciles existing runtimes once, immediately and outside approval |
+| A power loss corrupts npm-created runtime files | Promise only flushed receipts/final directory entries, validate package version and entry SHA-256 before use, and quarantine with a reinstall command on mismatch |
+| A 0.13.0 `confirm` update cannot reach apply because its bare approval command is missing | Repository-installed skills hand the person the exact-version npx approval with the server's config/state directories; after apply, the first new CLI/core MCP start reconciles once outside approval |
+| A channel-only install appears to promise `agentcomms` | Publish exactly the CLI of each managed runtime; isolated exact-set tests make the product topology visible |
 | CLI and MCP choose different custom bin directories | Persist the first resolved directory in installation metadata; later conflicting environment is diagnosed, not followed |
-| Recorded Node disappears or is replaced | Receipt records path/version, locator revalidates executable identity and minimum version, then validates current Node or prints no command |
+| Recorded Node, package or entry disappears or is replaced | Receipt records Node path/version and entry hash; startup and locator revalidate all of them, then quarantine or print no command |
 | A same-user hostile process forges ownership | Not a security boundary; exact bytes/target checks prevent accidents while retaining the base design's same-user threat boundary |
