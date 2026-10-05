@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, realpathSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -36,14 +36,17 @@ function binEnv(): NodeJS.ProcessEnv {
 }
 
 /** Starts the bin and closes its stdin, which is how a client ending a session looks to the server. */
-function runBin(args: string[], { closeStdin = true } = {}): Promise<Ran> {
+function runBin(
+  args: string[],
+  { closeStdin = true, env = binEnv() }: { closeStdin?: boolean; env?: NodeJS.ProcessEnv } = {},
+): Promise<Ran> {
   return new Promise((resolve, reject) => {
     const child = spawn(
       process.execPath,
       ['--experimental-strip-types', '--disable-warning=ExperimentalWarning', ENTRY, ...args],
       {
         stdio: ['pipe', 'pipe', 'pipe'],
-        env: binEnv(),
+        env,
       },
     );
     let stdout = '';
@@ -72,6 +75,63 @@ test('--help explains the options and writes nothing to stdout', async () => {
   assert.equal(result.stdout, '');
   assert.match(result.stderr, /--inbox <alias>/);
   assert.match(result.stderr, /--read-only/);
+  for (const flag of ['--config-dir', '--state-dir', '--data-dir', '--secrets-dir']) {
+    assert.match(result.stderr, new RegExp(flag));
+  }
+  assert.doesNotMatch(result.stderr, /--downloads-dir/);
+});
+
+test('the wrapper strictly parses and applies all four registration path pins before startup', async () => {
+  const env = binEnv();
+  const home = env.HOME as string;
+  const pinned = join(home, 'pinned');
+  mkdirSync(pinned, { recursive: true });
+  writeFileSync(
+    join(pinned, 'config.json'),
+    `${JSON.stringify({
+      version: 1,
+      secrets: { store: 'file' },
+      inboxes: {
+        work: {
+          id: 'ibx_AAAAAAAAAAAAAAAA',
+          provider: 'gmail',
+          email: 'jo@example.test',
+          identity: 'oidc',
+          client: 'default',
+          tier: 'read',
+          grantedScopes: [],
+          secretRef: 'gmail:refresh:ibx_AAAAAAAAAAAAAAAA',
+          createdAt: '2026-10-05T00:00:00.000Z',
+        },
+      },
+    })}\n`,
+  );
+  const result = await runBin(
+    [
+      '--config-dir',
+      pinned,
+      '--state-dir',
+      join(home, 'pinned-state'),
+      '--data-dir',
+      join(home, 'pinned-data'),
+      '--secrets-dir',
+      join(home, 'pinned-secrets'),
+      '--inbox',
+      'work',
+    ],
+    { env },
+  );
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stdout, '');
+});
+
+test('the wrapper refuses unknown and empty path options as usage before startup', async () => {
+  for (const args of [['--unknown'], ['--config-dir=']]) {
+    const result = await runBin(args);
+    assert.equal(result.code, 64, `${args.join(' ')}: ${result.stderr}`);
+    assert.equal(result.stdout, '');
+    assert.match(result.stderr, /usage|non-empty|unknown/i);
+  }
 });
 
 test('the server exits when its client disconnects, rather than lingering', async () => {

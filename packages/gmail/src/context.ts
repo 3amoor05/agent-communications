@@ -5,6 +5,7 @@ import {
   type Core,
   type InboxConfig,
   openCore,
+  type PathOverrides,
   requireInbox,
 } from '@agentcomms/core';
 import { type GoogleEndpoints, resolveEndpoints } from './auth/endpoints.ts';
@@ -28,6 +29,8 @@ export interface TransportRequest {
 export interface GmailContextOptions {
   core?: Core;
   env?: NodeJS.ProcessEnv;
+  /** Explicit suite directories, resolved before any store is constructed. */
+  pathOverrides?: PathOverrides;
   now?: () => Date;
   /** The shell syntax used for commands an operation returns or prints. */
   platform?: NodeJS.Platform | undefined;
@@ -61,7 +64,13 @@ export class GmailContext {
 
   constructor(options: GmailContextOptions = {}) {
     this.env = options.env ?? process.env;
-    this.core = options.core ?? openCore({ env: this.env });
+    this.core =
+      options.core ??
+      openCore({
+        env: this.env,
+        platform: options.platform ?? process.platform,
+        ...(options.pathOverrides ? { pathOverrides: options.pathOverrides } : {}),
+      });
     this.endpoints = resolveEndpoints(this.env);
     this.now = options.now ?? (() => new Date());
     this.platform = options.platform ?? process.platform;

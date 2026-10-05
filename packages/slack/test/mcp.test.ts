@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { createSlackMcpServer } from '../src/mcp/server.ts';
-import { type Harness, newHarness } from './support/harness.ts';
+import { type Harness, newHarness, tempDir } from './support/harness.ts';
 
 /**
  * The agent-facing surface.
@@ -66,6 +66,23 @@ test('the tool list is the same whatever is connected, so a workspace added late
 
   assert.deepEqual(before, after);
   assert.ok(before.includes('slack_read'));
+});
+
+test('the MCP factory applies all four registration path pins before opening its context', async () => {
+  const harness = await newHarness();
+  await harness.addWorkspace({ alias: 'acme' });
+  const built = await createSlackMcpServer({
+    env: { ...harness.env, AGENT_COMMS_CONFIG_DIR: tempDir('agent-slack-mcp-ambient-') },
+    pathOverrides: {
+      configDir: harness.core.paths.configDir,
+      stateDir: harness.core.paths.stateDir,
+      dataDir: harness.core.paths.dataDir,
+      secretsDir: harness.core.paths.secretsDir,
+    },
+    workspace: 'acme',
+    fetch: slackReplies(),
+  });
+  await built.server.close();
 });
 
 test('doctor tells MCP clients that a repair may contain one or more commands', async () => {

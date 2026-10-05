@@ -1,4 +1,4 @@
-import { CommsError, type Config, type Core, openCore } from '@agentcomms/core';
+import { CommsError, type Config, type Core, openCore, type PathOverrides } from '@agentcomms/core';
 import { PLATFORM, requireAccount, type WhatsAppAccount, whatsappAccountNames } from './config.ts';
 import { accountStateDir } from './index-db.ts';
 import { ChatListStore } from './lists.ts';
@@ -18,7 +18,10 @@ import type { ChatLists } from './visibility.ts';
  */
 
 export interface WhatsAppContextOptions {
+  core?: Core | undefined;
   env?: NodeJS.ProcessEnv | undefined;
+  /** Explicit suite directories, resolved before any store is constructed. */
+  pathOverrides?: PathOverrides | undefined;
   now?: (() => Date) | undefined;
   surface?: 'cli' | 'mcp' | undefined;
   /**
@@ -63,7 +66,14 @@ export class WhatsAppContext {
     this.now = options.now ?? (() => new Date());
     this.surface = options.surface ?? 'cli';
     this.platform = options.platform ?? process.platform;
-    this.core = openCore({ env: this.env, now: this.now });
+    this.core =
+      options.core ??
+      openCore({
+        env: this.env,
+        now: this.now,
+        platform: this.platform,
+        ...(options.pathOverrides ? { pathOverrides: options.pathOverrides } : {}),
+      });
     this.lists = new ChatListStore(this.core.paths.configDir);
     this.pinned = options.account;
     this.#log = options.log;

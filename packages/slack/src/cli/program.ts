@@ -18,7 +18,9 @@ import {
   installExitStatus,
   type OutputOptions,
   openCore,
+  PATH_OPTIONS,
   paint,
+  pathOverridesFromCliOptions,
   personAtTerminal,
   refuseRetiredOut,
   refuseUnclaimedApproval,
@@ -38,7 +40,7 @@ import {
   writeError,
   writeResult,
 } from '@agentcomms/core';
-import { Command, CommanderError, Option } from 'commander';
+import { Command, CommanderError, InvalidArgumentError, Option } from 'commander';
 import type { FetchLike } from '../api/guard.ts';
 import { exitAfterRefreshes, type SignalHost, settleBeforeExit } from '../auth/exit.ts';
 import { BROADCASTS } from '../compose/blocks.ts';
@@ -133,9 +135,7 @@ export interface CliDeps extends SlackContextOptions {
   streams?: Streams;
   platform?: NodeJS.Platform | undefined;
   /** Starts the stdio server. Injected so a test can inspect its inputs without opening stdio. */
-  startMcp?:
-    | ((options: { env: NodeJS.ProcessEnv; platform: NodeJS.Platform; workspace?: string }) => Promise<void>)
-    | undefined;
+  startMcp?: ((options: import('../mcp/server.ts').SlackMcpOptions) => Promise<void>) | undefined;
   /** Command used to start the detached sign-in listener; the tests point it at the source entry. */
   listenerCommand?: ListenerEntry;
   /** Opens the browser. Injected so a test does not. */
@@ -242,6 +242,27 @@ configuration problem.`,
     )
     .exitOverride();
 
+  for (const { flag } of PATH_OPTIONS) {
+    program.addOption(
+      new Option(`${flag} <dir>`, 'pin this suite directory for this run').argParser((value) => {
+        if (value.length === 0) throw new InvalidArgumentError(`${flag} needs a non-empty directory`);
+        return value;
+      }),
+    );
+  }
+
+  let invocationCore: ReturnType<typeof openCore> | undefined;
+  const coreForInvocation = (): ReturnType<typeof openCore> => {
+    if (invocationCore) return invocationCore;
+    const options = program.opts();
+    const pathOverrides = pathOverridesFromCliOptions(
+      Object.fromEntries(PATH_OPTIONS.map(({ key, option }) => [option, options[key] as string | undefined])),
+    );
+    invocationCore =
+      Object.keys(pathOverrides).length === 0 && deps.core ? deps.core : openCore({ env, platform, pathOverrides });
+    return invocationCore;
+  };
+
   const globals = (): GlobalOptions => {
     const options = program.opts();
     return {
@@ -270,7 +291,7 @@ configuration problem.`,
     // `sign-in-listen` too: it is the listener a sign-in started, not a command anybody types, and stopping it would
     // break the sign-in the person is in the middle of. So is the update check a command handed on (#48).
     if (exemptFromUpdateGate(path, ['sign-in-listen', UPDATE_CHECK_CHILD_COMMAND])) return;
-    const core = openCore({ env });
+    const core = coreForInvocation();
     let ended: number | null = null;
     const code = await runCommand(
       output(),
@@ -309,7 +330,9 @@ configuration problem.`,
       let foreground: { flowId: string; settled: Promise<unknown> } | undefined;
       const context = new SlackContext({
         ...deps,
+        core: coreForInvocation(),
         env,
+        pathOverrides: coreForInvocation().pathOverrides,
         surface: 'cli',
         foregroundSignIn: {
           signal: interrupted.signal,
@@ -1409,6 +1432,9 @@ configuration problem.`,
       await startSlackStdioServer({
         env,
         platform,
+        ...deps,
+        core: coreForInvocation(),
+        pathOverrides: coreForInvocation().pathOverrides,
         ...(flags.workspace ? { workspace: String(flags.workspace) } : {}),
       });
     });

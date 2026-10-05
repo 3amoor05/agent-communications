@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { createWhatsAppMcpServer } from '../src/mcp/server.ts';
 import { ALICE, ERIN_STATUS } from './support/fixture.ts';
-import { type Harness, newHarness } from './support/harness.ts';
+import { type Harness, newHarness, tempDir } from './support/harness.ts';
 
 /**
  * The agent-facing surface, and its parity with the command line.
@@ -111,6 +112,22 @@ test('the tools are exactly the read surface and the draft: nothing sends, marks
   } finally {
     await close();
   }
+});
+
+test('the MCP factory applies all four registration path pins before opening its context', async () => {
+  const harness = await newHarness();
+  await harness.ready(ACCOUNT);
+  const built = await createWhatsAppMcpServer({
+    env: { ...harness.env, AGENT_COMMS_CONFIG_DIR: tempDir('agent-whatsapp-mcp-ambient-') },
+    pathOverrides: {
+      configDir: harness.configDir,
+      stateDir: join(harness.root, 'pinned-state'),
+      dataDir: join(harness.root, 'pinned-data'),
+      secretsDir: join(harness.root, 'pinned-secrets'),
+    },
+    account: ACCOUNT,
+  });
+  await built.server.close();
 });
 
 test('every command and its tool run the same operation and return the same result; the rest say why not', async () => {

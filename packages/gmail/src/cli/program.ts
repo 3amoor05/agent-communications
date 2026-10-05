@@ -23,7 +23,9 @@ import {
   type OutputOptions,
   openCore,
   orgAddChange,
+  PATH_OPTIONS,
   paint,
+  pathOverridesFromCliOptions,
   profileSourcePath,
   refuseRetiredOut,
   refuseUnclaimedApproval,
@@ -42,7 +44,7 @@ import {
   withWords,
   writeResult,
 } from '@agentcomms/core';
-import { Command, CommanderError, Option } from 'commander';
+import { Command, CommanderError, InvalidArgumentError, Option } from 'commander';
 import type { RegistrationIntent } from '../auth/flows.ts';
 import { TIERS } from '../auth/scopes.ts';
 import { GmailContext, type GmailContextOptions } from '../context.ts';
@@ -138,6 +140,8 @@ import {
 export interface CliDeps extends GmailContextOptions {
   streams?: Streams;
   platform?: NodeJS.Platform | undefined;
+  /** Starts the stdio server. Injected so a test can inspect its inputs without opening stdio. */
+  startMcp?: ((options: import('../mcp/server.ts').GmailMcpOptions) => Promise<void>) | undefined;
   /** The send operation; tests replace it so parser round trips cannot send mail. */
   executeSend?: typeof executeSend | undefined;
   /** Command used to start the detached sign-in listener; the tests point it at the source entry. */
@@ -185,6 +189,27 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
     )
     .exitOverride();
 
+  for (const { flag } of PATH_OPTIONS) {
+    program.addOption(
+      new Option(`${flag} <dir>`, 'pin this suite directory for this run').argParser((value) => {
+        if (value.length === 0) throw new InvalidArgumentError(`${flag} needs a non-empty directory`);
+        return value;
+      }),
+    );
+  }
+
+  let invocationCore: ReturnType<typeof openCore> | undefined;
+  const coreForInvocation = (): ReturnType<typeof openCore> => {
+    if (invocationCore) return invocationCore;
+    const options = program.opts();
+    const pathOverrides = pathOverridesFromCliOptions(
+      Object.fromEntries(PATH_OPTIONS.map(({ key, option }) => [option, options[key] as string | undefined])),
+    );
+    invocationCore =
+      Object.keys(pathOverrides).length === 0 && deps.core ? deps.core : openCore({ env, platform, pathOverrides });
+    return invocationCore;
+  };
+
   const globals = (): GlobalOptions => {
     const options = program.opts();
     return {
@@ -215,7 +240,7 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
     // `oauth-listen` too: it is the listener a sign-in started, not a command anybody types, and stopping it would
     // break the sign-in the person is in the middle of. So is the update check a command handed on (#48).
     if (exemptFromUpdateGate(path, ['oauth-listen', UPDATE_CHECK_CHILD_COMMAND])) return;
-    const core = openCore({ env });
+    const core = coreForInvocation();
     let ended: number | null = null;
     const code = await runCommand(
       output(),
@@ -250,7 +275,8 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
         exitCode = gated;
         return;
       }
-      const context = new GmailContext({ ...deps, env, surface: 'cli' });
+      const core = coreForInvocation();
+      const context = new GmailContext({ ...deps, core, env, pathOverrides: core.pathOverrides, surface: 'cli' });
       exitCode = await runCommand(output(), () => body(context, globals(), ...args), streams);
       if (exitCode === 0 && softExit !== null) exitCode = softExit;
     };
@@ -1598,13 +1624,16 @@ update first, or put it off (agentcomms update, agentcomms update --later) · 64
     .option('--inbox <alias>', 'serve only this mailbox')
     .option('--read-only', 'leave out every tool that changes the mailbox', false)
     .action(
-      act(async (_context, _globalOptions, options: Options) => {
+      act(async (context, _globalOptions, options: Options) => {
         ran = true;
-        const { startStdioServer } = await import('../mcp/stdio-entry.ts');
+        const startStdioServer = deps.startMcp ?? (await import('../mcp/stdio-entry.ts')).startStdioServer;
         // Returns when the client disconnects.
         await startStdioServer({
           ...deps,
+          core: context.core,
           env,
+          pathOverrides: context.core.pathOverrides,
+          platform,
           inbox: options.inbox ? String(options.inbox) : undefined,
           readOnly: Boolean(options.readOnly),
         });

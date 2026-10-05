@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
-import { type Harness, newHarness, ok, refused } from './support/harness.ts';
+import { createResendMcpServer } from '../src/mcp/server.ts';
+import { type Harness, newHarness, ok, refused, tempDir } from './support/harness.ts';
 
 /**
  * The agent-facing surface: the same tools whatever is connected, a greeting under 2 KB that says what a model must
@@ -41,6 +42,24 @@ test('the tool list is the same whatever is connected, and has no way to add a k
   assert.equal(execute?.annotations?.destructiveHint, true);
   assert.equal(execute?.annotations?.idempotentHint, false);
   assert.match(String(tools.find((tool) => tool.name === 'resend_send_prepare')?.description), /Nothing is sent/);
+});
+
+test('the MCP factory applies all four registration path pins before opening its context', async () => {
+  harness = await newHarness();
+  await harness.addAccount({ name: 'acme/resend' });
+  const built = await createResendMcpServer({
+    env: { ...harness.env, AGENT_COMMS_CONFIG_DIR: tempDir('agent-resend-mcp-ambient-') },
+    pathOverrides: {
+      configDir: harness.core.paths.configDir,
+      stateDir: harness.core.paths.stateDir,
+      dataDir: harness.core.paths.dataDir,
+      secretsDir: harness.core.paths.secretsDir,
+    },
+    account: 'acme/resend',
+    fetch: harness.fake.fetch,
+    throttle: { intervalMs: 0 },
+  });
+  await built.server.close();
 });
 
 test(`the greeting stays under ${GREETING_LIMIT} bytes with many accounts, and keeps what matters most`, async () => {

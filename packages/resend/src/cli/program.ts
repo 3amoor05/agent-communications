@@ -15,7 +15,9 @@ import {
   installExitStatus,
   type OutputOptions,
   openCore,
+  PATH_OPTIONS,
   paint,
+  pathOverridesFromCliOptions,
   refuseUnclaimedApproval,
   renderInstall,
   renderPrune,
@@ -33,7 +35,7 @@ import {
   updateGateAtTerminal,
   writeResult,
 } from '@agentcomms/core';
-import { Command, CommanderError, Option } from 'commander';
+import { Command, CommanderError, InvalidArgumentError, Option } from 'commander';
 import { checkNewName } from '../accounts.ts';
 import { ResendContext, type ResendContextOptions } from '../context.ts';
 import { RESEND_MCP } from '../mcp/install.ts';
@@ -102,6 +104,8 @@ import {
 export interface CliDeps extends ResendContextOptions {
   streams?: Streams | undefined;
   platform?: NodeJS.Platform | undefined;
+  /** Starts the stdio server. Injected so a test can inspect its inputs without opening stdio. */
+  startMcp?: ((options: import('../mcp/server.ts').ResendMcpOptions) => Promise<void>) | undefined;
 }
 
 type Options = Record<string, unknown>;
@@ -168,6 +172,27 @@ is out: update first, or put it off (agentcomms update, agentcomms update --late
     )
     .exitOverride();
 
+  for (const { flag } of PATH_OPTIONS) {
+    program.addOption(
+      new Option(`${flag} <dir>`, 'pin this suite directory for this run').argParser((value) => {
+        if (value.length === 0) throw new InvalidArgumentError(`${flag} needs a non-empty directory`);
+        return value;
+      }),
+    );
+  }
+
+  let invocationCore: ReturnType<typeof openCore> | undefined;
+  const coreForInvocation = (): ReturnType<typeof openCore> => {
+    if (invocationCore) return invocationCore;
+    const options = program.opts();
+    const pathOverrides = pathOverridesFromCliOptions(
+      Object.fromEntries(PATH_OPTIONS.map(({ key, option }) => [option, options[key] as string | undefined])),
+    );
+    invocationCore =
+      Object.keys(pathOverrides).length === 0 && deps.core ? deps.core : openCore({ env, platform, pathOverrides });
+    return invocationCore;
+  };
+
   const globals = (): GlobalOptions => {
     const options = program.opts();
     return {
@@ -188,7 +213,7 @@ is out: update first, or put it off (agentcomms update, agentcomms update --late
     const path = commandPathOf(command);
     // The update check a command handed on (#48) is part of the gate, not a command anybody types.
     if (exemptFromUpdateGate(path, [UPDATE_CHECK_CHILD_COMMAND])) return;
-    const core = openCore({ env });
+    const core = coreForInvocation();
     let ended: number | null = null;
     const code = await runCommand(
       output(),
@@ -223,7 +248,8 @@ is out: update first, or put it off (agentcomms update, agentcomms update --late
         exitCode = gated;
         return;
       }
-      const context = new ResendContext({ ...deps, env, surface: 'cli' });
+      const core = coreForInvocation();
+      const context = new ResendContext({ ...deps, core, env, pathOverrides: core.pathOverrides, surface: 'cli' });
       exitCode = await runCommand(output(), () => body(context, globals(), ...args), streams);
       if (exitCode === 0 && softExit !== null) exitCode = softExit;
     };
@@ -659,8 +685,16 @@ is out: update first, or put it off (agentcomms update, agentcomms update --late
     .option('--account <name>', 'pin the server to one account; every tool then acts on it and no other')
     .action(async (flags: Options) => {
       ran = true;
-      const { startResendStdioServer } = await import('../mcp/stdio-entry.ts');
-      await startResendStdioServer({ ...deps, env, ...(flags.account ? { account: String(flags.account) } : {}) });
+      const startResendStdioServer = deps.startMcp ?? (await import('../mcp/stdio-entry.ts')).startResendStdioServer;
+      const core = coreForInvocation();
+      await startResendStdioServer({
+        ...deps,
+        core,
+        env,
+        pathOverrides: core.pathOverrides,
+        platform,
+        ...(flags.account ? { account: String(flags.account) } : {}),
+      });
     });
 
   mcp

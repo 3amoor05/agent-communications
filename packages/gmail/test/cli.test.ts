@@ -51,6 +51,8 @@ async function cli(
     platform?: NodeJS.Platform;
     /** Captures the real command parser's send request without asking Gmail to send. */
     onExecute?: (inbox: string, request: Record<string, unknown>) => void;
+    /** Leave core construction to the CLI, for tests of its global path identity. */
+    withoutCore?: boolean;
   } = {},
 ): Promise<Captured> {
   let stdout = '';
@@ -72,7 +74,7 @@ async function cli(
     stdin: Object.assign(input, { isTTY: options.tty ?? false }),
   };
   const code = await run(argv, {
-    core: harness.core,
+    ...(options.withoutCore ? {} : { core: harness.core }),
     env: { ...harness.env, ...options.env },
     streams,
     listenerCommand: {
@@ -103,6 +105,40 @@ async function cli(
   });
   return { code, stdout, stderr, json: <T>() => JSON.parse(stdout) as T };
 }
+
+test('all five shared path options are applied before command dispatch', async () => {
+  const pinned = offlineCliHarness();
+  const ambient = tempDir('agent-gmail-cli-ambient-');
+  await writeFile(join(ambient, 'config.json'), '{not json');
+  const result = await cli(
+    pinned,
+    [
+      '--config-dir',
+      pinned.core.paths.configDir,
+      '--state-dir',
+      pinned.core.paths.stateDir,
+      '--data-dir',
+      pinned.core.paths.dataDir,
+      '--secrets-dir',
+      pinned.core.paths.secretsDir,
+      '--downloads-dir',
+      pinned.core.paths.downloadsDir,
+      '--json',
+      'inbox',
+      'list',
+    ],
+    { env: { AGENT_COMMS_CONFIG_DIR: ambient }, withoutCore: true },
+  );
+  assert.equal(result.code, 0, result.stdout || result.stderr);
+  assert.deepEqual(dataOf(result.json<Envelope<unknown[]>>()), []);
+
+  const empty = await cli(pinned, ['--config-dir=', '--json', 'inbox', 'list'], {
+    env: { AGENT_COMMS_CONFIG_DIR: ambient },
+    withoutCore: true,
+  });
+  assert.equal(empty.code, 64);
+  assert.match(empty.stderr, /non-empty directory/);
+});
 
 /** An ANSI colour sequence, built rather than written as a literal control character. */
 const COLOUR = new RegExp(`${String.fromCharCode(27)}\\[`);

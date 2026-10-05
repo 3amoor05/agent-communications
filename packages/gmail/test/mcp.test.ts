@@ -127,6 +127,23 @@ test('the tool list is the same whatever is configured, and every tool says what
   ]);
 });
 
+test('the MCP factory applies all four registration path pins before opening its context', async () => {
+  const harness = await newHarness({ accounts: [{ sub: 'sub-1', email: 'jo@example.test' }] });
+  await harness.addInbox({ alias: 'work', email: 'jo@example.test', sub: 'sub-1', refreshToken: 'rt_x' });
+  const ambient = tempDir('agent-gmail-mcp-ambient-');
+  const { close } = await connect({
+    env: { ...harness.env, AGENT_COMMS_CONFIG_DIR: ambient },
+    pathOverrides: {
+      configDir: harness.core.paths.configDir,
+      stateDir: harness.core.paths.stateDir,
+      dataDir: harness.core.paths.dataDir,
+      secretsDir: harness.core.paths.secretsDir,
+    },
+    inbox: 'work',
+  });
+  await close();
+});
+
 test('a read-only server does not offer the tools that would write', async () => {
   const harness = await newHarness({ accounts: [{ sub: 'sub-1', email: 'jo@example.test' }] });
   await harness.addInbox({ alias: 'work', email: 'jo@example.test', sub: 'sub-1', refreshToken: 'rt_x' });

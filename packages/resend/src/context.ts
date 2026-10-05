@@ -4,6 +4,7 @@ import {
   type Core,
   inlineCommand,
   openCore,
+  type PathOverrides,
   type SecretStore,
   type SendPolicy,
   secretsStoreOf,
@@ -23,6 +24,8 @@ import { Throttle, type ThrottleOptions } from './api/throttle.ts';
 export interface ResendContextOptions {
   core?: Core | undefined;
   env?: NodeJS.ProcessEnv | undefined;
+  /** Explicit suite directories, resolved before any store is constructed. */
+  pathOverrides?: PathOverrides | undefined;
   now?: (() => Date) | undefined;
   /** The shell syntax used for commands an operation returns or prints. */
   platform?: NodeJS.Platform | undefined;
@@ -48,7 +51,13 @@ export class ResendContext {
 
   constructor(options: ResendContextOptions = {}) {
     this.env = options.env ?? process.env;
-    this.core = options.core ?? openCore({ env: this.env });
+    this.core =
+      options.core ??
+      openCore({
+        env: this.env,
+        platform: options.platform ?? process.platform,
+        ...(options.pathOverrides ? { pathOverrides: options.pathOverrides } : {}),
+      });
     this.now = options.now ?? (() => new Date());
     this.platform = options.platform ?? process.platform;
     this.surface = options.surface ?? 'cli';

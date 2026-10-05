@@ -1,4 +1,12 @@
-import { CommsError, type Config, type Core, openCore, type SecretStore, secretsStoreOf } from '@agentcomms/core';
+import {
+  CommsError,
+  type Config,
+  type Core,
+  openCore,
+  type PathOverrides,
+  type SecretStore,
+  secretsStoreOf,
+} from '@agentcomms/core';
 import { closedPermit, type FetchLike, guardSlackRequests } from './api/guard.ts';
 import { SLACK_ORIGIN } from './api/methods.ts';
 import { type FlowStore, openFlowStore } from './auth/flow.ts';
@@ -15,6 +23,8 @@ import type { PersistPolicy } from './auth/refresh.ts';
 export interface SlackContextOptions {
   core?: Core;
   env?: NodeJS.ProcessEnv;
+  /** Explicit suite directories, resolved before any store is constructed. */
+  pathOverrides?: PathOverrides;
   now?: () => Date;
   /** The shell syntax used for commands an operation returns or prints. */
   platform?: NodeJS.Platform | undefined;
@@ -119,7 +129,13 @@ export class SlackContext {
 
   constructor(options: SlackContextOptions = {}) {
     this.env = options.env ?? process.env;
-    this.core = options.core ?? openCore({ env: this.env });
+    this.core =
+      options.core ??
+      openCore({
+        env: this.env,
+        platform: options.platform ?? process.platform,
+        ...(options.pathOverrides ? { pathOverrides: options.pathOverrides } : {}),
+      });
     this.now = options.now ?? (() => new Date());
     this.foregroundSignIn = options.foregroundSignIn;
     this.platform = options.platform ?? process.platform;

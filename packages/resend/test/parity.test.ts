@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
+import { writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { PassThrough } from 'node:stream';
 import { afterEach, test } from 'node:test';
-import { type Harness, newHarness, ok, refused, type ToolResult } from './support/harness.ts';
+import { run } from '../src/cli/program.ts';
+import { type Harness, newHarness, ok, refused, type ToolResult, tempDir } from './support/harness.ts';
 
 /**
  * Both surfaces of every paired command and tool, run against the same fake Resend, return the same thing.
@@ -63,6 +67,52 @@ async function seed(): Promise<void> {
     },
   ];
 }
+
+test('all five shared path options are applied before command dispatch', async () => {
+  harness = await newHarness();
+  await harness.addAccount({ name: 'acme/resend' });
+  const ambient = tempDir('agent-resend-cli-ambient-');
+  await writeFile(join(ambient, 'config.json'), '{not json');
+  let stdout = '';
+  const out = new PassThrough();
+  out.on('data', (chunk) => {
+    stdout += String(chunk);
+  });
+  const code = await run(
+    [
+      '--config-dir',
+      harness.core.paths.configDir,
+      '--state-dir',
+      harness.core.paths.stateDir,
+      '--data-dir',
+      harness.core.paths.dataDir,
+      '--secrets-dir',
+      harness.core.paths.secretsDir,
+      '--downloads-dir',
+      harness.core.paths.downloadsDir,
+      '--json',
+      'account',
+      'list',
+    ],
+    {
+      env: { ...harness.env, AGENT_COMMS_CONFIG_DIR: ambient },
+      streams: { stdout: out, stderr: new PassThrough(), stdin: new PassThrough() },
+    },
+  );
+  assert.equal(code, 0, stdout);
+  const envelope = JSON.parse(stdout) as { data: { accounts: { name: string }[] } };
+  assert.deepEqual(
+    envelope.data.accounts.map((account) => account.name),
+    ['acme/resend'],
+  );
+
+  stdout = '';
+  const empty = await run(['--config-dir=', '--json', 'account', 'list'], {
+    env: { ...harness.env, AGENT_COMMS_CONFIG_DIR: ambient },
+    streams: { stdout: out, stderr: new PassThrough(), stdin: new PassThrough() },
+  });
+  assert.equal(empty, 64);
+});
 
 const SEND = {
   from: 'hello@acme.test',

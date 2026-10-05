@@ -5,6 +5,8 @@
  * the MCP server, and both are shipped as a bundle with no runtime dependencies — so the public API here stays a
  * contract we can keep, rather than the whole internal surface.
  */
+
+import type { PathOverrides } from '@agentcomms/core';
 import { createGmailMcpServer as createServer, type GmailMcpOptions } from './mcp/server.ts';
 import { redirectConsoleToStderr } from './mcp/stdio-entry.ts';
 import { VERSION } from './version.ts';
@@ -22,6 +24,8 @@ export interface GmailMcpHandle {
 export interface CreateGmailMcpServerOptions {
   /** Where the configuration lives; defaults to the usual per-user location. */
   env?: NodeJS.ProcessEnv | undefined;
+  /** Canonical suite directories supplied by a CLI or installer-written server entry. */
+  pathOverrides?: PathOverrides | undefined;
   /** Serve only this mailbox. */
   inbox?: string | undefined;
   /** Register only the tools that cannot change anything. */

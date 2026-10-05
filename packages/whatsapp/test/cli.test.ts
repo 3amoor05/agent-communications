@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import { isDangerous } from '@agentcomms/core';
 import { defaultStorePath, responsibleApp } from '../src/source/location.ts';
 import { ALICE } from './support/fixture.ts';
-import { newHarness } from './support/harness.ts';
+import { newHarness, tempDir } from './support/harness.ts';
 
 /**
  * The command line: setup, status, the JSON envelope and exit codes, and where things are written.
@@ -27,6 +27,37 @@ test('mcp carries the selected command platform into the stdio server', async ()
   });
   assert.equal(result.code, 0, result.stderr);
   assert.equal(received, 'win32');
+});
+
+test('all five shared path options are applied before command dispatch', async () => {
+  const harness = await newHarness({ store: false });
+  const ambient = tempDir('agent-whatsapp-cli-ambient-');
+  writeFileSync(join(ambient, 'config.json'), '{not json');
+  const result = await harness.cli(
+    [
+      '--config-dir',
+      harness.configDir,
+      '--state-dir',
+      join(harness.root, 'pinned-state'),
+      '--data-dir',
+      join(harness.root, 'pinned-data'),
+      '--secrets-dir',
+      join(harness.root, 'pinned-secrets'),
+      '--downloads-dir',
+      join(harness.root, 'pinned-downloads'),
+      '--json',
+      'status',
+    ],
+    { env: { ...harness.env, AGENT_COMMS_CONFIG_DIR: ambient } },
+  );
+  assert.equal(result.code, 0, result.stdout || result.stderr);
+  assert.deepEqual(result.data().accounts, []);
+
+  const empty = await harness.cli(['--config-dir=', '--json', 'status'], {
+    env: { ...harness.env, AGENT_COMMS_CONFIG_DIR: ambient },
+  });
+  assert.equal(empty.code, 64);
+  assert.match(empty.stderr, /non-empty directory/);
 });
 
 test('the default store is found from the HOME the environment names, never from the real home directory', () => {

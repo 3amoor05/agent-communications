@@ -17,7 +17,9 @@ import {
   installExitStatus,
   type OutputOptions,
   openCore,
+  PATH_OPTIONS,
   paint,
+  pathOverridesFromCliOptions,
   renderInstall,
   renderPrune,
   runCommand,
@@ -43,7 +45,7 @@ function sendApproveCommands(): string {
   return commands.length <= 1 ? commands.join('') : `${commands.slice(0, -1).join(', ')} or ${commands.at(-1)}`;
 }
 
-import { Command, CommanderError, Option } from 'commander';
+import { Command, CommanderError, InvalidArgumentError, Option } from 'commander';
 import { WhatsAppContext, type WhatsAppContextOptions } from '../context.ts';
 import { WHATSAPP_MCP } from '../mcp/install.ts';
 import { addAccount, removeAccount } from '../operations/accounts.ts';
@@ -84,9 +86,7 @@ export interface CliDeps extends WhatsAppContextOptions {
   /** Opens a draft's link. Injected so a test does not start WhatsApp. */
   open?: Opener | undefined;
   /** Starts the stdio server. Injected so a test can inspect its inputs without opening stdio. */
-  startMcp?:
-    | ((options: { env: NodeJS.ProcessEnv; platform: NodeJS.Platform; account?: string }) => Promise<void>)
-    | undefined;
+  startMcp?: ((options: import('../mcp/server.ts').WhatsAppMcpOptions) => Promise<void>) | undefined;
 }
 
 type Options = Record<string, unknown>;
@@ -133,6 +133,27 @@ a macOS dialog may be waiting) · 77 permission needed (macOS privacy) · 78 con
     )
     .exitOverride();
 
+  for (const { flag } of PATH_OPTIONS) {
+    program.addOption(
+      new Option(`${flag} <dir>`, 'pin this suite directory for this run').argParser((value) => {
+        if (value.length === 0) throw new InvalidArgumentError(`${flag} needs a non-empty directory`);
+        return value;
+      }),
+    );
+  }
+
+  let invocationCore: ReturnType<typeof openCore> | undefined;
+  const coreForInvocation = (): ReturnType<typeof openCore> => {
+    if (invocationCore) return invocationCore;
+    const options = program.opts();
+    const pathOverrides = pathOverridesFromCliOptions(
+      Object.fromEntries(PATH_OPTIONS.map(({ key, option }) => [option, options[key] as string | undefined])),
+    );
+    invocationCore =
+      Object.keys(pathOverrides).length === 0 && deps.core ? deps.core : openCore({ env, platform, pathOverrides });
+    return invocationCore;
+  };
+
   const output = (): OutputOptions => {
     const options = program.opts();
     return {
@@ -161,7 +182,7 @@ a macOS dialog may be waiting) · 77 permission needed (macOS privacy) · 78 con
   program.hook('preAction', async (_program, command) => {
     const path = commandPathOf(command);
     if (exemptFromUpdateGate(path, ['status'])) return;
-    const core = openCore({ env });
+    const core = coreForInvocation();
     let ended: number | null = null;
     const code = await runCommand(
       output(),
@@ -200,7 +221,9 @@ a macOS dialog may be waiting) · 77 permission needed (macOS privacy) · 78 con
           requireSupportedNode();
           const context = new WhatsAppContext({
             ...deps,
+            core: coreForInvocation(),
             env,
+            pathOverrides: coreForInvocation().pathOverrides,
             surface: 'cli',
             log: deps.log ?? ((line) => streams.stderr.write(`${line}\n`)),
           });
@@ -480,6 +503,9 @@ a macOS dialog may be waiting) · 77 permission needed (macOS privacy) · 78 con
           await startWhatsAppStdioServer({
             env,
             platform,
+            ...deps,
+            core: coreForInvocation(),
+            pathOverrides: coreForInvocation().pathOverrides,
             ...(flags.account ? { account: String(flags.account) } : {}),
           });
         },

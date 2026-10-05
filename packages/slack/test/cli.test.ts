@@ -289,6 +289,8 @@ async function cli(
     answerChallenge?: boolean;
     /** The shell syntax printed commands use; pinned whenever a test asserts their text. */
     platform?: NodeJS.Platform;
+    /** Leave core construction to the CLI, for tests of its global path identity. */
+    withoutCore?: boolean;
   } = {},
 ): Promise<Captured> {
   let stdout = '';
@@ -314,7 +316,7 @@ async function cli(
     options.onStderr?.(stderr);
   });
   const code = await run(argv, {
-    core: harness.core,
+    ...(options.withoutCore ? {} : { core: harness.core }),
     env: { ...harness.env, ...options.env },
     exchange: (params) => harness.exchange(params),
     streams: {
@@ -331,6 +333,44 @@ async function cli(
   });
   return { code, stdout, stderr, json: <T>() => JSON.parse(stdout) as T };
 }
+
+test('all five shared path options are applied before command dispatch', async () => {
+  const harness = await newHarness();
+  await harness.addWorkspace({ alias: 'acme' });
+  const ambient = tempDir('agent-slack-cli-ambient-');
+  await writeFile(join(ambient, 'config.json'), '{not json');
+  const result = await cli(
+    harness,
+    [
+      '--config-dir',
+      harness.core.paths.configDir,
+      '--state-dir',
+      harness.core.paths.stateDir,
+      '--data-dir',
+      harness.core.paths.dataDir,
+      '--secrets-dir',
+      harness.core.paths.secretsDir,
+      '--downloads-dir',
+      harness.core.paths.downloadsDir,
+      '--json',
+      'workspace',
+      'list',
+    ],
+    { env: { AGENT_COMMS_CONFIG_DIR: ambient }, withoutCore: true },
+  );
+  assert.equal(result.code, 0, result.stdout || result.stderr);
+  assert.deepEqual(
+    (result.json<Envelope<{ alias: string }[]>>().data ?? []).map((workspace) => workspace.alias),
+    ['acme'],
+  );
+
+  const empty = await cli(harness, ['--config-dir=', '--json', 'workspace', 'list'], {
+    env: { AGENT_COMMS_CONFIG_DIR: ambient },
+    withoutCore: true,
+  });
+  assert.equal(empty.code, 64);
+  assert.match(empty.stderr, /non-empty directory/);
+});
 
 /** A port nothing is listening on right now. Slack needs one fixed in advance, so the tests must choose too. */
 async function freePort(): Promise<number> {
