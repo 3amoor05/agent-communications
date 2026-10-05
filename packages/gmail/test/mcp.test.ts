@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { type ConfigV2, openCore, profileSourcePath, renameEntry, requireHandoffs, shownPath } from '@agentcomms/core';
 import { Client } from '@modelcontextprotocol/client';
@@ -767,7 +767,8 @@ test('a pinned gmail_setup refuses the machine-wide profile change', async () =>
     const error = result.structuredContent?.error as { code: string; message: string; hint: string };
     assert.equal(error.code, 'CONFIG');
     assert.match(error.message, /pinned/);
-    locatedGmailLine(error.hint, ['setup', '--profile', '/profiles/acme.agentcomms.json']);
+    // The handoff names the profile by its resolved path: on Windows `/profiles/…` is `D:\profiles\…`.
+    locatedGmailLine(error.hint, ['setup', '--profile', resolve('/profiles/acme.agentcomms.json')]);
   } finally {
     await close();
   }
