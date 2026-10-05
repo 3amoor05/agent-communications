@@ -200,9 +200,24 @@ interface HandleFile {
   [unknown: string]: unknown;
 }
 
+/**
+ * One stored aggregate, exactly as the store holds it (design 2026-10-05 §D4): the newest time anything matched it, the
+ * strongest source ever seen — `header` is kept once seen — and every mailbox that recorded it. Three separate facts,
+ * never one sighting: `touch` replaces the time, keeps a header and unions the mailboxes independently.
+ */
+export interface TaintAggregate {
+  readonly at: string;
+  readonly source: TaintSource;
+  readonly inboxIds: readonly string[];
+}
+
 export interface TaintCheck {
   address: boolean;
   domain: boolean;
+  /** The exact address's aggregate, when it is in the window. */
+  addressSeen?: TaintAggregate | undefined;
+  /** Its domain's, when that counts — not a public mailbox provider — and is in the window. */
+  domainSeen?: TaintAggregate | undefined;
 }
 
 export class TaintStore {
@@ -338,14 +353,29 @@ export class TaintStore {
     }
   }
 
-  /** Whether an address, or its (non-public) domain, was seen in email content in the window — from any inbox. */
+  /**
+   * Whether an address, or its (non-public) domain, was seen in email content in the window — from any inbox — and the
+   * aggregate each match is made of, for a caller to explain it. Nothing is written.
+   */
   async check(address: string): Promise<TaintCheck> {
     const file = this.#prune(await this.#read());
     const canonical = canonicalAddress(address);
     const domain = domainOf(canonical);
+    const exact = Object.hasOwn(file.addresses, canonical) ? file.addresses[canonical] : undefined;
+    const byDomain =
+      domain !== null && !PUBLIC_MAILBOX_DOMAINS.has(domain) && Object.hasOwn(file.domains, domain)
+        ? file.domains[domain]
+        : undefined;
+    const aggregate = (entry: TaintEntry): TaintAggregate => ({
+      at: entry.at,
+      source: entry.source,
+      inboxIds: [...entry.inboxIds],
+    });
     return {
-      address: canonical in file.addresses,
-      domain: domain !== null && !PUBLIC_MAILBOX_DOMAINS.has(domain) && domain in file.domains,
+      address: exact !== undefined,
+      domain: byDomain !== undefined,
+      ...(exact === undefined ? {} : { addressSeen: aggregate(exact) }),
+      ...(byDomain === undefined ? {} : { domainSeen: aggregate(byDomain) }),
     };
   }
 

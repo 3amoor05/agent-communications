@@ -23,12 +23,13 @@ import {
   type StoredApproval,
   sendEpochOf,
   stricterPolicy,
+  type TaintAggregate,
   withApproval,
   withSendingLease,
 } from '@agentcomms/core';
 import type { GmailContext, ResolvedInbox } from '../context.ts';
 import { analyseDraft, type DraftAnalysis, type Unsendable, unsendable } from '../domain/outbound.ts';
-import { addressField, filenameField, wrapField } from '../domain/untrusted-fields.ts';
+import { addressField, domainField, type FieldEnvelope, filenameField, wrapField } from '../domain/untrusted-fields.ts';
 import { sendCertainlyRefused } from '../gmail-api/errors.ts';
 import { type GmailTransport, providerId } from '../gmail-api/transport.ts';
 
@@ -57,6 +58,11 @@ export interface SendPreparation {
   /** The stricter of the live policy and anything risk escalation raised. */
   effectivePolicy: SendPolicy;
   riskFlags: string[];
+  /**
+   * Why each recipient that raised `recipient-tainted` raised it (design 2026-10-05 §D4): the address and its domain
+   * as untrusted fields, and the stored aggregate's facts in this package's own words. Empty when none did.
+   */
+  taint: RecipientTaint[];
   expect: Expectation;
   digest: string;
   expiresAt: string;
@@ -268,35 +274,129 @@ async function correspondentDomains(transport: GmailTransport): Promise<Set<stri
   return domains;
 }
 
+/** How the check of this mailbox's prior sends to one address ended (design 2026-10-05 §D4). */
+export type HistoryCheck = 'written' | 'not-written' | 'budget-exhausted' | 'provider-error';
+
+/** The most Gmail history requests one recipient analysis starts, across all its recipients (§D4). */
+export const HISTORY_BUDGET = 200;
+
+/** The most hits one address's check reads before it answers "not written" (§D4). */
+export const HISTORY_HITS = 50;
+
+/** What each unchecked answer says in a preview: never turned into a correspondence exemption (§D4). */
+const HISTORY_QUALIFICATION: Partial<Record<HistoryCheck, string>> = {
+  'budget-exhausted':
+    'prior-send history was not fully checked (the 200-read budget was reached); treated as not previously written.',
+  'provider-error': 'prior-send history could not be checked; treated as not previously written.',
+};
+
+/** What a removed mailbox is called where a stored aggregate names it: its id is software data, and means nothing. */
+const REMOVED_MAILBOX = 'a mailbox no longer connected';
+
+/** One operation's history requests: each `listMessages` and `getMessageMetadata` takes one before it starts. */
+interface HistoryBudget {
+  remaining: number;
+}
+
+/** The canonical recipients of a sent message, from its To, Cc and Bcc headers. */
+function recipientsOf(message: {
+  payload?: { headers?: Array<{ name?: string | null; value?: string | null }> | null } | null;
+}): string[] {
+  return (message.payload?.headers ?? [])
+    .filter((header) => /^(to|cc|bcc)$/i.test(header.name ?? ''))
+    .flatMap((header) => (header.value ?? '').split(','))
+    .map((value) => canonicalAddress(value.replace(/^.*<|>.*$/g, '').trim()));
+}
+
 /**
- * Has this mailbox written to this address before?
+ * Has this mailbox written to this exact address before — within both bounds (design 2026-10-05 §D4)?
  *
- * Gmail's `to:` matching is fuzzy — it matches display names and partial addresses — so a hit is confirmed by
- * comparing the parsed recipients of the messages it returns. A false "we have written to them" would remove exactly
- * the warning a first-time external recipient is there to raise.
+ * Gmail's search is fuzzy — it matches display names and partial addresses — so it asks for the address in To, Cc and
+ * Bcc, pages through at most fifty hits, and confirms each by comparing its parsed recipients: the headers comma-split
+ * and display-name wrappers regex-stripped before an exact canonical comparison, which is deliberately not RFC
+ * mailbox-list parsing. A false "we have written to them" would remove exactly the warning a tainted or first-time
+ * recipient is there to raise, so every doubt answers no: fifty fuzzy hits with the exact one fifty-first, a budget
+ * spent (`budget`, shared by every recipient of one operation, is taken before each request starts), or a provider
+ * error.
  */
-async function hasWrittenTo(transport: GmailTransport, address: string): Promise<boolean> {
-  const canonical = canonicalAddress(address);
-  const page = await transport.listMessages({ query: `in:sent to:${canonical}`, maxResults: 5 });
-  for (const { id } of page.ids) {
-    const message = await transport.getMessageMetadata(id);
-    const headers = message.payload?.headers ?? [];
-    const recipients = headers
-      .filter((header) => /^(to|cc|bcc)$/i.test(header.name ?? ''))
-      .flatMap((header) => (header.value ?? '').split(','))
-      .map((value) => canonicalAddress(value.replace(/^.*<|>.*$/g, '').trim()));
-    if (recipients.includes(canonical)) return true;
+async function hasWrittenTo(
+  transport: GmailTransport,
+  canonical: string,
+  budget: HistoryBudget,
+): Promise<HistoryCheck> {
+  const query = `in:sent {to:${canonical} cc:${canonical} bcc:${canonical}}`;
+  let checked = 0;
+  let pageToken: string | undefined;
+  try {
+    do {
+      if (budget.remaining <= 0) return 'budget-exhausted';
+      budget.remaining -= 1;
+      const page = await transport.listMessages({ query, maxResults: HISTORY_HITS - checked, pageToken });
+      for (const { id } of page.ids) {
+        if (checked >= HISTORY_HITS) break;
+        if (!id) continue;
+        if (budget.remaining <= 0) return 'budget-exhausted';
+        budget.remaining -= 1;
+        const message = await transport.getMessageMetadata(id);
+        checked += 1;
+        if (recipientsOf(message).includes(canonical)) return 'written';
+      }
+      pageToken = page.nextPageToken;
+    } while (pageToken !== undefined && checked < HISTORY_HITS);
+    return 'not-written';
+  } catch {
+    return 'provider-error';
   }
-  return false;
 }
 
 interface RecipientFacts {
+  /** As the draft has it: what the preview shows. */
   address: string;
+  canonical: string;
+  domain: string;
   external: boolean;
   firstTime: boolean;
+  /** What the taint store matched, by D4's formula — the exact address, which wins, or its domain alone. */
+  match: 'address' | 'domain' | null;
   tainted: boolean;
+  /** The stored aggregate's facts, for a tainted recipient: trusted words, never the address or domain. */
+  explanation: string[];
+  /** `own` for this mailbox's own address, which is never checked. */
+  historyCheck: HistoryCheck | 'own';
   lookalikeOf: string | null;
   note: string;
+}
+
+/**
+ * Why a recipient raised `recipient-tainted`, as a result carries it (design 2026-10-05 §D4). The address and domain
+ * are a sender's — through `addressField` and `domainField`, never in trusted prose; `facts` are this package's words
+ * about the stored aggregate — the mailboxes by name, a date, a template — and say only what the store holds.
+ */
+export interface RecipientTaint {
+  address: string;
+  domain: string;
+  match: 'address' | 'domain';
+  facts: string[];
+  historyCheck: HistoryCheck;
+}
+
+/**
+ * D4's separate statements about one stored aggregate. Never one sighting: the store keeps the newest time, the
+ * strongest source and the union of mailboxes independently, so they are said independently.
+ */
+function explain(aggregate: TaintAggregate | undefined, names: ReadonlyMap<string, string>): string[] {
+  if (aggregate === undefined) return [];
+  const known = [...new Set(aggregate.inboxIds.filter((id) => names.has(id)).map((id) => names.get(id) as string))];
+  const removed = new Set(aggregate.inboxIds.filter((id) => !names.has(id))).size;
+  const mailboxes = [
+    ...known,
+    ...(removed === 0 ? [] : [removed === 1 ? REMOVED_MAILBOX : `${removed} mailboxes no longer connected`]),
+  ];
+  return [
+    `seen in mail read in these mailboxes within the last seven days: ${mailboxes.join(', ')}`,
+    `most recently on ${aggregate.at.slice(0, 10)}`,
+    ...(aggregate.source === 'header' ? ['seen at least once in a header'] : []),
+  ];
 }
 
 /**
@@ -304,7 +404,10 @@ interface RecipientFacts {
  *
  * Risk escalation exists because `chat` trusts the agent to show the preview: a send to somebody the user has never
  * written to, at an address that arrived in a message we read this week, is exactly the shape of an exfiltration, and
- * it is worth taking out of the agent's hands entirely.
+ * it is worth taking out of the agent's hands entirely. D4's formula decides it:
+ * `(seen.address || (seen.domain && external)) && !written` — an exact stored address escalates internal or external,
+ * a domain match only for a recipient external to this mailbox, and a send this mailbox made to the exact address,
+ * found within both bounds, suppresses either.
  */
 async function studyRecipients(
   context: GmailContext,
@@ -314,7 +417,12 @@ async function studyRecipients(
 ): Promise<{ facts: RecipientFacts[]; flags: string[] }> {
   const own = await ownAddresses(transport, inbox);
   const internal = new Set(inbox.inbox.internalDomains.map((domain) => domain.toLowerCase()));
-  const everyone = [...new Set([...analysis.to, ...analysis.cc, ...analysis.bcc])];
+  // Each recipient once, in a deterministic order: To, then Cc, then Bcc, by canonical address.
+  const everyone = new Map<string, string>();
+  for (const address of [...analysis.to, ...analysis.cc, ...analysis.bcc]) {
+    const canonical = canonicalAddress(address);
+    if (!everyone.has(canonical)) everyone.set(canonical, address);
+  }
   // The domains this mailbox actually corresponds with, read from Sent rather than assembled from this draft's own
   // recipients. Built the latter way, a message addressed *only* to a lookalike had nothing to compare against and
   // the check never fired — which is precisely the message the check exists for.
@@ -324,33 +432,40 @@ async function studyRecipients(
     if (domain) knownDomains.add(domain);
   }
   for (const domain of internal) knownDomains.add(domain);
+  const names = new Map(Object.entries((await context.config()).inboxes).map(([alias, entry]) => [entry.id, alias]));
+  const budget: HistoryBudget = { remaining: HISTORY_BUDGET };
   const facts: RecipientFacts[] = [];
 
-  for (const address of everyone) {
-    const canonical = canonicalAddress(address);
+  for (const [canonical, address] of everyone) {
     const domain = domainOf(canonical) ?? '';
     const external = !own.has(canonical) && !internal.has(domain);
     const seen = await context.core.taint.check(canonical);
-    const written = own.has(canonical) ? true : await hasWrittenTo(transport, canonical);
-    // A domain in the taint store taints only when it is not a public mailbox provider — the store already decides
-    // that; here, either kind of sighting counts, because both mean the address reached us through mail we read.
-    const tainted = seen.address || seen.domain;
+    const historyCheck = own.has(canonical) ? 'own' : await hasWrittenTo(transport, canonical, budget);
+    const written = historyCheck === 'own' || historyCheck === 'written';
+    // A domain in the store counts only for a recipient external to this mailbox (the store already leaves public
+    // providers' domains out); an exact address counts either way, and wins the explanation.
+    const match = seen.address ? 'address' : seen.domain && external ? 'domain' : null;
+    const tainted = match !== null && !written;
     facts.push({
       address,
+      canonical,
+      domain,
       external,
       firstTime: external && !written,
+      match,
       // A tainted address that we have written to before is somebody we already correspond with.
-      tainted: tainted && !written,
+      tainted,
+      explanation: tainted ? explain(match === 'address' ? seen.addressSeen : seen.domainSeen, names) : [],
+      historyCheck,
       lookalikeOf: null,
       note: '',
     });
   }
 
   for (const fact of facts) {
-    const domain = domainOf(canonicalAddress(fact.address)) ?? '';
     if (!fact.firstTime) continue;
     for (const known of knownDomains) {
-      if (known !== domain && distance(known, domain) <= LOOKALIKE_DISTANCE) {
+      if (known !== fact.domain && distance(known, fact.domain) <= LOOKALIKE_DISTANCE) {
         fact.lookalikeOf = known;
         break;
       }
@@ -358,11 +473,19 @@ async function studyRecipients(
   }
 
   for (const fact of facts) {
+    // An unchecked history is said wherever its answer mattered: for an external recipient, or an exact sighting.
+    const qualification =
+      fact.historyCheck === 'own' || !(fact.external || fact.match === 'address')
+        ? undefined
+        : HISTORY_QUALIFICATION[fact.historyCheck];
     fact.note = [
       fact.external ? 'EXTERNAL' : 'internal',
       fact.firstTime ? 'FIRST-TIME' : '',
-      fact.tainted ? 'ADDRESS SEEN IN MAIL YOU READ' : '',
+      fact.tainted
+        ? `${fact.match === 'address' ? 'ADDRESS' : 'DOMAIN'} SEEN IN MAIL YOU READ (${fact.explanation.join('; ')})`
+        : '',
       fact.lookalikeOf ? `LOOKS LIKE ${fact.lookalikeOf}` : '',
+      qualification ?? '',
     ]
       .filter(Boolean)
       .join(' · ');
@@ -375,6 +498,23 @@ async function studyRecipients(
   }
   if (facts.some((fact) => fact.lookalikeOf)) flags.push('lookalike-domain');
   return { facts, flags };
+}
+
+/** The tainted recipients' explanations, the sender's parts through this package's field helpers (§D4). */
+function taintOf(facts: readonly RecipientFacts[], envelope: FieldEnvelope): RecipientTaint[] {
+  return facts.flatMap((fact) =>
+    fact.tainted && fact.match !== null && fact.historyCheck !== 'own'
+      ? [
+          {
+            address: addressField(fact.canonical, 'recipient', envelope),
+            domain: domainField(fact.domain, 'recipient-domain', envelope),
+            match: fact.match,
+            facts: fact.explanation,
+            historyCheck: fact.historyCheck,
+          },
+        ]
+      : [],
+  );
 }
 
 function expectationOf(analysis: DraftAnalysis): Expectation {
@@ -415,8 +555,13 @@ function previewFor(options: {
   effectivePolicy: SendPolicy;
 }): string {
   const { analysis, facts, record, alias } = options;
+  // Every way the draft writes a recipient carries that recipient's note: the note is this package's words alone.
+  const byCanonical = new Map(facts.map((fact) => [fact.canonical, fact.note]));
   const notes: Record<string, string> = {};
-  for (const fact of facts) notes[fact.address] = fact.note;
+  for (const address of [...analysis.to, ...analysis.cc, ...analysis.bcc]) {
+    const note = byCanonical.get(canonicalAddress(address));
+    if (note) notes[address] = note;
+  }
   const warnings: string[] = [];
   if (analysis.signatureResources.length > 0) {
     warnings.push(`signature loads ${analysis.signatureResources.length} image(s) from the internet when opened`);
@@ -521,6 +666,7 @@ export async function prepareSend(context: GmailContext, alias: string, draftId:
     policy: livePolicy,
     effectivePolicy,
     riskFlags: flags,
+    taint: taintOf(facts, { boundary: newBoundary(), inbox: alias, id: draftMessageId }),
     expect: record.expect,
     digest: analysis.digest,
     expiresAt: record.expiresAt,

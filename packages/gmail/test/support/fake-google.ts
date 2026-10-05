@@ -147,6 +147,11 @@ export interface FakeGoogle {
   holdNext(path: string): { reached: Promise<void>; release(): void };
   /** Called after a draft has become a sent message, to lose or replace the answer to that send. */
   afterSend: ((message: FakeMessage) => { status: number; body?: unknown; drop?: boolean } | undefined) | null;
+  /**
+   * At most this many rows to a page of a listing, whatever `maxResults` asked for — as Gmail may return fewer than it
+   * was asked for, with a next page. Null: as many as asked.
+   */
+  pageLimit: number | null;
   /** Turns a stored refresh token into one Google refuses, as revocation or a Testing-app expiry would. */
   revoke(refreshToken: string): void;
   /** Completes a consent the way a browser would, returning the redirect URL with `code` and `state`. */
@@ -185,6 +190,10 @@ function matchesQuery(
         return headerValue('from').toLowerCase().includes(value);
       case 'to':
         return headerValue('to').toLowerCase().includes(value) || headerValue('cc').toLowerCase().includes(value);
+      case 'cc':
+        return headerValue('cc').toLowerCase().includes(value);
+      case 'bcc':
+        return headerValue('bcc').toLowerCase().includes(value);
       case 'subject':
         return headerValue('subject').toLowerCase().includes(value);
       case 'in':
@@ -412,6 +421,7 @@ export async function startFakeGoogle(options: FakeGoogleOptions = {}): Promise<
   >();
   const requests: FakeGoogle['requests'] = [];
   let afterSend: FakeGoogle['afterSend'] = null;
+  let pageLimit: number | null = null;
 
   const fail = (
     path: string,
@@ -584,7 +594,7 @@ export async function startFakeGoogle(options: FakeGoogleOptions = {}): Promise<
         const rows = wantsThreads
           ? [...new Map(matching.map((value) => [value.threadId ?? value.id, value])).values()]
           : matching;
-        const pageSize = Math.max(1, Number(params.maxResults ?? 25));
+        const pageSize = Math.max(1, Math.min(Number(params.maxResults ?? 25), pageLimit ?? Number.POSITIVE_INFINITY));
         const start = Number(params.pageToken ?? '0');
         const page = rows.slice(start, start + pageSize);
         const next = start + pageSize < rows.length ? String(start + pageSize) : undefined;
@@ -842,6 +852,12 @@ export async function startFakeGoogle(options: FakeGoogleOptions = {}): Promise<
     },
     set afterSend(value) {
       afterSend = value;
+    },
+    get pageLimit() {
+      return pageLimit;
+    },
+    set pageLimit(value) {
+      pageLimit = value;
     },
     failNext(path, times, status, reason, retryAfter) {
       const list = failures.get(path) ?? [];

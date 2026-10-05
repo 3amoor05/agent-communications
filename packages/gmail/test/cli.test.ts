@@ -970,6 +970,7 @@ test('send execute rendering preserves every subject and every recipient list on
           policy: 'chat',
           effectivePolicy: 'chat',
           riskFlags: [],
+          taint: [],
           expect: { ...recipients, subject },
           digest: 'digest',
           expiresAt: '2026-10-04T12:00:00.000Z',

@@ -2457,6 +2457,23 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
           policy: z.string(),
           effectivePolicy: z.string(),
           riskFlags: z.array(z.string()),
+          taint: z
+            .array(
+              z.object({
+                address: z
+                  .string()
+                  .describe('the recipient: bare only while a plain address, else <untrusted-content>'),
+                domain: z.string().describe('its domain: bare only while a plain domain, else <untrusted-content>'),
+                match: z.string().describe('address (the exact address, which wins) or domain'),
+                facts: z
+                  .array(z.string())
+                  .describe('what the store holds, each said apart: the mailboxes, the latest date, a header sighting'),
+                historyCheck: z
+                  .string()
+                  .describe('written, not-written, budget-exhausted or provider-error: anything but written escalates'),
+              }),
+            )
+            .describe('why each recipient that raised recipient-tainted raised it'),
           expect: expectationSchema,
           digest: z.string(),
           expiresAt: z.string(),
