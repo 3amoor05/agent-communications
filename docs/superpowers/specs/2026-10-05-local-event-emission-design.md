@@ -1,6 +1,6 @@
 # Local event emission — design
 
-Status: **revised after round 9; five owner questions open (§8)**. Specification only, not an implementation.
+Status: **revised after round 10; five owner questions open (§8)**. Specification only, not an implementation.
 Written from the cited research pass (§2) and a checked read of this repository at `90463e1`.
 This design adds a new **standing disclosure authorisation**; it does not treat recurring event delivery
 as the existing per-content send gate
@@ -276,7 +276,14 @@ race as D12 specifies. Recovery is crash-injected after every durable write, app
 response, staged-row commit and final transaction.
 
 A loosening or any edit outside the whitelist below creates a pending rule version. The approved active rule version
-keeps running until that pending version completes the protocol above. A target, subscriber or judge edit always
+keeps running until that pending version completes the protocol above. **Hand-over without loss:** when an exactly
+approved new version replaces an older exactly approved or derived version of the same rule, the older version moves to
+`retiring` in the same final transaction and remains authorised for every occurrence at or before the new version's
+recorded activation point (its own approval covered them); the new version takes every occurrence after it. The older
+version retires once the source cursor has passed that point and its last projection is terminal. A **tightening**
+never drains: it replaces the active version at once and the wider version processes nothing further. Tests inject
+backlog and new occurrences before the fence, during the baseline call and before the final transaction, for all four
+sources and across restart, proving every occurrence is processed by exactly one version. A target, subscriber or judge edit always
 requires a new referencing rule version and approval, even when the object edit is narrower; this is what preserves
 the exact object-version grant rather than inventing a standalone object activation. Removing one of those objects is
 different: it records an immediate revocation of all of its versions and cancels their work, but activates no
@@ -1970,7 +1977,7 @@ No phase before B2 can make network disclosures. No new source ships without tai
   type. Run each activation before and after raw-page staging, occurrence-resolution/projection commit and final
   mailbox-cursor commit, and crash/restart at every activation/fence/scan write. There remains exactly one provider
   scan and mailbox cursor; each exact version has its own account point; no occurrence at or below that point is
-  projected for it; and older active versions lose none. A derived tightened version records byte-identical inherited
+  projected for it; and a replaced older version drains its range (below) so that no occurrence is processed by neither. A derived tightened version records byte-identical inherited
   points and requires no provider call. While the position intent is pending, affected mailbox commits pause; success
   installs all per-rule points before they resume, while timeout failure releases the fence and lets the old rule
   catch up from its unchanged cursor. The same same-type/replacement matrix runs against Slack per-conversation,
@@ -2112,7 +2119,9 @@ type AddressV1 = {
 type RiskFlagV1 =
   | 'executable' | 'script' | 'macro-enabled' | 'macro-capable' | 'markup'
   | 'archive' | 'disk-image' | 'double-extension' | 'bidi-filename'
-  | 'auto-read' | 'saved-as-download';
+  | 'auto-read' | 'saved-as-download'
+  | 'html-or-svg' | 'hidden-characters-in-name';   // emitted as-is by Resend's attachmentRisks
+                                                   // (packages/resend/src/compose/inbound.ts:253)
 
 type CommonEventV1<TType extends string, TChannel extends string, TAccountId extends string> = {
   id: EventIdV1;
@@ -2348,11 +2357,17 @@ type ResendEmailReceivedV1 = CommonEventV1<'resend.email.received', 'resend', Ac
     evaluatedBy: 'resend' | null;
   };
   attachments?: ResendReceivedAttachmentV1[];
-  body?: string;              // complete sanitised visible text, never an untrusted envelope
+  body?: string;              // sanitised visible text, at most 20,000 characters, never an untrusted envelope
+  bodyTruncated?: boolean;    // present exactly when body is present; true when the source text was longer
 };
 ```
 
-When `attachments` is present its length equals `attachmentCount`. The metadata is:
+When `attachments` is present its length equals `attachmentCount`. **Normalisation from the existing read:** the
+source is `showReceived` (`packages/resend/src/operations/read.ts:410`), whose body comes from `readBody`
+(`packages/resend/src/compose/inbound.ts:88`), which already truncates at 20,000 characters and wraps the text in the
+untrusted envelope; normalisation unwraps that envelope back to its sanitised text (the envelope is re-applied at
+delivery according to the target's representation, D3) and sets `bodyTruncated` from `readBody`'s truncation result.
+Attachment `riskFlags` are Resend's `attachmentRisks` values unchanged, de-duplicated and sorted. The metadata is:
 
 ```ts
 untrusted = [
