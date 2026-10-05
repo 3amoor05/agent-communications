@@ -1,6 +1,6 @@
 # Local event emission — design
 
-Status: **revised after round 5; two owner questions open (§8)**. Specification only, not an implementation.
+Status: **revised after round 5; five owner questions open (§8)**. Specification only, not an implementation.
 Written from the cited research pass (§2) and a checked read of this repository at `74fa592`.
 This design adds a new **standing disclosure authorisation**; it does not treat recurring event delivery
 as the existing per-content send gate
@@ -1493,3 +1493,11 @@ are in scope only through the approved
    publisher and only a candidate for D15's future bundled-judge design.
 2. **“Values as they are”** — this design means typed, sanitised source values with no transforms, not provider raw
    bytes. Is that the accepted product meaning?
+3. **`@cueplusplus/ui` public, or the app in a private repository?** The packages are MIT but their npm scope is
+   private (§2). D14's default, if nothing changes by phase C, is a private repository for the app; publishing
+   `@cueplusplus/ui`, `@cueplusplus/tokens` and `@cueplusplus/theme-cue` would let it live in `apps/desktop` here.
+4. **Signing identities** — an Apple Developer ID and a Windows code-signing certificate for the app's later release
+   job: who holds them?
+5. **Defaults** — hosted judges (event fields sent to TypeSafe) are available but every use needs its own standing
+   authorisation; should they instead be off unless enabled? And are the default retention values above (24 hours for
+   content, 30 days for decision metadata) right for your accounts?
