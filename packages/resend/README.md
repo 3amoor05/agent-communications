@@ -19,10 +19,11 @@ says this on every run.
 
 **Nothing is sent without a person.** A send is prepared, previewed — every recipient, BCC included, the reach (unique
 recipients), the From domain and whether it is verified — and approved: a yes in the conversation under the account's
-`chat` policy, or the approve command the result gives and a typed code under `confirm`. Above ten recipients, or to
-an address that arrived in mail read here, a person at a terminal approves, whatever the policy. The approval id is
-the request's `Idempotency-Key` and an `agentcomms_approval` tag; a send whose outcome is unknown is never repeated,
-only checked.
+`chat` policy, or the approve command the result gives and a typed code under `confirm` — which the agent learns of
+with `resend_send_wait`. Above ten recipients, or to an address that arrived in mail read here, a person at a terminal
+approves, whatever the policy. The approval id is the request's `Idempotency-Key` and an `agentcomms_approval` tag; a
+send whose outcome is unknown (`SEND_OUTCOME_UNKNOWN`) is never repeated, only checked, and a scheduled one is
+"accepted", never "sent", until Resend's own last event for it says so.
 
 **The key is typed by a person, at a terminal.** `agent-resend account add` reads it from a hidden prompt, or from
 `RESEND_API_KEY` in that terminal, and stores it in the system keychain. No MCP tool accepts a key: a key typed into

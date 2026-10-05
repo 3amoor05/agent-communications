@@ -317,8 +317,9 @@ await server.connectStdio();
 
 No tool approves. `slack_post_send` and the reaction tools claim an approval through the gate the CLI uses: under
 `chat` your yes in the conversation is the approval; under `confirm` they return `APPROVAL_PENDING` with the approve
-command for you to run — this installation's own, its folders pinned — and post only after you have; under `never`
-they refuse. The tools that change a workspace return a preview and an approval id first, whenever the change loosens
+command for you to run — this installation's own, its folders pinned — and `slack_approval_wait`, with which the agent
+learns that you have; they post only after you have, within 24 hours; under `never` they refuse. A post whose outcome
+Slack never answered is `SEND_OUTCOME_UNKNOWN`: it may have posted, and is checked in the channel, never repeated. The tools that change a workspace return a preview and an approval id first, whenever the change loosens
 it or removes it, and apply it only when called again with that id — after your yes under the `chat` change policy,
 after the approve command the result gives, at your terminal, under `confirm`. A server pinned to one workspace
 connects and removes none. No tool changes the Slack app itself: that needs an app configuration token, and a chat's

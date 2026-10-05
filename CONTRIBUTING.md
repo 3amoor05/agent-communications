@@ -218,6 +218,26 @@ leaves comments, types, regular expressions and identity positions alone by thei
 `test/helpers/printed-command-guard.mjs` — and its fixtures in `test/fixtures/printed-commands/` show what it refuses
 and what it accepts. A client's own CLI is never called `binary` there (`cliPath`).
 
+**9. An approval handed to a person names the agent's wait beside it.** A person approves at their terminal; the
+agent learns that they have by waiting, never by asking ([design](docs/superpowers/specs/2026-10-05-approval-smoothness-design.md),
+D3 and D7). So a refusal or a next step that sends a person to `approve` is made with the helpers in
+`packages/core/src/approval-handoffs.ts`, which core exports, never by putting a wait's name in a template:
+
+| Helper | Says |
+|---|---|
+| `approveAndWaitSentence(handoffs, surface, approvalId, (approve, wait) => …)` | the person's located `approve`, and the agent's wait: its tool over MCP (`surface: 'mcp'`), its located command at the command line |
+| `waitSentence(handoffs, surface, approvalId, (wait) => …)` | the wait alone — a timeout's "wait again", a download question's "wait for their answer" |
+| `changePendingHint(handoffs, surface, approvalId)` | a change waiting for a person at a terminal: run `approve`, learn when with the wait, then try again |
+| `approveRefusedHint(handoffs, approvalId)` | an `approve` an agent ran itself, refused: the person runs it, and the wait says when |
+
+The wait is the printing package's own — `APPROVAL_WAITS`, by manifest channel: `gmail_send_wait` and
+`send wait`, `slack_approval_wait` and `approval wait`, `resend_send_wait` and `send wait`, and core's
+`comms_approval_wait` and `approval wait` for a channel with none — located through the same handoffs as its
+`approve`, so both reach the same folders. A channel that adds a wait adds its row to `APPROVAL_WAITS` and a
+`capabilities.json` row whose operation is `waitForApproval`; `test/parity.test.mjs` holds the two to each other, and
+`test/tool-drift.test.mjs` holds each to a tool its server registers and a command its CLI defines. With no command
+here, a sentence says why, as every handoff does.
+
 Before — the 0.13.0 way, which no longer compiles: `shellCommand` is not exported, and `commandText` takes only a located
 or an external command:
 

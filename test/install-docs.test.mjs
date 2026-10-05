@@ -243,3 +243,126 @@ test('no guide hands a person a bare approve command: they run the one the resul
   assert.ok(seen > 0, 'the CLI listings that show an approve are read');
   assert.deepEqual(wrong, [], `a bare approve handed to a person:\n${wrong.join('\n')}`);
 });
+
+// ── How long an approval lasts, and what a guide says of it (CUE-404) ────────────────────────────────────────────
+
+/** A document's sentences, and its table cells, each read whole across its line breaks. */
+function sentences(text) {
+  const out = [];
+  for (const paragraph of text.split(/\n\s*\n/)) {
+    for (const piece of paragraph.replace(/\s+/g, ' ').split(/(?<=\.)\s+|\s*\|\s*/)) {
+      if (piece.trim() !== '') out.push(piece.trim());
+    }
+  }
+  return out;
+}
+
+test('no guide or skill gives an approval ten minutes flat: ten minutes is the chat route’s (CUE-404, §D1)', async () => {
+  /*
+   * 0.14.0 gives a send or change three lifetimes by its route: ten minutes for a yes in the chat, thirty for one
+   * that waits for a person outside it, and 24 hours once that person approved. A sentence that gives an approval ten
+   * minutes says it is the chat route's — or is about a probe, whose ten minutes are its own. The sign-in links'
+   * ten minutes name no approval and are not read here.
+   */
+  const wrong = [];
+  for (const { path, text } of await documents()) {
+    for (const sentence of sentences(text)) {
+      if (!/\b(?:ten|10)[- ]minutes?\b/i.test(sentence) || !/approv/i.test(sentence)) continue;
+      if (/\bchat\b|\bprobe\b/i.test(sentence)) continue;
+      wrong.push(`${path}: ${sentence}`);
+    }
+  }
+  assert.deepEqual(wrong, [], `an approval given ten minutes without its route:\n${wrong.join('\n')}`);
+});
+
+test('the sending guide says how long an approval lasts, how an agent learns of it, and what each outcome means (CUE-404)', async () => {
+  const page = (await readFile(join(ROOT, 'docs', 'sending.md'), 'utf8')).replace(/\s+/g, ' ');
+  const required = [
+    // §D1: the three lifetimes, and the download's own.
+    /ten minutes/,
+    /thirty minutes/,
+    /24 hours/,
+    // §D3: the four waits, status at zero, and that a wait only looks.
+    /`gmail_send_wait`/,
+    /`slack_approval_wait`/,
+    /`resend_send_wait`/,
+    /`comms_approval_wait`/,
+    /--wait-seconds 0/,
+    // §D1: a no said in the chat is revoked by the agent.
+    /\bsays? no\b[^.]*revok/i,
+    // §D2, §D8: the honest outcomes.
+    /`claimable`/,
+    /`SEND_OUTCOME_UNKNOWN`/,
+    /this approval expired; nothing was sent with it/,
+    /being sent by another call/,
+    /sent; the provider returned no id/,
+    /late result/,
+    // §D9: what the records read can prove of a draft, and what Drafts says now.
+    /not sent with any approval in the last 90 days/,
+    /not sent with any of the 500 most recently changed approval records/,
+    /still in Drafts/,
+    /no longer in Drafts — it may have been sent or deleted elsewhere/,
+    /\{ approvals, unsent \}/,
+    // Retention.
+    /90 days/,
+    /once a day/,
+    /5 seconds|five seconds/,
+    // §7: the accepted risks.
+    /24-hour|for 24 hours/,
+  ];
+  for (const pattern of required) assert.match(page, pattern, `docs/sending.md: missing ${pattern}`);
+});
+
+test('the upgrading guide says what 0.14.0 does to a configuration and to a server still on 0.13 (CUE-404, §4 item 0)', async () => {
+  const page = (await readFile(join(ROOT, 'docs', 'upgrading.md'), 'utf8')).replace(/\s+/g, ' ');
+  const required = [
+    /version 3/,
+    /this release reads versions 1 and 2/,
+    /[Rr]estart/,
+    /prepared by an earlier release; prepare it again/,
+    /records from an earlier release are still being retired/,
+    /earlier-release approvals/,
+    /prepare[^.]* again/,
+  ];
+  for (const pattern of required) assert.match(page, pattern, `docs/upgrading.md: missing ${pattern}`);
+});
+
+test('troubleshooting covers an unknown send outcome and a 0.13 server after the conversion (CUE-404)', async () => {
+  const page = await readFile(join(ROOT, 'docs', 'troubleshooting.md'), 'utf8');
+  assert.match(page, /^### `SEND_OUTCOME_UNKNOWN`/m);
+  assert.match(page, /^### .*this release reads versions 1 and 2/m);
+  assert.match(page, /^### `this approval expired; nothing was sent with it`/m);
+});
+
+test('SECURITY.md does not claim what an approval lasting a day leaves open (CUE-404, §7.1, §7.2)', async () => {
+  const page = (await readFile(join(ROOT, 'SECURITY.md'), 'utf8')).replace(/\s+/g, ' ');
+  const limits = page.slice(page.indexOf('## What the safety model does not claim'));
+  assert.match(limits, /approved[^.]*24 hours|24 hours[^.]*approv/i);
+  assert.match(limits, /any process[^.]*shares? the approval store/i);
+  assert.match(limits, /says no/i);
+});
+
+test('CONTRIBUTING sends a person to a terminal through the approve-and-wait helpers core exports (CUE-404, §D7)', async () => {
+  const page = await readFile(join(ROOT, 'CONTRIBUTING.md'), 'utf8');
+  const start = page.indexOf('## Telling a person what to run');
+  const section = page.slice(start, page.indexOf('\n## ', start + 4));
+  assert.match(section, /packages\/core\/src\/approval-handoffs\.ts/);
+  const source = await readFile(join(ROOT, 'packages', 'core', 'src', 'approval-handoffs.ts'), 'utf8');
+  const index = await readFile(join(ROOT, 'packages', 'core', 'src', 'index.ts'), 'utf8');
+  assert.match(index, /^export \* from '\.\/approval-handoffs\.ts';$/m, 'core exports the approval handoffs');
+  const helpers = [
+    'approveAndWaitSentence',
+    'waitSentence',
+    'changePendingHint',
+    'approveRefusedHint',
+    'APPROVAL_WAITS',
+  ];
+  for (const helper of helpers) {
+    assert.match(section, new RegExp(`\`${helper}\\b`), `CONTRIBUTING names ${helper}`);
+    assert.match(
+      source,
+      new RegExp(`export (?:function|const) ${helper}\\b`),
+      `approval-handoffs.ts exports ${helper}`,
+    );
+  }
+});

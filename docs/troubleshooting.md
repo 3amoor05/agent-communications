@@ -130,8 +130,37 @@ The transport already backs off and retries. Narrow the query or the mailbox lis
 
 ### `approval required`
 
-Working as intended. Exit `10`. A send needs `send prepare`, then your approval, then `send execute`. See
-[Sending and approvals](sending.md).
+Working as intended. Exit `10`. A send needs `send prepare`, then your approval, then `send execute`. Under `confirm`
+the approval is yours, outside the chat: "This needs your approval outside the chat: run … in a terminal, and I will
+wait with gmail_send_wait." Run the command it gives, exactly as given, within thirty minutes; the agent learns that
+you have by waiting, and sends — you never need to tell it. See [Sending and approvals](sending.md).
+
+### `this approval expired; nothing was sent with it`
+
+Nothing was sent. An approval waits ten minutes for a yes in the chat and thirty for you at a terminal, and once you
+approve it there it holds for 24 hours; the message says when it was prepared — or approved — and when it expired.
+Prepare it again; the preview is the full one. If it says "the clock moved backwards", the computer's clock went back
+past the approval, and it was expired to be safe.
+
+### `SEND_OUTCOME_UNKNOWN`
+
+Exit `10`, and never retried: Gmail's (or Slack's, or Resend's) answer to the send was lost — a dropped connection, a
+timeout, a server error — so it **may have gone**. Look in Sent (the channel, for Slack; `agent-resend send status
+<approvalId>` and the Resend dashboard, for Resend) before anything else. Its approval reads `sending`, then
+`unknown` once its two-minute lease runs out, and the process that sent it may still record a late result. Do not
+prepare it again until you know it did not go: a second prepare is a second message.
+
+### `being sent by another call since …; wait for it`
+
+Another process is sending that approval right now, renewing its lease every thirty seconds — a Slack post with large
+files can take many minutes. Wait: `agent-gmail send wait <approvalId>` (or the channel's own wait) says when it has
+finished, as `used`, `failed` or `unknown`. Do not prepare it again meanwhile.
+
+### `sent; the provider returned no id`
+
+The provider accepted the send but gave no id for it, so there is no message id to quote and nothing is made up. The
+approval stays `sending`, then reads `unknown`; look in Sent, or the channel, to see the message. For a scheduled
+Resend email the words are "accepted (scheduled); the provider returned no id".
 
 ### `the draft changed since it was approved`
 
@@ -335,9 +364,25 @@ keeps the `--inbox` and `--read-only` of the entry it replaces unless you pass o
 under its own `--name`, pass that again — another name is another entry — or run the `fix` that `doctor` prints
 for it, which carries every one of them. Like any registration it asks you to approve what it will write first.
 
+### `… has version 3; this release reads versions 1 and 2`
+
+A server or command of 0.13 or earlier, after 0.14.0 moved the shared configuration to version 3 — which it does the
+first time it prepares, approves or sends anything, or changes a send policy. Every call the old server starts fails
+this way until its client is restarted on 0.14. Restart the client (`claude --continue` resumes a Claude Code
+conversation); if it still says so, register the server again at the current release, as in
+[the server is running an old version](#the-server-is-running-an-old-version). Approvals the old release prepared and
+nobody used were retired at the conversion: prepare them again. See [Upgrading](upgrading.md#0140-the-configuration-moves-to-version-3).
+
+### `records from an earlier release are still being retired`
+
+After the conversion above, the approvals 0.13 prepared are revoked one by one. Until every one is, and ten minutes
+have passed since the conversion, no send policy can be loosened. The next send prepare, claim or approval retries them;
+`agentcomms doctor` lists what is still open under "earlier-release approvals". Tightening is never held up.
+
 ### An agent asks for approval in a form instead of the terminal
 
-That mailbox is on `confirm`, and the client has been trusted to show forms to a person. If you did not do that:
+That mailbox is on `confirm`, and the client has been trusted to show forms to a person. Declining the form revokes
+the approval; cancelling it decides nothing, and it stays pending. If you did not trust that client:
 
 ```bash
 agent-gmail confirm-clients list

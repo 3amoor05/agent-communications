@@ -61,6 +61,16 @@ The send gate protects against a mistaken or prompt-injected agent that uses thi
   a mailbox or workspace from `confirm` or `never` to `chat`, move credentials out of the keychain, or remove an
   account on its own claim. Each such change is audited. Set `agentcomms policy confirm` for an agent you do not
   watch.
+- **An approval a person gave outside the chat can be used for 24 hours.** Once a send or change is approved at a
+  terminal or in a form, any process that shares the approval store can claim it — once, for exactly what was
+  approved — until 24 hours have passed; approvals are not bound to the process that prepared them. A hostile process
+  running as you is already outside the boundary (above); inside it, the approval's binding means whoever claims it
+  does exactly what was approved, and nothing else.
+- **A "no" said in the chat is not seen.** The server cannot read the conversation. When the person says no, the
+  skills tell the agent to revoke the approval at once; an agent that does not leaves an approval waiting for a yes in
+  the chat usable for the rest of its ten minutes.
+- **A send whose provider never answered may have gone.** Its outcome is reported as unknown, and the process that
+  claimed it may still record a late result; nothing reconciles it but looking in Sent or the channel.
 - **Under the default `chat` policy, a message that asks you to reply to its own sender with private data** is
   caught only by you reading the preview. Risk escalation covers being told by a message to write to *someone
   else*; `confirm` covers both.
