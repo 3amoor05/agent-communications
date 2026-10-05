@@ -31,6 +31,7 @@ import {
   type LiveGate,
   liveGateOf,
   type OutcomeAction,
+  type UsedSaid,
   withApproval,
 } from './approval-outcome.ts';
 import {
@@ -479,6 +480,11 @@ export interface ClaimOptions {
    */
   pendingHint?: string | undefined;
   /**
+   * How a used send is said in the refusal of a claim of it — the surface's own words, as `pendingHint` is (design
+   * 2026-10-05 §D2's used-send row): "sent at …" when left out, as Gmail and Slack say it.
+   */
+  usedSaid?: UsedSaid | undefined;
+  /**
    * The caller's cancellation — an MCP request's signal — asked under the record's lock, immediately before the claim
    * would change the record.
    *
@@ -913,7 +919,7 @@ export class ApprovalStore {
     expect: ApprovalExpectation,
     action: OutcomeAction,
     decide: (current: ApprovalRecord, outcome: ApprovalOutcome, live: LiveGate | null) => ApprovalRecord,
-    options: { claimToken?: string | undefined } = {},
+    options: { claimToken?: string | undefined; usedSaid?: UsedSaid | undefined } = {},
   ): Promise<Transitioned> {
     const path = this.#path(approvalId);
     return withFileLock(`${path}.lock`, async () => {
@@ -922,7 +928,7 @@ export class ApprovalStore {
       if (found === null || !matchesExpectation(found, expect)) throw approvalNotFound(approvalId, expect.kind);
       const derived = this.#derived(found);
       const live = config === null || derived.form !== 'v2' ? null : liveGateOf(config, derived.record);
-      const outcome = approvalOutcome(derived, { action, live, now: this.#now() });
+      const outcome = approvalOutcome(derived, { action, live, now: this.#now(), usedSaid: options.usedSaid });
       if (found.form !== 'v2' || derived.form !== 'v2' || outcome.record === null) {
         throw outcome.error ?? integrityRefusal(found);
       }
@@ -960,7 +966,7 @@ export class ApprovalStore {
   async inspect(
     approvalId: string,
     expect: ApprovalExpectation = {},
-    options: { action?: OutcomeAction | undefined } = {},
+    options: { action?: OutcomeAction | undefined; usedSaid?: UsedSaid | undefined } = {},
   ): Promise<{ stored: StoredApproval; outcome: ApprovalOutcome }> {
     const action = options.action ?? 'inspect';
     const path = this.#path(approvalId);
@@ -970,7 +976,7 @@ export class ApprovalStore {
       if (found === null || !matchesExpectation(found, expect)) throw approvalNotFound(approvalId, expect.kind);
       const derived = this.#derived(found);
       const live = config === null || derived.form !== 'v2' ? null : liveGateOf(config, derived.record);
-      const outcome = approvalOutcome(derived, { action, live, now: this.#now() });
+      const outcome = approvalOutcome(derived, { action, live, now: this.#now(), usedSaid: options.usedSaid });
       if (found.form === 'v2' && derived.form === 'v2') {
         const acting = outcome.revokes && action !== 'inspect' && action !== 'wait' && outcome.record !== null;
         const current = acting && outcome.record !== null ? outcome.record : derived.record;
@@ -1021,13 +1027,20 @@ export class ApprovalStore {
     kind: ApprovalKind = 'send',
     // Kept for callers that pass it: a refusal here names no command since another kind's id became `NOT_FOUND`.
     _platform: NodeJS.Platform = process.platform,
+    options: { usedSaid?: UsedSaid | undefined } = {},
   ): Promise<string> {
     const challenge = newChallenge();
-    await this.#transition(approvalId, { kind }, 'approve', (current, outcome) => {
-      if (outcome.error) throw outcome.error;
-      if (current.state !== 'pending') throw this.#alreadyApproved(current, outcome);
-      return { ...current, challengeHash: hashChallenge(challenge) };
-    });
+    await this.#transition(
+      approvalId,
+      { kind },
+      'approve',
+      (current, outcome) => {
+        if (outcome.error) throw outcome.error;
+        if (current.state !== 'pending') throw this.#alreadyApproved(current, outcome);
+        return { ...current, challengeHash: hashChallenge(challenge) };
+      },
+      { usedSaid: options.usedSaid },
+    );
     return challenge;
   }
 
@@ -1046,57 +1059,64 @@ export class ApprovalStore {
     answer: string,
     kind: ApprovalKind = 'send',
     _platform: NodeJS.Platform = process.platform,
+    options: { usedSaid?: UsedSaid | undefined } = {},
   ): Promise<ApprovalRecord> {
     let failure: Failure | null = null;
-    const done = await this.#transition(approvalId, { kind }, 'approve', (current, outcome) => {
-      if (outcome.error) throw outcome.error;
-      if (current.state !== 'pending') throw this.#alreadyApproved(current, outcome);
-      if (!current.challengeHash)
-        throw refusalFor(current)('APPROVAL_REQUIRED', 'no challenge was issued for this approval', current);
-      const at = this.#now();
-      // A change's confirm means a person at a terminal, and nothing else approves one: a form approval is voided
-      // here, before it could be written as approval evidence no change may carry.
-      if (kind === 'change' && via !== 'terminal') {
-        failure = {
-          code: 'APPROVAL_VOID',
-          reason: 'the change policy is confirm, and this was not approved at a terminal',
-        };
-        return { ...current, state: 'revoked', reason: failure.reason, revokedAt: at.toISOString() };
-      }
-      if (live.draftMessageId !== current.draftMessageId || live.contentDigest !== current.contentDigest) {
-        const reason =
-          kind === 'change'
-            ? 'the change shown is not the one the approval was prepared for'
-            : 'the draft changed after the preview was prepared';
-        failure = { code: 'APPROVAL_VOID', reason };
-        return { ...current, state: 'revoked', reason: failure.reason, revokedAt: at.toISOString() };
-      }
-      if (!challengeMatches(answer, current.challengeHash)) {
-        const attempts = current.challengeAttempts + 1;
-        if (attempts >= MAX_CHALLENGE_ATTEMPTS) {
-          failure = { code: 'APPROVAL_VOID', reason: 'too many wrong answers to the challenge' };
-          return {
-            ...current,
-            challengeAttempts: attempts,
-            state: 'revoked',
-            reason: failure.reason,
-            revokedAt: at.toISOString(),
+    const done = await this.#transition(
+      approvalId,
+      { kind },
+      'approve',
+      (current, outcome) => {
+        if (outcome.error) throw outcome.error;
+        if (current.state !== 'pending') throw this.#alreadyApproved(current, outcome);
+        if (!current.challengeHash)
+          throw refusalFor(current)('APPROVAL_REQUIRED', 'no challenge was issued for this approval', current);
+        const at = this.#now();
+        // A change's confirm means a person at a terminal, and nothing else approves one: a form approval is voided
+        // here, before it could be written as approval evidence no change may carry.
+        if (kind === 'change' && via !== 'terminal') {
+          failure = {
+            code: 'APPROVAL_VOID',
+            reason: 'the change policy is confirm, and this was not approved at a terminal',
           };
+          return { ...current, state: 'revoked', reason: failure.reason, revokedAt: at.toISOString() };
         }
-        failure = { code: 'APPROVAL_REQUIRED', reason: 'the challenge did not match' };
-        return { ...current, challengeAttempts: attempts };
-      }
-      // Approval starts a window of its own, and records the binding the person approved.
-      return {
-        ...current,
-        state: 'approved',
-        approvedVia: via,
-        approvedAt: at.toISOString(),
-        usableUntil: new Date(at.getTime() + (current.approvedMs ?? APPROVAL_LIFETIMES.approved)).toISOString(),
-        approvedBindingDigest: current.bindingDigest,
-        challengeHash: undefined,
-      };
-    });
+        if (live.draftMessageId !== current.draftMessageId || live.contentDigest !== current.contentDigest) {
+          const reason =
+            kind === 'change'
+              ? 'the change shown is not the one the approval was prepared for'
+              : 'the draft changed after the preview was prepared';
+          failure = { code: 'APPROVAL_VOID', reason };
+          return { ...current, state: 'revoked', reason: failure.reason, revokedAt: at.toISOString() };
+        }
+        if (!challengeMatches(answer, current.challengeHash)) {
+          const attempts = current.challengeAttempts + 1;
+          if (attempts >= MAX_CHALLENGE_ATTEMPTS) {
+            failure = { code: 'APPROVAL_VOID', reason: 'too many wrong answers to the challenge' };
+            return {
+              ...current,
+              challengeAttempts: attempts,
+              state: 'revoked',
+              reason: failure.reason,
+              revokedAt: at.toISOString(),
+            };
+          }
+          failure = { code: 'APPROVAL_REQUIRED', reason: 'the challenge did not match' };
+          return { ...current, challengeAttempts: attempts };
+        }
+        // Approval starts a window of its own, and records the binding the person approved.
+        return {
+          ...current,
+          state: 'approved',
+          approvedVia: via,
+          approvedAt: at.toISOString(),
+          usableUntil: new Date(at.getTime() + (current.approvedMs ?? APPROVAL_LIFETIMES.approved)).toISOString(),
+          approvedBindingDigest: current.bindingDigest,
+          challengeHash: undefined,
+        };
+      },
+      { usedSaid: options.usedSaid },
+    );
     const failed = failure as Failure | null;
     if (failed) throw refusedAfter(refusalFor(done.record)(failed.code, failed.reason, done.record), done);
     return done.record;
@@ -1170,6 +1190,7 @@ export class ApprovalStore {
         }
         return { ...current, state: 'sending', sendingAt: at };
       },
+      { usedSaid: options.usedSaid },
     );
     const failed = failure as Failure | null;
     if (failed) throw refusedAfter(refuse(failed.code, failed.reason, done.record), done);

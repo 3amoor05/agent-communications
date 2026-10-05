@@ -132,6 +132,37 @@ test('chat: the matching draft is claimed once, then completed; later claims are
   );
 });
 
+test('a surface that says a used send its own way is refused in its words wherever it meets one: a look before acting, a claim, a challenge and an approval (CUE-404)', async () => {
+  const { store, record } = await setup();
+  const claim = await store.claimForSend(record.approvalId, live());
+  const used = await store.complete(record.approvalId, claim.claimToken, { sentMessageId: 'sent-1' });
+  const usedSaid = (at: string) => `accepted by Example at ${at}`;
+  const words = `nothing was sent: the approval was used already: it was accepted by Example at ${used.usedAt}, message id sent-1`;
+  const inWords = (error: unknown) => {
+    assert.ok(error instanceof CommsError, String(error));
+    assert.equal(error.code, 'APPROVAL_VOID');
+    assert.equal(error.message, words);
+    assert.equal((error.details?.approval as { state?: string } | undefined)?.state, 'used');
+    return true;
+  };
+  for (const action of ['claim', 'approve'] as const) {
+    const { outcome } = await store.inspect(record.approvalId, { kind: 'send' }, { action, usedSaid });
+    inWords(outcome.error);
+  }
+  await assert.rejects(store.claimForSend(record.approvalId, live(), { usedSaid }), inWords);
+  await assert.rejects(store.issueChallenge(record.approvalId, 'send', 'darwin', { usedSaid }), inWords);
+  await assert.rejects(
+    store.approve(record.approvalId, 'terminal', LIVE_DRAFT, 'ABCD', 'send', 'darwin', { usedSaid }),
+    inWords,
+  );
+  // And "sent", where a surface says nothing: acceptance is sending, as Gmail and Slack have it.
+  const { outcome } = await store.inspect(record.approvalId, { kind: 'send' }, { action: 'claim' });
+  assert.equal(
+    outcome.error?.message,
+    `nothing was sent: the approval was used already: it was sent at ${used.usedAt}, message id sent-1`,
+  );
+});
+
 test('parallel claims from many stores ("processes"): exactly one wins', async () => {
   const { store, record, time, config } = await setup();
   const stateDir = store.directory.replace(/[/\\]approvals$/, '');

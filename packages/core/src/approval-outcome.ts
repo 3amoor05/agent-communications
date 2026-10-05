@@ -157,7 +157,19 @@ export interface OutcomeContext {
   readonly live: LiveGate | null;
   /** When it is classified: the time a derived revocation is written with. */
   readonly now: Date;
+  /** The words a used send's refusal says what became of it in, on the surface refusing it: `sentAtWords` when left out. */
+  readonly usedSaid?: UsedSaid | undefined;
 }
+
+/**
+ * What became of a used send, in the words of the surface that says it, from the time the provider accepted it (D2's
+ * used-send row): Gmail and Slack, where acceptance is sending, say it was "sent at …"; Resend's own surfaces that it
+ * was "accepted by Resend at …"; core's generic surfaces "accepted by <provider> at …".
+ */
+export type UsedSaid = (usedAt: string) => string;
+
+/** A used send, said as sent: the refusal's words where the surface gives none — acceptance is sending. */
+export const sentAtWords: UsedSaid = (usedAt) => `sent at ${usedAt}`;
 
 /** The refusal prefix and detail key of each kind: a send sends nothing, a change changes nothing, a question saves nothing. */
 function refusalOf(kind: ApprovalKind) {
@@ -564,7 +576,7 @@ function classifyV2(read: ApprovalRecord, context: OutcomeContext): ApprovalOutc
   // A revocation a look derives is not written, and so has no time of its own: the next action writes it, with its own.
   const shown = derived !== null && !acting ? { ...record, revokedAt: undefined } : record;
   const approval = objectOf(shown, state, claimable, ownerRemoved, reason);
-  const error = errorOf(record, approval, { action, live, revokedByNever });
+  const error = errorOf(record, approval, { action, live, revokedByNever, usedSaid: context.usedSaid ?? sentAtWords });
   return {
     state,
     claimable,
@@ -620,7 +632,7 @@ export function downloadClaimable(
 function errorOf(
   record: ApprovalRecord,
   approval: ApprovalObject,
-  context: { action: OutcomeAction; live: LiveGate | null; revokedByNever: boolean },
+  context: { action: OutcomeAction; live: LiveGate | null; revokedByNever: boolean; usedSaid: UsedSaid },
 ): CommsError | undefined {
   const refuse = refusalOf(record.kind);
   const download = record.kind === 'download';
@@ -680,7 +692,7 @@ function errorOf(
       }
       return refuse(
         'APPROVAL_VOID',
-        `the approval was used already: it was sent at ${record.usedAt}, message id ${record.sentMessageId}`,
+        `the approval was used already: it was ${context.usedSaid(String(record.usedAt))}, message id ${record.sentMessageId}`,
         record,
         approval,
         'Prepare a new send only for a new message.',
