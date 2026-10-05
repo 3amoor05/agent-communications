@@ -1061,9 +1061,10 @@ test('a draft is shown as what it would post, by `draft show` and `slack_draft_g
     assert.equal(shown.source, undefined, 'words it does not post are not offered as its own');
     assert.equal(shown.problem?.code, 'BAD_DATA');
     assert.equal(shown.problem?.reason, 'source-differs');
+    // For darwin, as the `cli` helper pins the command that printed it.
     assert.equal(
       shown.problem?.hint,
-      `It was changed outside agent-communications. Delete it with ${slackInlineToFill(harness.core.paths, ['draft', 'delete', draftId, '--workspace'], ['<name>'])} and compose it again.`,
+      `It was changed outside agent-communications. Delete it with ${slackInlineToFill(harness.core.paths, ['draft', 'delete', draftId, '--workspace'], ['<name>'], 'darwin')} and compose it again.`,
     );
     assert.doesNotMatch(JSON.stringify(shown), /lunch/);
 

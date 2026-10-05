@@ -111,10 +111,11 @@ test('a reaction under `confirm` waits for a person, and the approval they give 
   assert.equal(error?.code, 'APPROVAL_PENDING', 'waiting, not refused');
   const approvalId = String(error?.details?.approvalId);
   assert.match(approvalId, /^ap_/, 'and it says which approval a person has to give');
-  // This installation's own approve, located: the program is this Node and Slack's entry here, never a bare name.
+  // This installation's own approve, located: the program is this Node and Slack's entry here, never a bare name —
+  // for darwin, as the `cli` helper pins the command that printed it.
   assert.ok(
     error?.hint?.includes(
-      `ask them to run ${slackInline(harness.core.paths, ['approve', approvalId])} in their own terminal`,
+      `ask them to run ${slackInline(harness.core.paths, ['approve', approvalId], 'darwin')} in their own terminal`,
     ),
     'the command that approves it',
   );
@@ -194,7 +195,8 @@ test('a post held for approval names agent-slack’s commands, never Gmail’s',
   assert.equal(held.code, EXIT_CODES.APPROVAL, held.stdout);
   const error = held.json<Envelope<never>>().error;
   assert.equal(error?.code, 'APPROVAL_PENDING');
-  assert.ok(error?.hint?.includes(slackInline(harness.core.paths, ['approve', approvalId])), error?.hint);
+  // For darwin, as the `cli` helper pins the command that printed it.
+  assert.ok(error?.hint?.includes(slackInline(harness.core.paths, ['approve', approvalId], 'darwin')), error?.hint);
   assert.match(error?.hint ?? '', /run the same post send command again/);
   assertNoBareCommand(error?.hint ?? '');
   assert.doesNotMatch(error?.hint ?? '', /gmail|trusted client form/i, 'there is no Gmail and no form here');

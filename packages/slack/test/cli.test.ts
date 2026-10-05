@@ -890,12 +890,16 @@ test('the manifest names the other mode and what switching to it takes', async (
   const harness = await newHarness();
   const read = await cli(harness, ['manifest', '--port', '51234']);
   const paths = harness.core.paths;
-  assert.ok(read.stdout.includes(slackInline(paths, ['manifest', '--mode', 'send', '--port', '51234'])), read.stdout);
+  // For darwin, as the `cli` helper pins the command that printed it.
+  assert.ok(
+    read.stdout.includes(slackInline(paths, ['manifest', '--mode', 'send', '--port', '51234'], 'darwin')),
+    read.stdout,
+  );
   assert.match(read.stdout, /update this same app with it first/);
   const send = await cli(harness, ['manifest', '--mode', 'send', '--port', '51234']);
   assert.ok(
     send.stdout.includes(
-      slackInline(paths, ['workspace', 'mode', '<name>', 'send', '--app-updated', '--port', '51234']),
+      slackInline(paths, ['workspace', 'mode', '<name>', 'send', '--app-updated', '--port', '51234'], 'darwin'),
     ),
     send.stdout,
   );
@@ -1323,9 +1327,10 @@ test('under the confirm change policy, an agent cannot claim its own widening be
   const asked = await cli(harness, argv, { env: { CLAUDECODE: '1' } });
   const pending = pendingOf(asked);
   assert.equal(pending.policy, 'confirm');
-  // Approved under `confirm` at the person's own terminal, with this installation's own approve, located.
+  // Approved under `confirm` at the person's own terminal, with this installation's own approve, located — for darwin,
+  // as the `cli` helper pins the command that printed it.
   const hint = asked.json<Envelope<never>>().error?.hint ?? '';
-  assert.ok(hint.includes(slackInline(harness.core.paths, ['approve', pending.approvalId])), hint);
+  assert.ok(hint.includes(slackInline(harness.core.paths, ['approve', pending.approvalId], 'darwin')), hint);
   assertNoBareCommand(hint);
 
   const claimed = await cli(harness, [...argv, '--approval', pending.approvalId], { env: { CLAUDECODE: '1' } });

@@ -95,7 +95,13 @@ test('a healthy install is healthy, and nothing asks to be fixed', () => {
 });
 
 test('no workspaces is a warning with the command that connects one', () => {
-  const result = doctor({ config: config({}), now: NOW, handoffs: HANDOFFS, bundles: new Map() });
+  // POSIX text, as the sibling test above pins it: Windows quotes `51234`, which a word starting with a digit needs.
+  const result = doctor({
+    config: config({}),
+    now: NOW,
+    handoffs: slackHandoffs(TEST_PATHS, 'darwin'),
+    bundles: new Map(),
+  });
   const check = find(result, 'workspaces');
   assert.equal(check?.status, 'warn');
   // Both halves: `workspace add` needs a Client ID that does not exist until an app does, so a fix naming only
