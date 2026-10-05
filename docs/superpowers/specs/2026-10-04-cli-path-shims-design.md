@@ -1,6 +1,6 @@
 # CUE-403 — runnable CLI handoffs from the running installation — design
 
-Status: **proposed for 0.13.1; revised after round 4 (6 P1, 4 P2, 1 P3), 2026-10-05. No implementation is in
+Status: **proposed for 0.13.1; revised after round 5 (2 P1, 2 P2), 2026-10-05. No implementation is in
 this change.**
 
 ## 1. What is being fixed
@@ -42,17 +42,18 @@ sending or change-policy semantics.
 
 ## 3. Decisions
 
-### D1. One structured locator; three resolution directions
+### D1. One structured locator; lockstep resolution in every direction
 
-Core owns `locateCliCommand`. A request supplies the calling package's resolver URL, the target channel manifest,
-argument words, whether the command needs the data directory, and the output platform. A successful result contains
-launcher words and their shell renderings; a failure contains a reason, the package to install and the equivalent MCP
-tool or action. Callers never supply a binary as word zero and never quote a line themselves.
+Core owns `locateCliCommand`. A request supplies the calling package's resolver URL, the target manifest, argument
+words, whether the command needs the data directory, and the output platform. Success is a `PrintedCommand` (D5);
+failure names the reason, package and equivalent MCP tool. Callers never supply word zero or quote a line.
 
-For an absolute Node-and-entry launch, the interpreter is `process.execPath`. The only retained `process.execArgv`
-flags are `--experimental-strip-types`, and `--experimental-transform-types` when the running source invocation used
-it. Debug, test, eval, preload/loader, condition, warning, source-map, title and memory flags are not CLI requirements.
-The existing local launcher shows why source needs type stripping (`packages/core/src/mcp-install.ts:546-556`).
+The interpreter rule is one rule: the running package's own CLI and channel→core use `process.execPath`; a command
+resolved from a registration uses that registration's recorded interpreter when it has one, otherwise
+`process.execPath`. The only retained `process.execArgv` flags are `--experimental-strip-types`, and
+`--experimental-transform-types` when the running source invocation used it. Debug, test, eval, preload/loader,
+condition, warning, source-map, title and memory flags are not CLI requirements. The existing local launcher shows why
+source needs type stripping (`packages/core/src/mcp-install.ts:546-556`).
 
 Resolution is directional:
 
@@ -66,17 +67,22 @@ Resolution is directional:
    (`packages/gmail/package.json:44-45`, `packages/slack/package.json:41-42`,
    `packages/resend/package.json:41-42`, `packages/whatsapp/package.json:41-42`). Gmail's server-only wrapper still
    supplies a resolver URL from its Gmail dependency (`packages/gmail-mcp/package.json:41-43`).
-3. **Core to a channel.** Core scans the client registrations it can read, filters registrations belonging to the
-   manifest product with the existing product recogniser, and sorts usable matches by client, config path and server
-   name for a deterministic choice. For a managed registration it reuses the registration's interpreter and checked
-   runtime CLI entry, dropping the server-only `mcp` and narrowing arguments. For an npx registration it uses the
-   registered npx executable and emits `npx -y @agentcomms/<channel>@<registered-version> …`; Gmail uses
-   `@agentcomms/gmail`, not its server-only wrapper. A registration with an absent entry, an unpinned npx spec, an
-   unreadable command, or an unrecognised launcher is not usable. With no usable registration, the result contains no
-   shell line: it names `@agentcomms/<channel>` and the channel MCP tool/action instead. Core has no channel dependency
-   to follow (`packages/core/src/operations/servers.ts:107-123`), while managed and npx registrations already expose
-   their version shapes (`packages/core/src/mcp-install.ts:338-350`,
-   `packages/core/src/operations/servers.ts:575-608`).
+3. **Any product to another product.** Core and every channel use the same core registration scanner; a channel can do
+   so because it has the D4 runtime dependency on core. The scanner filters with the existing product recogniser and
+   resolves the registration's version. It may print that product's command **only when that version equals the
+   printing package's own version**. A different or unknown version is unusable: in particular 0.13.0 rejects the new
+   path options in core's strict parser and Gmail's program (`packages/core/src/cli.ts:157-168`,
+   `packages/gmail/src/cli/program.ts:159-173`). Among matching registrations the priority is managed, then global,
+   then npx; within a class sort by client, config path, server name, command and arguments.
+
+   A managed registration supplies its checked runtime CLI entry; a global registration supplies the checked package
+   CLI entry resolved from its absolute launcher; both drop server-only `mcp` and narrowing arguments. An npx
+   registration supplies the registered absolute npx executable and the target CLI package pinned to the same version
+   (`@agentcomms/gmail`, not its server-only wrapper). An absent entry, unpinned spec, unreadable command, unrecognised
+   launcher or version mismatch is never used. If none matches, the hint uses an absolute, own/channel→core
+   `agentcomms update` command when that can be located; otherwise it prints no command and names the target package
+   and MCP tool. Managed and npx registrations already expose version shapes (`packages/core/src/mcp-install.ts:338-350`,
+   `packages/core/src/operations/servers.ts:575-612`).
 
 Before any file entry is returned, the locator `realpath`s both package root and entry, requires a readable regular
 file, and checks containment by path segments after realpath. A missing manifest binary, a mismatch between
@@ -84,11 +90,12 @@ file, and checks containment by path segments after realpath. A missing manifest
 version mismatch returns no command. Only the interpreter and a file entry are necessarily absolute; subcommands,
 flags, ids and an npx package spec are ordinary argument words.
 
-The same resolver handles manifest-generated approval-kind corrections. The current corrections concatenate every
-manifest's approve string (`packages/core/src/channel-words.ts:39-52`, `packages/core/src/changes.ts:314-332`,
-`packages/core/src/approvals.ts:644-655`); after this change each alternative is located separately. An unavailable
-alternative names its package and tells the person to return to the originating channel MCP action, never to type a
-bare approve command.
+The same scan defines channel→another-channel approval-kind corrections. Each channel manifest gets one alternative:
+its absolute approve command when a same-version registration resolves, otherwise its product name and a generic
+instruction to use that product's MCP tool. The fallback does not claim to know the originating tool, because send
+approval records carry no origin channel (`packages/core/src/approvals.ts:302-316`). The current corrections instead
+concatenate every manifest's bare approve string (`packages/core/src/channel-words.ts:39-52`,
+`packages/core/src/changes.ts:314-332`, `packages/core/src/approvals.ts:644-655`).
 
 ### D2. Resolved paths travel as global options, never environment assignments
 
@@ -116,38 +123,23 @@ MCP tool and shared operation (`capabilities.json:1-2`). The parity check contin
 tool names, not global flags (`scripts/parity.mjs:317-333`); its CLI driver must exercise every row once with the path
 flags to prove parsing precedes operation dispatch.
 
-### D3. Render for one Windows shell at a time
+### D3. Keep the existing tested Windows rendering contract
 
-POSIX keeps its single-quote renderer. Windows returns a primary **PowerShell** line and, when possible, a labelled
-**cmd.exe alternative**:
+POSIX keeps its single-quote renderer. Windows uses the existing `shellCommand` rules: emit one line only when the
+same line delivers the same words through cmd.exe, Windows PowerShell 5.1, PowerShell 7 and `.cmd` re-parsing;
+otherwise emit the inert JSON word array plus the instruction to type it with quoting for the person's shell. That
+contract already models legacy empty-argument/trailing-backslash behaviour and cmd delayed expansion
+(`packages/core/src/cli-runtime.ts:93-121`, `packages/core/test/cli.test.ts:1342-1419`). There are no new
+PowerShell- or cmd-specific renderers.
 
-- PowerShell is `& '<word>' '<word>' …`. Every word is single-quoted and an apostrophe is doubled. `$`, `%`, `!`, a
-  backtick, an empty word and trailing backslashes are literal in this form.
-- cmd.exe double-quotes every word. The run of backslashes before the closing quote is doubled. A word containing `%`
-  or `"` has no safe form under this contract, so the cmd.exe alternative is omitted and the result says which word
-  made it unavailable. PowerShell remains present.
-
-For all hostile characters together, the exact primary result is:
-
-```powershell
-& 'C:\Agent$Data\node.exe' 'C:\Agent''s suite\core\dist\cli.mjs' '--config-dir' 'C:\100%!`store\' '--state-dir' 'C:\Agent''s café state\' 'approve' 'ap_example'
-```
-
-The cmd.exe alternative is omitted with: `cmd.exe alternative unavailable: the --config-dir value contains %`.
-Without `%` or a double quote, trailing backslashes are doubled exactly:
-
-```bat
-"C:\Agent$Data\node.exe" "C:\Suite\core\dist\cli.mjs" "--config-dir" "C:\Agent!`store\\" "--state-dir" "C:\Café State\\" "approve" "ap_example"
-```
-
-The equivalent POSIX shape remains:
-
-```sh
-'/opt/Agent'\''s/node' '/opt/Agent'\''s/core/dist/cli.mjs' --config-dir '/opt/Agent'\''s/config' --state-dir '/opt/Agent'\''s/state' approve ap_example
-```
-
-`ShellCommand`, `inlineCommand` and `commandText` carry the labelled renderings rather than pretending one Windows
-line is universal. They never fall back to runnable-looking JSON for a legal Windows path.
+Resolved directory option values have redundant trailing separators removed before rendering (a filesystem root
+keeps its root separator). A legal Windows path can still have no common-shell line when it contains `$`, `%`, `!`,
+a backtick, a curly double quote, a Unicode control/format character, or an unspaced `&`, `^`, `(` or `)`; the same
+refusal covers argument words containing `|`, `<` or `>` in that position. Empty words, words ending in `\`, and
+words containing a straight double quote are also refused. The person sees the exact argv as non-runnable JSON and
+the manual-typing instruction, not a partial command
+(`packages/core/src/cli-runtime.ts:136-191`). An npx registration, including an absolute `npx.cmd` on Windows, goes
+through these same rules (`packages/core/src/mcp-install.ts:1017-1024`).
 
 ### D4. Packaging follows the runtime edge
 
@@ -163,7 +155,7 @@ It currently packs only direct workspace edges (`scripts/verify-package.mjs:96-1
 (`scripts/verify-package.mjs:135-150`). Thus verifying `gmail-mcp` packs Gmail and Gmail's local core tarball rather
 than asking the registry for an unpublished core.
 
-### D5. Every runtime handoff migrates; a manifest-derived lint keeps it migrated
+### D5. Every runtime handoff migrates; command-bearing output is branded
 
 The implementation keeps a checked, table-driven inventory with one row per runtime handoff and an assertion for the
 row's command or no-command fallback. The audited groups are:
@@ -224,26 +216,34 @@ row's command or no-command fallback. The audited groups are:
   `packages/resend/src/operations/send.ts:100-365`, `packages/resend/src/operations/send.ts:516-565`,
   `packages/resend/src/operations/send.ts:669-675`, `packages/resend/src/operations/read.ts:145-160`,
   `packages/resend/src/operations/doctor.ts:53-58`, `packages/resend/src/operations/doctor.ts:144`,
-  `packages/resend/src/cli/render.ts:29`, `packages/resend/src/cli/program.ts:279-770`).
+  `packages/resend/src/cli/render.ts:29`, `packages/resend/src/cli/program.ts:279-770`,
+  `packages/resend/src/mcp/server.ts:98`, `packages/resend/src/mcp/server.ts:514`).
 - **WhatsApp:** account, sync/index, config, chat-list, approval and permission handoffs
   (`packages/whatsapp/src/operations/accounts.ts:39-133`, `packages/whatsapp/src/config.ts:114-163`,
   `packages/whatsapp/src/index-db.ts:310-322`, `packages/whatsapp/src/operations/chat-lists.ts:99-119`,
   `packages/whatsapp/src/operations/status.ts:144`, `packages/whatsapp/src/operations/sync.ts:25-28`,
   `packages/whatsapp/src/source/snapshot.ts:120-125`, `packages/whatsapp/src/cli/render.ts:73`,
-  `packages/whatsapp/src/cli/program.ts:416-604`).
+  `packages/whatsapp/src/cli/program.ts:416-604`, `packages/whatsapp/src/mcp/server.ts:70`).
+
+The inventory also includes the core MCP instructions (`packages/core/src/mcp/server.ts:114`) and every MCP tool
+description that tells a person what to run. Instructions and descriptions say this generically — for example, "run
+the approve command each result gives" — rather than naming a bare CLI.
 
 The search also found incomplete argument-only `shellCommand` values. The fragments at
 `packages/core/src/operations/organisations.ts:394`, `packages/core/src/operations/organisations.ts:578-582`,
 `packages/gmail/src/operations/clients.ts:353-356` and `packages/core/src/cli.ts:896-903` become prose about options
 or words appended to a complete located command; they are never rendered as commands themselves.
 
-The lint reads manifest binaries through the channel registry. Using a syntax tree, it rejects any manifest binary
-which appears as a word anywhere inside a string or template literal in runtime source, not merely at the beginning,
-and rejects every `shellCommand` list that is empty or whose first word is an option/fragment. Its explicit allowlist
-contains only reviewed help/usage/grammar files and a reason per file; operation results, errors, hints, fixes and
-`nextStep` strings are never allowlisted. A fixture-only manifest proves a new channel's binary is covered. This
-replaces the current regex lint, which accepts bare names passed to `shellCommand`
-(`test/printed-command-construction.test.mjs:7-16`, `test/printed-command-construction.test.mjs:61-99`).
+`PrintedCommand` is an opaque branded type whose constructor and brand stay private to the locator module.
+`inlineCommand` accepts one and returns branded command text. Every result or error field that tells a person what to
+run — including `hint`, `fix`, `nextStep` and `command` variants — accepts only `PrintedCommand` or text built by
+`inlineCommand` from one. The type checker therefore rejects a literal binary and a command assembled dynamically
+from `manifest.binary`; a compile-time inventory enumerates those fields from the exported result/error types and
+constructs every fixture through the locator.
+
+Protocol identities are outside those types: MCP server names and `package.json` bin names remain ordinary identity
+fields and cannot flow into a command-bearing result field without the brand. The literal-string lint and its file
+allowlist are dropped; identity is excluded by construction, not by filename.
 
 ### D6. The guarantee is time-of-print identity, not immutability
 
@@ -288,19 +288,21 @@ authoritative data roots, and CLI-MCP parity for the preference.
 1. **Own locator matrix:** managed, npx, global and checkout installations on POSIX and Windows; only the two allowed
    Node flags survive. Checkout fixtures have no `dist`, then a stale `dist`, and both select `src/cli.ts`. Gmail's
    wrapper resolves Gmail. Manifest/bin mismatch, missing, unreadable and non-file targets fail with no bare fallback.
-2. **Direction matrix:** channel-to-core selects the channel's exact runtime dependency and rejects version drift.
-   Standalone core prints Gmail and Slack handoffs from managed and npx registrations; with no usable registration,
-   and with only an unreadable registration, it names the package and MCP action and prints no command. Include
-   manifest-generated approval-kind corrections.
+2. **Direction and version matrix:** channel→core selects the exact runtime dependency with core `dist` absent and
+   stale, always choosing source, and rejects version drift. Core→channel and channel→another-channel cover only a
+   0.13.0 registration, mixed old/current registrations, every matching launcher class and deterministic tie-breaks.
+   Approval-kind corrections include send records with no origin metadata and assert the generic per-product MCP
+   fallback.
 3. **Paths:** every CLI accepts the three global options before dispatch. Execute a handoff in a fresh shell with
    conflicting `AGENT_COMMS_*`, XDG, home/AppData values and another cwd; it reports the printing process's same
    config/state/data directories. Relative source overrides are printed as resolved absolutes. Commands which do not
-   use data omit `--data-dir`; runtime/install/prune/update commands include it. No output contains an environment
-   assignment.
-4. **Rendering:** byte-exact POSIX and PowerShell output for spaces, apostrophes, non-ASCII, `$`, `%`, `!`, backticks,
-   empty words and trailing backslashes. cmd.exe output doubles trailing backslashes; `%` and `"` each omit only the
-   cmd alternative with the stated reason. Running the PowerShell form and every available cmd form leaves sentinel
-   parent/session environment variables unchanged, including on failure.
+   use data omit `--data-dir`; runtime/install/prune/update plus `doctor`, `channels`, setup and repair handoffs are
+   classified explicitly. No output contains an environment assignment.
+4. **Rendering:** exercise the existing Windows contract through Windows PowerShell 5.1 and PowerShell 7 against both
+   `node.exe` and absolute `npx.cmd`, and through cmd.exe with delayed expansion enabled. Cover empty arguments,
+   trailing backslashes, `%`, `!`, directory-separator normalisation, safe lines and the inert-JSON/manual-instruction
+   fallback byte for byte. POSIX quoting remains byte-exact. Shell runs leave sentinel parent/session environment
+   variables unchanged, including on failure.
 5. **Containment and mutation:** lexical and realpath symlink escapes, root-prefix siblings and post-print replacement.
    Delete an npx cache before execution and assert an exact-version run or clean non-zero failure. Upgrade a fake global
    install in place and assert the newer fixture runs. A hostile test `NODE_OPTIONS` preloader demonstrates the
@@ -308,10 +310,10 @@ authoritative data roots, and CLI-MCP parity for the preference.
 6. **Packaging:** the verifier's transitive closure is deduplicated and ordered. The packed `gmail-mcp` consumer is
    installed with local Gmail and core tarballs in an isolated cache and performs its existing handshake without a
    registry copy of the candidate release.
-7. **Lint and inventory:** a fixture manifest adds a binary automatically; binary words embedded at the beginning or
-   middle of strings/templates fail outside the reasoned help/grammar allowlist; incomplete `shellCommand` word lists
-   fail. A table-driven migration test iterates every D5 row—no sampling—and asserts a located runnable result or its
-   specified package/MCP fallback for both CLI and MCP surfaces where the site serves both.
+7. **Types and inventory:** compile-time fixtures enumerate every command-bearing field from result/error types and
+   reject literals, option fragments and dynamically manifest-derived bare commands. Runtime fixtures cover every D5
+   row without sampling, including MCP instructions and tool descriptions. Separate fixtures prove MCP server names
+   and package bin names remain legal protocol identities while never satisfying `PrintedCommand`.
 8. **End to end:** prepare harmless change approvals through CLI and MCP, execute each printed command in a real shell
    with no suite binary on `PATH`, and observe the same temporary approval store. Run POSIX on POSIX and PowerShell plus
    the available cmd alternative on Windows. No provider transport is called.
