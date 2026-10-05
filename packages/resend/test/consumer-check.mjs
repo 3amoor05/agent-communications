@@ -155,6 +155,8 @@ try {
     'resend_send_execute',
     'resend_send_prepare',
     'resend_send_status',
+    // Where an approval stands, now or once it changes: it only looks.
+    'resend_send_wait',
     'resend_suppressions',
   ]);
   assert.ok(

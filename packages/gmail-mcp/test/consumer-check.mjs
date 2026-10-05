@@ -131,6 +131,8 @@ assert.deepEqual(names, [
   'gmail_send_cancel',
   'gmail_send_list',
   'gmail_send_prepare',
+  // Where an approval stands, now or once it changes: it only looks.
+  'gmail_send_wait',
   'gmail_sendas_list',
   'gmail_setup',
   'gmail_thread_get',

@@ -142,6 +142,8 @@ try {
   const tools = await waitFor(2);
   const names = tools.result.tools.map((tool) => tool.name).sort();
   assert.deepEqual(names, [
+    // Where an approval stands, now or once it changes: it only looks.
+    'slack_approval_wait',
     'slack_channels',
     'slack_doctor',
     // Local drafts only: none of the five reaches Slack.
@@ -177,8 +179,9 @@ try {
     'slack_workspace_show',
     'slack_workspaces_list',
   ]);
+  // The wait is named for the approval it waits on, and only looks (design 2026-10-05 §D3): it approves nothing.
   assert.ok(
-    names.every((name) => !/approv/.test(name)),
+    names.every((name) => name === 'slack_approval_wait' || !/approv/.test(name)),
     'no tool approves: under `confirm` that is a person at a terminal',
   );
 } finally {
