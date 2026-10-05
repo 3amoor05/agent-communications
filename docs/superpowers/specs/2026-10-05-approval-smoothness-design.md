@@ -1,6 +1,6 @@
 # CUE-404 — approving a send without fighting the clock — design
 
-Status: **revised after round 19 (2 P2, 1 P3, all addressed)**, 2026-10-05, from Linear CUE-404 (High; the
+Status: **revised after round 20 (1 P2, 2 P3, all addressed)**, 2026-10-05, from Linear CUE-404 (High; the
 owner: "this is very not smooth") and a cited research pass over this repository, the MCP specification and the
 clients' documentation. Depends on CUE-403 (the CLIs on PATH,
 [its spec](2026-10-04-cli-path-shims-design.md)) for every printed terminal command to work; ships after it.
@@ -117,8 +117,9 @@ execution already use — `{ approvalId, inboxId, inboxSub, draftId, draftMessag
 used by claim at `approvals.ts:725` and by Gmail at `packages/gmail/src/operations/send.ts:472`). There is no second
 copy: no stored `groupKey`. For a download the object is `{ "v": 2, "kind": "download", "contentDigest", "profile":
 { "pendingMs": 1800000, "policy", "requiredPolicy" }, "identity", "offered", "listing" }` — `policy` and
-`requiredPolicy` being the immutable asked-under values stored at creation (`approvals.ts:946`), which decide whether
-an answer may be relayed through chat (`approvals.ts:204`), and `listing` the stored listing array in its stored order,
+`requiredPolicy` being the immutable asked-under values stored at creation (`approvals.ts:946`) — `requiredPolicy` is the
+one that decides, with the live policy, whether an answer may be relayed through chat (`approvals.ts:204`); `policy` is
+descriptive and bound only so it cannot be rewritten — and `listing` the stored listing array in its stored order,
 each entry exactly the stored `ListedFile` `{ "name": string, "size": number | null, "renamed"?: RenameReason,
 "flags"?: string[] }` with absent optional members omitted; the record's own `listing` is optional
 (`approvals.ts:126`), and when it is absent the `listing` key is omitted from the binding object too —, where `offered` is the canonical list of folder meanings and paths
@@ -127,7 +128,8 @@ folders object `{ "downloads": "<absolute path>", "current": "<absolute path>" }
 written at creation (`approvals.ts:120, 933`) — not the rendered options, canonicalised by `canonicalJson`. The download
 binding also covers the exact stored `listing` (each entry's displayed name, size, rename reason and flags — today
 excluded from `downloadDigest`, `approvals.ts:150`, though terminal and form approval render it and derive warnings
-from it, `save-destination.ts:1260`), and every read requires `download.names` to equal the listing's names in order;
+from it, `save-destination.ts:1260`), and every read on which a `listing` is stored requires `download.names` to equal the listing's names in order (no
+comparison when the record has no `listing`);
 a mismatch or any altered listing field is `corrupt` before anything is rendered. Every read also requires the stored
 `approvalId` to equal the id in the record's file name; a mismatch is `corrupt` before any lock, write or claim marker
 touches another id (`approvals.ts:494, 570, 801`). Any stored identity field or offered folder altered after creation therefore fails recomputation, and every
@@ -314,7 +316,7 @@ be claimed. Downloads retain their public `answered` classification for stored `
 | `revoked` | `APPROVAL_VOID` with its reason; an explicit decline is “declined”, while cancellation is not a revoke |
 | download pending | `pending` until answered, expired or a wait times out; under `chat` the answer may be relayed, under `confirm` it comes from the terminal or trusted form |
 | download `approved` or `used` | `answered`, with the recorded destination choice when the answer came from the terminal or a form; a direct-chat `used` download says `answered (in chat)` with no destination and original creation-relative expiry; never `approved` with a `usableUntil` |
-| download `expired` | `expired` / `APPROVAL_EXPIRED`: a question with no recorded answer says it **expired before it was answered**; one answered at the terminal or in a form that then expired unused says it **was answered at <time> and expired before it was used**; current download state handling is separate already (`packages/core/src/approvals.ts:591-607, 972-1004`) |
+| download `expired` | `expired` / `APPROVAL_EXPIRED`: a question with no recorded answer says it **expired before it was answered**; one answered at the terminal or in a form that then expired unused says it **was answered and expired before it was used** (no answer time is stored, so none is reported); current download state handling is separate already (`packages/core/src/approvals.ts:591-607, 972-1004`) |
 
 `SEND_OUTCOME_UNKNOWN` is added to the one registry with exit **10**, `retryable: false`, and summary **“the send
 outcome is unknown; check before sending again”**. Exit 10 is the existing approval/send-refusal class, while the
@@ -839,6 +841,9 @@ lookup failures stay attached to their draft and do not raise the concurrency or
 
 ## 5. Tests owed
 
+- **Round-20 cases:** distinct answer, deadline and observation times, then restart: status, wait and list say
+  "answered and expired before it was used" with no answer time; golden and round-trip cases for an absent `listing`
+  (no `listing` key, no name comparison), an empty `listing` and a populated one.
 - **Round-19 cases:** golden canonical-JSON and SHA-256 vectors for the download object with and without the optional
   listing members; tampering with any listing field before a direct-chat claim and before a save → `corrupt`, nothing
   saved; a confirm question followed by live-policy loosening stays confirm, and a valid-value mutation of the stored
