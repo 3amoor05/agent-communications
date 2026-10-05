@@ -316,7 +316,7 @@ test('profile read add snapshots the selected app and neutralised display, witho
       mode: undefined,
       detached: false,
     }),
-    { surface: 'cli' },
+    { channel: 'slack', surface: 'cli' },
   );
   assert.equal(outcome.status, 'applied');
   if (outcome.status !== 'applied') return;
@@ -352,7 +352,7 @@ test('profile send add still needs widening approval and snapshots the send app'
   const harness = await newOrganisationHarness({ port, sendAppId: 'A0SEND' });
   const context = harness.context();
   const change = connectWorkspace(context, { alias: 'rgc/slack', mode: 'send', detached: false });
-  const prepared = await gatedChange(harness.core, change, { surface: 'cli' });
+  const prepared = await gatedChange(harness.core, change, { channel: 'slack', surface: 'cli' });
   assert.equal(prepared.status, 'approval-required');
   if (prepared.status !== 'approval-required') return;
   assert.deepEqual(await context.flows.pending(), []);
@@ -360,6 +360,7 @@ test('profile send add still needs widening approval and snapshots the send app'
   await finishChangeApproval(harness.core, prepared.prepared.approvalId, prompt.challenge, { surface: 'cli' });
   const before = await secretFiles(harness.core.paths.secretsDir);
   const started = await gatedChange(harness.core, change, {
+    channel: 'slack',
     surface: 'cli',
     approvalId: prepared.prepared.approvalId,
   });
@@ -416,7 +417,7 @@ test('a send approval is void when the same-client profile target changes before
     const harness = await newOrganisationHarness({ port: await freePort(), sendAppId: 'A0SEND' });
     const context = harness.context();
     const change = connectWorkspace(context, { alias: 'rgc/slack', mode: 'send', detached: false });
-    const prepared = await gatedChange(harness.core, change, { surface: 'cli' });
+    const prepared = await gatedChange(harness.core, change, { channel: 'slack', surface: 'cli' });
     assert.equal(prepared.status, 'approval-required');
     if (prepared.status !== 'approval-required') continue;
     const prompt = await beginChangeApproval(harness.core, prepared.prepared.approvalId, { surface: 'cli' });
@@ -503,10 +504,13 @@ test('explicit client id keeps the own-app path even when it equals the profile 
   const context = harness.context();
   const own = { alias: 'rgc/slack', mode: 'read', clientId: READ_CLIENT_ID, detached: false } as const;
   await assert.rejects(
-    gatedChange(harness.core, connectWorkspace(context, own), { surface: 'cli' }),
+    gatedChange(harness.core, connectWorkspace(context, own), { channel: 'slack', surface: 'cli' }),
     is('USAGE', /port/),
   );
-  const outcome = await gatedChange(harness.core, connectWorkspace(context, { ...own, port }), { surface: 'cli' });
+  const outcome = await gatedChange(harness.core, connectWorkspace(context, { ...own, port }), {
+    channel: 'slack',
+    surface: 'cli',
+  });
   assert.equal(outcome.status, 'applied');
   if (outcome.status !== 'applied') return;
   try {

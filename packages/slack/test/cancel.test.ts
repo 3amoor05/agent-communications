@@ -407,7 +407,7 @@ test('a post cancelled while its claim waits for the approval store posts nothin
   // Approved by a person at a terminal, so "as it was" is a state no claim could put back by itself.
   const record = await store.get(draft.approvalId);
   assert.ok(record);
-  const live = { draftMessageId: record.draftMessageId, digest: record.digest };
+  const live = { draftMessageId: record.draftMessageId, contentDigest: record.contentDigest };
   await store.approve(draft.approvalId, 'terminal', live, await store.issueChallenge(draft.approvalId));
 
   /*

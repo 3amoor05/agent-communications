@@ -33,7 +33,10 @@ function updateOut(harness: Harness, current: { registered: string[]; global: st
 
 /** An approval this machine holds, prepared before the update was found — as a send approved moments before is. */
 async function heldApproval(harness: Harness): Promise<string> {
-  const prepared = await gatedChange(harness.core, updateLaterChange(harness.core), { surface: 'mcp' });
+  const prepared = await gatedChange(harness.core, updateLaterChange(harness.core), {
+    channel: 'resend',
+    surface: 'mcp',
+  });
   assert.equal(prepared.status, 'approval-required');
   return (prepared as { prepared: { approvalId: string } }).prepared.approvalId;
 }
@@ -44,8 +47,10 @@ async function heldApproval(harness: Harness): Promise<string> {
  */
 async function sendApproval(harness: Harness, accountId: string, used = false): Promise<string> {
   const expect = { to: ['someone@example.test'], cc: [], bcc: [], subject: 'Hello' };
-  const draft = { draftMessageId: 'revision_one', digest: 'a'.repeat(64) };
+  const draft = { draftMessageId: 'revision_one', contentDigest: 'a'.repeat(64) };
   const record = await harness.core.approvals.create({
+    channel: 'resend',
+    sendEpoch: 0,
     inboxId: accountId,
     draftId: 'draft_one',
     ...draft,

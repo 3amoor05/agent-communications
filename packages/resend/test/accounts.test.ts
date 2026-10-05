@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { afterEach, test } from 'node:test';
 import { CommsError } from '@agentcomms/core';
+import {
+  readV1Record,
+  v1RecordPath,
+  v1SendRecord,
+  writeV1Record,
+} from '../../core/test/fixtures/approval-v1-0.13.0.ts';
 import { secretRefFor } from '../src/accounts.ts';
 import { ResendContext } from '../src/context.ts';
 import { runDoctor } from '../src/operations/doctor.ts';
@@ -154,6 +161,62 @@ test('removing an account is a change a person approves, and takes the key out o
   assert.equal(second.code, 0, second.stdout);
   assert.equal(await (await harness.core.secrets('file')).get(account.secretRef), null);
   assert.equal(await harness.context().accounts.find('acme/resend'), null);
+});
+
+test('removing a Resend account retires its v1 approvals in v1 shape', async () => {
+  harness = await newHarness();
+  const account = await harness.addAccount({ name: 'acme/resend', mode: 'send' });
+  // Two send approvals 0.13.0 prepared for this account and left open: one pending, one a person approved.
+  const ids = [`ap_${'0'.repeat(25)}1`, `ap_${'0'.repeat(25)}2`];
+  const createdAt = new Date(Date.now() - 60 * 1000).toISOString();
+  const originals = ids.map((approvalId, index) =>
+    v1SendRecord({
+      approvalId,
+      inboxId: account.id,
+      inboxSub: account.userId,
+      draftId: `rp_${'0'.repeat(25)}${index}`,
+      draftMessageId: 'e'.repeat(64),
+      digest: 'e'.repeat(64),
+      expect: { to: ['sam@partner.test'], cc: [], bcc: [], subject: 'Phase 2 plan' },
+      createdAt,
+      ...(index === 1
+        ? {
+            policy: 'confirm' as const,
+            state: 'approved',
+            approvedDigest: 'e'.repeat(64),
+            approvedVia: 'terminal' as const,
+          }
+        : {}),
+    }),
+  );
+  for (const record of originals) writeV1Record(harness.core.paths.stateDir, record);
+
+  const first = await harness.cli(['--json', 'account', 'remove', 'acme/resend'], { env: { CLAUDECODE: '1' } });
+  assert.equal(first.code, 10);
+  const approvalId = String(first.json().error?.details?.approvalId);
+  const second = await harness.cli(['--json', 'account', 'remove', 'acme/resend', '--approval', approvalId], {
+    env: { CLAUDECODE: '1' },
+  });
+  assert.equal(second.code, 0, second.stdout);
+  const removed = second.json<{ approvalsVoided: string[] }>().data;
+  assert.deepEqual([...(removed?.approvalsVoided ?? [])].sort(), ids, 'both are listed as voided');
+
+  for (const [index, original] of originals.entries()) {
+    const id = ids[index] as string;
+    const after = JSON.parse(readV1Record(harness.core.paths.stateDir, id)) as Record<string, unknown>;
+    assert.equal(after.digestVersion, 1, `${id}: still version 1`);
+    assert.equal('kind' in after, false, `${id}: a v1 send stays without a kind`);
+    assert.deepStrictEqual(after, {
+      ...original,
+      state: 'revoked',
+      reason: 'the account was removed',
+      updatedAt: after.updatedAt,
+    });
+    assert.notEqual(after.updatedAt, original.updatedAt);
+    assert.equal(existsSync(v1RecordPath(harness.core.paths.stateDir, id, '.claim')), false, `${id}: no claim marker`);
+  }
+  const row = (await harness.audit()).find((entry) => entry.operation === 'resend.account.remove');
+  assert.deepEqual([...((row?.ids as { approvalIds?: string[] } | undefined)?.approvalIds ?? [])].sort(), ids);
 });
 
 test('tightening a send policy applies at once; loosening it, or read → send, waits for a person', async () => {

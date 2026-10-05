@@ -121,7 +121,10 @@ test('an approval comms_server_install prepared is claimed by WhatsApp’s mcp i
     launcher: 'npx',
     noVerify: true,
   } as const;
-  const asked = await gatedChange(core, serverInstallChange(core, harness.env, request), { surface: 'mcp' });
+  const asked = await gatedChange(core, serverInstallChange(core, harness.env, request), {
+    channel: 'whatsapp',
+    surface: 'mcp',
+  });
   assert.equal(asked.status, 'approval-required');
   const approvalId = asked.status === 'approval-required' ? asked.prepared.approvalId : '';
   const claimed = await harness.cli([
@@ -351,11 +354,13 @@ test('a send’s approval is not approved here, and the refusal names every comm
   const core = openCore({ env: harness.personEnv });
   // A send approval as a sending channel's prepare writes one.
   const record = await core.approvals.create({
+    channel: 'resend',
     inboxId: 'acc_RRRRRRRRRRRRRRRR',
     inboxSub: 'key_12345678',
     draftId: 'rsd_x',
     draftMessageId: 'd',
-    digest: 'd',
+    contentDigest: 'd',
+    sendEpoch: 0,
     policy: 'confirm',
     requiredPolicy: 'confirm',
     riskFlags: [],

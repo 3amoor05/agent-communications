@@ -491,6 +491,7 @@ a macOS dialog may be waiting) · 77 permission needed (macOS privacy) · 78 con
     rerun: readonly string[],
   ): Promise<T> =>
     gatedChangeAtTerminal(context.core, change, {
+      channel: 'whatsapp',
       approvalId: flags.approval === undefined ? undefined : String(flags.approval),
       env,
       output: output(),

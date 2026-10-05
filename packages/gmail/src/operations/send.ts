@@ -6,11 +6,14 @@ import {
   domainOf,
   type Expectation,
   handoffSentence,
+  isCurrentDigestVersion,
   type MessagePreview,
+  otherVersionRefusal,
   publicView,
   renderMessagePreview,
   resolveName,
   type SendPolicy,
+  sendEpochOf,
   stricterPolicy,
 } from '@agentcomms/core';
 import type { GmailContext, ResolvedInbox } from '../context.ts';
@@ -418,11 +421,13 @@ export async function prepareSend(context: GmailContext, alias: string, draftId:
   const effectivePolicy = stricterPolicy(livePolicy, requiredPolicy);
 
   const record = await context.core.approvals.create({
+    channel: 'gmail',
     inboxId: resolved.inbox.id,
     inboxSub: resolved.inbox.sub,
     draftId,
     draftMessageId,
-    digest: analysis.digest,
+    contentDigest: analysis.digest,
+    sendEpoch: sendEpochOf(config, resolved.inbox.id),
     policy: livePolicy,
     requiredPolicy,
     riskFlags: flags,
@@ -483,6 +488,9 @@ export async function beginApproval(context: GmailContext, approvalId: string): 
       hint: 'Approvals last ten minutes. Prepare the send again.',
     });
   }
+  // A record an earlier release prepared is refused before the draft is read: this release cannot approve it, and an
+  // integrity check of it here would void it by rules it was not written under.
+  if (!isCurrentDigestVersion(record)) throw otherVersionRefusal(record);
   const config = await context.config();
   const entry = Object.entries(config.inboxes).find(([, inbox]) => inbox.id === record.inboxId);
   if (!entry) {
@@ -491,8 +499,10 @@ export async function beginApproval(context: GmailContext, approvalId: string): 
   const [alias, inbox] = entry;
   const livePolicy: SendPolicy = inbox.sendPolicy ?? config.defaults.sendPolicy;
   const { analysis, draftMessageId } = await readDraft(context, alias, record.draftId);
-  if (draftMessageId !== record.draftMessageId || analysis.digest !== record.digest) {
-    await context.core.approvals.revoke(approvalId, 'the draft changed after the preview was prepared');
+  if (draftMessageId !== record.draftMessageId || analysis.digest !== record.contentDigest) {
+    await context.core.approvals.revoke(approvalId, 'the draft changed after the preview was prepared', {
+      disposition: 'integrity',
+    });
     throw new CommsError('APPROVAL_VOID', 'nothing was sent: the draft changed after the preview was prepared', {
       hint: 'Prepare the send again to see what it says now.',
     });
@@ -525,6 +535,7 @@ export async function finishApproval(
 ): Promise<ApprovalRecord> {
   const record = await context.core.approvals.get(approvalId);
   if (!record) throw new CommsError('NOT_FOUND', `there is no approval ${approvalId}`);
+  if (!isCurrentDigestVersion(record)) throw otherVersionRefusal(record);
   const config = await context.config();
   const entry = Object.entries(config.inboxes).find(([, inbox]) => inbox.id === record.inboxId);
   if (!entry) throw new CommsError('NOT_FOUND', 'the mailbox this approval belongs to is no longer connected');
@@ -533,7 +544,7 @@ export async function finishApproval(
   const approved = await context.core.approvals.approve(
     approvalId,
     via,
-    { draftMessageId, digest: analysis.digest },
+    { draftMessageId, contentDigest: analysis.digest },
     answer,
     'send',
     context.platform,
@@ -582,6 +593,8 @@ export async function executeSend(
       hint: 'Approvals last ten minutes. Prepare the send again and show the new preview.',
     });
   }
+  // Before anything else, as the claim would: a record an earlier release prepared is never claimed here.
+  if (!isCurrentDigestVersion(known)) throw otherVersionRefusal(known);
   if (known.state !== 'pending' && known.state !== 'approved') {
     throw new CommsError('APPROVAL_VOID', `nothing was sent: ${describeState(known.state)}`, {
       hint: 'Prepare the send again if it should still go.',
@@ -605,7 +618,7 @@ export async function executeSend(
     options.approvalId,
     {
       draftMessageId: before.draftMessageId,
-      digest: before.analysis.digest,
+      contentDigest: before.analysis.digest,
       inboxId: resolved.inbox.id,
       inboxSub: resolved.inbox.sub,
       policy: livePolicy,
@@ -654,7 +667,7 @@ export async function executeSend(
   } catch (error) {
     throw await recordNoSend(context, bookkeeping, error);
   }
-  if (now.draftMessageId !== claimed.draftMessageId || now.analysis.digest !== claimed.digest) {
+  if (now.draftMessageId !== claimed.draftMessageId || now.analysis.digest !== claimed.contentDigest) {
     const error = new CommsError('APPROVAL_VOID', 'nothing was sent: the draft changed while it was being sent', {
       hint: 'Prepare the send again to see what it says now.',
     });
@@ -732,7 +745,7 @@ export async function executeSend(
       // one a person approved, and an audit line is worth having only if it says what actually happened.
       recipients: [...claimed.expect.to, ...claimed.expect.cc, ...claimed.expect.bcc].map(canonicalAddress),
       reason: [
-        `digest ${claimed.digest.slice(0, 12)} · policy ${livePolicy} · ${claimed.approvedVia ?? 'chat'}`,
+        `digest ${claimed.contentDigest.slice(0, 12)} · policy ${livePolicy} · ${claimed.approvedVia ?? 'chat'}`,
         ...unrecorded,
       ].join(' · '),
     });
@@ -773,7 +786,7 @@ export async function listApprovals(
 
 /** Cancels an approval. Anyone may cancel: refusing to send is never the dangerous direction. */
 export async function revokeApproval(context: GmailContext, approvalId: string): Promise<ApprovalRecord> {
-  const record = await context.core.approvals.revoke(approvalId, 'cancelled');
+  const record = await context.core.approvals.revoke(approvalId, 'cancelled', { disposition: 'person' });
   await context.core.audit.append({
     inboxId: record.inboxId,
     alias: '',

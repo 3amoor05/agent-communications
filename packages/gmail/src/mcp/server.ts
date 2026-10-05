@@ -411,6 +411,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
     return reply(
       changeToolResult(
         await gatedChange(context.core, change, {
+          channel: 'gmail',
           surface: 'mcp',
           approvalId,
           platform: context.platform,
@@ -1011,7 +1012,9 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
               // Declined or cancelled in the form is the person's no, as anything but 1, 2 or 3 at a terminal is.
               const how =
                 answered.kind !== 'elicit' ? 'not answered' : answered.action === 'decline' ? 'declined' : 'cancelled';
-              await context.core.approvals.revoke(choiceId, `${how} in the form`).catch(() => undefined);
+              await context.core.approvals
+                .revoke(choiceId, `${how} in the form`, { disposition: 'person' })
+                .catch(() => undefined);
               throw new CommsError('APPROVAL_REQUIRED', `nothing was saved: the question was ${how}`, {
                 hint: 'Make the download again if the files should still be saved.',
                 details: { choiceId },
@@ -1438,6 +1441,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
               },
             ),
             {
+              channel: 'gmail',
               surface: 'mcp',
               approvalId: orgApproval,
               platform: context.platform,
@@ -1818,6 +1822,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
             });
             await checkApprovalPin(approvalId);
             const outcome = await gatedChange(context.core, change, {
+              channel: 'gmail',
               surface: 'mcp',
               approvalId,
               platform: context.platform,

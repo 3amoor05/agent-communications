@@ -556,13 +556,14 @@ test('a scheduled email from this machine is cancelled at once; one scheduled el
     ],
   );
   const direct = await gatedChange(context.core, cancelScheduledChange(context, 'acme/resend', ours.resendId), {
+    channel: 'resend',
     surface: 'mcp',
   });
   assert.equal(direct.status, 'applied');
   const theirs = await gatedChange(
     context.core,
     cancelScheduledChange(context, 'acme/resend', 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'),
-    { surface: 'mcp' },
+    { channel: 'resend', surface: 'mcp' },
   );
   assert.equal(theirs.status, 'approval-required');
   if (theirs.status === 'approval-required') {
@@ -574,7 +575,7 @@ test('a scheduled email from this machine is cancelled at once; one scheduled el
   const applied = await gatedChange(
     context.core,
     cancelScheduledChange(context, 'acme/resend', 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'),
-    { surface: 'mcp', approvalId: theirs.prepared.approvalId },
+    { channel: 'resend', surface: 'mcp', approvalId: theirs.prepared.approvalId },
   );
   assert.equal(applied.status, 'applied');
   assert.equal(cancels().length, 2);
@@ -604,7 +605,10 @@ for (const [label, reply, outcome] of [
     });
     harness.fake.intercept = (request) => (request.path.endsWith('/cancel') ? reply : undefined);
     await assert.rejects(
-      gatedChange(context.core, cancelScheduledChange(context, 'acme/resend', sent.resendId), { surface: 'mcp' }),
+      gatedChange(context.core, cancelScheduledChange(context, 'acme/resend', sent.resendId), {
+        channel: 'resend',
+        surface: 'mcp',
+      }),
     );
     assert.equal(harness.fake.requests.filter((request) => request.path.endsWith('/cancel')).length, 1);
     const lines = (await harness.audit()).filter((line) => line.operation === 'resend.scheduled.cancel');
@@ -636,13 +640,14 @@ test('cancelling an email scheduled elsewhere is approved under the account’s 
   const theirs = await gatedChange(
     context.core,
     cancelScheduledChange(context, 'acme/resend', 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'),
-    { surface: 'mcp' },
+    { channel: 'resend', surface: 'mcp' },
   );
   assert.equal(theirs.status, 'approval-required');
   if (theirs.status !== 'approval-required') return;
   assert.equal(theirs.prepared.policy, 'confirm');
   await assert.rejects(
     gatedChange(context.core, cancelScheduledChange(context, 'acme/resend', 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'), {
+      channel: 'resend',
       surface: 'mcp',
       approvalId: theirs.prepared.approvalId,
     }),

@@ -202,7 +202,12 @@ export async function createResendMcpServer(options: ResendMcpOptions = {}): Pro
   // The approve command a waiting change names is Resend's own, located from this server's core (CUE-403).
   const runChange = async <T>(change: GatedChange<T>, approvalId: string | undefined) =>
     changeToolResult(
-      await gatedChange(context.core, change, { surface: 'mcp', approvalId, platform: context.platform }),
+      await gatedChange(context.core, change, {
+        channel: 'resend',
+        surface: 'mcp',
+        approvalId,
+        platform: context.platform,
+      }),
     );
 
   const readsResend = { readOnlyHint: true, openWorldHint: true } as const;

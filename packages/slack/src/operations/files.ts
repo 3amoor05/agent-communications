@@ -773,6 +773,7 @@ export async function downloadFiles(
     if (planned.length === 0) return nothingToSave(workspace, plan.selection, skipped, listedAll);
     const declared = described.files.reduce((sum, file) => sum + (file.size ?? 0), 0);
     const question = await askWhereToSave(context.core, {
+      channel: 'slack',
       request: binding,
       folders: folders(),
       configured: context.core.pathOverrides.downloadsDir !== undefined || Boolean(config.defaults.downloadsDir),

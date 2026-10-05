@@ -325,7 +325,7 @@ test('while a send is in flight, nothing else may touch the draft it is standing
   assert.ok(record);
   await harness.core.approvals.claimForSend(prepared.approvalId, {
     draftMessageId: record.draftMessageId,
-    digest: record.digest,
+    contentDigest: record.contentDigest,
     inboxId: record.inboxId,
     inboxSub: record.inboxSub,
     policy: 'chat',

@@ -257,7 +257,7 @@ is out: update first, or put it off (the stop names both commands) Â· 64 usage Â
           approvals: approvalsOf(command),
           // `send status` looks a send up by its approval, as `resend_send_status` does over MCP.
           approvalClaim: path.join(' ') === 'send status' ? SEND_LOOKUP : undefined,
-          ...terminalUpdateHooks(core, env, { output: output(), streams }),
+          ...terminalUpdateHooks(core, env, { channel: 'resend', output: output(), streams }),
         });
       },
       streams,
@@ -291,6 +291,7 @@ is out: update first, or put it off (the stop names both commands) Â· 64 usage Â
     rerun: readonly string[],
   ): Promise<T> =>
     gatedChangeAtTerminal(context.core, change, {
+      channel: 'resend',
       approvalId: flags.approval === undefined ? undefined : String(flags.approval),
       env,
       output: output(),

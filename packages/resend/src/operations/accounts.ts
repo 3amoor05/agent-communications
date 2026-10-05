@@ -365,7 +365,9 @@ export function removeAccountChange(context: ResendContext, name: string): Gated
         inboxId: removed.account.id,
         states: ['pending', 'approved'],
       })) {
-        await context.core.approvals.revoke(record.approvalId, 'the account was removed');
+        // The person approved removing the account, and with it every approval it held: a lifecycle revoke, which
+        // retires one an earlier release prepared in that release's own shape.
+        await context.core.approvals.revoke(record.approvalId, 'the account was removed', { disposition: 'lifecycle' });
         voided.push(record.approvalId);
       }
       await context.core.audit.append({

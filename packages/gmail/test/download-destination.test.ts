@@ -375,7 +375,10 @@ test('the update stop lets the person’s answer through by its choice id, and s
     cwd,
   });
   assert.equal(bare.code, 11, bare.stdout);
-  const prepared = await gatedChange(harness.core, updateLaterChange(harness.core), { surface: 'mcp' });
+  const prepared = await gatedChange(harness.core, updateLaterChange(harness.core), {
+    channel: 'gmail',
+    surface: 'mcp',
+  });
   const change = (prepared as { prepared: { approvalId: string } }).prepared.approvalId;
   const borrowed = await cli(
     harness,

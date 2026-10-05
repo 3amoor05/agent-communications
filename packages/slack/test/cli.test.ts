@@ -1131,7 +1131,10 @@ test('--finish takes no --approval: it is refused, and the sign-in is left to be
     '--port',
     String(port),
   ]);
-  const later = (await gatedChange(harness.core, updateLaterChange(harness.core), { surface: 'cli' })) as {
+  const later = (await gatedChange(harness.core, updateLaterChange(harness.core), {
+    channel: 'slack',
+    surface: 'cli',
+  })) as {
     prepared: { approvalId: string };
   };
   await redirect(start.authUrl);

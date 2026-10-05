@@ -145,7 +145,7 @@ test('of two renewals started together, the one finishing second is refused, tho
   const renew = async (): Promise<StartedSignIn> => {
     // As both surfaces start one: the operation `workspace reauth` and `slack_workspace_reauth` run.
     const change = reauthWorkspace(context, { alias: 'acme', port: await freePort(), detached: false });
-    const outcome = await gatedChange(harness.core, change, { surface: 'cli' });
+    const outcome = await gatedChange(harness.core, change, { channel: 'slack', surface: 'cli' });
     assert.equal(outcome.status, 'applied');
     if (outcome.status !== 'applied') throw new Error('not started');
     return outcome.result;
@@ -377,10 +377,14 @@ test('a widening approved through a change approval is still approved after a mi
   await harness.addWorkspace({ alias: 'live', mode: 'read', redirectPort: await freePort() });
   // Prepared and claimed as both surfaces do: the operation they run, through core's flow.
   const change = reauthWorkspace(context, { alias: 'live', mode: 'send', detached: false });
-  const asked = await gatedChange(harness.core, change, { surface: 'mcp' });
+  const asked = await gatedChange(harness.core, change, { channel: 'slack', surface: 'mcp' });
   assert.equal(asked.status, 'approval-required');
   if (asked.status !== 'approval-required') return;
-  const claimed = await gatedChange(harness.core, change, { surface: 'mcp', approvalId: asked.prepared.approvalId });
+  const claimed = await gatedChange(harness.core, change, {
+    channel: 'slack',
+    surface: 'mcp',
+    approvalId: asked.prepared.approvalId,
+  });
   assert.equal(claimed.status, 'applied');
   if (claimed.status !== 'applied') return;
 

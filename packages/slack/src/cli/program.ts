@@ -321,7 +321,7 @@ temporary (retry later) · 77 sign-in or permission needed · 78 configuration p
           approvals: approvalsOf(command),
           // A download's `--choice` is the question the person just answered: held to that kind, as the tool's is.
           approvalClaim: path.join(' ') === 'files download' ? DOWNLOAD_CLAIM : undefined,
-          ...terminalUpdateHooks(core, env, { output: output(), streams }),
+          ...terminalUpdateHooks(core, env, { channel: 'slack', output: output(), streams }),
         });
       },
       streams,
@@ -583,6 +583,7 @@ temporary (retry later) · 77 sign-in or permission needed · 78 configuration p
     rerun: readonly string[],
   ): Promise<T> =>
     gatedChangeAtTerminal(context.core, change, {
+      channel: 'slack',
       approvalId: flags.approval === undefined ? undefined : String(flags.approval),
       env,
       output: output(),

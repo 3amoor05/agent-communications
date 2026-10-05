@@ -8,10 +8,13 @@ import {
   type Expectation,
   handoffSentence,
   handoffSentenceToFill,
+  isCurrentDigestVersion,
   type MessagePreview,
+  otherVersionRefusal,
   publicView,
   renderMessagePreview,
   type SendPolicy,
+  sendEpochOf,
   sha256Hex,
   stricterPolicy,
 } from '@agentcomms/core';
@@ -346,12 +349,14 @@ export async function prepareSend(context: ResendContext, name: string, input: S
   const preparedId = newPreparedId();
 
   const record = await context.core.approvals.create({
+    channel: 'resend',
     inboxId: named.account.id,
     inboxSub: named.account.userId,
     draftId: preparedId,
     // A prepared message has no revision of its own: the same bytes are the same message, so the digest stands in.
     draftMessageId: digest,
-    digest,
+    contentDigest: digest,
+    sendEpoch: sendEpochOf(config, named.account.id),
     policy: livePolicy,
     requiredPolicy,
     riskFlags: study.flags,
@@ -561,6 +566,8 @@ export async function executeSend(
   const named = await context.accounts.require(name);
   requireSendMode(named, context.handoffs);
   const known = await ownRecord(context, named, options.approvalId);
+  // Before anything else, as the claim would: a record an earlier release prepared is never claimed here.
+  if (!isCurrentDigestVersion(known)) throw otherVersionRefusal(known);
   if (known.state !== 'pending' && known.state !== 'approved') {
     throw new CommsError('APPROVAL_VOID', `nothing was sent: ${describeState(known.state)}`, {
       hint:
@@ -592,7 +599,7 @@ export async function executeSend(
     options.approvalId,
     {
       draftMessageId: digest,
-      digest,
+      contentDigest: digest,
       inboxId: named.account.id,
       inboxSub: named.account.userId,
       policy: livePolicy,
@@ -909,9 +916,14 @@ async function recordAndAccount(
  */
 export async function beginSendApproval(context: ResendContext, approvalId: string): Promise<SendApprovalPrompt> {
   const { record, named } = await recordAndAccount(context, approvalId);
+  // A record an earlier release prepared is refused before the message is read again: this release cannot approve it,
+  // and the integrity check below would void it by rules it was not written under.
+  if (!isCurrentDigestVersion(record)) throw otherVersionRefusal(record);
   const { prepared, digest } = await reload(context, record);
-  if (digest !== record.digest) {
-    await context.core.approvals.revoke(approvalId, 'the message or an attachment changed after the preview');
+  if (digest !== record.contentDigest) {
+    await context.core.approvals.revoke(approvalId, 'the message or an attachment changed after the preview', {
+      disposition: 'integrity',
+    });
     throw new CommsError('APPROVAL_VOID', 'nothing was sent: the message or an attachment changed after the preview', {
       hint: 'Prepare the send again to see what it says now.',
     });
@@ -944,11 +956,12 @@ export async function finishSendApproval(
   answer: string,
 ): Promise<ApprovalRecord> {
   const { record, named } = await recordAndAccount(context, approvalId);
+  if (!isCurrentDigestVersion(record)) throw otherVersionRefusal(record);
   const { digest } = await reload(context, record);
   const approved = await context.core.approvals.approve(
     approvalId,
     'terminal',
-    { draftMessageId: digest, digest },
+    { draftMessageId: digest, contentDigest: digest },
     answer,
     'send',
     context.platform,
@@ -968,7 +981,7 @@ export async function finishSendApproval(
 /** Cancels an approval. Anyone may: refusing to send is never the dangerous direction. */
 export async function revokeSendApproval(context: ResendContext, approvalId: string): Promise<void> {
   const { named } = await recordAndAccount(context, approvalId);
-  await context.core.approvals.revoke(approvalId, 'cancelled at the terminal');
+  await context.core.approvals.revoke(approvalId, 'cancelled at the terminal', { disposition: 'person' });
   await context.core.audit.append({
     inboxId: named.account.id,
     alias: named.name,

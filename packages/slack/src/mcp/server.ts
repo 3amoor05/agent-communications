@@ -1138,6 +1138,7 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
     await ownApproval(approvalId, name);
     return changeToolResult(
       await gatedChange(context.core, change, {
+        channel: 'slack',
         surface: 'mcp',
         approvalId,
         platform: context.platform,
@@ -1152,6 +1153,7 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
   ) => {
     await ownApproval(approvalId, name);
     const outcome = await gatedChange(context.core, change, {
+      channel: 'slack',
       surface: 'mcp',
       approvalId,
       platform: context.platform,

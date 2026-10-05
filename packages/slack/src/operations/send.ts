@@ -7,6 +7,7 @@ import {
   type ClaimOptions,
   type CliHandoffs,
   CommsError,
+  type CreateApprovalInput,
   canonicalJson,
   type Expectation,
   type Handoff,
@@ -108,6 +109,11 @@ export interface PrepareDeps {
   readonly postingAs: string;
   readonly policy: SendPolicy;
   /**
+   * The account's send epoch as the configuration holds it now (`sendEpochOf`), stored on every approval this prepares
+   * and bound: a `never` set after the prepare leaves it behind for good.
+   */
+  readonly sendEpoch: number;
+  /**
    * What the workspace was connected as, and what Slack granted it — for a post with files, which needs both `send` and
    * `files:write`. Read from the configuration by `gateDepsFor`; a post of text alone does not look at them.
    */
@@ -116,17 +122,7 @@ export interface PrepareDeps {
   /** Which local files may be sent: the attachment jail's folders, as `attachPolicyOf` reads them. */
   readonly attachPolicy?: AttachPolicy | undefined;
   readonly approvals: {
-    create(input: {
-      inboxId: string;
-      inboxSub?: string | undefined;
-      draftId: string;
-      draftMessageId: string;
-      digest: string;
-      policy: SendPolicy;
-      requiredPolicy: SendPolicy;
-      riskFlags: string[];
-      expect: Expectation;
-    }): Promise<ApprovalRecord>;
+    create(input: CreateApprovalInput): Promise<ApprovalRecord>;
   };
 }
 
@@ -476,11 +472,13 @@ export async function preparePost(deps: PrepareDeps, draft: SlackDraft, book: Na
     broadcast || preview.notifies.estimated >= 50 || preview.notifies.unknown !== undefined ? 'confirm' : 'chat';
 
   const record = await deps.approvals.create({
+    channel: 'slack',
     inboxId: deps.accountId,
     inboxSub: deps.postingAs,
     draftId: draft.draftId,
     draftMessageId: draft.revision,
-    digest,
+    contentDigest: digest,
+    sendEpoch: deps.sendEpoch,
     policy: deps.policy,
     requiredPolicy,
     riskFlags,
@@ -531,7 +529,7 @@ export interface PostDeps extends PrepareDeps {
       approvalId: string,
       live: {
         draftMessageId: string;
-        digest: string;
+        contentDigest: string;
         inboxId: string;
         inboxSub?: string | undefined;
         policy: SendPolicy;
@@ -755,7 +753,7 @@ export async function postPrepared(
     approvalId,
     {
       draftMessageId: draft.revision,
-      digest,
+      contentDigest: digest,
       inboxId: deps.accountId,
       inboxSub: deps.postingAs,
       policy: deps.policy,
@@ -1279,7 +1277,7 @@ export function reactionOfApproval(record: ApprovalRecord, workspaceId: string):
     name: what?.[1] ?? '',
     remove: record.riskFlags.includes('removes-reaction'),
   };
-  if (!what || reactionDigest({ workspaceId, postingAs: record.inboxSub ?? '' }, options) !== record.digest) {
+  if (!what || reactionDigest({ workspaceId, postingAs: record.inboxSub ?? '' }, options) !== record.contentDigest) {
     throw new CommsError('BAD_DATA', 'this approval does not describe the reaction it is bound to', {
       hint: 'Nothing was approved. Ask for the reaction again, for a new approval.',
       details: { approvalId: record.approvalId },
@@ -1294,12 +1292,14 @@ export async function prepareReaction(deps: PrepareDeps, options: ReactionOption
   }
   const digest = reactionDigest(deps, options);
   const record = await deps.approvals.create({
+    channel: 'slack',
     inboxId: deps.accountId,
     inboxSub: deps.postingAs,
     draftId: reactionDraftId(options),
     // No draft to edit, so the reaction's own digest stands in: the same value means the same act.
     draftMessageId: digest,
-    digest,
+    contentDigest: digest,
+    sendEpoch: deps.sendEpoch,
     policy: deps.policy,
     /*
      * A reaction never raises its own ceremony.
@@ -1456,7 +1456,7 @@ export async function reactPrepared(
     approvalId,
     {
       draftMessageId: digest,
-      digest,
+      contentDigest: digest,
       inboxId: deps.accountId,
       inboxSub: deps.postingAs,
       policy: deps.policy,

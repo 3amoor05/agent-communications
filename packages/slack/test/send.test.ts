@@ -87,6 +87,7 @@ async function setUp(
     postingAs: 'U0',
     handoffs: slackHandoffs(),
     policy: options.policy ?? ('chat' as const),
+    sendEpoch: 0,
     approvals,
     permit: closedPermit(),
   };
@@ -208,6 +209,7 @@ test('a room whose size cannot be read says so rather than reporting a small one
       postingAs: 'U0',
       handoffs: slackHandoffs(),
       policy: 'chat',
+      sendEpoch: 0,
       approvals: new ApprovalStore(state, { now: NOW }),
     },
     draft,
@@ -492,6 +494,7 @@ test('a room that grew between the preview and the post voids the approval', asy
     postingAs: 'U0',
     handoffs: slackHandoffs(),
     policy: 'chat' as const,
+    sendEpoch: 0,
     approvals,
     permit: closedPermit(),
   };

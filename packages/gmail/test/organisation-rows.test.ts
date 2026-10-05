@@ -160,6 +160,7 @@ test('client add refuses to replace a client an organisation profile owns, with 
   // Refused before anybody is asked to approve it, as every conflict is.
   await assert.rejects(
     gatedChange(harness.core, clientAddChange(context, { path, name: 'acme-1', replace: true, noProbe: true }), {
+      channel: 'gmail',
       surface: 'mcp',
     }),
     refusedFor('replace'),

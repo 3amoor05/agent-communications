@@ -32,6 +32,8 @@ function normalise(value: unknown): unknown {
       .replace(/boundary=\\"[^\\"]+\\"/g, 'boundary=\\"B\\"')
       .replace(/ap_[0-9A-Z]{26}/g, 'ap_X')
       .replace(/rp_[0-9A-Z]{26}/g, 'rp_X')
+      // Bound to the approval's own id, which differs between two calls as the id does.
+      .replace(/"bindingDigest":"[0-9a-f]{64}"/g, '"bindingDigest":"B"')
       .replace(/"expiresAt":"[^"]+"/g, '"expiresAt":"T"')
       .replace(/"(createdAt|updatedAt|attemptedAt|finishedAt|at)":"[^"]+"/g, '"$1":"T"'),
   );

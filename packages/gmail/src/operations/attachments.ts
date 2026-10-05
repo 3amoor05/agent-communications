@@ -519,6 +519,7 @@ export async function downloadAttachments(
     // Nothing to save is said as it is, with the reasons, rather than asked about.
     if (planned.length === 0) return nothingToSave(skipped);
     const question = await askWhereToSave(context.core, {
+      channel: 'gmail',
       request,
       folders: folders(),
       configured: context.core.pathOverrides.downloadsDir !== undefined || Boolean(config.defaults.downloadsDir),

@@ -187,7 +187,7 @@ test('the approval is bound to each file’s hash: the same file with other byte
   const digestOf = async (files: string[] | undefined): Promise<string> => {
     const draft = await createDraft(context, 'acme', { channel: 'C1', text: 'the numbers', files });
     const prepared = await prepareDraftPost(context, 'acme', { draftId: draft.draftId }, slack);
-    return (await context.core.approvals.get(prepared.approvalId))?.digest ?? '';
+    return (await context.core.approvals.get(prepared.approvalId))?.contentDigest ?? '';
   };
   mkdirSync(join(docs, 'b'));
   // Same name, same size, same type, other bytes: only the hash tells them apart.
@@ -288,7 +288,7 @@ test('a post of text alone is previewed and bound exactly as it was before files
     text.replaceAll(draft.draftId, '<draft>').replaceAll(prepared.approvalId, '<approval>');
 
   assert.equal(
-    (await context.core.approvals.get(prepared.approvalId))?.digest,
+    (await context.core.approvals.get(prepared.approvalId))?.contentDigest,
     '03a877c2f1836d22301eba26b2916dfaa6bb9b02eef5c4982d4e3ca0029f25d0',
   );
   assert.deepEqual(prepared.riskFlags, []);
@@ -368,7 +368,7 @@ test('a bare URL typed into a file post’s words is flagged as it is written, a
   const prepared = await prepareDraftPost(w.context, 'acme', { draftId: draft.draftId }, w.slack);
   // Pinned first, so that a mutation to the flag or the warning is caught by the assertions below, not masked here.
   assert.equal(
-    (await w.context.core.approvals.get(prepared.approvalId))?.digest,
+    (await w.context.core.approvals.get(prepared.approvalId))?.contentDigest,
     'e8f5274ffc2e8ae4c65eb35c3d372f034973a068ad863c3bb47d01ce3320b9b9',
   );
   assert.deepEqual(prepared.preview.links, ['HTTPS://ci.example.com/runs/42']);

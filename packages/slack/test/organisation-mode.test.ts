@@ -125,13 +125,17 @@ for (const mode of ['read', 'send'] as const) {
     const plan = await planModeSet(f.context, alias, mode, { detached: false });
     assert.equal(plan.kind, 'change');
     if (plan.kind !== 'change') return;
-    let outcome = await gatedChange(f.h.core, plan.change, { surface: 'cli' });
+    let outcome = await gatedChange(f.h.core, plan.change, { channel: 'slack', surface: 'cli' });
     assert.equal(outcome.status, mode === 'send' ? 'approval-required' : 'applied');
     if (outcome.status === 'approval-required') {
       assert.deepEqual(await f.context.flows.pending(), []);
       const prompt = await beginChangeApproval(f.h.core, outcome.prepared.approvalId, { surface: 'cli' });
       await finishChangeApproval(f.h.core, outcome.prepared.approvalId, prompt.challenge, { surface: 'cli' });
-      outcome = await gatedChange(f.h.core, plan.change, { surface: 'cli', approvalId: outcome.prepared.approvalId });
+      outcome = await gatedChange(f.h.core, plan.change, {
+        channel: 'slack',
+        surface: 'cli',
+        approvalId: outcome.prepared.approvalId,
+      });
     }
     assert.equal(outcome.status, 'applied');
     if (outcome.status !== 'applied') return;
@@ -478,7 +482,7 @@ test('same-role profile replacement reauth selects current client/app and later 
     present(r.slack).redirectPort = port;
   });
   const change = reauthWorkspace(f.context, { alias, detached: false });
-  const outcome = await gatedChange(f.h.core, change, { surface: 'cli' });
+  const outcome = await gatedChange(f.h.core, change, { channel: 'slack', surface: 'cli' });
   assert.equal(outcome.status, 'applied');
   if (outcome.status !== 'applied') return;
   try {
@@ -531,11 +535,12 @@ async function coreUpdate(
       { organisation: 'rgc', source: path, approvalId },
       { env: f.h.env, platform: 'darwin', surface: 'mcp', keyring: null, cwd: f.h.home },
     );
-  const prepared = await gatedChange(f.h.core, build(), { surface: 'mcp' });
+  const prepared = await gatedChange(f.h.core, build(), { channel: 'slack', surface: 'mcp' });
   const outcome =
     prepared.status === 'applied'
       ? prepared
       : await gatedChange(f.h.core, build(prepared.prepared.approvalId), {
+          channel: 'slack',
           surface: 'mcp',
           approvalId: prepared.prepared.approvalId,
         });

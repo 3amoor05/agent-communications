@@ -48,7 +48,10 @@ function updateOut(harness: Harness, current: { registered: string[]; global: st
 
 /** An approval this machine holds, prepared before the update was found — as a post approved moments before is. */
 async function heldApproval(harness: Harness): Promise<string> {
-  const prepared = await gatedChange(harness.core, updateLaterChange(harness.core), { surface: 'mcp' });
+  const prepared = await gatedChange(harness.core, updateLaterChange(harness.core), {
+    channel: 'slack',
+    surface: 'mcp',
+  });
   assert.equal(prepared.status, 'approval-required');
   return (prepared as { prepared: { approvalId: string } }).prepared.approvalId;
 }

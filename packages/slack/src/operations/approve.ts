@@ -1,4 +1,11 @@
-import { type ApprovalRecord, CommsError, renderChannelPreview, truncateDisplay } from '@agentcomms/core';
+import {
+  type ApprovalRecord,
+  CommsError,
+  isCurrentDigestVersion,
+  otherVersionRefusal,
+  renderChannelPreview,
+  truncateDisplay,
+} from '@agentcomms/core';
 import { openDraftStore, type SlackDraft } from '../compose/drafts.ts';
 import type { SlackContext } from '../context.ts';
 import { gateDepsFor } from './gate.ts';
@@ -36,6 +43,9 @@ async function approvalAndWorkspace(context: SlackContext, approvalId: string) {
       hint: 'Prepare it again; an approval expires ten minutes after it is made.',
     });
   }
+  // A record an earlier release prepared is refused before the room or the draft is read: this release cannot approve
+  // it, and an integrity check of it (`currentPost`) would void it by rules it was not written under.
+  if (!isCurrentDigestVersion(record)) throw otherVersionRefusal(record);
   const config = await context.config();
   const entry = Object.entries(config.accounts).find(([, account]) => account.id === record.inboxId);
   if (!entry) {
@@ -106,7 +116,7 @@ async function currentPost(
    * the digests disagree: nothing is known to have changed, the room simply could not be read.
    */
   const notifiesRoom = view.preview.notifies.channel || view.preview.notifies.here;
-  if (!edited && view.roomUnread && (notifiesRoom || view.digest !== record.digest)) {
+  if (!edited && view.roomUnread && (notifiesRoom || view.digest !== record.contentDigest)) {
     throw new CommsError('PROVIDER_UNAVAILABLE', 'the channel could not be read, so who this reaches cannot be shown', {
       hint: 'Nothing was approved. Try again in a moment.',
       details: { approvalId, reason: view.roomUnread },
@@ -128,7 +138,7 @@ async function currentPost(
       },
     );
   }
-  if (edited || view.digest !== record.digest) {
+  if (edited || view.digest !== record.contentDigest) {
     const prepared = preparedReach(record);
     const reach = view.preview.notifies.estimated;
     /*
@@ -142,7 +152,7 @@ async function currentPost(
         : prepared !== undefined && prepared !== String(reach)
           ? `the channel now reaches ${reach}, not the ${prepared} it was prepared for`
           : 'the channel, or the account it posts as, is not what the preview showed';
-    await context.core.approvals.revoke(approvalId, reason);
+    await context.core.approvals.revoke(approvalId, reason, { disposition: 'integrity' });
     throw new CommsError('APPROVAL_VOID', `nothing was approved: ${reason}`, {
       hint: 'Prepare the post again, and approve the preview that prints.',
       details: { approvalId },
@@ -200,7 +210,7 @@ export async function finishApproval(
     await context.core.approvals.approve(
       approvalId,
       'terminal',
-      { draftMessageId: record.draftMessageId, digest: record.digest },
+      { draftMessageId: record.draftMessageId, contentDigest: record.contentDigest },
       answer,
       'send',
       context.platform,
@@ -211,7 +221,7 @@ export async function finishApproval(
   await context.core.approvals.approve(
     approvalId,
     'terminal',
-    { draftMessageId: draft.revision, digest: view.digest },
+    { draftMessageId: draft.revision, contentDigest: view.digest },
     answer,
     'send',
     context.platform,
@@ -219,7 +229,7 @@ export async function finishApproval(
 }
 
 export async function revokeApproval(context: SlackContext, approvalId: string): Promise<void> {
-  await context.core.approvals.revoke(approvalId, 'cancelled at the terminal');
+  await context.core.approvals.revoke(approvalId, 'cancelled at the terminal', { disposition: 'person' });
 }
 
 /** The workspace an approval belongs to, by its current name. */

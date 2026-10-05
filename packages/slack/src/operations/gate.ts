@@ -1,4 +1,4 @@
-import { effectiveAccountSendPolicy } from '@agentcomms/core';
+import { effectiveAccountSendPolicy, sendEpochOf } from '@agentcomms/core';
 import { closedPermit, type WritePermit } from '../api/guard.ts';
 import type { SlackContext } from '../context.ts';
 import { attachPolicyOf } from './drafts.ts';
@@ -36,6 +36,7 @@ export async function gateDepsFor(context: SlackContext, alias: string, deps: Se
     handoffs: context.handoffs,
     postingAs: account.userId,
     policy: effectiveAccountSendPolicy(config, name),
+    sendEpoch: sendEpochOf(config, account.id),
     // What a post with files is checked against, at prepare and again at send: the mode, the grant, and the folders.
     mode: account.mode ?? account.tier,
     grantedScopes: account.grantedScopes,

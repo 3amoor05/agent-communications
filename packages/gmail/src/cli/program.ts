@@ -276,7 +276,7 @@ update first, or put it off (the stop names both commands) · 64 usage · 65 bad
           approvals: approvalsOf(command),
           // A download's `--choice` is the question the person just answered: held to that kind, as the tool's is.
           approvalClaim: path.join(' ') === 'attachments download' ? DOWNLOAD_CLAIM : undefined,
-          ...terminalUpdateHooks(core, env, { output: output(), streams }),
+          ...terminalUpdateHooks(core, env, { channel: 'gmail', output: output(), streams }),
         });
       },
       streams,
@@ -440,6 +440,7 @@ update first, or put it off (the stop names both commands) · 64 usage · 65 bad
     approvalId: unknown,
   ): Promise<T> =>
     gatedChangeAtTerminal(context.core, change, {
+      channel: 'gmail',
       approvalId: typeof approvalId === 'string' ? approvalId : undefined,
       env,
       // `--no-input` means nobody is asked anything. The flow's one way to hear that is `json`, which it reads only
@@ -546,13 +547,14 @@ update first, or put it off (the stop names both commands) · 64 usage · 65 bad
           `Connected ${connected.inbox.email} as "${connected.alias}". Setup also asked to register the Gmail server with ${client}.\n\n`,
         );
         result = await gatedChangeAtTerminal(context.core, change, {
+          channel: 'gmail',
           env,
           output: { json: globalOptions.json || globalOptions.noInput, color: globalOptions.color, platform },
           rerun: install,
           streams,
         });
       } else {
-        const outcome = await gatedChange(context.core, change, { surface: 'cli', platform });
+        const outcome = await gatedChange(context.core, change, { channel: 'gmail', surface: 'cli', platform });
         if (outcome.status === 'approval-required') {
           const { prepared } = outcome;
           // This installation's own `mcp install`, located, carrying the approval: a result field, not in the digest.
@@ -1949,6 +1951,7 @@ update first, or put it off (the stop names both commands) · 64 usage · 65 bad
               },
             ),
             {
+              channel: 'gmail',
               approvalId: typeof options.orgApproval === 'string' ? options.orgApproval : undefined,
               env,
               output: { json: globalOptions.json || globalOptions.noInput, color: globalOptions.color },
@@ -2150,6 +2153,7 @@ update first, or put it off (the stop names both commands) · 64 usage · 65 bad
                * other step that waits for a person, so what this run did is still in `did`.
                */
               const outcome = await gatedChange(context.core, await registration(which), {
+                channel: 'gmail',
                 surface: 'cli',
                 approvalId: mcpApproval,
                 platform,
@@ -2469,6 +2473,7 @@ update first, or put it off (the stop names both commands) · 64 usage · 65 bad
              * `--mcp-approval` once the person agrees.
              */
             const result = await gatedChangeAtTerminal(context.core, await registration(which), {
+              channel: 'gmail',
               approvalId: mcpApproval,
               env,
               output: { json: globalOptions.json || globalOptions.noInput, color: globalOptions.color },
