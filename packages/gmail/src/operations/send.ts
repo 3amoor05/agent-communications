@@ -7,7 +7,9 @@ import {
   domainOf,
   type Expectation,
   ensureSendEpochConfig,
+  fenceOrStop,
   handoffSentence,
+  LEASE_LOST_BEFORE_SEND,
   type LegacyDrainReport,
   type MessagePreview,
   newBoundary,
@@ -28,7 +30,7 @@ import type { GmailContext, ResolvedInbox } from '../context.ts';
 import { analyseDraft, type DraftAnalysis, type Unsendable, unsendable } from '../domain/outbound.ts';
 import { addressField, filenameField, wrapField } from '../domain/untrusted-fields.ts';
 import { sendCertainlyRefused } from '../gmail-api/errors.ts';
-import type { GmailTransport } from '../gmail-api/transport.ts';
+import { type GmailTransport, providerId } from '../gmail-api/transport.ts';
 
 /**
  * The send gate: prepare → approve → execute.
@@ -72,11 +74,20 @@ export interface SendPreparation {
   legacyDrain?: LegacyDrainReport | undefined;
 }
 
+/** What a send that Gmail accepted without naming the message says, exactly (design 2026-10-05 §D8). */
+export const SENT_WITHOUT_ID = 'sent; the provider returned no id';
+
 export interface SendResult {
   inbox: string;
   approvalId: string;
   draftId: string;
-  sentMessageId: string;
+  /**
+   * The message Gmail filed, by its id — absent when Gmail accepted the send without naming it: then nothing records it
+   * as used, and the approval reads `sending`, then `unknown` (§D8). Never an empty string.
+   */
+  sentMessageId?: string | undefined;
+  /** What happened, in the words to repeat: "sent, message id …", or exactly {@link SENT_WITHOUT_ID}. */
+  said: string;
   threadId: string | undefined;
   to: string[];
   cc: string[];
@@ -126,11 +137,21 @@ function messageOf(error: unknown): string {
  * Keeps the failure that stopped the send visible, adding only what could not be settled afterwards — and where the
  * approval stands now that it is settled (decision 8), whatever the failure said of it before.
  */
-function noSendError(error: unknown, unrecorded: readonly string[], approval: ApprovalObject): CommsError {
+function noSendError(
+  error: unknown,
+  unrecorded: readonly string[],
+  approval: ApprovalObject,
+  // Gmail's own refusal of the send: certain, and said as such — nothing was sent (§D2).
+  sayNothingSent = false,
+): CommsError {
   const original =
     error instanceof CommsError ? error : new CommsError('UNEXPECTED', messageOf(error), { cause: error });
   const hint = [original.hint, ...unrecorded].filter((part) => part !== undefined);
-  return new CommsError(original.code, original.message, {
+  const message =
+    sayNothingSent && !original.message.startsWith('nothing was sent')
+      ? `nothing was sent: ${original.message}`
+      : original.message;
+  return new CommsError(original.code, message, {
     ...(hint.length === 0 ? {} : { hint: hint.join(' ') }),
     details: { ...original.details, approval },
     cause: error,
@@ -154,7 +175,12 @@ async function approvalNow(
   }
 }
 
-/** Settles a failure known to have happened before Gmail sent anything, without one failed write skipping another. */
+/**
+ * Settles a failure known to have happened before Gmail sent anything, without one failed write skipping another.
+ *
+ * `recorded` is for a failure whose approval is settled already — the fence's, which records `lease-lost-before-send`
+ * itself: the slot is given back and the audit written, and the refusal says where the approval stands now.
+ */
 async function recordNoSend(
   context: GmailContext,
   options: { alias: string; inboxId: string; approvalId: string; draftId: string },
@@ -163,21 +189,26 @@ async function recordNoSend(
   // Where the approval stood when it was claimed: what the refusal says if its failure cannot be recorded.
   claimed: ApprovalObject,
   error: unknown,
+  how: { sayNothingSent?: boolean; recorded?: string } = {},
 ): Promise<CommsError> {
   const unrecorded: string[] = [];
-  const said = messageOf(error);
+  const said = how.recorded ?? messageOf(error);
   let settled = claimed;
   try {
     await context.core.ledger.release(options.inboxId, options.approvalId);
   } catch (failure) {
     unrecorded.push(`the capacity slot could not be released (${messageOf(failure)})`);
   }
-  try {
-    settled = await context.core.approvals.approvalOf(
-      await context.core.approvals.complete(options.approvalId, claimToken, { error: said }),
-    );
-  } catch (failure) {
-    unrecorded.push(`the approval could not be marked failed (${messageOf(failure)})`);
+  if (how.recorded === undefined) {
+    try {
+      settled = await context.core.approvals.approvalOf(
+        await context.core.approvals.complete(options.approvalId, claimToken, { error: said }),
+      );
+    } catch (failure) {
+      unrecorded.push(`the approval could not be marked failed (${messageOf(failure)})`);
+    }
+  } else {
+    settled = await approvalNow(context, options.approvalId, options.inboxId, claimed);
   }
   try {
     await context.core.audit.append({
@@ -192,7 +223,7 @@ async function recordNoSend(
   } catch (failure) {
     unrecorded.push(`the audit log could not record the failure (${messageOf(failure)})`);
   }
-  return noSendError(error, unrecorded, settled);
+  return noSendError(error, unrecorded, settled, how.sayNothingSent);
 }
 
 function capsFor(defaults: { sendCaps: { perHour: number; perDay: number } }): Caps {
@@ -723,14 +754,33 @@ export async function executeSend(
       throw await recordNoSend(context, bookkeeping, claimToken, claimedApproval, error);
     }
 
-    let sent: { id: string; threadId: string | undefined };
+    /*
+     * The fence (design 2026-10-05 §D1): immediately before the one provider mutation, after the reservation and the
+     * final read, this claim must still hold a `sending` record — its lease renewed by the look. Once another caller has
+     * read it `unknown` (this call stalled past its lease), the send does not start: the record is completed `failed`,
+     * `lease-lost-before-send`, and nothing was sent. A fence narrows the window and cannot close it: a call suspended
+     * after it and before Gmail answers can still send, which is what `unknown` means.
+     */
+    const fenced = await fenceOrStop(context.core.approvals, options.approvalId, claimToken, { stepsStarted: 0 });
+    if (!fenced.proceed) {
+      throw await recordNoSend(
+        context,
+        bookkeeping,
+        claimToken,
+        claimedApproval,
+        fenced.error ?? new CommsError('APPROVAL_VOID', 'nothing was sent: the sending lease ran out'),
+        { recorded: LEASE_LOST_BEFORE_SEND },
+      );
+    }
+
+    let sent: { id: string | undefined; threadId: string | undefined };
     try {
       sent = await transport.sendDraft(options.draftId);
     } catch (error) {
       const said = error instanceof Error ? error.message : String(error);
       const ids = { approvalIds: [options.approvalId], draftIds: [options.draftId] };
       if (sendCertainlyRefused(error)) {
-        throw await recordNoSend(context, bookkeeping, claimToken, claimedApproval, error);
+        throw await recordNoSend(context, bookkeeping, claimToken, claimedApproval, error, { sayNothingSent: true });
       }
 
       let unaudited = '';
@@ -747,45 +797,53 @@ export async function executeSend(
       } catch (failure) {
         unaudited = ` The audit log could not record this either (${failure instanceof Error ? failure.message : String(failure)}).`;
       }
-      throw new CommsError(
-        error instanceof CommsError ? error.code : 'TRANSIENT',
-        `whether the email was sent is not known: ${said}`,
-        {
-          hint: `Check the Sent folder before anything else: Gmail may have sent it. Prepare the draft again only if it is not there — this approval is not used again.${unaudited}`,
-          details: {
-            ...(error instanceof CommsError ? error.details : {}),
-            approvalId: options.approvalId,
-            outcome: 'unknown',
-            // Still `sending`: nothing is recorded of a send whose outcome is not known.
-            approval: await approvalNow(context, options.approvalId, resolved.inbox.id, claimedApproval),
-          },
-          cause: error,
+      // Uncertain from the moment the answer is lost, and said with its own code at once: never retried, never a
+      // retryable transport code an agent would follow with the same call, never "prepare again" (§D2).
+      throw new CommsError('SEND_OUTCOME_UNKNOWN', `whether the email was sent is not known: ${said}`, {
+        hint: `Check the Sent folder before anything else: Gmail may have sent it. This approval is not used again. Do not prepare the draft again automatically: only once the person has checked that it is not in Sent.${unaudited}`,
+        details: {
+          ...(error instanceof CommsError ? error.details : {}),
+          approvalId: options.approvalId,
+          outcome: 'unknown',
+          // Still `sending`: nothing is recorded of a send whose outcome is not known.
+          approval: await approvalNow(context, options.approvalId, resolved.inbox.id, claimedApproval),
         },
-      );
+        cause: error,
+      });
     }
 
-    const sentMessageId = sent.id;
+    /*
+     * Gmail accepted it. Its id is validated before anything is built from it (§D8): a send Gmail accepted without
+     * naming the message is said as exactly that — never `used`, which needs an id, and never an empty string a
+     * completion, an audit line or a read-back would take for one. Nothing records it, so it reads `sending`, then
+     * `unknown` at its lease boundary.
+     */
+    const sentMessageId = providerId(sent.id);
     const unrecorded: string[] = [];
     // `used` only once it is written; until then — and for good, if it cannot be — the record as it stands.
     let approval: ApprovalObject | null = null;
-    try {
-      approval = await context.core.approvals.approvalOf(
-        await context.core.approvals.complete(options.approvalId, claimToken, { sentMessageId }),
-      );
-    } catch (error) {
-      unrecorded.push(
-        `the approval could not be marked used (${error instanceof Error ? error.message : String(error)}), so it will read as unknown`,
-      );
+    if (sentMessageId !== undefined) {
+      try {
+        approval = await context.core.approvals.approvalOf(
+          await context.core.approvals.complete(options.approvalId, claimToken, { sentMessageId }),
+        );
+      } catch (error) {
+        unrecorded.push(
+          `the approval could not be marked used (${error instanceof Error ? error.message : String(error)}), so it will read as unknown`,
+        );
+      }
     }
 
     // Read the sent message back: it is the only evidence that what went out is what was approved, and the only way to
-    // catch a reply that Gmail filed outside the conversation it was meant for.
+    // catch a reply that Gmail filed outside the conversation it was meant for. With no id there is nothing to read.
     let verified: SendResult['verified'] = null;
-    try {
-      const message = await transport.getMessageMetadata(sentMessageId);
-      verified = { threadId: message.threadId ?? undefined, labelIds: message.labelIds ?? [] };
-    } catch {
-      // The mail has gone either way; not being able to read it back is worth reporting, not worth failing.
+    if (sentMessageId !== undefined) {
+      try {
+        const message = await transport.getMessageMetadata(sentMessageId);
+        verified = { threadId: message.threadId ?? undefined, labelIds: message.labelIds ?? [] };
+      } catch {
+        // The mail has gone either way; not being able to read it back is worth reporting, not worth failing.
+      }
     }
 
     try {
@@ -795,11 +853,17 @@ export async function executeSend(
         operation: 'send.execute',
         outcome: 'ok',
         surface: context.surface,
-        ids: { approvalIds: [options.approvalId], draftIds: [options.draftId], messageIds: [sentMessageId] },
+        ids: {
+          approvalIds: [options.approvalId],
+          draftIds: [options.draftId],
+          // Only an id Gmail gave: accepted without one, the field is left out and the reason says so.
+          ...(sentMessageId === undefined ? {} : { messageIds: [sentMessageId] }),
+        },
         // From the record, not from what the caller claimed: the two are checked to be equal, but the record is the
         // one a person approved, and an audit line is worth having only if it says what actually happened.
         recipients: [...claimed.expect.to, ...claimed.expect.cc, ...claimed.expect.bcc].map(canonicalAddress),
         reason: [
+          ...(sentMessageId === undefined ? ['accepted-without-id'] : []),
           `digest ${claimed.contentDigest.slice(0, 12)} · policy ${livePolicy} · ${claimed.approvedVia ?? 'chat'}`,
           ...unrecorded,
         ].join(' · '),
@@ -812,7 +876,8 @@ export async function executeSend(
       inbox: alias,
       approvalId: options.approvalId,
       draftId: options.draftId,
-      sentMessageId,
+      ...(sentMessageId === undefined ? {} : { sentMessageId }),
+      said: sentMessageId === undefined ? SENT_WITHOUT_ID : `sent, message id ${sentMessageId}`,
       threadId: sent.threadId,
       to: claimed.expect.to,
       cc: claimed.expect.cc,

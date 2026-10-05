@@ -2461,7 +2461,11 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
           inbox: z.string(),
           approvalId: z.string(),
           draftId: z.string(),
-          sentMessageId: z.string(),
+          sentMessageId: z
+            .string()
+            .optional()
+            .describe('the message Gmail filed; absent when Gmail accepted the send without naming it'),
+          said: z.string().describe('what happened: "sent, message id …", or "sent; the provider returned no id"'),
           threadId: z.string().nullable(),
           to: z.array(z.string()),
           cc: z.array(z.string()),

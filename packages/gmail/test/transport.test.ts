@@ -6,7 +6,7 @@ import { SCOPES, scopesFor } from '../src/auth/scopes.ts';
 import { TokenSource } from '../src/auth/session.ts';
 import { describeGoogleError, isRetryable, mapGoogleError, parseRetryAfter } from '../src/gmail-api/errors.ts';
 import { createLimiter, withRetry } from '../src/gmail-api/retry.ts';
-import { GoogleGmailTransport } from '../src/gmail-api/transport.ts';
+import { GoogleGmailTransport, providerId } from '../src/gmail-api/transport.ts';
 import { gmailHandoffs, locatedGmailLine } from './support/handoffs.ts';
 import { type Harness, newHarness, TEST_CLIENT_ID, TEST_CLIENT_SECRET } from './support/harness.ts';
 
@@ -245,3 +245,10 @@ function defaultClient(config: { clients: Record<string, ClientConfig> }): Clien
   if (!client) throw new Error('the harness did not register a default client');
   return client;
 }
+
+test('a provider id is kept only when it is one: absent, null, empty and blank are all no id, never the empty string (D8o-g)', () => {
+  for (const missing of [undefined, null, '', ' ', '\t\n']) {
+    assert.equal(providerId(missing), undefined, JSON.stringify(missing));
+  }
+  assert.equal(providerId('18c2f0a1b2c3d4e5'), '18c2f0a1b2c3d4e5');
+});

@@ -102,6 +102,7 @@ async function cli(
               approvalId: request.approvalId,
               draftId: request.draftId,
               sentMessageId: 'm_parser',
+              said: 'sent, message id m_parser',
               threadId: undefined,
               to: request.expect.to,
               cc: request.expect.cc,

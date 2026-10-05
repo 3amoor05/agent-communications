@@ -139,6 +139,12 @@ export interface FakeGoogle {
   failNext(path: string, times: number, status: number, reason?: string, retryAfter?: string): void;
   /** Makes the next call to a path answer slowly, or not at all, with the connection held open: {@link SlowAnswer}. */
   slowNext(path: string, answer: SlowAnswer): void;
+  /**
+   * Holds the next call to a path once it is recorded, before anything is decided about it — forced failures and slow
+   * answers included — until `release` is called: a provider still working, for as long as a test needs. `reached`
+   * settles when the request has arrived.
+   */
+  holdNext(path: string): { reached: Promise<void>; release(): void };
   /** Called after a draft has become a sent message, to lose or replace the answer to that send. */
   afterSend: ((message: FakeMessage) => { status: number; body?: unknown; drop?: boolean } | undefined) | null;
   /** Turns a stored refresh token into one Google refuses, as revocation or a Testing-app expiry would. */
@@ -412,6 +418,7 @@ export async function startFakeGoogle(options: FakeGoogleOptions = {}): Promise<
   ): { status: number; reason?: string | undefined; retryAfter?: string | undefined } | undefined =>
     failures.get(path)?.shift();
   const slow = new Map<string, SlowAnswer[]>();
+  const holds = new Map<string, Array<{ arrived(): void; released: Promise<void> }>>();
 
   const accountOf = (request: IncomingMessage): { sub: string; scopes: string[] } | null => {
     const header = request.headers.authorization ?? '';
@@ -433,6 +440,12 @@ export async function startFakeGoogle(options: FakeGoogleOptions = {}): Promise<
         for (const [key, value] of new URLSearchParams(body)) params[key] = value;
       }
       requests.push({ method: request.method ?? 'GET', path: url.pathname, params });
+
+      const hold = holds.get(url.pathname)?.shift();
+      if (hold) {
+        hold.arrived();
+        await hold.released;
+      }
 
       const forced = fail(url.pathname);
       if (forced) {
@@ -837,6 +850,18 @@ export async function startFakeGoogle(options: FakeGoogleOptions = {}): Promise<
     },
     slowNext(path, answer) {
       slow.set(path, [...(slow.get(path) ?? []), answer]);
+    },
+    holdNext(path) {
+      let arrived!: () => void;
+      let release!: () => void;
+      const reached = new Promise<void>((settle) => {
+        arrived = settle;
+      });
+      const released = new Promise<void>((settle) => {
+        release = settle;
+      });
+      holds.set(path, [...(holds.get(path) ?? []), { arrived, released }]);
+      return { reached, release };
     },
     revoke(refreshToken) {
       const grant = tokens.get(refreshToken);

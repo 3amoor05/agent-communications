@@ -313,3 +313,46 @@ test('the send tools say where the approval stands: prepared, refused for a pers
     await chatClient.close();
   }
 });
+
+// ── What a send says when Gmail's answer is short of certain (CUE-404 Task 12; §D2, §D8) ─────────────────────────
+
+test('over MCP, a send Gmail accepted without an id says exactly that, and a lost answer is SEND_OUTCOME_UNKNOWN (D8o-e, D2pt-b)', async () => {
+  const harness = await mailbox('chat');
+  const { client, close } = await connect(harness);
+  try {
+    const prepareAndSend = async () => {
+      const id = await draftId(harness);
+      const prepared = (
+        await client.callTool({ name: 'gmail_send_prepare', arguments: { inbox: 'work', draftId: id } })
+      ).structuredContent as { approvalId: string; expect: unknown };
+      return (await client.callTool({
+        name: 'gmail_draft_send',
+        arguments: { inbox: 'work', draftId: id, approvalId: prepared.approvalId, expect: prepared.expect },
+      })) as ToolResult;
+    };
+
+    harness.google.afterSend = () => ({ status: 200, body: { threadId: 't-1' } });
+    const noId = await prepareAndSend();
+    assert.ok(!noId.isError, JSON.stringify(noId.structuredContent));
+    const sent = noId.structuredContent as { said: string; approval: { state: string } };
+    assert.equal(sent.said, 'sent; the provider returned no id');
+    assert.equal('sentMessageId' in sent, false);
+    assert.equal(sent.approval.state, 'sending', 'never used without an id');
+
+    harness.google.afterSend = () => ({ status: 503, body: { error: { code: 503, message: 'the answer was lost' } } });
+    const lost = await prepareAndSend();
+    assert.equal(lost.isError, true);
+    const error = (
+      lost.structuredContent as {
+        error: { code: string; hint: string; details: { approval: Record<string, unknown> } };
+      }
+    ).error;
+    assert.equal(error.code, 'SEND_OUTCOME_UNKNOWN');
+    assert.match(error.hint, /^Check the Sent folder before anything else/);
+    assert.equal(error.details.approval.state, 'sending');
+    assert.equal(typeof error.details.approval.unknownAt, 'string');
+    assert.equal(harness.google.requests.filter((request) => request.path.endsWith('/send')).length, 2);
+  } finally {
+    await close();
+  }
+});
