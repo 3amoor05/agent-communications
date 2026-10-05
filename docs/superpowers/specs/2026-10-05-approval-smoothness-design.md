@@ -82,12 +82,21 @@ implement the first two. The short repeat preview is dropped for this release an
   or change expires thirty minutes after creation. A `confirm`-route pending record is never directly claimable, even
   if the policy later becomes `chat`. A `chat`-route record is directly claimable only while the effective live policy
   is still `chat`; tightening to `confirm` makes that record wait for a terminal approval (or, for a send, a trusted
-  form) inside its original ten-minute window. Tightening to `never` still refuses it.
+  form) inside its original ten-minute window. Tightening to `never` revokes it (below).
 - **Approval starts a new, bounded window.** A send or change approved through its permitted channel stores
   `approvedAt` and `usableUntil = approvedAt + 24 h`. It remains single-use and content-bound: a changed draft,
   account, expected recipients or subject, or a drifted change plan still voids it at claim. Boundary equality is
-  expired. It is claimable only while the effective live policy is not `never`; tightening to `never` makes even an
-  unexpired approved record non-claimable and claim returns `POLICY_NEVER`.
+  expired. It is claimable only while the effective live policy is not `never`.
+- **`never` revokes; loosening revives nothing.** `never` exists only for sends (`ChangePolicy` has no such value,
+  `packages/core/src/config.ts:37, 45`). The operation that sets an owner's send policy to `never` revokes, in the same
+  operation and under each record's lock, every `pending` and `approved` send record of that owner, with reason
+  `sending was turned off (policy: never)`; a record already `sending` is left to finish or become `unknown`, and a
+  failure to revoke one is reported with the policy change rather than hidden. Independently, as today, any claim,
+  execute, or terminal/form approval that meets an effective `never` — the live policy, or a record's
+  `requiredPolicy: never` — revokes that record under its lock and returns `POLICY_NEVER`
+  (`packages/core/src/approvals.ts:757-758, 770-772`); an approval attempt never moves a record to `approved` under
+  `never`. So no record created before `never` can send after the policy is loosened again: a later `chat` or `confirm`
+  policy needs a newly prepared approval.
 - **Downloads do not adopt the new approval lifetime.** A download question expires thirty minutes after creation,
   including after it is answered, and has no `usableUntil`; this is the existing model
   (`packages/core/src/approvals.ts:921-1004`).
@@ -332,14 +341,15 @@ needs the terminal.
 | wrong code, attempts one or two | record remains pending; `APPROVAL_REQUIRED` |
 | wrong code, attempt three | atomically revoked; `APPROVAL_VOID`, “too many wrong codes” (the existing transition has the same boundary at `packages/core/src/approvals.ts:704-716`) |
 | approved send/change, before `usableUntil`, live policy not `never` | `state: approved`, `claimable: true` |
-| pending or approved send/change, live policy `never` | its real state, `claimable: false`; an execute/claim returns `POLICY_NEVER`; an approved Gmail record says “approved, but the mailbox's policy is now never” |
+| pending or approved send seen under live policy `never` (only in the window before the policy change's revocation reaches it, or when that revocation failed) | its real state, `claimable: false`, with “sending is turned off (policy: never); any use revokes it”; an execute, claim or approval attempt revokes it under its lock and returns `POLICY_NEVER` |
+| send revoked by `never` | `APPROVAL_VOID`: “revoked: sending was turned off (policy: never)”; prepare again once sending is allowed |
 | expired before approval | `state: expired`, `claimable: false`; `APPROVAL_EXPIRED`: “this approval expired; nothing was sent with it”, followed by prepared at …, expired at … and prepare-again guidance |
 | approved, then expired unused | `state: expired`, `claimable: false`; `APPROVAL_EXPIRED`: “this approval expired; nothing was sent with it”, followed by approved at …, expired unused at … and prepare-again guidance |
 | expiry forced because the observation clock is before `createdAt` or `approvedAt` | `state: expired`, `claimable: false`; `APPROVAL_EXPIRED`: “the clock moved backwards; this approval was expired safely at …; nothing was sent with it”, with `reason: clock-anomaly` and no false normal-deadline claim |
 | provider response leaves this call's outcome uncertain | immediately return non-retryable `SEND_OUTCOME_UNKNOWN` with `approval.state: sending`, `claimable: false`, `sendingAt`, any `sendingHeartbeatAt` and derived `unknownAt`; the send may have happened |
 | `sending`, inside its renewed lease, observed by another call | retryable `APPROVAL_PENDING`: “being sent by another call since …; wait for it”; include `sendingAt`, any `sendingHeartbeatAt` and derived `unknownAt`; never “prepare again” |
 | `unknown` at or after the sending-lease limit | `SEND_OUTCOME_UNKNOWN`: final to every caller except the original claim token's `used`/`failed` completion; the send may have happened and its claimant may still record a late provider result; check Sent/the channel before doing anything else |
-| used send | `APPROVAL_VOID`: already used at `usedAt`, with its non-empty provider message id. `used` means the provider **accepted** the send; the approval record stores nothing more and no transition follows it. Wording: core's generic surfaces say "accepted by <provider> at <time>"; Gmail and Slack, where acceptance is sending, say "sent"; Resend's own surfaces say "accepted by Resend, scheduled for <time>" for a scheduled send (from the request's `scheduledAt`, `packages/resend/src/operations/send.ts:581, 717`), and "cancelled from this machine before sending" only when this machine's local send record holds the successful provider cancellation (`packages/resend/src/operations/scheduled.ts:83-111`). A **current outcome** is reported only from Resend's own `last_event`, read with a full-access key (`send.ts:765`), through one fixed mapping: `scheduled` → "scheduled for <time>, not yet sent"; `queued` → "accepted by Resend, not yet sent"; `sent`, `delivered`, `delivery_delayed`, `opened`, `clicked` and `complained` → "sent (Resend reports <event>)"; `bounced` → "not delivered: Resend reports it bounced"; `suppressed` → "not delivered: Resend suppressed it"; `failed` → "not delivered: Resend reports it failed"; `canceled` → "Resend reports it cancelled" (source-neutral: Resend does not say who cancelled it) unless the local record above proves this machine did; any other value → "accepted by Resend; its latest event is one this version does not interpret", with the raw value only in an untrusted-wrapped field. Without a full-access key, or when the lookup fails, it is "current outcome unavailable". Nothing is ever "sent" because of the local `sent` event (written at acceptance, `send.ts:694`) or because the scheduled time has passed. The approval record is never rewritten by cancellation |
+| used send | `APPROVAL_VOID`: already used at `usedAt`, with its non-empty provider message id. `used` means the provider **accepted** the send; the approval record stores nothing more and no transition follows it. Wording: core's generic surfaces say "accepted by <provider> at <time>"; Gmail and Slack, where acceptance is sending, say "sent"; Resend's own surfaces say "accepted by Resend, scheduled for <time>" for a scheduled send (from the request's `scheduledAt`, `packages/resend/src/operations/send.ts:581, 717`), and "cancelled from this machine before sending" only when this machine's local send record holds the successful provider cancellation (`packages/resend/src/operations/scheduled.ts:83-111`). A **current outcome** is reported only from Resend's own `last_event`, read with a full-access key (`send.ts:765`), through one fixed mapping: `scheduled` → "scheduled for <time>, not yet sent"; `queued` → "accepted by Resend, not yet sent"; `sent`, `delivered`, `delivery_delayed`, `opened`, `clicked` and `complained` → "sent (Resend reports <event>)"; `bounced` → "Resend reports a bounce"; `suppressed` → "Resend reports it suppressed"; `failed` → "Resend reports a failure"; `canceled` → "Resend reports it cancelled" (source-neutral: Resend does not say who cancelled it) unless the local record above proves this machine did; any other value → "accepted by Resend; its latest event is one this version does not interpret", with the raw value only in an untrusted-wrapped field. Every one of these is attributed to Resend and is about the email as Resend's single `last_event` describes it, never a claim about every recipient: an email to several recipients can be delivered to one and bounce for another, and this status reads one event (`send.ts:733`), so no wording says "not delivered" or "delivered to everyone". Without a full-access key, or when the lookup fails, it is "current outcome unavailable". Nothing is ever "sent" because of the local `sent` event (written at acceptance, `send.ts:694`) or because the scheduled time has passed. The approval record is never rewritten by cancellation |
 | used change | `APPROVAL_VOID`: the approved change was already claimed at `usedAt`; no provider-id or “sent” wording |
 | `failed` | `APPROVAL_VOID` with channel-specific truth. Gmail/Resend certain failures say nothing was sent. A Slack file failure says **“nothing was posted”** and preserves `uploaded` and `possiblyUploaded` ids/names because bytes may already have reached Slack (`packages/slack/src/operations/send.ts:1016-1018, 1032-1035, 1088-1111, 1137-1172`) |
 | `revoked` | `APPROVAL_VOID` with its reason; an explicit decline is “declined”, while cancellation is not a revoke |
@@ -880,6 +890,15 @@ lookup failures stay attached to their draft and do not raise the concurrency or
 
 ## 5. Tests owed
 
+- **Round-25 cases:** a `pending` and an `approved` send each taken through `chat → never → chat` and
+  `confirm → never → confirm`: the change to `never` revokes both, and after loosening neither can be claimed, executed
+  or approved — each returns the revoked result, and only a newly prepared approval can send; a revocation failure
+  during the change to `never` is reported, and that record's next claim or approval revokes it and returns
+  `POLICY_NEVER`; a terminal and a trusted-form approval attempted under `never` each revoke and never write
+  `approved`; a record carrying `requiredPolicy: never` under a live `chat` policy revokes at claim. Resend
+  mixed-recipient fixtures — one recipient delivered and one bounced, under each order of `last_event` — produce only
+  attributed wording ("Resend reports …") and never "not delivered" or "delivered to everyone". The v1 decoder with
+  one fixture before and one after the original expiry for each of `pending` and `approved`.
 - **Round-24 cases:** a table-driven Resend status test over `last_event` values `scheduled`, `queued`, `sent`,
   `delivered`, `delivery_delayed`, `opened`, `clicked`, `complained`, `bounced`, `suppressed`, `failed`, `canceled`
   and an unknown future value, each producing exactly the D3 mapping, with the unknown value wrapped as untrusted and
@@ -896,7 +915,8 @@ lookup failures stay attached to their draft and do not raise the concurrency or
   delivered and canceled each reported through the D3 mapping (canceled source-neutrally); a provider lookup failure → "current outcome unavailable";
   a successful provider cancellation followed independently by send-record and audit failures → success with a
   bookkeeping-gap hint; the exact CLI, MCP and skill wording for a scheduled acceptance without an id; one scan mixing
-  valid v1 records (shown `legacy: true` with their stored state, never `corrupt`, never triggering the v2
+  valid v1 records (shown `legacy: true` with their derived v1 state — stored `pending`/`approved` before its original
+  expiry, `expired` after it — never `corrupt`, never triggering the v2
   missing-binding rule) with v2 records.
 - **Round-22 cases:** a Resend scheduled send: core status says "accepted by Resend", Resend's status says "scheduled,
   not yet sent" while `last_event` is `scheduled` (before or after its time), "cancelled from this machine before
