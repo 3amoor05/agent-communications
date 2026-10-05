@@ -1,6 +1,6 @@
 # CUE-404 — approving a send without fighting the clock — design
 
-Status: **revised after round 17 (3 P2, 1 P3, all addressed)**, 2026-10-05, from Linear CUE-404 (High; the
+Status: **revised after round 18 (2 P2, 1 P3, all addressed)**, 2026-10-05, from Linear CUE-404 (High; the
 owner: "this is very not smooth") and a cited research pass over this repository, the MCP specification and the
 clients' documentation. Depends on CUE-403 (the CLIs on PATH,
 [its spec](2026-10-04-cli-path-shims-design.md)) for every printed terminal command to work; ships after it.
@@ -118,15 +118,20 @@ used by claim at `approvals.ts:725` and by Gmail at `packages/gmail/src/operatio
 copy: no stored `groupKey`. For a download the object is `{ "v": 2, "kind": "download", "contentDigest", "profile":
 { "pendingMs": 1800000 }, "identity", "offered" }`, where `offered` is the canonical list of folder meanings and paths
 offered when the question was created (today excluded from `downloadDigest`, `approvals.ts:95`), exactly the stored
-folders object `{ "downloads": "<absolute path>", "current": "<absolute path>" | null }` as written at creation
-(`approvals.ts:926`) — not the rendered options — canonicalised by `canonicalJson`. Every read also requires the stored
+folders object `{ "downloads": "<absolute path>", "current": "<absolute path>" }` — both always strings, as typed and
+written at creation (`approvals.ts:120, 933`) — not the rendered options, canonicalised by `canonicalJson`. The download
+binding also covers the exact stored `listing` (each entry's displayed name, size, rename reason and flags — today
+excluded from `downloadDigest`, `approvals.ts:150`, though terminal and form approval render it and derive warnings
+from it, `save-destination.ts:1260`), and every read requires `download.names` to equal the listing's names in order;
+a mismatch or any altered listing field is `corrupt` before anything is rendered. Every read also requires the stored
 `approvalId` to equal the id in the record's file name; a mismatch is `corrupt` before any lock, write or claim marker
 touches another id (`approvals.ts:494, 570, 801`). Any stored identity field or offered folder altered after creation therefore fails recomputation, and every
 read
 recomputes it from the record's own fields before classifying: a missing, malformed, non-canonical or mismatching value
 makes the record `corrupt` (never claimable). `contentDigest` is an opaque identity on reads that cannot reach the
-provider (status, wait, lists, D9): they validate only its encoding and the `bindingDigest` coherence, because its
-canonical input (addresses, subject, body, attachments — `packages/core/src/digest.ts:139`) is not stored; approve and
+provider (status, wait, lists, D9): for **sends** they validate only its encoding and the `bindingDigest` coherence,
+because a send's canonical input (addresses, subject, body, attachments — `packages/core/src/digest.ts:139`) is not
+stored; change and download records do store their canonical input, so every read recomputes their `contentDigest` too; approve and
 claim compare it against the live content, exactly as today. **Confirmation evidence**, version 2, by provenance: a
 record reaches `approved` only through the terminal or a trusted form — a chat-route record is claimed straight from
 `pending` and never becomes `approved`. Evidence is defined **per kind**, keeping today's persisted literals
@@ -136,7 +141,7 @@ record reaches `approved` only through the terminal or a trusted form — a chat
 |---|---|---|
 | send | `approvedVia` ∈ {`terminal`, `elicitation`}; `approvedBindingDigest` = `bindingDigest` | neither field |
 | change | `approvedVia` = `terminal` only (confirm changes are terminal-only, `approvals.ts:901`); `approvedBindingDigest` = `bindingDigest` | neither field |
-| download | `approvedVia` as today, **no** `approvedAt`, and `approvedDigest` = SHA-256 of canonical `{ bindingDigest, answer }`, binding the recorded answer (`downloads`, `current`, `other` and its path) when it is accepted (`approvals.ts:979`); the save path re-verifies it before writing (`save-destination.ts:864`) | a chat-policy answer claimed straight from `pending` to `used` (`approvals.ts:1017`) carries no `approvedAt`, `approvedVia` or `approvedDigest`, in `used`, `revoked` or `expired` alike; a stored `download.answer` may exist **only** with valid terminal or `elicitation` evidence, so a pending or direct-chat record carrying one is `corrupt` and saves nothing |
+| download | `approvedVia` as today, **no** `approvedAt`, and `approvedDigest` = SHA-256 of canonical `{ bindingDigest, answer }`, binding the recorded answer (`downloads`, `current`, `other` and its path) when it is accepted (`approvals.ts:979`); the save path re-verifies it before writing (`save-destination.ts:864`) | a chat-policy answer claimed straight from `pending` to `used` (`approvals.ts:1017`) carries no `approvedAt`, `approvedVia` or `approvedDigest`, in `used`, `revoked` or `expired` alike; a stored `download.answer` may exist **only** with valid terminal or `elicitation` evidence, so a pending or direct-chat record carrying one is `corrupt` and saves nothing; the chat answer itself is never persisted (`approvals.ts:1060`, `save-destination.ts:903`), so status for a direct-chat `used` download says **`answered` (in chat)** with no destination |
 
 `approvedVia: chat` does not exist; "form" in prose means the stored `elicitation`. Any violation makes the record
 `corrupt`. Legacy (version-1) records,
@@ -303,7 +308,7 @@ be claimed. Downloads retain their public `answered` classification for stored `
 | `failed` | `APPROVAL_VOID` with channel-specific truth. Gmail/Resend certain failures say nothing was sent. A Slack file failure says **“nothing was posted”** and preserves `uploaded` and `possiblyUploaded` ids/names because bytes may already have reached Slack (`packages/slack/src/operations/send.ts:1016-1018, 1032-1035, 1088-1111, 1137-1172`) |
 | `revoked` | `APPROVAL_VOID` with its reason; an explicit decline is “declined”, while cancellation is not a revoke |
 | download pending | `pending` until answered, expired or a wait times out; under `chat` the answer may be relayed, under `confirm` it comes from the terminal or trusted form |
-| download `approved` or `used` | `answered`, with the recorded destination choice and original creation-relative expiry; never `approved` with a `usableUntil` |
+| download `approved` or `used` | `answered`, with the recorded destination choice when the answer came from the terminal or a form; a direct-chat `used` download says `answered (in chat)` with no destination and original creation-relative expiry; never `approved` with a `usableUntil` |
 | download `expired` | `expired` / `APPROVAL_EXPIRED`: the question expired before it was answered or used; current download state handling is separate already (`packages/core/src/approvals.ts:591-607, 972-1004`) |
 
 `SEND_OUTCOME_UNKNOWN` is added to the one registry with exit **10**, `retryable: false`, and summary **“the send
@@ -829,9 +834,13 @@ lookup failures stay attached to their draft and do not raise the concurrency or
 
 ## 5. Tests owed
 
+- **Round-18 cases:** a direct-chat `pending → used` download then status, wait and list report `answered (in chat)`
+  with no destination; mutating every `listing` field (especially `renamed` and `flags`) and a `names`/`listing`
+  disagreement → `corrupt` before any terminal or form rendering; `offered` with both paths through creation, canonical
+  JSON and SHA-256 vectors; change and download `contentDigest` recomputed on status reads.
 - **Round-17 cases:** file name A with stored `approvalId` B (B existing and not) → `corrupt`, no write or claim marker
   touches B; a pending or direct-chat download with an injected stored answer → `corrupt`, nothing saved; golden
-  `offered` vectors for both folder choices, with and without `current`; the committed manifest values (Gmail and Resend
+  `offered` vectors for both folder choices (both paths always present); the committed manifest values (Gmail and Resend
   `draft`, Slack `draft-revision-digest`) and a Slack reaction producing no D9 group.
 - **Round-16 cases:** independently mutating each identity field (`inboxId`, `inboxSub`, `draftId`, `draftMessageId`,
   `expect`) makes the record `corrupt` before approval, claim, provider access or reporting; mutating a confirm
