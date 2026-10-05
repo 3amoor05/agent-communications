@@ -205,8 +205,12 @@ holds the tokens and makes the requests — is a larger change and is not planne
 A new channel is its package, plus the rows and skills that describe it. Nothing in the core or the tooling is edited.
 
 1. **The package**, `packages/<channel>`: `@agentcomms/<channel>`, the same version as the rest, `@agentcomms/core` as a
-   `workspace:*` dev dependency (bundled, as Gmail's and Slack's are), and the `"agentcomms"` field (§2) with `channel`
-   equal to the directory name. Its CLI at `src/cli.ts` / `src/cli/program.ts` (`run`), its server at
+   runtime dependency, in `dependencies`, as `workspace:*` — which packs to the exact version, so a published channel
+   installs the core of its own release — and in no other dependency field, and the `"agentcomms"` field (§2) with
+   `channel` equal to the directory name. The bundle still inlines core, as Gmail's and Slack's do; the installed
+   package is how the channel finds core's own command. *(Amended 2026-10-05 by the
+   [CLI path design](2026-10-04-cli-path-shims-design.md), D4: this was a `workspace:*` development dependency, and
+   `test/channel-registry.test.mjs` now refuses a channel that declares core any other way.)* Its CLI at `src/cli.ts` / `src/cli/program.ts` (`run`), its server at
    `src/mcp/server.ts` (`create<Label>McpServer`), a README, the layout in §4, and `test/consumer-check.mjs` — the
    check `pnpm verify:packages` runs inside a throwaway project that installed the packed tarball, and the only test
    of what is actually published.

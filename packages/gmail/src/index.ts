@@ -2,8 +2,8 @@
  * The library entry of `@agentcomms/gmail`.
  *
  * It is deliberately small. Everything else in this package is reached through the `agent-gmail` command or through
- * the MCP server, and both are shipped as a bundle with no runtime dependencies — so the public API here stays a
- * contract we can keep, rather than the whole internal surface.
+ * the MCP server, and both are shipped as a bundle whose internals no caller can import — so the public API here
+ * stays a contract we can keep, rather than the whole internal surface.
  */
 
 import type { PathOverrides } from '@agentcomms/core';

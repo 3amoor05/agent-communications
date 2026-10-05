@@ -35,11 +35,13 @@
     "typecheck": "tsc -p tsconfig.json",
     "test": "node --experimental-strip-types --test --test-timeout=600000 \"test/**/*.test.ts\""
   },
+  "dependencies": {
+    "@agentcomms/core": "workspace:*"
+  },
   "optionalDependencies": {
     "@napi-rs/keyring": "2.1.0"
   },
   "devDependencies": {
-    "@agentcomms/core": "workspace:*",
     "@modelcontextprotocol/client": "2.0.0",
     "@modelcontextprotocol/server": "^2.0.0",
     "commander": "^15.0.0",

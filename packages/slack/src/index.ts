@@ -2,8 +2,8 @@
  * The library entry of `@agentcomms/slack`.
  *
  * Deliberately small. Everything else in this package is reached through the `agent-slack` command, which ships
- * as a bundle with no runtime dependencies — so what is exported here stays a contract that can be kept, rather
- * than the whole internal surface.
+ * as a bundle whose internals no caller can import — so what is exported here stays a contract that can be kept,
+ * rather than the whole internal surface.
  */
 import { VERSION } from './version.ts';
 

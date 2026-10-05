@@ -76,13 +76,13 @@ importers:
 
   packages/gmail:
     dependencies:
+      '@agentcomms/core':
+        specifier: workspace:*
+        version: link:../core
       '@clack/prompts':
         specifier: ^1.8.1
         version: 1.8.1
     devDependencies:
-      '@agentcomms/core':
-        specifier: workspace:*
-        version: link:../core
       '@googleapis/gmail':
         specifier: ^22.0.0
         version: 22.0.0
@@ -129,10 +129,11 @@ importers:
         version: 2.1.0
 
   packages/resend:
-    devDependencies:
+    dependencies:
       '@agentcomms/core':
         specifier: workspace:*
         version: link:../core
+    devDependencies:
       '@modelcontextprotocol/client':
         specifier: 2.0.0
         version: 2.0.0
@@ -151,10 +152,11 @@ importers:
         version: 2.1.0
 
   packages/slack:
-    devDependencies:
+    dependencies:
       '@agentcomms/core':
         specifier: workspace:*
         version: link:../core
+    devDependencies:
       '@modelcontextprotocol/client':
         specifier: 2.0.0
         version: 2.0.0
@@ -173,10 +175,11 @@ importers:
         version: 2.1.0
 
   packages/whatsapp:
-    devDependencies:
+    dependencies:
       '@agentcomms/core':
         specifier: workspace:*
         version: link:../core
+    devDependencies:
       '@modelcontextprotocol/client':
         specifier: 2.0.0
         version: 2.0.0

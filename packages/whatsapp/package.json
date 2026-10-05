@@ -38,8 +38,10 @@
     "typecheck": "tsc -p tsconfig.json",
     "test": "node --experimental-strip-types --disable-warning=ExperimentalWarning --test --test-timeout=600000 \"test/**/*.test.ts\""
   },
+  "dependencies": {
+    "@agentcomms/core": "workspace:*"
+  },
   "devDependencies": {
-    "@agentcomms/core": "workspace:*",
     "@modelcontextprotocol/client": "2.0.0",
     "@modelcontextprotocol/server": "^2.0.0",
     "commander": "^15.0.0",

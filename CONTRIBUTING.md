@@ -137,7 +137,11 @@ this repository and are released with the core, because a channel's process can 
 the shared keychain namespace, so it is trusted exactly as far as it is reviewed here.
 
 1. **The package**, `packages/<channel>`, named `@agentcomms/<channel>` and at the same version as the rest, with
-   `@agentcomms/core` as a `workspace:*` dev dependency. Its CLI at `src/cli.ts` with a Commander program at
+   `@agentcomms/core` as a runtime dependency, in `dependencies`, as `workspace:*`, and in no other dependency field.
+   That packs to the exact version, so a published channel installs the core of its own release: the bundle still
+   inlines core's code, and the installed package is how the channel finds core's own command
+   ([design](docs/superpowers/specs/2026-10-04-cli-path-shims-design.md), D4). `test/channel-registry.test.mjs`
+   refuses a channel that declares core any other way. Its CLI at `src/cli.ts` with a Commander program at
    `src/cli/program.ts` exporting `run`, its MCP server at `src/mcp/server.ts` exporting `create<Label>McpServer`, a
    README, and `THIRD_PARTY_LICENSES` in its `"files"`. And **`test/consumer-check.mjs`**: `pnpm verify:packages`
    packs the package, installs the tarball into a throwaway project and runs that file there, so it is the only test

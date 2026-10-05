@@ -1,12 +1,35 @@
 // Runs inside a fresh project that installed the packed tarball (scripts/verify-package.mjs).
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { join } from 'node:path';
 
 const version = JSON.parse(
   readFileSync(join('node_modules', '@agentcomms', 'gmail-mcp', 'package.json'), 'utf8'),
 ).version;
+
+/** The directory Node finds `name` in when it is looked up from inside `from`, as a `require` there would. */
+function packageRoot(name, from) {
+  const found = createRequire(join(from, 'package.json'))
+    .resolve.paths(name)
+    .map((modules) => join(modules, name))
+    .find((directory) => existsSync(join(directory, 'package.json')));
+  assert.ok(found, `${name} is not installed where ${from} can find it`);
+  return found;
+}
+const manifestAt = (directory) => JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8'));
+
+/*
+ * Gmail depends on core at runtime, pinned to its own version (design 2026-10-04, D4): a channel finds core's command
+ * through the installed package. The verifier gave this project Gmail's and core's tarballs from this checkout and
+ * refused every @agentcomms package from a registry, so the core found from inside Gmail is this release's — not the
+ * copy of a version already out, which is what npm fetched while only Gmail's tarball was given to it.
+ */
+const gmailRoot = packageRoot('@agentcomms/gmail', process.cwd());
+assert.equal(manifestAt(gmailRoot).version, version, 'the server and Gmail are one release');
+assert.equal(manifestAt(gmailRoot).dependencies?.['@agentcomms/core'], version, 'Gmail pins its core exactly');
+assert.equal(manifestAt(packageRoot('@agentcomms/core', gmailRoot)).version, version, 'the core Gmail finds');
 const bin = join('node_modules', '.bin', process.platform === 'win32' ? 'agent-gmail-mcp.cmd' : 'agent-gmail-mcp');
 
 /** Speaks MCP to the packed server over stdio: initialize, then tools/list. */
@@ -118,4 +141,6 @@ assert.deepEqual(names, [
 
 child.stdin.end();
 child.kill();
-console.log(`gmail-mcp consumer check: initialize and tools/list over stdio OK (${names.length} tools)`);
+console.log(
+  `gmail-mcp consumer check: Gmail and core ${version} installed, initialize and tools/list over stdio OK (${names.length} tools)`,
+);

@@ -95,9 +95,11 @@ version cannot be sent twice, so that one mistake would end the release at that 
 If one of them then fails, the fix is a new commit, the package is already out at that version from the old one, and
 every package moves to the next version. After the preflight, nothing can fail the commit any more.
 
-A channel bundles core and depends at runtime on nothing else of this suite, so its first version can go out before
-the rest of the release. A package that did depend on another one of them at runtime (as `gmail-mcp` does on `gmail`)
-would not install until the re-run had published that one, so re-run straight away.
+Every channel depends at runtime on exactly the same-version `@agentcomms/core` — pnpm packs its `workspace:*` edge to
+that version — so core is packed and published before every channel: `scripts/packages.mjs` puts it first, and the
+workflow, `scripts/release.mjs` and `pnpm verify:packages` all follow that order. No channel's version installs until
+its core's is on the registry, a first version included: published by hand from the tagged commit, it waits, as
+`gmail-mcp` waits for `gmail`, until the re-run has published core at that version. So re-run straight away.
 
 ## The packages
 

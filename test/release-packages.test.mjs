@@ -7,8 +7,10 @@ import { delimiter, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { REGISTRY } from '../scripts/channels.mjs';
 import { PACKAGES } from '../scripts/packages.mjs';
 import { isVisible } from '../scripts/release-confirm.mjs';
+import { workspaceClosure } from '../scripts/verify-package.mjs';
 import { tempDir } from './helpers/temp-dir.mjs';
 
 /** Text matched literally inside a RegExp: every character that means something there, backslash included. */
@@ -88,6 +90,34 @@ test('the shared list is in an order that installs: every package after what it 
   }
 });
 
+test('the release documents say every channel pins the same-version core, so core goes out before every channel', async () => {
+  /*
+   * A channel used to bundle core and depend on it only for development, and RELEASING.md drew a permission from
+   * that: a channel's first version "can go out before the rest of the release". Every channel now depends on core at
+   * runtime, pinned to its own version (design 2026-10-04, D4), so a channel out before its core is a channel nobody
+   * can install. The page says so, and the list the release walks agrees with it.
+   */
+  const text = (await readFile(join(ROOT, 'docs', 'RELEASING.md'), 'utf8')).replace(/\s+/g, ' ');
+  assert.match(
+    text,
+    /every channel depends at runtime on exactly the same-version `@agentcomms\/core`/i,
+    'RELEASING.md does not say each channel pins the core of its own version',
+  );
+  assert.match(text, /core is packed and published before every channel/i, 'RELEASING.md does not put core first');
+  assert.doesNotMatch(text, /depends at runtime on nothing else of this suite/i, 'the old runtime claim is back');
+  assert.doesNotMatch(
+    text,
+    /first version can go out before the rest of the release/i,
+    'RELEASING.md still lets a channel go out before its core',
+  );
+  assert.equal(PACKAGES.indexOf('core'), 0, 'core is not the first package published');
+  const channels = REGISTRY.channels.filter((channel) => channel.directory !== 'core');
+  assert.ok(channels.length > 0, 'no channel found — the discovery is wrong');
+  for (const { directory } of channels) {
+    assert.ok(PACKAGES.indexOf(directory) > 0, `@agentcomms/${directory} is not published after core`);
+  }
+});
+
 test('running the list prints it, which is how the workflow reads it', async () => {
   const { status, stdout } = await runScript(join(ROOT, 'scripts', 'packages.mjs'), []);
   assert.equal(status, 0);
@@ -161,6 +191,98 @@ test('the local release script, sync-versions, the package verifier and the lice
   }
   const root = JSON.parse(await readFile(join(ROOT, 'package.json'), 'utf8'));
   assert.equal(root.scripts['verify:packages'], 'node scripts/verify-package.mjs --all');
+});
+
+// ── The package verifier's dependency closure ──────────────────────────────────────────────────────────────────────
+
+/** A workspace of bare manifests, each `@agentcomms/<directory>` at 1.0.0 plus `fields`; returns a directory finder. */
+async function workspaceOf(manifests) {
+  const root = await tempDir('verify-closure-');
+  for (const [directory, fields] of Object.entries(manifests)) {
+    await mkdir(join(root, 'packages', directory), { recursive: true });
+    await writeFile(
+      join(root, 'packages', directory, 'package.json'),
+      JSON.stringify({ name: `@agentcomms/${directory}`, version: '1.0.0', ...fields }),
+    );
+  }
+  return (directory) => join(root, 'packages', directory);
+}
+
+const closureNames = (directory) => workspaceClosure(directory).map((entry) => entry.name);
+
+test('the package verifier gives the consumer every workspace package beneath the candidate, once each, dependencies first', async () => {
+  /*
+   * A wrapper over two packages that both need the same base — `gmail-mcp` over Gmail over core, with a second route to
+   * core. Only the direct edges used to be packed: the base, two levels down, was left to npm, which fetched the copy
+   * the registry had from the last release, or failed for a version not out yet.
+   */
+  const at = await workspaceOf({
+    base: { dependencies: { zod: '^4.0.0' } },
+    left: { dependencies: { '@agentcomms/base': 'workspace:*' } },
+    right: { optionalDependencies: { '@agentcomms/base': 'workspace:*' } },
+    top: {
+      dependencies: { '@agentcomms/right': 'workspace:*', '@agentcomms/left': 'workspace:*', commander: '^15.0.0' },
+      // A development edge is not installed with the candidate, so nothing is packed for it.
+      devDependencies: { '@agentcomms/tooling': 'workspace:*' },
+    },
+    tooling: {},
+  });
+  assert.deepEqual(closureNames(at('top')), ['@agentcomms/base', '@agentcomms/left', '@agentcomms/right']);
+  assert.deepEqual(
+    workspaceClosure(at('top')).map((entry) => entry.directory),
+    [at('base'), at('left'), at('right')],
+    'each is packed from its own directory',
+  );
+  assert.deepEqual(closureNames(at('left')), ['@agentcomms/base']);
+  assert.deepEqual(closureNames(at('base')), []);
+});
+
+test('the package verifier refuses a workspace circle, and an edge whose directory holds another package', async () => {
+  const circle = await workspaceOf({
+    first: { dependencies: { '@agentcomms/second': 'workspace:*' } },
+    second: { optionalDependencies: { '@agentcomms/first': 'workspace:*' } },
+  });
+  assert.throws(
+    () => workspaceClosure(circle('first')),
+    /@agentcomms\/first → @agentcomms\/second → @agentcomms\/first/,
+  );
+  const misnamed = await workspaceOf({
+    top: { dependencies: { '@agentcomms/base': 'workspace:*' } },
+    base: { name: '@agentcomms/other' },
+  });
+  assert.throws(() => workspaceClosure(misnamed('top')), /@agentcomms\/base.*@agentcomms\/other/);
+});
+
+test('verifying any package of this checkout packs core first, and a server-only package its channel too', () => {
+  const position = (name) => PACKAGES.indexOf(name.slice('@agentcomms/'.length));
+  for (const name of PACKAGES) {
+    const closure = closureNames(join(ROOT, 'packages', name));
+    assert.equal(new Set(closure).size, closure.length, `${name}: a package packed twice`);
+    assert.deepEqual(
+      closure,
+      [...closure].sort((a, b) => position(a) - position(b)),
+      `${name}: not in publish order`,
+    );
+    if (name === 'core') assert.deepEqual(closure, []);
+    else assert.equal(closure[0], '@agentcomms/core', `${name}: core is not packed for it, or not first`);
+  }
+  const wrappers = Object.entries(REGISTRY.wrappers);
+  assert.ok(wrappers.length > 0, 'no server-only package found — the discovery is wrong');
+  for (const [wrapper, channel] of wrappers) {
+    assert.deepEqual(closureNames(join(ROOT, 'packages', wrapper)), ['@agentcomms/core', `@agentcomms/${channel}`]);
+  }
+});
+
+test('the package verifier installs the whole closure, and no @agentcomms package from a registry', async () => {
+  // The run itself is `pnpm verify:packages`; this holds the script to the two lines that make it prove anything.
+  const verifier = await readFile(join(ROOT, 'scripts', 'verify-package.mjs'), 'utf8');
+  assert.match(verifier, /for \(const \{ name, directory \} of workspaceClosure\(packageDir\)\)/);
+  assert.match(
+    verifier,
+    /`--\$\{SCOPE\}:registry=\$\{registry\.url\}`/,
+    'the scope is not sent to the refusing registry',
+  );
+  assert.match(verifier, /\.\.\.dependencyTarballs,\s*tarball,/);
 });
 
 // ── The publish job's shape ──────────────────────────────────────────────────────────────────────────────────────

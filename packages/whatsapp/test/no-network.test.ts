@@ -98,10 +98,12 @@ test("the package's own code imports no network module and calls no fetch, WebSo
   assert.deepEqual(offenders, []);
 
   const manifest = JSON.parse(readFileSync(join(PACKAGE, 'package.json'), 'utf8')) as Record<string, unknown>;
-  assert.equal(
+  // Nothing installed at run time but this suite's own core, which every channel carries so that it can find core's
+  // command (design 2026-10-04, D4); its code is inlined in the bundle checked below, not imported from there.
+  assert.deepEqual(
     manifest.dependencies,
-    undefined,
-    'nothing installed at run time: no WhatsApp client library, no driver',
+    { '@agentcomms/core': 'workspace:*' },
+    'nothing else installed at run time: no WhatsApp client library, no driver',
   );
   assert.equal(manifest.optionalDependencies, undefined, 'not even the keychain module: this package holds no secret');
   // What the manifest promises, as core and every tool read it: no host, only `read`, and nothing about sending.

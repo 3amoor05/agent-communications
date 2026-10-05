@@ -1,8 +1,10 @@
 import { defineConfig } from 'tsdown';
 
 // Both entries are fully bundled — commander and comms-core included — for the same reason the Gmail package is:
-// `npx @agentcomms/slack` should install one package and start immediately. The optional native keychain module
-// is the only thing left external, because it ships a binary per platform.
+// `agent-slack` should start immediately, from its own files. `@agentcomms/core` is still installed beside it, as a
+// runtime dependency pinned to this version, because a handoff finds core's own command through that installed
+// package (design 2026-10-04, D4). The optional native keychain module is the only import left external, because it
+// ships a binary per platform.
 export default defineConfig({
   entry: { index: 'src/index.ts', cli: 'src/cli.ts' },
   format: 'esm',

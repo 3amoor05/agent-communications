@@ -76,7 +76,7 @@
 | D7 | Language / runtime | TypeScript, ESM, Node **>= 22.12** | Node 20 is EOL (2026-04-30); `google-auth-library` 11 and `@googleapis/gmail` 22 require Node 22 **[V]** |
 | D8 | Google libraries | `@googleapis/gmail` ^22, `@googleapis/people` ^12, `google-auth-library` ^11 — never `googleapis` | 15 MB vs 222 MB installed **[V]** |
 | D9 | MCP SDK | `@modelcontextprotocol/server` 2.0.x + zod 4 | Serves both the 2025-11-25 and 2026-07-28 protocol eras from one handler; MRTR elicitation for `confirm` **[V]** |
-| D10 | Bundling | `tsdown`; application entry points fully bundled so `npx` installs no dependency tree | Measured: whole stack 812 kB, 0.07–0.10 s start **[V]** |
+| D10 | Bundling | `tsdown`; application entry points fully bundled, so they start from their own files *(amended 2026-10-05 by the [CLI path design](2026-10-04-cli-path-shims-design.md), D4: every channel also depends at runtime on `@agentcomms/core` at exactly its own version, which is how it finds core's command, so installing a channel installs that core beside it)* | Measured: whole stack 812 kB, 0.07–0.10 s start **[V]** |
 | D11 | Workspace | pnpm 11 workspaces, committed lockfile | Strict isolation, supply-chain defaults **[V]** |
 | D12 | Tests | `node:test` with native type stripping; fake transport + synthetic fixtures; packed-tarball e2e | House convention; zero test-runner dependency |
 | D13 | Lint/format | Biome | No TypeScript-version coupling **[V]** |
@@ -109,8 +109,11 @@ skills/         gmail-* skills (Agent Skills format), one directory each
 - **`@agentcomms/gmail`** — the Gmail provider and both user-facing surfaces. OAuth (loopback + PKCE, manual
   and two-step modes), Gmail and People API adapters with a retry layer, MIME compose and parse, the body
   pipeline, threads/timeline, attachments, export, contacts, follow-ups, drafts, organise, the send gate, the
-  CLI (commander) and the MCP server factory. Published with its CLI **fully bundled** (`dist/cli.mjs`, zero
-  runtime `dependencies` except the optional keyring) and a library entry (`dist/index.mjs`) for embedding.
+  CLI (commander) and the MCP server factory. Published with its CLI **fully bundled** (`dist/cli.mjs`) and a
+  library entry (`dist/index.mjs`) for embedding. *(Amended 2026-10-05 by the
+  [CLI path design](2026-10-04-cli-path-shims-design.md), D4: the bundle still inlines core, and the package also
+  depends at runtime on `@agentcomms/core` at exactly its own version, through which it finds core's command, besides
+  the optional keyring.)*
 - **`@agentcomms/gmail-mcp`** — a thin package whose single bin starts the stdio server
   (`createGmailMcpServer()` from `@agentcomms/gmail`, pinned exact). Exists so client configs can say
   `npx -y @agentcomms/gmail-mcp@X.Y.Z` and so the MCP server has an obvious package name.

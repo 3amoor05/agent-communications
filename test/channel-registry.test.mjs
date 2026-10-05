@@ -30,7 +30,7 @@ function newcomerManifest(version) {
     type: 'module',
     license: 'MIT',
     bin: { 'agent-newcomer': './dist/cli.mjs' },
-    devDependencies: { '@agentcomms/core': 'workspace:*' },
+    dependencies: { '@agentcomms/core': 'workspace:*' },
     agentcomms: {
       contract: 1,
       channel: 'newcomer',
@@ -271,6 +271,194 @@ test('a new channel that borrows Gmail’s or Slack’s shapes, or a command out
   // As declared in the first place, it is accepted.
   await declare(manifest.agentcomms);
   assert.match(await snapshotSource(root), /channel: 'newcomer'/);
+});
+
+/**
+ * Every channel carries the core it was released with (design 2026-10-04, D4).
+ *
+ * A channel's bundle inlines core, and that used to be the whole story: core sat in `devDependencies`, and nothing of
+ * it was installed beside a channel. A channel now finds core's own command through its installed package, so core is
+ * a runtime dependency, pinned to the channel's exact version — what a channel prints must be the same release's
+ * core, not whichever one npm chose. Checked for every channel the registry discovers, never a list of today's: core
+ * itself excepted, since `readChannels` returns it first and it cannot depend on itself.
+ *
+ * Returns the packages checked and what is wrong with each, as sentences.
+ */
+export function coreEdgeProblems(registry) {
+  const core = registry.channels.find((channel) => channel.directory === 'core');
+  const checked = [];
+  const problems = [];
+  for (const { directory, packageName, packageJson } of registry.channels) {
+    if (directory === 'core') continue;
+    checked.push(packageName);
+    const own = packageJson.version;
+    for (const field of ['devDependencies', 'peerDependencies', 'optionalDependencies']) {
+      if (packageJson[field]?.[core.packageName] !== undefined) {
+        problems.push(`${packageName}: declares ${core.packageName} in ${field}; it belongs in "dependencies" alone`);
+      }
+    }
+    const specifier = packageJson.dependencies?.[core.packageName];
+    if (specifier === undefined) {
+      problems.push(`${packageName}: ${core.packageName} is not in its runtime "dependencies"`);
+      continue;
+    }
+    if (!String(specifier).startsWith('workspace:')) {
+      problems.push(`${packageName}: ${core.packageName} "${specifier}" is not this checkout's core (workspace:*)`);
+    } else if (core.packageJson.version !== own) {
+      problems.push(
+        `${packageName} ${own}: its workspace edge resolves to ${core.packageName} ${core.packageJson.version}`,
+      );
+    }
+    const packed = packedRange(String(specifier), core.packageJson.version);
+    if (packed !== own) {
+      problems.push(`${packageName}: ${core.packageName} "${specifier}" packs as "${packed}", not exactly ${own}`);
+    }
+  }
+  return { checked, problems };
+}
+
+/** What pnpm writes for a dependency when it packs: `workspace:*` the exact version, `workspace:^` a caret range. */
+function packedRange(specifier, version) {
+  const range = /^workspace:(.*)$/.exec(specifier)?.[1];
+  if (range === undefined) return specifier;
+  if (range === '*') return version;
+  if (range === '^' || range === '~') return `${range}${version}`;
+  return range;
+}
+
+test('every channel this checkout ships depends on core at runtime, pinned to its own version', () => {
+  const { checked, problems } = coreEdgeProblems(REGISTRY);
+  assert.deepEqual(problems, []);
+  assert.deepEqual(
+    checked,
+    REGISTRY.channels.filter((channel) => channel.directory !== 'core').map((channel) => channel.packageName),
+  );
+  assert.ok(checked.length > 0, 'no channel found — the discovery is wrong');
+});
+
+test('a channel added later is held to the same edge, and every way of getting it wrong is refused', async () => {
+  const { root, version } = await treeWithNewcomer();
+  const path = join(root, 'packages', 'newcomer', 'package.json');
+  const manifest = newcomerManifest(version);
+  const { dependencies, ...rest } = manifest;
+  const problemsWith = async (fields) => {
+    await writeFile(path, JSON.stringify({ ...rest, ...fields }));
+    const { checked, problems } = coreEdgeProblems(loadRegistry(root));
+    assert.ok(checked.includes('@agentcomms/newcomer'), 'the newcomer was not checked');
+    // The shipped channels are the test above's; these fixtures are about the newcomer alone.
+    return problems.filter((problem) => problem.startsWith('@agentcomms/newcomer'));
+  };
+
+  // As the instructions for a new channel declare it, accepted.
+  assert.deepEqual(await problemsWith({ dependencies }), []);
+
+  // Missing, and only for development, as every channel was before.
+  assert.deepEqual(await problemsWith({}), [
+    '@agentcomms/newcomer: @agentcomms/core is not in its runtime "dependencies"',
+  ]);
+  assert.deepEqual(await problemsWith({ devDependencies: dependencies }), [
+    '@agentcomms/newcomer: declares @agentcomms/core in devDependencies; it belongs in "dependencies" alone',
+    '@agentcomms/newcomer: @agentcomms/core is not in its runtime "dependencies"',
+  ]);
+
+  // In the runtime field and another besides, each refused on its own.
+  for (const field of ['devDependencies', 'peerDependencies', 'optionalDependencies']) {
+    assert.deepEqual(
+      await problemsWith({ dependencies, [field]: dependencies }),
+      [`@agentcomms/newcomer: declares @agentcomms/core in ${field}; it belongs in "dependencies" alone`],
+      field,
+    );
+  }
+
+  // Ranged: the workspace edge packs to a range, or a range is written out, and npm may then pick another core.
+  assert.deepEqual(await problemsWith({ dependencies: { '@agentcomms/core': 'workspace:^' } }), [
+    `@agentcomms/newcomer: @agentcomms/core "workspace:^" packs as "^${version}", not exactly ${version}`,
+  ]);
+  assert.deepEqual(await problemsWith({ dependencies: { '@agentcomms/core': `^${version}` } }), [
+    `@agentcomms/newcomer: @agentcomms/core "^${version}" is not this checkout's core (workspace:*)`,
+    `@agentcomms/newcomer: @agentcomms/core "^${version}" packs as "^${version}", not exactly ${version}`,
+  ]);
+
+  // Mismatched: a channel at another version than the core its edge resolves to.
+  assert.deepEqual(await problemsWith({ dependencies, version: '0.0.1' }), [
+    `@agentcomms/newcomer 0.0.1: its workspace edge resolves to @agentcomms/core ${version}`,
+    `@agentcomms/newcomer: @agentcomms/core "workspace:*" packs as "${version}", not exactly 0.0.1`,
+  ]);
+  assert.deepEqual(await problemsWith({ dependencies: { '@agentcomms/core': '0.0.1' } }), [
+    `@agentcomms/newcomer: @agentcomms/core "0.0.1" is not this checkout's core (workspace:*)`,
+    `@agentcomms/newcomer: @agentcomms/core "0.0.1" packs as "0.0.1", not exactly ${version}`,
+  ]);
+});
+
+/** The comments of a source file as one line of prose: each without its `//`, `/*` or leading `*`, then joined. */
+function commentsOf(source) {
+  return [...source.matchAll(/\/\*[\s\S]*?\*\/|\/\/.*$/gm)]
+    .map(([comment]) => comment.replace(/^\/\/|^\/\*+|\*\/$/g, '').replace(/^\s*\*/gm, ''))
+    .join(' ')
+    .replace(/\s+/g, ' ');
+}
+
+/** The text of a Markdown section, from its heading to the next heading of the same level or higher. */
+function sectionOf(markdown, heading) {
+  const start = markdown.indexOf(`${heading}\n`);
+  assert.notEqual(start, -1, `no section "${heading}"`);
+  const level = /^#+/.exec(heading)[0].length;
+  const rest = markdown.slice(start + heading.length);
+  const end = rest.search(new RegExp(`^#{1,${level}} `, 'm'));
+  return (end === -1 ? rest : rest.slice(0, end)).replace(/\s+/g, ' ');
+}
+
+/** Claims a channel's comments made while core was only bundled, each false once core is installed beside it. */
+const NO_DEPENDENCY_CLAIMS = [
+  /no runtime dependenc/i,
+  /no dependency tree/i,
+  /zero runtime/i,
+  /nothing to install/i,
+  /installs? one package/i,
+  /no runtime dependency of its own/i,
+];
+
+test('the instructions a new channel follows, the designs and every channel’s comments say core is a runtime dependency', async () => {
+  const read = (path) => readFile(join(ROOT, path), 'utf8');
+
+  // The two places a new channel's author reads the rule.
+  for (const [path, heading] of [
+    ['docs/superpowers/specs/2026-09-26-channel-plugins-design.md', '## 9. Adding a channel'],
+    ['CONTRIBUTING.md', '## Adding a channel'],
+  ]) {
+    const rule = sectionOf(await read(path), heading);
+    assert.doesNotMatch(rule, /dev dependency|devDependencies/i, `${path} still makes core a development dependency`);
+    assert.match(
+      rule,
+      /`@agentcomms\/core` as a runtime dependency, in `dependencies`, as `workspace:\*`/,
+      `${path} does not make core a runtime dependency`,
+    );
+    assert.match(rule, /packs to (?:the|its) exact version/, `${path} does not say the packed pin is exact`);
+  }
+
+  // The governing design no longer says npx installs nothing beside a channel, or that Gmail depends on nothing.
+  const design = (await read('docs/superpowers/specs/2026-09-18-agent-communications-design.md')).replace(/\s+/g, ' ');
+  for (const claim of [/installs no dependency tree/i, /zero runtime `dependencies`/i]) {
+    assert.doesNotMatch(design, claim, `the communications design still says ${claim}`);
+  }
+  assert.match(design, /depends at runtime on `@agentcomms\/core` at exactly its own version/);
+
+  // Every channel's bundler and library comments, found from the registry.
+  const channels = REGISTRY.channels.filter((channel) => channel.directory !== 'core');
+  assert.ok(channels.length > 0, 'no channel found — the discovery is wrong');
+  for (const { directory } of channels) {
+    for (const file of ['tsdown.config.ts', 'src/index.ts']) {
+      const comments = commentsOf(await read(`packages/${directory}/${file}`));
+      for (const claim of NO_DEPENDENCY_CLAIMS) {
+        assert.doesNotMatch(comments, claim, `packages/${directory}/${file} still says ${claim}`);
+      }
+    }
+    assert.match(
+      commentsOf(await read(`packages/${directory}/tsdown.config.ts`)),
+      /`@agentcomms\/core` is still installed beside it/,
+      `packages/${directory}/tsdown.config.ts does not say core is a runtime dependency`,
+    );
+  }
 });
 
 /**
