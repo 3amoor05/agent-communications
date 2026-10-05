@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { CHANNEL_SNAPSHOT } from '../../../src/channels.generated.ts';
 import type { RegisteredServer } from '../../../src/mcp-clients.ts';
+import { VERSION } from '../../../src/version.ts';
 import { tempDir } from '../../helpers/temp.ts';
 
 /*
@@ -11,7 +12,8 @@ import { tempDir } from '../../helpers/temp.ts';
  * the locator reads. Nothing in them runs; each entry is a one-line module.
  */
 
-export const VERSION = '0.13.0';
+/** This release: the trees are of the same version as the core locating in them, as a same-release install is. */
+export { VERSION };
 
 /** A package of this suite, by its channel word, as core's snapshot of the manifests has it. */
 export function suiteEntry(channel: string): (typeof CHANNEL_SNAPSHOT)[number] {
