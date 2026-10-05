@@ -10,11 +10,13 @@ import {
   handoffSentence,
   type LegacyDrainReport,
   type MessagePreview,
+  newBoundary,
   ownerOf,
-  type PublicApproval,
-  publicStored,
+  type PublicApprovalView,
+  publicApproval,
   renderMessagePreview,
   resolveName,
+  type SenderFieldWrapper,
   type SendPolicy,
   type StoredApproval,
   sendEpochOf,
@@ -24,6 +26,7 @@ import {
 } from '@agentcomms/core';
 import type { GmailContext, ResolvedInbox } from '../context.ts';
 import { analyseDraft, type DraftAnalysis, type Unsendable, unsendable } from '../domain/outbound.ts';
+import { addressField, filenameField, wrapField } from '../domain/untrusted-fields.ts';
 import { sendCertainlyRefused } from '../gmail-api/errors.ts';
 import type { GmailTransport } from '../gmail-api/transport.ts';
 
@@ -824,15 +827,17 @@ export async function executeSend(
 }
 
 /**
- * The approvals on this machine, for `send list` and for the doctor — every form, none skipped — each with the
- * mailbox it belongs to by name, `(removed)` for one no longer connected, and null for a record whose owner cannot be
- * trusted. Narrowed to a mailbox (`inbox`, or a pinned server's), only that mailbox's own: a record whose owner cannot
- * be trusted never matches. Never includes a challenge hash, or anything of a record that cannot be read but its stub.
+ * The approvals on this machine, for `send list` and for the doctor — every form, none skipped — each looked at under
+ * its own lock and classified, as a status is (design 2026-10-05 §D8), with the mailbox it belongs to by name,
+ * `(removed)` for one no longer connected, and null for a record whose owner cannot be trusted. Narrowed to a mailbox
+ * (`inbox`, or a pinned server's), only that mailbox's own: a record whose owner cannot be trusted — a stub — never
+ * matches. What a sender wrote goes through this package's own field helpers: an address bare only while it is a plain
+ * address, a subject always wrapped, a file name decoded and wrapped. Never a challenge hash or a claim token.
  */
 export async function listApprovals(
   context: GmailContext,
   filter: { inbox?: string | undefined } = {},
-): Promise<Array<PublicApproval & { inbox: string | null }>> {
+): Promise<Array<PublicApprovalView & { inbox: string | null }>> {
   const config = await context.config();
   const byId = new Map(Object.entries(config.inboxes).map(([alias, inbox]) => [inbox.id, alias]));
   const name = filter.inbox;
@@ -840,10 +845,30 @@ export async function listApprovals(
     ? resolveName(config, 'inbox', name, () => new CommsError('NOT_FOUND', `there is no mailbox called "${name}"`))
         .inbox.id
     : undefined;
-  const stored = await context.core.approvals.list(inboxId ? { inboxId } : {});
-  return stored.map((entry) => {
-    const owner = ownerOf(entry);
-    return { ...publicStored(entry), inbox: owner === null ? null : (byId.get(owner) ?? '(removed)') };
+  const seen = await context.core.approvals.inspectAll(inboxId ? { inboxId } : {});
+  return seen.map(({ stored, outcome }) => {
+    const owner = ownerOf(stored);
+    const alias = owner === null ? null : (byId.get(owner) ?? '(removed)');
+    // The envelope names the mailbox by its alias where it still has one, else by the id it was prepared for.
+    const envelope = {
+      boundary: newBoundary(),
+      inbox: alias !== null && alias !== '(removed)' ? alias : (owner ?? 'none') || 'none',
+      id: outcome.approval.id,
+    };
+    const wrap: SenderFieldWrapper = (text, field) =>
+      field === 'subject'
+        ? wrapField(text, 'subject', envelope)
+        : field === 'filename'
+          ? filenameField(text, envelope)
+          : addressField(text, field, envelope);
+    return {
+      ...publicApproval(stored, outcome, {
+        wrap,
+        // Gmail's own surface: acceptance is sending, and says so (D2).
+        ...(outcome.approval.channel === 'gmail' ? { usedSaid: (at: string) => `sent at ${at}` } : {}),
+      }),
+      inbox: alias,
+    };
   });
 }
 

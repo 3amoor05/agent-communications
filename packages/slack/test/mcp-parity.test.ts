@@ -4,7 +4,7 @@ import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, test } from 'node:test';
-import { asV2 } from '@agentcomms/core';
+import { asV2, waitForApproval } from '@agentcomms/core';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { v1ChangeRecord, writeV1Record } from '../../core/test/fixtures/approval-v1-0.13.0.ts';
@@ -1535,6 +1535,11 @@ test('kind dispatch at `agent-slack approve`: a stub gets the integrity refusal,
   assert.match(legacy.said, /prepared by a different version of agent-communications/);
 });
 
+/** A result as two surfaces give it, apart from each envelope's random boundary — the one thing they never share. */
+function unbound<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value).replace(/boundary=\\"[^\\"]+\\"/g, 'boundary=\\"B\\"')) as T;
+}
+
 // ── Waiting for an approval (CUE-404 Task 10; design 2026-10-05 §D3) ─────────────────────────────────────────────────
 
 test('slack_approval_wait and `approval wait` say the same of an approval, only look, and on a pinned server find only its own (D3r-e, D3r-f, D8o-c)', async () => {
@@ -1572,7 +1577,10 @@ test('slack_approval_wait and `approval wait` say the same of an approval, only 
     assert.deepEqual([tool.state, tool.claimable, tool.ended], ['pending', true, 'now']);
     const command = await cli(harness, ['approval', 'wait', ours.approvalId, '--wait-seconds', '0'], counted);
     assert.equal(command.code, 0, JSON.stringify(command.envelope));
-    assert.deepEqual(command.envelope.data, tool, 'the command and the tool agree');
+    assert.deepEqual(unbound(command.envelope.data), unbound(tool), 'the command and the tool agree');
+    // And core's own status of it says the same (D8o-c).
+    const status = await waitForApproval(harness.core, ours.approvalId, { waitSeconds: 0 });
+    assert.deepEqual(unbound(tool.approval), unbound(JSON.parse(JSON.stringify(status.approval))));
     assert.equal(
       ok<{ state: string }>(await pinned.call('slack_approval_wait', { approvalId: ours.approvalId, waitSeconds: 0 }))
         .state,

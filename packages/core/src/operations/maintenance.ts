@@ -1,4 +1,5 @@
 import { access, constants, stat } from 'node:fs/promises';
+import { type PublicApprovalView, publicApproval } from '../approval-outcome.ts';
 import { integrityRefusal, kindOf, type PublicApproval, publicStored } from '../approval-stored.ts';
 import type { ApprovalState } from '../approvals.ts';
 import type { AuditRecord } from '../audit.ts';
@@ -177,6 +178,38 @@ export async function doctor(core: Core, env: NodeJS.ProcessEnv, options: Doctor
   });
 
   if (readable) checks.push(...organisationChecks(config, handoffs));
+
+  /*
+   * Approval records that cannot be used (design 2026-10-05 §D2): a file that cannot be read, or a record whose binding
+   * does not verify, so whose it is cannot be trusted. Never used, never rewritten, and never shown but as a stub —
+   * counted here, by kind of fault, and nothing of what they hold. Something to look at, not a failure.
+   */
+  if (readable) {
+    const stubs = await core.approvals.list().then(
+      (records) =>
+        records.filter(
+          (stored) =>
+            stored.form === 'unreadable' || (stored.form === 'corrupt' && stored.attribution === 'unverifiable'),
+        ),
+      () => [],
+    );
+    if (stubs.length > 0) {
+      const unreadable = stubs.filter((stored) => stored.form === 'unreadable').length;
+      const unverified = stubs.length - unreadable;
+      checks.push({
+        name: 'approvals',
+        ok: true,
+        warn: true,
+        detail: `${stubs.length} approval record${stubs.length === 1 ? '' : 's'} cannot be used: ${unreadable} could not be read, ${unverified} failed ${unverified === 1 ? 'its' : 'their'} integrity check. None is ever used, and nothing in them is shown`,
+        fix: remedy(
+          handoffSentence(
+            handoffs.core(['approvals', 'list', '--state', 'corrupt']),
+            (command) => `${command} names them by id. Prepare again whatever they were for.`,
+          ),
+        ),
+      });
+    }
+  }
 
   /*
    * An open legacy drain (design 2026-10-05 §D1): approvals an earlier release prepared, still being retired. Not a
@@ -521,7 +554,7 @@ export const APPROVAL_STATES: readonly (ApprovalState | 'corrupt')[] = Object.fr
 export async function listApprovals(
   core: Core,
   options: { inbox?: string | undefined; state?: string | undefined } = {},
-): Promise<PublicApproval[]> {
+): Promise<PublicApprovalView[]> {
   // A state that does not exist matched nothing, and read as "no approvals" — the one answer that is never a
   // reason to look again.
   if (options.state !== undefined && !(APPROVAL_STATES as readonly string[]).includes(options.state)) {
@@ -530,11 +563,12 @@ export async function listApprovals(
     });
   }
   const inboxId = inboxIdFor(await core.config.load(), options.inbox);
-  const records = await core.approvals.list({
+  // Each looked at under its lock and classified, as a status is (design 2026-10-05 §D8): the public object, or a stub.
+  const records = await core.approvals.inspectAll({
     ...(inboxId ? { inboxId } : {}),
     ...(options.state ? { states: [options.state as ApprovalState | 'corrupt'] } : {}),
   });
-  return records.map(publicStored);
+  return records.map(({ stored, outcome }) => publicApproval(stored, outcome));
 }
 
 /**

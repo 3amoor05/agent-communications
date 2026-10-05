@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
-import { asV2 } from '@agentcomms/core';
+import { asV2, waitForApproval } from '@agentcomms/core';
 import { createResendMcpServer } from '../src/mcp/server.ts';
 import { assertNoBareCommand, resendInline } from './support/handoffs.ts';
 import { type Harness, newHarness, ok, refused, tempDir } from './support/harness.ts';
@@ -227,6 +227,11 @@ test('changing an account from chat is a change approval: the preview first, the
   }
 });
 
+/** A result as two surfaces give it, apart from each envelope's random boundary — the one thing they never share. */
+function unbound<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value).replace(/boundary=\\"[^\\"]+\\"/g, 'boundary=\\"B\\"')) as T;
+}
+
 // ── Waiting for an approval (CUE-404 Task 10; design 2026-10-05 §D3) ─────────────────────────────────────────────────
 
 test('resend_send_wait and `send wait` say the same of an approval, only look, and on a pinned server find only its own (D3r-e, D3r-f, D8o-c)', async () => {
@@ -251,10 +256,16 @@ test('resend_send_wait and `send wait` say the same of an approval, only look, a
       await whole.call('resend_send_wait', { approvalId: ours.approvalId, waitSeconds: 0 }),
     );
     assert.deepEqual([tool.state, tool.claimable, tool.ended], ['pending', true, 'now']);
-    assert.deepEqual(tool.approval, ours.approval, 'the object the preparation gave');
+    const shown = tool.approval as Record<string, unknown>;
+    for (const [key, value] of Object.entries(ours.approval)) {
+      assert.deepEqual(shown[key], value, `the object the preparation gave: ${key}`);
+    }
     const command = await harness.cli(['--json', 'send', 'wait', ours.approvalId, '--wait-seconds', '0']);
     assert.equal(command.code, 0, command.stdout + command.stderr);
-    assert.deepEqual(command.json<{ data: unknown }>().data, tool, 'the command and the tool agree');
+    assert.deepEqual(unbound(command.json<{ data: unknown }>().data), unbound(tool), 'the command and the tool agree');
+    // And core's own status of it says the same (D8o-c).
+    const status = await waitForApproval(harness.core, ours.approvalId, { waitSeconds: 0 });
+    assert.deepEqual(unbound(shown), unbound(JSON.parse(JSON.stringify(status.approval))));
     const envelope = async (approvalId: string) => {
       const refusal = refused(await pinned.call('resend_send_wait', { approvalId, waitSeconds: 0 }));
       assert.equal(refusal.code, 'NOT_FOUND');

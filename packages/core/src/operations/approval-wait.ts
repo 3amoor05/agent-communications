@@ -1,9 +1,10 @@
 import { setTimeout as sleepFor } from 'node:timers/promises';
 import {
-  type ApprovalObject,
   type ApprovalOutcome,
   approvalNotFound,
   type PublicApprovalState,
+  type PublicApprovalView,
+  publicApproval,
 } from '../approval-outcome.ts';
 import type { StoredApproval } from '../approval-stored.ts';
 import { channelLabel, isChannel } from '../channel-servers.ts';
@@ -94,8 +95,11 @@ export interface ApprovalWait {
   readonly state: PublicApprovalState | 'cancelled';
   /** Whether the next call can use it now. Never true for a cancelled wait. */
   readonly claimable: boolean;
-  /** D8's object, as the final locked look saw it. */
-  readonly approval: ApprovalObject;
+  /**
+   * D8's public object, as the final locked look saw it — what it was for, each field a sender could have written
+   * enveloped — or, for a record whose owner cannot be trusted, its stub alone (D2).
+   */
+  readonly approval: PublicApprovalView;
   readonly ended: WaitEnd;
   /** How long it waited, in whole seconds. */
   readonly waitedSeconds: number;
@@ -190,12 +194,13 @@ async function waitHeld(
   let seen = await core.approvals.inspect(approvalId, expect, { action: 'wait' });
   const finish = (ended: WaitEnd, outcome: ApprovalOutcome): ApprovalWait => {
     const waitedSeconds = Math.floor((clock.now() - started) / 1000);
+    const approval = publicApproval(seen.stored, outcome);
     if (ended === 'cancelled') {
       return {
         approvalId,
         state: 'cancelled',
         claimable: false,
-        approval: outcome.approval,
+        approval,
         ended,
         waitedSeconds,
       };
@@ -204,7 +209,7 @@ async function waitHeld(
       approvalId,
       state: outcome.state,
       claimable: outcome.claimable,
-      approval: outcome.approval,
+      approval,
       ended,
       waitedSeconds,
       ...(ended === 'timeout' ? { hint: waitAgainHint(outcome.state, options.channel) } : {}),

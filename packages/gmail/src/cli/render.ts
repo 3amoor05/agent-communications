@@ -794,12 +794,16 @@ export function renderApprovals(records: ApprovalView[], color: boolean): string
         record.inbox ?? '—',
         record.state === 'corrupt'
           ? `corrupt (${record.reason})`
-          : 'legacy' in record && record.legacy === true
+          : record.legacy === true
             ? `${record.state} (earlier release)`
-            : record.state,
-        'draftId' in record && record.draftId !== undefined ? record.draftId : '—',
-        ('expect' in record && record.expect !== undefined ? record.expect.to.join(', ') : '') || '—',
-        'expiresAt' in record && record.expiresAt !== undefined ? record.expiresAt.slice(11, 16) : '—',
+            : record.claimable === true
+              ? `${record.state}, claimable`
+              : record.reason !== undefined && (record.state === 'revoked' || record.state === 'failed')
+                ? `${record.state} (${record.reason})`
+                : record.state,
+        record.draftId ?? '—',
+        record.expect?.to.join(', ') || '—',
+        record.expiresAt !== undefined ? record.expiresAt.slice(11, 16) : '—',
       ]),
     ],
     color,

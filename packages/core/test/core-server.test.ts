@@ -181,6 +181,11 @@ async function connect(m: Machine, options: Partial<CoreMcpOptions> = {}) {
   return { client, call, ok, close: () => Promise.all([client.close(), server.close()]) };
 }
 
+/** A result as two surfaces give it, apart from each envelope's random boundary — the one thing they never share. */
+function unbound<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value).replace(/boundary=\\"[^\\"]+\\"/g, 'boundary=\\"B\\"')) as T;
+}
+
 /** A person at a terminal approving a change under `confirm`: shown it, and typing the code back. */
 async function approveAtTerminal(core: Core, approvalId: string): Promise<void> {
   const prompt = await beginChangeApproval(core, approvalId, { surface: 'cli' });
@@ -338,7 +343,10 @@ test('paths, the audit log and the approvals list return what their commands pri
       cli(m, ['audit', 'tail', '--limit', '5', '--json']).json().data,
     );
     const listed = (await ok('comms_approvals_list', { state: 'pending' })).approvals as { approvalId: string }[];
-    assert.deepEqual(listed, cli(m, ['approvals', 'list', '--state', 'pending', '--json']).json().data);
+    assert.deepEqual(
+      unbound(listed),
+      unbound(cli(m, ['approvals', 'list', '--state', 'pending', '--json']).json().data),
+    );
     assert.deepEqual(
       listed.map((record) => record.approvalId),
       [loosen.approvalId],
@@ -923,10 +931,15 @@ test('comms_approval_wait and `approval wait` say the same of an approval, now o
     const before = readFileSync(join(m.core.approvals.directory, `${approvalId}.json`), 'utf8');
     const tool = await ok('comms_approval_wait', { approvalId, waitSeconds: 0 });
     assert.deepEqual([tool.state, tool.claimable, tool.ended], ['pending', false, 'now']);
-    assert.deepEqual(tool.approval, prepared.approval, 'the object the preparation gave');
+    // The object the preparation gave, and what the change is for — its summary, enveloped.
+    const shown = tool.approval as Record<string, unknown>;
+    for (const [key, value] of Object.entries(prepared.approval as Record<string, unknown>)) {
+      assert.deepEqual(shown[key], value, key);
+    }
+    assert.match(String((shown.expect as { subject: string }).subject), /^<untrusted-content /);
     const command = cli(m, ['approval', 'wait', approvalId, '--wait-seconds', '0', '--json']);
     assert.equal(command.status, 0, command.stderr);
-    assert.deepEqual(command.json().data, tool, 'the command and the tool agree');
+    assert.deepEqual(unbound(command.json().data), unbound(tool), 'the command and the tool agree');
     // Waited for: a second's wait, still pending, says how to wait again and never to prepare again.
     const waited = await ok('comms_approval_wait', { approvalId, waitSeconds: 1 });
     assert.deepEqual([waited.state, waited.ended], ['pending', 'timeout']);

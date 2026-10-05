@@ -1610,6 +1610,51 @@ export class ApprovalStore {
   }
 
   /**
+   * Every approval file, each looked at under its own lock and classified there, as `inspect` looks at one — against one
+   * configuration snapshot, loaded once before any file is read (design 2026-10-05 §D2, §D8). What a list shows: each
+   * record's form and its outcome, nothing skipped. Like a look, it writes only what reading derives — an expiry at its
+   * boundary, a stale send's `unknown` — never a revocation: an owner removed or a stale epoch is shown as revoked, and
+   * written by the next action.
+   *
+   * `inboxId` keeps the records whose owner is that id (`ownerOf`), so one whose owner cannot be trusted never matches;
+   * `states` keeps those whose classified state is listed — a stored state, `corrupt`, and for a download's answered
+   * question its stored `approved` or `used`.
+   */
+  async inspectAll(
+    filter: { inboxId?: string; states?: (ApprovalState | 'corrupt')[] } = {},
+  ): Promise<Array<{ stored: StoredApproval; outcome: ApprovalOutcome }>> {
+    let names: string[];
+    try {
+      names = (await readdir(this.directory)).filter((name) => APPROVAL_ID_PATTERN.test(name.replace(/\.json$/, '')));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw error;
+    }
+    const config = await this.#config();
+    const found: Array<{ stored: StoredApproval; outcome: ApprovalOutcome }> = [];
+    for (const name of names) {
+      const approvalId = name.slice(0, -5);
+      const seen = await withFileLock(`${this.#path(approvalId)}.lock`, async () => {
+        const read = await this.#read(approvalId, config);
+        // Gone between the listing and the read: there is nothing to show.
+        if (read === null) return null;
+        const derived = this.#derived(read);
+        if (read.form === 'v2' && derived.form === 'v2' && derived.record.state !== read.record.state) {
+          await this.#write({ ...derived.record, updatedAt: this.#now().toISOString() });
+        }
+        const live = config === null || derived.form !== 'v2' ? null : liveGateOf(config, derived.record);
+        return { stored: derived, outcome: approvalOutcome(derived, { action: 'inspect', live, now: this.#now() }) };
+      });
+      if (seen === null) continue;
+      if (filter.inboxId !== undefined && filter.inboxId !== '' && ownerOf(seen.stored) !== filter.inboxId) continue;
+      const shown = seen.outcome.state === 'answered' ? stateOf(seen.stored) : seen.outcome.state;
+      if (filter.states && !filter.states.includes(shown)) continue;
+      found.push(seen);
+    }
+    return found.sort((a, b) => byCreation(a.stored, b.stored));
+  }
+
+  /**
    * Every approval file, each in one of its four forms — nothing skipped, nothing omitted — read against one
    * configuration snapshot, loaded once before any file is read: a loader that fails fails the whole list.
    *
@@ -1637,23 +1682,25 @@ export class ApprovalStore {
       if (filter.states && !filter.states.includes(stateOf(current))) continue;
       found.push(current);
     }
-    const createdOf = (stored: StoredApproval) =>
-      stored.form === 'v2' ? stored.record.createdAt : stored.form === 'legacy' ? stored.view.createdAt : null;
-    const idOf = (stored: StoredApproval) =>
-      stored.form === 'v2'
-        ? stored.record.approvalId
-        : stored.form === 'legacy'
-          ? stored.view.approvalId
-          : (corruptStubOf(stored)?.approvalId ?? '');
-    // Oldest first; a record that cannot be read has no time to be ordered by, and follows, by id.
-    return found.sort((a, b) => {
-      const [x, y] = [createdOf(a), createdOf(b)];
-      if (x !== null && y !== null) return x < y ? -1 : x > y ? 1 : 0;
-      if (x !== null) return -1;
-      if (y !== null) return 1;
-      return idOf(a) < idOf(b) ? -1 : 1;
-    });
+    return found.sort(byCreation);
   }
+}
+
+/** Oldest first; a record that cannot be read has no time to be ordered by, and follows, by id. */
+function byCreation(a: StoredApproval, b: StoredApproval): number {
+  const createdOf = (stored: StoredApproval) =>
+    stored.form === 'v2' ? stored.record.createdAt : stored.form === 'legacy' ? stored.view.createdAt : null;
+  const idOf = (stored: StoredApproval) =>
+    stored.form === 'v2'
+      ? stored.record.approvalId
+      : stored.form === 'legacy'
+        ? stored.view.approvalId
+        : (corruptStubOf(stored)?.approvalId ?? '');
+  const [x, y] = [createdOf(a), createdOf(b)];
+  if (x !== null && y !== null) return x < y ? -1 : x > y ? 1 : 0;
+  if (x !== null) return -1;
+  if (y !== null) return 1;
+  return idOf(a) < idOf(b) ? -1 : 1;
 }
 
 /**

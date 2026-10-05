@@ -2795,8 +2795,14 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
               .string()
               .nullable()
               .describe('the mailbox by name, `(removed)`, or null when whose it is cannot be trusted'),
-            state: z.string().describe('its state, or `corrupt` for a record that cannot be used'),
+            state: z
+              .string()
+              .describe(
+                'its state, or `corrupt` for a record that cannot be used; a download’s answered question is `answered`',
+              ),
+            claimable: z.boolean().optional().describe('true when the next call can use it now'),
             legacy: z.boolean().optional().describe('true for an approval an earlier release prepared'),
+            said: z.string().optional().describe('where it stands, in words, for an expired, used or earlier record'),
             reason: z.string().optional(),
             draftId: z.string().optional(),
             policy: z.string().optional(),
@@ -2810,7 +2816,13 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
                 subject: z.string(),
               })
               .optional()
-              .describe('what it would send; for a change, its summary as the subject'),
+              .describe(
+                'what it would send — every address and the subject inside <untrusted-content> unless plainly an address — or, for a change, its summary as the subject',
+              ),
+            files: z
+              .looseObject({ names: z.array(z.string()) })
+              .optional()
+              .describe('a download’s question: the names its files would be saved under, inside <untrusted-content>'),
             createdAt: z.string().optional(),
             expiresAt: z.string().optional(),
           }),

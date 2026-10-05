@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
-import type { PublicApproval } from './approval-stored.ts';
+import type { PublicApprovalView } from './approval-outcome.ts';
 import { renderApprovalWait } from './approval-wait-surface.ts';
 import { approveChangeAtTerminal, gatedChangeAtTerminal, refuseUnclaimedApproval } from './change-flow.ts';
 import type { PreparedChange } from './changes.ts';
@@ -174,14 +174,17 @@ Exit codes: 0 ok · 1 unexpected · 10 approval required · 11 an update is out:
  * One line of `approvals list`: the id and the state (`corrupt` for a record that cannot be used), then what the record
  * has of these — its policy, when it expires, why it is corrupt, and that an earlier release prepared it.
  */
-function approvalLine(approval: PublicApproval): string {
+function approvalLine(approval: PublicApprovalView): string {
   return [
     approval.approvalId,
     approval.state.padEnd(8),
-    ...('policy' in approval && approval.policy !== undefined ? [approval.policy] : []),
-    ...('expiresAt' in approval ? [`expires ${approval.expiresAt}`] : []),
-    ...(approval.state === 'corrupt' ? [`(${approval.reason})`] : []),
-    ...('legacy' in approval && approval.legacy === true ? ['(prepared by an earlier release)'] : []),
+    ...(approval.claimable === true ? ['claimable'] : []),
+    ...(approval.route !== undefined ? [`route ${approval.route}`] : []),
+    ...(approval.expiresAt !== undefined && (approval.state === 'pending' || approval.state === 'approved')
+      ? [`expires ${approval.usableUntil ?? approval.expiresAt}`]
+      : []),
+    ...(approval.reason !== undefined ? [`(${approval.reason})`] : []),
+    ...(approval.legacy === true ? ['(prepared by an earlier release)'] : []),
   ].join('  ');
 }
 

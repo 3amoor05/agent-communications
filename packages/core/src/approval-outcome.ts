@@ -1,5 +1,5 @@
 import { type ApprovalRoute, unknownAtOf } from './approval-binding.ts';
-import { integrityRefusal, type StoredApproval } from './approval-stored.ts';
+import { type CorruptStub, corruptStubOf, integrityRefusal, type StoredApproval } from './approval-stored.ts';
 import { CLOCK_ANOMALY } from './approval-validate.ts';
 import {
   type ApprovalKind,
@@ -8,6 +8,7 @@ import {
   otherVersionRefusal,
   stricterPolicy,
 } from './approvals.ts';
+import { channelLabel, isChannel } from './channel-servers.ts';
 import {
   type ChangePolicy,
   type Config,
@@ -17,6 +18,7 @@ import {
 } from './config.ts';
 import { CommsError, type ErrorCode } from './errors.ts';
 import { sendEpochOf } from './send-epoch.ts';
+import { newBoundary, wrapUntrusted } from './untrusted.ts';
 
 /**
  * One locked classification of every record into an outcome (design 2026-10-05 §D2).
@@ -227,9 +229,176 @@ function objectOf(
   };
 }
 
-/** D8's object from an outcome: where the approval stands, as anyone may be told. */
-export function publicApproval(outcome: ApprovalOutcome): ApprovalObject {
-  return outcome.approval;
+/**
+ * Every place an approval shows something a sender could have written (design 2026-10-05 §D8): the recipients and
+ * subject a send expects — a draft's, which a reply takes from the mail it answers — and the names a download's
+ * question would save its files under. Each is wrapped in the untrusted-content envelope on every record that shows it,
+ * a removed owner's and an earlier release's included. Fixed: a field not on this list is never shown.
+ */
+export const SENDER_CONTROLLED_FIELDS: readonly string[] = Object.freeze([
+  'expect.to',
+  'expect.cc',
+  'expect.bcc',
+  'expect.subject',
+  'files.names',
+  'files.listing',
+]);
+
+/** The kind of sender-controlled field a string is, for the envelope it goes in. */
+export type SenderField = 'to' | 'cc' | 'bcc' | 'subject' | 'filename';
+
+/**
+ * Wraps one sender-controlled string: core's envelope, always, by default. A channel that shows the object on its own
+ * surface may wrap with its own helpers — Gmail's leaves a plain address bare and wraps anything that is not one.
+ */
+export type SenderFieldWrapper = (text: string, field: SenderField) => string;
+
+/**
+ * An approval as a status, a wait or a list shows it (design 2026-10-05 §D8): D8's object, under the id it is listed
+ * by, with what it was for — every string a sender could have written inside its envelope — and a line saying where it
+ * stands where the state has words of its own. Never a challenge hash or a claim token.
+ */
+export interface PublicApprovalObject extends ApprovalObject {
+  readonly approvalId: string;
+  /** The mailbox or account it belongs to, by its id: software data, never a name a sender chose. */
+  readonly inboxId?: string | undefined;
+  /** A send's draft, by the provider's id. */
+  readonly draftId?: string | undefined;
+  /** What a send expects, or a change's summary as its subject: each string enveloped. */
+  readonly expect?: { readonly to: string[]; readonly cc: string[]; readonly bcc: string[]; readonly subject: string };
+  /** A download's question: the names its files would be saved under, as listed, enveloped. */
+  readonly files?: { readonly names: string[]; readonly listing?: string[] | undefined } | undefined;
+  /** Where it stands, in words, for the states that have their own: expired, used, an earlier release's. */
+  readonly said?: string | undefined;
+}
+
+/**
+ * What a status, a wait or a list shows of one record: its public object, or — for a record whose owner cannot be
+ * trusted, unreadable or with a binding that does not verify — exactly the stub `{ approvalId, state: 'corrupt',
+ * reason }`, and nothing from the file (D2). Either way every key of the object can be read; a stub's are absent.
+ */
+export type PublicApprovalView =
+  | PublicApprovalObject
+  | (CorruptStub & { readonly [K in Exclude<keyof PublicApprovalObject, keyof CorruptStub>]?: undefined });
+
+export interface PublicApprovalOptions {
+  /** How each sender-controlled string is wrapped: core's envelope when left out. */
+  readonly wrap?: SenderFieldWrapper | undefined;
+  /** The words for a used send on the surface showing it: "accepted by <channel> at …" when left out. */
+  readonly usedSaid?: ((usedAt: string) => string) | undefined;
+}
+
+/** A channel's label, from the manifest snapshot, or its word when it is none this release knows. */
+function labelOf(channel: string): string {
+  return isChannel(channel) ? channelLabel(channel) : channel;
+}
+
+/** Where a record stands, in words, for the states that have their own (D2): or nothing. */
+function saidOf(
+  approval: ApprovalObject,
+  facts: { kind: ApprovalKind | null; answered: boolean },
+  options: PublicApprovalOptions,
+): string | undefined {
+  if (approval.legacy === true) {
+    return approval.channel === null
+      ? 'an earlier release’s approval: shown, and never used here'
+      : `an earlier release’s ${labelOf(approval.channel)} approval: shown, and never used here`;
+  }
+  if (approval.state === 'expired') {
+    if (facts.kind === 'download') {
+      return facts.answered
+        ? 'the question was answered and expired before it was used'
+        : 'the question expired before it was answered';
+    }
+    const nothing = `nothing was ${facts.kind === 'change' ? 'changed' : 'sent'} with it`;
+    return approval.reason === CLOCK_ANOMALY
+      ? `the clock moved backwards; this approval was expired safely at ${approval.expiredAt}; ${nothing}`
+      : `this approval expired; ${nothing}`;
+  }
+  if (approval.state === 'used' && facts.kind === 'send' && approval.usedAt !== undefined) {
+    return (
+      options.usedSaid?.(approval.usedAt) ??
+      `accepted by ${approval.channel === null ? 'its provider' : labelOf(approval.channel)} at ${approval.usedAt}`
+    );
+  }
+  return undefined;
+}
+
+/**
+ * D8's public object for one stored record and its classification — what a status, a wait and a list show
+ * (design 2026-10-05 §D8). A record whose owner cannot be trusted is shown as its stub alone. Every other — version 2,
+ * an earlier release's, a corrupt one whose binding verifies — shows what it was for, each sender-controlled field
+ * (`SENDER_CONTROLLED_FIELDS`) wrapped, whoever its owner is now.
+ */
+export function publicApproval(
+  stored: StoredApproval,
+  outcome: ApprovalOutcome,
+  options: PublicApprovalOptions = {},
+): PublicApprovalView {
+  const stub = corruptStubOf(stored);
+  if (stub !== null && (stored.form === 'unreadable' || (stored.form === 'corrupt' && stored.safe === null))) {
+    return stub;
+  }
+  const approval = outcome.approval;
+  const boundary = newBoundary();
+  const wrap: SenderFieldWrapper =
+    options.wrap ?? ((text, field) => wrapUntrusted(text, { field, id: approval.id }, boundary));
+  const source =
+    stored.form === 'v2'
+      ? {
+          inboxId: stored.record.inboxId,
+          draftId: stored.record.draftId,
+          expect: stored.record.expect,
+          download: stored.record.download,
+          answered: stored.record.approvedVia !== undefined,
+        }
+      : stored.form === 'legacy'
+        ? {
+            inboxId: stored.view.inboxId,
+            draftId: stored.record.draftId,
+            expect: stored.view.expect,
+            download: stored.record.download,
+            answered: stored.record.approvedVia !== undefined,
+          }
+        : stored.form === 'corrupt' && stored.safe !== null
+          ? {
+              inboxId: stored.safe.inboxId,
+              draftId: stored.safe.draftId,
+              expect: stored.safe.expect,
+              download: undefined,
+              answered: false,
+            }
+          : null;
+  const kind = approval.kind;
+  const expect =
+    source === null
+      ? undefined
+      : {
+          to: source.expect.to.map((to) => wrap(to, 'to')),
+          cc: source.expect.cc.map((cc) => wrap(cc, 'cc')),
+          bcc: source.expect.bcc.map((bcc) => wrap(bcc, 'bcc')),
+          subject: wrap(source.expect.subject, 'subject'),
+        };
+  const download = source?.download;
+  const files =
+    download === undefined
+      ? undefined
+      : {
+          names: download.names.map((name) => wrap(name, 'filename')),
+          ...(download.listing === undefined
+            ? {}
+            : { listing: download.listing.map((file) => wrap(file.name, 'filename')) }),
+        };
+  const said = saidOf(approval, { kind, answered: source?.answered ?? false }, options);
+  return {
+    approvalId: approval.id,
+    ...approval,
+    ...(source === null ? {} : { inboxId: source.inboxId }),
+    ...(source !== null && kind === 'send' ? { draftId: source.draftId } : {}),
+    ...(expect === undefined ? {} : { expect }),
+    ...(files === undefined ? {} : { files }),
+    ...(said === undefined ? {} : { said }),
+  };
 }
 
 /**
@@ -361,7 +530,9 @@ function classifyV2(read: ApprovalRecord, context: OutcomeContext): ApprovalOutc
   }
   const state: PublicApprovalState =
     record.kind === 'download' && (record.state === 'approved' || record.state === 'used') ? 'answered' : record.state;
-  const approval = objectOf(record, state, claimable, ownerRemoved, reason);
+  // A revocation a look derives is not written, and so has no time of its own: the next action writes it, with its own.
+  const shown = derived !== null && !acting ? { ...record, revokedAt: undefined } : record;
+  const approval = objectOf(shown, state, claimable, ownerRemoved, reason);
   const error = errorOf(record, approval, { action, live, revokedByNever });
   return {
     state,

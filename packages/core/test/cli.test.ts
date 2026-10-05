@@ -15,6 +15,7 @@ import {
 } from '../src/cli-runtime.ts';
 import { commandAsJson, inlineQuoted, quoteCommand, quotedText } from '../src/command-line.ts';
 import { secretsStoreOf } from '../src/config.ts';
+import { openCore } from '../src/core.ts';
 import { CommsError } from '../src/errors.ts';
 import { CORE_CALLER, isCommand } from '../src/handoffs.ts';
 import { isInside } from '../src/jail.ts';
@@ -209,6 +210,57 @@ test('audit tail and approvals list work on an empty config', () => {
   assert.deepEqual(JSON.parse(approvals.stdout).data, []);
   const missing = run(['approvals', 'list', '--inbox', 'nope', '--json']);
   assert.equal(missing.status, 66);
+});
+
+test('approvals list prints each record’s state, whether it can be claimed, and its reason — a stub as its id, corrupt, and why', async () => {
+  const { config, env } = cliEnv();
+  writeFileSync(
+    join(config, 'config.json'),
+    JSON.stringify({
+      version: 2,
+      defaults: { sendPolicy: 'chat' },
+      inboxes: {
+        'acme/gmail': {
+          id: 'ibx_AAAAAAAAAAAAAAAA',
+          provider: 'gmail',
+          email: 'jo@acme.test',
+          identity: 'oidc',
+          client: 'desktop',
+          tier: 'send',
+          grantedScopes: [],
+          secretRef: 'gmail:refresh:ibx_AAAAAAAAAAAAAAAA',
+          internalDomains: ['acme.test'],
+          createdAt: '2026-09-01T00:00:00.000Z',
+        },
+      },
+    }),
+  );
+  const core = openCore({ env, caller: CORE_CALLER });
+  const record = await core.approvals.create({
+    channel: 'gmail',
+    inboxId: 'ibx_AAAAAAAAAAAAAAAA',
+    draftId: 'r-1',
+    draftMessageId: 'm-1',
+    contentDigest: 'a'.repeat(64),
+    sendEpoch: 0,
+    policy: 'chat',
+    requiredPolicy: 'chat',
+    riskFlags: [],
+    expect: { to: ['sam@partner.test'], cc: [], bcc: [], subject: 'hi' },
+  });
+  const stub = `ap_${'7'.repeat(26)}`;
+  writeFileSync(join(core.approvals.directory, `${stub}.json`), '{"approvalId": "ap_');
+  const listed = spawnSync(process.execPath, [...NODE_FLAGS, CLI, 'approvals', 'list'], { encoding: 'utf8', env });
+  assert.equal(listed.status, 0, listed.stderr);
+  const lines = listed.stdout.trim().split('\n');
+  assert.match(
+    lines.find((line) => line.startsWith(record.approvalId)) ?? '',
+    /pending\s+claimable\s+route chat\s+expires /,
+  );
+  assert.equal(
+    lines.find((line) => line.startsWith(stub)),
+    `${stub}  corrupt   (truncated)`,
+  );
 });
 
 test('audit tail --limit takes a whole number of 1 or more and refuses anything else as USAGE, naming it', () => {
