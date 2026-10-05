@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
-import { asV2, waitForApproval } from '@agentcomms/core';
+import { asV2, newApprovalId, sendEpochOf, waitForApproval } from '@agentcomms/core';
+import { v1SendRecord, writeV1Record } from '../../core/test/fixtures/approval-v1-0.13.0.ts';
+import { assertExpectWrapped, assertOnlyWrapped, HOSTILE_EXPECT } from '../../core/test/helpers/hostile-approval.ts';
 import { createResendMcpServer } from '../src/mcp/server.ts';
 import { assertNoBareCommand, resendInline } from './support/handoffs.ts';
 import { type Harness, newHarness, ok, refused, tempDir } from './support/harness.ts';
@@ -340,6 +342,66 @@ test('resend_send_status and `send status` give Resend’s own last event throug
     );
     assert.doesNotMatch(String(unknown.verdict), /SYSTEM|everyone/);
     assert.equal(harness.fake.sends().length, 1, 'a status never sends');
+  } finally {
+    await close();
+  }
+});
+
+test('resend_send_status and `send status` show what a sender wrote in the approval only inside the envelope (CUE-404 review)', async () => {
+  harness = await newHarness();
+  const account = await harness.addAccount({ name: 'acme/resend', mode: 'send' });
+  const send = await harness.core.approvals.create({
+    channel: 'resend',
+    inboxId: account.id,
+    draftId: 'rp_hostile',
+    draftMessageId: 'rp_hostile',
+    contentDigest: 'a'.repeat(64),
+    sendEpoch: sendEpochOf(await harness.core.config.load(), account.id),
+    policy: 'chat',
+    requiredPolicy: 'chat',
+    riskFlags: [],
+    expect: HOSTILE_EXPECT,
+  });
+  // And one an earlier release prepared for this account: shown as legacy, its expectation as stored.
+  const legacy = newApprovalId();
+  writeV1Record(
+    harness.core.paths.stateDir,
+    v1SendRecord({
+      approvalId: legacy,
+      inboxId: account.id,
+      draftId: 'rp_legacy',
+      draftMessageId: 'rp_legacy',
+      digest: 'b'.repeat(64),
+      expect: HOSTILE_EXPECT,
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+    }),
+  );
+  const { call, close } = await harness.mcp();
+  try {
+    for (const [form, approvalId] of [
+      ['send', send.approvalId],
+      ['legacy', legacy],
+    ] as const) {
+      const result = await call('resend_send_status', { account: 'acme/resend', approvalId });
+      const tool = ok<Record<string, unknown>>(result);
+      const json = await harness.cli(['--json', 'send', 'status', approvalId, '--account', 'acme/resend']);
+      assert.equal(json.code, 0, json.stdout + json.stderr);
+      const command = json.json<Record<string, unknown>>().data ?? {};
+      for (const [surface, shown] of [
+        ['resend_send_status', tool],
+        ['resend_send_status text', JSON.parse((result.content ?? []).map((part) => part.text ?? '').join(''))],
+        ['send status --json', command],
+      ] as const) {
+        const label = `${surface} ${form}`;
+        assert.ok(assertOnlyWrapped(shown, label) > 0, `${label}: what it was for is shown, wrapped`);
+        const approval = (shown as { approval?: Record<string, unknown> }).approval;
+        assert.equal(approval?.approvalId, approvalId, label);
+        assertExpectWrapped(approval?.expect, label);
+      }
+      const text = await harness.cli(['send', 'status', approvalId, '--account', 'acme/resend']);
+      assert.equal(text.stdout.trim(), `${approvalId}: ${String(tool.verdict)}`);
+    }
+    assert.equal(harness.fake.sends().length, 0, 'a status never sends');
   } finally {
     await close();
   }

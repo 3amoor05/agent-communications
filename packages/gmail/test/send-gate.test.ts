@@ -2,7 +2,15 @@ import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { asV2, CommsError } from '@agentcomms/core';
+import { asV2, CommsError, newApprovalId, sendEpochOf } from '@agentcomms/core';
+import { v1SendRecord, writeV1Record } from '../../core/test/fixtures/approval-v1-0.13.0.ts';
+import {
+  assertExpectWrapped,
+  assertFilesWrapped,
+  assertOnlyWrapped,
+  HOSTILE_EXPECT,
+  HOSTILE_FILE_NAME,
+} from '../../core/test/helpers/hostile-approval.ts';
 import { renderSendPreparation, renderSent } from '../src/cli/render.ts';
 import { GmailContext } from '../src/context.ts';
 import { createDraft } from '../src/operations/drafts.ts';
@@ -18,7 +26,7 @@ import {
 import type { FakeGoogle } from './support/fake-google.ts';
 import { assertNoBareCommand, gmailInline } from './support/handoffs.ts';
 import { type Harness, newHarness } from './support/harness.ts';
-import { cli } from './support/surfaces.ts';
+import { cli, connect } from './support/surfaces.ts';
 
 /**
  * The gate, end to end. Everything here is about one promise: **nothing leaves the mailbox that a person has not seen
@@ -354,6 +362,83 @@ test('an approval can be cancelled, and cancelling is never refused', async () =
     executeSend(context, 'work', { draftId, approvalId: prepared.approvalId, expect: prepared.expect }),
     (error: unknown) => error instanceof CommsError,
   );
+});
+
+test('`send cancel --json` shows what a sender wrote only inside the envelope, and the tool shows none of it (CUE-404 review)', async () => {
+  const { harness } = await connected({ riskEscalation: false });
+  const inboxId = (await harness.core.config.load()).inboxes.work?.id ?? '';
+  // Each form a cancel can return with what it was for: a send, a download's question, an earlier release's send.
+  const hostile = async () => {
+    const send = await harness.core.approvals.create({
+      channel: 'gmail',
+      inboxId,
+      inboxSub: 'sub-1',
+      draftId: 'r-draft-1',
+      draftMessageId: 'msg-v1',
+      contentDigest: 'a'.repeat(64),
+      sendEpoch: sendEpochOf(await harness.core.config.load(), inboxId),
+      policy: 'chat',
+      requiredPolicy: 'chat',
+      riskFlags: [],
+      expect: HOSTILE_EXPECT,
+    });
+    const question = await harness.core.approvals.createDownload({
+      channel: 'gmail',
+      download: {
+        summary: 'where to save 1 file from work',
+        target: { kind: 'inbox', name: 'work', id: inboxId },
+        operation: 'attachments.download',
+        request: { selection: { kind: 'messages', ids: ['m1'] } },
+        files: ['m1/1'],
+        names: [HOSTILE_FILE_NAME],
+        folders: { downloads: '/srv/jo/Downloads', current: '/srv/jo/work' },
+        listing: [{ name: HOSTILE_FILE_NAME, size: 10 }],
+      },
+      policy: 'chat',
+    });
+    const legacy = newApprovalId();
+    writeV1Record(
+      harness.core.paths.stateDir,
+      v1SendRecord({
+        approvalId: legacy,
+        inboxId,
+        inboxSub: 'sub-1',
+        draftId: 'r-draft-2',
+        draftMessageId: 'msg-v2',
+        digest: 'b'.repeat(64),
+        expect: HOSTILE_EXPECT,
+        createdAt: new Date(Date.now() - 60_000).toISOString(),
+      }),
+    );
+    return { send: send.approvalId, question: question.approvalId, legacy };
+  };
+
+  for (const [form, approvalId] of Object.entries(await hostile())) {
+    const label = `send cancel --json ${form}`;
+    const run = await cli(harness, ['send', 'cancel', approvalId, '--json']);
+    assert.equal(run.code, 0, run.stdout + run.stderr);
+    const shown = run.envelope<Record<string, unknown>>().data ?? {};
+    assert.equal(shown.approvalId, approvalId, label);
+    assert.equal(shown.state, 'revoked', label);
+    assert.ok(assertOnlyWrapped(shown, label) > 0, `${label}: what it was for is shown, wrapped`);
+    if (form === 'question') assertFilesWrapped(shown.files, label);
+    else assertExpectWrapped(shown.expect, label);
+    assert.equal('download' in shown, false, `${label}: no stored question`);
+    const text = await cli(harness, ['send', 'cancel', approvalId]);
+    assert.equal(text.stdout.trim(), `Approval ${approvalId} is revoked. Nothing was sent.`, label);
+  }
+  // `gmail_send_cancel` answers with the id and the state alone: nothing a sender wrote at all.
+  const agent = await connect({ core: harness.core, env: harness.env });
+  try {
+    for (const [form, approvalId] of Object.entries(await hostile())) {
+      const result = await agent.call('gmail_send_cancel', { approvalId });
+      assert.notEqual(result.isError, true, JSON.stringify(result.structuredContent));
+      assert.deepEqual(result.structuredContent, { approvalId, state: 'revoked' }, form);
+      assertOnlyWrapped(result, `gmail_send_cancel ${form}`);
+    }
+  } finally {
+    await agent.close();
+  }
 });
 
 test('a draft an agent could not have written is refused outright', async () => {

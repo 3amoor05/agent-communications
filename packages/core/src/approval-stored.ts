@@ -6,13 +6,7 @@ import {
   type LegacyView,
 } from './approval-legacy.ts';
 import { type Attribution, type IntegrityReason, validateV2 } from './approval-validate.ts';
-import {
-  type ApprovalKind,
-  type ApprovalRecord,
-  type ApprovalState,
-  type Expectation,
-  publicView,
-} from './approvals.ts';
+import type { ApprovalKind, ApprovalRecord, ApprovalState, Expectation } from './approvals.ts';
 import type { Config } from './config.ts';
 import { CommsError } from './errors.ts';
 
@@ -71,20 +65,6 @@ export type StoredApproval =
       readonly safe: SafeFields | null;
     }
   | { readonly form: 'unreadable'; readonly stub: CorruptStub };
-
-/** A corrupt record as an owner sees it: its safe fields, `state: 'corrupt'` and the reason. */
-export type PublicCorruptApproval = SafeFields & {
-  readonly approvalId: string;
-  readonly state: 'corrupt';
-  readonly reason: IntegrityReason;
-};
-
-/** Any approval as it may be shown to anyone, agents included. Never a challenge hash, never a file's raw bytes. */
-export type PublicApproval =
-  | (Omit<ApprovalRecord, 'challengeHash'> & { readonly legacy?: undefined })
-  | LegacyView
-  | PublicCorruptApproval
-  | CorruptStub;
 
 // ── Decoding ─────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -337,22 +317,6 @@ export function corruptStubOf(stored: StoredApproval): CorruptStub | null {
       return stored.stub;
     default:
       return null;
-  }
-}
-
-/** The public shape of each form. */
-export function publicStored(stored: StoredApproval): PublicApproval {
-  switch (stored.form) {
-    case 'v2':
-      return publicView(stored.record);
-    case 'legacy':
-      return stored.view;
-    case 'corrupt':
-      return stored.safe === null
-        ? { approvalId: stored.approvalId, state: 'corrupt', reason: stored.reason }
-        : { ...stored.safe, approvalId: stored.approvalId, state: 'corrupt', reason: stored.reason };
-    case 'unreadable':
-      return stored.stub;
   }
 }
 

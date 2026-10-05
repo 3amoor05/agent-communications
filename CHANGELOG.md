@@ -72,6 +72,9 @@ What it means for you: a minor release, with changes you will see and some a scr
   public object — `approvalId`, `state`, `claimable`, `route`, its times and reason, what a sender wrote inside the
   untrusted-content envelope. The stored fields, `policy`, `requiredPolicy`, `riskFlags` and the rest, are gone.
   `--state corrupt` lists the records that cannot be used.
+- What `agentcomms approvals revoke --json`, `comms_approval_revoke` and `agent-gmail send cancel --json` return, and
+  the `approval` in `agent-resend send status --json` and `resend_send_status`, is that same public object instead of
+  the stored record: the recipients, the subject and a question's file names come only inside the envelope.
 - An approval id of the wrong kind or channel — a send's given to a change, or a Slack post's to `agent-gmail approve`,
   say — now gets the same `NOT_FOUND` as an id nobody prepared, with no hint pointing at another command. Every
   approval `NOT_FOUND` now reads alike, "nothing was sent: no approval <id>" (or changed, or saved), pinned servers

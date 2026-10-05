@@ -1,6 +1,6 @@
 import { access, constants, stat } from 'node:fs/promises';
 import { type PublicApprovalView, publicApproval } from '../approval-outcome.ts';
-import { integrityRefusal, kindOf, type PublicApproval, publicStored } from '../approval-stored.ts';
+import { integrityRefusal, kindOf } from '../approval-stored.ts';
 import type { ApprovalState } from '../approvals.ts';
 import type { AuditRecord } from '../audit.ts';
 import { revokeChange } from '../changes.ts';
@@ -545,8 +545,8 @@ export const APPROVAL_STATES: readonly (ApprovalState | 'corrupt')[] = Object.fr
 ]);
 
 /**
- * Every approval on this machine, in its public shape (`publicStored`): a version-2 record, a record an earlier release
- * prepared, a corrupt record shown to its owner, or the stub of one that cannot be read — none of them skipped.
+ * Every approval on this machine, in its public shape (`publicApproval`): a version-2 record, a record an earlier
+ * release prepared, a corrupt record shown to its owner, or the stub of one that cannot be read — none of them skipped.
  *
  * `inbox` keeps the records owned by that mailbox (`ownerOf`), so a record whose owner cannot be trusted never matches
  * it; `state` keeps those in that state (`stateOf`).
@@ -577,8 +577,15 @@ export async function listApprovals(
  * A change approval is revoked through `revokeChange`, which records it in the audit log as every other step of a
  * change approval is; a send approval as it always was. Either from an earlier release is retired in its own shape. A
  * corrupt or unreadable record is refused, with only its stub, and nothing is written to it.
+ *
+ * What it returns is the record's public object, as a status shows it (`publicApproval`): what a sender wrote — the
+ * recipients and subject, a question's file names — only inside the untrusted-content envelope, never the stored record.
  */
-export async function revokeApproval(core: Core, approvalId: string, surface: 'cli' | 'mcp'): Promise<PublicApproval> {
+export async function revokeApproval(
+  core: Core,
+  approvalId: string,
+  surface: 'cli' | 'mcp',
+): Promise<PublicApprovalView> {
   // Looked at under its lock first, classified there: one nobody prepared is the one NOT_FOUND, and one that cannot be
   // used is refused with only its stub, before anything is written or audited.
   const { stored: existing } = await core.approvals.inspect(approvalId);
@@ -588,5 +595,5 @@ export async function revokeApproval(core: Core, approvalId: string, surface: 'c
     kindOf(existing) === 'change'
       ? await revokeChange(core, approvalId, reason, { surface, disposition: 'person' })
       : await core.approvals.revoke(approvalId, reason, { disposition: 'person' });
-  return publicStored(stored);
+  return publicApproval(stored, await core.approvals.outcomeOf(stored));
 }

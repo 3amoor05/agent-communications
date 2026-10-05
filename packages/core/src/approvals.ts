@@ -1007,6 +1007,27 @@ export class ApprovalStore {
   }
 
   /**
+   * The classification of a record a call has just written, in any of its forms — a revoke's, a cancel's — for its
+   * result to show through `publicApproval`, as a status, a wait and a list show theirs: what a sender wrote only inside
+   * the untrusted-content envelope (design 2026-10-05 §D8). Classified as a look at it would be, against a fresh read of
+   * the configuration, without the lock and writing nothing, as `approvalOf` is; a configuration that cannot be read
+   * leaves nothing claimable, and never fails the call it reports on.
+   */
+  async outcomeOf(stored: StoredApproval): Promise<ApprovalOutcome> {
+    const derived = this.#derived(stored);
+    let live: LiveGate | null = null;
+    if (derived.form === 'v2') {
+      try {
+        const config = await this.#config();
+        live = config === null ? null : liveGateOf(config, derived.record);
+      } catch {
+        live = null;
+      }
+    }
+    return approvalOutcome(derived, { action: 'inspect', live, now: this.#now() });
+  }
+
+  /**
    * The refusal of a second approval of a record a person approved already: there is nothing to approve, and the
    * approval can be used as it is.
    */

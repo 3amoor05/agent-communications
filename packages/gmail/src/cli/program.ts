@@ -34,7 +34,7 @@ import {
   paint,
   pathOverridesFromCliOptions,
   profileSourcePath,
-  publicStored,
+  publicApproval,
   refuseRetiredOut,
   refuseUnclaimedApproval,
   renderApprovalWait,
@@ -1355,7 +1355,9 @@ update first, or put it off (the stop names both commands) · 64 usage · 65 bad
     .description('cancel an approval — refusing to send is never the dangerous direction')
     .action(
       act(async (context, _globalOptions, approvalId: string) => {
-        const result = publicStored(await revokeApproval(context, approvalId));
+        const stored = await revokeApproval(context, approvalId);
+        // Its public object, as `send wait` shows it: what a sender wrote only inside the envelope (design §D8).
+        const result = publicApproval(stored, await context.core.approvals.outcomeOf(stored));
         writeResult(
           result,
           output(),

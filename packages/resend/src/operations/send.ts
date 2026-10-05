@@ -15,8 +15,8 @@ import {
   type LegacyDrainReport,
   type MessagePreview,
   ownerOf,
-  type PublicApproval,
-  publicStored,
+  type PublicApprovalView,
+  publicApproval,
   renderMessagePreview,
   type SendPolicy,
   sendEpochOf,
@@ -953,8 +953,11 @@ async function claimAndSend(
 export interface SendStatus {
   account: string;
   approvalId: string;
-  /** The approval in its public shape — every form, an earlier release's and a corrupt one's included — or none. */
-  approval: PublicApproval | null;
+  /**
+   * The approval as a status shows it (`publicApproval`) — every form, an earlier release's and a corrupt one's
+   * included, the recipients and subject only inside the untrusted-content envelope — or none.
+   */
+  approval: PublicApprovalView | null;
   local: SendSummary | null;
   /**
    * What Resend says now, when it could be asked: the email's id, its last event — one this version does not interpret
@@ -1010,14 +1013,16 @@ export async function sendStatus(context: ResendContext, name: string, approvalI
    * another kind's, one whose owner cannot be trusted and one nobody prepared alike — unless this account's own send
    * record knows the id, when its approval is simply gone.
    */
-  const stored = await context.core.approvals
+  const seen = await context.core.approvals
     .inspect(approvalId, { kind: 'send', owner: named.account.id })
-    .then(({ stored: seen }) => seen)
     .catch((error: unknown) => {
       if (error instanceof CommsError && error.code === 'NOT_FOUND' && local !== null) return null;
       throw error;
     });
-  const base = { account: name, approvalId, approval: stored ? publicStored(stored) : null, local };
+  const stored = seen?.stored ?? null;
+  // Shown as the look classified it, what a sender wrote only inside its envelope (design 2026-10-05 §D8).
+  const approval = seen ? publicApproval(seen.stored, seen.outcome) : null;
+  const base = { account: name, approvalId, approval, local };
   if (!local) {
     return {
       ...base,

@@ -16,6 +16,7 @@ import type { AccountConfig, InboxConfig } from '../src/config.ts';
 import { type Core, openCore } from '../src/core.ts';
 import { CommsError, ERROR_REGISTRY, EXIT_CODES } from '../src/errors.ts';
 import { CORE_CALLER, handoffText, isCommand } from '../src/handoffs.ts';
+import { newApprovalId } from '../src/ids.ts';
 import { type CoreMcpOptions, createCoreMcpServer } from '../src/mcp/server.ts';
 import { type McpProduct, managedRuntimeDir, managedRuntimeEntry, pruneManagedRuntimes } from '../src/mcp-install.ts';
 import { changePolicyReport } from '../src/operations/change-policy.ts';
@@ -23,9 +24,18 @@ import { type DoctorCheck, type DoctorReport, doctor } from '../src/operations/m
 import { serverInstallChange, serverPruneChange } from '../src/operations/servers.ts';
 import { renderDoctor } from '../src/render.ts';
 import type { SecretStore } from '../src/secrets.ts';
+import { sendEpochOf } from '../src/send-epoch.ts';
 import { VERSION } from '../src/version.ts';
+import { v1SendRecord, writeV1Record } from './fixtures/approval-v1-0.13.0.ts';
 import { pinArgs, registration, writeManaged } from './fixtures/cli-command/trees.ts';
 import { assertNoBareCommand, coreCommand, coreHandoffs, coreInline, locatedCoreLine } from './helpers/handoffs.ts';
+import {
+  assertExpectWrapped,
+  assertFilesWrapped,
+  assertOnlyWrapped,
+  HOSTILE_EXPECT,
+  HOSTILE_FILE_NAME,
+} from './helpers/hostile-approval.ts';
 import { tempDir } from './helpers/temp.ts';
 
 /*
@@ -392,6 +402,90 @@ test('revoking a change approval from chat voids it, and the audit log says whic
     assert.equal(line?.surface, 'mcp');
     // Revoked is final: approving it at a terminal afterwards is refused.
     await assert.rejects(approveAtTerminal(m.core, String(loosen.approvalId)));
+  } finally {
+    await close();
+  }
+});
+
+/** A send, a download's question and an earlier release's send, each holding what a hostile sender wrote. */
+async function hostileApprovals(core: Core): Promise<{ send: string; question: string; legacy: string }> {
+  const send = await core.approvals.create({
+    channel: 'gmail',
+    inboxId: MAIL,
+    inboxSub: 'sub-1',
+    draftId: 'r-draft-1',
+    draftMessageId: 'msg-v1',
+    contentDigest: 'a'.repeat(64),
+    sendEpoch: sendEpochOf(await core.config.load(), MAIL),
+    policy: 'chat',
+    requiredPolicy: 'chat',
+    riskFlags: [],
+    expect: HOSTILE_EXPECT,
+  });
+  const question = await core.approvals.createDownload({
+    channel: 'gmail',
+    download: {
+      summary: 'where to save 1 file from acme/gmail',
+      target: { kind: 'inbox', name: 'acme/gmail', id: MAIL },
+      operation: 'attachments.download',
+      request: { selection: { kind: 'messages', ids: ['m1'] } },
+      files: ['m1/1'],
+      names: [HOSTILE_FILE_NAME],
+      folders: { downloads: '/srv/jo/Downloads', current: '/srv/jo/work' },
+      listing: [{ name: HOSTILE_FILE_NAME, size: 10 }],
+    },
+    policy: 'chat',
+  });
+  const legacy = newApprovalId();
+  writeV1Record(
+    core.paths.stateDir,
+    v1SendRecord({
+      approvalId: legacy,
+      inboxId: MAIL,
+      draftId: 'r-draft-2',
+      draftMessageId: 'msg-v2',
+      digest: 'b'.repeat(64),
+      expect: HOSTILE_EXPECT,
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+    }),
+  );
+  return { send: send.approvalId, question: question.approvalId, legacy };
+}
+
+test('a revoke shows what a sender wrote only inside the envelope, from the command and the tool alike (CUE-404 review)', async () => {
+  const m = machine({ inboxes: { 'acme/gmail': inbox() } });
+  const { call, close } = await connect(m);
+  try {
+    // One set revoked at the command line, one from chat: each a pending record of every form that shows its content.
+    for (const surface of ['cli', 'mcp'] as const) {
+      const ids = await hostileApprovals(m.core);
+      for (const [form, approvalId] of Object.entries(ids)) {
+        const label = `${surface} ${form}`;
+        let shown: Record<string, unknown>;
+        if (surface === 'cli') {
+          const run = cli(m, ['approvals', 'revoke', approvalId, '--json']);
+          assert.equal(run.status, 0, run.stdout + run.stderr);
+          shown = run.json().data;
+          // The line a person reads says only the id and the state.
+          const text = cli(m, ['approvals', 'revoke', approvalId]);
+          assert.equal(text.stdout.trim(), `${approvalId} is revoked`, label);
+        } else {
+          const result = (await call('comms_approval_revoke', { approvalId })) as ToolResult & {
+            content: { type: string; text: string }[];
+          };
+          assert.notEqual(result.isError, true, `${label}: ${JSON.stringify(result.structuredContent)}`);
+          shown = result.structuredContent ?? {};
+          // The text a model reads is the same object, held to the same rule.
+          assertOnlyWrapped(JSON.parse(result.content.map((part) => part.text).join('')), `${label} text`);
+        }
+        assert.equal(shown.approvalId, approvalId, label);
+        assert.equal(shown.state, 'revoked', label);
+        assert.ok(assertOnlyWrapped(shown, label) > 0, `${label}: what it was for is shown, wrapped`);
+        if (form === 'question') assertFilesWrapped(shown.files, label);
+        else assertExpectWrapped(shown.expect, label);
+        assert.equal('download' in shown, false, `${label}: no stored question`);
+      }
+    }
   } finally {
     await close();
   }

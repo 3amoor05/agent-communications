@@ -279,7 +279,9 @@ test('sending: the same preview, the same execute, the same status from both sur
       JSON.parse(
         JSON.stringify(normalise(value))
           .replace(uuid, 'U')
-          .replace(/<[^>"]+@example\.test>/g, 'M'),
+          .replace(/<[^>"]+@example\.test>/g, 'M')
+          // The approval's `said` names the moment Resend accepted each send, and the two were accepted apart.
+          .replace(/(accepted by Resend at )[^"]+/g, '$1T'),
       );
     assert.deepEqual(loose(cliStatus), loose(toolStatus));
   } finally {
