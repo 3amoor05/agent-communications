@@ -15,6 +15,7 @@ import {
   sendApprovesHint,
 } from '@agentcomms/core';
 import { RESEND_CALLER } from '../src/caller.ts';
+import { nothingToDo, usageHint } from '../src/cli/program.ts';
 import { renderAccounts } from '../src/cli/render.ts';
 import { ResendContext } from '../src/context.ts';
 import { runDoctor } from '../src/operations/doctor.ts';
@@ -24,6 +25,7 @@ import { VERSION } from '../src/version.ts';
 import {
   assertNoBareCommand,
   coreText,
+  locatedResendLine,
   notLocatable,
   OLD_NODE,
   RESEND_SOURCE_CLI,
@@ -352,6 +354,64 @@ test('where Resend cannot be located, every handoff says why and keeps what it h
 });
 
 // ── `--help`, and a command with nothing after it ──────────────────────────────────────────────────────────────────
+
+test('a usage error and an empty command line point at this installation’s --help, located (7d-resend)', async () => {
+  harness = await newHarness();
+  for (const platform of ['darwin', 'win32'] as const) {
+    const help = resendHandoffs(harness.core.paths, platform).own(['--help'], { uses: [] });
+    assert.ok(isCommand(help));
+    assert.deepEqual(help.words.slice(-1), ['--help']);
+    assert.ok(!help.words.includes('--config-dir'), '--help opens no folder, so none is pinned');
+
+    const usage = await harness.cli(['--json', 'nonsense'], { platform });
+    assert.equal(usage.code, 64);
+    assert.equal(usage.json().error?.hint, `Run ${inlineCommand(help)} to see the commands.`);
+    assertNoBareCommand(String(usage.json().error?.hint), 'the usage error');
+
+    // A parse that runs nothing — Commander shows the help for an empty line itself, so this is its fallback.
+    assert.equal(nothingToDo(help), `Nothing to do. Try ${inlineCommand(help)}.`);
+    assert.equal(usageHint(help), `Run ${inlineCommand(help)} to see the commands.`);
+  }
+  const why = resendHandoffs(harness.core.paths, 'darwin', OLD_NODE).own(['--help'], { uses: [] });
+  assert.ok(!isCommand(why));
+  assert.equal(nothingToDo(why), why.message);
+  assert.equal(usageHint(why), why.message);
+  // From the real CLI's own words, for a reader of the plain output: Resend's entry, then `--help`.
+  locatedResendLine((await harness.cli(['nonsense'])).stderr, ['--help']);
+});
+
+test('approving as an agent, or with no terminal, names the approve a person runs, located (7d-resend)', async () => {
+  harness = await newHarness();
+  const approve = resendInline(harness.core, ['approve', 'ap_1']);
+  const agent = await harness.cli(['--json', 'approve', 'ap_1'], { env: { CLAUDECODE: '1' } });
+  assert.equal(agent.json().error?.hint, `Ask the user to run ${approve} in their own terminal.`);
+  const script = await harness.cli(['--json', 'approve', 'ap_1']);
+  assert.equal(script.json().error?.hint, `Run ${approve} directly in a terminal.`);
+  // A key, likewise: the command a person runs is this one, with the name, located.
+  const key = await harness.cli(['--json', 'account', 'add', 'acme/resend'], { env: { CLAUDECODE: '1' } });
+  assert.equal(
+    key.json().error?.hint,
+    `Ask the user to run ${resendInline(harness.core, ['account', 'add', 'acme/resend'])} in their own terminal. Never paste a key into a chat: the transcript keeps it.`,
+  );
+  const install = await harness.cli(['--json', 'mcp', 'install']);
+  assert.equal(
+    install.json().error?.hint,
+    `For example: ${resendInline(harness.core, ['mcp', 'install', '--client', 'claude-code'])}.`,
+  );
+});
+
+test('a change asked for at the command line is run again as this installation’s own command, with the approval', async () => {
+  harness = await newHarness();
+  await harness.addAccount({ name: 'acme/resend', mode: 'read' });
+  const asked = await harness.cli(['--json', 'account', 'remove', 'acme/resend']);
+  assert.equal(asked.code, 10, asked.stdout);
+  const approvalId = String(asked.json().error?.details?.approvalId);
+  assert.equal(
+    asked.json().error?.hint,
+    `Show the person the preview. Once they say yes, run ${resendInline(harness.core, ['account', 'remove', 'acme/resend', '--approval', approvalId])}.`,
+  );
+  assert.ok(await harness.context().accounts.find('acme/resend'), 'nothing was removed while it was asked');
+});
 
 // ── The greeting and the tools name no CLI ──────────────────────────────────────────────────────────────────────
 

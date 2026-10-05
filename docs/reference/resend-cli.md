@@ -68,7 +68,7 @@ agent-resend account add [options] <name>
 | `--mode <mode>` | read (the default for a full-access key) or send (choices: "read", "send") | — |
 | `--send <policy>` | how its sends are approved; the machine default if left out (choices: "chat", "confirm", "never") | — |
 | `--domain <domain>` | for a sending-only key restricted to one domain: that domain | — |
-| `--approval <approvalId>` | apply a change a person approved: said yes to in chat, or approved with `agent-resend approve` | — |
+| `--approval <approvalId>` | apply a change a person approved: said yes to in chat, or approved with the approve command it gave | — |
 
 ### `agent-resend account list`
 
@@ -96,7 +96,7 @@ agent-resend account remove [options] <name>
 
 | Option | What it does | Default |
 |---|---|---|
-| `--approval <approvalId>` | apply a change a person approved: said yes to in chat, or approved with `agent-resend approve` | — |
+| `--approval <approvalId>` | apply a change a person approved: said yes to in chat, or approved with the approve command it gave | — |
 
 ### `agent-resend account policy`
 
@@ -111,7 +111,7 @@ agent-resend account policy [options] <name>
 | `--send <policy>` | chat, confirm or never | — |
 | `--mode <mode>` | read or send | — |
 | `--change <policy>` | how a loosening of this account is approved: chat or confirm | — |
-| `--approval <approvalId>` | apply a change a person approved: said yes to in chat, or approved with `agent-resend approve` | — |
+| `--approval <approvalId>` | apply a change a person approved: said yes to in chat, or approved with the approve command it gave | — |
 
 ### `agent-resend doctor`
 
@@ -341,7 +341,7 @@ agent-resend scheduled cancel [options] <id>
 | Option | What it does | Default |
 |---|---|---|
 | `--account <name>` | which account, as `organisation/resend` | — |
-| `--approval <approvalId>` | apply a change a person approved: said yes to in chat, or approved with `agent-resend approve` | — |
+| `--approval <approvalId>` | apply a change a person approved: said yes to in chat, or approved with the approve command it gave | — |
 
 ### `agent-resend approve`
 

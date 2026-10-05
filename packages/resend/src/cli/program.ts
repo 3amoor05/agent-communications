@@ -5,13 +5,15 @@ import {
   approveChangeAtTerminal,
   CommsError,
   canPrompt,
+  cliHandoffs,
   colorEnabled,
   commandPathOf,
   EXIT_CODES,
   exemptFromUpdateGate,
   type GatedChange,
   gatedChangeAtTerminal,
-  inlineCommand,
+  type Handoff,
+  handoffSentence,
   installExitStatus,
   type OutputOptions,
   openCore,
@@ -21,15 +23,14 @@ import {
   refuseUnclaimedApproval,
   renderInstall,
   renderPrune,
+  resolvePaths,
   runCommand,
   runUpdateCheckChild,
   SEND_LOOKUP,
-  type ShellCommand,
   type Streams,
   type SupportedClient,
   serverInstallChange,
   serverPruneChange,
-  shellCommand,
   terminalUpdateHooks,
   UPDATE_CHECK_CHILD_COMMAND,
   updateGateAtTerminal,
@@ -123,6 +124,19 @@ function withoutOptionValues(text: string): string {
 
 const collect = (value: string, previous: string[] = []): string[] => [...previous, value];
 
+/** What a usage error tells the person: this installation's own `--help`, located — or why there is none here. */
+export function usageHint(help: Handoff): string {
+  return handoffSentence(help, (command) => `Run ${command} to see the commands.`);
+}
+
+/**
+ * What a command line that ran nothing says. Commander shows the help for an empty one itself, so this is the fallback
+ * for a parse that ends with no command run and no error — never a bare name either way.
+ */
+export function nothingToDo(help: Handoff): string {
+  return handoffSentence(help, (command) => `Nothing to do. Try ${command}.`);
+}
+
 /** `--expect-to a@x.test,b@x.test`, or `none`: a list is always written out, so a permission prompt shows it. */
 function expectList(raw: unknown, flag: string): string[] {
   const value = String(raw ?? '').trim();
@@ -182,6 +196,10 @@ is out: update first, or put it off (agentcomms update, agentcomms update --late
     );
   }
 
+  /*
+   * Core, opened as Resend — its caller — so every command this prints for a person is this installation's own, its
+   * folders pinned (CUE-403). A core handed in is a test's, opened the same way; `ResendContext` refuses one that is not.
+   */
   let invocationCore: ReturnType<typeof openCore> | undefined;
   const coreForInvocation = (): ReturnType<typeof openCore> => {
     if (invocationCore) return invocationCore;
@@ -195,6 +213,12 @@ is out: update first, or put it off (agentcomms update, agentcomms update --late
         : openCore({ env, platform, pathOverrides, caller: RESEND_CALLER });
     return invocationCore;
   };
+
+  /** This installation's own `--help`, for a usage error or an empty command line: it opens no folder, so pins none. */
+  const help = (): Handoff =>
+    cliHandoffs({ caller: RESEND_CALLER, paths: resolvePaths({ env, platform }), platform, env }).own(['--help'], {
+      uses: [],
+    });
 
   const globals = (): GlobalOptions => {
     const options = program.opts();
@@ -230,11 +254,10 @@ is out: update first, or put it off (agentcomms update, agentcomms update --late
           output: output(),
           noInput: false,
           streams,
-          approveCommand: 'agent-resend approve',
           approvals: approvalsOf(command),
           // `send status` looks a send up by its approval, as `resend_send_status` does over MCP.
           approvalClaim: path.join(' ') === 'send status' ? SEND_LOOKUP : undefined,
-          ...terminalUpdateHooks(core, env, { output: output(), streams, approveCommand: 'agent-resend approve' }),
+          ...terminalUpdateHooks(core, env, { output: output(), streams }),
         });
       },
       streams,
@@ -257,26 +280,28 @@ is out: update first, or put it off (agentcomms update, agentcomms update --late
       if (exitCode === 0 && softExit !== null) exitCode = softExit;
     };
 
-  /** A change the way every changing command runs one: core's `gatedChangeAtTerminal`. */
+  /**
+   * A change the way every changing command runs one: core's `gatedChangeAtTerminal`. `rerun` is this command's words
+   * after the program, which core locates as Resend's own and runs again with `--approval <id>`.
+   */
   const changeAt = <T>(
     context: ResendContext,
     change: GatedChange<T>,
     flags: Options,
-    command: ShellCommand,
+    rerun: readonly string[],
   ): Promise<T> =>
     gatedChangeAtTerminal(context.core, change, {
       approvalId: flags.approval === undefined ? undefined : String(flags.approval),
       env,
       output: output(),
-      command,
-      approveCommand: 'agent-resend approve',
+      rerun,
       streams,
     });
 
   const approvalOption = (command: Command): Command =>
     command.option(
       '--approval <approvalId>',
-      'apply a change a person approved: said yes to in chat, or approved with `agent-resend approve`',
+      'apply a change a person approved: said yes to in chat, or approved with the approve command it gave',
     );
   const accountOption = (command: Command): Command =>
     command.requiredOption('--account <name>', 'which account, as `organisation/resend`');
@@ -305,21 +330,17 @@ is out: update first, or put it off (agentcomms update, agentcomms update --late
   ).action(
     act(async (context, options, name: string, flags: Options) => {
       const mode = modeOf(flags.mode);
-      const command = shellCommand(
-        [
-          'agent-resend',
-          'account',
-          'add',
-          name,
-          ...(mode ? ['--mode', mode] : []),
-          ...(flags.send ? ['--send', String(flags.send)] : []),
-          ...(flags.domain ? ['--domain', String(flags.domain)] : []),
-        ],
-        platform,
-      );
+      const rerun = [
+        'account',
+        'add',
+        name,
+        ...(mode ? ['--mode', mode] : []),
+        ...(flags.send ? ['--send', String(flags.send)] : []),
+        ...(flags.domain ? ['--domain', String(flags.domain)] : []),
+      ];
       // The name first: a name that cannot be taken is refused before anybody types a key for it.
       checkNewName(await context.config(), name, context.handoffs);
-      const key = await readApiKey(env, streams, { json: options.json, command });
+      const key = await readApiKey(env, streams, { json: options.json, command: context.handoffs.own(rerun) });
       // Through the machine's one throttle, like every other request: the key is on some team's budget already.
       const inspection = await inspectKey(context, key);
       const added = await changeAt(
@@ -336,7 +357,7 @@ is out: update first, or put it off (agentcomms update, agentcomms update --late
           inspection,
         ),
         flags,
-        command,
+        rerun,
       );
       writeResult(added, output(), (data) => renderAdded(data, options.color), streams);
     }),
@@ -366,12 +387,7 @@ is out: update first, or put it off (agentcomms update, agentcomms update --late
     account.command('remove <name>').description('forget an account and delete its key, once a person approves it'),
   ).action(
     act(async (context, _options, name: string, flags: Options) => {
-      const removed = await changeAt(
-        context,
-        removeAccountChange(context, name),
-        flags,
-        shellCommand(['agent-resend', 'account', 'remove', name], platform),
-      );
+      const removed = await changeAt(context, removeAccountChange(context, name), flags, ['account', 'remove', name]);
       writeResult(removed, output(), renderRemoved, streams);
     }),
   );
@@ -392,23 +408,14 @@ is out: update first, or put it off (agentcomms update, agentcomms update --late
       if (reporting) refuseUnclaimedApproval(flags.approval, policyApprovalRefusal('cli'));
       const result = reporting
         ? await policyReport(context, name)
-        : await changeAt(
-            context,
-            policyChange(context, name, wanted),
-            flags,
-            shellCommand(
-              [
-                'agent-resend',
-                'account',
-                'policy',
-                name,
-                ...(wanted.send ? ['--send', wanted.send] : []),
-                ...(wanted.mode ? ['--mode', wanted.mode] : []),
-                ...(wanted.change ? ['--change', wanted.change] : []),
-              ],
-              platform,
-            ),
-          );
+        : await changeAt(context, policyChange(context, name, wanted), flags, [
+            'account',
+            'policy',
+            name,
+            ...(wanted.send ? ['--send', wanted.send] : []),
+            ...(wanted.mode ? ['--mode', wanted.mode] : []),
+            ...(wanted.change ? ['--change', wanted.change] : []),
+          ]);
       writeResult(result, output(), renderPolicy, streams);
     }),
   );
@@ -621,12 +628,13 @@ is out: update first, or put it off (agentcomms update, agentcomms update --late
     ),
   ).action(
     act(async (context, _options, id: string, flags: Options) => {
-      const cancelled = await changeAt(
-        context,
-        cancelScheduledChange(context, String(flags.account), id),
-        flags,
-        shellCommand(['agent-resend', 'scheduled', 'cancel', id, '--account', String(flags.account)], platform),
-      );
+      const cancelled = await changeAt(context, cancelScheduledChange(context, String(flags.account), id), flags, [
+        'scheduled',
+        'cancel',
+        id,
+        '--account',
+        String(flags.account),
+      ]);
       writeResult(cancelled, output(), renderCancelled, streams);
     }),
   );
@@ -639,15 +647,16 @@ is out: update first, or put it off (agentcomms update, agentcomms update --late
         // Checked before the id is looked up, so an agent is told to hand this to a person whatever it passed. A
         // speed bump against the ordinary case, not a boundary: `script -q /dev/null` gives any command a terminal.
         const marker = agentMarker(env);
+        const approve = context.handoffs.own(['approve', approvalId]);
         if (marker) {
           throw new CommsError('APPROVAL_REQUIRED', 'only a person can approve a send or a change, not an agent', {
-            hint: `Ask the user to run ${inlineCommand(shellCommand(['agent-resend', 'approve', approvalId], context.platform))} in their own terminal.`,
+            hint: handoffSentence(approve, (command) => `Ask the user to run ${command} in their own terminal.`),
             details: { marker },
           });
         }
         if (!canPrompt(env, streams, { json: options.json })) {
           throw new CommsError('APPROVAL_REQUIRED', 'approving needs an interactive terminal', {
-            hint: `Run ${inlineCommand(shellCommand(['agent-resend', 'approve', approvalId], context.platform))} directly in a terminal.`,
+            hint: handoffSentence(approve, (command) => `Run ${command} directly in a terminal.`),
           });
         }
         const pending = await context.core.approvals.get(approvalId);
@@ -730,28 +739,27 @@ is out: update first, or put it off (agentcomms update, agentcomms update --late
         // Named, never assumed: writing into a client's configuration nobody named is the thing to ask about.
         if (!flags.client) {
           throw new CommsError('USAGE', 'name the client with --client', {
-            hint: 'For example: `agent-resend mcp install --client claude-code`.',
+            hint: handoffSentence(
+              context.handoffs.own(['mcp', 'install', '--client', 'claude-code']),
+              (command) => `For example: ${command}.`,
+            ),
           });
         }
         // `mcp` and `mcp install` both take `--account`, and Commander gives a repeated name to the parent.
         const pinned = (flags.account ?? mcp.opts().account) as string | undefined;
         const launcher = flags.launcher as 'managed' | 'npx' | 'local' | undefined;
         const name = flags.name as string | undefined;
-        const again = shellCommand(
-          [
-            'agent-resend',
-            'mcp',
-            'install',
-            '--client',
-            String(flags.client),
-            ...(name !== undefined && name !== 'resend' ? ['--name', name] : []),
-            ...(pinned !== undefined ? ['--account', pinned] : []),
-            ...(launcher !== undefined ? ['--launcher', launcher] : []),
-            ...(flags.verify === false ? ['--no-verify'] : []),
-            ...(flags.force === true ? ['--force'] : []),
-          ],
-          platform,
-        );
+        const again = [
+          'mcp',
+          'install',
+          '--client',
+          String(flags.client),
+          ...(name !== undefined && name !== 'resend' ? ['--name', name] : []),
+          ...(pinned !== undefined ? ['--account', pinned] : []),
+          ...(launcher !== undefined ? ['--launcher', launcher] : []),
+          ...(flags.verify === false ? ['--no-verify'] : []),
+          ...(flags.force === true ? ['--force'] : []),
+        ];
         const result = await changeAt(
           context,
           serverInstallChange(
@@ -803,10 +811,7 @@ is out: update first, or put it off (agentcomms update, agentcomms update --late
             RESEND_MCP,
           ),
           flags,
-          shellCommand(
-            ['agent-resend', 'mcp', 'prune', ...(flags.includePrinted === true ? ['--include-printed'] : [])],
-            platform,
-          ),
+          ['mcp', 'prune', ...(flags.includePrinted === true ? ['--include-printed'] : [])],
         );
         writeResult(result, output(), () => renderPrune(result, options.color), streams);
       }),
@@ -831,7 +836,7 @@ is out: update first, or put it off (agentcomms update, agentcomms update --late
       return runCommand(
         output(),
         async () => {
-          throw new CommsError('USAGE', message, { hint: 'Run `agent-resend --help` to see the commands.' });
+          throw new CommsError('USAGE', message, { hint: usageHint(help()) });
         },
         streams,
       );
@@ -839,7 +844,7 @@ is out: update first, or put it off (agentcomms update, agentcomms update --late
     throw error;
   }
   if (!ran) {
-    streams.stderr.write(`${paint(globals().color, 'dim', 'Nothing to do. Try `agent-resend --help`.')}\n`);
+    streams.stderr.write(`${paint(globals().color, 'dim', nothingToDo(help()))}\n`);
     return 64;
   }
   return exitCode;

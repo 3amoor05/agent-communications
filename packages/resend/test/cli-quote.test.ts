@@ -4,12 +4,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
-import { openCore } from '@agentcomms/core';
+import { isCommand, openCore } from '@agentcomms/core';
 import { RESEND_CALLER } from '../src/caller.ts';
 import { run } from '../src/cli/program.ts';
 import { ResendContext } from '../src/context.ts';
+import { assertNoBareCommand, resendHandoffs, resendInline } from './support/handoffs.ts';
 
-/** The command printed for a person to add a key has to fit the shell on the platform running this CLI (CUE-398). */
+/**
+ * The command printed for a person to add a key has to fit the shell on the platform running this CLI (CUE-398) — and,
+ * since CUE-403, it is this installation's own: this Node, Resend's entry, the folders pinned, then the words.
+ */
 
 interface ErrorEnvelope {
   error?: { hint?: string };
@@ -23,7 +27,10 @@ test('the Resend operation context carries an explicitly selected platform', () 
   assert.equal(context.handoffs.platform, 'win32', 'its commands are quoted for that shell');
 });
 
-async function addAccount(domain: string, platform: NodeJS.Platform): Promise<string> {
+async function addAccount(
+  domain: string,
+  platform: NodeJS.Platform,
+): Promise<{ hint: string; core: ReturnType<typeof openCore> }> {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'agent-resend-quote-')));
   const configDir = join(root, 'config');
   mkdirSync(configDir);
@@ -52,14 +59,23 @@ async function addAccount(domain: string, platform: NodeJS.Platform): Promise<st
     streams: { stdout: out, stderr: new PassThrough(), stdin: new PassThrough() },
   });
   assert.equal(code, 77, stdout);
-  return String((JSON.parse(stdout) as ErrorEnvelope).error?.hint);
+  return { hint: String((JSON.parse(stdout) as ErrorEnvelope).error?.hint), core };
 }
 
 test('the hand-off command quotes a spaced word on POSIX and prints words instead of an unsafe Windows line', async () => {
+  const words = (domain: string) => ['account', 'add', 'acme/resend', '--domain', domain];
   const posix = await addAccount('two words.test', 'darwin');
-  assert.match(posix, /agent-resend account add acme\/resend --domain 'two words\.test'/);
+  assert.equal(
+    posix.hint,
+    `Ask the user to run ${resendInline(posix.core, words('two words.test'))} in their own terminal. Never paste a key into a chat: the transcript keeps it.`,
+  );
+  assert.match(posix.hint, / account add acme\/resend --domain 'two words\.test'`/);
 
   const windows = await addAccount('client%domain.test', 'win32');
-  assert.match(windows, /\["agent-resend","account","add","acme\/resend","--domain","client\\u0025domain\.test"\]/);
-  assert.match(windows, /cannot be quoted the same way for cmd\.exe and for PowerShell/);
+  const add = resendHandoffs(windows.core.paths, 'win32').own(words('client%domain.test'));
+  assert.ok(isCommand(add) && add.line === null, 'no Windows line passes a % alike to every shell');
+  assert.match(windows.hint, /"account","add","acme\/resend","--domain","client\\u0025domain\.test"\]/);
+  assert.match(windows.hint, /cannot be quoted the same way for cmd\.exe and for PowerShell/);
+  assert.ok(windows.hint.includes(resendInline(windows.core, words('client%domain.test'), 'win32')), windows.hint);
+  for (const { hint } of [posix, windows]) assertNoBareCommand(hint);
 });

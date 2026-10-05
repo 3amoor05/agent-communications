@@ -75,6 +75,11 @@ assert.deepEqual(accounts.data.accounts, []);
 // A key is typed by a person at a terminal: with no terminal and no key, it is refused before anything is read.
 const add = run('account', 'add', 'acme/resend', '--json');
 assert.equal(add.status, 77, `account add without a terminal: ${add.stdout.slice(0, 400)}`);
+// The command it hands a person is this installation's own (CUE-403): the packed bundle locates its package from where
+// it runs, so the line names this Node and the installed `dist/cli.mjs`, never `agent-resend` by its bare name.
+const handedOver = String(JSON.parse(add.stdout).error?.hint);
+assert.match(handedOver, /@agentcomms[\\/]+resend[\\/]+dist[\\/]+cli\.mjs/, handedOver);
+assert.doesNotMatch(handedOver, /(?:^|[\s`'"[])agent-resend(?:\.cmd)? /i, handedOver);
 
 /*
  * The server, as a client starts it: the packed bin, `mcp`, over stdio.

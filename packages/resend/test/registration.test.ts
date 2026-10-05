@@ -10,6 +10,7 @@ import { EXIT_CODES, managedRuntimeDir } from '@agentcomms/core';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { VERSION } from '../src/version.ts';
+import { assertNoBareCommand, resendInline } from './support/handoffs.ts';
 import { type Captured, type Harness, newHarness, tempDir } from './support/harness.ts';
 
 /*
@@ -163,13 +164,15 @@ test('pinned with `account`: prepared by comms_server_install, written with --ac
     const install = ['mcp', 'install', '--client', 'cursor', '--account', 'acme/resend', '--launcher', 'npx'];
     const fromCommand = pending(await cli(m, [...install, '--no-verify']));
     assert.equal(body(fromCommand.preview), body(asked.preview), 'the same words from either surface');
-    // The command an agent is told to run again carries the pin: without it, it would ask for a wider server.
-    assert.match(
-      fromCommand.hint,
-      new RegExp(
-        `agent-resend mcp install --client cursor --account acme/resend --launcher npx --no-verify --approval ${fromCommand.approvalId}`,
+    // The command an agent is told to run again carries the pin: without it, it would ask for a wider server. It is
+    // this installation's own, located, its folders pinned (CUE-403).
+    assert.ok(
+      fromCommand.hint.includes(
+        resendInline(m.harness.core, [...install, '--no-verify', '--approval', fromCommand.approvalId]),
       ),
+      fromCommand.hint,
     );
+    assertNoBareCommand(fromCommand.hint);
     assert.equal(await cursorEntry(m), undefined, 'nothing is written while it is only asked');
 
     const claimed = await cli(m, [...install, '--no-verify', '--approval', asked.approvalId]);
