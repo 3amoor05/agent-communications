@@ -823,6 +823,8 @@ export async function downloadFiles(
     surface: context.surface,
     env: context.env,
     signal,
+    // An agent left waiting for the person's own answer learns of it with the workspace's wait.
+    waitTool: 'slack_approval_wait',
   }).catch((error: unknown) => {
     throw isCancellation(error) ? notStarted() : error;
   });
