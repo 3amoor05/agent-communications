@@ -1,11 +1,13 @@
 import { join } from 'node:path';
 import {
   appendPrivateLine,
+  applySendPolicyChange,
   type ChangePolicy,
   CommsError,
+  type Config,
   defaultChangePolicy,
   effectiveSendPolicy,
-  ensureSendEpochConfig,
+  type FenceReport,
   findById,
   type GatedChange,
   type InboxRuntimeState,
@@ -167,6 +169,11 @@ export interface InboxPolicyResult {
   previousChangePolicy: ChangePolicy;
   /** What became of the approvals an earlier release prepared, when this write retired them. Absent otherwise. */
   legacyDrain?: LegacyDrainReport | undefined;
+  /**
+   * When the send policy was set: what a change to `never` did to the approvals prepared before it, by id — revoked,
+   * already being sent (claimed before it, and never recalled), or not revoked (the epoch still fences them).
+   */
+  fenced?: FenceReport | undefined;
 }
 
 /**
@@ -228,33 +235,41 @@ export async function inboxPolicy(
   wanted: InboxPolicies,
   consent?: LooseningConsent,
 ): Promise<InboxPolicyResult> {
-  // A send policy moves only with its send epoch, on version 3: converted first, an earlier release's records retired.
-  const legacyDrain =
-    wanted.sendPolicy === undefined
-      ? undefined
-      : (await ensureSendEpochConfig(context.core, { now: context.now })).legacyDrain;
   const { inbox } = await context.inbox(alias);
   let result: InboxPolicyResult | undefined;
-  await context.core.config.update(
-    (current) => {
-      const now = findById(current, 'inbox', inbox.id);
-      if (!now) throw new CommsError('NOT_FOUND', `no inbox called "${alias}"`);
-      // Measured under the lock, against the policies as they are now, so what is reported as `previous` is what
-      // this write replaced rather than what a read a moment earlier saw.
-      const next = { ...now.inbox, ...wanted };
-      result = {
-        alias: now.alias,
-        sendPolicy: next.sendPolicy ?? current.defaults.sendPolicy,
-        previous: now.inbox.sendPolicy ?? current.defaults.sendPolicy,
-        changePolicy: next.changePolicy ?? defaultChangePolicy(current),
-        previousChangePolicy: now.inbox.changePolicy ?? defaultChangePolicy(current),
-      };
-      return { ...current, inboxes: { ...current.inboxes, [now.alias]: next } };
-    },
-    consent ? { consent } : {},
-  );
+  const write = (current: Config): Config => {
+    const now = findById(current, 'inbox', inbox.id);
+    if (!now) throw new CommsError('NOT_FOUND', `no inbox called "${alias}"`);
+    // Measured under the lock, against the policies as they are now, so what is reported as `previous` is what
+    // this write replaced rather than what a read a moment earlier saw.
+    const next = { ...now.inbox, ...wanted };
+    result = {
+      alias: now.alias,
+      sendPolicy: next.sendPolicy ?? current.defaults.sendPolicy,
+      previous: now.inbox.sendPolicy ?? current.defaults.sendPolicy,
+      changePolicy: next.changePolicy ?? defaultChangePolicy(current),
+      previousChangePolicy: now.inbox.changePolicy ?? defaultChangePolicy(current),
+    };
+    return { ...current, inboxes: { ...current.inboxes, [now.alias]: next } };
+  };
+  /*
+   * A send policy moves only with its send epoch, on version 3 (`applySendPolicyChange`): converted first, an earlier
+   * release's records retired, the epoch raised in the same write as a `never`, and then — the config lock let go —
+   * every approval it fenced revoked, and every one already being sent said so.
+   */
+  const changed =
+    wanted.sendPolicy === undefined
+      ? undefined
+      : await applySendPolicyChange(context.core, write, { consent, now: context.now });
+  if (changed === undefined) await context.core.config.update(write, consent ? { consent } : {});
   if (!result) throw new CommsError('UNEXPECTED', 'the policy was written without being measured');
-  if (legacyDrain !== undefined) result = { ...result, legacyDrain };
+  if (changed !== undefined) {
+    result = {
+      ...result,
+      ...(changed.legacyDrain === undefined ? {} : { legacyDrain: changed.legacyDrain }),
+      fenced: changed.fenced,
+    };
+  }
   await context.core.audit.append({
     inboxId: inbox.id,
     alias: result.alias,

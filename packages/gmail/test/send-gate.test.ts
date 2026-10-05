@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { asV2, CommsError } from '@agentcomms/core';
 import { GmailContext } from '../src/context.ts';
 import { createDraft } from '../src/operations/drafts.ts';
+import { inboxPolicy } from '../src/operations/inboxes.ts';
 import {
   beginApproval,
   executeSend,
@@ -14,6 +15,7 @@ import {
 import type { FakeGoogle } from './support/fake-google.ts';
 import { gmailInline } from './support/handoffs.ts';
 import { type Harness, newHarness } from './support/harness.ts';
+import { cli } from './support/surfaces.ts';
 
 /**
  * The gate, end to end. Everything here is about one promise: **nothing leaves the mailbox that a person has not seen
@@ -49,6 +51,9 @@ async function connected(
   }
   return { harness, context: new GmailContext({ core: harness.core, env: harness.env }), google: harness.google };
 }
+
+/** The path a loosening of `work`'s send policy is consented by. */
+const WORK_SEND = 'inboxes.work.sendPolicy';
 
 async function draftTo(context: GmailContext, to: string[], text = 'Tuesday works for me.'): Promise<string> {
   const draft = await createDraft(context, 'work', { to, subject: 'Tuesday', text });
@@ -141,6 +146,50 @@ test('the claim token never reaches an audit row, a result or an error, sent or 
   for (const token of tokens) {
     for (const text of shown) assert.ok(!text.includes(token), `the claim token shows in ${text.slice(0, 120)}`);
   }
+});
+
+test('turning sending off revokes every send waiting for it and says so, at the terminal too; loosening revives none', async () => {
+  const { context, google, harness } = await connected({ riskEscalation: false });
+  const draftId = await draftTo(context, ['sam@partner.test']);
+  const prepared = await prepareSend(context, 'work', draftId);
+  const turnedOff = await inboxPolicy(context, 'work', { sendPolicy: 'never' });
+  assert.deepEqual(turnedOff.fenced, { revoked: [prepared.approvalId], alreadySending: [], couldNotRevoke: [] });
+  // The command prints what the change did, from the same result.
+  await inboxPolicy(context, 'work', { sendPolicy: 'chat' }, { kind: 'loosening-consent', paths: [WORK_SEND] });
+  const again = await prepareSend(context, 'work', draftId);
+  const printed = await cli(harness, ['inbox', 'policy', 'work', '--send', 'never'], { tty: true, stdin: '\n' });
+  assert.match(printed.stdout, new RegExp(`Revoked, prepared before sending was turned off: ${again.approvalId}\\.`));
+  // Loosened again, neither revoked approval sends: only a new one could.
+  await inboxPolicy(context, 'work', { sendPolicy: 'chat' }, { kind: 'loosening-consent', paths: [WORK_SEND] });
+  for (const approval of [prepared, again]) {
+    await assert.rejects(
+      executeSend(context, 'work', { draftId, approvalId: approval.approvalId, expect: approval.expect }),
+      (error: unknown) => error instanceof CommsError && error.code === 'APPROVAL_VOID',
+    );
+  }
+  assert.equal(google.requests.filter((request) => request.path.endsWith('/send')).length, 0);
+});
+
+test('a sweep that failed is reported, and after loosening the send still revokes on its stale epoch at execute', async () => {
+  const { context, google, harness } = await connected({ riskEscalation: false });
+  const draftId = await draftTo(context, ['sam@partner.test']);
+  const prepared = await prepareSend(context, 'work', draftId);
+  const revoke = harness.core.approvals.revoke.bind(harness.core.approvals);
+  harness.core.approvals.revoke = async () => {
+    throw new CommsError('LOCK_TIMEOUT', 'another process is holding the approval');
+  };
+  const turnedOff = await inboxPolicy(context, 'work', { sendPolicy: 'never' });
+  harness.core.approvals.revoke = revoke;
+  assert.deepEqual(turnedOff.fenced?.couldNotRevoke, [prepared.approvalId]);
+  await inboxPolicy(context, 'work', { sendPolicy: 'chat' }, { kind: 'loosening-consent', paths: [WORK_SEND] });
+  await assert.rejects(
+    executeSend(context, 'work', { draftId, approvalId: prepared.approvalId, expect: prepared.expect }),
+    (error: unknown) =>
+      error instanceof CommsError &&
+      error.code === 'APPROVAL_VOID' &&
+      /sending was turned off since this was prepared \(policy: never\)/.test(error.message),
+  );
+  assert.equal(google.requests.filter((request) => request.path.endsWith('/send')).length, 0);
 });
 
 test('editing the draft after the preview voids the approval, and nothing is sent', async () => {

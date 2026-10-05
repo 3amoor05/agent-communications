@@ -2028,6 +2028,17 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
             previous: z.string().describe('the send policy in force before, whether set on the mailbox or inherited'),
             changePolicy: z.string(),
             previousChangePolicy: z.string(),
+            fenced: z
+              .object({
+                revoked: z.array(z.string()),
+                alreadySending: z.array(z.string()),
+                couldNotRevoke: z.array(z.string()),
+                unswept: z.string().optional(),
+              })
+              .optional()
+              .describe(
+                'when the send policy was set: the approvals a change to never revoked, those already being sent when it was turned off (not recalled), and those it could not revoke (they can never send all the same), by id',
+              ),
           }),
         ),
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },

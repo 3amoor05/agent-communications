@@ -1,6 +1,7 @@
 import {
   type CliHandoffs,
   commandText,
+  describeFenceReport,
   describeSize,
   escapeForDisplay,
   handoffText,
@@ -456,6 +457,9 @@ export function renderPolicies(result: PolicyResult, color: boolean): string {
   if (result.changed) {
     lines.push('', `Changed from: posts ${result.previous.sendPolicy}, changes ${result.previous.changePolicy}.`);
   }
+  // What a change to never did to the approvals prepared before it.
+  const fenced = result.fenced === undefined ? [] : describeFenceReport(result.fenced);
+  if (fenced.length > 0) lines.push('', ...fenced);
   return lines.join('\n');
 }
 

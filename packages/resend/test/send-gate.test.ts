@@ -5,7 +5,9 @@ import { afterEach, test } from 'node:test';
 import { asV2, CommsError, stateOf } from '@agentcomms/core';
 import { v1ChangeRecord, v1SendRecord, writeV1Record } from '../../core/test/fixtures/approval-v1-0.13.0.ts';
 import { APPROVAL_TAG } from '../src/api/guard.ts';
+import { renderPolicy } from '../src/cli/render.ts';
 import { REACH_CONFIRM_THRESHOLD, type SendInput } from '../src/compose/message.ts';
+import { policyChange } from '../src/operations/accounts.ts';
 import { showReceived } from '../src/operations/read.ts';
 import {
   beginSendApproval,
@@ -75,6 +77,25 @@ test('sending needs an approval and sends exactly once, with the approval as its
     lines.map((line) => line.outcome),
     ['started', 'ok'],
   );
+});
+
+test('turning sending off revokes every send waiting for it, and the policy result and the terminal say which', async () => {
+  harness = await newHarness();
+  await sendMode();
+  const context = harness.context('mcp');
+  const prepared = await prepareSend(context, 'acme/resend', message());
+  const change = policyChange(context, 'acme/resend', { send: 'never' });
+  const report = await change.apply(undefined, await change.plan(await harness.core.config.load()));
+  assert.deepEqual(report.fenced, { revoked: [prepared.approvalId], alreadySending: [], couldNotRevoke: [] });
+  assert.match(
+    renderPolicy(report),
+    new RegExp(`Revoked, prepared before sending was turned off: ${prepared.approvalId}\\.`),
+  );
+  await assert.rejects(
+    executeSend(context, 'acme/resend', { approvalId: prepared.approvalId, expect: prepared.expect }),
+    refusal('APPROVAL_VOID'),
+  );
+  assert.equal(harness.fake.sends().length, 0);
 });
 
 test('a second claim of one approval is refused, even when two executes race', async () => {
@@ -521,11 +542,15 @@ test('a policy or mode tightened after the preview applies to that send', async 
     executeSend(context, 'acme/resend', { approvalId: confirm.approvalId, expect: confirm.expect }),
     refusal('APPROVAL_PENDING'),
   );
+  // Turned to never, the change itself revokes it (its sweep): from then it is voided, and says why.
   await harness.cli(['--json', 'account', 'policy', 'acme/resend', '--send', 'never'], { env: { CLAUDECODE: '1' } });
   await assert.rejects(
     executeSend(context, 'acme/resend', { approvalId: confirm.approvalId, expect: confirm.expect }),
-    refusal('POLICY_NEVER'),
+    refusal('APPROVAL_VOID'),
   );
+  const revoked = asV2(await harness.core.approvals.get(confirm.approvalId));
+  assert.equal(revoked?.state, 'revoked');
+  assert.match(revoked?.reason ?? '', /sending was turned off since this was prepared/);
   // Back to chat takes a person's approval — but a fresh prepare, then read mode, refuses before any claim.
   await harness.addAccount({ name: 'zeta/resend', mode: 'send' });
   const read = await prepareSend(context, 'zeta/resend', message());

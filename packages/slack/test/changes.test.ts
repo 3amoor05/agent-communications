@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { CommsError, classifyChange } from '@agentcomms/core';
+import { asV2, CommsError, classifyChange } from '@agentcomms/core';
+import { renderPolicies } from '../src/cli/render.ts';
 import { SlackContext } from '../src/context.ts';
 import { connectWorkspace, policyChange, policyWanted } from '../src/operations/changes.ts';
 import { newHarness, TEST_CLIENT_ID } from './support/harness.ts';
@@ -74,4 +75,32 @@ test('a policy that is not one is refused in the same words from either surface'
   assert.throws(() => policyWanted({ change: 'never' }), /"never" is not a change policy/);
   assert.deepEqual(policyWanted({ send: 'confirm', change: 'chat' }), { send: 'confirm', change: 'chat' });
   assert.deepEqual(policyWanted({}), {});
+});
+
+test('turning posting off revokes every post waiting for it, and the result and the terminal say which', async () => {
+  const harness = await newHarness();
+  await harness.addWorkspace({ alias: 'acme', mode: 'send' });
+  const account = (await harness.core.config.load()).accounts.acme;
+  assert.ok(account);
+  const waiting = await harness.core.approvals.create({
+    channel: 'slack',
+    inboxId: account.id,
+    inboxSub: account.userId,
+    draftId: `dft_${'A'.repeat(22)}`,
+    draftMessageId: 'rev-1',
+    contentDigest: 'b'.repeat(64),
+    sendEpoch: 0,
+    policy: 'chat',
+    requiredPolicy: 'chat',
+    riskFlags: [],
+    expect: { to: ['#engineering'], cc: [], bcc: [], subject: '' },
+  });
+  const change = policyChange(contextFor(harness), 'acme', { send: 'never' });
+  const result = await change.apply(undefined, await change.plan(await harness.core.config.load()));
+  assert.deepEqual(result.fenced, { revoked: [waiting.approvalId], alreadySending: [], couldNotRevoke: [] });
+  assert.equal(asV2(await harness.core.approvals.get(waiting.approvalId))?.state, 'revoked');
+  assert.match(
+    renderPolicies(result, false),
+    new RegExp(`Revoked, prepared before sending was turned off: ${waiting.approvalId}\\.`),
+  );
 });

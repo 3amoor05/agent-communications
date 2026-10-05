@@ -112,6 +112,7 @@ test('a loosening asked for in chat is made on the call that brings its approval
       previous: 'never',
       changePolicy: 'chat',
       previousChangePolicy: 'chat',
+      fenced: { revoked: [], alreadySending: [], couldNotRevoke: [] },
     });
     assert.equal((await harness.core.config.load()).inboxes.work?.sendPolicy, 'chat');
 
@@ -162,6 +163,7 @@ test('an approval prepared on one surface is claimed on the other, because it is
       previous: 'confirm',
       changePolicy: 'chat',
       previousChangePolicy: 'chat',
+      fenced: { revoked: [], alreadySending: [], couldNotRevoke: [] },
     });
   } finally {
     await close();

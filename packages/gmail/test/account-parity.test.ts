@@ -236,6 +236,8 @@ test('gmail_inbox_policy tightens as `inbox policy` does, with the same result',
       previous: 'chat',
       changePolicy: 'chat',
       previousChangePolicy: 'chat',
+      // A send policy was set: what it did to the approvals waiting on it — nothing, here.
+      fenced: { revoked: [], alreadySending: [], couldNotRevoke: [] },
     });
 
     // Further, to never, and the same value again: neither loosens anything.

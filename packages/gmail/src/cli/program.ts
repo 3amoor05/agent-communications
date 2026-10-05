@@ -10,6 +10,7 @@ import {
   colorEnabled,
   commandPathOf,
   DOWNLOAD_CLAIM,
+  describeFenceReport,
   downloadAtTerminal,
   EXIT_CODES,
   exemptFromUpdateGate,
@@ -854,6 +855,8 @@ update first, or put it off (the stop names both commands) · 64 usage · 65 bad
               ...(options.change === undefined
                 ? []
                 : [`Loosening "${data.alias}" now needs: ${data.changePolicy} (was ${data.previousChangePolicy}).`]),
+              // What a change to never did to the approvals prepared before it.
+              ...(data.fenced === undefined ? [] : describeFenceReport(data.fenced)),
             ].join('\n'),
           streams,
         );

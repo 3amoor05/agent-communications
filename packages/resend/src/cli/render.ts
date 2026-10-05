@@ -1,4 +1,11 @@
-import { type CliHandoffs, escapeForDisplay, handoffSentenceToFill, paint, truncateDisplay } from '@agentcomms/core';
+import {
+  type CliHandoffs,
+  describeFenceReport,
+  escapeForDisplay,
+  handoffSentenceToFill,
+  paint,
+  truncateDisplay,
+} from '@agentcomms/core';
 import type { AccountView, AddedAccount, PolicyReport, RemovedAccount } from '../operations/accounts.ts';
 import type { DoctorResult } from '../operations/doctor.ts';
 import type { Readable } from '../operations/read.ts';
@@ -57,6 +64,8 @@ export function renderPolicy(report: PolicyReport): string {
     `${report.name}: ${report.mode} mode, send policy ${report.sendPolicy}${report.sendPolicyFrom === 'default' ? ' (the machine default)' : ''}`,
     `Changes to it are approved under the machine's change policy: ${report.changePolicy}.`,
     `A send to more than ${report.confirmAboveRecipients} people needs a person at a terminal, whatever the policy.`,
+    // What a change to never did to the approvals prepared before it.
+    ...(report.fenced === undefined ? [] : describeFenceReport(report.fenced)),
   ].join('\n');
 }
 

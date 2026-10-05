@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import {
+  applySendPolicyChange,
   asLegacy,
   asV2,
   type ChangePolicy,
@@ -7,7 +8,7 @@ import {
   CommsError,
   type Config,
   classifyChange,
-  ensureSendEpochConfig,
+  type FenceReport,
   type GatedChange,
   handoffSentence,
   type LegacyDrainReport,
@@ -415,6 +416,8 @@ export interface PolicyReport {
   confirmAboveRecipients: number;
   /** What became of the approvals an earlier release prepared, when this write retired them. Absent otherwise. */
   legacyDrain?: LegacyDrainReport | undefined;
+  /** When the send policy was set: what a change to `never` did to the approvals prepared before it, by id. */
+  fenced?: FenceReport | undefined;
 }
 
 function reportOf(named: NamedAccount, config: Config): PolicyReport {
@@ -491,33 +494,35 @@ export function policyChange(context: ResendContext, name: string, wanted: Polic
       };
     },
     apply: async (consent, request) => {
-      // A send policy moves only with its send epoch, on version 3: converted first, an earlier release's retired.
-      const legacyDrain =
-        wanted.send === undefined
-          ? undefined
-          : (await ensureSendEpochConfig(context.core, { now: context.now })).legacyDrain;
       const approved = requireAccount(request.before, name, context.handoffs).account;
       let written: NamedAccount | undefined;
       /*
        * By id, under whatever name it has at the write: a rename in between must not set the policy on an account
        * that took the old name, and an account that is gone is refused rather than recreated from the snapshot.
        */
-      const config = await context.core.config.update(
-        (current) => {
-          const held = accountById(current, approved.id, context.handoffs);
-          if (!held) {
-            throw new CommsError('CONFIG', `"${name}" changed while its policy was being set, so nothing was set`, {
-              hint: handoffSentence(
-                context.handoffs.own(['account', 'list']),
-                (command) => `Check it with ${command}, then set the policy again.`,
-              ),
-            });
-          }
-          written = { name: held.name, account: next(checked(held).account) };
-          return withAccount(current, held.name, written.account);
-        },
-        consent ? { consent } : {},
-      );
+      const write = (current: Config): Config => {
+        const held = accountById(current, approved.id, context.handoffs);
+        if (!held) {
+          throw new CommsError('CONFIG', `"${name}" changed while its policy was being set, so nothing was set`, {
+            hint: handoffSentence(
+              context.handoffs.own(['account', 'list']),
+              (command) => `Check it with ${command}, then set the policy again.`,
+            ),
+          });
+        }
+        written = { name: held.name, account: next(checked(held).account) };
+        return withAccount(current, held.name, written.account);
+      };
+      /*
+       * A send policy moves only with its send epoch, on version 3 (`applySendPolicyChange`): converted first, an
+       * earlier release's records retired, the epoch raised in the same write as a `never`, and then — the config lock
+       * let go — every approval it fenced revoked, and every one already being sent said so.
+       */
+      const changed =
+        wanted.send === undefined
+          ? undefined
+          : await applySendPolicyChange(context.core, write, { consent, now: context.now });
+      const config = changed?.config ?? (await context.core.config.update(write, consent ? { consent } : {}));
       const now = written ?? { name, account: next(approved) };
       await context.core.audit.append({
         inboxId: approved.id,
@@ -528,7 +533,11 @@ export function policyChange(context: ResendContext, name: string, wanted: Polic
         reason: said,
       });
       const report = reportOf(now, config);
-      return legacyDrain === undefined ? report : { ...report, legacyDrain };
+      return {
+        ...report,
+        ...(changed?.legacyDrain === undefined ? {} : { legacyDrain: changed.legacyDrain }),
+        ...(changed === undefined ? {} : { fenced: changed.fenced }),
+      };
     },
   };
 }
