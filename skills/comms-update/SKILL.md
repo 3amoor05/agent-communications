@@ -30,10 +30,12 @@ person, and ask which they want:
   the person to update it where it was installed (the plugin or the extension), or to put the stop off.
 - **Not now** — call `comms_update` with `later: true`. It is a change like any other: show the
   preview ("Skip the update to X until tomorrow") and wait for the person's yes (under `confirm`,
-  their `agentcomms approve <id>`), then call again with the `approvalId`. Nothing stops again until
-  midnight, local time, on this computer; the first request after it asks again. Never put it off on
-  your own: the stop exists so the person decides. Where the core server is not connected — only a
-  plugin's server is — the person runs `npx -y @agentcomms/core@latest update --later` at a terminal.
+  the approve command the result gives, run at their own terminal), then call again with the
+  `approvalId`. Nothing stops again until midnight, local time, on this computer; the first request
+  after it asks again. Never put it off on your own: the stop exists so the person decides. Where the
+  core server is not connected — only a plugin's server is — the stop itself gives the `update --later`
+  command, and the `update` one, as this installation runs them: hand those over exactly as given, or,
+  where it says they are not locatable here, that sentence (contract, §5).
 
 A call carrying the `approvalId` of an approval the person already gave on this computer, still
 waiting to be used, is never stopped — an empty or made-up id does not count, nor one already used,
@@ -82,8 +84,8 @@ reason says to run.
 Call `comms_update` without `check`. It returns `approvalRequired`, a `preview` and an `approvalId`:
 show the whole preview — it names every registration, runtime and global command it will change — and
 ask. Under the `chat` change policy, call `comms_update` again with the `approvalId` after their yes.
-Under `confirm`, they run `agentcomms approve <approvalId>` in their own terminal first; you cannot
-approve it yourself. If they say no, call `comms_approval_revoke`.
+Under `confirm`, they first run the approve command the result gives, in their own terminal, exactly
+as given; you cannot approve it yourself. If they say no, call `comms_approval_revoke`.
 
 The result lists each step with its `outcome`. A registration that did not start, or a runtime that
 did not install, is reported as `failed` with its `detail`: say which, and do not call the update done.
@@ -106,7 +108,9 @@ uses, so a window that was not restarted keeps its old one until it is.
 | Not now | `agentcomms update --later` — approved like any change; nothing stops until midnight |
 | The daily check off, or on | `agentcomms update --auto off` (approved like any change), `--auto on` (at once) |
 
-Where `agentcomms` is not installed, use `npx -y @agentcomms/core@latest` in its place.
+Where `agentcomms` is not installed, use `npx -y @agentcomms/core@latest` in its place. A command a result or
+a stop hands over is another matter: give the person that one, exactly as given — it names the installation that
+printed it, with its folders pinned — never one rebuilt from these names.
 
 ## Pitfalls
 

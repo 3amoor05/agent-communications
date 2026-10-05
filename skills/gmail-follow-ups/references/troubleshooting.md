@@ -48,8 +48,8 @@ The rest of the run still returns, which is why a short list needs `errors` read
 
 | Code | What happened | The one thing that resolves it |
 |---|---|---|
-| `SCOPE_MISSING` | The mailbox was never granted the `read` capability | The user runs `agent-gmail inbox reauth <alias> --tier read` |
-| `AUTH_REQUIRED` | Google rejected the credentials, the refresh token is gone from the secret store, or the grant was revoked or expired | The user runs `agent-gmail inbox reauth <alias>`. The error's hint distinguishes the week-old-consent case, which is an unpublished app rather than a revoked grant |
+| `SCOPE_MISSING` | The mailbox was never granted the `read` capability | The user signs in again with `read`: the error's hint gives Gmail's `inbox reauth` command for that mailbox, to hand over as given (or `gmail_inbox_reauth` from a chat) |
+| `AUTH_REQUIRED` | Google rejected the credentials, the refresh token is gone from the secret store, or the grant was revoked or expired | The user signs in again: the error's hint gives Gmail's `inbox reauth` command for that mailbox, to hand over as given (or `gmail_inbox_reauth` from a chat). The hint distinguishes the week-old-consent case, which is an unpublished app rather than a revoked grant |
 | `AUTH_REQUIRED` (Workspace policy) | A Google Workspace policy blocks this app for that account | An administrator allows the OAuth client under the Workspace security settings. Nothing the user can do alone |
 | `CONFIG` | The Gmail API is not enabled on the Google Cloud project that owns the OAuth client | A person enables it in the Cloud console; the error carries the console link when Google supplied one |
 | `TRANSIENT` | Google rate-limited the account, or returned a server error | Wait a minute and re-run. The operation reads only, so a retry is safe |

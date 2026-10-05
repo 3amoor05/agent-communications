@@ -50,7 +50,7 @@ It refuses before any approval exists when:
   domain list, so the preview says it was not checked, and Resend refuses an unverified domain itself);
 - the email reaches more than 50 people — that is a broadcast, which this does not send;
 - an attachment is outside the allowed folders — the person can copy it under their home folder, or allow its folder
-  with `agentcomms attach roots add <folder>`, which needs their approval;
+  with core's `attach roots add`, as the refusal gives it, which needs their approval;
 - the HTML loads anything from the internet, shows an image of any kind (inline `data:` and `cid:` ones too), hides
   parts, has forms or scripts, or shows something other than the text part (`UNSENDABLE_HTML`) — send plain text
   instead, or HTML that shows exactly the text.
@@ -77,12 +77,13 @@ It lists what people get wrong when it is summarised:
 | Policy | What the person does | What you do then |
 |---|---|---|
 | `chat` | Says yes, in this conversation, to the whole preview you showed | `resend_send_execute` (or `send execute`), once |
-| `confirm` | Runs `agent-resend approve <approvalId>` in their own terminal and types the code it shows | Call the same `resend_send_execute` again once they say they have |
+| `confirm` | Runs the approve command the result gives in their own terminal and types the code it shows | Call the same `resend_send_execute` again once they say they have |
 | `never` | Nothing: sending is off for this account | Offer the text for them to send another way; do not ask for a policy change |
 
 An email reaching **more than 10 people**, or an address that arrived in mail read here and was never written to
 from here, is held as `confirm` whatever the account says: the preview's last line says so. There is no tool that
-approves, and there will not be one; `agent-resend approve` is refused to an agent.
+approves, and there will not be one; Resend's `approve` is refused to an agent. Hand the person the command the
+result gives, exactly as given (contract, §14).
 
 ## 4. Send, once
 

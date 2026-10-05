@@ -222,3 +222,37 @@ test('Slack mode guidance keeps each account path and consent step in its own se
     for (const pattern of required) assert.match(text, pattern, `${label}: missing ${pattern}`);
   }
 });
+
+test('every channel’s contract says a command for a person is the one a result gives, or why there is none (CUE-403)', async () => {
+  // From the registry: a new channel's contract has to say it from its first commit.
+  for (const family of REGISTRY.skillFamilies) {
+    const prose = (await readFile(join(ROOT, family.contract), 'utf8')).replace(/\s+/g, ' ');
+    const required = [
+      /## \d+\. A command for a person is the one a result gives\./,
+      // The first outcome: the command itself, handed over as given.
+      /Hand it over exactly as given/,
+      /Never write one yourself/,
+      // The second: words to type, on Windows.
+      /words as JSON/,
+      /C:\\Program Files/,
+      // The third: none here, said, and no command put in its place.
+      /not locatable here/,
+      /installs or updates it the way they usually do/,
+    ];
+    for (const pattern of required) assert.match(prose, pattern, `${family.contract}: missing ${pattern}`);
+  }
+});
+
+test('WhatsApp’s person-only commands are handed over as words, never as a bare command line (CUE-403)', async () => {
+  // `add`, `remove`, `allow`, `deny` and `clear` have no tool and refuse an agent: a person runs them with the WhatsApp
+  // CLI as this installation has it. A skill gives the words, never `agent-whatsapp …` as a line to paste.
+  const contract = await readFile(join(ROOT, 'skills', '_shared', 'contract-whatsapp.md'), 'utf8');
+  const reading = await readFile(join(SKILLS, 'whatsapp-reading', 'SKILL.md'), 'utf8');
+  for (const [name, text] of [
+    ['contract-whatsapp.md', contract],
+    ['whatsapp-reading', reading],
+  ]) {
+    assert.doesNotMatch(text, /agent-whatsapp (?:add|remove|allow|deny|clear)\b/, name);
+    assert.match(text.replace(/\s+/g, ' '), /`deny \+15555550102 --account personal\/whatsapp`/, name);
+  }
+});

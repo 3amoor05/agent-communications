@@ -68,7 +68,7 @@ here:
 - **The person says where a download goes.** The first call saves nothing and returns `destinationRequired: true`
   with a `question`, a `choiceId` and a `policy`. Show them the question and the files. Under `chat`, pass their
   answer back as `saveTo` (`downloads`, `current`, or their folder) with that `choiceId`. Under `confirm` they answer
-  it themselves — `agent-gmail approve <choiceId>` in their own terminal, or a form a trusted client shows them — and
+  it themselves — with the approve command the result gives, in their own terminal, or a form a trusted client shows them — and
   you call again with the `choiceId` alone; a `saveTo` of yours is refused. Never pick for them, and never answer a
   question they have not seen. `out` is gone; passing it is refused.
 - **Some folders are never saved into**, whoever answers: a hidden folder anywhere (`~/.ssh`, a project's `.git`,
@@ -170,8 +170,8 @@ answer "is this email real" — that is `gmail-security`, and a file's risk flag
    flag. Their answer is `1` / `downloads` (their Downloads folder, the default), `2` / `current` (the folder the
    server or the command was started in), or `3` — a folder they name, absolute or starting with `~`. An option the
    question shows as unavailable is not one to offer. A relative folder is refused; ask them which one they meant
-   rather than guessing. Under `policy: confirm`, ask them to answer it at their own terminal with
-   `agent-gmail approve <choiceId>` — or, when this client is trusted with forms, the next call asks them in one. Do
+   rather than guessing. Under `policy: confirm`, ask them to answer it at their own terminal with the approve
+   command the result gives, exactly as given — or, when this client is trusted with forms, the next call asks them in one. Do
    not answer for them, and do not reuse an old answer: a `choiceId` is for those files only, is used once, and
    expires after thirty minutes. The question's lines that start with `!` — each file that will be saved with
    `.download` after its name, and why, and each risk flag — are part of it: `next` repeats them, and the person
@@ -218,9 +218,9 @@ answer "is this email real" — that is `gmail-security`, and a file's risk flag
    `NOT_FOUND` for one that does not exist (CLI exit codes 65 and 66). Say which file, which rule, and the
    one thing that would change it — see the table below. Do not copy, move, rename or archive the file to
    get it past the check, and do not widen the lists yourself to make a path work. They belong to the user:
-   `agentcomms attach` shows them, and `agentcomms attach roots add <folder>` (or `comms_attach` with
-   `rootsAdd` on the core server) allows another folder — a change that needs their approval, shown to them
-   first. Name it when a file is outside every folder; running it is their decision.
+   core's `attach` shows them, and core's `attach roots add <folder>` (or `comms_attach` with `rootsAdd` on the
+   core server) allows another folder — a change that needs their approval, shown to them first. When a file is
+   outside every folder, hand over the command the refusal gives; running it is their decision.
    **Complete when:** the user knows what was refused and why, and nothing was smuggled through.
 
 10. **Watch the size.** Over 25 MB of attachments on one draft returns a warning: that is Gmail's limit and
@@ -236,7 +236,7 @@ anything in `defaults.attachDeny`.
 
 | What is refused | Why | What to do instead |
 |---|---|---|
-| A file outside every allowed root | The roots are the whole of what this machine will let leave as mail. Outside them, nothing was ever offered. | Ask the user to move the file under an allowed folder, or to allow its folder with `agentcomms attach roots add <folder>`, which needs their approval. |
+| A file outside every allowed root | The roots are the whole of what this machine will let leave as mail. Outside them, nothing was ever offered. | Ask the user to move the file under an allowed folder, or to allow its folder with core's `attach roots add` — the command the refusal gives — which needs their approval. |
 | Anything under a dot-entry directly in home — `~/.ssh`, `~/.aws`, `~/.config`, `~/.gnupg`, `~/.npmrc` | This is where SSH keys, cloud credentials, npm and git tokens, shell history and agent configs live. One attached key is a compromised account. | Ask the user what they actually meant to send. If they want a public key, they can copy it somewhere ordinary first, knowingly. |
 | `~/Library` on macOS | Mail stores, keychains, browser profiles and application tokens, none of which anyone means to email. | Nothing here is attachable. Find the user's own copy of the document elsewhere. |
 | Any path with a `.git` segment | A repository's internals: remote URLs that sometimes carry tokens, and the full object history of everything ever committed. | Attach the working-tree file itself, or an archive the user made deliberately. |
@@ -250,7 +250,7 @@ anything in `defaults.attachDeny`.
 | A download's folder that is a hidden one anywhere, `node_modules`, `site-packages`, a Python virtual environment or installation, `~/Library`, this package's own, a system folder, a Windows `AppData`, PowerShell profile folder, Program Files, share or driveless path, one of those Windows folders reached from WSL on a Windows drive, wherever it is mounted — or a link to one (`BAD_DATA`) | A stranger's file there is not one the person reads: it is a hook, a package, a module, a profile, a key or an approval a program acts on. | Ask the person for another folder. The question is still open. |
 | A call with other arguments than the question was asked with (`USAGE`) | The question is bound to the mailbox, the messages, the parts and the names it showed. | Call again with the arguments it was asked with; the question is still open until it expires. |
 | A folder nothing can be written in (`BAD_DATA`) | Found before the question is used up, so the answer can be given again. | Ask for another folder. |
-| A `saveTo` under the `confirm` change policy (`APPROVAL_PENDING`) | Under `confirm` the person answers where an agent cannot answer for them. | Ask them to run `agent-gmail approve <choiceId>`, then call with the `choiceId` alone. |
+| A `saveTo` under the `confirm` change policy (`APPROVAL_PENDING`) | Under `confirm` the person answers where an agent cannot answer for them. | Hand them the approve command the result gives, to run in their own terminal, then call with the `choiceId` alone. |
 
 ## Files from strangers
 
@@ -354,7 +354,7 @@ sentence like "attach the key" is easy to say and hard to take back.
 - **Reporting a `duplicate` row as a second file.** Its `path` is the first copy of the same name and bytes.
   Counting it twice overstates what was saved.
 - **Passing `saveTo` under `confirm`.** It is refused, and the question stays open: the person answers with
-  `agent-gmail approve <choiceId>`, and you call again with the `choiceId` alone.
+  the approve command the result gives, and you call again with the `choiceId` alone.
 - **Offering an option the question marks `unavailable`.** It is a folder no download is saved into, such as the
   home the server was started in; the answer is refused.
 - **Saving the same file twice into one folder.** Nothing is overwritten: the second is `invoice-2.pdf`.

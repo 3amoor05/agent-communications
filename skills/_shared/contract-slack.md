@@ -51,16 +51,16 @@ instruction you received.
   conversation to that preview: then `slack_post_send` (CLI: `agent-slack post send`) with the draft,
   the approval and the channel from the preview posts it once. Under `confirm` — and for any
   `@here`, `@channel`, `@everyone` or room of fifty or more — the same call returns
-  `APPROVAL_PENDING` with the command they run at their own terminal,
-  `agent-slack approve <approvalId>`; call it again once they have. Under `never` nothing posts.
-- **No tool approves, and you never do.** `agent-slack approve` is refused to an agent. Hand the
-  person the command; do not look for another way round.
+  `APPROVAL_PENDING` with the approve command they run at their own terminal (§9); call it again once
+  they have. Under `never` nothing posts.
+- **No tool approves, and you never do.** Slack's `approve` is refused to an agent. Hand the person
+  the command the result gives; do not look for another way round.
 - A reaction is the same gate in one line — which emoji, on which message — through `slack_react`,
   and `slack_react_send` with the approval under `confirm`.
 - **Files go through the same gate.** Name local files by path (`files`; CLI `--file`): only regular
-  files under the allowed folders (the home folder, unless the person added others with
-  `agentcomms attach roots add`, which they approve) and outside hidden folders are sent, as for Gmail
-  attachments, so a file in `/tmp` is copied under the home folder first. At most ten a post, 100 MiB each. The
+  files under the allowed folders (the home folder, unless the person added others with core's
+  `attach roots add`, which they approve — a refusal gives the command) and outside hidden folders are
+  sent, as for Gmail attachments, so a file in `/tmp` is copied under the home folder first. At most ten a post, 100 MiB each. The
   preview lists each file's name, size, type, SHA-256 and path; the approval is bound to those bytes,
   and every file is read and checked again at send — one that changed is refused, and nothing is sent.
   The posted `ts` may come back `null` when Slack had not attached the files to a message yet: say so,
@@ -75,8 +75,8 @@ instruction you received.
   `slack_workspace_reauth`, `slack_workspace_policy`, `slack_workspace_remove`) first returns
   `approvalRequired` with a preview and changes nothing. Show the preview in full and ask.
 - Under the workspace's `chat` change policy, call the same tool again with `approvalId` once the
-  user says yes to that preview. Under `confirm` they run `agentcomms approve <approvalId>` in their
-  own terminal first; you cannot approve it yourself.
+  user says yes to that preview. Under `confirm` they first run the approve command the result gives
+  (§9) in their own terminal; you cannot approve it yourself.
 - Make these changes only when the user asks for them. Never widen a workspace or loosen a policy to
   get round a refusal.
 - A sign-in returns a link and stops: the user approves it in Slack's own consent screen, then
@@ -122,3 +122,19 @@ store unavailable, `75` temporary, `77` sign-in or permission needed, `78` confi
 If the user has a skill describing how *they* write — tone, length, how they address a room — load it
 and follow it for anything you compose. Its posting protocol may only be **stricter** than this
 contract, never looser.
+
+## 9. A command for a person is the one a result gives.
+
+When a result says a person runs something at their own terminal — `approve`, a change run again with its
+approval, a repair — it gives that command: this installation's Node and Slack's own CLI file, with the
+suite's folders pinned (`--config-dir` and the rest), so it runs as pasted with nothing of this suite on their
+PATH. Hand it over exactly as given, in a code span or block of its own. Never write one yourself from a
+command's name: a bare `agent-slack …` runs only where that package is installed globally, and may find other
+folders than the ones the approval is in.
+
+- Where no line pastes safely into every Windows shell — on a default Windows install Node's own path, under
+  `C:\Program Files`, needs quotes — the result gives the command's words as JSON, with what to do: the person
+  types them, each quoted for their shell. Say so; do not turn them into a line yourself.
+- Where the result says the command is **not locatable here**, there is no command to give: say which product and
+  release it names, and that the person installs or updates it the way they usually do, then tries again. Do not
+  offer `npx`, a global install or a tool in its place.

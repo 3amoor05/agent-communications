@@ -162,7 +162,7 @@ A change stops with exit `10`, its preview and an approval id, and changes nothi
 exception: `agentcomms org update <organisation> --for-other-addresses off` turns that off at once,
 because narrowing never waits, and the preview and the final result both say it was done. Show the
 preview; after their yes, run the command its hint gives, which carries the approval id. Under `confirm` they
-run `agentcomms approve <id>` in their own terminal first. A person running a command at a terminal
+first run the approve command the hint gives, in their own terminal, exactly as given. A person running a command at a terminal
 approves there and then: `yes`, or the code under `confirm`.
 
 ## Pitfalls

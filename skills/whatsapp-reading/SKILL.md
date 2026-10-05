@@ -83,15 +83,14 @@ Never write that a message was sent. Never try to send it some other way — see
 
 ## What is the person's, not yours
 
-`agent-whatsapp add`, `remove`, `allow`, `deny` and `clear` choose which store is read and which chats
-you may see. They have no tool and refuse an agent. If the person wants a chat hidden or shown, give
-them the command, for example:
-
-```sh
-agent-whatsapp deny +15555550102 --account personal/whatsapp
-```
-
-and let them run it.
+`add`, `remove`, `allow`, `deny` and `clear` choose which store is read and which chats you may see.
+They are the person's own commands, run with WhatsApp's CLI at their own terminal; they have no tool
+and refuse an agent. If the person wants a chat hidden or shown, tell them which command and its
+words — for example `deny +15555550102 --account personal/whatsapp` — and let them run it with
+WhatsApp's CLI as they installed it. Where a result has given you WhatsApp's command for this
+installation (`whatsapp_status`'s `setup`, or a refusal's hint), those words go after it, in place
+of `add` and what follows. Never hand over `agent-whatsapp …` as a line to paste: it is on their
+PATH only where they installed the package globally (contract, §11).
 
 ## Pitfalls
 
