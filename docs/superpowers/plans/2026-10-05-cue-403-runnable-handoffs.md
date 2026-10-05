@@ -135,21 +135,26 @@ ongoing completeness check. In Task 15, inspect false-negative fixtures as close
 6. **Risky — introduce the branded command types and locate own-product and channel-to-core CLIs.**
 
    **Changes.** Add three deliberately one-way modules. `packages/core/src/command-brands.ts` is the leaf that owns
-   the private brand symbols, exports only the opaque `PrintedCommand` and `ExternalCommand` types plus the reviewed
-   `externalCommand(words, reason)` constructor, and exports no `PrintedCommand` constructor or branding token. It
-   must not import `operations/servers.ts` or `mcp-install.ts`. `externalCommand` checks every word against all
+   **only** the `ExternalCommand` brand: its private symbol, the opaque type and the reviewed `externalCommand(words,
+   reason)` constructor. The `PrintedCommand` brand symbol, type and its only constructor live privately in
+   `packages/core/src/cli-command.ts` (the locator module), as the spec requires (`spec:348`) — separate ES modules
+   have no friend access, so keeping it there is what makes the construction boundary real without an unchecked cast.
+   `command-brands.ts` must not import `operations/servers.ts` or `mcp-install.ts`. `externalCommand` checks every word against all
    manifest binaries, all `@agentcomms/` specifiers and real/symlinked paths inside discovered suite roots,
    case-insensitively for Windows executable names. `packages/core/src/registrations.ts` is a neutral parser: move
    `launcherOf` out of `packages/core/src/operations/servers.ts` into it and put the registration argv/product/version
-   parsing shared by server reports and the locator there, expressed over neutral structural facts so it imports
-   neither `mcp-install.ts` nor `cli-command.ts`. `packages/core/src/cli-command.ts` imports both neutral modules and
-   is the only reviewed module that materialises a `PrintedCommand` after location and verification. Export only the
+   parsing shared by server reports and the locator there. It may import `mcp-install.ts` to reuse the existing
+   product recogniser `isProductServer` and `pinnedVersion` (`mcp-install.ts:362`), which `mcp-install.ts` itself keeps
+   using for overwrite protection and preview warnings (`mcp-install.ts:671, 1234`) and whose public surface Gmail and
+   Slack already import; it never imports `cli-command.ts`. `packages/core/src/cli-command.ts` imports both modules and
+   is the only module that can construct a `PrintedCommand`. Export only the
    opaque command types, `externalCommand` and the public locator/rendering surface from
    `packages/core/src/index.ts`; do not re-export either private brand symbol or a `PrintedCommand` factory.
 
-   The permitted import graph is `mcp-clients/channel facts → registrations`, manifest/path facts →
-   `command-brands`, `command-brands + registrations → cli-command`, `command-brands → mcp-install`, and
-   `registrations + mcp-install → operations/servers`; there is no reverse edge. Migrate the legitimate external
+   The permitted import graph is `mcp-clients/channel facts → registrations`, `mcp-install → registrations`, manifest/
+   path facts → `command-brands`, `command-brands + registrations → cli-command`, `command-brands → mcp-install`, and
+   `registrations + mcp-install → operations/servers`; `mcp-install.ts` imports `command-brands.ts` but never
+   `registrations.ts` or `cli-command.ts`, so there is no cycle. Migrate the legitimate external
    sites in `packages/gmail/src/operations/doctor.ts`, `packages/core/src/operations/maintenance.ts`,
    `packages/core/src/mcp-install.ts` and `packages/core/src/other-servers.ts` (`chmod`, `claude mcp`, `codex mcp`,
    and rival removal) with an explicit reason. Initially retain the old `ShellCommand` construction path only as a
@@ -184,8 +189,9 @@ ongoing completeness check. In Task 15, inspect false-negative fixtures as close
    **Changes.** Complete `locateCliCommand` in `packages/core/src/cli-command.ts` using
    `scanRegisteredServers` plus the manifest-derived product recogniser, registration parser and `launcherOf` from
    neutral `packages/core/src/registrations.ts`. Preserve the Task 6 graph: the locator imports
-   `command-brands.ts` and `registrations.ts`; `registrations.ts` imports neither the locator nor `mcp-install.ts`;
-   `mcp-install.ts` imports only `command-brands.ts`; and `operations/servers.ts` imports the neutral registration
+   `command-brands.ts` and `registrations.ts`; `registrations.ts` may import `mcp-install.ts` (for `isProductServer`
+   and `pinnedVersion`) but never the locator; `mcp-install.ts` imports `command-brands.ts` and never `registrations.ts`
+   or the locator; and `operations/servers.ts` imports the neutral registration
    helpers rather than supplying them. Strip all five pre-sentinel path
    options and their operands before recognition. Reject npx registrations. Require the registration's package
    version to equal the printing package version and `process.execPath` to satisfy the target engine. Rank managed
@@ -213,7 +219,7 @@ ongoing completeness check. In Task 15, inspect false-negative fixtures as close
    extend `test/release-packages.test.mjs` to prove that the release and verify paths keep the focused job, exact Node
    version and single-test command. Do not lower root `engines.node` below 22.18. Mutate version equality, npx
    rejection, ordering, case rules, path-operand removal, no-spawn behaviour and segment containment separately;
-   make `registrations.ts` import `mcp-install.ts`; and remove `--experimental-strip-types` from a selected `.ts`
+   make `mcp-install.ts` import `registrations.ts` (closing a cycle); and remove `--experimental-strip-types` from a selected `.ts`
    entry. The registration graph test or case **0000**, respectively, must fail.
 
    **Done when.** A cross-product result is same-release, target-engine-compatible and backed by a checked contained
@@ -394,7 +400,7 @@ ongoing completeness check. In Task 15, inspect false-negative fixtures as close
    Add compile-time rejection fixtures for every migrated `hint`/`fix`/`nextStep`/`command`-like result variant, and
    type those fields as `PrintedCommand | ExternalCommand` with prose in separate fields/fixed renderers. Change
    `inlineCommand` and `commandText` to accept only that union. Remove the deprecated `ShellCommand` export and public
-   arbitrary constructor; `command-brands.ts` exposes the opaque types but no `PrintedCommand` constructor or brand
+   arbitrary constructor; `command-brands.ts` exposes only `ExternalCommand`, and no module but `cli-command.ts` holds a `PrintedCommand` constructor or brand
    token, only the locator can materialise `PrintedCommand`, and only `externalCommand` can create `ExternalCommand`.
 
    **Tests first.** Add fixtures under `test/fixtures/printed-commands/` and an isolated compile harness for §4
