@@ -32,6 +32,9 @@ const MAX_TOKEN_CHARS = 500;
 /** A plain address: a local part of the usual characters, and a domain of labels. No quotes, no spaces. */
 const PLAIN_ADDRESS = /^[a-z0-9._%+-]{1,64}@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}$/i;
 
+/** A plain domain: labels of the usual characters, as an address's domain is held to. */
+const PLAIN_DOMAIN = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}$/i;
+
 /** A MIME type with no parameters: a registered top-level type and an RFC 6838 restricted-name subtype. */
 const MIME_TYPE =
   /^(?:application|audio|font|haptics|image|message|model|multipart|text|video)\/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}$/i;
@@ -60,4 +63,12 @@ export function mimeTypeField(value: string, envelope: FieldEnvelope): string {
 /** An address: bare when it is a plain address and nothing more, wrapped otherwise. */
 export function addressField(address: string, field: string, envelope: FieldEnvelope): string {
   return PLAIN_ADDRESS.test(address) ? address : wrapField(address.slice(0, MAX_TOKEN_CHARS), field, envelope);
+}
+
+/**
+ * A domain: bare when it is a plain domain and nothing more, wrapped otherwise — `addressField`'s sibling, for a domain
+ * a sender put in front of us (design 2026-10-05 §D4). The caller canonicalises it first (IDNA, lower case).
+ */
+export function domainField(domain: string, field: string, envelope: FieldEnvelope): string {
+  return PLAIN_DOMAIN.test(domain) ? domain : wrapField(domain.slice(0, MAX_TOKEN_CHARS), field, envelope);
 }

@@ -50,7 +50,7 @@ Each mailbox has one. `agent-gmail inbox list` shows it.
 | Policy | What it takes | When to use it |
 |---|---|---|
 | `chat` (default) | your yes in the conversation | an agent you are watching |
-| `confirm` | a code typed at a terminal, or into a form from a client that has proved its forms reach a person | an agent you are not watching — with the change policy `confirm` too (`agentcomms policy confirm`) |
+| `confirm` | a code typed at a terminal, or into a form from a client you chose to trust with approval forms | an agent you are not watching — with the change policy `confirm` too (`agentcomms policy confirm`) |
 | `never` | nothing sends; the draft waits in Gmail | mailboxes an agent should never speak for |
 
 Changing a policy to something weaker is a loosening, and a loosening is a change you approve: the command, or

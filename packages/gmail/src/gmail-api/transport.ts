@@ -68,8 +68,11 @@ export interface GmailTransport {
    * package fails at the request rather than at review time.
    *
    * Never retried, at any layer: a retried send may deliver the same mail twice, and nothing here can tell.
+   *
+   * `id` is absent when Gmail accepted the send without naming the message (`providerId`): never an empty string,
+   * which every later reader would take for an id (design 2026-10-05 §D8).
    */
-  sendDraft(draftId: string): Promise<{ id: string; threadId: string | undefined }>;
+  sendDraft(draftId: string): Promise<{ id: string | undefined; threadId: string | undefined }>;
   /** Adds and removes labels on many messages at once. Changing a label is not sending anything. */
   modifyMessages(
     messageIds: readonly string[],
@@ -161,6 +164,15 @@ export interface TransportOptions {
   retry?: { attempts?: number; sleep?: (ms: number) => Promise<void>; random?: () => number };
   /** How long an attachment download may go silent, and how slowly it may arrive. Tests set it; production does not. */
   download?: Partial<DownloadLimits> | undefined;
+}
+
+/**
+ * A provider's id as this package keeps it: a non-empty string, or absent (design 2026-10-05 §D8). `undefined`, `null`,
+ * `""` and blank are all absence — never an empty string a completion, an audit line or a read-back would take for an
+ * id.
+ */
+export function providerId(value: string | null | undefined): string | undefined {
+  return typeof value === 'string' && value.trim() !== '' ? value : undefined;
 }
 
 /** Builds the list parameters, omitting the page token entirely when there is none. */
@@ -531,7 +543,7 @@ export class GoogleGmailTransport implements GmailTransport {
     });
   }
 
-  async sendDraft(draftId: string): Promise<{ id: string; threadId: string | undefined }> {
+  async sendDraft(draftId: string): Promise<{ id: string | undefined; threadId: string | undefined }> {
     this.#auth();
     if (this.#sendPermit.draftId) {
       throw new CommsError('SEND_REFUSED', 'a send is already in progress on this transport');
@@ -544,7 +556,8 @@ export class GoogleGmailTransport implements GmailTransport {
         // `never`: not one retry, at any layer. The first attempt may already have delivered the mail.
         { mode: 'never' },
       );
-      return { id: data.id ?? '', threadId: data.threadId ?? undefined };
+      // Accepted without an id is reported as exactly that, never as the empty string (§D8).
+      return { id: providerId(data.id), threadId: data.threadId ?? undefined };
     } finally {
       this.#sendPermit.draftId = null;
     }

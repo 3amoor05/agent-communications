@@ -11,14 +11,15 @@ import {
 import type { GmailContext } from '../context.ts';
 
 /**
- * Which MCP clients may be trusted to put an approval form in front of a person.
+ * The MCP clients the person chose to trust with approval forms.
  *
  * Under the `confirm` policy the approval has to come from a channel the model cannot answer. An MCP form elicitation
- * is such a channel **only if the client actually shows it to a human** — `clientInfo.name` is self-reported, and a
- * client that auto-accepts forms, or answers them from the model, would turn the strongest gate in this package into
- * a formality. So the list is empty by default and fail-closed, and a name reaches it only by evidence: the client
- * raises a probe form carrying a code, a person types that code back, and only then may the name be added — with a
- * change approval, from a chat or a terminal, the consent every other loosening needs.
+ * is such a channel **only if the client actually shows it to a human** — `clientInfo.name` is self-reported, a client
+ * that auto-accepts forms, or answers them from the model, would turn the strongest gate in this package into a
+ * formality, and no MCP mechanism proves a person answered one (design 2026-10-05 §D5). So the list is empty by
+ * default and fail-closed, and a name reaches it only by the person's decision: the client raises a probe form carrying
+ * a code, the code comes back — which shows only that the client can return a form's answer — and only then may the
+ * name be added, with a change approval, from a chat or a terminal, the consent every other loosening needs.
  */
 
 const PROBE_TTL_MS = 10 * 60 * 1000;
@@ -86,7 +87,7 @@ export async function completeProbe(context: GmailContext, probeId: string): Pro
   await writeProbes(context, file);
 }
 
-/** Has this client proved, in the last ten minutes, that its forms reach a person? */
+/** Has this client returned a probe form's code in the last ten minutes? */
 export async function hasRecentProbe(context: GmailContext, client: string): Promise<boolean> {
   const file = await readProbes(context);
   const cutoff = context.now().getTime() - PROBE_TTL_MS;
@@ -99,20 +100,24 @@ export async function listConfirmClients(context: GmailContext): Promise<string[
   return (await context.config()).defaults.confirm.elicitationClients;
 }
 
-/** The refusal for a client that has not proved, in the last ten minutes, that its forms reach a person. */
+/** The refusal for a client that has not returned a probe form's code in the last ten minutes. */
 async function requireRecentProbe(context: GmailContext, name: string): Promise<void> {
   if (!(await hasRecentProbe(context, name))) {
-    throw new CommsError('APPROVAL_REQUIRED', `"${name}" has not shown that its approval forms reach a person`, {
-      hint: `In that client, ask it to run the gmail_confirm_probe tool and type the code it shows. Then run this again within ten minutes.`,
-    });
+    throw new CommsError(
+      'APPROVAL_REQUIRED',
+      `"${name}" has not shown, in the last ten minutes, that it can return an approval form's answer`,
+      {
+        hint: `In that client, ask it to run the gmail_confirm_probe tool and type the code it shows. Then run this again within ten minutes.`,
+      },
+    );
   }
 }
 
 /**
  * Trusting a client's approval forms, as one change both surfaces run through core's flow.
  *
- * Two things have to be true, and they are different in kind. The probe is evidence that the client shows its forms
- * to a person — checked when the change is planned, so nobody is asked to approve trusting a client that has not
+ * Two things have to be true, and they are different in kind. The probe is evidence that the client can return a
+ * form's answer — checked when the change is planned, so nobody is asked to approve trusting a client that has not
  * shown it, and again when it is written. The change approval is the decision, and core's classifier already counts
  * a name added to `defaults.confirm.elicitationClients` as a loosening, so the store refuses the write without it.
  * A name already on the list loosens nothing, and is applied at once.

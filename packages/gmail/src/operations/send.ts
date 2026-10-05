@@ -7,7 +7,9 @@ import {
   domainOf,
   type Expectation,
   ensureSendEpochConfig,
+  fenceOrStop,
   handoffSentence,
+  LEASE_LOST_BEFORE_SEND,
   type LegacyDrainReport,
   type MessagePreview,
   newBoundary,
@@ -21,14 +23,16 @@ import {
   type StoredApproval,
   sendEpochOf,
   stricterPolicy,
+  type TaintAggregate,
   withApproval,
   withSendingLease,
 } from '@agentcomms/core';
 import type { GmailContext, ResolvedInbox } from '../context.ts';
 import { analyseDraft, type DraftAnalysis, type Unsendable, unsendable } from '../domain/outbound.ts';
-import { addressField, filenameField, wrapField } from '../domain/untrusted-fields.ts';
+import { addressField, domainField, type FieldEnvelope, filenameField, wrapField } from '../domain/untrusted-fields.ts';
 import { sendCertainlyRefused } from '../gmail-api/errors.ts';
-import type { GmailTransport } from '../gmail-api/transport.ts';
+import { type GmailTransport, providerId } from '../gmail-api/transport.ts';
+import type { HistoryResult } from './history-cache.ts';
 
 /**
  * The send gate: prepare → approve → execute.
@@ -55,6 +59,16 @@ export interface SendPreparation {
   /** The stricter of the live policy and anything risk escalation raised. */
   effectivePolicy: SendPolicy;
   riskFlags: string[];
+  /**
+   * Why each recipient that raised `recipient-tainted` raised it (design 2026-10-05 §D4): the address and its domain
+   * as untrusted fields, and the stored aggregate's facts in this package's own words. Empty when none did.
+   */
+  taint: RecipientTaint[];
+  /**
+   * Present when this mailbox's correspondent domains could not be known — its cache untrustworthy and the scan that
+   * would replace it failed, or the scan not committed to it — so a lookalike could not be ruled out (§D4).
+   */
+  correspondentHistory?: CorrespondentHistory | undefined;
   expect: Expectation;
   digest: string;
   expiresAt: string;
@@ -72,11 +86,20 @@ export interface SendPreparation {
   legacyDrain?: LegacyDrainReport | undefined;
 }
 
+/** What a send that Gmail accepted without naming the message says, exactly (design 2026-10-05 §D8). */
+export const SENT_WITHOUT_ID = 'sent; the provider returned no id';
+
 export interface SendResult {
   inbox: string;
   approvalId: string;
   draftId: string;
-  sentMessageId: string;
+  /**
+   * The message Gmail filed, by its id — absent when Gmail accepted the send without naming it: then nothing records it
+   * as used, and the approval reads `sending`, then `unknown` (§D8). Never an empty string.
+   */
+  sentMessageId?: string | undefined;
+  /** What happened, in the words to repeat: "sent, message id …", or exactly {@link SENT_WITHOUT_ID}. */
+  said: string;
   threadId: string | undefined;
   to: string[];
   cc: string[];
@@ -126,11 +149,21 @@ function messageOf(error: unknown): string {
  * Keeps the failure that stopped the send visible, adding only what could not be settled afterwards — and where the
  * approval stands now that it is settled (decision 8), whatever the failure said of it before.
  */
-function noSendError(error: unknown, unrecorded: readonly string[], approval: ApprovalObject): CommsError {
+function noSendError(
+  error: unknown,
+  unrecorded: readonly string[],
+  approval: ApprovalObject,
+  // Gmail's own refusal of the send: certain, and said as such — nothing was sent (§D2).
+  sayNothingSent = false,
+): CommsError {
   const original =
     error instanceof CommsError ? error : new CommsError('UNEXPECTED', messageOf(error), { cause: error });
   const hint = [original.hint, ...unrecorded].filter((part) => part !== undefined);
-  return new CommsError(original.code, original.message, {
+  const message =
+    sayNothingSent && !original.message.startsWith('nothing was sent')
+      ? `nothing was sent: ${original.message}`
+      : original.message;
+  return new CommsError(original.code, message, {
     ...(hint.length === 0 ? {} : { hint: hint.join(' ') }),
     details: { ...original.details, approval },
     cause: error,
@@ -154,7 +187,12 @@ async function approvalNow(
   }
 }
 
-/** Settles a failure known to have happened before Gmail sent anything, without one failed write skipping another. */
+/**
+ * Settles a failure known to have happened before Gmail sent anything, without one failed write skipping another.
+ *
+ * `recorded` is for a failure whose approval is settled already — the fence's, which records `lease-lost-before-send`
+ * itself: the slot is given back and the audit written, and the refusal says where the approval stands now.
+ */
 async function recordNoSend(
   context: GmailContext,
   options: { alias: string; inboxId: string; approvalId: string; draftId: string },
@@ -163,21 +201,26 @@ async function recordNoSend(
   // Where the approval stood when it was claimed: what the refusal says if its failure cannot be recorded.
   claimed: ApprovalObject,
   error: unknown,
+  how: { sayNothingSent?: boolean; recorded?: string } = {},
 ): Promise<CommsError> {
   const unrecorded: string[] = [];
-  const said = messageOf(error);
+  const said = how.recorded ?? messageOf(error);
   let settled = claimed;
   try {
     await context.core.ledger.release(options.inboxId, options.approvalId);
   } catch (failure) {
     unrecorded.push(`the capacity slot could not be released (${messageOf(failure)})`);
   }
-  try {
-    settled = await context.core.approvals.approvalOf(
-      await context.core.approvals.complete(options.approvalId, claimToken, { error: said }),
-    );
-  } catch (failure) {
-    unrecorded.push(`the approval could not be marked failed (${messageOf(failure)})`);
+  if (how.recorded === undefined) {
+    try {
+      settled = await context.core.approvals.approvalOf(
+        await context.core.approvals.complete(options.approvalId, claimToken, { error: said }),
+      );
+    } catch (failure) {
+      unrecorded.push(`the approval could not be marked failed (${messageOf(failure)})`);
+    }
+  } else {
+    settled = await approvalNow(context, options.approvalId, options.inboxId, claimed);
   }
   try {
     await context.core.audit.append({
@@ -192,7 +235,7 @@ async function recordNoSend(
   } catch (failure) {
     unrecorded.push(`the audit log could not record the failure (${messageOf(failure)})`);
   }
-  return noSendError(error, unrecorded, settled);
+  return noSendError(error, unrecorded, settled, how.sayNothingSent);
 }
 
 function capsFor(defaults: { sendCaps: { perHour: number; perDay: number } }): Caps {
@@ -211,13 +254,29 @@ async function ownAddresses(transport: GmailTransport, inbox: ResolvedInbox): Pr
 }
 
 /**
+ * Where the correspondent domains came from, when it was not a fresh scan or a fresh cache entry: the cache could not
+ * be trusted and its recovery scan failed, or the scan's observation could not be committed (design 2026-10-05 §D4).
+ * Either keeps the lookalike check's escalation, rather than concluding there is no lookalike.
+ */
+export type CorrespondentHistory = 'cache-malformed' | 'cache-write-failed';
+
+/**
  * The domains this mailbox has written to recently.
  *
- * One list per prepare, from the last two hundred sent messages. It is the yardstick a lookalike is measured
- * against, so it has to come from the mailbox's history rather than from the draft under examination.
+ * From the last two hundred sent messages — one list, and at most two hundred metadata reads — or from the shared cache
+ * while a scan's answer is fresh, so a prepare and the terminal approval of one draft scan once between them. It is the
+ * yardstick a lookalike is measured against, so it has to come from the mailbox's history rather than from the draft
+ * under examination.
  */
-async function correspondentDomains(transport: GmailTransport): Promise<Set<string>> {
+async function correspondentDomains(
+  context: GmailContext,
+  transport: GmailTransport,
+  inboxId: string,
+): Promise<{ domains: Set<string>; doubt: CorrespondentHistory | undefined }> {
+  const cached = await context.historyCache.readCorrespondents(inboxId);
+  if (cached.state === 'ok' && cached.value !== null) return { domains: new Set(cached.value), doubt: undefined };
   const domains = new Set<string>();
+  let scanned = true;
   try {
     const page = await transport.listMessages({ query: 'in:sent', maxResults: 200 });
     for (const { id } of page.ids.slice(0, 200)) {
@@ -231,41 +290,149 @@ async function correspondentDomains(transport: GmailTransport): Promise<Set<stri
       }
     }
   } catch {
-    // A mailbox that will not answer leaves the set empty, which fires no lookalike flags — a quieter preview, not
-    // a wrong one, and every other check still runs.
+    // A mailbox that will not answer leaves the set as far as it got, which fires fewer lookalike flags — a quieter
+    // preview, not a wrong one, and every other check still runs. Not an observation: nothing is cached.
+    scanned = false;
   }
-  return domains;
+  // A cache that could not be trusted, and no scan to put in its place: no conclusion that there is no lookalike.
+  if (!scanned) return { domains, doubt: cached.state === 'malformed' ? 'cache-malformed' : undefined };
+  try {
+    await context.historyCache.recordCorrespondents(inboxId, [...domains]);
+  } catch {
+    return { domains, doubt: 'cache-write-failed' };
+  }
+  return { domains, doubt: undefined };
 }
 
 /**
- * Has this mailbox written to this address before?
- *
- * Gmail's `to:` matching is fuzzy — it matches display names and partial addresses — so a hit is confirmed by
- * comparing the parsed recipients of the messages it returns. A false "we have written to them" would remove exactly
- * the warning a first-time external recipient is there to raise.
+ * How the check of this mailbox's prior sends to one address ended (design 2026-10-05 §D4): what was found — live, or
+ * from the shared cache while fresh — or that the cache could not be trusted (`cache-malformed`) or what was found
+ * could not be committed to it (`cache-write-failed`). Anything but `written` is treated as not written.
  */
-async function hasWrittenTo(transport: GmailTransport, address: string): Promise<boolean> {
-  const canonical = canonicalAddress(address);
-  const page = await transport.listMessages({ query: `in:sent to:${canonical}`, maxResults: 5 });
-  for (const { id } of page.ids) {
-    const message = await transport.getMessageMetadata(id);
-    const headers = message.payload?.headers ?? [];
-    const recipients = headers
-      .filter((header) => /^(to|cc|bcc)$/i.test(header.name ?? ''))
-      .flatMap((header) => (header.value ?? '').split(','))
-      .map((value) => canonicalAddress(value.replace(/^.*<|>.*$/g, '').trim()));
-    if (recipients.includes(canonical)) return true;
+export type HistoryCheck = HistoryResult | 'cache-malformed' | 'cache-write-failed';
+
+/** The most Gmail history requests one recipient analysis starts, across all its recipients (§D4). */
+export const HISTORY_BUDGET = 200;
+
+/** The most hits one address's check reads before it answers "not written" (§D4). */
+export const HISTORY_HITS = 50;
+
+/** What each unchecked answer says in a preview: never turned into a correspondence exemption (§D4). */
+const HISTORY_QUALIFICATION: Partial<Record<HistoryCheck, string>> = {
+  'budget-exhausted':
+    'prior-send history was not fully checked (the 200-read budget was reached); treated as not previously written.',
+  'provider-error': 'prior-send history could not be checked; treated as not previously written.',
+  'cache-malformed': 'prior-send history could not be read from its cache; treated as not previously written.',
+  'cache-write-failed': 'prior-send history was checked but could not be recorded; treated as not previously written.',
+};
+
+/** What a removed mailbox is called where a stored aggregate names it: its id is software data, and means nothing. */
+const REMOVED_MAILBOX = 'a mailbox no longer connected';
+
+/** One operation's history requests: each `listMessages` and `getMessageMetadata` takes one before it starts. */
+interface HistoryBudget {
+  remaining: number;
+}
+
+/** The canonical recipients of a sent message, from its To, Cc and Bcc headers. */
+function recipientsOf(message: {
+  payload?: { headers?: Array<{ name?: string | null; value?: string | null }> | null } | null;
+}): string[] {
+  return (message.payload?.headers ?? [])
+    .filter((header) => /^(to|cc|bcc)$/i.test(header.name ?? ''))
+    .flatMap((header) => (header.value ?? '').split(','))
+    .map((value) => canonicalAddress(value.replace(/^.*<|>.*$/g, '').trim()));
+}
+
+/**
+ * Has this mailbox written to this exact address before — within both bounds (design 2026-10-05 §D4)?
+ *
+ * Gmail's search is fuzzy — it matches display names and partial addresses — so it asks for the address in To, Cc and
+ * Bcc, pages through at most fifty hits, and confirms each by comparing its parsed recipients: the headers comma-split
+ * and display-name wrappers regex-stripped before an exact canonical comparison, which is deliberately not RFC
+ * mailbox-list parsing. A false "we have written to them" would remove exactly the warning a tainted or first-time
+ * recipient is there to raise, so every doubt answers no: fifty fuzzy hits with the exact one fifty-first, a budget
+ * spent (`budget`, shared by every recipient of one operation, is taken before each request starts), or a provider
+ * error.
+ */
+async function hasWrittenTo(
+  transport: GmailTransport,
+  canonical: string,
+  budget: HistoryBudget,
+): Promise<HistoryResult> {
+  const query = `in:sent {to:${canonical} cc:${canonical} bcc:${canonical}}`;
+  let checked = 0;
+  let pageToken: string | undefined;
+  try {
+    do {
+      if (budget.remaining <= 0) return 'budget-exhausted';
+      budget.remaining -= 1;
+      const page = await transport.listMessages({ query, maxResults: HISTORY_HITS - checked, pageToken });
+      for (const { id } of page.ids) {
+        if (checked >= HISTORY_HITS) break;
+        if (!id) continue;
+        if (budget.remaining <= 0) return 'budget-exhausted';
+        budget.remaining -= 1;
+        const message = await transport.getMessageMetadata(id);
+        checked += 1;
+        if (recipientsOf(message).includes(canonical)) return 'written';
+      }
+      pageToken = page.nextPageToken;
+    } while (pageToken !== undefined && checked < HISTORY_HITS);
+    return 'not-written';
+  } catch {
+    return 'provider-error';
   }
-  return false;
 }
 
 interface RecipientFacts {
+  /** As the draft has it: what the preview shows. */
   address: string;
+  canonical: string;
+  domain: string;
   external: boolean;
   firstTime: boolean;
+  /** What the taint store matched, by D4's formula — the exact address, which wins, or its domain alone. */
+  match: 'address' | 'domain' | null;
   tainted: boolean;
+  /** The stored aggregate's facts, for a tainted recipient: trusted words, never the address or domain. */
+  explanation: string[];
+  /** `own` for this mailbox's own address, which is never checked. */
+  historyCheck: HistoryCheck | 'own';
   lookalikeOf: string | null;
   note: string;
+}
+
+/**
+ * Why a recipient raised `recipient-tainted`, as a result carries it (design 2026-10-05 §D4). The address and domain
+ * are a sender's — through `addressField` and `domainField`, never in trusted prose; `facts` are this package's words
+ * about the stored aggregate — the mailboxes by name, a date, a template — and say only what the store holds.
+ */
+export interface RecipientTaint {
+  address: string;
+  domain: string;
+  match: 'address' | 'domain';
+  facts: string[];
+  historyCheck: HistoryCheck;
+}
+
+/**
+ * D4's separate statements about one stored aggregate. Never one sighting: the store keeps the newest time, the
+ * strongest source and the union of mailboxes independently, so they are said independently.
+ */
+function explain(aggregate: TaintAggregate | undefined, names: ReadonlyMap<string, string>): string[] {
+  if (aggregate === undefined) return [];
+  const known = [...new Set(aggregate.inboxIds.filter((id) => names.has(id)).map((id) => names.get(id) as string))];
+  const removed = new Set(aggregate.inboxIds.filter((id) => !names.has(id))).size;
+  const mailboxes = [
+    ...known,
+    ...(removed === 0 ? [] : [removed === 1 ? REMOVED_MAILBOX : `${removed} mailboxes no longer connected`]),
+  ];
+  return [
+    `seen in mail read in these mailboxes within the last seven days: ${mailboxes.join(', ')}`,
+    `most recently on ${aggregate.at.slice(0, 10)}`,
+    ...(aggregate.source === 'header' ? ['seen at least once in a header'] : []),
+  ];
 }
 
 /**
@@ -273,53 +440,69 @@ interface RecipientFacts {
  *
  * Risk escalation exists because `chat` trusts the agent to show the preview: a send to somebody the user has never
  * written to, at an address that arrived in a message we read this week, is exactly the shape of an exfiltration, and
- * it is worth taking out of the agent's hands entirely.
+ * it is worth taking out of the agent's hands entirely. D4's formula decides it:
+ * `(seen.address || (seen.domain && external)) && !written` — an exact stored address escalates internal or external,
+ * a domain match only for a recipient external to this mailbox, and a send this mailbox made to the exact address,
+ * found within both bounds, suppresses either.
  */
 async function studyRecipients(
   context: GmailContext,
   transport: GmailTransport,
   inbox: ResolvedInbox,
   analysis: DraftAnalysis,
-): Promise<{ facts: RecipientFacts[]; flags: string[] }> {
+): Promise<{ facts: RecipientFacts[]; flags: string[]; correspondentHistory: CorrespondentHistory | undefined }> {
   const own = await ownAddresses(transport, inbox);
   const internal = new Set(inbox.inbox.internalDomains.map((domain) => domain.toLowerCase()));
-  const everyone = [...new Set([...analysis.to, ...analysis.cc, ...analysis.bcc])];
+  // Each recipient once, in a deterministic order: To, then Cc, then Bcc, by canonical address.
+  const everyone = new Map<string, string>();
+  for (const address of [...analysis.to, ...analysis.cc, ...analysis.bcc]) {
+    const canonical = canonicalAddress(address);
+    if (!everyone.has(canonical)) everyone.set(canonical, address);
+  }
   // The domains this mailbox actually corresponds with, read from Sent rather than assembled from this draft's own
   // recipients. Built the latter way, a message addressed *only* to a lookalike had nothing to compare against and
   // the check never fired — which is precisely the message the check exists for.
-  const knownDomains = await correspondentDomains(transport);
+  const correspondents = await correspondentDomains(context, transport, inbox.inbox.id);
+  const knownDomains = correspondents.domains;
   for (const address of own) {
     const domain = domainOf(address);
     if (domain) knownDomains.add(domain);
   }
   for (const domain of internal) knownDomains.add(domain);
+  const names = new Map(Object.entries((await context.config()).inboxes).map(([alias, entry]) => [entry.id, alias]));
+  const histories = await priorSends(context, transport, inbox.inbox.id, [...everyone.keys()], own);
   const facts: RecipientFacts[] = [];
 
-  for (const address of everyone) {
-    const canonical = canonicalAddress(address);
+  for (const [canonical, address] of everyone) {
     const domain = domainOf(canonical) ?? '';
     const external = !own.has(canonical) && !internal.has(domain);
     const seen = await context.core.taint.check(canonical);
-    const written = own.has(canonical) ? true : await hasWrittenTo(transport, canonical);
-    // A domain in the taint store taints only when it is not a public mailbox provider — the store already decides
-    // that; here, either kind of sighting counts, because both mean the address reached us through mail we read.
-    const tainted = seen.address || seen.domain;
+    const historyCheck = histories.get(canonical) ?? 'own';
+    const written = historyCheck === 'own' || historyCheck === 'written';
+    // A domain in the store counts only for a recipient external to this mailbox (the store already leaves public
+    // providers' domains out); an exact address counts either way, and wins the explanation.
+    const match = seen.address ? 'address' : seen.domain && external ? 'domain' : null;
+    const tainted = match !== null && !written;
     facts.push({
       address,
+      canonical,
+      domain,
       external,
       firstTime: external && !written,
+      match,
       // A tainted address that we have written to before is somebody we already correspond with.
-      tainted: tainted && !written,
+      tainted,
+      explanation: tainted ? explain(match === 'address' ? seen.addressSeen : seen.domainSeen, names) : [],
+      historyCheck,
       lookalikeOf: null,
       note: '',
     });
   }
 
   for (const fact of facts) {
-    const domain = domainOf(canonicalAddress(fact.address)) ?? '';
     if (!fact.firstTime) continue;
     for (const known of knownDomains) {
-      if (known !== domain && distance(known, domain) <= LOOKALIKE_DISTANCE) {
+      if (known !== fact.domain && distance(known, fact.domain) <= LOOKALIKE_DISTANCE) {
         fact.lookalikeOf = known;
         break;
       }
@@ -327,11 +510,19 @@ async function studyRecipients(
   }
 
   for (const fact of facts) {
+    // An unchecked history is said wherever its answer mattered: for an external recipient, or an exact sighting.
+    const qualification =
+      fact.historyCheck === 'own' || !(fact.external || fact.match === 'address')
+        ? undefined
+        : HISTORY_QUALIFICATION[fact.historyCheck];
     fact.note = [
       fact.external ? 'EXTERNAL' : 'internal',
       fact.firstTime ? 'FIRST-TIME' : '',
-      fact.tainted ? 'ADDRESS SEEN IN MAIL YOU READ' : '',
+      fact.tainted
+        ? `${fact.match === 'address' ? 'ADDRESS' : 'DOMAIN'} SEEN IN MAIL YOU READ (${fact.explanation.join('; ')})`
+        : '',
       fact.lookalikeOf ? `LOOKS LIKE ${fact.lookalikeOf}` : '',
+      qualification ?? '',
     ]
       .filter(Boolean)
       .join(' · ');
@@ -343,7 +534,74 @@ async function studyRecipients(
     flags.push('attachment-to-first-time-recipient');
   }
   if (facts.some((fact) => fact.lookalikeOf)) flags.push('lookalike-domain');
-  return { facts, flags };
+  // Correspondents that could not be known for a first-time recipient: a lookalike cannot be ruled out (§D4).
+  const correspondentHistory = correspondents.doubt;
+  if (correspondentHistory !== undefined && facts.some((fact) => fact.firstTime)) flags.push('lookalike-unchecked');
+  return { facts, flags, correspondentHistory };
+}
+
+/**
+ * Every recipient's prior-send answer, in order: from the shared cache while fresh — which costs nothing — and live,
+ * within one budget of 200 requests, for the rest; then what was found live, committed to the cache in one locked
+ * change (design 2026-10-05 §D4).
+ *
+ * Two doubts are never turned into "written". A cache file that cannot be trusted answers every address
+ * `cache-malformed` — not written, and nothing asked of Gmail — and is replaced by a valid write. An observation that
+ * could not be committed is `cache-write-failed`: whatever it found, it suppresses nothing.
+ */
+async function priorSends(
+  context: GmailContext,
+  transport: GmailTransport,
+  inboxId: string,
+  canonicals: readonly string[],
+  own: ReadonlySet<string>,
+): Promise<Map<string, HistoryCheck>> {
+  const others = canonicals.filter((canonical) => !own.has(canonical));
+  const answers = new Map<string, HistoryCheck>();
+  const cached = await context.historyCache.readAddresses(inboxId, others);
+  if (cached.state === 'malformed') {
+    for (const canonical of others) answers.set(canonical, 'cache-malformed');
+    // Replaced by a valid locked write, with nothing in it this operation could vouch for.
+    await context.historyCache.recordAddresses(inboxId, new Map()).catch(() => undefined);
+    return answers;
+  }
+  const budget: HistoryBudget = { remaining: HISTORY_BUDGET };
+  const observed = new Map<string, HistoryResult>();
+  for (const canonical of others) {
+    const hit = cached.value.get(canonical);
+    if (hit !== undefined) {
+      answers.set(canonical, hit.result);
+      continue;
+    }
+    const result = await hasWrittenTo(transport, canonical, budget);
+    observed.set(canonical, result);
+    answers.set(canonical, result);
+  }
+  if (observed.size > 0) {
+    try {
+      await context.historyCache.recordAddresses(inboxId, observed);
+    } catch {
+      for (const canonical of observed.keys()) answers.set(canonical, 'cache-write-failed');
+    }
+  }
+  return answers;
+}
+
+/** The tainted recipients' explanations, the sender's parts through this package's field helpers (§D4). */
+function taintOf(facts: readonly RecipientFacts[], envelope: FieldEnvelope): RecipientTaint[] {
+  return facts.flatMap((fact) =>
+    fact.tainted && fact.match !== null && fact.historyCheck !== 'own'
+      ? [
+          {
+            address: addressField(fact.canonical, 'recipient', envelope),
+            domain: domainField(fact.domain, 'recipient-domain', envelope),
+            match: fact.match,
+            facts: fact.explanation,
+            historyCheck: fact.historyCheck,
+          },
+        ]
+      : [],
+  );
 }
 
 function expectationOf(analysis: DraftAnalysis): Expectation {
@@ -382,16 +640,28 @@ function previewFor(options: {
   record: ApprovalRecord;
   alias: string;
   effectivePolicy: SendPolicy;
+  /** The risk flags this look raised: one the preview says in words of its own. */
+  flags?: readonly string[] | undefined;
 }): string {
   const { analysis, facts, record, alias } = options;
+  // Every way the draft writes a recipient carries that recipient's note: the note is this package's words alone.
+  const byCanonical = new Map(facts.map((fact) => [fact.canonical, fact.note]));
   const notes: Record<string, string> = {};
-  for (const fact of facts) notes[fact.address] = fact.note;
+  for (const address of [...analysis.to, ...analysis.cc, ...analysis.bcc]) {
+    const note = byCanonical.get(canonicalAddress(address));
+    if (note) notes[address] = note;
+  }
   const warnings: string[] = [];
   if (analysis.signatureResources.length > 0) {
     warnings.push(`signature loads ${analysis.signatureResources.length} image(s) from the internet when opened`);
   }
   if (analysis.bcc.length > 0) {
     warnings.push(`${analysis.bcc.length} blind recipient(s) — the others will not see them`);
+  }
+  if (options.flags?.includes('lookalike-unchecked')) {
+    warnings.push(
+      'the domains this mailbox writes to could not be read, so a lookalike recipient domain could not be ruled out',
+    );
   }
   const preview: MessagePreview = {
     recipients: {
@@ -452,9 +722,9 @@ export async function prepareSend(context: GmailContext, alias: string, draftId:
     throw new CommsError('BAD_DATA', 'this draft has no recipients', { hint: 'Add them and prepare the send again.' });
   }
 
-  const { facts, flags } = config.defaults.riskEscalation
+  const { facts, flags, correspondentHistory } = config.defaults.riskEscalation
     ? await studyRecipients(context, transport, resolved, analysis)
-    : { facts: [], flags: [] };
+    : { facts: [], flags: [], correspondentHistory: undefined };
   const requiredPolicy: SendPolicy = flags.length > 0 ? 'confirm' : 'chat';
   const effectivePolicy = stricterPolicy(livePolicy, requiredPolicy);
 
@@ -486,26 +756,46 @@ export async function prepareSend(context: GmailContext, alias: string, draftId:
     approvalId: record.approvalId,
     inbox: alias,
     draftId,
-    preview: previewFor({ analysis, facts, record, alias, effectivePolicy }),
+    preview: previewFor({ analysis, facts, record, alias, effectivePolicy, flags }),
     policy: livePolicy,
     effectivePolicy,
     riskFlags: flags,
+    taint: taintOf(facts, { boundary: newBoundary(), inbox: alias, id: draftMessageId }),
+    ...(correspondentHistory === undefined ? {} : { correspondentHistory }),
     expect: record.expect,
     digest: analysis.digest,
     expiresAt: record.expiresAt,
     // Not in the approval's digest: the draft is. The command is this process's own, located where it is printed.
     nextStep:
       effectivePolicy === 'confirm'
-        ? handoffSentence(
-            context.handoffs.own(['approve', record.approvalId]),
-            (command) =>
-              `Show the preview to the user, then have them run ${command} in a terminal, or send it from Gmail. You cannot approve this yourself.`,
-            { instead: 'Show the preview to the user; they can send it from Gmail. You cannot approve this yourself.' },
-          )
+        ? confirmNextStep(context, record.approvalId)
         : 'Show the preview to the user verbatim and wait for an explicit yes. Then send it with the same approval id and the recipients and subject shown above.',
     approval: await context.core.approvals.approvalOf(record),
     ...(legacyDrain === undefined ? {} : { legacyDrain }),
   };
+}
+
+/**
+ * What follows a prepare that waits for a person outside the chat (design 2026-10-05 §D5): their terminal command, and
+ * the wait that learns when they have used it — `gmail_send_wait` over MCP, `send wait` at the command line — so the
+ * agent never asks the person to relay it, and never prepares again.
+ */
+function confirmNextStep(context: GmailContext, approvalId: string): string {
+  const instead = 'Show the preview to the user; they can send it from Gmail. You cannot approve this yourself.';
+  return handoffSentence(
+    context.handoffs.own(['approve', approvalId]),
+    (approve) => {
+      const first = `Show the preview to the user, then have them run ${approve} in a terminal`;
+      const last = 'or they can send it from Gmail. You cannot approve this yourself.';
+      if (context.surface === 'mcp') return `${first}; learn when they have with gmail_send_wait — ${last}`;
+      return handoffSentence(
+        context.handoffs.own(['send', 'wait', approvalId]),
+        (wait) => `${first}; learn when they have with ${wait} — ${last}`,
+        { instead: `${first} — ${last}` },
+      );
+    },
+    { instead },
+  );
 }
 
 export interface ApprovalPrompt {
@@ -549,9 +839,9 @@ export async function beginApproval(context: GmailContext, approvalId: string): 
     });
   }
   const transport = await context.transport(alias);
-  const { facts } = config.defaults.riskEscalation
+  const { facts, flags } = config.defaults.riskEscalation
     ? await studyRecipients(context, transport, { alias, inbox }, analysis)
-    : { facts: [] };
+    : { facts: [], flags: [] };
   const challenge = await context.core.approvals.issueChallenge(approvalId, 'send', context.platform);
   return {
     approvalId,
@@ -561,6 +851,7 @@ export async function beginApproval(context: GmailContext, approvalId: string): 
       record,
       alias,
       effectivePolicy: stricterPolicy(livePolicy, record.requiredPolicy),
+      flags,
     }),
     challenge,
     effectivePolicy: stricterPolicy(livePolicy, record.requiredPolicy),
@@ -723,14 +1014,33 @@ export async function executeSend(
       throw await recordNoSend(context, bookkeeping, claimToken, claimedApproval, error);
     }
 
-    let sent: { id: string; threadId: string | undefined };
+    /*
+     * The fence (design 2026-10-05 §D1): immediately before the one provider mutation, after the reservation and the
+     * final read, this claim must still hold a `sending` record — its lease renewed by the look. Once another caller has
+     * read it `unknown` (this call stalled past its lease), the send does not start: the record is completed `failed`,
+     * `lease-lost-before-send`, and nothing was sent. A fence narrows the window and cannot close it: a call suspended
+     * after it and before Gmail answers can still send, which is what `unknown` means.
+     */
+    const fenced = await fenceOrStop(context.core.approvals, options.approvalId, claimToken, { stepsStarted: 0 });
+    if (!fenced.proceed) {
+      throw await recordNoSend(
+        context,
+        bookkeeping,
+        claimToken,
+        claimedApproval,
+        fenced.error ?? new CommsError('APPROVAL_VOID', 'nothing was sent: the sending lease ran out'),
+        { recorded: LEASE_LOST_BEFORE_SEND },
+      );
+    }
+
+    let sent: { id: string | undefined; threadId: string | undefined };
     try {
       sent = await transport.sendDraft(options.draftId);
     } catch (error) {
       const said = error instanceof Error ? error.message : String(error);
       const ids = { approvalIds: [options.approvalId], draftIds: [options.draftId] };
       if (sendCertainlyRefused(error)) {
-        throw await recordNoSend(context, bookkeeping, claimToken, claimedApproval, error);
+        throw await recordNoSend(context, bookkeeping, claimToken, claimedApproval, error, { sayNothingSent: true });
       }
 
       let unaudited = '';
@@ -747,45 +1057,53 @@ export async function executeSend(
       } catch (failure) {
         unaudited = ` The audit log could not record this either (${failure instanceof Error ? failure.message : String(failure)}).`;
       }
-      throw new CommsError(
-        error instanceof CommsError ? error.code : 'TRANSIENT',
-        `whether the email was sent is not known: ${said}`,
-        {
-          hint: `Check the Sent folder before anything else: Gmail may have sent it. Prepare the draft again only if it is not there — this approval is not used again.${unaudited}`,
-          details: {
-            ...(error instanceof CommsError ? error.details : {}),
-            approvalId: options.approvalId,
-            outcome: 'unknown',
-            // Still `sending`: nothing is recorded of a send whose outcome is not known.
-            approval: await approvalNow(context, options.approvalId, resolved.inbox.id, claimedApproval),
-          },
-          cause: error,
+      // Uncertain from the moment the answer is lost, and said with its own code at once: never retried, never a
+      // retryable transport code an agent would follow with the same call, never "prepare again" (§D2).
+      throw new CommsError('SEND_OUTCOME_UNKNOWN', `whether the email was sent is not known: ${said}`, {
+        hint: `Check the Sent folder before anything else: Gmail may have sent it. This approval is not used again. Do not prepare the draft again automatically: only once the person has checked that it is not in Sent.${unaudited}`,
+        details: {
+          ...(error instanceof CommsError ? error.details : {}),
+          approvalId: options.approvalId,
+          outcome: 'unknown',
+          // Still `sending`: nothing is recorded of a send whose outcome is not known.
+          approval: await approvalNow(context, options.approvalId, resolved.inbox.id, claimedApproval),
         },
-      );
+        cause: error,
+      });
     }
 
-    const sentMessageId = sent.id;
+    /*
+     * Gmail accepted it. Its id is validated before anything is built from it (§D8): a send Gmail accepted without
+     * naming the message is said as exactly that — never `used`, which needs an id, and never an empty string a
+     * completion, an audit line or a read-back would take for one. Nothing records it, so it reads `sending`, then
+     * `unknown` at its lease boundary.
+     */
+    const sentMessageId = providerId(sent.id);
     const unrecorded: string[] = [];
     // `used` only once it is written; until then — and for good, if it cannot be — the record as it stands.
     let approval: ApprovalObject | null = null;
-    try {
-      approval = await context.core.approvals.approvalOf(
-        await context.core.approvals.complete(options.approvalId, claimToken, { sentMessageId }),
-      );
-    } catch (error) {
-      unrecorded.push(
-        `the approval could not be marked used (${error instanceof Error ? error.message : String(error)}), so it will read as unknown`,
-      );
+    if (sentMessageId !== undefined) {
+      try {
+        approval = await context.core.approvals.approvalOf(
+          await context.core.approvals.complete(options.approvalId, claimToken, { sentMessageId }),
+        );
+      } catch (error) {
+        unrecorded.push(
+          `the approval could not be marked used (${error instanceof Error ? error.message : String(error)}), so it will read as unknown`,
+        );
+      }
     }
 
     // Read the sent message back: it is the only evidence that what went out is what was approved, and the only way to
-    // catch a reply that Gmail filed outside the conversation it was meant for.
+    // catch a reply that Gmail filed outside the conversation it was meant for. With no id there is nothing to read.
     let verified: SendResult['verified'] = null;
-    try {
-      const message = await transport.getMessageMetadata(sentMessageId);
-      verified = { threadId: message.threadId ?? undefined, labelIds: message.labelIds ?? [] };
-    } catch {
-      // The mail has gone either way; not being able to read it back is worth reporting, not worth failing.
+    if (sentMessageId !== undefined) {
+      try {
+        const message = await transport.getMessageMetadata(sentMessageId);
+        verified = { threadId: message.threadId ?? undefined, labelIds: message.labelIds ?? [] };
+      } catch {
+        // The mail has gone either way; not being able to read it back is worth reporting, not worth failing.
+      }
     }
 
     try {
@@ -795,11 +1113,17 @@ export async function executeSend(
         operation: 'send.execute',
         outcome: 'ok',
         surface: context.surface,
-        ids: { approvalIds: [options.approvalId], draftIds: [options.draftId], messageIds: [sentMessageId] },
+        ids: {
+          approvalIds: [options.approvalId],
+          draftIds: [options.draftId],
+          // Only an id Gmail gave: accepted without one, the field is left out and the reason says so.
+          ...(sentMessageId === undefined ? {} : { messageIds: [sentMessageId] }),
+        },
         // From the record, not from what the caller claimed: the two are checked to be equal, but the record is the
         // one a person approved, and an audit line is worth having only if it says what actually happened.
         recipients: [...claimed.expect.to, ...claimed.expect.cc, ...claimed.expect.bcc].map(canonicalAddress),
         reason: [
+          ...(sentMessageId === undefined ? ['accepted-without-id'] : []),
           `digest ${claimed.contentDigest.slice(0, 12)} · policy ${livePolicy} · ${claimed.approvedVia ?? 'chat'}`,
           ...unrecorded,
         ].join(' · '),
@@ -812,7 +1136,8 @@ export async function executeSend(
       inbox: alias,
       approvalId: options.approvalId,
       draftId: options.draftId,
-      sentMessageId,
+      ...(sentMessageId === undefined ? {} : { sentMessageId }),
+      said: sentMessageId === undefined ? SENT_WITHOUT_ID : `sent, message id ${sentMessageId}`,
       threadId: sent.threadId,
       to: claimed.expect.to,
       cc: claimed.expect.cc,

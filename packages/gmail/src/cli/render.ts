@@ -762,10 +762,15 @@ export function renderSent(result: SendResult, color: boolean): string {
     paint(
       color,
       'dim',
-      `Message ${result.sentMessageId} in ${result.inbox}, approval ${result.approvalId} (${result.approval.state}).`,
+      result.sentMessageId === undefined
+        ? // Accepted without an id: said exactly so, and recorded as nothing more (design 2026-10-05 §D8).
+          `In ${result.inbox}, approval ${result.approvalId} (${result.approval.state}): ${result.said}.`
+        : `Message ${result.sentMessageId} in ${result.inbox}, approval ${result.approvalId} (${result.approval.state}).`,
     ),
   ];
-  if (result.verified) {
+  if (result.sentMessageId === undefined) {
+    lines.push(paint(color, 'yellow', 'With no id there is nothing to read it back by: look for it in Sent.'));
+  } else if (result.verified) {
     lines.push(
       paint(
         color,

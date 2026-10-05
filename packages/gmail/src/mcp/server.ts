@@ -278,6 +278,8 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
 
   /** The key a download's form is answered under, beside the send's and the probe's. */
   const SAVE_KEY = 'save';
+  /** The reason a form's explicit decline is stored with — a send's or a download's: the person's no (§D1). */
+  const DECLINED = 'declined';
   /**
    * The download questions a form was raised for, and the client it was raised to. Held here rather than on disk, as a
    * probe's code is: a form is one exchange, in one process, and an answer to a form nobody raised proves nothing.
@@ -1081,17 +1083,45 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
                 details: { choiceId, client },
               });
             }
-            if (answered.kind !== 'elicit' || answered.action !== 'accept') {
-              // Declined or cancelled in the form is the person's no, as anything but 1, 2 or 3 at a terminal is.
-              const how =
-                answered.kind !== 'elicit' ? 'not answered' : answered.action === 'decline' ? 'declined' : 'cancelled';
-              await context.core.approvals
-                .revoke(choiceId, `${how} in the form`, { disposition: 'person' })
-                .catch(() => undefined);
-              throw new CommsError('APPROVAL_REQUIRED', `nothing was saved: the question was ${how}`, {
-                hint: 'Make the download again if the files should still be saved.',
-                details: { choiceId },
+            /*
+             * As a send's form (§D1, "A refusal has one stored meaning"): declined is the person's no, revoked at once
+             * under the record's lock as `declined`; cancelled or dismissed decides nothing, and the question waits for
+             * an answer — at the terminal, or in this form raised again.
+             */
+            if (answered.kind === 'elicit' && answered.action === 'decline') {
+              const revoked = await context.core.approvals.revoke(choiceId, DECLINED, {
+                disposition: 'person',
+                expect: { kind: 'download' },
               });
+              throw new CommsError('APPROVAL_VOID', 'nothing was saved: the question was declined', {
+                hint: 'The person said no: do not make the download again unless they ask for it.',
+                details: {
+                  choiceId,
+                  approval: revoked.form === 'v2' ? await context.core.approvals.approvalOf(revoked.record) : null,
+                },
+              });
+            }
+            if (answered.kind !== 'elicit' || answered.action !== 'accept') {
+              const how = answered.kind === 'elicit' ? 'cancelled' : 'not answered';
+              const waiting = await context.core.approvals
+                .inspect(choiceId, { kind: 'download' })
+                .then(({ outcome }) => outcome.approval)
+                .catch(() => null);
+              throw new CommsError(
+                'APPROVAL_PENDING',
+                `nothing was saved: the form was ${how}, and the question is still waiting`,
+                {
+                  hint: handoffSentence(
+                    context.handoffs.own(['approve', choiceId]),
+                    (command) =>
+                      `It is still the person's to answer: they can run ${command} in their own terminal while you wait with gmail_send_wait, then call again with choiceId "${choiceId}" alone — or call again with it now to show them the form.`,
+                    {
+                      instead: `It is still the person's to answer: call again with choiceId "${choiceId}" alone to show them the form.`,
+                    },
+                  ),
+                  details: { choiceId, approval: waiting },
+                },
+              );
             }
             const content = acceptedContent(
               ctx.mcpReq.inputResponses,
@@ -2427,6 +2457,31 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
           policy: z.string(),
           effectivePolicy: z.string(),
           riskFlags: z.array(z.string()),
+          taint: z
+            .array(
+              z.object({
+                address: z
+                  .string()
+                  .describe('the recipient: bare only while a plain address, else <untrusted-content>'),
+                domain: z.string().describe('its domain: bare only while a plain domain, else <untrusted-content>'),
+                match: z.string().describe('address (the exact address, which wins) or domain'),
+                facts: z
+                  .array(z.string())
+                  .describe('what the store holds, each said apart: the mailboxes, the latest date, a header sighting'),
+                historyCheck: z
+                  .string()
+                  .describe(
+                    'written, not-written, budget-exhausted, provider-error, cache-malformed or cache-write-failed: anything but written escalates',
+                  ),
+              }),
+            )
+            .describe('why each recipient that raised recipient-tainted raised it'),
+          correspondentHistory: z
+            .string()
+            .optional()
+            .describe(
+              'cache-malformed or cache-write-failed: the lookalike check could not rely on Sent, and escalated',
+            ),
           expect: expectationSchema,
           digest: z.string(),
           expiresAt: z.string(),
@@ -2461,7 +2516,11 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
           inbox: z.string(),
           approvalId: z.string(),
           draftId: z.string(),
-          sentMessageId: z.string(),
+          sentMessageId: z
+            .string()
+            .optional()
+            .describe('the message Gmail filed; absent when Gmail accepted the send without naming it'),
+          said: z.string().describe('what happened: "sent, message id …", or "sent; the provider returned no id"'),
           threadId: z.string().nullable(),
           to: z.array(z.string()),
           cc: z.array(z.string()),
@@ -2507,9 +2566,12 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
               ? null
               : await context.core.approvals.inspect(approvalId, { kind: 'send', owner }).catch(() => null);
           const outcome = seen?.outcome;
-          // Channel (a): a form the model cannot answer, but only from a client that has proved its forms reach a
-          // person. An un-allowlisted client is told to use the terminal or Gmail — and the approval is left alone,
-          // because being asked from the wrong client is not evidence that anything is wrong with the message.
+          /*
+           * Channel (a): a form the model cannot answer, raised only by a client the person chose to trust with them —
+           * no MCP mechanism proves a person answered one (design 2026-10-05 §D5). Any other client gets the complete
+           * refusal: the person's terminal command, and the wait that learns the result. The approval is left alone,
+           * because being asked from another client is not evidence that anything is wrong with the message.
+           */
           if (outcome !== undefined && needsConfirmation(outcome)) {
             const answered = inputResponse(ctx.mcpReq.inputResponses, APPROVAL_KEY);
             if (answered.kind === 'missing') {
@@ -2519,13 +2581,10 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
                   hint: handoffSentence(
                     context.handoffs.own(['approve', approvalId]),
                     (command) =>
-                      `Ask the user to run ${command} in a terminal, or to send the draft from Gmail. This client is not on the list of clients whose approval forms are known to reach a person.`,
-                    {
-                      instead:
-                        'Ask the user to send the draft from Gmail: this client is not on the list of clients whose approval forms are known to reach a person.',
-                    },
+                      `This needs your approval outside the chat: run ${command} in a terminal, and I will wait with gmail_send_wait.`,
+                    { instead: 'This needs your approval outside the chat; it can also be sent from Gmail.' },
                   ),
-                  details: { approvalId, client, approval: outcome.approval },
+                  details: { approvalId, approval: outcome.approval },
                 });
               }
               const prompt = await beginApproval(context, approvalId);
@@ -2544,12 +2603,40 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
                 },
               });
             }
+            /*
+             * One stored meaning for each refusal (§D1, "A refusal has one stored meaning"). An explicit decline is the
+             * person's no: revoked at once, under the record's lock, as `declined`, so nothing can claim it later. A
+             * cancelled or dismissed form decides nothing: the approval is left as it is, still the person's to give.
+             */
+            if (answered.kind === 'elicit' && answered.action === 'decline') {
+              const revoked = await context.core.approvals.revoke(approvalId, DECLINED, {
+                disposition: 'person',
+                expect: { kind: 'send', owner },
+              });
+              throw new CommsError('APPROVAL_VOID', 'nothing was sent: the approval was declined', {
+                hint: 'The person said no: do not prepare it again unless they ask for it.',
+                details: {
+                  approvalId,
+                  approval:
+                    revoked.form === 'v2' ? await context.core.approvals.approvalOf(revoked.record) : outcome.approval,
+                },
+              });
+            }
             if (answered.kind !== 'elicit' || answered.action !== 'accept') {
+              const how = answered.kind === 'elicit' ? 'cancelled' : 'not answered';
               throw new CommsError(
-                'APPROVAL_REQUIRED',
-                `nothing was sent: the approval was ${answered.kind === 'elicit' ? `${answered.action}ed` : 'not given'}`,
+                'APPROVAL_PENDING',
+                `nothing was sent: the form was ${how}, and the approval is still waiting`,
                 {
-                  hint: 'Prepare the send again if it should still go.',
+                  hint: handoffSentence(
+                    context.handoffs.own(['approve', approvalId]),
+                    (command) =>
+                      `It is still the person's to give: they can run ${command} in a terminal while you wait with gmail_send_wait, or you can call gmail_draft_send again to show them the form.`,
+                    {
+                      instead:
+                        "It is still the person's to give: call gmail_draft_send again to show them the form, or they can send it from Gmail.",
+                    },
+                  ),
                   details: { approvalId, approval: outcome.approval },
                 },
               );
@@ -2569,9 +2656,9 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
     server.registerTool(
       'gmail_confirm_probe',
       {
-        title: 'Check that approval forms reach a person',
+        title: 'Check that this client returns approval forms',
         description:
-          'Raise a test approval form carrying a short code, so the user can prove this client shows forms to a human rather than answering them itself. Run it when the user wants to approve sends in this client instead of in a terminal. It sends nothing and changes nothing on its own: after it succeeds, trusting the client is gmail_confirm_client_add (or `confirm-clients add <name>` in the Gmail CLI), within ten minutes, with a change approval.',
+          'Raise a test approval form carrying a short code, which the user types back. Run it only when the user asks to approve sends in this client instead of in a terminal. A matching code shows that this client can return an approval form’s answer — nothing more: no client is proved to put a form in front of a person. It sends nothing and changes nothing on its own: after it succeeds, whether to add this client to the ones the person chose to trust is theirs to decide — gmail_confirm_client_add (or `confirm-clients add <name>` in the Gmail CLI), within ten minutes, with a change approval.',
         inputSchema: z.object({}),
         outputSchema: z.object({
           client: z.string(),
@@ -2592,7 +2679,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
             return inputRequired({
               inputRequests: {
                 [PROBE_KEY]: inputRequired.elicit({
-                  message: `A person is reading this: type ${probe.code} to confirm that approval forms from "${client}" reach you.`,
+                  message: `To check that "${client}" can return an approval form's answer, type ${probe.code}.`,
                   requestedSchema: {
                     type: 'object',
                     properties: { code: { type: 'string', title: `Type ${probe.code}`, minLength: 1 } },
@@ -2650,7 +2737,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
         {
           title: 'Trust a client’s approval forms',
           description:
-            'Trust an MCP client to show the user approval forms, so a send from a `confirm` mailbox can be approved in that client instead of at a terminal. Refused unless that client passed gmail_confirm_probe in the last ten minutes — the user typing the code it showed. Then returns `approvalRequired` and a preview: show it verbatim, ask, and call again with `approvalId` after the user says yes. The same as `confirm-clients add` in the Gmail CLI.',
+            'Add an MCP client to the clients the person chose to trust with approval forms, so a send from a `confirm` mailbox can be approved in that client instead of at a terminal. Only when the person asks to trust it. Refused unless that client passed gmail_confirm_probe in the last ten minutes — the user typing the code it showed. Then returns `approvalRequired` and a preview: show it verbatim, ask, and call again with `approvalId` after the user says yes. The same as `confirm-clients add` in the Gmail CLI.',
           inputSchema: z.object({
             name: z.string().min(1).describe('the client name, as gmail_confirm_probe reported it'),
             approvalId: approvalArgument,
@@ -2673,7 +2760,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
       {
         title: 'Stop trusting a client’s forms',
         description:
-          'Take a client off the list of those trusted to show a person an approval form. Trusting fewer clients only makes sending stricter, so this needs no approval: a send from a `confirm` mailbox made in that client is then approved at a terminal instead. Removing a name that is not on the list changes nothing. The same as `confirm-clients remove` in the Gmail CLI.',
+          'Take a client off the clients the person chose to trust with approval forms. Trusting fewer clients only makes sending stricter, so this needs no approval: a send from a `confirm` mailbox made in that client is then approved at a terminal instead. Removing a name that is not on the list changes nothing. The same as `confirm-clients remove` in the Gmail CLI.',
         inputSchema: z.object({
           name: z.string().min(1).describe('the client name, as gmail_confirm_clients lists it'),
         }),
@@ -2760,7 +2847,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
     {
       title: 'Clients trusted to show approval forms',
       description:
-        'The MCP clients whose approval forms are trusted to reach a person, so a send from a `confirm` mailbox can be approved in a form instead of at a terminal. Empty by default. A client gets on the list in two steps: gmail_confirm_probe in that client (the evidence), then gmail_confirm_client_add, approved by the user (the decision). The same as `confirm-clients list` in the Gmail CLI.',
+        'The MCP clients the person chose to trust with approval forms, so a send from a `confirm` mailbox can be approved in a form instead of at a terminal. Empty by default. A client gets on the list in two steps: gmail_confirm_probe in that client (it can return a form’s answer), then gmail_confirm_client_add, approved by the user (the decision). The same as `confirm-clients list` in the Gmail CLI.',
       inputSchema: z.object({}),
       outputSchema: z.object({ clients: z.array(z.string()) }),
       annotations: { readOnlyHint: true, openWorldHint: false },

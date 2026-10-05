@@ -1,11 +1,25 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { test } from 'node:test';
-import { ApprovalStore, asV2, CommsError, SENDING_LEASE_MS } from '@agentcomms/core';
+import { setTimeout as sleep } from 'node:timers/promises';
+import {
+  ApprovalStore,
+  asV2,
+  CommsError,
+  ERROR_REGISTRY,
+  LEASE_LOST_BEFORE_SEND,
+  SENDING_HEARTBEAT_MS,
+  SENDING_LEASE_MS,
+  SendLedger,
+  waitForApproval,
+} from '@agentcomms/core';
 import { renderSent } from '../src/cli/render.ts';
 import { GmailContext } from '../src/context.ts';
 import { mapGoogleError, sendCertainlyRefused } from '../src/gmail-api/errors.ts';
+import type { GmailTransport } from '../src/gmail-api/transport.ts';
 import { createDraft } from '../src/operations/drafts.ts';
-import { executeSend, prepareSend } from '../src/operations/send.ts';
+import { executeSend, listApprovals, prepareSend } from '../src/operations/send.ts';
 import { DRAFT_SEND_PATH } from './support/fake-google.ts';
 import { type Harness, newHarness } from './support/harness.ts';
 
@@ -54,6 +68,46 @@ async function prepared(setup: Awaited<ReturnType<typeof world>>) {
   return { approval, send, state };
 }
 
+/**
+ * The same world on a clock of its own, read by the approvals and the ledger — and by `other()`, another process's
+ * store over the same state directory, which is how a second caller looks at a send under way.
+ */
+function onClock(setup: Awaited<ReturnType<typeof world>>) {
+  let at = Date.now();
+  const now = () => new Date(at);
+  const stateDir = setup.harness.core.paths.stateDir;
+  const open = () => new ApprovalStore(stateDir, { now, loadConfig: () => setup.harness.core.config.load() });
+  setup.harness.core.approvals = open();
+  setup.harness.core.ledger = new SendLedger(stateDir, now);
+  return {
+    now,
+    advance: (ms: number) => {
+      at += ms;
+    },
+    other: open,
+    file: (approvalId: string) =>
+      JSON.parse(readFileSync(join(stateDir, 'approvals', `${approvalId}.json`), 'utf8')) as Record<string, unknown>,
+  };
+}
+
+/** Another draft of the world's mailbox, prepared. */
+async function preparedAnother(setup: Awaited<ReturnType<typeof world>>, text: string) {
+  const draft = await createDraft(setup.context, 'work', { to: ['sam@partner.test'], subject: 'Again', text });
+  return prepared({ ...setup, draftId: draft.draftId });
+}
+
+/** Waits, in real time, for `check` to hold. */
+async function until(check: () => boolean | Promise<boolean>, what: string): Promise<void> {
+  for (let i = 0; i < 1000; i += 1) {
+    if (await check()) return;
+    await sleep(5);
+  }
+  assert.fail(`never: ${what}`);
+}
+
+const sendsTo = (setup: Awaited<ReturnType<typeof world>>) =>
+  setup.harness.google.requests.filter((request) => request.path === DRAFT_SEND_PATH).length;
+
 test('Gmail’s certain-refusal classifier is a narrow allowlist', () => {
   for (const status of [400, 401, 403, 404, 429]) {
     const mapped = mapGoogleError({ response: { status, data: { error: { code: status, message: 'refused' } } } });
@@ -80,9 +134,21 @@ test('Gmail acting before its answer is lost leaves the approval sending and tel
     (thrown: unknown) => thrown,
   );
   assert.ok(error instanceof CommsError);
+  // Uncertain the moment the answer is lost: its own code, never retryable, never TRANSIENT (D2pt-b).
+  assert.equal(error.code, 'SEND_OUTCOME_UNKNOWN');
+  assert.equal(ERROR_REGISTRY[error.code].retryable, false);
   assert.match(error.message, /^whether the email was sent is not known:/);
-  assert.match(error.hint ?? '', /Sent folder/);
+  assert.match(error.hint ?? '', /^Check the Sent folder before anything else/);
+  assert.match(error.hint ?? '', /This approval is not used again\./);
+  assert.match(error.hint ?? '', /Do not prepare the draft again automatically/);
   assert.equal(error.details?.outcome, 'unknown');
+  const sending = error.details?.approval as Record<string, unknown>;
+  assert.equal(sending.state, 'sending');
+  assert.equal(sending.claimable, false);
+  assert.equal(typeof sending.sendingAt, 'string');
+  // The fence before the send renewed the lease: unknownAt is from that renewal, or from the claim.
+  const renewed = Date.parse(String(sending.sendingHeartbeatAt ?? sending.sendingAt));
+  assert.equal(sending.unknownAt, new Date(renewed + SENDING_LEASE_MS).toISOString());
   assert.equal(await state(), 'sending');
   const later = new ApprovalStore(setup.harness.core.paths.stateDir, {
     now: () => new Date(Date.now() + SENDING_LEASE_MS),
@@ -117,6 +183,8 @@ test('only Gmail responses documented as pre-action refusals mark the approval f
       assert.ok(error instanceof CommsError);
       assert.equal(await state(), 'failed');
       assert.doesNotMatch(error.message, /not known/);
+      // A certain refusal says so: nothing was sent (D2pt-f).
+      assert.match(error.message, /^nothing was sent: /);
       assert.equal(error.details?.outcome, undefined);
 
       const retry = await send().then(
@@ -140,6 +208,7 @@ test('only Gmail responses documented as pre-action refusals mark the approval f
       (thrown: unknown) => thrown,
     );
     assert.ok(error instanceof CommsError);
+    assert.equal(error.code, 'SEND_OUTCOME_UNKNOWN');
     assert.equal(await state(), 'sending');
     assert.equal(error.details?.outcome, 'unknown');
   });
@@ -285,7 +354,11 @@ test('every certain no-send path attempts each bookkeeping step independently', 
           assert.equal(error.cause.message, error.message);
         } else {
           assert.equal(error.code, original.code);
-          assert.equal(error.message, original.message);
+          // Gmail's own refusal of the send says nothing was sent (D2pt-f); the steps before it keep their words.
+          assert.equal(
+            error.message,
+            trigger === 'Gmail refusal' ? `nothing was sent: ${original.message}` : original.message,
+          );
           assert.deepEqual(apartFromApproval(error.details), original.details);
           assert.equal(error.cause, original);
         }
@@ -380,7 +453,7 @@ test('an unknown Gmail outcome keeps its slot and approval when its audit also f
     (thrown: unknown) => thrown,
   );
   assert.ok(error instanceof CommsError, String(error));
-  assert.equal(error.code, original.code);
+  assert.equal(error.code, 'SEND_OUTCOME_UNKNOWN', 'never the transport’s retryable code');
   assert.match(error.message, /^whether the email was sent is not known:/);
   assert.match(error.hint ?? '', /^Check the Sent folder/);
   assert.match(error.hint ?? '', /audit log could not record this either \(audit disk is read-only\)/);
@@ -400,7 +473,8 @@ test('an unknown Gmail outcome keeps its slot and approval when its audit also f
 test('Gmail success is never rewritten when its approval or audit bookkeeping fails', async (t) => {
   await t.test('approval record', async () => {
     const setup = await world();
-    const { send, state } = await prepared(setup);
+    const clock = onClock(setup);
+    const { approval, send, state } = await prepared(setup);
     const store = setup.harness.core.approvals;
     const complete = store.complete.bind(store);
     store.complete = async (approvalId, claimToken, outcome) => {
@@ -410,9 +484,23 @@ test('Gmail success is never rewritten when its approval or audit bookkeeping fa
 
     const result = await send();
     assert.ok(result.sentMessageId);
+    assert.equal(result.said, `sent, message id ${result.sentMessageId}`, 'an outward success');
     assert.match(result.note ?? '', /the approval could not be marked used \(approval disk is read-only\)/);
+    assert.match(result.note ?? '', /so it will read as unknown/);
+    assert.equal(result.approval.state, 'sending', 'never a used invented');
     assert.match(renderSent(result, false), /approval could not be marked used/);
     assert.equal(await state(), 'sending');
+    // Later looks: sending while its lease lasts, unknown from its boundary on — never used (D2pt-h).
+    const status = async () =>
+      (await waitForApproval(setup.harness.core, approval.approvalId, { waitSeconds: 0, channel: 'gmail' })).state;
+    const listed = async () =>
+      (await listApprovals(setup.context, { inbox: 'work' })).find((entry) => entry.approvalId === approval.approvalId)
+        ?.state;
+    assert.equal(await status(), 'sending');
+    assert.equal(await listed(), 'sending');
+    clock.advance(SENDING_LEASE_MS);
+    assert.equal(await status(), 'unknown');
+    assert.equal(await listed(), 'unknown');
   });
 
   await t.test('audit record', async () => {
@@ -433,4 +521,275 @@ test('Gmail success is never rewritten when its approval or audit bookkeeping fa
     assert.match(renderSent(result, false), /audit log could not record it/);
     assert.equal(await state(), 'used');
   });
+});
+
+// ── The fence before every provider mutation (CUE-404 Task 12; design 2026-10-05 §D1, "Version-2 timestamps") ──────
+
+/** One provider mutation `executeSend` makes, and how a test reaches the moment just before it. */
+interface FenceSite {
+  /** The mutation as the fake Google records it. */
+  readonly method: string;
+  readonly path: string;
+  /**
+   * Arranges for `pause` to run as the claimant reaches this mutation: right after the step `executeSend` takes just
+   * before it, and so before the fence that guards it — the claimant suspended there, past its lease.
+   */
+  readonly reach: (transport: GmailTransport, pause: () => Promise<void>) => void;
+}
+
+/**
+ * Every provider mutation `executeSend` makes, each with a fence before it. Today that is one: the send itself,
+ * `drafts/send` through `transport.sendDraft`, reached after the ledger reservation and the final draft re-read. A
+ * mutation `executeSend` gains must be listed here — the completeness test below fails until it is — and so gets its
+ * own case in the fence test.
+ */
+const GMAIL_FENCE_SITES: readonly FenceSite[] = [
+  {
+    method: 'POST',
+    path: DRAFT_SEND_PATH,
+    // The step before it: the final draft re-read, the second read of the draft in `executeSend`.
+    reach: (transport, pause) => {
+      const getDraft = transport.getDraft.bind(transport);
+      let reads = 0;
+      transport.getDraft = async (draftId) => {
+        const draft = await getDraft(draftId);
+        reads += 1;
+        if (reads === 2) await pause();
+        return draft;
+      };
+    },
+  },
+];
+
+test('a claimant suspended past its lease just before a provider mutation starts none of it: lease-lost-before-send, nothing sent (R11b)', async (t) => {
+  for (const site of GMAIL_FENCE_SITES) {
+    await t.test(`${site.method} ${site.path}`, async () => {
+      const setup = await world();
+      const clock = onClock(setup);
+      const { approval, send, state } = await prepared(setup);
+      site.reach(await setup.context.transport('work'), async () => {
+        // Suspended here, renewing nothing, past its lease; another caller looks, and persists `unknown`.
+        clock.advance(SENDING_LEASE_MS);
+        const seen = await clock.other().inspect(approval.approvalId);
+        assert.equal(seen.outcome.state, 'unknown');
+        assert.equal(clock.file(approval.approvalId).state, 'unknown', 'persisted by the other caller');
+      });
+      const from = setup.harness.google.requests.length;
+
+      const error = await send().then(
+        () => assert.fail('a claimant whose lease ran out went on to send'),
+        (thrown: unknown) => thrown,
+      );
+      assert.ok(error instanceof CommsError, String(error));
+      assert.equal(error.code, 'APPROVAL_VOID');
+      assert.match(error.message, /^nothing was sent: /);
+      assert.equal(
+        setup.harness.google.requests
+          .slice(from)
+          .filter((request) => request.method === site.method && request.path === site.path).length,
+        0,
+        'no request for that site reached Gmail',
+      );
+      assert.equal(await state(), 'failed');
+      assert.equal(clock.file(approval.approvalId).reason, LEASE_LOST_BEFORE_SEND);
+      const settled = error.details?.approval as Record<string, unknown>;
+      assert.equal(settled.state, 'failed');
+      assert.equal(settled.reason, LEASE_LOST_BEFORE_SEND);
+      // Nothing went, so the slot it reserved is given back, and the audit says why.
+      const inbox = (await setup.harness.core.config.load()).inboxes.work;
+      assert.ok(inbox);
+      assert.equal((await setup.harness.core.ledger.status(inbox.id, { perHour: 20, perDay: 100 })).hour, 0);
+      const audit = await setup.harness.core.audit.tail({ inbox: 'work' });
+      const outcome = audit.findLast((entry) => entry.operation === 'send.execute');
+      assert.equal(outcome?.outcome, 'failed');
+      assert.match(outcome?.reason ?? '', new RegExp(LEASE_LOST_BEFORE_SEND));
+    });
+  }
+});
+
+test('the fence-site table lists every provider mutation a successful send makes, and nothing else', async () => {
+  const setup = await world();
+  const { send } = await prepared(setup);
+  const from = setup.harness.google.requests.length;
+  await send();
+  // A mutation is anything but a read of Gmail: OAuth's own token requests are the client's, not the mailbox's.
+  const made = setup.harness.google.requests
+    .slice(from)
+    .filter((request) => request.path.startsWith('/gmail/') && request.method !== 'GET')
+    .map((request) => `${request.method} ${request.path}`);
+  assert.deepEqual(
+    [...new Set(made)].sort(),
+    GMAIL_FENCE_SITES.map((site) => `${site.method} ${site.path}`).sort(),
+    'executeSend made a provider mutation the fence-site table does not list: list it, with a fence before it',
+  );
+});
+
+test('a send Gmail holds across several renewals stays sending, then records what Gmail said — sent, and again refused (R10c)', async (t) => {
+  for (const outcome of ['used', 'failed'] as const) {
+    await t.test(outcome, async (t) => {
+      const setup = await world();
+      const clock = onClock(setup);
+      const { approval, send, state } = await prepared(setup);
+      const id = approval.approvalId;
+      // The real transport against the loopback fake, which holds the send open: Gmail still working.
+      const held = setup.harness.google.holdNext(DRAFT_SEND_PATH);
+      if (outcome === 'failed') setup.harness.google.failNext(DRAFT_SEND_PATH, 1, 400);
+      t.mock.timers.enable({ apis: ['setInterval'] });
+      const settled = send().then(
+        (result) => ({ result, error: undefined }),
+        (error: unknown) => ({ result: undefined, error }),
+      );
+      await held.reached;
+      const claimedAt = Date.parse(String(clock.file(id).sendingAt));
+      for (let beat = 1; beat <= 5; beat += 1) {
+        clock.advance(SENDING_HEARTBEAT_MS);
+        t.mock.timers.tick(SENDING_HEARTBEAT_MS);
+        await until(
+          () => clock.file(id).sendingHeartbeatAt === clock.now().toISOString(),
+          `renewal ${beat} written while Gmail holds the send`,
+        );
+        // Another caller looks: still sending — past two minutes from the claim, inside the lease it renewed.
+        const seen = await clock.other().inspect(id);
+        assert.equal(seen.outcome.state, 'sending', `after renewal ${beat}`);
+      }
+      assert.ok(clock.now().getTime() - claimedAt > SENDING_LEASE_MS, 'held beyond the lease of the claim alone');
+      assert.equal(await state(), 'sending');
+      held.release();
+      const { result, error } = await settled;
+      if (outcome === 'used') {
+        assert.ok(result, String(error));
+        assert.equal(result.approval.state, 'used');
+        assert.equal(await state(), 'used');
+        assert.equal(clock.file(id).sendingHeartbeatAt, clock.now().toISOString(), 'its last renewal is kept');
+      } else {
+        assert.ok(error instanceof CommsError, String(error));
+        assert.match(error.message, /^nothing was sent: /);
+        assert.equal(await state(), 'failed');
+      }
+      assert.equal(sendsTo(setup), 1);
+    });
+  }
+});
+
+test('a claim across the hourly cap rollover is counted when its slot is reserved, after the claim (D1rr-f)', async () => {
+  const setup = await world();
+  const clock = onClock(setup);
+  await setup.harness.core.config.update((config) => ({
+    ...config,
+    defaults: { ...config.defaults, sendCaps: { perHour: 1, perDay: 10 } },
+  }));
+  const first = await prepared(setup);
+  await first.send();
+  const hour = 60 * 60 * 1000;
+
+  // Claimed and reserved inside the hour: the cap refuses it, its approval fails, and nothing is sent.
+  clock.advance(hour - 5 * 60 * 1000);
+  const early = await preparedAnother(setup, 'Before the hour is out.');
+  clock.advance(5 * 60 * 1000 - 1);
+  const refused = await early.send().then(
+    () => assert.fail('a send over the hourly cap went'),
+    (thrown: unknown) => thrown,
+  );
+  assert.ok(refused instanceof CommsError);
+  assert.equal(refused.code, 'RATE_CAPPED');
+  assert.equal(await early.state(), 'failed');
+
+  // Claimed in the hour's last millisecond, its slot reserved at the rollover: the reservation is what counts.
+  const late = await preparedAnother(setup, 'At the hour.');
+  const store = setup.harness.core.approvals;
+  const claim = store.claimForSend.bind(store);
+  let claimedAt = '';
+  store.claimForSend = async (...args) => {
+    const claimed = await claim(...args);
+    claimedAt = claimed.record.sendingAt ?? '';
+    clock.advance(1);
+    return claimed;
+  };
+  const sent = await late.send();
+  assert.equal(sent.approval.state, 'used');
+  assert.ok(
+    Date.parse(claimedAt) < Date.parse(String(asV2(await store.get(first.approval.approvalId))?.sentAt)) + hour,
+  );
+
+  // The approval the cap refused stays refused after the rollover: it was claimed once, and failed.
+  const again = await early.send().then(
+    () => assert.fail('a failed approval was used after the rollover'),
+    (thrown: unknown) => thrown,
+  );
+  assert.ok(again instanceof CommsError);
+  assert.match(again.message, /^nothing was sent: the send it was claimed for failed/);
+  assert.equal(sendsTo(setup), 2);
+});
+
+test('Gmail accepting a send without an id is said as exactly that: never used, never an empty id, no read-back (D8o-e, D8o-g)', async (t) => {
+  const bodies: ReadonlyArray<[string, Record<string, unknown>]> = [
+    ['no id', { threadId: 't-1', labelIds: ['SENT'] }],
+    ['an empty id', { id: '', threadId: 't-1' }],
+    ['a null id', { id: null }],
+  ];
+  for (const [name, body] of bodies) {
+    await t.test(name, async () => {
+      const setup = await world();
+      const clock = onClock(setup);
+      const { approval, send, state } = await prepared(setup);
+      setup.harness.google.afterSend = () => ({ status: 200, body });
+      const transport = await setup.context.transport('work');
+      // What the transport hands back, from a send this approval made.
+      const returned: Array<{ id: string | undefined }> = [];
+      const sendDraft = transport.sendDraft.bind(transport);
+      transport.sendDraft = async (draftId) => {
+        const answer = await sendDraft(draftId);
+        returned.push(answer);
+        return answer;
+      };
+      const readBacks: string[] = [];
+      const metadata = transport.getMessageMetadata.bind(transport);
+      transport.getMessageMetadata = async (messageId) => {
+        readBacks.push(messageId);
+        return metadata(messageId);
+      };
+      const completions: unknown[] = [];
+      const store = setup.harness.core.approvals;
+      const complete = store.complete.bind(store);
+      store.complete = async (approvalId, claimToken, outcome) => {
+        completions.push(outcome);
+        return complete(approvalId, claimToken, outcome);
+      };
+      const audited: unknown[] = [];
+      const append = setup.harness.core.audit.append.bind(setup.harness.core.audit);
+      setup.harness.core.audit.append = async (record, ...rest) => {
+        if (record.operation === 'send.execute') audited.push(record);
+        return append(record, ...rest);
+      };
+
+      const result = await send();
+      assert.equal(returned.length, 1);
+      assert.equal(returned[0]?.id, undefined, 'absent, never the empty string');
+      assert.equal(result.said, 'sent; the provider returned no id');
+      assert.equal(result.sentMessageId, undefined);
+      assert.equal('sentMessageId' in result, false);
+      assert.equal(result.approval.state, 'sending', 'never used');
+      assert.equal(result.approval.sentMessageId, undefined);
+      assert.equal(result.verified, null, 'nothing to read back by');
+      assert.deepEqual(completions, [], 'no completion: there is no id to record it by');
+      assert.deepEqual(readBacks, [], 'no read-back with no id');
+      assert.equal(audited.length, 1);
+      const line = audited[0] as { outcome: string; ids?: Record<string, unknown>; reason?: string };
+      assert.equal(line.outcome, 'ok');
+      assert.match(line.reason ?? '', /^accepted-without-id/);
+      assert.equal(line.ids?.messageIds, undefined, 'the id field is left out');
+      assert.ok(!JSON.stringify(audited).includes('""'), 'no empty id anywhere in the audit line');
+      assert.equal(await state(), 'sending');
+      const rendered = renderSent(result, false);
+      assert.match(rendered, /sent; the provider returned no id/);
+      assert.doesNotMatch(rendered, /undefined|message id/);
+      // And at its lease boundary it reads unknown, as nothing recorded it.
+      clock.advance(SENDING_LEASE_MS);
+      assert.equal(
+        (await waitForApproval(setup.harness.core, approval.approvalId, { waitSeconds: 0, channel: 'gmail' })).state,
+        'unknown',
+      );
+      assert.equal(sendsTo(setup), 1);
+    });
+  }
 });

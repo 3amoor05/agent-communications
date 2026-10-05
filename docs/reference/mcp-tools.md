@@ -52,12 +52,12 @@ names it `from`. There is no default mailbox.
 | [`gmail_label_create`](#gmail_label_create) | Create a label, or return the one already there. |
 | [`gmail_send_prepare`](#gmail_send_prepare) | Read a draft and return the preview the person must approve, with an approval id bound to exactly this content. |
 | [`gmail_draft_send`](#gmail_draft_send) | Send a draft that gmail_send_prepare has prepared and the user has approved. |
-| [`gmail_confirm_probe`](#gmail_confirm_probe) | Raise a test approval form carrying a short code, so the user can prove this client shows forms to a human rather than answering them itself. |
-| [`gmail_confirm_client_add`](#gmail_confirm_client_add) | Trust an MCP client to show the user approval forms, so a send from a `confirm` mailbox can be approved in that client instead of at a terminal. |
-| [`gmail_confirm_client_remove`](#gmail_confirm_client_remove) | Take a client off the list of those trusted to show a person an approval form. |
+| [`gmail_confirm_probe`](#gmail_confirm_probe) | Raise a test approval form carrying a short code, which the user types back. |
+| [`gmail_confirm_client_add`](#gmail_confirm_client_add) | Add an MCP client to the clients the person chose to trust with approval forms, so a send from a `confirm` mailbox can be approved in that client instead of at a terminal. |
+| [`gmail_confirm_client_remove`](#gmail_confirm_client_remove) | Take a client off the clients the person chose to trust with approval forms. |
 | [`gmail_send_cancel`](#gmail_send_cancel) | Cancel a prepared send. |
 | [`gmail_send_wait`](#gmail_send_wait) | Wait for an approval — a send, a change or a download’s question — to be usable or finished, and say where it stands: pending (with `claimable` true when a yes in the chat can use it), approved, being sent, used, failed, unknown, expired, revoked, corrupt, or answered for a question. |
-| [`gmail_confirm_clients`](#gmail_confirm_clients) | The MCP clients whose approval forms are trusted to reach a person, so a send from a `confirm` mailbox can be approved in a form instead of at a terminal. |
+| [`gmail_confirm_clients`](#gmail_confirm_clients) | The MCP clients the person chose to trust with approval forms, so a send from a `confirm` mailbox can be approved in a form instead of at a terminal. |
 | [`gmail_send_list`](#gmail_send_list) | Approvals that have been prepared, with what each one would send and when it expires: a send’s recipients and subject in `expect`, or — `kind: "change"` — the change to an account a person was asked to approve. |
 
 ### `gmail_inboxes_list`
@@ -566,7 +566,7 @@ Send a draft that gmail_send_prepare has prepared and the user has approved. You
 
 ### `gmail_confirm_probe`
 
-Raise a test approval form carrying a short code, so the user can prove this client shows forms to a human rather than answering them itself. Run it when the user wants to approve sends in this client instead of in a terminal. It sends nothing and changes nothing on its own: after it succeeds, trusting the client is gmail_confirm_client_add (or `confirm-clients add <name>` in the Gmail CLI), within ten minutes, with a change approval.
+Raise a test approval form carrying a short code, which the user types back. Run it only when the user asks to approve sends in this client instead of in a terminal. A matching code shows that this client can return an approval form’s answer — nothing more: no client is proved to put a form in front of a person. It sends nothing and changes nothing on its own: after it succeeds, whether to add this client to the ones the person chose to trust is theirs to decide — gmail_confirm_client_add (or `confirm-clients add <name>` in the Gmail CLI), within ten minutes, with a change approval.
 
 *writes*
 
@@ -574,7 +574,7 @@ Takes no arguments.
 
 ### `gmail_confirm_client_add`
 
-Trust an MCP client to show the user approval forms, so a send from a `confirm` mailbox can be approved in that client instead of at a terminal. Refused unless that client passed gmail_confirm_probe in the last ten minutes — the user typing the code it showed. Then returns `approvalRequired` and a preview: show it verbatim, ask, and call again with `approvalId` after the user says yes. The same as `confirm-clients add` in the Gmail CLI.
+Add an MCP client to the clients the person chose to trust with approval forms, so a send from a `confirm` mailbox can be approved in that client instead of at a terminal. Only when the person asks to trust it. Refused unless that client passed gmail_confirm_probe in the last ten minutes — the user typing the code it showed. Then returns `approvalRequired` and a preview: show it verbatim, ask, and call again with `approvalId` after the user says yes. The same as `confirm-clients add` in the Gmail CLI.
 
 *writes*
 
@@ -585,7 +585,7 @@ Trust an MCP client to show the user approval forms, so a send from a `confirm` 
 
 ### `gmail_confirm_client_remove`
 
-Take a client off the list of those trusted to show a person an approval form. Trusting fewer clients only makes sending stricter, so this needs no approval: a send from a `confirm` mailbox made in that client is then approved at a terminal instead. Removing a name that is not on the list changes nothing. The same as `confirm-clients remove` in the Gmail CLI.
+Take a client off the clients the person chose to trust with approval forms. Trusting fewer clients only makes sending stricter, so this needs no approval: a send from a `confirm` mailbox made in that client is then approved at a terminal instead. Removing a name that is not on the list changes nothing. The same as `confirm-clients remove` in the Gmail CLI.
 
 *writes · idempotent*
 
@@ -616,7 +616,7 @@ Wait for an approval — a send, a change or a download’s question — to be u
 
 ### `gmail_confirm_clients`
 
-The MCP clients whose approval forms are trusted to reach a person, so a send from a `confirm` mailbox can be approved in a form instead of at a terminal. Empty by default. A client gets on the list in two steps: gmail_confirm_probe in that client (the evidence), then gmail_confirm_client_add, approved by the user (the decision). The same as `confirm-clients list` in the Gmail CLI.
+The MCP clients the person chose to trust with approval forms, so a send from a `confirm` mailbox can be approved in a form instead of at a terminal. Empty by default. A client gets on the list in two steps: gmail_confirm_probe in that client (it can return a form’s answer), then gmail_confirm_client_add, approved by the user (the decision). The same as `confirm-clients list` in the Gmail CLI.
 
 *read-only*
 
