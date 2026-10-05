@@ -88,6 +88,9 @@ export interface FileReply {
 
 export type FileAnswer = (request: SlackRequest) => FileReply;
 
+/** How the files host answers an upload: at once, or — a promise — once the test lets it, after its bytes arrived. */
+export type UploadAnswer = (request: SlackRequest) => FileReply | Promise<FileReply>;
+
 /** One upload URL `files.getUploadURLExternal` handed out, and what it was asked for. */
 export interface IssuedUpload {
   readonly fileId: string;
@@ -137,8 +140,11 @@ export interface FakeSlack {
   script: Record<string, Reply>;
   /** Answers by `<TEAM>-<FILEID>`, the pair the files path names. A file with no answer is a 404. */
   files: Record<string, FileAnswer>;
-  /** How the files host answers an upload. `200 OK` unless replaced. */
-  uploadAnswer: FileAnswer;
+  /**
+   * How the files host answers an upload. `200 OK` unless replaced. A promise holds the answer back — the bytes have
+   * arrived and been recorded — until it settles: an upload as long as a test needs it to be.
+   */
+  uploadAnswer: UploadAnswer;
   /**
    * Scripts the three Web API methods a file post makes, and returns what they see as they are called.
    *
@@ -238,7 +244,9 @@ const receivers = new WeakMap<FakeSlack, (request: SlackRequest) => void>();
 function answerFile(fake: FakeSlack, recorded: SlackRequest, response: ServerResponse): void {
   if (recorded.path.startsWith('/upload/')) {
     receivers.get(fake)?.(recorded);
-    sendReply(fake.uploadAnswer(recorded), response);
+    const reply = fake.uploadAnswer(recorded);
+    if (reply instanceof Promise) void reply.then((held) => sendReply(held, response));
+    else sendReply(reply, response);
     return;
   }
   const pair = recorded.path.split('/')[2] ?? '';

@@ -12,9 +12,10 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { type TestContext, test } from 'node:test';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { setFlagsFromString } from 'node:v8';
 import { runInNewContext } from 'node:vm';
-import { asV2, CommsError, renderChannelPreview } from '@agentcomms/core';
+import { ApprovalStore, asV2, CommsError, renderChannelPreview, waitForApproval } from '@agentcomms/core';
 import { closedPermit, spendOn } from '../src/api/guard.ts';
 import { slackFileUpload, uploadDeadlineMs } from '../src/api/upload.ts';
 import { payloadOf } from '../src/compose/blocks.ts';
@@ -24,7 +25,14 @@ import { SlackContext } from '../src/context.ts';
 import { scopesForMode } from '../src/manifest.ts';
 import { createDraft } from '../src/operations/drafts.ts';
 import { prepareDraftPost, sendPost } from '../src/operations/post.ts';
-import { type FakeSlack, type FakeUploads, startFakeSlack, UPLOADS } from './support/fake-slack.ts';
+import { type FakeSlack, type FakeUploads, type FileReply, startFakeSlack, UPLOADS } from './support/fake-slack.ts';
+import {
+  assertStartedOnlyThatStep,
+  assertStoppedBefore,
+  FENCE_CASES,
+  fenceWorld,
+  suspendAt,
+} from './support/fence-sites.ts';
 import { assertNoBareCommand, slackCommand, slackHandoffs, slackInline } from './support/handoffs.ts';
 import { type Harness, newHarness } from './support/harness.ts';
 
@@ -895,6 +903,287 @@ test('a file changed after the first pass and before its upload voids the approv
   assert.deepEqual(w.uploads.received, {}, 'bytes reached the upload URL from a file changed after it was approved');
   assert.deepEqual(w.uploads.completed, []);
   assert.equal(asV2(await w.context.core.approvals.get(prepared.approvalId))?.state, 'failed');
+});
+
+// ── What a file post says when it fails, and when Slack gives it no id ──────────────────────────────────────
+
+test('a file post that fails before an upload, during one, after a known upload or at the share says nothing was posted, naming exactly the files that went up', async (t) => {
+  /*
+   * §5 D2pt-a. Until Slack shares them, uploaded files are in no channel: every failure before a successful share
+   * posted nothing, and says so — with the files that went up, which Slack discards, and the one that may have.
+   */
+  const cases: {
+    what: string;
+    arrange: (w: World) => void;
+    uploaded: number[];
+    possiblyUploaded: number[];
+    shared: number;
+  }[] = [
+    {
+      what: 'before an upload: Slack gives no upload URL',
+      arrange: (w) => {
+        w.uploads = w.fake.acceptUploads({ urlError: 'invalid_arguments' });
+      },
+      uploaded: [],
+      possiblyUploaded: [],
+      shared: 0,
+    },
+    {
+      what: 'during an upload: the connection drops with the bytes sent',
+      arrange: (w) => {
+        w.fake.uploadAnswer = () => ({ drop: true });
+      },
+      uploaded: [],
+      possiblyUploaded: [0],
+      shared: 0,
+    },
+    {
+      what: 'after a known upload: Slack gives no URL for the next file',
+      arrange: (w) => {
+        const issue = w.fake.script['files.getUploadURLExternal'];
+        let asked = 0;
+        w.fake.script['files.getUploadURLExternal'] = (request) => {
+          asked += 1;
+          return asked === 2 ? { ok: false, error: 'internal_error' } : issue?.(request);
+        };
+      },
+      uploaded: [0],
+      possiblyUploaded: [],
+      shared: 0,
+    },
+    {
+      what: 'at the share: Slack refuses it',
+      arrange: (w) => {
+        w.uploads = w.fake.acceptUploads({ completeError: 'channel_not_found' });
+      },
+      uploaded: [0, 1],
+      possiblyUploaded: [],
+      shared: 1,
+    },
+  ];
+  for (const { what, arrange, uploaded, possiblyUploaded, shared } of cases) {
+    const w = await world(t);
+    arrange(w);
+    const names = ['a.txt', 'b.txt'];
+    const draft = await createDraft(w.context, 'acme', {
+      channel: 'C1',
+      text: 'the files',
+      files: [file(w.docs, 'a.txt', 'a'), file(w.docs, 'b.txt', 'b')],
+    });
+    const { prepared, send } = await prepareAndSend(w, draft.draftId);
+    const error = await refusal(send());
+    const named = (indices: number[]) =>
+      indices.map((index) => ({ id: w.uploads.issued[index]?.fileId, name: names[index] }));
+
+    assert.match(error.message, /^nothing was posted: /, what);
+    assert.notEqual(error.code, 'SEND_OUTCOME_UNKNOWN', what);
+    assert.deepEqual(error.details?.uploaded, named(uploaded), what);
+    if (possiblyUploaded.length === 0) {
+      assert.equal('possiblyUploaded' in (error.details ?? {}), false, `${what}: a file said to be possibly up`);
+    } else {
+      assert.deepEqual(error.details?.possiblyUploaded, named(possiblyUploaded), what);
+    }
+    const hint = error.hint ?? '';
+    const up = uploaded.map((index) => names[index]).join(', ');
+    if (uploaded.length === 1)
+      assert.ok(hint.includes(`${up} was uploaded and never shared; Slack discards it.`), hint);
+    if (uploaded.length > 1)
+      assert.ok(hint.includes(`${up} were uploaded and never shared; Slack discards them.`), hint);
+    if (uploaded.length === 0) assert.doesNotMatch(hint, /was uploaded and never shared|were uploaded/, what);
+    const maybe = possiblyUploaded.map((index) => names[index]).join(', ');
+    if (possiblyUploaded.length > 0) {
+      assert.ok(
+        hint.includes(
+          `${maybe} may have been uploaded before the failure; nothing shared it, so if Slack has it, Slack discards it.`,
+        ),
+        hint,
+      );
+    } else {
+      assert.doesNotMatch(hint, /may have been uploaded/, what);
+    }
+    assert.equal(w.uploads.completed.length, shared, what);
+    assert.equal(asV2(await w.context.core.approvals.get(prepared.approvalId))?.state, 'failed', what);
+    const record = (await w.context.core.audit.tail()).find(
+      (entry) => entry.operation === 'slack.post' && entry.approvalId === prepared.approvalId,
+    );
+    assert.equal(record?.outcome, 'failed', what);
+    assert.match(record?.reason ?? '', /^nothing was posted: /, what);
+    assert.deepEqual(
+      record?.ids?.files ?? [],
+      named(uploaded).map((one) => one.id),
+      what,
+    );
+  }
+});
+
+test('a file Slack gives an empty id is never uploaded, shared, read back or recorded by that id', async (t) => {
+  /*
+   * §5 D8o-h, for files: an empty id is no id. A file Slack named `""` cannot be shared by it, and an approval or an
+   * audit record that held one would be read as an id by everyone after. It is refused before its bytes go anywhere.
+   */
+  const w = await world(t);
+  w.fake.script['files.getUploadURLExternal'] = () => ({ ok: true, upload_url: `${UPLOADS}v1/CwABempty`, file_id: '' });
+  const draft = await createDraft(w.context, 'acme', { channel: 'C1', files: [file(w.docs, 'a.txt', 'a')] });
+  const { prepared, send } = await prepareAndSend(w, draft.draftId);
+  const store = w.context.core.approvals;
+  const complete = store.complete.bind(store);
+  const completions: unknown[] = [];
+  store.complete = (approvalId, claimToken, outcome) => {
+    completions.push(outcome);
+    return complete(approvalId, claimToken, outcome);
+  };
+
+  const error = await refusal(send());
+  assert.match(error.message, /^nothing was posted: /);
+  assert.deepEqual(error.details?.uploaded, []);
+  assert.equal(
+    w.fake.requests.some((request) => request.host === 'files'),
+    false,
+    'bytes went to an upload URL for a file with no id',
+  );
+  assert.deepEqual(w.uploads.completed, []);
+  assert.equal(
+    w.fake.requests.some((request) => request.method === 'files.info'),
+    false,
+    'a file was read back by an empty id',
+  );
+  assert.equal(completions.length, 1);
+  assert.ok(
+    completions.every((outcome) => !('sentMessageId' in (outcome as object))),
+    'the approval was completed as used',
+  );
+  assert.equal(asV2(await store.get(prepared.approvalId))?.state, 'failed');
+  const record = (await w.context.core.audit.tail()).find(
+    (entry) => entry.operation === 'slack.post' && entry.approvalId === prepared.approvalId,
+  );
+  assert.equal(record?.outcome, 'failed');
+  assert.deepEqual(record?.ids, { channel: 'C1' }, 'the audit holds an empty file id');
+});
+
+// ── The fence before each step ─────────────────────────────────────────────────────────────────────────────────
+
+/*
+ * The fence-site table (`support/fence-sites.ts`), for the steps a two-file post makes: an upload URL for each file,
+ * each upload, and the share. Each case suspends the claimant just before one step while another caller finds its
+ * lease run out. §5 R11c and R12c — and R12b, after a fence said go.
+ */
+for (const c of FENCE_CASES.filter((one) => one.flow === 'files')) {
+  test(`a claimant whose lease ran out just before ${c.label} starts neither it nor any later step, and says so`, async (t) => {
+    const w = await fenceWorld(t);
+    const log = suspendAt(w, c.step, 'before');
+    await assertStoppedBefore(w, c, await w.run(c.flow), log);
+  });
+}
+
+test('a file post’s claimant suspended right after a fence said go starts that one step and no later one', async (t) => {
+  for (const c of FENCE_CASES.filter((one) => one.flow === 'files')) {
+    const w = await fenceWorld(t);
+    const log = suspendAt(w, c.step, 'after');
+    await assertStartedOnlyThatStep(w, c, await w.run(c.flow), log);
+  }
+});
+
+// ── Long work: one lease across uploads that take minutes ──────────────────────────────────────────────────────
+
+/** Waits, in real time, for `check` to hold. */
+async function until(check: () => Promise<boolean> | boolean, what: string): Promise<void> {
+  for (let i = 0; i < 2000; i += 1) {
+    if (await check()) return;
+    await sleep(5);
+  }
+  assert.fail(`never: ${what}`);
+}
+
+test('a file post whose upload takes over five minutes keeps its lease, reads sending to status and wait throughout, and then records what Slack said', async (t) => {
+  /*
+   * §5 D1sl-c. One upload may take 1,600 seconds, and a post may carry ten: a fixed age would call a live post
+   * unknown, so the claimant renews its lease every thirty seconds while Slack has the bytes. The time is the store's
+   * and the renewal timer's, moved on by hand; the upload is real, against the loopback Slack, and held open until the
+   * test lets it answer — once with success, once with a failure.
+   */
+  for (const ending of ['success', 'failure'] as const) {
+    await t.test(ending, async (t) => {
+      const w = await world(t);
+      const started = Date.now();
+      let now = started;
+      const store = new ApprovalStore(w.harness.core.paths.stateDir, {
+        now: () => new Date(now),
+        handoffs: w.harness.core.handoffs,
+        loadConfig: () => w.harness.core.config.load(),
+      });
+      w.harness.core.approvals = store;
+      const renewals: string[] = [];
+      const heartbeat = store.heartbeat.bind(store);
+      store.heartbeat = async (approvalId, claimToken) => {
+        const renewed = await heartbeat(approvalId, claimToken);
+        renewals.push(renewed);
+        return renewed;
+      };
+      let answer!: (reply: FileReply) => void;
+      const answered = new Promise<FileReply>((settle) => {
+        answer = settle;
+      });
+      w.fake.uploadAnswer = () => answered;
+      const draft = await createDraft(w.context, 'acme', {
+        channel: 'C1',
+        text: 'the dump',
+        files: [file(w.docs, 'dump.bin', 'x'.repeat(4096))],
+      });
+      const { prepared, send } = await prepareAndSend(w, draft.draftId);
+      const id = prepared.approvalId;
+      t.mock.timers.enable({ apis: ['setInterval'] });
+      const sending = send().then(
+        (posted) => ({ posted, error: undefined }),
+        (error: unknown) => ({ posted: undefined, error }),
+      );
+      await until(() => w.fake.requests.some((request) => request.path.startsWith('/upload/')), 'the upload began');
+      // The fences before the upload URL and the upload renewed it too (`fence` is a renewal); the timer's come next.
+      const fenced = renewals.length;
+      assert.equal(fenced, 2, 'a fence before each step so far');
+
+      for (let beat = 1; beat <= 11; beat += 1) {
+        now += 30_000;
+        t.mock.timers.tick(30_000);
+        await until(() => renewals.length === fenced + beat, `renewal ${beat}`);
+        assert.equal(renewals.at(-1), 'renewed', `renewal ${beat}`);
+        const record = asV2(await store.get(id));
+        assert.equal(record?.state, 'sending', `status at ${beat * 30} seconds`);
+        assert.equal(record?.sendingHeartbeatAt, new Date(now).toISOString(), `renewal ${beat} written`);
+        const look = await waitForApproval(w.harness.core, id, { waitSeconds: 0, channel: 'slack' });
+        assert.equal(look.state, 'sending', `a zero wait at ${beat * 30} seconds`);
+      }
+      assert.ok(now - started > 5 * 60_000, 'the upload was not held for five minutes');
+      // A wait of its own, over two more seconds of the same clock: still being sent at its end.
+      const clock = {
+        now: () => now,
+        sleep: async (ms: number) => {
+          now += ms;
+        },
+      };
+      const waited = await waitForApproval(w.harness.core, id, { waitSeconds: 2, channel: 'slack', clock });
+      assert.equal(waited.state, 'sending');
+      assert.equal(waited.ended, 'timeout');
+
+      answer(ending === 'success' ? { status: 200, body: 'OK' } : { status: 500, body: 'no' });
+      const { posted, error } = await sending;
+      const [issued] = w.uploads.issued;
+      if (ending === 'success') {
+        assert.equal(error, undefined, String(error));
+        assert.deepEqual(posted && 'files' in posted ? posted.files.map((one) => one.id) : [], [issued?.fileId]);
+        assert.equal(asV2(await store.get(id))?.state, 'used');
+      } else {
+        assert.ok(error instanceof CommsError, String(error));
+        assert.match(error.message, /^nothing was posted: /);
+        assert.deepEqual(error.details?.possiblyUploaded, [{ id: issued?.fileId, name: 'dump.bin' }]);
+        assert.equal(asV2(await store.get(id))?.state, 'failed');
+      }
+      // The renewals stopped with the post.
+      const after = renewals.length;
+      t.mock.timers.tick(5 * 30_000);
+      await sleep(20);
+      assert.equal(renewals.length, after, 'a renewal after the post was over');
+    });
+  }
 });
 
 // ── The time an upload is allowed ────────────────────────────────────────────────────────────────────────────

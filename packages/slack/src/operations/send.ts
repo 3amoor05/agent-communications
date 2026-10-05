@@ -13,9 +13,11 @@ import {
   type CreateApprovalInput,
   canonicalJson,
   type Expectation,
+  fenceOrStop,
   type Handoff,
   handoffSentence,
   handoffSentenceToFill,
+  LEASE_LOST_BEFORE_SEND,
   messageDigest,
   type OutcomeAction,
   type SendClaim,
@@ -552,6 +554,8 @@ export interface PostDeps extends PrepareDeps {
     ): Promise<SendClaim>;
     complete(approvalId: string, claimToken: string, outcome: SendOutcome): Promise<ApprovalRecord>;
     heartbeat(approvalId: string, claimToken: string): Promise<'renewed' | 'lost'>;
+    /** The look before each provider step: `go` while this claim still holds the send, `stop` once it reads unknown. */
+    fence(approvalId: string, claimToken: string): Promise<'go' | 'stop'>;
     /** A locked look at one approval, classified for what the caller is about to do (design 2026-10-05 §D2). */
     inspect(
       approvalId: string,
@@ -570,10 +574,15 @@ export interface PostDeps extends PrepareDeps {
 export interface PostedMessage {
   readonly approvalId: string;
   readonly channel: string;
-  readonly ts: string;
   /**
-   * What else is true of this post, when anything is: that the call was cancelled too late to stop it
-   * ({@link POSTED_ANYWAY}), or that a record of it could not be written afterwards (`recordPosted`). Absent otherwise.
+   * The message Slack posted. Absent — never `''` — when Slack accepted the post without saying which message it is:
+   * `note` then says {@link NO_ID}, and the approval stays `sending`, to read `unknown` (design 2026-10-05 §D8).
+   */
+  readonly ts?: string | undefined;
+  /**
+   * What else is true of this post, when anything is: that Slack gave it no ts ({@link NO_ID}), that the call was
+   * cancelled too late to stop it ({@link POSTED_ANYWAY}), or that a record of it could not be written afterwards
+   * (`recordPosted`). Absent otherwise.
    */
   readonly note?: string | undefined;
   /**
@@ -709,6 +718,22 @@ const POSTED_ANYWAY =
   'the call was cancelled too late to stop it: Slack accepted the post, and a post cannot be taken back';
 
 /**
+ * What a result says of a post or reaction Slack accepted without an id to record it by (design 2026-10-05 §D8):
+ * exactly this, never an id made up and never `used`. The approval stays `sending`, and reads `unknown` once its lease
+ * runs out.
+ */
+const NO_ID = 'sent; the provider returned no id';
+
+/** What its audit record says in place of the id it omits. */
+const ACCEPTED_WITHOUT_ID =
+  'accepted without an id: the approval is not marked used, and reads unknown once its lease runs out';
+
+/** A provider id, or absence: `undefined`, `null`, `''` and anything not a string are no id at all — never `''`. */
+function providerId(value: unknown): string | undefined {
+  return typeof value === 'string' && value !== '' ? value : undefined;
+}
+
+/**
  * Claims an approval, and when it is waiting for a person, says so with the command they run as data.
  *
  * The hint is prose for whoever reads it. An agent relaying the step to a person should not have to dig a command out
@@ -763,10 +788,15 @@ async function claimOrHandOver(
  * already have acted on it, and abandoning it would record as failed a post that is in the channel. So it is waited
  * for, the approval is recorded as used, and the result and the audit record say the call was cancelled too late.
  *
+ * Claimed, every request to Slack starts only after a fence: the claim's lease is renewed while Slack's work is
+ * outstanding, and once another caller has found it run out and recorded `unknown`, no further request starts (design
+ * 2026-10-05 §D1).
+ *
  * Once that request has gone out, what is recorded is only what is known. A refusal posted nothing, and is a failed
  * post. An answer lost on the way back may be a post, and is recorded as neither (`recordMaybePosted`). And a post
  * Slack accepted is a post, whatever the writes after it do (`recordPosted`): the dispatch and the bookkeeping are kept
- * apart, so a record that fails to be written can never turn into a failure of the post it records.
+ * apart, so a record that fails to be written can never turn into a failure of the post it records. A post accepted
+ * with no ts is a post too, said to be one with no id ({@link NO_ID}), and never recorded `used`.
  */
 export async function postPrepared(
   deps: PostDeps,
@@ -855,6 +885,8 @@ async function postClassified(
     // Claimed, and nothing sent yet: the approval is spent on a post that did not happen, and recorded as failed.
     if (deps.signal?.aborted)
       throw await recordNotPosted(deps, approvalId, { claimToken, claimed }, where, cancelledPost(SPENT_BY_CANCEL));
+    // The fence (design 2026-10-05 §D1): the post starts only while this claim still holds the send.
+    await fenceFirstStep(deps, approvalId, { claimToken, claimed }, 'slack.post', where);
     let response: SlackResponse;
     try {
       // Without the signal, deliberately: this is the request that posts, and it is never abandoned once it is out.
@@ -875,13 +907,19 @@ async function postClassified(
     }
 
     // Posted. Nothing from here records the approval as failed, or throws: see `recordPosted`.
-    const ts = typeof response.ts === 'string' ? response.ts : '';
+    const ts = providerId(response.ts);
     const { late, unrecorded, approval } = await recordPosted(deps, approvalId, { claimToken, claimed }, ts, {
       channel: payload.channel,
-      ts,
+      ...(ts === undefined ? {} : { ts }),
     });
-    const note = noteOf([late, ...unrecorded]);
-    return { approvalId, channel: payload.channel, ts, ...(note === undefined ? {} : { note }), approval };
+    const note = noteOf([ts === undefined ? NO_ID : undefined, late, ...unrecorded]);
+    return {
+      approvalId,
+      channel: payload.channel,
+      ...(ts === undefined ? {} : { ts }),
+      ...(note === undefined ? {} : { note }),
+      approval,
+    };
   });
 }
 
@@ -893,6 +931,58 @@ function messageOf(error: unknown): string {
 /** What a result's note says: each thing worth saying, in order, or nothing at all. */
 function noteOf(said: readonly (string | undefined)[]): string | undefined {
   return said.filter((one) => one !== undefined).join('; ') || undefined;
+}
+
+/**
+ * The fence before a flow's first provider step — a post, a reaction, or a file post's first upload URL (design
+ * 2026-10-05 §D1). While this claim still holds the send, it goes on. Once another caller has found the lease run out
+ * and recorded `unknown`, nothing has been asked of Slack: `fenceOrStop` records the approval `failed`
+ * (`lease-lost-before-send`), and this audits it and throws the refusal saying nothing was sent, with where the
+ * approval stands.
+ */
+async function fenceFirstStep(
+  deps: PostDeps,
+  approvalId: string,
+  claim: { claimToken: string; claimed: ApprovalObject },
+  operation: string,
+  ids: Record<string, string | string[]>,
+): Promise<void> {
+  const verdict = await fenceOrStop(deps.approvals, approvalId, claim.claimToken, { stepsStarted: 0 });
+  if (verdict.proceed) return;
+  throw await recordLeaseLost(deps, approvalId, claim.claimed, operation, ids, verdict.error);
+}
+
+/** Audits a send whose lease ran out before its first step — `fenceOrStop` recorded it — and returns what to throw. */
+async function recordLeaseLost(
+  deps: PostDeps,
+  approvalId: string,
+  claimed: ApprovalObject,
+  operation: string,
+  ids: Record<string, string | string[]>,
+  error: CommsError | null,
+): Promise<CommsError> {
+  const refusal =
+    error ??
+    new CommsError('APPROVAL_VOID', 'nothing was sent: the sending lease ran out before anything was sent', {
+      details: { approvalId, reason: LEASE_LOST_BEFORE_SEND },
+    });
+  let unaudited: string | undefined;
+  try {
+    await deps.audit?.append({
+      inboxId: deps.accountId,
+      alias: deps.workspaceName,
+      operation,
+      outcome: 'failed',
+      ids,
+      approvalId,
+      reason: LEASE_LOST_BEFORE_SEND,
+      ...(deps.surface ? { surface: deps.surface } : {}),
+    });
+  } catch (failure) {
+    unaudited = `The audit log could not record this (${messageOf(failure)}).`;
+  }
+  const said = unaudited === undefined ? refusal : refusalWithBookkeeping(refusal, [unaudited]);
+  return settledWith(said, await approvalNow(deps, approvalId, claimed)) as CommsError;
 }
 
 /**
@@ -935,9 +1025,11 @@ async function recordNotPosted(
  * the store reads as `unknown` once the attempt is plainly over (`SENDING_LEASE_MS`) — the state it has for exactly
  * this, and the one a send whose process died mid-request is left in. It is not used again either way.
  *
- * The audit record says so in its reason, as Resend's does for the same case; and the error says it in its message,
- * keeping the code and the details of what went wrong. Should the audit record fail to be written, the error says that
- * too rather than being replaced by it: what happened to the post is the one thing the caller has to hear.
+ * The audit record says so in its reason, as Resend's does for the same case; and the error says it in its message and
+ * its own code, `SEND_OUTCOME_UNKNOWN` (design 2026-10-05 §D2) — never retryable, as the provider's own `TRANSIENT`
+ * was, since a retry of a post that happened is a second post — keeping the details of what went wrong. Should the
+ * audit record fail to be written, the error says that too rather than being replaced by it: what happened to the post
+ * is the one thing the caller has to hear.
  */
 async function recordMaybePosted(
   deps: PostDeps,
@@ -964,21 +1056,18 @@ async function recordMaybePosted(
   } catch (failure) {
     unaudited = ` The audit log could not record this either (${messageOf(failure)}).`;
   }
-  return new CommsError(
-    error instanceof CommsError ? error.code : 'TRANSIENT',
-    `whether ${what} is not known: ${said}`,
-    {
-      hint: `Look in the channel before anything else: Slack may have posted it. Prepare the draft again only if it is not there — this approval is not used again.${unaudited}`,
-      details: {
-        ...(error instanceof CommsError ? error.details : {}),
-        ...details,
-        approvalId,
-        outcome: 'unknown',
-        // Still `sending`: nothing is recorded of a post whose outcome is not known.
-        approval: await approvalNow(deps, approvalId, claimed),
-      },
+  return new CommsError('SEND_OUTCOME_UNKNOWN', `whether ${what} is not known: ${said}`, {
+    cause: error,
+    hint: `Look in the channel before anything else: Slack may have posted it. Prepare the draft again only if it is not there — this approval is not used again.${unaudited}`,
+    details: {
+      ...(error instanceof CommsError ? error.details : {}),
+      ...details,
+      approvalId,
+      outcome: 'unknown',
+      // Still `sending`: nothing is recorded of a post whose outcome is not known.
+      approval: await approvalNow(deps, approvalId, claimed),
     },
-  );
+  });
 }
 
 /**
@@ -1003,21 +1092,24 @@ async function recordPosted(
   deps: PostDeps,
   approvalId: string,
   claim: { claimToken: string; claimed: ApprovalObject },
-  sentMessageId: string,
+  sentMessageId: string | undefined,
   ids: Record<string, string | string[]>,
 ): Promise<{ late: string | undefined; unrecorded: string[]; approval: ApprovalObject }> {
   const unrecorded: string[] = [];
   // `used` only once it is written; until then — and for good, if it cannot be — the record as it stands.
   let approval: ApprovalObject | null = null;
-  try {
-    approval = await deps.approvals.approvalOf(
-      await deps.approvals.complete(approvalId, claim.claimToken, { sentMessageId }),
-    );
-  } catch (error) {
-    unrecorded.push(`the approval could not be marked used (${messageOf(error)}), so it will read as unknown`);
+  // No id, no completion: `used` is never written without one, and the record stays `sending` (design §D8).
+  if (sentMessageId !== undefined) {
+    try {
+      approval = await deps.approvals.approvalOf(
+        await deps.approvals.complete(approvalId, claim.claimToken, { sentMessageId }),
+      );
+    } catch (error) {
+      unrecorded.push(`the approval could not be marked used (${messageOf(error)}), so it will read as unknown`);
+    }
   }
   const late = deps.signal?.aborted ? POSTED_ANYWAY : undefined;
-  const reason = noteOf([late, ...unrecorded]);
+  const reason = noteOf([sentMessageId === undefined ? ACCEPTED_WITHOUT_ID : undefined, late, ...unrecorded]);
   try {
     await deps.audit?.append({
       inboxId: deps.accountId,
@@ -1063,6 +1155,23 @@ function perhapsDiscarded(possible: readonly { name: string }[]): string {
   if (possible.length === 0) return '';
   const names = possible.map((file) => truncateDisplay(file.name, 60)).join(', ');
   return `${names} may have been uploaded before the failure; nothing shared it, so if Slack has it, Slack discards it.`;
+}
+
+/**
+ * A file post whose lease ran out after it had started: another call found it `unknown`, so no further step started —
+ * and the files, never shared, are in no channel. Nothing was posted; what went up is named, as any failure before the
+ * share names it. Never mid-upload: the fence is asked between steps, so no file is in flight when it stops.
+ */
+function leaseRanOut(uploaded: readonly { id: string; name: string }[]): CommsError {
+  return new CommsError('APPROVAL_VOID', 'nothing was posted: the sending lease ran out before the files were shared', {
+    hint: [
+      discarded(uploaded),
+      'No step started once its lease had run out, and nothing was shared. Prepare the draft again and show the new preview to the user.',
+    ]
+      .filter(Boolean)
+      .join(' '),
+    details: { reason: 'lease-lost', stage: 'upload', uploaded: [...uploaded] },
+  });
 }
 
 /** The refusal for a file that is not the one approved: nothing more is sent, and the approval is spent. */
@@ -1145,9 +1254,12 @@ async function messageTsOf(
  *    to that URL. Never bytes kept from an earlier reading: what is hashed is what is sent.
  * 3. Then one call names the channel, the thread and the words, and makes every file visible as one post.
  *
+ * Each of those requests — every upload URL, every upload, the share — starts only after a fence says this claim still
+ * holds the send (design 2026-10-05 §D1), and one lease, renewed while they run, covers them all.
+ *
  * A failure before the last step posts nothing, and says which files had been uploaded — Slack discards a file that
- * is never shared. A refusal at it is a failed post; an answer lost at it may be a post, and is recorded as not known
- * (`recordMaybePosted`). Afterwards, a few looks at `files.info` for the message's ts.
+ * is never shared. So does a refusal at it, and a lease that ran out between steps; an answer lost at it may be a post,
+ * and is `SEND_OUTCOME_UNKNOWN` (`recordMaybePosted`). Afterwards, a few looks at `files.info` for the message's ts.
  *
  * A cancelled call stops an upload on its way and is asked once more before the last step: either way nothing is
  * shared, and the approval is recorded as failed. The last step itself is the request that posts, and is never
@@ -1178,6 +1290,27 @@ async function postFiles(
   const refile = refileCommand(deps.workspaceName, draftId, deps.handoffs);
   // Widened, not narrowed to its first value: it moves on inside the permit's callback, which no narrowing follows.
   let stage = 'check' as 'check' | 'upload' | 'complete';
+  /*
+   * The fence before each step (design 2026-10-05 §D1): an upload URL, each upload, the share. One lease covers them
+   * all — renewed while they run, however long an upload takes — and a step starts only while this claim still holds
+   * it. Stopped before the first, nothing was asked of Slack, and that is recorded here (`stoppedFirst`), not again
+   * below; stopped after, the failure below says what had gone up. Each step counts as started once its fence said go.
+   */
+  let stepsStarted = 0;
+  let stoppedFirst: CommsError | undefined;
+  const fence = async (): Promise<void> => {
+    if (stepsStarted === 0) {
+      try {
+        await fenceFirstStep(deps, approvalId, claim, 'slack.post', { channel: payload.channel });
+      } catch (error) {
+        stoppedFirst = error as CommsError;
+        throw error;
+      }
+    } else {
+      const verdict = await fenceOrStop(deps.approvals, approvalId, claim.claimToken, { stepsStarted });
+      if (!verdict.proceed) throw leaseRanOut(uploaded);
+    }
+  };
   try {
     await spendOn(deps.permit, approvalId, PUBLISH_FILES, async () => {
       for (const file of files) {
@@ -1186,17 +1319,24 @@ async function postFiles(
       }
       stage = 'upload';
       for (const file of files) {
+        await fence();
+        stepsStarted += 1;
         const place = await callSlack(call, 'files.getUploadURLExternal', { filename: file.name, length: file.size });
-        if (typeof place.upload_url !== 'string' || typeof place.file_id !== 'string') {
-          throw new CommsError('PROVIDER_UNAVAILABLE', 'Slack’s answer held no upload URL for the file', {
+        // An empty URL or id is none: a file Slack named `''` could be shared, and recorded, by nothing.
+        const url = providerId(place.upload_url);
+        const fileId = providerId(place.file_id);
+        if (url === undefined || fileId === undefined) {
+          throw new CommsError('PROVIDER_UNAVAILABLE', 'Slack’s answer held no upload URL or file id for the file', {
             hint: 'Try again shortly.',
           });
         }
         const read = await rereadFile(file, policy);
         if (!read.ok) throw notApproved(file, read.why, uploaded, refile);
-        inFlight = { id: place.file_id, name: file.name };
+        await fence();
+        stepsStarted += 1;
+        inFlight = { id: fileId, name: file.name };
         try {
-          await slackFileUpload(transfer, { url: place.upload_url, bytes: read.bytes });
+          await slackFileUpload(transfer, { url, bytes: read.bytes });
         } catch (error) {
           // A cancelled upload fails as a lost connection does; it is reported as what it was. `inFlight` is kept, so
           // the record says this file's bytes may have reached Slack — they had begun to go.
@@ -1204,11 +1344,14 @@ async function postFiles(
           throw error;
         }
         inFlight = undefined;
-        uploaded.push({ id: place.file_id, name: file.name });
-        posted.push({ id: place.file_id, name: file.name, size: file.size, sha256: file.sha256 });
+        uploaded.push({ id: fileId, name: file.name });
+        posted.push({ id: fileId, name: file.name, size: file.size, sha256: file.sha256 });
       }
       // Every file is up and none is shared: the last moment a cancellation keeps the post from happening.
       if (deps.signal?.aborted) throw cancelledPost(SPENT_BY_CANCEL);
+      // Before the stage moves on: a lease run out here shared nothing, and is no post that may have happened.
+      await fence();
+      stepsStarted += 1;
       stage = 'complete';
       await callSlack(call, PUBLISH_FILES, {
         files: JSON.stringify(posted.map((file) => ({ id: file.id, title: file.name }))),
@@ -1219,6 +1362,8 @@ async function postFiles(
       });
     });
   } catch (error) {
+    // Stopped before the first step: recorded and audited already, and nothing had been asked of Slack.
+    if (error === stoppedFirst) throw error;
     const possiblyUploaded = inFlight === undefined ? [] : [inFlight];
     // Which files went up, and which may have: by id and name, never by what is in them.
     const ids = {
@@ -1245,14 +1390,18 @@ async function postFiles(
   }
 
   // Posted. Nothing from here records the approval as failed, or throws: see `recordPosted`.
-  const first = posted[0]?.id ?? '';
-  const { ts, note: unshared } = await messageTsOf(deps.call, first, payload.channel);
+  const first = posted[0]?.id;
+  // Read back only by an id Slack gave: every posted file has one (above), and there is always a first.
+  const { ts, note: unshared } =
+    first === undefined
+      ? { ts: null, note: 'Slack did not say which message holds them' }
+      : await messageTsOf(deps.call, first, payload.channel);
   // The looks above are not cut short by a cancellation: the post has happened, and its ts is part of the record.
   const { late, unrecorded, approval } = await recordPosted(
     deps,
     approvalId,
     claim,
-    ts ?? posted.map((file) => file.id).join(','),
+    ts ?? providerId(posted.map((file) => file.id).join(',')),
     // What was posted, by what it is: ids, names, sizes and hashes. Never a byte of it.
     {
       channel: payload.channel,
@@ -1277,9 +1426,10 @@ async function postFiles(
 /**
  * A file post's failure, in words that say what did and did not happen.
  *
- * A refusal of a changed file is already worded for itself. Anything else before the files were shared posts nothing,
- * and names the files that had gone up, and the one that may have — its bytes sent, its answer failed; a refusal at
- * the call that shares them is a failed post (one that may have posted never comes here: see `recordMaybePosted`). A
+ * A refusal of a changed file, and a lease that ran out between steps, are already worded for themselves. Anything else
+ * before the files were shared posts nothing, and names the files that had gone up, and the one that may have — its
+ * bytes sent, its answer failed. So does a refusal at the call that shares them (design 2026-10-05 §D2): Slack refused
+ * it before acting, so nothing was posted; one that may have posted never comes here (`recordMaybePosted`). A
  * cancellation keeps its own words, which already say nothing was posted.
  */
 function reportFailure(
@@ -1299,14 +1449,7 @@ function reportFailure(
       details: { ...error.details, stage, ...which },
     });
   }
-  if (stage === 'complete') {
-    return new CommsError(error.code, `the post failed: ${error.message}`, {
-      hint: [error.hint, 'The files were uploaded; if Slack did not share them, it discards them.']
-        .filter(Boolean)
-        .join(' '),
-      details: { ...error.details, stage, ...which },
-    });
-  }
+  // At the share too: Slack refused it before acting (anything else is `recordMaybePosted`'s), so nothing is posted.
   return new CommsError(error.code, `nothing was posted: ${error.message}`, {
     hint: [discarded(uploaded), perhapsDiscarded(possiblyUploaded), error.hint].filter(Boolean).join(' '),
     details: { ...error.details, stage, ...which },
@@ -1447,8 +1590,17 @@ function reactionOperation(options: ReactionOptions): 'slack.reaction.add' | 'sl
   return options.remove ? 'slack.reaction.remove' : 'slack.reaction.add';
 }
 
+/** What a reaction is audited by: the message, and the emoji. An empty value is none, and is left out — never `''`. */
 function reactionIds(options: ReactionOptions): Record<string, string> {
-  return { channel: options.channel, ts: options.ts, emoji: options.name };
+  const ids: Record<string, string> = {};
+  for (const [key, value] of [
+    ['channel', options.channel],
+    ['ts', options.ts],
+    ['emoji', options.name],
+  ] as const) {
+    if (value !== '') ids[key] = value;
+  }
+  return ids;
 }
 
 /** Keeps Slack's refusal as the error, adding only what failed while this tried to record it. */
@@ -1498,7 +1650,10 @@ async function recordReactionRefused(
   return settledWith(refusalWithBookkeeping(error, unrecorded), settled) as CommsError;
 }
 
-/** Records a reaction request whose answer does not say whether Slack acted, and returns what to throw. */
+/**
+ * Records a reaction request whose answer does not say whether Slack acted, and returns what to throw: as a post's
+ * (`recordMaybePosted`), `SEND_OUTCOME_UNKNOWN`, with the approval left `sending`.
+ */
 async function recordReactionUnknown(
   deps: PostDeps,
   approvalId: string,
@@ -1523,20 +1678,17 @@ async function recordReactionUnknown(
     unaudited = ` The audit log could not record this either (${messageOf(failure)}).`;
   }
   const act = options.remove ? 'removed' : 'added';
-  return new CommsError(
-    error instanceof CommsError ? error.code : 'TRANSIENT',
-    `whether the reaction was ${act} is not known: ${said}`,
-    {
-      hint: `Look at the message before anything else: Slack may have ${act} the reaction. Try again only if its state is not what the person asked for — this approval is not used again.${unaudited}`,
-      details: {
-        ...(error instanceof CommsError ? error.details : {}),
-        approvalId,
-        outcome: 'unknown',
-        // Still `sending`: nothing is recorded of a reaction whose outcome is not known.
-        approval: await approvalNow(deps, approvalId, claimed),
-      },
+  return new CommsError('SEND_OUTCOME_UNKNOWN', `whether the reaction was ${act} is not known: ${said}`, {
+    cause: error,
+    hint: `Look at the message before anything else: Slack may have ${act} the reaction. Try again only if its state is not what the person asked for — this approval is not used again.${unaudited}`,
+    details: {
+      ...(error instanceof CommsError ? error.details : {}),
+      approvalId,
+      outcome: 'unknown',
+      // Still `sending`: nothing is recorded of a reaction whose outcome is not known.
+      approval: await approvalNow(deps, approvalId, claimed),
     },
-  );
+  });
 }
 
 /** Records a reaction whose requested state is known to hold, without letting bookkeeping rewrite that success. */
@@ -1549,14 +1701,19 @@ async function recordReactionChanged(
 ): Promise<ReactionResult> {
   const unrecorded: string[] = [];
   let approval: ApprovalObject | null = null;
-  try {
-    approval = await deps.approvals.approvalOf(
-      await deps.approvals.complete(approvalId, claim.claimToken, { sentMessageId: options.ts }),
-    );
-  } catch (error) {
-    unrecorded.push(`the approval could not be marked used (${messageOf(error)}), so it will read as unknown`);
+  // What a reaction is recorded by is the message it is on. With none, it is never `used` by an empty id (§D8).
+  const sentMessageId = providerId(options.ts);
+  if (sentMessageId !== undefined) {
+    try {
+      approval = await deps.approvals.approvalOf(
+        await deps.approvals.complete(approvalId, claim.claimToken, { sentMessageId }),
+      );
+    } catch (error) {
+      unrecorded.push(`the approval could not be marked used (${messageOf(error)}), so it will read as unknown`);
+    }
   }
-  const reason = noteOf([known, ...unrecorded]);
+  const unidentified = sentMessageId === undefined;
+  const reason = noteOf([unidentified ? ACCEPTED_WITHOUT_ID : undefined, known, ...unrecorded]);
   try {
     await deps.audit?.append({
       inboxId: deps.accountId,
@@ -1571,7 +1728,7 @@ async function recordReactionChanged(
   } catch (error) {
     unrecorded.push(`the audit log could not record it (${messageOf(error)})`);
   }
-  const note = noteOf([known, ...unrecorded]);
+  const note = noteOf([unidentified ? NO_ID : undefined, known, ...unrecorded]);
   return {
     approvalId,
     ...(note === undefined ? {} : { note }),
@@ -1601,6 +1758,8 @@ export async function reactPrepared(
   // Claimed: the lease is renewed while Slack's answer is outstanding.
   return withSendingLease(deps.approvals, approvalId, claim.claimToken, async () => {
     const method: PostingMethod = options.remove ? 'reactions.remove' : 'reactions.add';
+    // The fence (design 2026-10-05 §D1): the reaction starts only while this claim still holds the send.
+    await fenceFirstStep(deps, approvalId, claim, reactionOperation(options), reactionIds(options));
     try {
       await spendOn(deps.permit, approvalId, method, () =>
         callSlack({ ...deps.call, permit: deps.permit }, method, {

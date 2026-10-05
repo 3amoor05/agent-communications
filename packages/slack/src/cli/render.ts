@@ -286,7 +286,12 @@ export function renderUpdatedDraft(draft: SlackDraft, workspace: string, handoff
 export function renderPosted(posted: PostedMessage | PostedFiles): string {
   const sentence = (note: string) => `${note.charAt(0).toUpperCase()}${note.slice(1)}.`;
   const after = posted.note === undefined ? '' : ` ${sentence(posted.note)}`;
-  if (!('files' in posted)) return `Posted to ${posted.channel} at ${posted.ts}.${after}`;
+  if (!('files' in posted)) {
+    // No ts from Slack: the note says so ("sent; the provider returned no id"), and no ts is made up for the line.
+    return posted.ts === undefined
+      ? `Posted to ${posted.channel}.${after}`
+      : `Posted to ${posted.channel} at ${posted.ts}.${after}`;
+  }
   const count = `${posted.files.length} file${posted.files.length === 1 ? '' : 's'}`;
   const head =
     posted.ts === null
