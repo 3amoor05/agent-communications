@@ -8,8 +8,8 @@ with `agent-resend mcp install --client claude-code`.
 
 **Every call that acts on an account takes `account`.** There is no default account. **Nothing is sent without
 a person's approval of that exact email**: `resend_send_prepare` returns a preview, and `resend_send_execute`
-sends it once — after a yes in the conversation under `chat`, after `agent-resend approve` at the person’s own
-terminal under `confirm`, and always at a terminal above ten recipients. A send whose outcome is unknown is
+sends it once — after a yes in the conversation under `chat`, after the approve command the result gives, at
+the person’s own terminal, under `confirm`, and always at a terminal above ten recipients. A send whose outcome is unknown is
 checked with `resend_send_status`, never repeated. **Read-only is agent-resend’s rule, not the key’s**: Resend
 has no read-only key. No tool adds a key, and no tool approves.
 

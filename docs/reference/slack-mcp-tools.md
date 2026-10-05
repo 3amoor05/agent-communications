@@ -9,10 +9,10 @@ with `agent-slack mcp install --client claude-code`.
 **Every call that acts on a workspace takes `workspace`.** There is no default workspace. **Nothing posts without
 a person's approval of that exact content**: `slack_post_prepare` returns a preview, and `slack_post_send` and the
 reaction tools claim it through the gate `agent-slack post send` uses — a yes in the conversation under `chat`,
-`agent-slack approve` at the person’s own terminal under `confirm`. **Nothing loosens a workspace without a
+the approve command the result gives, at the person’s own terminal, under `confirm`. **Nothing loosens a workspace without a
 person's approval of that exact change**: a tool that would connect or move one to `send`, loosen a policy, or
 remove one returns a preview and an approval id first, and applies the change when called again with that id —
-after a yes under the `chat` change policy, after `agentcomms approve` at the person’s terminal under `confirm`.
+after a yes under the `chat` change policy, after the approve command the result gives under `confirm`.
 Tightening applies at once. No tool approves.
 
 ## Tools

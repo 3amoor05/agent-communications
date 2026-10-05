@@ -10,7 +10,7 @@ the one registration that cannot come from chat. Every tool runs the operation i
 **Every change is shown to a person first.** A changing tool’s first call returns `approvalRequired`, a
 `preview` and an `approvalId`; the same tool called again with the same arguments and that id applies it —
 after the person’s yes in the conversation under the `chat` change policy, or after they run
-`agentcomms approve <approvalId>` at their own terminal under `confirm`. No tool approves a change, and none
+the approve command the result gives, at their own terminal, under `confirm`. No tool approves a change, and none
 applies a change it did not plan itself.
 
 ## Tools
