@@ -528,12 +528,16 @@ test('the command at a person’s own terminal answers under confirm too: the an
   assert.deepEqual(await listing(cwd), ['invoice.pdf']);
 });
 
-/** A client that raises forms, under a name of its own, answering each form as `answer` says — or declining it. */
+/**
+ * A client that raises forms, under a name of its own, answering each form as `answer` says — or, given nothing to
+ * answer with, declining it (or cancelling it, as `refuse` says).
+ */
 async function formClient(
   harness: Harness,
   cwd: string,
   name: string,
   answer: (message: string, schema: unknown) => Record<string, unknown> | null,
+  refuse: 'decline' | 'cancel' = 'decline',
 ) {
   const built = await createGmailMcpServer({ core: harness.core, env: harness.env, cwd });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -544,7 +548,7 @@ async function formClient(
     asked.push(params.message);
     const content = answer(params.message, params.requestedSchema);
     return content === null
-      ? { action: 'decline' as const }
+      ? { action: refuse }
       : { action: 'accept' as const, content: content as Record<string, string> };
   });
   await Promise.all([built.server.connect(serverTransport), client.connect(clientTransport)]);
@@ -629,7 +633,7 @@ test('under confirm, an answer to a form nobody raised is refused, even from a t
   }
 });
 
-test('under confirm, a declined form saves nothing; a client not trusted with forms is sent to the terminal', async () => {
+test('under confirm, a declined form saves nothing and voids the question; a client not trusted with forms is sent to the terminal', async () => {
   const { harness, downloads, cwd } = await mailbox();
   await confirmPolicy(harness);
   await trustForms(harness, 'form-client');
@@ -637,8 +641,12 @@ test('under confirm, a declined form saves nothing; a client not trusted with fo
   try {
     const asked = wire(await declining.call({ inbox: 'work', messageIds: ['m1'] }));
     const refused = toolError(await declining.call({ inbox: 'work', messageIds: ['m1'], choiceId: asked.choiceId }));
-    assert.equal(refused.code, 'APPROVAL_REQUIRED');
-    assert.match(refused.message, /nothing was saved: the question was declined/);
+    // A decline is the person's no, stored as one (D2-f).
+    assert.equal(refused.code, 'APPROVAL_VOID');
+    assert.equal(refused.message, 'nothing was saved: the question was declined');
+    const record = asV2(await harness.core.approvals.get(String(asked.choiceId)));
+    assert.equal(record?.state, 'revoked');
+    assert.equal(record?.reason, 'declined');
   } finally {
     await declining.close();
   }
@@ -663,6 +671,38 @@ test('under confirm, a declined form saves nothing; a client not trusted with fo
   }
   assert.deepEqual(await listing(downloads), []);
   assert.deepEqual(await listing(cwd), []);
+});
+
+test('under confirm, a cancelled form decides nothing: the question waits, and the person can still answer it (D2-f)', async () => {
+  const { harness, downloads, cwd } = await mailbox();
+  await confirmPolicy(harness);
+  await trustForms(harness, 'form-client');
+  const cancelling = await formClient(harness, cwd, 'form-client', () => null, 'cancel');
+  let choiceId = '';
+  try {
+    const asked = wire(await cancelling.call({ inbox: 'work', messageIds: ['m1'] }));
+    choiceId = String(asked.choiceId);
+    const waiting = toolError(await cancelling.call({ inbox: 'work', messageIds: ['m1'], choiceId }));
+    assert.equal(waiting.code, 'APPROVAL_PENDING');
+    assert.equal(waiting.message, 'nothing was saved: the form was cancelled, and the question is still waiting');
+    // Where to go: the person's own terminal, and the wait that learns when they have answered.
+    assert.ok(waiting.hint?.includes(gmailInline(harness.core.paths, ['approve', choiceId])), String(waiting.hint));
+    assert.match(waiting.hint ?? '', /gmail_send_wait/);
+    assertNoBareCommand(waiting.hint ?? '');
+    assert.equal(asV2(await harness.core.approvals.get(choiceId))?.state, 'pending');
+  } finally {
+    await cancelling.close();
+  }
+  // Still the person's to answer: in a form raised again, and the files are saved where they said.
+  const answering = await formClient(harness, cwd, 'form-client', () => ({ choice: 'current' }));
+  try {
+    const saved = wire(await answering.call({ inbox: 'work', messageIds: ['m1'], choiceId }));
+    assert.equal(saved.folder, cwd);
+    assert.deepEqual(await listing(cwd), ['invoice.pdf']);
+  } finally {
+    await answering.close();
+  }
+  assert.deepEqual(await listing(downloads), []);
 });
 
 /** A folder programs load from on their own: `~/Library`'s on macOS and Linux, AppData on Windows, whose list has no

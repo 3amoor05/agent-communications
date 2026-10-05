@@ -237,6 +237,16 @@ test('under confirm, no argument an agent can pass will send: only a typed appro
   const prepared = await prepareSend(context, 'work', draftId);
   assert.equal(prepared.effectivePolicy, 'confirm');
   assert.match(prepared.nextStep, /cannot approve this yourself/);
+  // The person's command, and at the command line the wait that learns when they have used it (§D5).
+  assert.ok(
+    prepared.nextStep.includes(gmailInline(context.core.paths, ['approve', prepared.approvalId], context.platform)),
+  );
+  assert.ok(
+    prepared.nextStep.includes(
+      gmailInline(context.core.paths, ['send', 'wait', prepared.approvalId], context.platform),
+    ),
+    prepared.nextStep,
+  );
 
   await assert.rejects(
     executeSend(context, 'work', { draftId, approvalId: prepared.approvalId, expect: prepared.expect }),

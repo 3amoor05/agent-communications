@@ -1449,11 +1449,12 @@ update first, or put it off (the stop names both commands) · 64 usage · 65 bad
       }),
     );
 
-  // Which clients may put an approval form in front of a person. Empty by default and fail-closed: `clientInfo.name`
-  // is self-reported, so a name gets here only after a probe a human answered, and only from a terminal.
+  // The clients the person chose to trust with approval forms. Empty by default and fail-closed: `clientInfo.name` is
+  // self-reported, and no MCP mechanism proves a person answered a form, so a name gets here only by the person's
+  // decision, after a probe whose code came back.
   const confirmClients = program
     .command('confirm-clients')
-    .description('MCP clients whose approval forms are trusted to reach you');
+    .description('MCP clients you chose to trust with approval forms');
 
   confirmClients
     .command('list')

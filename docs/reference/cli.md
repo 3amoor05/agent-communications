@@ -48,7 +48,7 @@ Scripts should read these rather than parse output.
 | [`draft`](#agent-gmail-draft) | write messages into Drafts — never sent from here |
 | [`send`](#agent-gmail-send) | send a draft that has been prepared and approved — never anything else |
 | [`approve`](#agent-gmail-approve) | approve a send or a change at this terminal: read it, then type the code back — or answer where a download is saved |
-| [`confirm-clients`](#agent-gmail-confirm-clients) | MCP clients whose approval forms are trusted to reach you |
+| [`confirm-clients`](#agent-gmail-confirm-clients) | MCP clients you chose to trust with approval forms |
 | [`organise\|organize`](#agent-gmail-organise) | label, archive, star and mark read — every change reversible, and previewable with --dry-run |
 | [`organise-undo\|organize-undo`](#agent-gmail-organise-undo) | put an organising change back, from the `undo` a --json organise returned |
 | [`trash`](#agent-gmail-trash) | move mail to the bin, or take it out again — nothing is ever deleted outright |
@@ -569,7 +569,7 @@ agent-gmail approve [options] <approvalId>
 
 ### `agent-gmail confirm-clients`
 
-MCP clients whose approval forms are trusted to reach you
+MCP clients you chose to trust with approval forms
 
 ```
 agent-gmail confirm-clients [options] [command]

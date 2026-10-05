@@ -62,8 +62,8 @@ export interface CliRun {
 
 /**
  * Runs the CLI in-process. With `answer`, a person at the terminal answers the first question it asks: `yes` under
- * the `chat` change policy, and the code the approval store issued under `confirm` — read back off the prompt, since
- * it is invented per run.
+ * the `chat` change policy, and the code the approval store issued under `confirm` — or for a send — read back off the
+ * prompt, since it is invented per run.
  *
  * With `replies`, each reply is typed once its prompt has appeared, in order. A plain prompt reads whatever is waiting
  * on standard input, so answers written up front are all swallowed by the first question.
@@ -112,7 +112,7 @@ export async function cli(
       input.write(`${reply}\n`);
     }
     if (options.answer && !answered) {
-      const asked = /Type (\S+) to (?:apply this change|approve this change|confirm)/.exec(stderr);
+      const asked = /Type (\S+) to (?:apply this change|approve this change|confirm|send this)/.exec(stderr);
       if (asked) {
         answered = true;
         input.write(`${asked[1]}\n`);

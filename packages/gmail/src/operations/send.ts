@@ -527,16 +527,34 @@ export async function prepareSend(context: GmailContext, alias: string, draftId:
     // Not in the approval's digest: the draft is. The command is this process's own, located where it is printed.
     nextStep:
       effectivePolicy === 'confirm'
-        ? handoffSentence(
-            context.handoffs.own(['approve', record.approvalId]),
-            (command) =>
-              `Show the preview to the user, then have them run ${command} in a terminal, or send it from Gmail. You cannot approve this yourself.`,
-            { instead: 'Show the preview to the user; they can send it from Gmail. You cannot approve this yourself.' },
-          )
+        ? confirmNextStep(context, record.approvalId)
         : 'Show the preview to the user verbatim and wait for an explicit yes. Then send it with the same approval id and the recipients and subject shown above.',
     approval: await context.core.approvals.approvalOf(record),
     ...(legacyDrain === undefined ? {} : { legacyDrain }),
   };
+}
+
+/**
+ * What follows a prepare that waits for a person outside the chat (design 2026-10-05 §D5): their terminal command, and
+ * the wait that learns when they have used it — `gmail_send_wait` over MCP, `send wait` at the command line — so the
+ * agent never asks the person to relay it, and never prepares again.
+ */
+function confirmNextStep(context: GmailContext, approvalId: string): string {
+  const instead = 'Show the preview to the user; they can send it from Gmail. You cannot approve this yourself.';
+  return handoffSentence(
+    context.handoffs.own(['approve', approvalId]),
+    (approve) => {
+      const first = `Show the preview to the user, then have them run ${approve} in a terminal`;
+      const last = 'or they can send it from Gmail. You cannot approve this yourself.';
+      if (context.surface === 'mcp') return `${first}; learn when they have with gmail_send_wait — ${last}`;
+      return handoffSentence(
+        context.handoffs.own(['send', 'wait', approvalId]),
+        (wait) => `${first}; learn when they have with ${wait} — ${last}`,
+        { instead: `${first} — ${last}` },
+      );
+    },
+    { instead },
+  );
 }
 
 export interface ApprovalPrompt {
