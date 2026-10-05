@@ -1,21 +1,24 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, realpathSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
   channelManifest,
+  cliHandoffs,
   handoffSentence,
   handoffSentenceToFill,
   isCommand,
   knownClientConfigs,
   openCore,
+  type RegisteredServer,
   sendApprovesHint,
 } from '@agentcomms/core';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { createWhatsAppMcpServer } from '../src/mcp/server.ts';
+import { MIN_NODE } from '../src/sqlite.ts';
 import { VERSION } from '../src/version.ts';
 import { ALICE } from './support/fixture.ts';
 import {
@@ -26,6 +29,7 @@ import {
   OWN_SOURCE_CLI,
   ownInline,
   ownText,
+  pathsOf,
   whatsappHandoffs,
 } from './support/handoffs.ts';
 import { newHarness, tempDir } from './support/harness.ts';
@@ -421,4 +425,74 @@ test('a correction found from a Windows registration in another case names the l
   assert.ok(said().includes(sendApprovesHint(registered, record.approvalId)), said());
   assert.doesNotMatch(said(), /Agent-Gmail\.CMD/i);
   assertNoBareCommand(said());
+});
+
+// ── A Node core runs on and WhatsApp does not ───────────────────────────────────────────────────────────────────────
+
+test('the range the locator checks for WhatsApp is the floor WhatsApp refuses below: its manifest’s engines', () => {
+  const manifest = JSON.parse(readFileSync(join(PACKAGE, 'package.json'), 'utf8')) as { engines: { node: string } };
+  assert.equal(manifest.engines.node, `>=${MIN_NODE}`);
+  const core = JSON.parse(readFileSync(join(PACKAGE, '..', 'core', 'package.json'), 'utf8')) as {
+    engines: { node: string };
+  };
+  assert.notEqual(core.engines.node, manifest.engines.node, 'core runs on Nodes WhatsApp does not: the case below');
+});
+
+test('on a Node core supports and WhatsApp does not, WhatsApp’s own commands are the locator’s Node-range failure', async () => {
+  const harness = await newHarness({ store: false });
+  for (const version of ['v22.12.0', 'v22.15.1']) {
+    const handoffs = whatsappHandoffs(harness.env, 'darwin', { version, execArgv: [] });
+    const own = handoffs.own(['sync', '--account', ACCOUNT]);
+    assert.ok(!isCommand(own), `no command to run WhatsApp with on ${version}`);
+    assert.equal(own.reason, 'engine');
+    assert.equal(own.nodeRange, `>=${MIN_NODE}`);
+    assert.equal(
+      own.message,
+      `WhatsApp ${VERSION} (@agentcomms/whatsapp) needs Node >=${MIN_NODE}, and this is Node ${version}, so there is no command to run it with here. Run it again under a Node in that range.`,
+    );
+    assert.ok(!('words' in own), 'nothing to run');
+    // Core's own command still runs there: its range is wider.
+    assert.ok(isCommand(handoffs.core(['update'])), `core runs on ${version}`);
+  }
+  assert.ok(
+    isCommand(whatsappHandoffs(harness.env, 'darwin', { version: `v${MIN_NODE}`, execArgv: [] }).own(['status'])),
+  );
+});
+
+test('a core process on such a Node, finding this WhatsApp registered, gets the Node-range failure and no command (0a)', async () => {
+  const harness = await newHarness({ store: false });
+  // Core as a caller: a module of the core this package installs, as core's own CLI or server is.
+  const coreCaller = { url: import.meta.resolve('@agentcomms/core'), packageName: '@agentcomms/core' };
+  // This checkout's WhatsApp, registered from source with an interpreter that is never run.
+  const server: RegisteredServer = {
+    client: 'claude-code',
+    path: join(harness.home, '.claude.json'),
+    name: 'whatsapp',
+    command: join(tempDir(), 'node-24', 'bin', 'node'),
+    args: [OWN_SOURCE_CLI, 'mcp'],
+  } as RegisteredServer;
+  const paths = pathsOf(harness.env);
+  for (const version of ['v22.12.0', 'v22.15.1']) {
+    const found = cliHandoffs({ caller: coreCaller, paths, platform: 'darwin', runtime: { version, execArgv: [] } })
+      .withRegistrations([server])
+      .of('whatsapp', ['sync', '--account', ACCOUNT]);
+    assert.ok(!isCommand(found), `no command on ${version}`);
+    assert.equal(found.reason, 'engine');
+    assert.equal(found.nodeRange, `>=${MIN_NODE}`);
+    assert.match(
+      found.message,
+      new RegExp(`needs Node >=${MIN_NODE.replace(/\./g, '\\.')}, and this is Node ${version}`),
+    );
+    assert.ok(!('words' in found), 'nothing a person could paste and see WhatsApp refuse');
+  }
+  const runs = cliHandoffs({
+    caller: coreCaller,
+    paths,
+    platform: 'darwin',
+    runtime: { version: `v${MIN_NODE}`, execArgv: [] },
+  })
+    .withRegistrations([server])
+    .of('whatsapp', ['sync', '--account', ACCOUNT]);
+  assert.ok(isCommand(runs), 'message' in runs ? runs.message : '');
+  assertLocatedHere(runs.words, harness.env, ['sync', '--account', ACCOUNT]);
 });

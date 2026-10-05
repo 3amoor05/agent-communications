@@ -1,7 +1,7 @@
 // Runs inside a fresh project that installed the packed tarball (scripts/verify-package.mjs).
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { composeDraft, createWhatsAppMcpServer, PACKAGE_NAME, VERSION } from '@agentcomms/whatsapp';
 
@@ -66,6 +66,15 @@ assert.equal(status.ok, true);
 assert.deepEqual(status.data.accounts, []);
 assert.match(status.data.reads, /no network client/);
 assert.match(status.data.sends, /^never/);
+// What it says to run first is this installation's own add — the bin this consumer installed, under the Node that ran
+// it — never a bare `agent-whatsapp`, which nothing put on PATH (CUE-403). On a Windows Node whose path needs quotes it
+// is the words as JSON, to type.
+const installedCli = realpathSync(join('node_modules', '@agentcomms', 'whatsapp', 'dist', 'cli.mjs'));
+assert.ok(
+  [installedCli, JSON.stringify(installedCli).slice(1, -1)].some((form) => status.data.setup.includes(form)),
+  `status names the installed CLI to run: ${status.data.setup}`,
+);
+assert.doesNotMatch(status.data.setup, /(?:^|[\s`"])agent-whatsapp(?:\.cmd)?[\s`"]/i, status.data.setup);
 
 /*
  * The server, as a client starts it: the packed bin, `mcp`, over stdio. Six tools, the read surface and the draft;
