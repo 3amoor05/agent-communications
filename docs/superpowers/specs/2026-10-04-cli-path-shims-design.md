@@ -1,6 +1,6 @@
 # CUE-403 — runnable CLI handoffs from the running installation — design
 
-Status: **proposed for 0.13.1; revised after round 10 (1 P2, 2 P3), 2026-10-05. No implementation is in
+Status: **proposed for 0.13.1; revised after round 11 (2 P2, 1 P3), 2026-10-05. No implementation is in
 this change.**
 
 ## 1. What is being fixed
@@ -59,8 +59,8 @@ word zero or quote a line.
 The interpreter rule is one rule: the running package's own CLI and channel→core use `process.execPath`; a command
 resolved from a registration uses that registration's recorded interpreter when it has one, otherwise
 `process.execPath`. Whichever interpreter is chosen must satisfy the **target** package's `engines.node` range, checked
-against that interpreter's own version (for a recorded interpreter, by running it with `--version` once and caching the
-answer for the process); lockstep packages do not share one floor — core accepts Node `>=22.12.0` while WhatsApp needs
+against that interpreter's own version (for a recorded interpreter, by running it with `--version` on **every** locator
+call — no cache, so an interpreter replaced in place is never vouched for by an old answer); lockstep packages do not share one floor — core accepts Node `>=22.12.0` while WhatsApp needs
 `>=22.16.0` and checks it before every action (`packages/core/package.json:8-10`, `packages/whatsapp/package.json:8-10`,
 `packages/whatsapp/src/cli/program.ts:200, 477`). An interpreter outside the range yields no command, with the reason naming
 the required Node range. The only retained `process.execArgv` flags are `--experimental-strip-types`, and
@@ -97,8 +97,11 @@ Resolution is directional:
    A managed registration supplies its checked runtime CLI entry; another file-backed registration supplies the
    checked package CLI entry resolved from its absolute command or entry. This includes an installer-written `local`
    registration and a separately installed global package; `global` is not an installer launcher. Both drop server-only
-   `mcp` and narrowing arguments. An npx registration supplies the registered absolute npx executable and the target
-   CLI package pinned to the same version (`@agentcomms/gmail`, not its server-only wrapper). An absent entry, unpinned
+   `mcp` and narrowing arguments. An **npx registration is never used for a cross-product command**: the pasted `npx`
+   would pick its own Node from the person's PATH, and the target's `engines.node` range is unknown when the npx cache
+   has been evicted, so neither the interpreter nor the range can be validated at print time; it is treated as not
+   locatable (below). (A process's *own* commands, printed by an npx-launched server, are unaffected: they use that
+   process's own Node and its own package entry.) An absent entry, unpinned
    spec, unreadable command, unrecognised launcher or version mismatch is never used. When no same-version registration
    resolves, the result contains **no
    command**. It names the product and the printing package's exact version and says that version is not locatable
@@ -161,7 +164,10 @@ between the entry/package word and the subcommand, exactly one canonical absolut
 or writes downloads, downloads. It emits none for a suite directory the target does not use. Thus caller ordering,
 duplicate or relative values, and the cwd where a registered or retry command is later run cannot override the pins.
 Gmail's raw-argv retry builder goes through this same normalization after removing approval flags
-(`packages/gmail/src/cli/program.ts:369-388`). The independent pins override conflicting variables and defaults in the
+(`packages/gmail/src/cli/program.ts:369-388`); that approval removal also stops at the first `--`, and every generated
+approval option (`gatedChangeAtTerminal` today appends it at the end — `packages/core/src/change-flow.ts:217`,
+`packages/core/src/cli-runtime.ts:131`) is inserted immediately **before** an existing `--`, never after it, so the
+retry still claims its approval and every positional word after the sentinel survives. The independent pins override conflicting variables and defaults in the
 target shell for the named suite directories; they intentionally do not reproduce or override the environment used to
 find the person's MCP clients. No environment assignment is printed on any platform.
 
@@ -416,6 +422,11 @@ authoritative data roots, and CLI-MCP parity for the preference.
 
 ## 4. Tests
 
+00. **Round-11 cases:** a core process with only an npx registration of a channel prints no cross-product command and
+    says why, with the npx cache present and evicted and with caller, registration-environment and paste-shell Node
+    versions all different; `client add -- --approval` and `-- --approval=x` keep the positional words exactly while the
+    generated retry (approval option inserted before `--`) applies the prepared change end to end; a recorded interpreter
+    replaced between two locator calls in one process is re-probed and the second call refuses a now-unsupported Node.
 0. **Round-10 cases:** a core process on Node 22.12–22.15 resolving a same-version WhatsApp registration (global and
    managed, with and without a recorded interpreter) prints no command and names Node `>=22.16.0`, while a
    satisfying recorded interpreter is used; raw retry argv containing `-- --config-dir` and `-- --config-dir=value` keeps
