@@ -65,12 +65,8 @@ export class GmailContext {
   readonly platform: NodeJS.Platform;
   readonly surface: 'cli' | 'mcp';
   readonly cwd: string;
-  /**
-   * What recipient analyses learned from Sent, shared for ten minutes across every process using this state directory
-   * (design 2026-10-05 §D4). A test replaces it with one whose writes fail.
-   */
-  historyCache: HistoryCache;
   readonly #createTransport: (request: TransportRequest) => GmailTransport;
+  #historyCache: HistoryCache | undefined;
   readonly #transports = new Map<string, GmailTransport>();
   #handoffs: CliHandoffs | undefined;
 
@@ -90,8 +86,21 @@ export class GmailContext {
     this.surface = options.surface ?? 'cli';
     this.cwd = options.cwd ?? process.cwd();
     this.flows = new FlowStore(this.core.paths.stateDir, this.now, this.surface, () => this.handoffs);
-    this.historyCache = new HistoryCache(this.core.paths.stateDir, { now: this.now });
     this.#createTransport = options.createTransport ?? defaultTransport;
+  }
+
+  /**
+   * What recipient analyses learned from Sent, shared for ten minutes across every process using this state directory
+   * (design 2026-10-05 §D4). Made on first use, so a call that studies no recipient — a wait, a list — never touches
+   * it. A test replaces it with one whose writes fail.
+   */
+  get historyCache(): HistoryCache {
+    this.#historyCache ??= new HistoryCache(this.core.paths.stateDir, { now: this.now });
+    return this.#historyCache;
+  }
+
+  set historyCache(cache: HistoryCache) {
+    this.#historyCache = cache;
   }
 
   /**
