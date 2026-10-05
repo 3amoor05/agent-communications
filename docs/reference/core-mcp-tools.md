@@ -73,7 +73,7 @@ Every approval on this machine â€” for sends, posts and configuration changes â€
 | Argument | Type | Required | What it is |
 |---|---|---|---|
 | `inbox` | string | no | only this mailbox, as `organisation/gmail` |
-| `state` | `pending` \\| `approved` \\| `sending` \\| `used` \\| `failed` \\| `unknown` \\| `expired` \\| `revoked` | no | only approvals in this state |
+| `state` | `pending` \\| `approved` \\| `sending` \\| `used` \\| `failed` \\| `unknown` \\| `expired` \\| `revoked` \\| `corrupt` | no | only approvals in this state |
 
 ### `comms_approval_revoke`
 

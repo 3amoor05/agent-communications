@@ -1,5 +1,6 @@
 import { access, constants, stat } from 'node:fs/promises';
-import { type ApprovalRecord, type ApprovalState, approvalKind, publicView } from '../approvals.ts';
+import { integrityRefusal, kindOf, type PublicApproval, publicStored } from '../approval-stored.ts';
+import type { ApprovalState } from '../approvals.ts';
 import type { AuditRecord } from '../audit.ts';
 import { revokeChange } from '../changes.ts';
 import { type Channel, channelServer } from '../channel-servers.ts';
@@ -473,7 +474,8 @@ export async function auditTail(core: Core, options: AuditTailOptions = {}): Pro
   });
 }
 
-export const APPROVAL_STATES: readonly ApprovalState[] = Object.freeze([
+/** Every state a listing can be filtered by: the stored states, and `corrupt` for a record that cannot be used. */
+export const APPROVAL_STATES: readonly (ApprovalState | 'corrupt')[] = Object.freeze([
   'pending',
   'approved',
   'sending',
@@ -482,14 +484,20 @@ export const APPROVAL_STATES: readonly ApprovalState[] = Object.freeze([
   'unknown',
   'expired',
   'revoked',
+  'corrupt',
 ]);
 
-export type ApprovalView = Omit<ApprovalRecord, 'challengeHash'>;
-
+/**
+ * Every approval on this machine, in its public shape (`publicStored`): a version-2 record, a record an earlier release
+ * prepared, a corrupt record shown to its owner, or the stub of one that cannot be read — none of them skipped.
+ *
+ * `inbox` keeps the records owned by that mailbox (`ownerOf`), so a record whose owner cannot be trusted never matches
+ * it; `state` keeps those in that state (`stateOf`).
+ */
 export async function listApprovals(
   core: Core,
   options: { inbox?: string | undefined; state?: string | undefined } = {},
-): Promise<ApprovalView[]> {
+): Promise<PublicApproval[]> {
   // A state that does not exist matched nothing, and read as "no approvals" — the one answer that is never a
   // reason to look again.
   if (options.state !== undefined && !(APPROVAL_STATES as readonly string[]).includes(options.state)) {
@@ -500,23 +508,27 @@ export async function listApprovals(
   const inboxId = inboxIdFor(await core.config.load(), options.inbox);
   const records = await core.approvals.list({
     ...(inboxId ? { inboxId } : {}),
-    ...(options.state ? { states: [options.state as ApprovalState] } : {}),
+    ...(options.state ? { states: [options.state as ApprovalState | 'corrupt'] } : {}),
   });
-  return records.map(publicView);
+  return records.map(publicStored);
 }
 
 /**
  * Revokes an approval of either kind. Refusing is never the dangerous direction, so this asks nobody.
  *
  * A change approval is revoked through `revokeChange`, which records it in the audit log as every other step of a
- * change approval is; a send approval as it always was.
+ * change approval is; a send approval as it always was. Either from an earlier release is retired in its own shape. A
+ * corrupt or unreadable record is refused, with only its stub, and nothing is written to it.
  */
-export async function revokeApproval(core: Core, approvalId: string, surface: 'cli' | 'mcp'): Promise<ApprovalView> {
+export async function revokeApproval(core: Core, approvalId: string, surface: 'cli' | 'mcp'): Promise<PublicApproval> {
   const existing = await core.approvals.get(approvalId);
+  if (existing !== null && (existing.form === 'corrupt' || existing.form === 'unreadable')) {
+    throw integrityRefusal(existing);
+  }
   const reason = 'revoked by the user';
-  const record =
-    existing && approvalKind(existing) === 'change'
+  const stored =
+    kindOf(existing) === 'change'
       ? await revokeChange(core, approvalId, reason, { surface, disposition: 'person' })
       : await core.approvals.revoke(approvalId, reason, { disposition: 'person' });
-  return publicView(record);
+  return publicStored(stored);
 }

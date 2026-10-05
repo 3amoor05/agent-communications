@@ -1,4 +1,5 @@
-import type { ApprovalRecord, ApprovalState } from '../approvals.ts';
+import { corruptStubOf, type StoredApproval, stateOf } from '../approval-stored.ts';
+import type { ApprovalState } from '../approvals.ts';
 import type { GatedChange } from '../change-flow.ts';
 import { CHANNELS, type Channel, channelLabel, channelServer, requireChannelManifest } from '../channel-servers.ts';
 import { accountNoun, pinOption } from '../channel-words.ts';
@@ -863,9 +864,13 @@ async function nothingToApply(core: Core, approvalId: string, planned: Planned):
       details: { approvalId },
     });
   }
-  const record = await core.approvals.get(approvalId);
-  const unused = `so there is nothing to apply; the approval ${approvalId} was not used (${whatBecameOf(record)})`;
-  const details = { approvalId, ...(record ? { state: record.state } : {}) };
+  const stored = await core.approvals.get(approvalId);
+  // One that cannot be read safely is said to be that — never "not used", as though anything were known of it.
+  const unused =
+    stored !== null && corruptStubOf(stored) !== null
+      ? `and the approval ${approvalId} was refused: ${whatBecameOf(stored)}`
+      : `so there is nothing to apply; the approval ${approvalId} was not used (${whatBecameOf(stored)})`;
+  const details = { approvalId, ...(stored ? { state: stateOf(stored) } : {}) };
   if (planned.nothingBehind) {
     return new CommsError('USAGE', `nothing was changed: nothing is behind the latest release, ${unused}`, {
       hint: check(
@@ -891,8 +896,16 @@ async function nothingToApply(core: Core, approvalId: string, planned: Planned):
  * send states are here too: any approval's id can be handed to an update, a send's among them, and this reads the
  * record before anything looks at its kind.
  */
-function whatBecameOf(record: ApprovalRecord | null): string {
-  if (record === null) return 'there is no approval by that id';
+function whatBecameOf(stored: StoredApproval | null): string {
+  if (stored === null) return 'there is no approval by that id';
+  // Read safely or not at all: a record that cannot be is said to be that, by its fixed reason alone.
+  const stub = corruptStubOf(stored);
+  if (stub !== null) return `it could not be read safely (${stub.reason})`;
+  if (stored.form === 'legacy') {
+    return `it was prepared by an earlier release, and is ${stored.view.state}; this release does not use it`;
+  }
+  if (stored.form !== 'v2') return 'it could not be read safely';
+  const record = stored.record;
   const states: Record<ApprovalState, string> = {
     pending: `it was still waiting to be approved, and lapses at ${record.expiresAt}`,
     approved: `it had been approved, and lapses unspent at ${record.expiresAt}`,

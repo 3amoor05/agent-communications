@@ -1,11 +1,10 @@
+import { asLegacy, asV2, integrityRefusal, kindOf, type StoredApproval } from './approval-stored.ts';
 import {
   type ApprovalRecord,
-  approvalKind,
   type ChangeBinding,
   type ChangeTarget,
   changeDigest,
   DOWNLOAD_ANSWER_HINT,
-  isCurrentDigestVersion,
   isMisdirectedSend,
   otherVersionRefusal,
   type RevokeDisposition,
@@ -320,26 +319,29 @@ async function changeRecord(
   approvalId: string,
   options: Pick<ChangeOptions, 'platform'> = {},
 ): Promise<ApprovalRecord & { change: ChangeBinding }> {
-  const record = await core.approvals.get(approvalId);
-  if (!record) {
+  const stored = await core.approvals.get(approvalId);
+  if (!stored) {
     throw new CommsError('NOT_FOUND', `no approval ${approvalId}`, {
       hint: 'Prepare the change again; an approval expires ten minutes after it is made.',
     });
   }
+  // A record that cannot be used is refused before anything of it is shown, and says only that it is corrupt.
+  if (stored.form === 'corrupt' || stored.form === 'unreadable') throw integrityRefusal(stored);
   // A download's question is answered, never approved: there is no code for a person to type, and the command that
   // answers it at a terminal is the approve of the channel the files come from.
-  if (approvalKind(record) === 'download') {
+  if (kindOf(stored) === 'download') {
     throw new CommsError('USAGE', `${approvalId} is a question about where to save files, not a configuration change`, {
       hint: DOWNLOAD_ANSWER_HINT,
     });
   }
-  if (approvalKind(record) !== 'change') {
+  if (kindOf(stored) !== 'change') {
     throw new CommsError('USAGE', `approval ${approvalId} is for a send, not a configuration change`, {
       hint: sendApprovesHint(await requireHandoffs(core, options.platform).registered(), approvalId),
     });
   }
   // One an earlier release prepared is never approved here: refused before anything of it is shown or checked.
-  if (!isCurrentDigestVersion(record)) throw otherVersionRefusal(record);
+  if (stored.form === 'legacy') throw otherVersionRefusal(stored.view);
+  const record = stored.record;
   /*
    * What is shown is rendered from the record, and only believed once it reproduces the record's own digest — so the
    * lines a person reads are the change the approval permits, not a description that happens to sit beside it.
@@ -433,8 +435,9 @@ export async function recordChangeApprovalRefused(
   error: unknown,
   options: ChangeOptions,
 ): Promise<void> {
-  const record = await core.approvals.get(approvalId).catch(() => null);
-  const change = record && approvalKind(record) === 'change' ? record.change : undefined;
+  // Only a valid version-2 change says what it was about: nothing is read from any other form.
+  const record = asV2(await core.approvals.get(approvalId).catch(() => null));
+  const change = record?.kind === 'change' ? record.change : undefined;
   await auditRefusal(core, 'change.approve', error, {
     surface: options.surface,
     approvalId,
@@ -454,18 +457,21 @@ export async function revokeChange(
   approvalId: string,
   reason: string,
   options: ChangeOptions & { disposition: RevokeDisposition },
-): Promise<ApprovalRecord> {
-  const record = await core.approvals.revoke(approvalId, reason, { disposition: options.disposition });
+): Promise<StoredApproval> {
+  // A corrupt or unreadable record is refused by the store before anything is audited, and nothing is written to it.
+  const stored = await core.approvals.revoke(approvalId, reason, { disposition: options.disposition });
+  // What it was about: from a version-2 change, or from what an earlier release stored on one.
+  const record = asV2(stored) ?? asLegacy(stored);
   await auditChange(core, {
     operation: 'change.revoke',
     outcome: 'ok',
     surface: options.surface,
     approvalId,
-    target: record.change?.target ?? null,
-    policy: changePolicyOf(record),
+    target: record?.change?.target ?? null,
+    policy: record ? changePolicyOf(record) : undefined,
     reason,
   });
-  return record;
+  return stored;
 }
 
 function changePolicyOf(record: Pick<ApprovalRecord, 'requiredPolicy'>): ChangePolicy {

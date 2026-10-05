@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
+import type { PublicApproval } from './approval-stored.ts';
 import { approveChangeAtTerminal, gatedChangeAtTerminal, refuseUnclaimedApproval } from './change-flow.ts';
 import type { PreparedChange } from './changes.ts';
 import {
@@ -164,6 +165,21 @@ Exit codes: 0 ok · 1 unexpected · 10 approval required · 11 an update is out:
 `;
 
 /** A usage error, its hint the help of this installation: `help`, located (`CliHandoffs.own(['--help'])`). */
+/**
+ * One line of `approvals list`: the id and the state (`corrupt` for a record that cannot be used), then what the record
+ * has of these — its policy, when it expires, why it is corrupt, and that an earlier release prepared it.
+ */
+function approvalLine(approval: PublicApproval): string {
+  return [
+    approval.approvalId,
+    approval.state.padEnd(8),
+    ...('policy' in approval && approval.policy !== undefined ? [approval.policy] : []),
+    ...('expiresAt' in approval ? [`expires ${approval.expiresAt}`] : []),
+    ...(approval.state === 'corrupt' ? [`(${approval.reason})`] : []),
+    ...('legacy' in approval && approval.legacy === true ? ['(prepared by an earlier release)'] : []),
+  ].join('  ');
+}
+
 function usageError(message: string, help: Handoff): CommsError {
   return new CommsError('USAGE', message, { hint: handoffSentence(help, (command) => `Run ${command}.`) });
 }
@@ -444,11 +460,7 @@ export async function main(
       case 'approvals': {
         if (sub === 'list') {
           const records = await listApprovals(core, { inbox: values.inbox, state: values.state });
-          writeResult(records, output, (rs) =>
-            rs.length
-              ? rs.map((r) => `${r.approvalId}  ${r.state.padEnd(8)}  ${r.policy}  expires ${r.expiresAt}`).join('\n')
-              : 'no approvals',
-          );
+          writeResult(records, output, (rs) => (rs.length ? rs.map(approvalLine).join('\n') : 'no approvals'));
           return;
         }
         if (sub === 'revoke') {

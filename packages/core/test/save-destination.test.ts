@@ -15,6 +15,7 @@ import {
 import { join, parse, posix, win32 } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
+import { asV2, stateOf } from '../src/approval-stored.ts';
 import { ApprovalStore, type DownloadBinding, type DownloadRequest, downloadDigest } from '../src/approvals.ts';
 import { beginChangeApproval } from '../src/changes.ts';
 import type { Streams } from '../src/cli-runtime.ts';
@@ -124,9 +125,9 @@ test('a download’s question is kept pending, bound to a digest the store compu
   assert.notEqual(downloadDigest({ ...REQUEST, names: ['invoice.pdf', 'other.exe.download'] }), record.contentDigest);
   // Longer than an approval's ten minutes: a person deciding where files go may look in a folder first.
   time.advance(10 * 60 * 1000);
-  assert.equal((await store.get(record.approvalId))?.state, 'pending');
+  assert.equal(asV2(await store.get(record.approvalId))?.state, 'pending');
   time.advance(20 * 60 * 1000);
-  assert.equal((await store.get(record.approvalId))?.state, 'expired');
+  assert.equal(asV2(await store.get(record.approvalId))?.state, 'expired');
   await assert.rejects(
     store.claimForDownload(record.approvalId, REQUEST),
     refusal(/^nothing was saved: the question expired before it was answered/, 'APPROVAL_EXPIRED'),
@@ -169,7 +170,7 @@ test('a question claimed for another account, request, set of files or names is 
       what,
     );
     // Left open, not voided: a call with the wrong arguments is the agent's slip, and the person is not asked again.
-    assert.equal((await store.get(approvalId))?.state, 'pending', what);
+    assert.equal(asV2(await store.get(approvalId))?.state, 'pending', what);
     assert.equal((await store.claimForDownload(approvalId, REQUEST)).state, 'used', what);
     // Open only while it lasts: past thirty minutes it is expired, whatever is claimed.
     const late = await store.createDownload({ channel: 'gmail', download: binding(), policy: 'chat' });
@@ -208,8 +209,8 @@ test('a question is never spent as a send or a change, nor either of those as a 
     store.claimForDownload(change.approvalId, REQUEST),
     refusal(/is a configuration change, not a question about where to save files/, 'USAGE'),
   );
-  assert.equal((await store.get(question.approvalId))?.state, 'pending');
-  assert.equal((await store.get(change.approvalId))?.state, 'pending');
+  assert.equal(asV2(await store.get(question.approvalId))?.state, 'pending');
+  assert.equal(asV2(await store.get(change.approvalId))?.state, 'pending');
 });
 
 test('a question is never approved at a terminal: `approve` says what it is, and leaves it waiting', async () => {
@@ -219,10 +220,10 @@ test('a question is never approved at a terminal: `approve` says what it is, and
     beginChangeApproval(core, question.approvalId, { surface: 'cli' }),
     refusal(/is a question about where to save files, not a configuration change/, 'USAGE'),
   );
-  assert.equal((await core.approvals.get(question.approvalId))?.state, 'pending');
+  assert.equal(asV2(await core.approvals.get(question.approvalId))?.state, 'pending');
 });
 
-test('a question whose record no longer describes what its digest binds is voided, not believed', async () => {
+test('a question whose record no longer describes what its digest binds is refused as corrupt, never believed or rewritten', async () => {
   const store = new ApprovalStore(tempDir(), { now: clock().now });
   const record = await store.createDownload({ channel: 'gmail', download: binding(), policy: 'chat' });
   const path = join(store.directory, `${record.approvalId}.json`);
@@ -230,10 +231,12 @@ test('a question whose record no longer describes what its digest binds is voide
   // The files it describes, changed where it is kept, to the ones a claim then asks for: the digest still binds the old.
   stored.download.files = ['m9/1'];
   writeFileSync(path, JSON.stringify(stored));
+  const tampered = readFileSync(path, 'utf8');
   await assert.rejects(
     store.claimForDownload(record.approvalId, { ...REQUEST, files: ['m9/1'] }),
-    refusal(/does not describe the download it is bound to/, 'APPROVAL_VOID'),
+    refusal(/is corrupt \(content-digest-mismatch\)/, 'APPROVAL_VOID'),
   );
+  assert.equal(readFileSync(path, 'utf8'), tampered, 'a corrupt record is never rewritten');
 });
 
 // ── The folders, and the answer ────────────────────────────────────────────────────────────────────────────────
@@ -375,17 +378,25 @@ test('a folder is made when missing, private, and resolved through its links; a 
 
 /** What `askWhereToSave` is asked with, beside the folders: two files, under the `chat` change policy, over MCP. */
 function asking(core: Core, env: NodeJS.ProcessEnv, overrides: Partial<Parameters<typeof askWhereToSave>[1]> = {}) {
+  // The listing names the files the question is bound to, in order — as every download's question does — so a test
+  // that lists other files asks about those.
+  const listing = overrides.listing ?? [
+    { name: 'invoice.pdf', size: 1024 },
+    { name: 'setup.exe.download', size: 1024 },
+  ];
+  const request: DownloadRequest = {
+    ...REQUEST,
+    files: listing.map((_, index) => `m1/${index + 1}`),
+    names: listing.map((file) => file.name),
+  };
   return askWhereToSave(core, {
     channel: 'gmail',
-    request: REQUEST,
+    request,
     folders: { downloads: '/srv/sam/Downloads', current: '/work/project' },
     configured: false,
     count: 2,
     bytes: 2048,
-    listing: [
-      { name: 'invoice.pdf', size: 1024 },
-      { name: 'receipt.pdf', size: 1024 },
-    ],
+    listing,
     policy: 'chat',
     surface: 'mcp',
     tool: 'gmail_attachment_download',
@@ -410,7 +421,7 @@ test('the question shows both folders by their exact paths, and names the files 
   ]);
   assert.match(question.next, /never choose for them/);
   assert.match(question.next, new RegExp(`choiceId "${question.choiceId}"`));
-  const record = await core.approvals.get(question.choiceId);
+  const record = asV2(await core.approvals.get(question.choiceId));
   assert.equal(record?.kind, 'download');
   assert.equal(record?.expect.subject, 'where to save 2 files from acme/gmail');
 });
@@ -476,7 +487,7 @@ test('a folder that is a file is refused before the question is spent on it', as
     }),
     refusal(/it is a file/, 'BAD_DATA'),
   );
-  assert.equal((await core.approvals.get(approvalId))?.state, 'pending', 'the question was spent');
+  assert.equal(asV2(await core.approvals.get(approvalId))?.state, 'pending', 'the question was spent');
 });
 
 // ── At a terminal ──────────────────────────────────────────────────────────────────────────────────────────────
@@ -513,7 +524,7 @@ function recorder(core: Core, env: NodeJS.ProcessEnv, home: string, policy: 'cha
     calls.push(answer);
     if (answer.saveTo !== undefined) return { destinationRequired: false, saved: answer.saveTo };
     if (answer.choiceId !== undefined) {
-      const record = await core.approvals.get(String(answer.choiceId));
+      const record = asV2(await core.approvals.get(String(answer.choiceId)));
       return { destinationRequired: false, recorded: record?.download?.answer, via: record?.approvedVia };
     }
     return {
@@ -599,7 +610,7 @@ test('anything else at the terminal cancels, saves nothing, and revokes the ques
   );
   assert.equal(calls.length, 1);
   const [question] = await core.approvals.list();
-  assert.equal(question?.state, 'revoked');
+  assert.equal(question && stateOf(question), 'revoked');
 });
 
 test('at the terminal, a folder no download may use is said so and asked again, never recorded', async () => {
@@ -1452,7 +1463,7 @@ test('a refused folder is refused before the question is spent, whoever gave the
       refusal(/^cannot save into /, 'BAD_DATA'),
       folder,
     );
-    assert.equal((await core.approvals.get(approvalId))?.state, 'pending', `${folder}: the question was spent`);
+    assert.equal(asV2(await core.approvals.get(approvalId))?.state, 'pending', `${folder}: the question was spent`);
   }
   // A person's own --to, with no question, is held to the same list.
   await assert.rejects(
@@ -1508,7 +1519,7 @@ test('a folder offered by default that is refused is shown as unavailable, with 
     }),
     refusal(new RegExp(ROOT_REFUSED), 'BAD_DATA'),
   );
-  assert.equal((await core.approvals.get(asked.choiceId))?.state, 'pending');
+  assert.equal(asV2(await core.approvals.get(asked.choiceId))?.state, 'pending');
 });
 
 // ── A folder that cannot be written ────────────────────────────────────────────────────────────────────────────
@@ -1563,7 +1574,7 @@ test('a folder nothing can be written in, or one that cannot be made, is refused
         settling(core, env, home, { kind: 'choice', answer: { choice: 'other', folder }, choiceId: approvalId }),
         refusal(/^cannot save into /, 'BAD_DATA'),
       );
-      assert.equal((await core.approvals.get(approvalId))?.state, 'pending', `${folder}: the question was spent`);
+      assert.equal(asV2(await core.approvals.get(approvalId))?.state, 'pending', `${folder}: the question was spent`);
     }
   } finally {
     chmodSync(locked, 0o700);
@@ -1607,7 +1618,7 @@ test('under chat, the answer relayed from the conversation claims the question',
   });
   assert.equal(settled.folder, offered.downloads);
   assert.equal(settled.answeredVia, 'chat');
-  assert.equal((await core.approvals.get(approvalId))?.state, 'used');
+  assert.equal(asV2(await core.approvals.get(approvalId))?.state, 'used');
 });
 
 test('under confirm, an answer in the arguments is refused with the terminal command, and the question left open', async () => {
@@ -1630,14 +1641,14 @@ test('under confirm, an answer in the arguments is refused with the terminal com
       thrown.hint,
     );
   }
-  assert.equal((await core.approvals.get(approvalId))?.state, 'pending');
+  assert.equal(asV2(await core.approvals.get(approvalId))?.state, 'pending');
   assert.equal(existsSync(offered.downloads), false, 'a folder was made');
   // The store refuses it on its own too, whoever calls it.
   await assert.rejects(
     core.approvals.claimForDownload(approvalId, REQUEST, { policy: 'chat' }),
     refusal(/confirm/, 'APPROVAL_PENDING'),
   );
-  assert.equal((await core.approvals.get(approvalId))?.state, 'pending');
+  assert.equal(asV2(await core.approvals.get(approvalId))?.state, 'pending');
 });
 
 test('a question asked under chat is held to confirm when the account is tightened before it is answered', async () => {
@@ -1660,7 +1671,7 @@ test('a question asked under confirm stays confirm when the account is loosened 
     settling(core, env, home, { kind: 'choice', answer: { choice: 'current' }, choiceId: approvalId }, 'chat'),
     refusal(/confirm/, 'APPROVAL_PENDING'),
   );
-  assert.equal((await core.approvals.get(approvalId))?.state, 'pending');
+  assert.equal(asV2(await core.approvals.get(approvalId))?.state, 'pending');
 });
 
 test('under confirm, the answer the person gave at their terminal or in a trusted form saves — with the id alone', async () => {
@@ -1678,7 +1689,7 @@ test('under confirm, the answer the person gave at their terminal or in a truste
       core.approvals.answerDownload(approvalId, 'terminal', { choice: 'downloads' }),
       refusal(/answered already, and it is answered once/, 'APPROVAL_VOID'),
     );
-    assert.deepEqual((await core.approvals.get(approvalId))?.download?.answer, {
+    assert.deepEqual(asV2(await core.approvals.get(approvalId))?.download?.answer, {
       choice: 'other',
       folder: join(home, `Invoices-${via}`),
     });
@@ -1687,7 +1698,7 @@ test('under confirm, the answer the person gave at their terminal or in a truste
       settling(core, env, home, { kind: 'choice', answer: { choice: 'downloads' }, choiceId: approvalId }, 'confirm'),
       refusal(/answered this question themselves/, 'USAGE'),
     );
-    assert.equal((await core.approvals.get(approvalId))?.state, 'approved');
+    assert.equal(asV2(await core.approvals.get(approvalId))?.state, 'approved');
     const settled = await settling(core, env, home, { kind: 'choice', answer: null, choiceId: approvalId }, 'confirm');
     assert.deepEqual(plain(settled), {
       folder: join(home, `Invoices-${via}`),
@@ -1710,7 +1721,7 @@ test('under chat, an id alone with no recorded answer is refused before the ques
     settling(core, env, home, { kind: 'choice', answer: null, choiceId: approvalId }),
     refusal(/`choiceId` needs the person’s answer/, 'USAGE'),
   );
-  assert.equal((await core.approvals.get(approvalId))?.state, 'pending');
+  assert.equal(asV2(await core.approvals.get(approvalId))?.state, 'pending');
 });
 
 test('`approve` at a terminal shows the question again and records the person’s answer; anything else revokes it', async () => {
@@ -1742,7 +1753,7 @@ test('`approve` at a terminal shows the question again and records the person’
     /! CLAUDE\.md will be saved as CLAUDE\.md\.download — a file tools read or run on their own; rename it yourself if you trust it/,
   );
   assert.match(term.err(), new RegExp(`That cannot be used: it is ${ROOT_REFUSED}`));
-  const record = await core.approvals.get(asked.choiceId);
+  const record = asV2(await core.approvals.get(asked.choiceId));
   assert.equal(record?.state, 'approved');
   assert.equal(record?.approvedVia, 'terminal');
   // Answered: a second `approve` is refused.
@@ -1761,14 +1772,14 @@ test('`approve` at a terminal shows the question again and records the person’
     streams: terminal(['n']).streams,
   });
   assert.deepEqual(cancelled, { state: 'revoked' });
-  assert.equal((await core.approvals.get(other.choiceId))?.state, 'revoked');
+  assert.equal(asV2(await core.approvals.get(other.choiceId))?.state, 'revoked');
 });
 
 test('under confirm the question says so, and names the command that answers it', async () => {
   const { core, env } = machine();
   const question = await asking(core, env, { policy: 'confirm' });
   assert.equal(question.policy, 'confirm');
-  assert.equal((await core.approvals.get(question.choiceId))?.requiredPolicy, 'confirm');
+  assert.equal(asV2(await core.approvals.get(question.choiceId))?.requiredPolicy, 'confirm');
   assert.ok(
     question.question.includes(
       `answer this yourself, at your own terminal — ${coreInline(core.paths, ['approve', question.choiceId])}`,

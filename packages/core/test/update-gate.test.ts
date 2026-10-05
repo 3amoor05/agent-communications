@@ -9,6 +9,7 @@ import { test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
+import { asV2 } from '../src/approval-stored.ts';
 import { ApprovalStore } from '../src/approvals.ts';
 import { type GatedChange, gatedChange } from '../src/change-flow.ts';
 import { CHANNEL_SERVERS } from '../src/channel-servers.ts';
@@ -591,7 +592,7 @@ async function spentApprovals(m: Machine): Promise<Record<'revoked' | 'used' | '
     })
   ).approvalId;
   const ids = [revoked, used, expired, send];
-  const states = await Promise.all(ids.map(async (id) => (await m.core.approvals.get(id))?.state));
+  const states = await Promise.all(ids.map(async (id) => asV2(await m.core.approvals.get(id))?.state));
   assert.deepEqual(states, ['revoked', 'used', 'expired', 'pending']);
   return { revoked, used, expired, 'a send': send };
 }
@@ -619,12 +620,16 @@ test("a used, revoked or expired approval claims nothing, nor a send's for a cha
     assert.equal(codeOf(borrowed), 'USAGE', JSON.stringify(borrowed.structuredContent));
     assert.match(textOf(borrowed), /needs no approval/);
     assert.equal((await m.core.config.load()).defaults.changePolicy, undefined, 'the tightening was applied');
-    assert.equal((await m.core.approvals.get(later.approvalId))?.state, 'pending', 'the person can still say not now');
+    assert.equal(
+      asV2(await m.core.approvals.get(later.approvalId))?.state,
+      'pending',
+      'the person can still say not now',
+    );
 
     // Revoking takes either kind: a person's no to a send reaches it past the stop.
     const revoke = await call('comms_approval_revoke', { approvalId: spent['a send'] });
     assert.ok(!stopped(revoke), JSON.stringify(revoke.structuredContent));
-    assert.equal((await m.core.approvals.get(spent['a send']))?.state, 'revoked');
+    assert.equal(asV2(await m.core.approvals.get(spent['a send']))?.state, 'revoked');
   } finally {
     await close();
   }
@@ -646,7 +651,7 @@ test("a look-up of a send goes past the stop by the approval it went under, used
     expect: { to: ['someone@example.test'], cc: [], bcc: [], subject: 'Hello' },
   });
   await m.core.approvals.complete(send, { sentMessageId: 'email_one' });
-  assert.equal((await m.core.approvals.get(send))?.state, 'used');
+  assert.equal(asV2(await m.core.approvals.get(send))?.state, 'used');
 
   assert.equal(await claimsApproval(m.core, send, SEND_LOOKUP), true, 'a used send, looked up');
   assert.equal(await claimsApproval(m.core, send), false, 'a used send, claimed');
@@ -1993,7 +1998,7 @@ test('agentcomms: an approval a command claims is one still waiting, prepared as
     assert.match(errorOf(refused).message, /takes no --approval|an approval goes with a policy to set/);
   }
   assert.equal(run(['channels', '--json']).status, 11, 'without it, the command is stopped as before');
-  assert.equal((await m.core.approvals.get(forThis))?.state, 'pending', 'nothing claimed or approved it');
+  assert.equal(asV2(await m.core.approvals.get(forThis))?.state, 'pending', 'nothing claimed or approved it');
 });
 
 test('an organisation profile change carries its approval past the stop, from the command and from the tool', async () => {
@@ -2084,7 +2089,7 @@ test('a dry run, or a migration with nothing to rename, takes no approval: the i
   assert.equal((JSON.parse(reported.stdout) as { data: { status: string } }).data.status, 'already-migrated');
 
   assert.equal(readFileSync(configFile, 'utf8'), before, 'the configuration was changed');
-  assert.equal((await m.core.approvals.get(later))?.state, 'pending', 'the approval was claimed');
+  assert.equal(asV2(await m.core.approvals.get(later))?.state, 'pending', 'the approval was claimed');
 });
 
 test('stopped, an agent that has "not now" prepared and hands its id to a dry run is refused, and the stop stands', async () => {
@@ -2157,7 +2162,7 @@ test('stopped, an agent that has "not now" prepared and hands its id to a dry ru
 
   // Nothing was renamed or put off: both still wait for the person, and every other call is stopped as before.
   assert.equal(readFileSync(configFile, 'utf8'), before, 'the configuration was changed');
-  for (const each of [later, id]) assert.equal((await m.core.approvals.get(each))?.state, 'pending', each);
+  for (const each of [later, id]) assert.equal(asV2(await m.core.approvals.get(each))?.state, 'pending', each);
   assert.equal((await readUpdateCheck(m.stateDir)).snoozedUntil, null);
   assert.equal(run(['channels', '--json']).status, 11, 'the stop stands');
 });

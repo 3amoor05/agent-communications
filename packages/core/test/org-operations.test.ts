@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { asV2 } from '../src/approval-stored.ts';
 import { changeDigest } from '../src/approvals.ts';
 import { type GatedChange, gatedChange } from '../src/change-flow.ts';
 import { beginChangeApproval, type PreparedChange } from '../src/changes.ts';
@@ -337,7 +338,7 @@ test('a profile that changed between the preview and the claim is refused in tho
   );
   assert.equal((await config(m)).organisations, undefined);
   assert.equal(await storedSecret(m, 'acme-1'), null);
-  assert.equal((await m.core.approvals.get(approvalId))?.state, 'revoked', 'and the approval cannot be used again');
+  assert.equal(asV2(await m.core.approvals.get(approvalId))?.state, 'revoked', 'and the approval cannot be used again');
 });
 
 test('profile drift does not rewrite a v1 change', async () => {
@@ -351,7 +352,7 @@ test('profile drift does not rewrite a v1 change', async () => {
     surface: 'mcp',
   });
   assert.equal(first.status, 'approval-required');
-  const prepared = await m.core.approvals.get((first as { prepared: PreparedChange }).prepared.approvalId);
+  const prepared = asV2(await m.core.approvals.get((first as { prepared: PreparedChange }).prepared.approvalId));
   assert.ok(prepared?.change);
   const legacyId = `ap_${'0'.repeat(25)}9`;
   const original = writeV1Record(
@@ -2235,13 +2236,17 @@ test('no profile text can make a preview claim something was done at once: a lab
   assert.match(preview, / · nothing has been changed — approving does not change it\n/, 'nothing was done at once');
   assert.doesNotMatch(preview, /done already/i);
 
-  // Nor can a record gain the field it was not prepared with: it is bound, and a terminal refuses to show it.
+  // Nor can a record gain the field it was not prepared with: it is bound, so the record reads as corrupt, and a
+  // terminal refuses to show it.
   const { approvalId } = (first as { prepared: PreparedChange }).prepared;
   const file = join(m.core.approvals.directory, `${approvalId}.json`);
   const stored = JSON.parse(readFileSync(file, 'utf8'));
   stored.change.doneAtOnce = ['for other addresses: on → off'];
   writeFileSync(file, JSON.stringify(stored));
-  await assert.rejects(beginChangeApproval(m.core, approvalId, { surface: 'cli' }), is('BAD_DATA'));
+  await assert.rejects(
+    beginChangeApproval(m.core, approvalId, { surface: 'cli' }),
+    is('APPROVAL_VOID', /is corrupt \(content-digest-mismatch\)/),
+  );
 });
 
 // ── What a profile names, located (CUE-403) ─────────────────────────────────────────────────────────────────────

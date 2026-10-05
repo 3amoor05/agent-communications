@@ -4,6 +4,7 @@ import { existsSync, readdirSync, readFileSync, realpathSync, statSync, writeFil
 import { dirname, join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { asV2 } from '../src/approval-stored.ts';
 import { main, renderAttach } from '../src/cli.ts';
 import {
   inlineCommand,
@@ -1310,7 +1311,7 @@ test('approve is refused to an agent and to anything without a terminal, touches
     piped.stderr.includes(`Run \`${locatedCoreLine(piped.stderr, ['approve', approvalId])}\` directly in a terminal`),
   );
 
-  const record = await core.approvals.get(approvalId);
+  const record = asV2(await core.approvals.get(approvalId));
   assert.equal(record?.state, 'pending');
   assert.equal(record?.challengeHash, undefined, 'no code was issued to either');
   const refused = (await core.audit.tail()).filter((line) => line.operation === 'change.approve');

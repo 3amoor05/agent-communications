@@ -3,6 +3,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
+import { asV2 } from '../src/approval-stored.ts';
 import { changeDigest } from '../src/approvals.ts';
 import {
   beginChangeApproval,
@@ -463,7 +464,7 @@ test('under confirm, a change is not claimable until a person approved it at a t
     assert.ok(error.hint?.includes(inlineCommand(approve)), error.hint);
     return true;
   });
-  assert.equal((await core.approvals.get(prepared.approvalId))?.state, 'pending', 'waiting is not voiding');
+  assert.equal(asV2(await core.approvals.get(prepared.approvalId))?.state, 'pending', 'waiting is not voiding');
 
   const prompt = await beginChangeApproval(core, prepared.approvalId, { surface: 'cli' });
   assert.equal(prompt.preview, prepared.preview, 'the terminal shows what the chat showed');
@@ -482,10 +483,15 @@ test('under confirm, an approval given anywhere but a terminal does not count', 
     { ...spec, summary: 'Let acme/slack post' },
     { channel: 'core', surface: 'mcp' },
   );
-  const record = await core.approvals.get(prepared.approvalId);
+  const record = asV2(await core.approvals.get(prepared.approvalId));
   const challenge = await core.approvals.issueChallenge(prepared.approvalId, 'change');
   const bound = { draftMessageId: record?.contentDigest ?? '', contentDigest: record?.contentDigest ?? '' };
-  await core.approvals.approve(prepared.approvalId, 'elicitation', bound, challenge, 'change');
+  // Voided where it is given: a form approval of a change is never written as one.
+  await assert.rejects(
+    core.approvals.approve(prepared.approvalId, 'elicitation', bound, challenge, 'change'),
+    refusedWith('APPROVAL_VOID', /the change policy is confirm, and this was not approved at a terminal/),
+  );
+  assert.equal(asV2(await core.approvals.get(prepared.approvalId))?.state, 'revoked');
   await assert.rejects(
     claimChange(core, prepared.approvalId, spec, { surface: 'mcp' }),
     refusedWith('APPROVAL_VOID', /the change policy is confirm, and this was not approved at a terminal/),
@@ -625,7 +631,7 @@ test('the policy in force is read from the file, never from the before a caller 
   const prepared = await prepareChange(core, { ...forged, summary: 'x' }, { channel: 'core', surface: 'mcp' });
   assert.equal(prepared.policy, 'confirm');
   // And at the claim too: the record's policy aside, the live one alone would refuse it.
-  const record = await core.approvals.get(prepared.approvalId);
+  const record = asV2(await core.approvals.get(prepared.approvalId));
   const file = join(core.approvals.directory, `${prepared.approvalId}.json`);
   writeFileSync(file, JSON.stringify({ ...record, policy: 'chat', requiredPolicy: 'chat' }));
   await assert.rejects(
@@ -774,9 +780,10 @@ test('the terminal shows only a change that reproduces its own digest, and only 
   const stored = JSON.parse(readFileSync(file, 'utf8'));
   stored.change.loosened[0].after = 'read';
   writeFileSync(file, JSON.stringify(stored));
+  // Its content digest no longer recomputes: the record is corrupt, and says only that.
   await assert.rejects(
     beginChangeApproval(core, prepared.approvalId, { surface: 'cli' }),
-    refusedWith('BAD_DATA', /does not describe the change it is bound to/),
+    refusedWith('APPROVAL_VOID', /is corrupt \(content-digest-mismatch\)/),
   );
 
   // A send's approval is not approved here.
@@ -785,7 +792,7 @@ test('the terminal shows only a change that reproduces its own digest, and only 
     inboxId: MAIL,
     draftId: 'r-1',
     draftMessageId: 'm-1',
-    contentDigest: 'd-1',
+    contentDigest: 'd'.repeat(64),
     sendEpoch: 0,
     policy: 'confirm',
     requiredPolicy: 'confirm',
@@ -796,7 +803,7 @@ test('the terminal shows only a change that reproduces its own digest, and only 
     beginChangeApproval(core, send.approvalId, { surface: 'cli' }),
     refusedWith('USAGE', /is for a send, not a configuration change/),
   );
-  assert.equal((await core.approvals.get(send.approvalId))?.challengeHash, undefined, 'no challenge was issued');
+  assert.equal(asV2(await core.approvals.get(send.approvalId))?.challengeHash, undefined, 'no challenge was issued');
 });
 
 test('every step is in the audit trail: surface, policy and outcome', async () => {
@@ -873,7 +880,7 @@ test('agentcomms approve: a person reads the change and types the code; Enter ca
   assert.deepEqual(approved, { approvalId: first.approvalId, state: 'approved' });
   assert.match(person.shown(), /CHANGE PREVIEW/);
   assert.match(person.shown(), /acme\/slack mode: read → send/);
-  const record = await core.approvals.get(first.approvalId);
+  const record = asV2(await core.approvals.get(first.approvalId));
   assert.equal(record?.state, 'approved');
   assert.equal(record?.approvedVia, 'terminal');
 
@@ -885,7 +892,7 @@ test('agentcomms approve: a person reads the change and types the code; Enter ca
   const declines = terminal(() => '');
   const cancelled = await approveChangeAtTerminal(core, second.approvalId, {}, { color: false }, declines.streams);
   assert.equal(cancelled.state, 'cancelled');
-  assert.equal((await core.approvals.get(second.approvalId))?.state, 'revoked');
+  assert.equal(asV2(await core.approvals.get(second.approvalId))?.state, 'revoked');
 });
 
 test("the terminal's approve renders its handoff for the selected shell platform", async () => {
@@ -968,7 +975,7 @@ test('a v1 change is never approved at a terminal or claimed here, and nothing i
     { ...spec, summary: 'Let acme/slack post' },
     { channel: 'core', surface: 'mcp' },
   );
-  const stored = await core.approvals.get(prepared.approvalId);
+  const stored = asV2(await core.approvals.get(prepared.approvalId));
   assert.ok(stored?.change);
   for (const [moment, createdAt] of [
     ['fresh', '2026-09-25T09:59:00.000Z'],

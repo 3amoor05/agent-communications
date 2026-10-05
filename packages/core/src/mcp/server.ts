@@ -281,7 +281,7 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
       inputSchema: {
         inbox: z.string().optional().describe('only this mailbox, as `organisation/gmail`'),
         state: z
-          .enum(['pending', 'approved', 'sending', 'used', 'failed', 'unknown', 'expired', 'revoked'])
+          .enum(['pending', 'approved', 'sending', 'used', 'failed', 'unknown', 'expired', 'revoked', 'corrupt'])
           .optional()
           .describe('only approvals in this state'),
       },

@@ -349,7 +349,7 @@ async function sendRecord(core: ReturnType<typeof openCore>) {
     inboxId: 'ibx_AAAAAAAAAAAAAAAA',
     draftId: 'r-1',
     draftMessageId: 'm-1',
-    contentDigest: 'd-1',
+    contentDigest: 'd'.repeat(64),
     sendEpoch: 0,
     policy: 'confirm',
     requiredPolicy: 'confirm',

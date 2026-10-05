@@ -2,12 +2,13 @@ import { randomBytes } from 'node:crypto';
 import { constants, readFileSync } from 'node:fs';
 import { access, type FileHandle, lstat, mkdir, open, realpath, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
+import { asV2, integrityRefusal, kindOf } from './approval-stored.ts';
 import {
-  approvalKind,
   type DownloadBinding,
   type DownloadRequest,
   downloadClaimRefusal,
   type ListedFile,
+  otherVersionRefusal,
   type RecordedSaveAnswer,
 } from './approvals.ts';
 import { agentMarker, canPrompt, defaultStreams, paint, type Streams } from './cli-runtime.ts';
@@ -869,10 +870,12 @@ export async function settleDestination(core: Core, input: SettleInput): Promise
           (command) =>
             `Ask the person to run ${command} in their own terminal and answer there, then run this again with --choice ${answer.choiceId} alone.`,
         );
-  const asked = await core.approvals.get(answer.choiceId).catch(() => null);
+  // Only a valid version-2 question reaches the checks below; any other form is no open question here, and the claim
+  // that follows refuses it.
+  const asked = asV2(await core.approvals.get(answer.choiceId).catch(() => null));
   if (
     asked !== null &&
-    approvalKind(asked) === 'download' &&
+    asked.kind === 'download' &&
     asked.download !== undefined &&
     (asked.state === 'pending' || asked.state === 'approved')
   ) {
@@ -1241,12 +1244,18 @@ async function storedQuestion(
   env: NodeJS.ProcessEnv,
   color: boolean,
 ): Promise<{ text: string; options: SaveOption[]; deny: SaveDenyInput }> {
-  const record = await core.approvals.get(choiceId);
-  if (!record || approvalKind(record) !== 'download' || record.download === undefined) {
-    throw new CommsError('NOT_FOUND', `no question ${choiceId} about where to save files`, {
+  const stored = await core.approvals.get(choiceId);
+  const notFound = () =>
+    new CommsError('NOT_FOUND', `no question ${choiceId} about where to save files`, {
       hint: 'Make the download again; a question expires thirty minutes after it is asked.',
     });
-  }
+  if (stored === null) throw notFound();
+  // A record that cannot be used says only that; one an earlier release asked is never answered here.
+  if (stored.form === 'corrupt' || stored.form === 'unreadable') throw integrityRefusal(stored);
+  if (kindOf(stored) !== 'download') throw notFound();
+  if (stored.form === 'legacy') throw otherVersionRefusal(stored.view);
+  const record = stored.record;
+  if (record.download === undefined) throw notFound();
   if (record.state !== 'pending') {
     const refusal = (code: 'APPROVAL_EXPIRED' | 'APPROVAL_VOID', why: string) =>
       new CommsError(code, `nothing was saved: ${why}`, {

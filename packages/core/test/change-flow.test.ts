@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
+import { stateOf } from '../src/approval-stored.ts';
 import { type GatedChange, gatedChange, gatedChangeAtTerminal } from '../src/change-flow.ts';
 import { inlineCommand, type Streams } from '../src/cli-runtime.ts';
 import type { AccountConfig, SendPolicy } from '../src/config.ts';
@@ -337,7 +338,7 @@ test('at the CLI a person at a terminal approves there: yes applies, anything el
   );
   assert.equal(await policyNow(no), 'never');
   const [record] = await no.approvals.list();
-  assert.equal(record?.state, 'revoked', 'a cancelled approval cannot be claimed later');
+  assert.equal(record && stateOf(record), 'revoked', 'a cancelled approval cannot be claimed later');
 });
 
 test('importing core never starts the agentcomms CLI, whatever the running program is called', async () => {

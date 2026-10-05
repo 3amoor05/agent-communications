@@ -1,4 +1,4 @@
-import { approvalKind } from '../approvals.ts';
+import { asLegacy, asV2, kindOf, stateOf } from '../approval-stored.ts';
 import type { GatedChange } from '../change-flow.ts';
 import { type ChangeRequest, type ChangeSurface, revokeChange } from '../changes.ts';
 import { inlineCommand } from '../cli-runtime.ts';
@@ -338,9 +338,12 @@ async function refuseChangedProfile(
   surface: ChangeSurface,
 ): Promise<void> {
   if (approvalId === undefined) return;
-  const record = await core.approvals.get(approvalId).catch(() => null);
-  if (!record || approvalKind(record) !== 'change' || (record.state !== 'pending' && record.state !== 'approved'))
-    return;
+  // A version-2 change, or one an earlier release prepared (read from what it stored), still waiting to be used.
+  const stored = await core.approvals.get(approvalId).catch(() => null);
+  const record = kindOf(stored) === 'change' ? (asV2(stored) ?? asLegacy(stored)) : null;
+  if (stored === null || record === null) return;
+  const state = stateOf(stored);
+  if (state !== 'pending' && state !== 'approved') return;
   const line = record.change?.effects.find(
     (effect) => effect.startsWith('reads it from ') && effect.includes(`(path SHA-256 ${pathDigest(file.path)})`),
   );
@@ -1064,12 +1067,9 @@ const NARROWED_WHEN_PREPARED = 'for other addresses: on → off';
 /** Whether the approval being claimed was prepared by a call that narrowed: its `doneAtOnce` says so. */
 async function approvalRecordsNarrowing(core: Core, approvalId: string | undefined): Promise<boolean> {
   if (approvalId === undefined) return false;
-  const record = await core.approvals.get(approvalId).catch(() => null);
-  return (
-    record !== null &&
-    approvalKind(record) === 'change' &&
-    record.change?.doneAtOnce?.includes(NARROWED_WHEN_PREPARED) === true
-  );
+  // Only a valid version-2 change says what it did at once.
+  const record = asV2(await core.approvals.get(approvalId).catch(() => null));
+  return record?.kind === 'change' && record.change?.doneAtOnce?.includes(NARROWED_WHEN_PREPARED) === true;
 }
 
 /**

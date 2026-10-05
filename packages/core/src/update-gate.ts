@@ -1,4 +1,5 @@
-import { type ApprovalKind, approvalKind } from './approvals.ts';
+import { asV2, kindOf } from './approval-stored.ts';
+import type { ApprovalKind } from './approvals.ts';
 import { gatedChangeAtTerminal } from './change-flow.ts';
 import { CHANNEL_SNAPSHOT } from './channels.generated.ts';
 import { agentMarker, canPrompt, type OutputOptions, paint, type Streams } from './cli-runtime.ts';
@@ -88,12 +89,16 @@ export const DOWNLOAD_CLAIM: Readonly<ApprovalClaim> = Object.freeze({ kind: 'do
 export async function claimsApproval(core: Core, id: unknown, claim: ApprovalClaim = {}): Promise<boolean> {
   // No id at all, the usual call: nothing to look up.
   if (typeof id !== 'string') return false;
-  const record = await core.approvals.get(id).catch(() => null);
-  if (record === null) return false;
-  if (claim.kind !== undefined && approvalKind(record) !== claim.kind) return false;
+  const stored = await core.approvals.get(id).catch(() => null);
+  if (stored === null) return false;
+  // A kind that cannot be known matches no kind asked for.
+  if (claim.kind !== undefined && kindOf(stored) !== claim.kind) return false;
+  // A look-up only reads: any record of the kind it asks about, an earlier release's included.
   if (claim.lookup === true) return true;
-  // The store reads an approval past its deadline as `expired`, so a pending one here is one that can still be used.
-  return record.state === 'pending' || record.state === 'approved';
+  // A claim, only for a valid version-2 record still waiting to be used. The store reads one past its deadline as
+  // `expired`, so a pending one here is one that can still be used.
+  const record = asV2(stored);
+  return record !== null && (record.state === 'pending' || record.state === 'approved');
 }
 
 // ── A server: every tool call ─────────────────────────────────────────────────────────────────────────────────

@@ -478,7 +478,7 @@ test('a number that is not a whole one, or a value of the wrong type, is USAGE f
 
     const state = refused(await call('comms_approvals_list', { state: 'nope' }));
     assert.equal(state.code, 'USAGE');
-    assert.match(state.message, /`state` takes `pending`, `approved`, .* or `revoked`/);
+    assert.match(state.message, /`state` takes `pending`, `approved`, .* `revoked` or `corrupt`/);
 
     // …and the calls that are right still work.
     const ok = await call('comms_audit_tail', { limit: 5 });

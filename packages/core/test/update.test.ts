@@ -8,6 +8,8 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
+import { asV2, stateOf } from '../src/approval-stored.ts';
+import type { ApprovalState } from '../src/approvals.ts';
 import { CHANNEL_SERVERS } from '../src/channel-servers.ts';
 import { inlineCommand } from '../src/cli-runtime.ts';
 import type { AccountConfig, InboxConfig } from '../src/config.ts';
@@ -22,6 +24,7 @@ import { VERSION } from '../src/version.ts';
 import { registration, writeManaged } from './fixtures/cli-command/trees.ts';
 import { assertNoBareCommand, coreHandoffs, locatedCoreLine } from './helpers/handoffs.ts';
 import { tempDir } from './helpers/temp.ts';
+import { v2Record } from './helpers/v2-records.ts';
 
 /*
  * `agentcomms update` and `comms_update`: what on this machine is behind the latest release, and one change, approved
@@ -717,7 +720,7 @@ test('update prepares one approval listing every step, writes nothing before it,
     assert.ok(!preview.includes('…'), 'no step is cut short in the preview');
     // The steps a person agreed to, in full, are what the approval is bound to.
     assert.deepEqual(
-      (await m.core.approvals.get(String(first.approvalId)))?.change?.effects,
+      asV2(await m.core.approvals.get(String(first.approvalId)))?.change?.effects,
       steps.map((line) => line.slice(4)),
     );
 
@@ -725,7 +728,7 @@ test('update prepares one approval listing every step, writes nothing before it,
     assert.equal(readFileSync(config, 'utf8'), untouched);
     assert.deepEqual([deps.runtimes, deps.globals], [[], []]);
     assert.deepEqual(
-      (await m.core.approvals.list()).map((record) => record.approvalId),
+      (await m.core.approvals.list()).map((record) => asV2(record)?.approvalId),
       [first.approvalId],
     );
 
@@ -780,7 +783,7 @@ test('update prepares one approval listing every step, writes nothing before it,
 
     // The approval was claimed, once, and is spent…
     assert.deepEqual(
-      (await m.core.approvals.list()).map((record) => [record.approvalId, record.state]),
+      (await m.core.approvals.list()).map((record) => [asV2(record)?.approvalId, stateOf(record)]),
       [[first.approvalId, 'used']],
     );
     // …and now there is nothing left to do.
@@ -1082,7 +1085,7 @@ const nothingBehind = (approvalId: unknown, became: string) =>
 
 /** What the refusal says of an approval still waiting for its yes. */
 const waiting = async (core: Core, approvalId: unknown) =>
-  `it was still waiting to be approved, and lapses at ${(await core.approvals.get(String(approvalId)))?.expiresAt}`;
+  `it was still waiting to be approved, and lapses at ${asV2(await core.approvals.get(String(approvalId)))?.expiresAt}`;
 
 test('an approval for an update applied meanwhile says nothing is left to apply, never that calling again applies it (CUE-303)', async () => {
   /*
@@ -1108,7 +1111,7 @@ test('an approval for an update applied meanwhile says nothing is left to apply,
     assert.doesNotMatch(String(late.hint), /applies at once/);
     assert.match(String(late.hint), /comms_update with `check`, or `[^`]+` at a terminal/);
     locatedCoreLine(String(late.hint), ['update', '--check']);
-    assert.equal((await m.core.approvals.get(stale))?.state, 'pending', 'the approval was claimed');
+    assert.equal(asV2(await m.core.approvals.get(stale))?.state, 'pending', 'the approval was claimed');
 
     // What had become of it, when that is why it could not have been used anyway.
     const again = await refused('comms_update', { noVerify: true, approvalId: other.approvalId });
@@ -1123,7 +1126,7 @@ test('an approval for an update applied meanwhile says nothing is left to apply,
   const later = openCore({ env: m.env, caller: CORE_CALLER, now: () => new Date(Date.now() + 11 * 60 * 1000) });
   const expired = await connect({ ...m, core: later }, { update: fakes(m) });
   try {
-    const record = await later.approvals.get(stale);
+    const record = asV2(await later.approvals.get(stale));
     assert.equal(record?.state, 'expired');
     const late = await expired.refused('comms_update', { approvalId: stale });
     assert.equal(late.message, nothingBehind(stale, `it had expired at ${record?.expiresAt}`));
@@ -1149,31 +1152,38 @@ test('an approval handed to an update with nothing to apply is named in every st
       'updated',
     );
     const file = join(m.core.approvals.directory, `${handed}.json`);
-    const stored = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
-    const lapses = String(stored.expiresAt);
-    const said: Record<string, string> = {
-      pending: `it was still waiting to be approved, and lapses at ${lapses}`,
-      approved: `it had been approved, and lapses unspent at ${lapses}`,
+    // Each state written as a valid record of it, made a minute ago: a change's, or a send's for the states only a
+    // send reaches — so that a send under way is not taken for one whose process died, nor any of them for corrupt.
+    const start = Date.now() - 60_000;
+    const recordIn = (state: ApprovalState) =>
+      v2Record({
+        kind: ['sending', 'failed', 'unknown'].includes(state) ? 'send' : 'change',
+        state,
+        via: state === 'approved' ? 'terminal' : undefined,
+        start,
+        approvalId: handed,
+      });
+    const lapses = (state: ApprovalState) => recordIn(state).expiresAt;
+    const said: Record<ApprovalState, string> = {
+      pending: `it was still waiting to be approved, and lapses at ${lapses('pending')}`,
+      approved: `it had been approved, and lapses unspent at ${lapses('approved')}`,
       sending: 'it is an approval to send, and that send is under way',
       used: 'it had been spent already',
       failed: 'it had been spent on a send that failed',
       unknown: 'it had been spent on a send whose outcome was never recorded',
-      expired: `it had expired at ${lapses}`,
+      expired: `it had expired at ${lapses('expired')}`,
       revoked: 'it had been revoked',
     };
-    for (const [state, words] of Object.entries(said)) {
-      // `updatedAt` now, so that a send under way is not taken for one whose process died.
-      writeFileSync(file, JSON.stringify({ ...stored, state, updatedAt: new Date().toISOString() }));
+    for (const [state, words] of Object.entries(said) as [ApprovalState, string][]) {
+      writeFileSync(file, JSON.stringify(recordIn(state)));
       const late = await refused('comms_update', { noVerify: true, approvalId: handed });
       assert.equal(late.code, 'USAGE', state);
       assert.equal(late.message, nothingBehind(handed, words), state);
     }
-    // A state this version has never heard of — written by a later one, or by hand — is named as it is.
-    writeFileSync(file, JSON.stringify({ ...stored, state: 'mislaid' }));
-    assert.equal(
-      (await refused('comms_update', { noVerify: true, approvalId: handed })).message,
-      nothingBehind(handed, 'it is "mislaid", a state this version does not know'),
-    );
+    // A state this version has never heard of — written by a later one, or by hand — cannot be read safely, and says so.
+    writeFileSync(file, JSON.stringify({ ...recordIn('pending'), state: 'mislaid' }));
+    const mislaid = await refused('comms_update', { noVerify: true, approvalId: handed });
+    assert.match(mislaid.message, /approval ap_\w+ was refused: it could not be read safely \(wrong-shape\)$/);
     // An id of the right shape that no approval has.
     const none = `ap_${'0'.repeat(26)}`;
     assert.equal(
@@ -1201,10 +1211,11 @@ test('an approval the store cannot read is reported as that, never as an approva
       'updated',
     );
 
-    writeFileSync(join(m.core.approvals.directory, `${handed}.json`), '{ not json');
+    writeFileSync(join(m.core.approvals.directory, `${handed}.json`), '{ not json }');
     const corrupt = await refused('comms_update', { noVerify: true, approvalId: handed });
-    assert.equal(corrupt.code, 'UNEXPECTED', JSON.stringify(corrupt));
-    assert.match(corrupt.message, /JSON/);
+    // Read as what it is — a file that cannot be read safely, by its fixed reason — and never echoed.
+    assert.match(corrupt.message, /could not be read safely \(invalid-json\)/, JSON.stringify(corrupt));
+    assert.doesNotMatch(corrupt.message, /not json/);
     assert.doesNotMatch(corrupt.message, /not used|nothing to apply/);
 
     // A record that cannot be read at all — here a folder where the file should be — goes up as that, too.
