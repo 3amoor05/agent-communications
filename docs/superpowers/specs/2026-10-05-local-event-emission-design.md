@@ -1,8 +1,8 @@
 # Local event emission — design
 
-Status: **revised after design review round 1, 2026-10-05 — 10 P1 and 6 P2, all addressed**; specification only,
+Status: **revised after round 2 (8 P1, 7 P2, 1 P3, all addressed), 2026-10-05**; specification only,
 not an implementation. Written from the cited research pass (§2) and a checked read of this repository at
-`fc9c5cc`. This design adds a new **standing disclosure authorisation**; it does not treat recurring event delivery
+`ef1db77`. This design adds a new **standing disclosure authorisation**; it does not treat recurring event delivery
 as the existing per-content send gate
 (`docs/superpowers/specs/2026-09-25-cli-mcp-parity-design.md:18-19`). CLI–MCP parity still holds, with explicit
 human-only exceptions for secrets and approval, and `"agentcomms"` still means a channel.
@@ -27,7 +27,7 @@ reads, and for a design of everything that takes:
 
 ## 2. What is true, and was checked
 
-### In this repository (at `fc9c5cc`)
+### In this repository (at `ef1db77`)
 
 | Fact | Source |
 |---|---|
@@ -44,19 +44,24 @@ reads, and for a design of everything that takes:
 | The publish list is derived from packages with channel manifests and the server wrappers those manifests name. A non-channel library or service has no declaration that puts it in that list. | `scripts/packages.mjs:1-37`; `docs/superpowers/specs/2026-09-26-channel-plugins-design.md:110-125` |
 | WhatsApp already uses `node:sqlite`, and its package requires Node 22.16 or newer. Core itself requires Node 22.12 and its untrusted envelope imports `node:crypto`, so neither is an isomorphic dependency for a browser-safe package. | `packages/whatsapp/src/index-db.ts:1-18`; `packages/whatsapp/package.json:1-10`; `packages/core/package.json:1-10`; `packages/core/src/untrusted.ts:1-3` |
 | Credentials in model context are already a security-policy violation, and terminal-only approval is already an explicit parity exception. | `SECURITY.md:28-33`; `capabilities.json:241-254,566-571` |
+| Core approval records are kind-separated, compare-and-swap under a per-record lock and single-use through an `O_EXCL` claim marker; the present kind union is `send | change | download`. This design extends that machinery rather than treating an ordinary change approval as disclosure authority. | `packages/core/src/approvals.ts:20-54,801-813` |
+| Core already provides lowercase SHA-256 and recursively key-sorted canonical JSON; the event and disclosure identities below reuse those exact primitives. | `packages/core/src/digest.ts:99-100,117-127` |
 
 ### Outside it (checked 2026-10-05; first-party or primary sources)
 
 | Fact | Source |
 |---|---|
 | Gmail `history.list` is cursor-paginated, history IDs are non-contiguous, an expired cursor normally returns 404, and the final `historyId` is stored only when no `nextPageToken` remains. Specific change lists can duplicate the generic `messages` list. | [Gmail `users.history.list`](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.history/list) |
-| Slack has separate paginated history and replies methods. Its rate-limit notice establishes a conservative regime of one call per minute and 15 results for affected new non-Marketplace apps; newly created internal apps must be assumed subject to it unless Slack grants an increase. | [Slack rate-limit notice](https://api.slack.com/changelog/2025-05-terms-rate-limit-update-and-faq), [`conversations.replies`](https://docs.slack.dev/reference/methods/conversations.replies/) |
+| Slack has separate cursor-paginated history and replies methods; callers must follow `next_cursor`, not infer completion from page size. Its rate-limit notice establishes a conservative regime of one call per minute and 15 results for affected new non-Marketplace apps. | [`conversations.history`](https://docs.slack.dev/reference/methods/conversations.history/), [`conversations.replies`](https://docs.slack.dev/reference/methods/conversations.replies/), [Slack rate-limit notice](https://docs.slack.dev/changelog/2025/05/29/rate-limit-changes-for-non-marketplace-apps/) |
 | Resend's received and sent lists are cursor-paginated, and the sent list exposes only the current `last_event`. | [Resend received list](https://resend.com/docs/api-reference/emails/list-received-emails), [Resend sent list](https://resend.com/docs/api-reference/emails/list-emails) |
 | CloudEvents 1.0 requires `id`, `source`, `specversion` and `type`; extension values use the CloudEvents scalar type system. Standard Webhooks signs `id.timestamp.payload`, serialises symmetric secrets with `whsec_`, serialises a signature as `v1,<base64>`, and supports overlapping signatures for rotation. | [CloudEvents 1.0.2](https://github.com/cloudevents/spec/blob/v1.0.2/cloudevents/spec.md), [Standard Webhooks specification](https://github.com/standard-webhooks/standard-webhooks/blob/main/spec/standard-webhooks.md) |
 | JSON Pointer has no wildcard; tokens escape `~` as `~0` and `/` as `~1`. Native `EventSource` accepts a URL and `withCredentials`, not an arbitrary Authorization header. | [RFC 6901](https://www.rfc-editor.org/rfc/rfc6901), [HTML Standard: server-sent events](https://html.spec.whatwg.org/multipage/server-sent-events.html) |
 | TypeSafe documents Jev through its hosted System One API, Noul as a 0–1 yes/no probability, and current model limits, but the reviewed published artefacts and terms provide no local weights or self-hosting contract. Ollama also returns a 0–1 probability for Noul. | [TypeSafe quick start](https://docs.typesafe.ai/introduction/quickstart), [TypeSafe models](https://docs.typesafe.ai/models), [Ollama decisions](https://docs.ollama.com/capabilities/decision) |
 | The documented near-name is Laya, from a different publisher. Its published usage is a Transformers-style decision head and it offers an ONNX Runtime extra. | [Laya model page](https://huggingface.co/convaiinnovations/laya) |
 | Tauri registers custom commands for all windows/webviews by default unless the application constrains them with `AppManifest::commands`; capability files alone are not that command declaration. | [Tauri capabilities](https://v2.tauri.app/security/capabilities/) |
+| A fetch carrying `Authorization` needs CORS permission for that non-wildcard header; a preflight response names its allowed methods and headers, and exact-origin, credential-omitting responses need no `Access-Control-Allow-Credentials`. | [Fetch Standard: CORS protocol](https://fetch.spec.whatwg.org/#http-new-header-syntax) |
+| Unicode publishes versioned CaseFolding data and a versioned UTS #46 IDNA algorithm; pinning both to 15.1 prevents the browser and Node evaluators from inheriting different host Unicode behaviour. | [Unicode 15.1 components](https://www.unicode.org/versions/components-15.1.0.html), [UTS #46 revision 31](https://www.unicode.org/reports/tr46/tr46-31.html) |
+| Apple's PPPC deployment page documents managed-policy identity by bundle ID or file path plus a designated code requirement. It does not establish how an interactive TCC grant behaves for this daemon; that remains a phase-D hypothesis to test. | [Apple Platform Deployment](https://support.apple.com/en-gb/guide/deployment/dep38df53c2a/web) |
 
 ## 3. Decisions
 
@@ -86,51 +91,98 @@ A rule that automatically forwards future messages is not the existing send gate
 content; event emission approves a bounded class of future, unseen content. This design names that new authority a
 **standing disclosure authorisation**.
 
-**Approval rule.** Enabling or loosening any rule, target, subscriber or hosted judge always needs approval outside
-the chat, regardless of `changePolicy`: either `agent-events approve <id>` at the human terminal, or the desktop app's
-typed-challenge flow (D13). `chat` may prepare and explain a proposal, but can never claim this authorisation. This is
-deliberately stricter than ordinary changes because it authorises later disclosures the person has not seen.
-Loopback SSE subscribers and hosted-judge inputs count as disclosures.
+**Approval rule.** Enabling or loosening any rule, target, subscriber or judge always needs approval outside the
+chat, regardless of `changePolicy`: either `agent-events approve <id>` at the human terminal, or the desktop app's
+typed-challenge flow (D13). Phase B1 adds a fourth core approval kind, `disclosure`, and an `app` approval channel;
+the present core union has only `send | change | download` (`packages/core/src/approvals.ts:43-54`). A disclosure
+record can be approved only through `terminal` or `app` and can be claimed only from `approved`, never directly from
+`pending`. `chat` and MCP may prepare and explain one, but can never approve or claim it. This is deliberately
+stricter than an ordinary change because it authorises later disclosures the person has not seen. Loopback SSE
+subscribers and **every** judge input, including input to a local or bundled judge, are within the standing authority.
 
-The daemon creates an immutable pending version and a deterministic preview. Its digest binds all of:
+**Complete digest.** The daemon creates immutable pending versions and one deterministic preview. The digest is
+lowercase SHA-256 over core's recursively key-sorted canonical JSON (`packages/core/src/digest.ts:99-100,117-127`)
+of a versioned **canonical full rule document**. That document embeds the referenced immutable documents rather than
+hashing only their ids, and contains all of:
 
-- the **rule version**: event type and version, every deterministic and agentic condition, and the mapping with every
-  output field and the source pointer from which it comes;
-- the **target version**: kind, scheme, host, port, resolved-address policy (including `localNetwork`) and
-  `untrustedRepresentation`;
-- the **subscriber version**, when present: stream identity, accepted Origin set and replay retention;
-- the **judge version**, when present: provider, model, endpoint, prompt-template version and the exact input fields;
-- all content, decision, stream and dead-letter **retention** values; and
-- the rule's **delivery rate cap**, default 60 deliveries per rolling hour. Raising it is a loosening.
+- the rule id and version; source channel; event type and type version; and a non-empty, sorted source scope of
+  explicit stable account ids. The UI presents their current names, but ids are authoritative. Version 1 offers no
+  “all accounts”, “all current accounts” or “all present and future accounts” selector: connecting another account
+  cannot add it to an existing rule;
+- the complete deterministic-condition AST and agentic condition, including operator options, literal operands,
+  threshold and uncertainty policy; and the complete mapping AST, including every object/array position, constant
+  value, source pointer and `reject | omit | null` missing policy;
+- the complete ordered target set and each target version: kind and id; for a webhook, the canonical full URL
+  including scheme, host, explicit/default port, path and query (fragments are refused); resolved-address and
+  `localNetwork` policy; untrusted representation; signing mode; delivery ordering; and retry limit. For SSE it also
+  embeds the subscriber id/version, exact allowed Origins and stream identity. Secret bytes and secret generations
+  are deliberately absent;
+- each judge id/version, provider, model, full endpoint, prompt-template version, exact input pointers, output
+  interpretation, maximum input/output tokens and every per-rule, per-provider and global call/token/concurrency
+  budget that constrains it; and
+- the delivery rate cap (default 60 deliveries per rolling hour) and **every** retention value: ingest content,
+  hold, delivery, SSE replay, dead-letter payload and decision metadata. The defaults are respectively 24 hours,
+  24 hours, 24 hours, 24 hours, seven days and 30 days; SSE remains capped at seven days. Raising any cap or
+  retention is a loosening.
 
-Every active authorisation, its versions, digest, approval time, retention and remaining rate-cap window appears in
+Golden tests change one digest field at a time, including an account id, a newly connected but unselected account,
+URL path and query, mapping constant, missing policy and each judge budget. Every active authorisation, its full set
+of versions, digest, approval time, retention deadlines and remaining rate-cap window appears in
 `agent-events doctor` and the app. Nothing is enabled by install, update or import.
 
-**Version rule.** Rules, targets, subscribers and judges are immutable versioned objects. A decision and every
-delivery bind `(ruleId, ruleVersion, targetId, targetVersion[, subscriberId, subscriberVersion])`; an agentic
-decision also binds `(judgeId, judgeVersion)`. Delivery uses exactly those versions and never follows a mutable id to
+**Version and activation rule.** Rules, targets, subscribers and judges are immutable versioned rows in the events
+database. A decision and every delivery bind `(ruleId, ruleVersion, targetId, targetVersion[, subscriberId,
+subscriberVersion][, judgeId, judgeVersion])`. Delivery uses exactly those versions and never follows a mutable id to
 a different endpoint.
 
-- A loosening edit creates a pending version. The approved active version keeps running until the pending version
-  receives a new standing disclosure authorisation.
-- A tightening edit — disabling or removing an object, narrowing conditions or mapping, reducing retention or the
-  rate cap, removing a target, changing `plain` to `enveloped`, or turning off `localNetwork` — atomically replaces
-  the active version with the narrowed version or an immutable disabled/tombstone version. In the same transaction,
-  every queued or retryable delivery made under the superseded version becomes `cancelled` with an audit record. It
-  is never sent and never re-mapped.
-- Revocation is immediate at the committed disable/remove transaction. A worker must move a delivery to
-  `disclosing` under the same record lock immediately before I/O; after revocation commits, no worker can cross that
-  boundary. An I/O that crossed it before revocation is recorded as already in flight and cannot be recalled.
+Activation crosses the daemon's SQLite database and the core approval store by one recoverable protocol, not by a
+claimed cross-store transaction:
+
+1. Under the daemon's activation lock, re-plan the full document and verify its digest. A SQLite transaction inserts
+   a unique pending activation intent naming the disclosure approval id, digest, every version to activate and the
+   active pointers it expects to replace.
+2. Claim that exact `disclosure` approval once in the core store. Core's existing store uses a per-record transition
+   and an `O_EXCL` marker for its single-use guarantee (`packages/core/src/approvals.ts:20-29,801-813`).
+3. A second SQLite transaction re-checks the intent, expected pointers and digest, marks those versions active,
+   records the activation and marks the intent complete.
+
+Startup runs recovery before any source or worker. A pending intent paired with a `used` disclosure approval finishes
+step 3; one paired with a pending, approved-but-unused, expired, revoked or absent approval is dropped without moving
+an active pointer. Because the intent is durable before the claim, a used disclosure approval can never be stranded
+without enough SQLite state to finish. Recovery is crash-injected after every durable write and approval-store
+transition.
+
+A loosening or any edit outside the whitelist below creates a pending version. The approved active version keeps
+running until that pending version completes the protocol above. The **entire tightening whitelist** is syntactic:
+
+1. disable an object (a remove command activates an immutable disabled/tombstone version);
+2. remove a target from a rule;
+3. remove an output field from a mapping;
+4. lower a rate cap;
+5. shorten any retention;
+6. change `plain` to `enveloped`; or
+7. turn `localNetwork` off.
+
+Every other edit—including any condition edit, constant change, source-pointer substitution, target/subscriber/judge
+pointer substitution, new account or output field, or inverse transition—needs a fresh standing authorisation. A
+tightening is SQLite-only and commits in one transaction: it moves the active pointer, marks every queued or
+retryable affected delivery `cancelled`, purges each cancelled ciphertext, and purges retained SSE entries made under
+the superseded rule, target/subscriber or judge version. Property tests generate old/new documents for every
+whitelisted edit and prove the new disclosure set is a subset; mutations outside the seven forms are always pending.
+
+Revocation is immediate at that commit. Immediately before delivery I/O, a worker transaction moves a row to
+`disclosing` only if the bound rule, target/subscriber and judge versions are still the active pointers and the
+global switch is enabled. After revocation commits, no worker can cross that boundary. I/O already in flight cannot
+be recalled and is recorded as such.
 
 **Secrets never enter model context.** Creating, entering, revealing or rotating a webhook signing secret, subscriber
 token or judge API key is a human-only action in the terminal or app. Terminal entry requires the existing TTY and
 agent-marker checks (`packages/core/src/change-flow.ts:208-210,291-320`;
 `packages/core/src/cli-runtime.ts:36-60`); any key typed by the person uses hidden input. MCP tools never accept or
-return secret material. An MCP-proposed
-target, subscriber or hosted judge is created incomplete and disabled; the person completes its secret slot in the
-terminal or app. Signing-secret and token rotation changes generations inside a referenced secret slot, not the
-authorised disclosure fields: two signing generations may overlap (D7), but secret bytes and generations are absent
-from the preview and audit.
+return secret material. An MCP-proposed target, subscriber or hosted judge is created incomplete and disabled; the
+person completes its secret slot in the terminal or app. Signing-secret and token rotation changes generations inside
+a referenced secret slot, not the authorised disclosure fields: two signing generations may overlap (D7), but secret
+bytes and generations are absent from the preview and audit.
 
 These human-only secret commands and app operations receive `status: "exception"` rows in `capabilities.json`, with
 the reason: "secret material must never enter model input or output; the person completes this operation at the
@@ -142,8 +194,9 @@ in scope as a vulnerability (`SECURITY.md:32-33`).
 **Required `SECURITY.md` amendment.** Phase B1 adds the following exact bullets; this specification does not edit
 `SECURITY.md` itself:
 
-> - **Disclosure without a standing authorisation** — any webhook, subscriber stream or hosted judge receiving
->   event-derived content without an active, digest-bound standing disclosure authorisation for the exact rule,
+> - **Disclosure without a standing authorisation** — any webhook or subscriber stream receiving event-derived
+>   content, or any hosted, local or bundled judge being invoked with it, without an active, digest-bound standing
+>   disclosure authorisation for the exact rule,
 >   target, subscriber and judge versions; after that authorisation is revoked; outside its approved mapping,
 >   retention or delivery rate cap; or without successful taint recording before disclosure.
 
@@ -151,9 +204,9 @@ and, under "What the safety model does not claim":
 
 > - **A standing disclosure authorisation is not approval of each event.** Once a person enables one at the terminal
 >   or in the app, future unseen content that matches its approved rule may leave automatically through its approved
->   target or hosted judge. `agent-events doctor` and the app list every active authorisation. Disabling or removing
->   any bound rule, target, subscriber or judge revokes it immediately; content already in a network operation cannot
->   be recalled.
+>   target or be evaluated by its approved judge. `agent-events doctor` and the app list every active authorisation.
+>   Disabling or removing any bound rule, target, subscriber or judge revokes it immediately; content already in a
+>   network operation cannot be recalled.
 
 ### D3. The event catalogue: typed, versioned, and explicit about trust
 
@@ -170,6 +223,15 @@ interface EventDefinition<T> {
   schema: z.ZodType<T>;                 // JSON values only; ISO strings, no Date or transforms
   untrusted: readonly PointerPattern[]; // sender-controlled prose
   content: readonly PointerPattern[];   // fields that can make an agentic prefilter selective
+  addresses: readonly PointerPattern[]; // structured address-valued fields
+  handles: readonly {                   // platform ids carry their workspace scope
+    pattern: PointerPattern;
+    workspace: PointerPattern;
+  }[];
+  formats: readonly {
+    pattern: PointerPattern;
+    format: 'email' | 'domain' | 'date-time' | 'uri';
+  }[];
   dedupeKey(event: T): string;
   examples: readonly T[];
 }
@@ -185,8 +247,17 @@ names array index zero; array indices with leading zeroes and `-` are refused. O
 `"-"` remain ordinary keys. Access uses own properties only, so `__proto__`, `constructor` and `prototype` are data,
 never prototype traversal.
 
-Every event carries `{ id, type, version, occurredAt, observedAt, account: { name, id, channel }, hop }` and its own
-body. `hop` is zero for provider events and is bounded as D12 specifies. Version 1 includes:
+`dedupeKey` is stable within an account and event type, never a database row number that changes on rebuild. The
+normaliser computes `eventId` as lowercase hexadecimal SHA-256 over the UTF-8 bytes of core canonical JSON for the
+tuple `["agentcomms-event-v1", installationId, accountId, eventType, typeVersion, dedupeKey]`, truncated to its first
+32 hex characters. The literal domain separator and length-delimited JSON values make the encoding unambiguous;
+core's hash and canonical encoder are at `packages/core/src/digest.ts:99-100,117-127`. Ingest has
+`UNIQUE(eventId)`, so polling, crash recovery and a rebuilt provider index converge on the same row while identical
+provider ids in two accounts have different preimages. D8 detects and stops on the theoretical truncated-hash
+collision instead of merging unequal canonical identities.
+
+Every event carries `{ id: eventId, type, version, occurredAt, observedAt, account: { name, id, channel }, hop }` and
+its own body. `hop` is zero for provider events and is bounded as D12 specifies. Version 1 includes:
 
 | Type | Body (abridged) | Sender-controlled patterns |
 |---|---|---|
@@ -210,28 +281,39 @@ Three independent mechanisms must not be conflated:
 1. **Prose representation.** Each target version chooses `untrustedRepresentation: "enveloped" | "plain"`.
    `enveloped` is the default and replaces each sender-controlled string with the existing
    `<untrusted-content>` envelope (`packages/core/src/untrusted.ts:99-120`). `plain` delivers the sanitised value as
-   is — the owner's "value as is" — and is a loosening whose approval preview warns: "A consumer that feeds this
-   value to a model must envelope it first." Local SSE subscribers default to `enveloped`.
+   typed by the source, with no mapping transform, and is a loosening whose approval preview warns: "This is a
+   sanitised source value, not the provider's raw bytes. A consumer that feeds it to a model must envelope it first."
+   Local SSE subscribers default to `enveloped`. Whether this is the accepted meaning of “values as they are” remains
+   the explicit owner question in §8.
 2. **Address and handle taint.** This is always computed from the exact final target payload or judge input and
    flushed before disclosure, regardless of prose representation (D7).
 3. **Other untrusted text.** Provider and target error messages are sanitised, bounded and rendered as untrusted in
    logs and the app; audit rows keep only stable codes and hashes. A judge's optional `reasonCode` must match
    `^[a-z0-9_]{1,40}$` and is labelled **model-produced**, never presented as provider fact or configuration.
 
-For each mapping, a sender-controlled source value intersects when its concrete pointer equals, is an ancestor of, or
-is a descendant of an expanded untrusted pointer. Copying a parent object therefore transforms each untrusted string
-descendant separately and lists the corresponding output pointer; copying an untrusted subtree recursively transforms
-its string leaves. The generated JSON Schema for each rule/target version describes the actual delivered
-representation, including envelope strings when selected.
+The mapping evaluator returns both the mapped value and provenance from each concrete output pointer to the concrete
+source pointers it copied; constants have explicit `constant` provenance. A catalogue pattern intersects a copied
+value when its concrete source pointer equals, is an ancestor of, or is a descendant of that value's provenance.
+Copying a parent therefore propagates every matching untrusted, address and structured-handle descendant to its exact
+output pointer; copying a subtree recursively preserves the same provenance. `handles` supplies the platform id and
+its workspace id separately because core intentionally requires adapters to parse platform markup and hand over ids
+rather than infer them from arbitrary strings (`packages/core/src/taint.ts:95-120,401-410`). Structured `addresses`
+are recorded as headers; every mapped `untrusted` prose string is also scanned for free-text addresses through the
+same `observeText` path the existing envelope uses (`packages/core/src/taint.ts:380-398`); constants do not inherit
+source taint. The same provenance computation is applied to a judge's exact input projection.
+
+The generated JSON Schema for each rule/target version describes the actual delivered representation, including
+envelope strings when selected. Catalogue validation proves every address, handle, workspace and semantic-format
+pattern is legal for the schema and expands only to values of the declared type.
 
 ### D4. Sources: polling first, with complete cursors and reset detection
 
 | Source | Version 1 | Later |
 |---|---|---|
 | Gmail | Poll `users.history.list` from the stored `historyId`. Follow every `nextPageToken` before committing the final response's `historyId`. An occurrence key is `(historyRecordId, messageId, changeType)`; use the specific change arrays, not duplicate generic entries. `messageAdded` with `DRAFT` is ignored; with `SENT` and not `DRAFT` it is sent; without either it is received. `SPAM` and `TRASH` are excluded unless the rule opts in. Label changes are emitted separately. A 404 re-baselines at `getProfile().historyId` and emits `agentcomms.source.gap`, with no silent backfill. These rules implement Gmail's pagination and change model ([Gmail `history.list`](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.history/list)). | `watch` plus Pub/Sub pull may wake the same reconciliation path; it never replaces `history.list`. |
-| Slack | Poll only conversations named by active rule versions. Dedupe posts on `(channelId, ts)` and edits, when enabled, on `(channelId, ts, edited.ts)`. When a thread's `latest_reply` advances, call `conversations.replies` and ingest its new replies; `conversations.history` alone is not a reply source. One round-robin scheduler per workspace owns a request budget derived from the configured tier and revised downward from observed 429/`Retry-After`. It must support the conservative one-call/minute, 15-result regime for affected new non-Marketplace and newly created internal apps unless Slack grants an increase ([Slack notice](https://api.slack.com/changelog/2025-05-terms-rate-limit-update-and-faq)). The app shows expected worst-case latency from named-conversation count, pending reply pages and that budget. | Socket Mode remains phase F's real-time path. |
+| Slack | Poll only conversations named by active rule versions and promise **top-level posted messages only**, plus the bounded reply reconciliation below. Each conversation has a committed timestamp watermark and a durable scan `{oldest: watermark, latest: cycle-start, cursor}`. Follow every `response_metadata.next_cursor`, even after a short or empty page; a cycle may spend only its workspace request budget, so a cut-short scan persists that exact cursor and boundary and continues next cycle. It commits the new watermark only after the last page and committed ingest. A budget cut, ordinary empty page or `invalid_cursor` alone is never a gap. On `invalid_cursor`, restart the same bounded scan without a cursor; emit `agentcomms.source.gap` only when Slack explicitly reports an `is_limited` or equivalent retained-history boundary that excludes the committed watermark. If coverage cannot be established, mark the source degraded and do not advance or emit a gap. Posts dedupe on `(channelId, ts)`. The scheduler supports Slack's conservative affected-app limit and learns from 429/`Retry-After`; the UI shows worst-case latency ([`conversations.history`](https://docs.slack.dev/reference/methods/conversations.history/), [Slack rate-limit notice](https://docs.slack.dev/changelog/2025/05/29/rate-limit-changes-for-non-marketplace-apps/)). For a thread whose parent was observed within the previous seven days, maintain a separate reply watermark and fully cursor-page `conversations.replies` under the same resumable budget ([`conversations.replies`](https://docs.slack.dev/reference/methods/conversations.replies/)). **Polling does not emit replies to older threads or any message edits.** Those are documented version-1 polling limits, not silent completeness claims. | Phase F's Socket Mode source is the complete path for posts, replies to threads of any age and edits; it reconciles reconnects before advancing its event cursor. |
 | Resend | `received.list` is paged newest-first until the stored last-seen received id appears, then that id advances only with committed ingest. The sent list is paged newest-first through every id from the most recent seven days. Those ids have rows in a state table for seven days; each read compares `last_event` with the stored value and emits only a change. The UI says these are observed states, not every intermediate transition. The daemon may consume at most half the machine-wide throttle and an interactive CLI/MCP call always takes the next available slot. | A signed hosted relay for Resend webhooks is a separate product. |
-| WhatsApp | Run the existing snapshot-and-rebuild sync (`packages/whatsapp/src/operations/sync.ts:45-113`), then diff indexes. Identity is `ZSTANZAID` when present, otherwise `(chatId, timestamp, sender, SHA-256(text))`. Exact duplicate fallback rows coalesce; if two non-identical rows share that fallback key, emit `agentcomms.source.gap` with `fallback_key_collision`, do not advance that chat's baseline, and surface the collision for repair. A decrease in maximum `Z_PK`, an index-format change, or disappearance of a previously retained non-empty stanza-id set is a store reset: re-baseline and emit a gap rather than treating old high-water marks as current. macOS privacy control identifies an app or binary by bundle id/file path plus its code-signing requirement ([Apple Platform Deployment](https://support.apple.com/en-gb/guide/deployment/dep38df53c2a/web)); the grant must therefore be made by the same executable identity that later reads the store. An app-launched daemon and a service-launched one require separate grants. A phase-D spike verifies that identity behaviour before background collection ships. | A file-system notification may wake the same safe snapshot path; it never reads the live store. |
+| WhatsApp | Change the existing snapshot-and-rebuild sync (`packages/whatsapp/src/operations/sync.ts:45-113`) so, under its index lock, it renames the current target to an owner-only sibling `index.previous.sqlite` **before** the existing atomic building-index replacement point (`packages/whatsapp/src/index-db.ts:266-277`), then renames the checked building index into place and fsyncs the directory. Startup restores the sibling if a crash landed between the renames. Diff old and new before deleting the sibling. The comparison is a multiset: rows with `ZSTANZAID` are counted under that id; otherwise occurrences are keyed by `(chatId, timestamp, sender, SHA-256(text), occurrenceIndex)`, where the stable occurrence index is the row's order within that equal four-field group. Equal rows are never coalesced, and repeated stanza ids also retain their counts. A decrease in maximum `Z_PK`, an index-format change, or disappearance of a previously retained non-empty stanza-id set is a store reset: re-baseline and emit a gap rather than treating old high-water marks as current. Apple's PPPC page establishes only the identifiers available to a managed privacy payload ([Apple Platform Deployment](https://support.apple.com/en-gb/guide/deployment/dep38df53c2a/web)). **Hypotheses for the phase-D spike**, not current claims, are that interactive TCC follows the same executable identity and that app-launched and service-launched copies may need separate grants; background collection does not ship until the spike establishes the actual behaviour and the app explains it. | A file-system notification may wake the same safe snapshot path; it never reads the live store. |
 
 Slack opens a fresh `openWorkspace` session for every poll and never caches credentials across polls, matching the
 current token boundary (`packages/slack/src/operations/session.ts:131-145`;
@@ -271,23 +353,34 @@ type Condition =
 
 - `path` is a concrete JSON Pointer validated against the selected event schema. Empty `all`, `any` and `in` arrays
   are refused at save; values must have the schema's exact type.
-- A missing path is false for every leaf except a negated `exists`. `in` means the path's scalar value is one of
-  `values`. `contains` means substring for strings and element membership for arrays, with `value` having the array
-  schema's element type. `startsWith`, `endsWith` and case sensitivity are string-only.
-- String comparison applies NFC and then Unicode Default Case Folding when case-insensitive; it never uses locale
-  casing. Numbers do not coerce. Date operands are valid RFC 3339 instants checked at save and compared as instants;
-  invalid dates are refused.
-- `domainIs` is legal only for an address/domain field. Its value is normalised and saved as an exact IDNA-ASCII
-  domain; it matches that domain only unless `includeSubdomains` is true.
+- Every leaf whose path is missing evaluates Boolean `false`, including `equals`, `notEquals`, comparisons and
+  `domainIs`. `not` is ordinary Boolean negation of its child, with no missing-value propagation, so
+  `not(equals(missing, x))` is `true`; `exists` alone tests presence and is `false` for a missing path. `in` means the
+  path's scalar value is one of `values`. `contains` means substring for strings and element membership for arrays,
+  with `value` having the array schema's element type. `startsWith`, `endsWith` and case sensitivity are string-only.
+- The catalogue's D3 `formats` metadata is authoritative. `domainIs` is legal only on `email` or `domain` fields;
+  date operands and `gt | gte | lt | lte` date comparison are legal only on `date-time` fields. Numeric comparison
+  remains legal only on numbers. URI fields receive no implicit domain or date semantics. Invalid or mismatched
+  operator/type combinations are refused when the rule is saved.
+- Case-insensitive string comparison applies NFC and then **full Unicode 15.1 Default Case Folding** using the
+  `C`/`F` mappings from the bundled 15.1 `CaseFolding.txt`, excluding Turkic-only mappings; it never calls a host
+  locale or runtime case conversion ([Unicode 15.1 components](https://www.unicode.org/versions/components-15.1.0.html)).
+  Numbers do not coerce. Date operands are valid RFC 3339 instants checked at save and compared as instants.
+- `domainIs` normalises and saves an exact IDNA-ASCII domain with a bundled, pinned implementation of UTS #46
+  revision 31 / Unicode 15.1, non-transitional processing, STD3 rules, hyphen/Bidi/joiner checks and DNS-length
+  verification ([UTS #46 revision 31](https://www.unicode.org/reports/tr46/tr46-31.html)). It matches that domain
+  only unless `includeSubdomains` is true. The implementation and its data ship inside `@agentcomms/events`; Node and
+  browser builds cannot fall through to different platform IDNA libraries.
 - No regular expressions in version 1. Limits: depth 8, 64 nodes, scalar value 1 KB, `in` 256 values. The tree is
-  saved; its sentence is generated.
+  saved; its sentence is generated. Repository JSON conformance vectors cover missing/negation, every legal format,
+  Unicode 15.1 folding and UTS #46, and the same vectors run against Node and a real browser build.
 
 **Agentic** — a question put to a judge after a real deterministic prefilter:
 
 - `{ judgeId, judgeVersion, question, inputs: JsonPointer[], threshold, onUncertain }`. At least one deterministic
   leaf must reference a catalogue `content` field; account/type checks alone do not qualify.
-- The judge sees only `inputs`, sanitised and enveloped in a fixed versioned prompt. Hosted input is taint-flushed
-  before the call (D7). It has no tools, secrets or authority.
+- The judge sees only `inputs`, sanitised and enveloped in a fixed versioned prompt. Input to every hosted, local or
+  bundled judge is taint-flushed before the call (D7). It has no tools, secrets or authority.
 - An adapter returns one provider-native probability `p`, clamped to `[0,1]`; it never accepts a provider-supplied
   `match`. The daemon clamps `threshold` to `[0,1]` and derives match as `p >= threshold`. The uncertain band is
   `max(0, threshold - 0.1) <= p < threshold`. `onUncertain` is `no-match` by default or `hold`; only the terminal or
@@ -337,29 +430,56 @@ The delivered envelope is CloudEvents structured JSON:
   canonical scalar encoding, not a JSON array.
 
 Standard Webhooks removes `whsec_`, base64-decodes the suffix, and uses it as the HMAC-SHA256 key over the exact
-transmitted bytes `webhook-id + "." + webhook-timestamp + "." + body`. The symmetric secret shown to a human is
-`whsec_<base64>` and the signature is
-`webhook-signature: v1,<base64>`. Rotation keeps two active secret generations for a bounded overlap and sends both
-space-separated `v1` signatures. Consumer documentation and examples require raw-body verification, constant-time
-comparison, the stable id as an idempotency key and a five-minute timestamp tolerance
-([Standard Webhooks](https://github.com/standard-webhooks/standard-webhooks/blob/main/spec/standard-webhooks.md)).
+transmitted bytes `webhook-id + "." + webhook-timestamp + "." + body`. `webhook-id` is the immutable delivery id and
+is constant across every attempt of that delivery. `webhook-timestamp` is the integer Unix time at the start of
+**each attempt**, not the event time or first-attempt time; every retry recomputes all active-generation signatures
+over that new timestamp and the unchanged body. The symmetric secret shown to a human is `whsec_<base64>` and the
+signature is `webhook-signature: v1,<base64>`. Rotation keeps two active secret generations for a bounded overlap and
+sends both space-separated `v1` signatures. Consumer documentation and examples require raw-body verification,
+constant-time comparison, the stable webhook id as an idempotency key and a five-minute timestamp tolerance; this
+follows Standard Webhooks' distinction between event time and the timestamp of each attempt
+([Standard Webhooks](https://github.com/standard-webhooks/standard-webhooks/blob/main/spec/standard-webhooks.md#webhook-metadata)).
+An injected-clock test advances between attempts and proves the id and body are identical while the timestamp and
+signature change.
 
 ### D7. Targets, network boundaries, taint and delivery promises
 
 | Target | Version 1 contract |
 |---|---|
-| **Webhook** | HTTPS `POST` of the exact CloudEvent bytes, Standard Webhooks signed. Success is 2xx. Retry with capped exponential backoff and jitter until success, but no later than 24 hours and no more than 20 attempts; then `dead-lettered`. Promise: **bounded at-least-once attempts**, not unconditional receipt. |
-| **Local SSE stream** | `GET /v1/streams/<subscriber>` on 127.0.0.1/::1. Each subscriber has an encrypted retained stream log, default 24 hours and maximum 7 days, bound into its standing authorisation. `Last-Event-ID` replays entries still in that window. There is no acknowledgement, so the promise is only **available for replay within the approved window**, never receipt or processing. |
-| Socket.IO, JetStream, Redis Streams, Pub/Sub, EventBridge/SQS, QStash, Trigger.dev | Later, first-party delivery code inside the daemon. Each future target needs its own reviewed guarantee, authorisation fields and network boundary. |
+| **Webhook** | HTTPS `POST` of the exact CloudEvent bytes, Standard Webhooks signed. Success is 2xx. Retry with capped exponential backoff and jitter until success, the approved delivery-retention deadline or 20 attempts. Exhausting attempts before the deadline is `dead-lettered`; reaching the deadline first is `retention-expired`. Promise: **bounded at-least-once attempts**, not unconditional receipt. |
+| **Local SSE stream** | `GET /v1/streams/<subscriber>` on 127.0.0.1/::1. Each subscriber has an encrypted retained stream log, default 24 hours and maximum 7 days, bound into its standing authorisation. `Last-Event-ID` replays entries still in that window only while every recorded version is active and the global switch is enabled. There is no acknowledgement, so the promise is only **available for replay within the approved window**, never receipt or processing. |
 
-Webhook payloads are deleted after a 2xx; SSE payloads are deleted after their subscriber window expires. A
-dead-lettered webhook payload remains encrypted only for its approved dead-letter retention, default seven days, then
-is deleted; dropping it deletes it immediately. When one decision has both target kinds, each target's copy follows
-its own rule.
+Every phase-F adapter is reviewed first-party code inside the daemon and implements exactly
+`deliver(payload, versions) -> delivered | retryable | permanent`. `versions` carries the exact rule, target,
+subscriber and judge versions; `delivered` means acceptance at the boundary named below, never proof that an
+eventual consumer processed the message. The target version declares that boundary, downstream guarantee, ordering
+scope, idempotency key and error classification before it can be approved:
 
-**Taint before any disclosure.** Before webhook network I/O, before appending an SSE event to a subscriber-readable
-log, and before a hosted-judge call, the daemon scans the exact target-specific bytes/value that will be disclosed
-for addresses and platform handles. It records them in core's taint store under the originating source
+| Phase-F adapter | `delivered` boundary, guarantee and ordering declaration |
+|---|---|
+| Socket.IO | A named application acknowledgement. The daemon retries the same delivery id before later rows in its ordering key, giving bounded at-least-once attempts and duplicates on an ambiguous acknowledgement; receive order is serial within that key. Socket.IO itself guarantees message order but defaults to at-most-once arrival, so the acknowledgement/retry layer is part of this adapter, not an inferred platform promise ([Socket.IO delivery guarantees](https://socket.io/docs/v4/delivery-guarantees/)). |
+| NATS JetStream | A server `PubAck`. Publication is retried with the delivery id as the message id; consumer redelivery and order are those of the approved stream/consumer configuration, recorded in the target version, not a blanket exactly-once claim ([NATS JetStream](https://docs.nats.io/nats-concepts/jetstream)). |
+| Redis Streams | Successful `XADD` of the delivery id. Entries are append-ordered within the approved stream; consumer groups are at-least-once and consumers must deduplicate by delivery id ([Redis streaming](https://redis.io/docs/latest/develop/use-cases/streaming/)). |
+| Google Pub/Sub | A successful publish acknowledgement. Default subscriptions are at-least-once and unordered; an approved target may promise within-key order only when ordering is enabled and the daemon ordering key is used ([Pub/Sub subscription properties](https://cloud.google.com/pubsub/docs/subscription-overview)). |
+| EventBridge / SQS | Successful `PutEvents` entry or `SendMessage`. EventBridge and SQS Standard are at-least-once with no strict order; an SQS FIFO target alone promises order within its approved message-group key ([AWS decision guide](https://docs.aws.amazon.com/decision-guides/latest/decision-guides/sns-or-sqs-or-eventbridge.html)). |
+| QStash | Accepted enqueue with delivery id as the deduplication key. Delivery is at least once; FIFO is promised only for an approved queue with parallelism one, which blocks later entries behind retries ([QStash use cases](https://upstash.com/docs/qstash/overall/usecases), [QStash queues](https://upstash.com/docs/qstash/features/queues)). |
+| Trigger.dev | An accepted task run with the delivery id as its idempotency key. The adapter promises no execution order; a target that needs serial execution must name an approved queue/concurrency key and still documents only the ordering Trigger.dev actually guarantees ([Trigger.dev idempotency](https://trigger.dev/docs/idempotency), [concurrency and queues](https://trigger.dev/product/concurrency-and-queues)). |
+
+**Retention is terminal.** A held decision receives `holdExpiresAt` from the approved hold window, default 24 hours;
+if no person resolves it by then, one transaction records terminal outcome `hold-expired` and purges its retained
+ciphertext, creating no delivery. Every delivery has an approved absolute retention deadline independent of its retry
+or rate-cap schedule. If it has not crossed to `disclosing` before that deadline—including because it waited behind a
+rate cap—it becomes terminal `retention-expired` and its ciphertext is purged. Cancelling a delivery records
+`cancelled` and purges its ciphertext in the **same** transaction. Webhook payloads are purged after a 2xx; SSE
+payloads after their window or any bound-version revocation. A webhook that exhausts attempts before its delivery
+deadline becomes `dead-lettered`; its encrypted payload remains only for the separately approved dead-letter
+retention, default seven days, then is purged, and `delivery drop` purges it immediately. When one decision has
+multiple targets, each target copy reaches its own terminal outcome and deadline.
+
+**Taint before every judge and disclosure.** Before **every** judge call—hosted, loopback/local or bundled—before
+webhook or phase-F network I/O, and before appending an SSE event to a subscriber-readable log, the daemon takes the
+structured addresses, scoped platform handles and prose-extracted addresses derived through D3 mapping provenance
+from the exact target-specific value. It records them in core's taint store under the originating source
 (`gmail-event`, `slack-event`, `resend-event`, `whatsapp-event`) and proceeds only after `flush` succeeds. On failure,
 nothing is posted, appended or called; the step remains retryable. This preserves the current fail-closed collector
 contract (`packages/core/src/taint.ts:273-285,426-429`) while making event taint per source from phase B1 onward,
@@ -377,30 +497,54 @@ scheme, original host, port, policy and whether HTTP is permitted; plain HTTP is
 `target test` runs only for an already approved target version, or from the terminal/app against a pending version as
 part of its approval. MCP cannot test an unapproved target, so it cannot turn proposals into SSRF probes.
 
-**SSE authentication.** A fetch-streaming client sends `Authorization: Bearer <subscriber token>`. Native browser
+**SSE authentication and CORS.** A fetch-streaming client sends `Authorization: Bearer <subscriber token>`. Native browser
 `EventSource` is unsupported in version 1 because its constructor supplies no arbitrary Authorization header
 ([HTML Standard](https://html.spec.whatwg.org/multipage/server-sent-events.html)). Tokens never appear in query
 strings or cookies. Requests with `Origin` are refused unless that exact origin is in the approved subscriber
-version; preflight is not enabled. `Host` is checked against the listener's fixed local authority.
+version. For an approved exact Origin, `OPTIONS /v1/streams/<subscriber>` answers only a requested `GET` with
+`Access-Control-Allow-Origin: <that exact origin>`, `Access-Control-Allow-Methods: GET`,
+`Access-Control-Allow-Headers: Authorization, Last-Event-ID` and `Vary: Origin`; it never emits
+`Access-Control-Allow-Credentials`, never uses `*`, and refuses any other requested method/header or unapproved
+Origin. The GET repeats the exact allow-origin response and browser clients use `credentials: "omit"`. This narrow
+preflight is required because `Authorization` is not CORS-safelisted ([Fetch Standard](https://fetch.spec.whatwg.org/#http-new-header-syntax)).
+`Host` is checked against the listener's fixed local authority. Rotating a subscriber token atomically installs the
+new generation and invalidates the old token immediately, but does **not** purge retained entries or create a new
+subscriber version; revoking the subscriber version does both deny access and purge its entries in the revocation
+transaction.
 
 ### D8. Durable ingest, decisions and outboxes
 
 One SQLite database, `<stateDir>/events/events.sqlite`, is owned only by `agent-events run`:
 
+- `event_settings(singleton, enabled, changedAt, activationId?)` — the authoritative global switch;
+- immutable `rule_versions`, `target_versions`, `subscriber_versions` and `judge_versions`, each holding its full
+  canonical document and digest; `active_versions(kind, objectId, version, approvalId, activatedAt)`; durable
+  `activation_intents` and append-only `activations`/`revocations`;
 - `cursors(source, account, cursor, updatedAt)`;
-- `ingest(eventId, type, version, account, dedupeKey, occurredAt, observedAt, ciphertext, nonce, tag, enabledRules)`;
+- `ingest(eventId UNIQUE, installationId, type, version, accountId, dedupeKey, occurredAt, observedAt, ciphertext,
+  nonce, tag)` plus `ingest_rules(eventId, ruleId, ruleVersion, decisionDeadline)`;
 - `decisions(id, eventId, ruleId, ruleVersion, outcome, judge…, UNIQUE(eventId, ruleId, ruleVersion))`;
-- `deliveries(decisionId, ruleVersion, targetId, targetVersion, subscriberId?, subscriberVersion?, ciphertext,
-  attempts, nextAt, state, leaseUntil, lastError,
-  UNIQUE(decisionId, targetId, targetVersion, subscriberId, subscriberVersion))`;
-- `stream_log(subscriberId, subscriberVersion, eventId, ciphertext, expiresAt)`;
+- `deliveries(id, decisionId, ruleId, ruleVersion, targetKey NOT NULL, targetId, targetVersion, subscriberId?,
+  subscriberVersion?, judgeId?, judgeVersion?, ciphertext, attempts, nextAt, expiresAt, state, leaseUntil,
+  lastError, UNIQUE(decisionId, targetKey))`, where `targetKey` is exactly
+  `webhook:<targetId>:<version>` or `sse:<subscriberId>:<version>`;
+- `stream_log(id, ruleId, ruleVersion, targetId, targetVersion, subscriberId, subscriberVersion, judgeId?,
+  judgeVersion?, eventId, ciphertext, expiresAt)`;
 - source-specific cursor/state tables, judge-budget reservations and worker leases.
 
-The source transaction inserts each encrypted normalised event and advances its cursor together. An ingest row is
-kept until every rule version that was enabled at ingest has a terminal decision and every held decision is resolved;
-then it is purged. A crash before or after cursor commit, decision insert, judge response or delivery creation
-re-evaluates from ingest, with the uniqueness constraint absorbing repeats. Delivery retries use the stored payload
-and exact versions; they never re-evaluate, re-map or re-ask a judge.
+`eventId` is D3's deterministic id and `UNIQUE(eventId)` is the ingest idempotency boundary. On a conflict, the
+transaction compares the stored `(installationId, accountId, type, version, dedupeKey)` with the canonical identity:
+an equal tuple is a repeat; a different tuple is a fatal `event_id_collision`, leaves the source cursor unchanged and
+degrades that source rather than merging events. Cross-account and forced-hash-collision tests cover both branches.
+
+The source transaction inserts each encrypted normalised event, snapshots the exact enabled rule versions into
+`ingest_rules` and advances its cursor together. An ingest row is kept until every snapshotted rule has a terminal
+decision. A rule that has not reached a decision by its approved ingest-content deadline receives terminal
+`retention-expired`; a held result reaches terminal `hold-expired` at its hold deadline. Neither creates a delivery,
+and both permit immediate ciphertext purge once the other snapshotted rules are terminal. A crash before or after
+cursor commit, decision insert, judge response or delivery creation re-evaluates from ingest, with the uniqueness
+constraints absorbing repeats. Delivery retries use the stored payload and exact versions; they never re-evaluate,
+re-map or re-ask a judge.
 
 All content-bearing blobs — ingest, deliveries and stream entries — are encrypted in the application with AES-256-GCM
 under one random per-installation key held only in the secret store. Every write uses a unique 96-bit nonce and AAD
@@ -409,35 +553,44 @@ free-page residue contain ciphertext too. Metadata needed to schedule and audit 
 retained content unrecoverable and is reported by `doctor`; there is no plaintext fallback.
 
 While evaluation is paused by the required-update gate, source polling pauses as well: the daemon never advances
-cursors while it cannot decide retained events. `rule test` uses still-retained ingest rows for recent events; if no
-suitable row remains, it performs a fresh provider read without advancing the source cursor and delivers nothing.
+cursors while it cannot decide retained events. `rule test` has the zero-network contract in D10 and never performs a
+fresh provider read.
 
 Workers claim rows with expiring leases. On restart an expired lease returns to its prior retryable state. Ordering,
-when enabled, is only by `(rule, account, target)`, so one failing destination does not block another. The rule's
-approved rolling-hour rate cap is reserved transactionally before a delivery claim.
+when enabled, is only by `(rule, account, target)`, so one failing destination does not block another. Immediately
+before external I/O, one SQLite transaction re-reads `event_settings.enabled` and every bound active pointer, checks
+the delivery deadline, reserves the approved rolling-hour rate-cap slot and moves the row to `disclosing`. A failed
+check instead reaches `cancelled` or `retention-expired` and purges ciphertext in that transaction. SSE append and
+replay transactions perform the same switch/pointer checks. Each appended stream row stores all of the rule,
+target/subscriber and optional judge versions under which it was made; revoking any one purges matching rows in the
+same pointer-change transaction. Subscriber-token rotation changes only the secret generation, invalidates the old
+token and retains those rows.
 
-Decision metadata defaults to 30 days; dead-letter payload retention defaults to seven days; SSE defaults to 24
-hours. The person may lower retention immediately. Raising it or changing any disclosure-bound retention needs a new
-standing authorisation.
+Decision metadata defaults to 30 days; ingest content, holds, delivery and SSE replay default to 24 hours;
+dead-letter payload retention defaults to seven days. The person may shorten any retention through D2's whitelist.
+Raising one needs a new standing authorisation. Expiry workers use database time/deadlines and terminal transitions,
+not best-effort deletion jobs.
 
-### D9. Where configuration lives
+### D9. Authoritative event state and the config boundary
 
-`config.json` gains `events: { enabled, sources{}, rules{}, targets{}, judges{}, subscribers{} }`, containing immutable
-version records, active/pending pointers and secret references only. Payloads, cursors, decisions and leases are
-runtime state in D8; secret bytes remain in the secret store.
+`config.json` gains **no `events` key and carries no event state**. Rules, targets, subscribers, judges, every
+immutable version and pending/active pointer, source cursors, the global switch, activation intents, activations and
+revocations live only in D8's daemon-owned SQLite database. Event secret references live in the relevant immutable
+SQLite version; secret bytes remain in core's secret store.
 
-`classifyChange` learns the events key, but its ordinary `chat|confirm` result does not grant standing disclosure.
-It classifies tightening so it can apply immediately and identifies a proposed loosening for the preview; D2 then
-requires the dedicated out-of-chat authorisation whatever the ordinary policy. The current classifier's existing
-safety fields remain unchanged (`packages/core/src/config.ts:1375-1483,1487-1548`).
+The existing config remains necessary only for core/channel concerns that predate events: connected inbox/account
+identity and provider credentials, the chosen secret-store backend, and ordinary send/change policies. Event sources
+refer to those accounts by stable id but do not copy or mutate them. Core changes only to add the `disclosure`
+approval kind/channel and its terminal/app claim path; `classifyChange` does not learn an events field and its
+existing safety fields stay unchanged (`packages/core/src/config.ts:1375-1483,1487-1548`). This keeps standing
+authority out of a file whose current commit primitive is an atomic rename (`packages/core/src/config.ts:949-951`)
+and makes every tightening, cancellation and SSE purge one SQLite transaction.
 
-There is no mutable "current target" behind a delivery. Active pointers move only in the atomic transitions in D2,
-and queued rows hold exact versions. This resolves the old contradiction: **loosening keeps the approved version
-running; tightening replaces it and cancels superseded queued work**.
-
-Supported older releases preserve the unknown top-level `events` value without acting on it because their config
-roots are loose and writes serialise the parsed value (`packages/core/src/config.ts:468-485,545-568,949-951`). The
-events release must include a compatibility fixture proving each still-supported older reader does not erase it.
+There is no mutable "current target" behind a delivery. SQLite active pointers move only through D2's activation or
+tightening transactions, and queued rows hold exact versions. **Loosening keeps the approved version running;
+tightening replaces it, cancels superseded work, purges its ciphertext and removes replayable SSE content in one
+store.** No older-release config compatibility fixture is needed because there is no event config value for an old
+reader to preserve.
 
 ### D10. Control surfaces and parity
 
@@ -453,19 +606,34 @@ Every non-exception capability is one operation in `packages/events-daemon/src/o
 | Subscribers | `subscribers list`, `subscriber add|remove` |
 | Judges | `judges list`, `judge add|remove`, `judge test` |
 | Deliveries | `deliveries list`, `delivery retry|drop`, `held list|decide` |
-| Daemon | `status`, `run`, `stop`, `pause|resume`, `approve <id>`, `doctor` |
+| Daemon | `status`, `run`, `stop`, `pause|resume`, `disable-all|enable-all`, `approve <id>`, `doctor` |
 
-MCP can read, test rules, and propose disabled, secretless versions. It cannot approve a standing authorisation,
-resolve a held model decision, test an unapproved target, or accept/return/reveal/rotate a secret. The paired terminal
-commands and app operations exist, but each gets a `status: "exception"` capability row naming its human-only reason.
-`run` is also an exception because a tool cannot start the server in which it runs. The precedent for visible
-exceptions and same-operation parity is `docs/superpowers/specs/2026-09-25-cli-mcp-parity-design.md:164-168` and
-`capabilities.json:241-254`.
+`rule test` is the same operation from CLI and MCP and may evaluate a disabled or unapproved rule because it has a
+strictly local contract. Its input is either catalogue `examples` or retained ingest rows from explicitly named
+accounts the calling server is currently allowed to read (respecting its pin and live account access). It evaluates
+only deterministic conditions and the mapping; an agentic node is reported `not-evaluated`. It never calls a judge,
+provider or target, never advances a cursor and never creates a decision/delivery. Returned source and mapped values
+are sanitised and enveloped regardless of the pending target's representation, and their D3-derived taint is flushed
+before return exactly like any other read; a flush failure fails the test.
 
-The first call that enables or loosens a disclosure returns `standingApprovalRequired`, an id, digest and complete
-preview. A repeated MCP call cannot claim it. The terminal/app approval operation re-plans under the record lock and
-refuses digest drift. `doctor` reports daemon/protocol health, active authorisations, source lag, leases, held
-decisions, dead letters, retention and missing secrets.
+`judge test` may call only an already approved, active judge version. The terminal or app may test a pending judge
+from the approval screen as part of approving that exact version; MCP and ordinary CLI calls cannot. The same rule
+applies to **every** real judge call, hosted, local or bundled. `target test` keeps the equivalent restriction in D7.
+Automated tests inject every provider/judge/target transport and fail on any real socket; they prove an unapproved
+`rule test` or `judge test` makes zero network calls.
+
+MCP can otherwise read and propose disabled, secretless versions. It cannot approve or claim a disclosure
+authorisation, resolve a held model decision, test an unapproved target/judge, or accept/return/reveal/rotate a
+secret. The paired terminal commands and app operations exist, but each gets a `status: "exception"` capability row
+naming its human-only reason. `run` is also an exception because a tool cannot start the server in which it runs. The
+precedent for visible exceptions and same-operation parity is
+`docs/superpowers/specs/2026-09-25-cli-mcp-parity-design.md:164-168` and `capabilities.json:241-254`.
+
+The first call that enables or loosens a disclosure returns `standingApprovalRequired`, a `disclosure` approval id,
+digest and complete preview. A repeated MCP call cannot claim it. The terminal/app approval operation re-plans under
+the daemon activation lock, refuses digest drift and runs D2's intent → core claim → SQLite activation protocol.
+`doctor` reports daemon/protocol health, global switch, active authorisations, pending intents, source lag, leases,
+held decisions, dead letters, retention deadlines and missing secrets.
 
 The `agentcomms-events` skill teaches an agent to propose and test a disabled rule, explain both untrusted
 representations, and hand the approval id to the person. It never instructs the agent to type or request a secret.
@@ -475,8 +643,8 @@ representations, and hand the approval id to the person. It never instructs the 
 | Kind | Contract | Disclosure |
 |---|---|---|
 | `typesafe` | Jev through `POST https://api.typesafe.ai/v1/systemone`, using provider-native Noul output. It is **treated as hosted-only under currently published artefacts and terms**; this is not a claim that local Jev is impossible. | Exact approved input fields leave for the approved host. |
-| `local-endpoint` | An approved loopback Ollama/System One endpoint or a generic JSON-output model. Generic numbers are uncalibrated scores. | Local network only, still subject to target resolution and taint-before-call. |
-| `bundled` | A separately downloaded model run locally. | None. |
+| `local-endpoint` | An approved loopback Ollama/System One endpoint or a generic JSON-output model. Generic numbers are uncalibrated scores. The endpoint gets the same per-connection resolution, pinning and redirect refusal as D7; pending endpoints cannot be reached from MCP tests. | Local network only; D7 taint still flushes before every call. |
+| `bundled` | A separately downloaded model run locally. | No network disclosure, but D7 taint still flushes before invocation and the version still needs standing authority. |
 
 Models are never in the installer. An opt-in download shows name, exact version, publisher, licence, checksum and
 size; a signed manifest and SHA-256 are verified before atomic installation. "Leia" remains unidentified. Laya is a
@@ -485,10 +653,12 @@ an explicit export to ONNX and the ONNX Runtime path — not `llama.cpp`
 ([Laya](https://huggingface.co/convaiinnovations/laya)).
 Redistribution requires a licence that permits it and a labelled Gmail/Slack quality evaluation.
 
-Every judge is immutable and versioned. A hosted judge cannot be enabled until its exact input fields and retention
-are approved under D2 and its key is completed by a person under D2. "Never use hosted judges" is an immediate
-tightening. Prompt injection can change only the model's bounded score/reason code; it cannot change rules, mappings,
-targets or authority.
+Every judge is immutable and versioned. No hosted, local or bundled judge may be called until that exact judge
+version is active under D2, except for one terminal/app call made inside its own approval screen as D10 defines. A
+hosted judge additionally needs its key completed by a person. "Never use judges" and disabling one judge are
+immediate whitelist tightenings: the transaction moves its active pointer, cancels and purges queued work, and purges
+SSE rows whose decisions used it. Prompt injection can change only the model's bounded score/reason code; it cannot
+change rules, mappings, targets or authority.
 
 ### D12. The daemon: one owner, one authenticated protocol
 
@@ -520,6 +690,22 @@ A normal available update does not stop the daemon. A required update pauses pol
 `disclosing` I/O may finish and everything else waits. The global pause stops polling, judge calls and delivery
 claims; it does not erase state.
 
+The owner's **global switch** is separate from operational pause and is the `event_settings.enabled` row in D8.
+`agent-events disable-all`, its MCP peer and the app switch are one immediate tightening: a single SQLite transaction
+sets it false, cancels every queued/retryable delivery, purges those ciphertexts and purges every retained SSE entry.
+It needs no approval. It does not revoke the underlying standing authorisations, so `enable-all` may resume the exact
+still-active, unexpired versions, but enabling is a disclosure loosening and needs a new terminal/app-only
+`disclosure` approval. Its canonical preview and digest enumerate the active authorisation digests it will resume;
+pointer or digest drift refuses it. Enabling uses D2's activation-intent → core-claim → SQLite-commit protocol and
+does not resurrect cancelled deliveries or purged replay entries.
+
+Every boundary races safely with disable. A source transaction re-checks the switch before committing ingest/cursor;
+a judge reservation moves to `judging` only in a transaction that checks the switch and active rule/judge pointers;
+D8 performs that check before `disclosing`, SSE append and SSE replay. A provider read or external judge/delivery I/O
+that crossed its boundary before disable is recorded as in flight and cannot be recalled, but no later operation can
+cross. Tests stop each worker at both sides of every boundary. `pause|resume` remains an operational control that
+retains queues and replay and therefore grants no disclosure authority; it cannot stand in for `enable-all`.
+
 Operational events increment `hop`; the daemon refuses to emit one past hop 3. A delivery of
 `agentcomms.delivery.dead_lettered` that itself dead-letters is audited but never emits another dead-letter event.
 
@@ -530,8 +716,9 @@ Operational events increment `hop`; the daemon refuses to emit one past hop 3. A
 
 **Screens:**
 
-1. **Overview** — global state, daemon/protocol health, source lag, active authorisations, recent delivery outcomes,
-   held decisions and pending approvals.
+1. **Overview** — the authoritative global enable/disable switch, daemon/protocol health, source lag, active
+   authorisations, recent delivery outcomes, held decisions and pending approvals. Disable applies immediately;
+   enable opens the D12 out-of-chat approval flow.
 2. **Sources** — accounts, event types, interval/budget, expected latency, cursor and health.
 3. **Rules** — deterministic tree, optional judge, exact input fields and budgets, mapping builder, target-specific
    representation/schema, delivery rate cap, preview and dry-run test.
@@ -544,11 +731,13 @@ Operational events increment `hop`; the daemon refuses to emit one past hop 3. A
 
 **Approval is equivalent to the terminal.** The webview supplies only an approval id, digest and typed response. The
 Rust layer fetches the authoritative preview from the daemon by id and digest; it never renders preview fields
-supplied by the webview. Rust uses the same text-only renderer as the terminal: no HTML interpretation, bidi/C0/C1,
-zero-width and control characters neutralised, links displayed as inert text and never clickable, and
-envelope-looking text unable to close or forge a section. It shows the daemon-issued challenge, then calls the
-daemon's approve operation. Under the approval record lock, the daemon re-plans, re-checks the digest and challenge,
-and only then activates the versions.
+supplied by the webview. The TypeScript terminal renderer and Rust app renderer are separate implementations of one
+text-only contract: no HTML interpretation, bidi/C0/C1, zero-width and control characters neutralised, links
+displayed as inert text and never clickable, and envelope-looking text unable to close or forge a section. They run
+the same repository JSON fixtures in `test/fixtures/disclosure-preview/*.json`; each fixture contains the structured
+preview input and exact expected UTF-8 bytes, and either renderer drifting fails CI. Rust shows the daemon-issued
+challenge, then calls the daemon's approve operation. Under the daemon activation lock, it re-plans and re-checks the
+digest/challenge, records approval through core, and runs D2's recoverable activation protocol.
 
 The webview has no shell, file-system or direct network permissions. Rust alone holds the control session. Secret
 entry/reveal is a deliberately narrow Rust command invoked only from the secret screen and never copied to logs,
@@ -556,9 +745,9 @@ audit or app telemetry. Capability files are scoped to the settings window, and 
 custom commands per window with `tauri_build::AppManifest::commands`, because Tauri otherwise exposes registered
 commands to every window/webview ([Tauri capabilities](https://v2.tauri.app/security/capabilities/)).
 
-Tests cover HTML tags, bidi/control characters, OSC/CSI, fake headers and envelope-looking preview text; inert links;
-digest drift; wrong or missing challenge; a webview-supplied fake preview; and generated command-manifest access from
-every window.
+Tests cover the cross-language JSON vectors; HTML tags, bidi/control characters, OSC/CSI, fake headers and
+envelope-looking preview text; inert links; digest drift; wrong or missing challenge; a webview-supplied fake preview;
+and generated command-manifest access from every window.
 
 ### D14. Repository structure, packaging and versions
 
@@ -566,8 +755,8 @@ every window.
 apps/
   desktop/                # Tauri + React + @cueplusplus/ui
 packages/
-  core/                   # gains events config/classification, app/daemon surfaces, acc_ state
-  events/                 # NEW @agentcomms/events — isomorphic catalogue, conditions, mapping, schemas
+  core/                   # gains disclosure approvals/app channel; no event configuration
+  events/                 # NEW @agentcomms/events — isomorphic catalogue, pinned Unicode, conditions, mapping
   events-daemon/          # NEW @agentcomms/events-daemon — I/O, ingest, approval, delivery, CLI, MCP
   gmail/ slack/ resend/ whatsapp/  # each gains operations/events.ts and manifest events
 ```
@@ -584,13 +773,16 @@ The top-level `"agentcomms"` field continues to mean **channel**, exactly as the
 source and release tests read both declarations, compute dependency order and prove every publishable package is
 included. They do not widen the channel-manifest union.
 
-Delivery adapters remain reviewed first-party modules inside the daemon until a separate isolation design exists.
-There is no `kind: "delivery"` manifest: a manifest cannot stop an adapter from reading the shared secret store or
-outbox.
+Delivery adapters remain reviewed first-party modules inside the daemon, implement D7's three-result contract and
+declare their guarantee/ordering in each target version. There is no `kind: "delivery"` manifest: a manifest cannot
+stop an adapter from reading the shared secret store or outbox.
 
 All npm packages remain lockstep. The desktop has its own version but declares a tested daemon-protocol support
-matrix. If the app stays in this monorepo, root `pnpm verify` runs its TypeScript typecheck and unit tests; the signed
-Tauri build remains in the app's own platform workflow.
+matrix. Root `pnpm verify` runs the desktop TypeScript typecheck, unit tests and the TypeScript side of the shared
+renderer vectors. The desktop workflow runs on macOS, Windows and Linux and, on **each** platform, runs
+`cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`,
+`cargo test --all-targets --all-features`, the Rust side of the renderer/command/secret tests, and an unsigned Tauri
+build. Signing/notarisation is a later credentialed release job, not a substitute for this cross-platform build gate.
 
 The private/public `@cueplusplus` distribution choice and signing identities remain owner decisions (§8). If those
 UI packages remain unpublished and private, unauthenticated fork CI cannot install them; phase C must then either
@@ -602,61 +794,85 @@ Each phase is specified, reviewed, planned and built separately. The order is by
 
 | Phase | Delivers | Depends on |
 |---|---|---|
-| A | Isomorphic `@agentcomms/events`: catalogue and pointer patterns, conditions, mapping, generated source/delivery schemas; no I/O or `node:` imports | — |
-| B1 | Daemon skeleton: authenticated/versioned control protocol, stale recovery, owner-only state, AES-GCM durable ingest, Gmail source, rule evaluation, immutable standing authorisations and the `SECURITY.md` amendment, per-source taint-before-disclosure, outbox/leases/cancellation; **only** a local `dry-run` target that records what would have been sent | A |
-| B2 | Network hardening, pinned resolution, Standard Webhooks/signing/rotation, webhook delivery, authenticated SSE and replay retention | B1 |
+| A | Isomorphic `@agentcomms/events`: catalogue and pointer/provenance patterns, semantic formats, bundled Unicode 15.1 case folding and UTS #46, conditions, mapping, generated source/delivery schemas and shared Node/browser conformance vectors; no I/O or `node:` imports | — |
+| B1 | Daemon skeleton: authenticated/versioned control protocol, stale recovery, owner-only authoritative SQLite state and global switch, AES-GCM durable ingest, deterministic event ids, Gmail source, rule evaluation, core `disclosure` approvals plus recoverable activation intents, immutable standing authorisations and the `SECURITY.md` amendment, per-source taint-before-every-judge/disclosure, terminal retention, outbox/leases/cancellation; **only** a local `dry-run` target that records what would have been sent | A |
+| B2 | Network hardening, pinned resolution, Standard Webhooks per-attempt signing/rotation, webhook delivery, authenticated SSE, exact-origin CORS, replay retention and version-bound purge | B1 |
 | B3 | CLI/MCP parity and exception rows, human-only secret completion, `doctor`, event skill | B2 |
 | C | Desktop app and tray lifecycle, Rust approval/secret surfaces, supervision and protocol compatibility | B3; CUE++ distribution decision |
-| D | Slack, Resend and WhatsApp sources, each shipping with its own per-source taint and reset/fairness tests | B1 |
-| E | Hosted/local judges, holds, durable budgets, adversarial corpus | B2 (C for app hold resolution) |
-| F | Evaluated bundled judge, OS service, future first-party targets, Gmail Pub/Sub and Slack Socket Mode | D, E |
+| D | Slack, Resend and WhatsApp sources, including resumable Slack pagination/documented polling limits and WhatsApp old-index multiset diff; each ships with per-source taint and reset/fairness tests | B1 |
+| E | Hosted/local judges, holds, durable budgets, adversarial corpus; refuses to build or ship unless B3's secret-completion and human-only capability surfaces are present | B3 (C for app hold resolution) |
+| F | Evaluated bundled judge, OS service, first-party adapters under D7's contract, Gmail Pub/Sub and the complete Slack Socket Mode source | D, E |
 
 No phase before B2 can make network disclosures. No new source ships without taint-before-disclosure.
 
 ## 5. Tests the phases owe
 
-- **Catalogue and pointer grammar:** every schema/example; pattern validation and expansion; `~0`, `~1`, root `""`,
-  empty keys, numeric array indices, refused leading zeroes and `-`, literal `*`, copied parents, ancestors and
-  descendants, and own-property handling of `__proto__`, `constructor` and `prototype`.
-- **Conditions and judges:** every operator × legal schema type; empty `all`/`any`/`in`; NFC plus Unicode default
-  case fold; invalid dates; IDNA and subdomains; exact uncertain boundaries including threshold 0 and 1; provider
-  probability vs uncalibrated score; content-field prefilter; durable per-rule/provider/global reservations,
-  concurrency 2, timeouts counted and malformed output fail-closed.
-- **Mapping and wire:** constants, objects/arrays, every missing policy, both representations and their generated
-  schemas, parent-copy representation, canonical `agentcommsuntrusted` including root, URI-escaped source
-  components, exact CloudEvents 1.0 shape, exact transmitted-byte signatures, `whsec_`, overlapping signatures,
-  raw-body consumer verification and five-minute replay tolerance.
-- **Crash injection:** before and after cursor/ingest commit, decision insert, judge response persistence, webhook
-  2xx recording and SSE append. Every restart reaches one terminal decision per
-  `(eventId, ruleId, ruleVersion)` and never advances over memory-only content.
-- **Version races:** concurrent disable, remove, tightening and loosening versus claim, retry and SSE append. A
-  disclosure either crosses `disclosing` before revocation or becomes audited `cancelled`; it never follows a
-  mutable target, remaps old work or sends after the revocation transaction.
-- **Taint:** forced taint-store failure proves no hosted-judge call, webhook request or readable SSE append occurred;
-  final plain/enveloped payloads discover addresses and Slack handles under their source; error strings remain
-  untrusted and reason codes constrained.
-- **Secrets:** scan CLI/MCP inputs and outputs, structured content, logs, audit, database metadata and app IPC.
-  MCP proposals contain no secret; terminal hidden input and app reveal-once work; rotation sends two signatures
-  without exposing either secret.
-- **Sources:** Gmail multiple pages, duplicated generic/specific records, add/remove/add occurrences, DRAFT/SENT and
-  spam/trash classification, 404 gap; Slack posts, edits, replies, round-robin budget, learned 429s and expected
-  latency; Resend received pagination, seven-day sent state, half-share and interactive priority; WhatsApp stanza and
-  fallback identities, exact/non-identical collisions, all three reset signals and executable-identity spike.
-- **Network:** DNS rebinding between approval and every attempt; mixed good/refused answers; all named IPv4/IPv6
-  special ranges and mapped forms; SNI/Host preservation; redirects; unapproved MCP target tests; SSE wrong/missing
-  bearer, query/cookie refusal, Origin/CORS/preflight, Host and browser `EventSource` unsupported.
-- **Control and storage:** Unix `0700` parent, same-uid peer and second token; Windows pipe/state ACLs; hello version
-  negotiation, request authentication, complete error shape, stale pid/socket recovery, worker lease expiry,
-  encrypted DB/WAL/free-page inspection, ordering by `(rule, account, target)` and protocol compatibility matrix.
-- **Approvals and app:** every digest-bound field, default 60/hour, `chat` unable to claim, doctor/app active list,
-  hostile text-only rendering, inert links, webview-forged data, digest drift, missing/wrong challenge, daemon record
-  lock and per-window `AppManifest::commands`.
-- **Delivery promises:** webhook 2xx/retry/24-hour/20-attempt boundary and id stability; SSE replay inside and refusal
-  outside the window; independent payload deletion; dead-letter retention/drop; operational hop cap and no
-  dead-letter recursion.
-- **Parity and packaging:** every capability row driven on CLI and MCP, every exception reason checked, no
-  `"agentcomms"` non-channel kind, both `agentcommsPackage` kinds published in dependency order, events package
-  browser import with no `node:` edge, and root verify covering app typecheck/unit tests when present.
+- **Catalogue, identity and pointer grammar:** every schema/example and semantic-format/address/handle declaration;
+  pattern validation and expansion; `~0`, `~1`, root `""`, empty keys, numeric array indices, refused leading zeroes
+  and `-`, literal `*`, copied parents/ancestors/descendants, and own-property handling of `__proto__`, `constructor`
+  and `prototype`. Event-id vectors cover stable repeats, the same dedupe key in different accounts, every tuple
+  component and an injected SHA collision that stops without advancing the cursor.
+- **Conditions and local tests:** every operator × legal schema type and every refused format/type pairing; empty
+  `all`/`any`/`in`; every missing leaf false, plain `not`, and `exists`; Unicode 15.1 folding and UTS #46 vectors run
+  in Node and a browser; invalid dates and subdomains. `rule test` runs catalogue and authorised retained-ingest
+  cases, returns only sanitised/enveloped output, records taint, marks agentic nodes not evaluated and makes zero
+  provider/judge/target requests. Unapproved `judge test` also makes zero network requests.
+- **Judges and budgets:** exact uncertain boundaries including threshold 0 and 1; provider probability vs
+  uncalibrated score; content-field prefilter; approved-version enforcement for hosted, local and bundled calls;
+  terminal/app pending-version exception; durable per-rule/provider/global reservations, concurrency 2, timeouts
+  counted and malformed output fail-closed. All automated transports are loopback fakes or injected functions.
+- **Mapping and wire:** constants, objects/arrays, every missing policy, both representations and generated schemas;
+  provenance through parent/object/array copies; canonical `agentcommsuntrusted` including root; URI-escaped source
+  components; exact CloudEvents 1.0 shape; non-null webhook/SSE `targetKey` uniqueness. Exact-byte Standard Webhooks
+  tests cover `whsec_`, overlapping signatures, raw-body verification and five-minute tolerance; an injected clock
+  proves retries keep `webhook-id`/body and change `webhook-timestamp`/signature.
+- **Digest and activation recovery:** one-at-a-time digest mutations for source/account scope, connecting a new
+  unselected account, URL path/query, conditions, constants, pointers, missing policies, all caps/retentions and every
+  judge budget. Crash injection before/after activation-intent insert, core claim-marker creation, core `used`, active
+  pointer commit and completed-intent mark proves `intent + used` finishes and every unused/expired case drops.
+- **Ingest and worker crash recovery:** before/after cursor/ingest commit, decision insert, judge response persistence,
+  delivery creation, `disclosing`, webhook 2xx recording and SSE append. Every restart reaches one terminal decision
+  per `(eventId, ruleId, ruleVersion)`, one delivery per `(decisionId, targetKey)`, and never advances over memory-only
+  content.
+- **Tightening, revocation and global races:** property tests generate each of D2's seven whitelisted edits and prove
+  its disclosed set is a subset; every condition/constant/pointer or other edit is pending. Concurrent disable/remove
+  and `disable-all` race polling commit, judge transition/call, webhook claim, SSE append and SSE replay. A disclosure
+  crosses `judging`/`disclosing` before the transaction or is cancelled/refused with ciphertext purged; it never
+  follows a mutable version. `enable-all` needs a disclosure approval and resurrects no old work.
+- **SSE:** replay inside and refusal outside retention; rule, target, subscriber and judge revocation each purge only
+  bound entries in the same transaction; global disable purges all entries; token rotation rejects the old token but
+  preserves replay under the new one. A real-browser test completes the approved exact-Origin OPTIONS preflight and
+  fetch-streams with `credentials: "omit"`; unapproved Origin, method/header, query/cookie token and wrong Host/bearer
+  are refused; native `EventSource` remains unsupported.
+- **Taint:** structured address and Slack-handle provenance through scalar, parent and object mappings and judge input;
+  free-text address extraction; workspace scope retained. Forced taint-store failure proves no hosted, local or
+  bundled judge call, webhook/phase-F request or readable SSE append occurs; errors stay untrusted and reason codes
+  constrained.
+- **Retention:** held-decision expiry produces `hold-expired` with no delivery; unevaluated ingest and rate-cap backlog
+  reach `retention-expired`; cancellation purges payload in its pointer-change transaction; webhook success,
+  dead-letter expiry/drop and independent multi-target deadlines purge exactly their ciphertext and leave metadata.
+- **Secrets:** scan CLI/MCP inputs and outputs, structured content, logs, audit, database metadata and app IPC. MCP
+  proposals contain no secret; terminal hidden input and app reveal-once work; signing rotation sends two signatures;
+  subscriber rotation invalidates the old token without purging; no secret is exposed.
+- **Sources:** Gmail multiple pages, duplicate generic/specific records, add/remove/add occurrences, DRAFT/SENT,
+  spam/trash and 404 gap. Slack tests short/empty pages with `next_cursor`, bounded cycle continuation, watermark
+  commit, history-loss-only gap, seven-day reply pagination, refusal to promise old-thread replies or edits, and phase-F
+  Socket Mode coverage of both. Resend covers received pagination, seven-day sent state, half-share and interactive
+  priority. WhatsApp covers old-index rename/crash restore, stanza and fallback multisets with identical duplicates,
+  occurrence indices, all reset signals and the executable-identity spike.
+- **Network and adapter contract:** DNS rebinding on every attempt; mixed good/refused answers; all named IPv4/IPv6
+  special ranges and mapped forms; SNI/Host preservation; redirects; unapproved target/judge tests. Contract tests
+  drive every first-party adapter through `delivered | retryable | permanent`, verify its acceptance boundary,
+  idempotency key and declared order, and use only fakes—never Slack, Gmail, Resend or a real queue.
+- **Control, storage and app:** Unix `0700` parent, same-uid peer/token; Windows pipe/state ACLs; protocol negotiation,
+  authentication/error shape, stale recovery, leases, encrypted DB/WAL/free pages, SQLite as the sole event authority,
+  and protocol compatibility. Hostile preview fixtures produce byte-identical TypeScript/Rust output; fake webview
+  data, digest drift, wrong challenge and per-window commands fail. On macOS, Windows and Linux the desktop workflow
+  runs Rust fmt, clippy with warnings denied, tests and an unsigned Tauri build.
+- **Parity, phases and packaging:** every capability row is driven on CLI and MCP and every exception reason checked;
+  no `"agentcomms"` non-channel kind; both `agentcommsPackage` kinds publish in dependency order; browser import has
+  no `node:` edge; root verify runs the TypeScript desktop/vector side. A phase-E gate deliberately removes or stubs
+  B3 secret completion and human-only operations and proves judges then refuse to build or ship.
 
 ## 6. Out of scope
 
@@ -671,15 +887,16 @@ sends from the desktop app. Plain **sanitised** target values are in scope only 
 1. **Future unseen content leaves automatically.** This is the defining risk of a standing disclosure
    authorisation, why chat cannot approve one, why its digest binds every disclosure dimension, and why every active
    grant is visible and immediately revocable.
-2. **A same-user hostile process can drive terminal or app.** That remains threat tier T2, as the existing security
-   policy states (`SECURITY.md:51-63`). Typed challenges and peer/token checks are meaningful against accidental and
-   model-only action, not a hostile process with the user's full authority.
+2. **A same-user hostile process can drive terminal or app.** The existing security policy describes that boundary
+   without assigning it a tier (`SECURITY.md:51-63`). Typed challenges and peer/token checks are meaningful against
+   accidental and model-only action, not a hostile process with the user's full authority.
 3. **Agentic decisions can be wrong or injected.** Their maximum effect is the approved decision path; prefilters,
    exact inputs, no tools, durable caps, uncertainty handling and fail-closed validation limit cost and action, not
    semantic error.
 4. **Content exists at rest.** Ingest, outbox and stream replay require retained content. Application-level
    AES-256-GCM keeps plaintext out of SQLite pages, WAL and free-page residue, while approval-bound retention and
-   prompt purge bound duration. A process that can use the installation key is within T2.
+   prompt purge bound duration. A same-user process that can use the installation key is outside this design's
+   protection, as `SECURITY.md:51-63` states.
 5. **Provider limits can make polling slow.** Slack may be one call/minute, Gmail can invalidate cursors, and Resend
    shares its budget with interactive work. The schedulers prefer correctness and interactive use over low latency,
    and the app states expected lag rather than promising real time.
@@ -697,4 +914,7 @@ sends from the desktop app. Plain **sanitised** target values are in scope only 
 3. **Signing identities** — who holds the Apple Developer ID and Windows signing certificate?
 4. **Hosted judges** — should the product expose TypeSafe at all, or ship with hosted judges hidden by default?
 5. **Retention defaults** — this revision specifies 30 days for decision metadata, seven days for dead-letter
-   payloads, and 24 hours for SSE replay. Should any default be lower before implementation planning?
+   payloads, and 24 hours for ingest content, holds, delivery and SSE replay. Should any default be lower before
+   implementation planning?
+6. **“Values as they are”** — this design means typed, sanitised source values with no transforms, not provider raw
+   bytes. Is that the accepted product meaning?
