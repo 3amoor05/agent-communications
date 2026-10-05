@@ -76,7 +76,8 @@ async function machine(changePolicy: 'chat' | 'confirm') {
     `${JSON.stringify(
       {
         version: 2,
-        defaults: { changePolicy },
+        // Files may be attached from one folder of the home only, so another is a loosening to approve.
+        defaults: { changePolicy, attachRoots: ['~/attachable'] },
         inboxes: {
           'acme/gmail': {
             id: INBOX,
@@ -139,8 +140,9 @@ function sendOf(core: Core, channel: 'gmail' | 'slack' | 'resend', policy: 'chat
 
 async function changeWorld(row: string): Promise<World> {
   const m = await machine(routeOf(row));
-  // Outside the home, whose files may already be attached: a folder this change would add.
-  const folder = tempDir('comms-matrix-outgoing-');
+  // A folder in the home files may not be attached from yet, named from it as a person names it on every platform.
+  mkdirSync(join(m.home, 'outgoing'));
+  const folder = join('~', 'outgoing');
   const asked = (await m.call('comms_attach', { rootsAdd: folder })).structuredContent ?? {};
   if (asked.approvalRequired !== true) throw new Error(`the change asked nothing: ${JSON.stringify(asked)}`);
   return {
