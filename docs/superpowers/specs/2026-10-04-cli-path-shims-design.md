@@ -1,6 +1,6 @@
 # CUE-403 — runnable CLI handoffs from the running installation — design
 
-Status: **proposed for 0.13.1; revised after round 12 (3 P2), 2026-10-05. No implementation is in
+Status: **proposed for 0.13.1; revised after round 13 (1 P2), 2026-10-05. No implementation is in
 this change.**
 
 ## 1. What is being fixed
@@ -56,16 +56,12 @@ words, the resolved-directory uses of the target command, and the output platfor
 (D5); failure contains no command and names the reason, product, package and required version. Callers never supply
 word zero or quote a line.
 
-The interpreter rule is one rule: the running package's own CLI and channel→core use `process.execPath`. A command
-resolved from a **managed** registration uses the interpreter recorded by this project's own installer for that
-runtime; only such an interpreter is ever executed, and only to probe it. Every other registration uses
-`process.execPath`; an interpreter named by a client configuration is never run. Whichever interpreter is chosen must
-satisfy the **target** package's `engines.node` range, checked against that interpreter's version: `process.execPath`
-by `process.version`; a recorded managed interpreter by running it with `--version` on **every** locator call (no
-cache, so one replaced in place is never vouched for by an old answer), bounded to 2 seconds and 1 KiB of output, and
-accepted only on exit status 0 with a parseable `vMAJOR.MINOR.PATCH` line. A missing, non-executable, failing,
-slow, oversized or malformed probe yields no command, as does a version outside the range; the reason names the
-required Node range. Lockstep packages do not share one floor — core accepts Node `>=22.12.0` while WhatsApp needs
+The interpreter rule is one rule: every printed command runs under `process.execPath` — the running package's own
+CLI, channel→core and every cross-product command alike. **No interpreter named by a registration or a client
+configuration is ever executed**, not even to probe its version: a scanned registration carries no installer
+provenance (`packages/core/src/mcp-clients.ts:30`, `packages/core/src/operations/servers.ts:575`), so none can be
+trusted to run. `process.execPath` must satisfy the **target** package's `engines.node` range, checked against
+`process.version`; outside the range the result has no command and the reason names the required Node range. Lockstep packages do not share one floor — core accepts Node `>=22.12.0` while WhatsApp needs
 `>=22.16.0` and checks it before every action (`packages/core/package.json:8-10`, `packages/whatsapp/package.json:8-10`,
 `packages/whatsapp/src/cli/program.ts:200, 477`). The only retained `process.execArgv` flags are `--experimental-strip-types`, and
 `--experimental-transform-types` when the running source invocation used it. Debug, test, eval, preload/loader,
@@ -429,19 +425,19 @@ authoritative data roots, and CLI-MCP parity for the preference.
 
 ## 4. Tests
 
-000. **Round-12 cases:** same-version npx registrations (including an absolute `npx.cmd`) are never cross-product
+000. **Round-12/13 cases:** same-version npx registrations (including an absolute `npx.cmd`) are never cross-product
      candidates, cache present or absent; a managed Gmail registration whose pinned directories end in
-     `@agentcomms/slack` (POSIX and Windows) is recognised as Gmail; a client-configured interpreter is never executed;
-     a recorded managed interpreter that is missing, non-executable, exits non-zero, prints malformed or oversized output
-     or never exits yields no command within the 2-second bound; `--mcp-approval` is inserted before an existing `--`.
+     `@agentcomms/slack`, in both spaced and `--x=value` forms (POSIX and Windows), is recognised as Gmail; a
+     managed-shaped hand-written registration and a genuine managed registration with a changed interpreter are both
+     used, if at all, only under `process.execPath`, and neither registration command is ever executed (a spy asserts no
+     spawn); `process.execPath` below a target's `engines.node` yields no command; `--mcp-approval` is inserted before an
+     existing `--`.
 00. **Round-11 cases:** a core process with only an npx registration of a channel prints no cross-product command and
     says why, with the npx cache present and evicted and with caller, registration-environment and paste-shell Node
     versions all different; `client add -- --approval` and `-- --approval=x` keep the positional words exactly while the
-    generated retry (approval option inserted before `--`) applies the prepared change end to end; a recorded interpreter
-    replaced between two locator calls in one process is re-probed and the second call refuses a now-unsupported Node.
+    generated retry (approval option inserted before `--`) applies the prepared change end to end.
 0. **Round-10 cases:** a core process on Node 22.12–22.15 resolving a same-version WhatsApp registration (global and
-   managed, with and without a recorded interpreter) prints no command and names Node `>=22.16.0`, while a
-   satisfying recorded interpreter is used; raw retry argv containing `-- --config-dir` and `-- --config-dir=value` keeps
+   managed) prints no command and names Node `>=22.16.0`, whatever interpreter the registration names; raw retry argv containing `-- --config-dir` and `-- --config-dir=value` keeps
    every word after `--` exactly, and a dangling spaced `--config-dir` before `--` yields no command; `C:\Profiles\` is
    printed bare while a quote-requiring word ending in `\` is refused.
 1. **Own locator matrix:** installer-written managed, npx and local registrations, plus global and direct-checkout
