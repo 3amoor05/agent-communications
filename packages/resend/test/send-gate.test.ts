@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, test } from 'node:test';
-import { asV2, CommsError, newInboxId, stateOf } from '@agentcomms/core';
+import { asV2, CommsError, newInboxId, stateOf, waitForApproval } from '@agentcomms/core';
 import { v1ChangeRecord, v1SendRecord, writeV1Record } from '../../core/test/fixtures/approval-v1-0.13.0.ts';
 import { APPROVAL_TAG } from '../src/api/guard.ts';
 import { renderPolicy } from '../src/cli/render.ts';
@@ -852,6 +852,22 @@ test('every Resend send result and refusal says where its approval stands; one r
   );
   assert.equal(again.code, 'APPROVAL_VOID');
   assert.equal((again.details?.approval as { state?: string } | undefined)?.state, 'used');
+  // In Resend's own words (D2's used-send row): accepted by Resend — never "sent" — with Resend's id; as the terminal
+  // approval says it, and as resend_send_wait shows it (CUE-404).
+  const accepted = `nothing was sent: the approval was used already: it was accepted by Resend at ${sent.approval.usedAt}, message id ${sent.resendId}`;
+  assert.equal(again.message, accepted);
+  await assert.rejects(beginSendApproval(context, prepared.approvalId), (error: unknown) => {
+    assert.ok(error instanceof CommsError);
+    assert.equal(error.code, 'APPROVAL_VOID');
+    assert.equal(error.message, accepted);
+    return true;
+  });
+  const asked = await harness.cli(['approve', prepared.approvalId], { tty: true });
+  assert.equal(asked.code, 10, asked.stdout + asked.stderr);
+  assert.ok(asked.stderr.includes(accepted), asked.stderr);
+  assert.doesNotMatch(asked.stdout + asked.stderr, /it was sent at/);
+  const waited = await waitForApproval(harness.core, prepared.approvalId, { waitSeconds: 0, channel: 'resend' });
+  assert.equal(waited.approval.said, `accepted by Resend at ${sent.approval.usedAt}`);
 
   // Waiting for a person: refused, with the record as it stands.
   await harness.cli(['account', 'policy', 'acme/resend', '--send', 'confirm'], { env: { CLAUDECODE: '1' } });

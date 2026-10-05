@@ -23,6 +23,7 @@ import {
   sha256Hex,
   stateOf,
   stricterPolicy,
+  type UsedSaid,
   withApproval,
   withSendingLease,
 } from '@agentcomms/core';
@@ -122,6 +123,13 @@ export interface SendResult {
 }
 
 /**
+ * A used approval, as Resend's own surfaces refuse it (design 2026-10-05 §D2, the used-send row): Resend accepted the
+ * email — which is not that it went, since one may be scheduled, bounce or be cancelled — and never "sent". The words
+ * `resend_send_wait` shows for it too, core's for every provider.
+ */
+const ACCEPTED_BY_RESEND: UsedSaid = (usedAt) => `accepted by Resend at ${usedAt}`;
+
+/**
  * A send's approval as the one account that may use it, classified under its lock as the claim would classify it
  * (design 2026-10-05 §D2), or a refusal that does not touch it.
  *
@@ -138,7 +146,7 @@ async function ownRecord(
   const { outcome } = await context.core.approvals.inspect(
     approvalId,
     { kind: 'send', owner: named.account.id },
-    { action: 'claim' },
+    { action: 'claim', usedSaid: ACCEPTED_BY_RESEND },
   );
   if (outcome.error) throw outcome.error;
   if (outcome.record === null) throw new CommsError('UNEXPECTED', 'a send approval read as no record');
@@ -729,6 +737,7 @@ async function claimAndSend(
           } then execute it again with the same approval.`,
         { instead: 'Ask the user to approve it at their own terminal, then execute it again with the same approval.' },
       )} You cannot approve it yourself.`,
+      usedSaid: ACCEPTED_BY_RESEND,
       platform: context.platform,
     },
   );
@@ -1181,7 +1190,7 @@ async function recordAndAccount(
   const { outcome } = await context.core.approvals.inspect(
     approvalId,
     { kind: 'send', channel: 'resend' },
-    { action: 'approve' },
+    { action: 'approve', usedSaid: ACCEPTED_BY_RESEND },
   );
   if (outcome.error) throw outcome.error;
   const record = outcome.record;
@@ -1225,7 +1234,9 @@ export async function beginSendApproval(context: ResendContext, approvalId: stri
   const study = await studyRecipients(context, named, prepared.message, config.defaults.riskEscalation);
   const live = named.account.sendPolicy ?? config.defaults.sendPolicy;
   const effective = stricterPolicy(live, record.requiredPolicy);
-  const challenge = await context.core.approvals.issueChallenge(approvalId, 'send', context.platform);
+  const challenge = await context.core.approvals.issueChallenge(approvalId, 'send', context.platform, {
+    usedSaid: ACCEPTED_BY_RESEND,
+  });
   return {
     approvalId,
     account: named.name,
@@ -1261,6 +1272,7 @@ export async function finishSendApproval(
     answer,
     'send',
     context.platform,
+    { usedSaid: ACCEPTED_BY_RESEND },
   );
   await context.core.audit.append({
     inboxId: named.account.id,

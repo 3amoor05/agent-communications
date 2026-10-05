@@ -109,14 +109,7 @@ const SURFACES = {
  * Where a surface does not do what D2 says, and the decision is not this task's: the observation's case is reported as
  * a TODO naming what it does instead.
  */
-const KNOWN = [
-  ...['resend_send_execute', 'approve (terminal)'].map((surface) => ({
-    channel: 'resend',
-    surface,
-    row: 'used',
-    todo: 'Resend refuses a used approval in core’s words, “it was sent at …, message id …” — D2: Resend’s own surfaces say it was accepted by Resend, never that it was sent',
-  })),
-];
+const KNOWN = [];
 
 const NOT_FOUND_APPROVAL_NULL = true;
 
@@ -472,7 +465,7 @@ function usedRefusal(channel) {
   return refused(
     'APPROVAL_VOID',
     channel === 'resend'
-      ? new RegExp(`the approval was used already: it was accepted by Resend at ${TIME}`)
+      ? new RegExp(`the approval was used already: it was accepted by Resend at ${TIME}, message id matrix-sent-1$`)
       : new RegExp(`the approval was used already: it was sent at ${TIME}, message id matrix-sent-1$`),
     'used',
   );

@@ -113,7 +113,7 @@ approval is still alive. Hand the person the command, then learn when they have 
 
 | Refusal | What happened |
 |---|---|
-| `APPROVAL_VOID` — used already | It was sent once, and is not sent again |
+| `APPROVAL_VOID` — used already, "accepted by Resend at …" | Resend accepted it once, and it is not sent again. Whether it went is what `resend_send_status` reports |
 | `APPROVAL_VOID` — "the send it was claimed for failed" | Resend refused it: nothing was sent, and the reason says why |
 | `APPROVAL_EXPIRED` | "this approval expired; nothing was sent with it". Prepare again if it should still go |
 | `APPROVAL_PENDING` — "being sent by another call since …; wait for it" | Another call is sending it. Wait with `resend_send_wait` until it reads `used`, `failed` or `unknown`. Never prepare again while a send is `sending` |
