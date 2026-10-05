@@ -133,6 +133,12 @@ function whenCalled<K extends 'claimForSend' | 'claimForDownload' | 'complete'>(
   });
 }
 
+/** A result apart from where its approval stands, which each test checks on its own (design 2026-10-05 §D8). */
+function apartFromApproval<T extends { approval?: unknown }>(result: T): Omit<T, 'approval'> {
+  const { approval: _approval, ...rest } = result;
+  return rest;
+}
+
 // ── Downloads ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 function fileRecord(id: string, name: string): Record<string, unknown> {
@@ -395,7 +401,9 @@ test('a post cancelled before its approval is claimed posts nothing, and the app
 
   // The same approval posts it, once, when the call is not cancelled.
   fake.script['conversations.info'] = room as NonNullable<typeof room>;
-  assert.deepEqual(await send(), { approvalId: draft.approvalId, channel: 'C1', ts: TS });
+  const again = await send();
+  assert.deepEqual(apartFromApproval(again), { approvalId: draft.approvalId, channel: 'C1', ts: TS });
+  assert.equal(again.approval.state, 'used');
   assert.equal(await state(), 'used');
   assert.equal(posted(), 1);
 });
@@ -414,19 +422,31 @@ test('a post cancelled while its claim waits for the approval store posts nothin
    * Another process holds the approval's lock as the claim arrives, and the person cancels while the claim waits for
    * it: the post had looked at its signal, clear, just before. Before the change the claim went through once the lock
    * was let go — and the approval, spent on a post that never happened, was recorded as failed.
+   *
+   * Taken once the post's first look at the approval (design 2026-10-05 §D2) has let go of it, so it is the claim
+   * itself that waits.
    */
-  const lock = await holdLock(store, draft.approvalId);
+  let lock: { release: () => Promise<void> } | undefined;
+  const inspect = store.inspect.bind(store);
+  store.inspect = async (...args: Parameters<typeof inspect>) => {
+    const seen = await inspect(...args);
+    lock ??= await holdLock(store, draft.approvalId);
+    return seen;
+  };
   const claiming = whenCalled(store, 'claimForSend');
   const cancel = new AbortController();
   const sending = send(cancel.signal);
   await claiming;
   await new Promise((settle) => setTimeout(settle, 100));
   cancel.abort();
-  await lock.release();
+  await lock?.release();
+  store.inspect = inspect;
 
   await assert.rejects(sending, (error: unknown) => {
     isCancellation(/^cancelled: nothing was posted$/)(error);
     assert.match((error as CommsError).hint ?? '', /^The approval was not used/);
+    // Where it stands: approved, as it was.
+    assert.equal(((error as CommsError).details?.approval as { state?: string } | undefined)?.state, 'approved');
     return true;
   });
   assert.equal(await state(), 'approved', 'the approval was claimed');
@@ -434,7 +454,9 @@ test('a post cancelled while its claim waits for the approval store posts nothin
   assert.deepEqual(await audited(harness, 'slack.post'), []);
 
   // The same approval posts it, once, when the call is not cancelled.
-  assert.deepEqual(await send(), { approvalId: draft.approvalId, channel: 'C1', ts: TS });
+  const again = await send();
+  assert.deepEqual(apartFromApproval(again), { approvalId: draft.approvalId, channel: 'C1', ts: TS });
+  assert.equal(again.approval.state, 'used');
   assert.equal(await state(), 'used');
   assert.equal(posted(), 1);
 });
@@ -500,7 +522,8 @@ test('a post cancelled once its request has gone out is posted, the approval is 
 
   const result = await send(cancel.signal, through);
   const late = 'the call was cancelled too late to stop it: Slack accepted the post, and a post cannot be taken back';
-  assert.deepEqual(result, { approvalId: draft.approvalId, channel: 'C1', ts: TS, note: late });
+  assert.deepEqual(apartFromApproval(result), { approvalId: draft.approvalId, channel: 'C1', ts: TS, note: late });
+  assert.equal(result.approval.state, 'used');
   assert.equal(posted(), 1);
   assert.equal(await state(), 'used');
   const [record] = await audited(harness, 'slack.post');

@@ -1,11 +1,12 @@
 import {
+  type ApprovalKind,
+  approvalNotFound,
   CommsError,
   changeToolResult,
   checkForUpdates,
   DOWNLOAD_CLAIM,
   type GatedChange,
   gatedChange,
-  ownerOf,
   refuseUnclaimedApproval,
   retiredOutHint,
   strictToolArguments,
@@ -318,18 +319,22 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
    * Claiming an approval against the wrong change voids it — that is how drift is caught — and the change a pinned
    * tool computes is always its own workspace's. So `approvalId` naming another workspace's post, reaction or change
    * voided it from a server that was never given that workspace: an approval the person has to notice was lost and
-   * prepare again. Gmail's server had this reproduced; `gmail_send_cancel` already refused it the same way. The record
-   * is only read here, never moved, and one that does not exist is left to the claim to report as it always has.
+   * prepare again. Gmail's server had this reproduced; `gmail_send_cancel` already refused it the same way.
+   *
+   * One look under the record's lock, by whose it is and what it is, before anything of its state (design 2026-10-05
+   * §D2): the store's own NOT_FOUND, byte for byte the one for an id nobody prepared, for another workspace's, another
+   * kind's, or one whose owner cannot be trusted — an unreadable file, or a corrupt record whose binding does not verify.
+   * The record is only looked at here, never moved.
    */
-  const ownApproval = async (approvalId: string | undefined, name: string): Promise<void> => {
+  const ownApproval = async (approvalId: string | undefined, kind: ApprovalKind): Promise<void> => {
     if (pinnedId === undefined || approvalId === undefined) return;
-    // Held, and not this workspace's — or whose it is cannot be trusted (`ownerOf` is null for an unreadable file, or
-    // a corrupt record whose binding does not verify): never let through as though it were absent.
-    const stored = await context.core.approvals.get(approvalId);
-    if (stored !== null && ownerOf(stored) !== pinnedId) {
-      throw new CommsError('NOT_FOUND', `no approval "${approvalId}" for the "${name}" workspace`, {
-        hint: `This server only serves "${name}".`,
-      });
+    try {
+      await context.core.approvals.inspect(approvalId, { kind, owner: pinnedId });
+    } catch (error) {
+      if (error instanceof CommsError && (error.code === 'NOT_FOUND' || error.code === 'USAGE')) {
+        throw approvalNotFound(approvalId, kind);
+      }
+      throw error;
     }
   };
 
@@ -774,7 +779,7 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
     async (args, ctx) => {
       try {
         const name = await resolve(args.workspace);
-        await ownApproval(args.approvalId, name);
+        await ownApproval(args.approvalId, 'send');
         // The request's signal, so a cancelled call stops before Slack has the post: see `postPrepared` for how far.
         const posted = await sendPost(
           context,
@@ -993,7 +998,7 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
     async (args) => {
       try {
         const name = await resolve(args.workspace);
-        await ownApproval(args.approvalId, name);
+        await ownApproval(args.approvalId, 'send');
         return reply(await react(context, name, reactionOf(args), args.approvalId, slackDeps));
       } catch (error) {
         return fail(error);
@@ -1137,8 +1142,8 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
    * `name` is the workspace the change is for, so a pinned server refuses another workspace's approval before the claim
    * could void it: see `ownApproval`.
    */
-  const runChange = async <T>(change: GatedChange<T>, approvalId: string | undefined, name: string) => {
-    await ownApproval(approvalId, name);
+  const runChange = async <T>(change: GatedChange<T>, approvalId: string | undefined, _name: string) => {
+    await ownApproval(approvalId, 'change');
     return changeToolResult(
       await gatedChange(context.core, change, {
         channel: 'slack',
@@ -1152,9 +1157,9 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
     change: GatedChange<StartedSignIn>,
     approvalId: string | undefined,
     reauth: boolean,
-    name: string,
+    _name: string,
   ) => {
-    await ownApproval(approvalId, name);
+    await ownApproval(approvalId, 'change');
     const outcome = await gatedChange(context.core, change, {
       channel: 'slack',
       surface: 'mcp',

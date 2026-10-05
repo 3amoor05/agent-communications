@@ -1,9 +1,8 @@
 import {
   type ApprovalRecord,
+  approvalNotFound,
   CommsError,
   ensureSendEpochConfig,
-  integrityRefusal,
-  otherVersionRefusal,
   ownerOf,
   renderChannelPreview,
   truncateDisplay,
@@ -37,19 +36,20 @@ export interface ApprovalPrompt {
   readonly challenge: string;
 }
 
-/** The approval, and the workspace it belongs to by its current name. */
+/**
+ * The approval, classified under its lock for the approval a person is about to give (design 2026-10-05 §D2), and the
+ * workspace it belongs to by its current name.
+ *
+ * A post's or a reaction's, or the one NOT_FOUND — an id of another kind is not found, as one nobody prepared is not.
+ * Then anything that cannot be approved is refused for what it is, with where it stands, before the room or the draft
+ * is read: corrupt, an earlier release's, expired, used, revoked — now, because its workspace was removed or posting
+ * was turned off — or under way.
+ */
 async function approvalAndWorkspace(context: SlackContext, approvalId: string) {
-  const stored = await context.core.approvals.get(approvalId);
-  if (!stored) {
-    throw new CommsError('NOT_FOUND', `no approval ${approvalId}`, {
-      hint: 'Prepare it again; an approval expires ten minutes after it is made.',
-    });
-  }
-  // Only a valid version-2 record is approved here, and anything else is refused before the room or the draft is
-  // read: an integrity check of it (`currentPost`) would judge it by rules it was not written under.
-  if (stored.form === 'corrupt' || stored.form === 'unreadable') throw integrityRefusal(stored);
-  if (stored.form === 'legacy') throw otherVersionRefusal(stored.view);
-  const record = stored.record;
+  const { outcome } = await context.core.approvals.inspect(approvalId, { kind: 'send' }, { action: 'approve' });
+  if (outcome.error) throw outcome.error;
+  const record = outcome.record;
+  if (record === null) throw new CommsError('UNEXPECTED', 'a send approval read as no record');
   const config = await context.config();
   const entry = Object.entries(config.accounts).find(([, account]) => account.id === record.inboxId);
   if (!entry) {
@@ -156,10 +156,16 @@ async function currentPost(
         : prepared !== undefined && prepared !== String(reach)
           ? `the channel now reaches ${reach}, not the ${prepared} it was prepared for`
           : 'the channel, or the account it posts as, is not what the preview showed';
-    await context.core.approvals.revoke(approvalId, reason, { disposition: 'integrity' });
+    const voided = await context.core.approvals.revoke(approvalId, reason, {
+      disposition: 'integrity',
+      expect: { kind: 'send' },
+    });
     throw new CommsError('APPROVAL_VOID', `nothing was approved: ${reason}`, {
       hint: 'Prepare the post again, and approve the preview that prints.',
-      details: { approvalId },
+      details: {
+        approvalId,
+        approval: voided.form === 'v2' ? await context.core.approvals.approvalOf(voided.record) : null,
+      },
     });
   }
   return { draft, view };
@@ -240,13 +246,20 @@ export async function revokeApproval(context: SlackContext, approvalId: string):
 
 /** The workspace an approval belongs to, by its current name. */
 export async function workspaceForApproval(context: SlackContext, approvalId: string): Promise<string> {
-  // Whose it is, from a record that can be trusted to say — a version-2 record, or the stored owner of one an earlier
-  // release prepared. One that cannot is not found, as an id nobody prepared is not.
-  const owner = ownerOf(await context.core.approvals.get(approvalId));
-  if (owner === null) throw new CommsError('NOT_FOUND', `no approval ${approvalId}`);
+  // Whose it is, looked at under its lock as a post's or a reaction's, from a record that can be trusted to say — a
+  // version-2 record, or the stored owner of one an earlier release prepared. One that cannot is the one NOT_FOUND,
+  // as an id nobody prepared, or of another kind, is.
+  // As the approval about to be given: a revocation the classification derives — its workspace removed, posting
+  // turned off since — is written now, by this first step of it.
+  const { stored, outcome } = await context.core.approvals.inspect(approvalId, { kind: 'send' }, { action: 'approve' });
+  const owner = ownerOf(stored);
+  if (owner === null) throw approvalNotFound(approvalId, 'send');
   const config = await context.config();
   const entry = Object.entries(config.accounts).find(([, account]) => account.id === owner);
-  if (!entry) throw new CommsError('NOT_FOUND', 'the workspace this approval belongs to is no longer connected');
+  // Its workspace removed: the classification already says what that makes of it.
+  if (!entry) {
+    throw outcome.error ?? new CommsError('NOT_FOUND', 'the workspace this approval belongs to is no longer connected');
+  }
   requireWorkspace(config, entry[0], context.handoffs);
   return entry[0];
 }

@@ -183,7 +183,11 @@ test('under `chat`, slack_post_send posts the prepared draft once, and records t
 
     const posted = await call('slack_post_send', { workspace: 'acme', draftId, approvalId, expectChannel: 'C1' });
     assert.notEqual(posted.isError, true, JSON.stringify(posted.structuredContent));
-    assert.deepEqual(posted.structuredContent, { approvalId, channel: 'C1', ts: '1700000000.000100' });
+    const { approval, ...result } = posted.structuredContent as { approval: { state: string; sentMessageId: string } };
+    assert.deepEqual(result, { approvalId, channel: 'C1', ts: '1700000000.000100' });
+    // Where the approval stands (design 2026-10-05 §D8): used, with the message's ts.
+    assert.equal(approval.state, 'used');
+    assert.equal(approval.sentMessageId, '1700000000.000100');
     assert.equal(fake.count('chat.postMessage'), 1);
 
     const again = await call('slack_post_send', { workspace: 'acme', draftId, approvalId, expectChannel: 'C1' });
@@ -571,6 +575,10 @@ test('under `confirm`, slack_react adds nothing and hands over the command; slac
     assert.equal(error.code, 'APPROVAL_PENDING');
     const approvalId = String(error.details?.approvalId);
     assert.match(approvalId, /^ap_/);
+    // Waiting for the person: pending, and not claimable on a yes in the chat.
+    const waiting = error.details?.approval as { state?: string; claimable?: boolean } | undefined;
+    assert.equal(waiting?.state, 'pending');
+    assert.equal(waiting?.claimable, false);
     assert.equal(error.details?.command, slackCommand(harness.core.paths, ['approve', approvalId], 'darwin'));
     assert.match(error.hint ?? '', /slack_react_send/, 'the tool that uses the approval once it is given');
     assert.doesNotMatch(error.hint ?? '', /--approval/, 'not a flag for a command the agent is not running');
@@ -587,7 +595,9 @@ test('under `confirm`, slack_react adds nothing and hands over the command; slac
 
     const made = await call('slack_react_send', { ...REACTION, approvalId });
     assert.notEqual(made.isError, true, JSON.stringify(made.structuredContent));
-    assert.deepEqual(made.structuredContent, { approvalId });
+    const { approval, ...result } = made.structuredContent as { approval: { state: string } };
+    assert.deepEqual(result, { approvalId });
+    assert.equal(approval.state, 'used', 'where the approval stands (design 2026-10-05 §D8)');
     assert.equal(fake.count('reactions.add'), 1);
 
     const again = await call('slack_react_send', { ...REACTION, approvalId });

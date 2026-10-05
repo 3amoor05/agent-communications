@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -431,4 +432,46 @@ test('a post prepared without a count is voided for that reason, never for a cou
     assert.match(posted.json<Envelope<never>>().error?.message ?? '', why, 'and the send says the same');
     assert.equal(slack.count('chat.postMessage'), 0);
   }
+});
+
+// ── The terminal classifies before it shows anything (CUE-404 Task 9; design 2026-10-05 §D2, §D8) ───────────────────
+
+test('the terminal classifies a post before it shows it: an expired one, or one whose workspace was removed, is refused for what it is, and nothing is asked of Slack', async () => {
+  const harness = await newHarness();
+  await harness.addWorkspace({ alias: 'acme', mode: 'send', sendPolicy: 'confirm' });
+  const slack = scripted({
+    'conversations.info': { ok: true, channel: { id: 'C1', name: 'eng', num_members: 4, is_member: true } },
+  });
+  const expired = await preparedPost(harness, slack.read);
+  const removed = await preparedPost(harness, slack.read);
+  // One past its thirty minutes, as a person who comes back to it later would find it.
+  const file = join(harness.core.approvals.directory, `${expired.approvalId}.json`);
+  const record = JSON.parse(readFileSync(file, 'utf8')) as Record<string, string>;
+  for (const key of ['createdAt', 'expiresAt', 'updatedAt'] as const) {
+    record[key] = new Date(Date.parse(record[key] as string) - 60 * 60_000).toISOString();
+  }
+  writeFileSync(file, JSON.stringify(record));
+  const asked = slack.count('conversations.info');
+
+  const late = await cli(harness, ['approve', expired.approvalId], { read: slack.read, tty: true });
+  assert.equal(late.code, EXIT_CODES.APPROVAL, late.stdout + late.stderr);
+  assert.match(late.stderr, /this approval expired; nothing was sent with it: prepared at /);
+  assert.doesNotMatch(late.stderr, /Type \S+ to approve/, 'no code was asked for');
+  assert.equal(asV2(await harness.core.approvals.get(expired.approvalId))?.state, 'expired');
+
+  // Its workspace removed: revoked by this first step, and said so.
+  await harness.core.config.update((config) => {
+    const { acme: _acme, ...accounts } = config.accounts;
+    return { ...config, accounts };
+  });
+  const gone = await cli(harness, ['approve', removed.approvalId], { read: slack.read, tty: true });
+  assert.equal(gone.code, EXIT_CODES.APPROVAL, gone.stdout + gone.stderr);
+  assert.match(gone.stderr, /its mailbox or account was removed/);
+  assert.doesNotMatch(gone.stderr, /Type \S+ to approve/);
+  assert.equal(asV2(await harness.core.approvals.get(removed.approvalId))?.state, 'revoked', 'written by the action');
+
+  // One nobody prepared: the one NOT_FOUND.
+  const nobody = await cli(harness, ['approve', `ap_${'7'.repeat(26)}`], { read: slack.read, tty: true });
+  assert.match(nobody.stderr, /nothing was sent: no approval ap_7+/);
+  assert.equal(slack.count('conversations.info'), asked, 'Slack was asked nothing at the terminal');
 });

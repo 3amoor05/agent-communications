@@ -486,7 +486,8 @@ test('a file post goes up file by file, then one call names the channel, and the
     'the words went out a second time as a message of their own',
   );
 
-  assert.deepEqual(posted, {
+  const { approval, ...result } = posted;
+  assert.deepEqual(result, {
     approvalId: prepared.approvalId,
     channel: 'C1',
     ts: '1700000000.000200',
@@ -495,6 +496,9 @@ test('a file post goes up file by file, then one call names the channel, and the
       { id: second.fileId, name: 'totals.csv', size: Buffer.byteLength(csv), sha256: sha256(csv) },
     ],
   });
+  // Where the approval stands (design 2026-10-05 §D8): used, with the ts the files were posted in.
+  assert.equal(approval.state, 'used');
+  assert.equal(approval.sentMessageId, '1700000000.000200');
   assert.equal(asV2(await w.context.core.approvals.get(prepared.approvalId))?.state, 'used');
 });
 

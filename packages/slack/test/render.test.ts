@@ -234,19 +234,21 @@ test('doctor prefixes every command in a multi-line repair', () => {
 
 test('a post reads as it always did, and a note about its record is said after it rather than dropped', () => {
   // `post send` prints this: a post whose approval could not be marked used afterwards has to say so at a terminal too.
+  const approval = { id: 'ap_1', kind: 'send' as const, channel: 'slack', state: 'used' as const, claimable: false };
   assert.equal(
-    renderPosted({ approvalId: 'ap_1', channel: 'C1', ts: '1700000000.000100' }),
+    renderPosted({ approvalId: 'ap_1', channel: 'C1', ts: '1700000000.000100', approval }),
     'Posted to C1 at 1700000000.000100.',
   );
   const note = 'the approval could not be marked used (the store was busy), so it will read as unknown';
   assert.equal(
-    renderPosted({ approvalId: 'ap_1', channel: 'C1', ts: '1700000000.000100', note }),
+    renderPosted({ approvalId: 'ap_1', channel: 'C1', ts: '1700000000.000100', note, approval }),
     `Posted to C1 at 1700000000.000100. The approval could not be marked used (the store was busy), so it will read as unknown.`,
   );
   const file = { id: 'F1', name: 'a.txt', size: 1, sha256: 'ab' };
   assert.match(
-    renderPosted({ approvalId: 'ap_1', channel: 'C1', ts: '1700000000.000200', files: [file], note }).split('\n')[0] ??
-      '',
+    renderPosted({ approvalId: 'ap_1', channel: 'C1', ts: '1700000000.000200', files: [file], note, approval }).split(
+      '\n',
+    )[0] ?? '',
     /^Posted 1 file to C1 at 1700000000\.000200\. The approval could not be marked used/,
   );
 });

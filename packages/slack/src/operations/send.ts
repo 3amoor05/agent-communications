@@ -1,5 +1,8 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import {
+  type ApprovalExpectation,
+  type ApprovalObject,
+  type ApprovalOutcome,
   type ApprovalRecord,
   type AttachPolicy,
   type CanonicalChannelMessage,
@@ -14,12 +17,15 @@ import {
   handoffSentence,
   handoffSentenceToFill,
   messageDigest,
+  type OutcomeAction,
   type SendClaim,
   type SendOutcome,
   type SendPolicy,
+  type StoredApproval,
   sha256Hex,
   stricterPolicy,
   truncateDisplay,
+  withApproval,
   withSendingLease,
 } from '@agentcomms/core';
 import { callSlack, certainlyRefused, type PostingMethod, type SlackCall, type SlackResponse } from '../api/call.ts';
@@ -74,6 +80,8 @@ export interface PreparedPost {
   readonly requiredPolicy: SendPolicy;
   readonly riskFlags: readonly string[];
   readonly expiresAt: string;
+  /** Where its approval stands (design 2026-10-05 §D8): pending, and whether a yes in the chat posts it. */
+  readonly approval: ApprovalObject;
 }
 
 /**
@@ -126,6 +134,8 @@ export interface PrepareDeps {
   readonly attachPolicy?: AttachPolicy | undefined;
   readonly approvals: {
     create(input: CreateApprovalInput): Promise<ApprovalRecord>;
+    /** D8's object for a record this call just wrote or finished: what its result reports. */
+    approvalOf(record: ApprovalRecord): Promise<ApprovalObject>;
   };
 }
 
@@ -511,6 +521,7 @@ export async function preparePost(deps: PrepareDeps, draft: SlackDraft, book: Na
     requiredPolicy,
     riskFlags,
     expiresAt: record.expiresAt,
+    approval: await deps.approvals.approvalOf(record),
   };
 }
 
@@ -541,6 +552,12 @@ export interface PostDeps extends PrepareDeps {
     ): Promise<SendClaim>;
     complete(approvalId: string, claimToken: string, outcome: SendOutcome): Promise<ApprovalRecord>;
     heartbeat(approvalId: string, claimToken: string): Promise<'renewed' | 'lost'>;
+    /** A locked look at one approval, classified for what the caller is about to do (design 2026-10-05 §D2). */
+    inspect(
+      approvalId: string,
+      expect?: ApprovalExpectation,
+      options?: { action?: OutcomeAction | undefined },
+    ): Promise<{ stored: StoredApproval; outcome: ApprovalOutcome }>;
   };
   /**
    * The call's cancellation: the MCP request's signal, which the SDK aborts when the client cancels the call. The
@@ -559,6 +576,11 @@ export interface PostedMessage {
    * ({@link POSTED_ANYWAY}), or that a record of it could not be written afterwards (`recordPosted`). Absent otherwise.
    */
   readonly note?: string | undefined;
+  /**
+   * Where the approval stands now that Slack has the post (design 2026-10-05 §D8): `used` — or still `sending` when
+   * that could not be recorded, which later reads as `unknown`. Never a `used` invented.
+   */
+  readonly approval: ApprovalObject;
 }
 
 /** One file of a post, as Slack now has it: its id there, and what was sent. */
@@ -583,6 +605,8 @@ export interface PostedFiles {
   readonly ts: string | null;
   readonly files: readonly PostedFile[];
   readonly note?: string | undefined;
+  /** Where the approval stands now that the files are shared, as for a message ({@link PostedMessage}). */
+  readonly approval: ApprovalObject;
 }
 
 /**
@@ -641,6 +665,33 @@ function isCancelledPost(error: unknown): boolean {
   return error instanceof CommsError && error.details?.reason === 'cancelled';
 }
 
+/** What a refusal said of its approval (decision 8), to carry on to the refusal that replaces it. */
+function approvalOfError(error: unknown): ApprovalObject | null {
+  return error instanceof CommsError ? ((error.details?.approval as ApprovalObject | null | undefined) ?? null) : null;
+}
+
+/**
+ * Where a claimed post's approval stands now, read under its lock — or, when that read fails, what `fallback` said: a
+ * report never turns into a failure of the post it reports on.
+ */
+async function approvalNow(deps: PostDeps, approvalId: string, fallback: ApprovalObject): Promise<ApprovalObject> {
+  try {
+    return (await deps.approvals.inspect(approvalId, { kind: 'send', owner: deps.accountId })).outcome.approval;
+  } catch {
+    return fallback;
+  }
+}
+
+/** `error`, saying where its approval stands now that it is settled — whatever it said of it before. */
+function settledWith(error: unknown, approval: ApprovalObject): unknown {
+  if (!(error instanceof CommsError)) return error;
+  return new CommsError(error.code, error.message, {
+    ...(error.hint === undefined ? {} : { hint: error.hint }),
+    details: { ...error.details, approval },
+    ...(error.cause === undefined ? {} : { cause: error.cause }),
+  });
+}
+
 /** Before the claim has changed the record, a cancellation spends nothing. */
 const NOT_USED = 'The approval was not used: it can still post this draft until it expires.';
 
@@ -676,16 +727,16 @@ async function claimOrHandOver(
   approvalId: string,
   live: Parameters<PostDeps['approvals']['claimForSend']>[1],
   pendingHint: string,
-): Promise<string> {
+): Promise<{ claimToken: string; claimed: ApprovalObject }> {
   try {
-    const { claimToken } = await deps.approvals.claimForSend(approvalId, live, {
+    const { claimToken, approval } = await deps.approvals.claimForSend(approvalId, live, {
       pendingHint,
       signal: deps.signal,
       platform: deps.handoffs.platform,
     });
-    return claimToken;
+    return { claimToken, claimed: approval };
   } catch (error) {
-    if (isCancelledPost(error)) throw cancelledPost(NOT_USED);
+    if (isCancelledPost(error)) throw withApproval(cancelledPost(NOT_USED), approvalOfError(error));
     if (!(error instanceof CommsError) || error.code !== 'APPROVAL_PENDING') throw error;
     // Another call's send under way is not waiting for a person: no approve command for it.
     if (error.details?.state === 'sending') throw error;
@@ -725,6 +776,33 @@ export async function postPrepared(
   book: NameBook,
 ): Promise<PostedMessage | PostedFiles> {
   /*
+   * The approval first, before Slack is asked anything — this workspace's post, classified under its lock as the claim
+   * would classify it (design 2026-10-05 §D2). Another workspace's, another kind's or one nobody prepared is the one
+   * NOT_FOUND; a used, expired or revoked one — now, because posting was turned off since — or one being posted by
+   * another call is refused for what it is, with where it stands. Until the claim, a refusal says where it stands too.
+   */
+  const { outcome } = await deps.approvals.inspect(
+    approvalId,
+    { kind: 'send', owner: deps.accountId },
+    { action: 'claim' },
+  );
+  if (outcome.error) throw outcome.error;
+  try {
+    return await postClassified(deps, draft, approvalId, expectChannel, book);
+  } catch (error) {
+    throw withApproval(error, outcome.approval);
+  }
+}
+
+/** {@link postPrepared}, once its approval is classified: everything from the draft's checks to its outcome. */
+async function postClassified(
+  deps: PostDeps,
+  draft: SlackDraft,
+  approvalId: string,
+  expectChannel: string,
+  book: NameBook,
+): Promise<PostedMessage | PostedFiles> {
+  /*
    * The caller restates the destination; this builds the rest.
    *
    * It used to take the whole `Expectation`, which meant the CLI had to reconstruct a value `preparePost` had
@@ -754,7 +832,7 @@ export async function postPrepared(
 
   // Cancelled while the room was looked up: the claim is next, and is not made. The store asks again as it claims.
   if (deps.signal?.aborted) throw cancelledPost(NOT_USED);
-  const claimToken = await claimOrHandOver(
+  const { claimToken, claimed } = await claimOrHandOver(
     deps,
     approvalId,
     {
@@ -769,12 +847,14 @@ export async function postPrepared(
   );
   // Claimed: from here until its outcome is recorded, the claim's lease is renewed while Slack's work is outstanding.
   return withSendingLease(deps.approvals, approvalId, claimToken, async () => {
-    if (policy !== undefined) return postFiles(deps, approvalId, claimToken, draft.draftId, payload, files, policy);
+    if (policy !== undefined) {
+      return postFiles(deps, approvalId, { claimToken, claimed }, draft.draftId, payload, files, policy);
+    }
 
     const where = { channel: payload.channel };
     // Claimed, and nothing sent yet: the approval is spent on a post that did not happen, and recorded as failed.
     if (deps.signal?.aborted)
-      throw await recordNotPosted(deps, approvalId, claimToken, where, cancelledPost(SPENT_BY_CANCEL));
+      throw await recordNotPosted(deps, approvalId, { claimToken, claimed }, where, cancelledPost(SPENT_BY_CANCEL));
     let response: SlackResponse;
     try {
       // Without the signal, deliberately: this is the request that posts, and it is never abandoned once it is out.
@@ -790,15 +870,18 @@ export async function postPrepared(
       );
     } catch (error) {
       if (certainlyRefused(error, 'chat.postMessage'))
-        throw await recordNotPosted(deps, approvalId, claimToken, where, error);
-      throw await recordMaybePosted(deps, approvalId, where, error, 'it was posted');
+        throw await recordNotPosted(deps, approvalId, { claimToken, claimed }, where, error);
+      throw await recordMaybePosted(deps, approvalId, claimed, where, error, 'it was posted');
     }
 
     // Posted. Nothing from here records the approval as failed, or throws: see `recordPosted`.
     const ts = typeof response.ts === 'string' ? response.ts : '';
-    const { late, unrecorded } = await recordPosted(deps, approvalId, claimToken, ts, { channel: payload.channel, ts });
+    const { late, unrecorded, approval } = await recordPosted(deps, approvalId, { claimToken, claimed }, ts, {
+      channel: payload.channel,
+      ts,
+    });
     const note = noteOf([late, ...unrecorded]);
-    return { approvalId, channel: payload.channel, ts, ...(note === undefined ? {} : { note }) };
+    return { approvalId, channel: payload.channel, ts, ...(note === undefined ? {} : { note }), approval };
   });
 }
 
@@ -822,13 +905,13 @@ function noteOf(said: readonly (string | undefined)[]): string | undefined {
 async function recordNotPosted(
   deps: PostDeps,
   approvalId: string,
-  claimToken: string,
+  claim: { claimToken: string; claimed: ApprovalObject },
   ids: Record<string, string | string[]>,
   error: unknown,
   outcome: 'failed' | 'refused' = 'failed',
 ): Promise<unknown> {
   const reason = messageOf(error);
-  await deps.approvals.complete(approvalId, claimToken, { error: reason });
+  const failed = await deps.approvals.complete(approvalId, claim.claimToken, { error: reason });
   await deps.audit?.append({
     inboxId: deps.accountId,
     alias: deps.workspaceName,
@@ -839,7 +922,7 @@ async function recordNotPosted(
     reason,
     ...(deps.surface ? { surface: deps.surface } : {}),
   });
-  return error;
+  return settledWith(error, await deps.approvals.approvalOf(failed));
 }
 
 /**
@@ -859,6 +942,7 @@ async function recordNotPosted(
 async function recordMaybePosted(
   deps: PostDeps,
   approvalId: string,
+  claimed: ApprovalObject,
   ids: Record<string, string | string[]>,
   error: unknown,
   what: string,
@@ -885,7 +969,14 @@ async function recordMaybePosted(
     `whether ${what} is not known: ${said}`,
     {
       hint: `Look in the channel before anything else: Slack may have posted it. Prepare the draft again only if it is not there — this approval is not used again.${unaudited}`,
-      details: { ...(error instanceof CommsError ? error.details : {}), ...details, approvalId, outcome: 'unknown' },
+      details: {
+        ...(error instanceof CommsError ? error.details : {}),
+        ...details,
+        approvalId,
+        outcome: 'unknown',
+        // Still `sending`: nothing is recorded of a post whose outcome is not known.
+        approval: await approvalNow(deps, approvalId, claimed),
+      },
     },
   );
 }
@@ -911,13 +1002,17 @@ async function recordMaybePosted(
 async function recordPosted(
   deps: PostDeps,
   approvalId: string,
-  claimToken: string,
+  claim: { claimToken: string; claimed: ApprovalObject },
   sentMessageId: string,
   ids: Record<string, string | string[]>,
-): Promise<{ late: string | undefined; unrecorded: string[] }> {
+): Promise<{ late: string | undefined; unrecorded: string[]; approval: ApprovalObject }> {
   const unrecorded: string[] = [];
+  // `used` only once it is written; until then — and for good, if it cannot be — the record as it stands.
+  let approval: ApprovalObject | null = null;
   try {
-    await deps.approvals.complete(approvalId, claimToken, { sentMessageId });
+    approval = await deps.approvals.approvalOf(
+      await deps.approvals.complete(approvalId, claim.claimToken, { sentMessageId }),
+    );
   } catch (error) {
     unrecorded.push(`the approval could not be marked used (${messageOf(error)}), so it will read as unknown`);
   }
@@ -937,7 +1032,7 @@ async function recordPosted(
   } catch (error) {
     unrecorded.push(`the audit log could not record it (${messageOf(error)})`);
   }
-  return { late, unrecorded };
+  return { late, unrecorded, approval: approval ?? (await approvalNow(deps, approvalId, claim.claimed)) };
 }
 
 /** The call that makes uploaded files visible, and so the one a file post's permit is opened for. */
@@ -1061,7 +1156,7 @@ async function messageTsOf(
 async function postFiles(
   deps: PostDeps,
   approvalId: string,
-  claimToken: string,
+  claim: { claimToken: string; claimed: ApprovalObject },
   draftId: string,
   payload: ComposedPayload,
   files: readonly SlackDraftFile[],
@@ -1140,23 +1235,23 @@ async function postFiles(
     };
     // The call that shares the files went out and came back as neither a success nor a refusal: they may be posted.
     if (stage === 'complete' && !certainlyRefused(error, PUBLISH_FILES)) {
-      throw await recordMaybePosted(deps, approvalId, ids, error, 'the files were posted', {
+      throw await recordMaybePosted(deps, approvalId, claim.claimed, ids, error, 'the files were posted', {
         stage,
         uploaded: [...uploaded],
       });
     }
     const reported = reportFailure(error, stage, uploaded, possiblyUploaded);
-    throw await recordNotPosted(deps, approvalId, claimToken, ids, reported, stage === 'check' ? 'refused' : 'failed');
+    throw await recordNotPosted(deps, approvalId, claim, ids, reported, stage === 'check' ? 'refused' : 'failed');
   }
 
   // Posted. Nothing from here records the approval as failed, or throws: see `recordPosted`.
   const first = posted[0]?.id ?? '';
   const { ts, note: unshared } = await messageTsOf(deps.call, first, payload.channel);
   // The looks above are not cut short by a cancellation: the post has happened, and its ts is part of the record.
-  const { late, unrecorded } = await recordPosted(
+  const { late, unrecorded, approval } = await recordPosted(
     deps,
     approvalId,
-    claimToken,
+    claim,
     ts ?? posted.map((file) => file.id).join(','),
     // What was posted, by what it is: ids, names, sizes and hashes. Never a byte of it.
     {
@@ -1169,7 +1264,14 @@ async function postFiles(
     },
   );
   const note = noteOf([unshared, late, ...unrecorded]);
-  return { approvalId, channel: payload.channel, ts, files: posted, ...(note === undefined ? {} : { note }) };
+  return {
+    approvalId,
+    channel: payload.channel,
+    ts,
+    files: posted,
+    ...(note === undefined ? {} : { note }),
+    approval,
+  };
 }
 
 /**
@@ -1231,6 +1333,8 @@ export interface PreparedReaction {
   readonly remove: boolean;
   readonly requiredPolicy: SendPolicy;
   readonly expect: Expectation;
+  /** Where its approval stands (design 2026-10-05 §D8): pending, and whether a yes in the chat makes it. */
+  readonly approval: ApprovalObject;
 }
 
 /** What a reaction's approval is bound to: this emoji, on this message, in this workspace, as this account. */
@@ -1258,6 +1362,8 @@ export interface ReactionOptions {
 export interface ReactionResult {
   readonly approvalId: string;
   readonly note?: string | undefined;
+  /** Where the approval stands now (design 2026-10-05 §D8): `used`, or still `sending` when that was not recorded. */
+  readonly approval: ApprovalObject;
 }
 
 function reactionExpectation(options: ReactionOptions): Expectation {
@@ -1333,6 +1439,7 @@ export async function prepareReaction(deps: PrepareDeps, options: ReactionOption
     remove: options.remove === true,
     requiredPolicy: 'chat',
     expect: record.expect,
+    approval: await deps.approvals.approvalOf(record),
   };
 }
 
@@ -1360,14 +1467,17 @@ function refusalWithBookkeeping(error: CommsError, unrecorded: readonly string[]
 async function recordReactionRefused(
   deps: PostDeps,
   approvalId: string,
-  claimToken: string,
+  claim: { claimToken: string; claimed: ApprovalObject },
   options: ReactionOptions,
   error: CommsError,
 ): Promise<CommsError> {
   const unrecorded: string[] = [];
   const reason = messageOf(error);
+  let settled = claim.claimed;
   try {
-    await deps.approvals.complete(approvalId, claimToken, { error: reason });
+    settled = await deps.approvals.approvalOf(
+      await deps.approvals.complete(approvalId, claim.claimToken, { error: reason }),
+    );
   } catch (failure) {
     unrecorded.push(`the approval could not be marked failed (${messageOf(failure)})`);
   }
@@ -1385,13 +1495,14 @@ async function recordReactionRefused(
   } catch (failure) {
     unrecorded.push(`the audit log could not record the refusal (${messageOf(failure)})`);
   }
-  return refusalWithBookkeeping(error, unrecorded);
+  return settledWith(refusalWithBookkeeping(error, unrecorded), settled) as CommsError;
 }
 
 /** Records a reaction request whose answer does not say whether Slack acted, and returns what to throw. */
 async function recordReactionUnknown(
   deps: PostDeps,
   approvalId: string,
+  claimed: ApprovalObject,
   options: ReactionOptions,
   error: unknown,
 ): Promise<CommsError> {
@@ -1421,6 +1532,8 @@ async function recordReactionUnknown(
         ...(error instanceof CommsError ? error.details : {}),
         approvalId,
         outcome: 'unknown',
+        // Still `sending`: nothing is recorded of a reaction whose outcome is not known.
+        approval: await approvalNow(deps, approvalId, claimed),
       },
     },
   );
@@ -1430,13 +1543,16 @@ async function recordReactionUnknown(
 async function recordReactionChanged(
   deps: PostDeps,
   approvalId: string,
-  claimToken: string,
+  claim: { claimToken: string; claimed: ApprovalObject },
   options: ReactionOptions,
   known?: string | undefined,
 ): Promise<ReactionResult> {
   const unrecorded: string[] = [];
+  let approval: ApprovalObject | null = null;
   try {
-    await deps.approvals.complete(approvalId, claimToken, { sentMessageId: options.ts });
+    approval = await deps.approvals.approvalOf(
+      await deps.approvals.complete(approvalId, claim.claimToken, { sentMessageId: options.ts }),
+    );
   } catch (error) {
     unrecorded.push(`the approval could not be marked used (${messageOf(error)}), so it will read as unknown`);
   }
@@ -1456,7 +1572,11 @@ async function recordReactionChanged(
     unrecorded.push(`the audit log could not record it (${messageOf(error)})`);
   }
   const note = noteOf([known, ...unrecorded]);
-  return { approvalId, ...(note === undefined ? {} : { note }) };
+  return {
+    approvalId,
+    ...(note === undefined ? {} : { note }),
+    approval: approval ?? (await approvalNow(deps, approvalId, claim.claimed)),
+  };
 }
 
 /** Applies one prepared reaction, once, through the permit. */
@@ -1466,7 +1586,7 @@ export async function reactPrepared(
   options: ReactionOptions,
 ): Promise<ReactionResult> {
   const digest = reactionDigest(deps, options);
-  const claimToken = await claimOrHandOver(
+  const claim = await claimOrHandOver(
     deps,
     approvalId,
     {
@@ -1479,7 +1599,7 @@ export async function reactPrepared(
     waitingHint('reaction', deps.surface, approvalId, deps.handoffs),
   );
   // Claimed: the lease is renewed while Slack's answer is outstanding.
-  return withSendingLease(deps.approvals, approvalId, claimToken, async () => {
+  return withSendingLease(deps.approvals, approvalId, claim.claimToken, async () => {
     const method: PostingMethod = options.remove ? 'reactions.remove' : 'reactions.add';
     try {
       await spendOn(deps.permit, approvalId, method, () =>
@@ -1502,7 +1622,7 @@ export async function reactPrepared(
         return recordReactionChanged(
           deps,
           approvalId,
-          claimToken,
+          claim,
           options,
           'Slack says this account had already added the reaction',
         );
@@ -1515,16 +1635,16 @@ export async function reactPrepared(
         return recordReactionChanged(
           deps,
           approvalId,
-          claimToken,
+          claim,
           options,
           'Slack says this account had no such reaction on the message, so there was nothing of yours to remove; reactions other people added are not affected.',
         );
       }
       if (error instanceof CommsError && certainlyRefused(error, method)) {
-        throw await recordReactionRefused(deps, approvalId, claimToken, options, error);
+        throw await recordReactionRefused(deps, approvalId, claim, options, error);
       }
-      throw await recordReactionUnknown(deps, approvalId, options, error);
+      throw await recordReactionUnknown(deps, approvalId, claim.claimed, options, error);
     }
-    return recordReactionChanged(deps, approvalId, claimToken, options);
+    return recordReactionChanged(deps, approvalId, claim, options);
   });
 }

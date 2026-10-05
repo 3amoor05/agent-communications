@@ -784,8 +784,14 @@ test('a pinned server refuses another workspace’s approval before touching it,
     ] as [string, Record<string, unknown>][]) {
       const refused = failed(await pinned.call(tool, args));
       assert.equal(refused.code, 'NOT_FOUND', tool);
-      assert.equal(refused.message, `no approval "${zetaChange}" for the "acme" workspace`, tool);
-      assert.equal(refused.hint, 'This server only serves "acme".', tool);
+      // The one NOT_FOUND (design 2026-10-05 §D2): byte for byte an id nobody prepared, naming no workspace.
+      const nobody = failed(await pinned.call(tool, { ...args, approvalId: `ap_${'7'.repeat(26)}` }));
+      assert.equal(
+        JSON.stringify(refused).replaceAll(zetaChange, 'ID'),
+        JSON.stringify(nobody).replaceAll(`ap_${'7'.repeat(26)}`, 'ID'),
+        tool,
+      );
+      assert.deepEqual(refused.details, { approval: null }, tool);
       assert.equal(await state(zetaChange), 'pending', `${tool} left it alone`);
     }
 
@@ -817,6 +823,12 @@ test('a pinned server refuses another workspace’s approval before touching it,
     ] as [string, Record<string, unknown>][]) {
       const refused = failed(await pinned.call(tool, args));
       assert.equal(refused.code, 'NOT_FOUND', tool);
+      const nobody = failed(await pinned.call(tool, { ...args, approvalId: `ap_${'7'.repeat(26)}` }));
+      assert.equal(
+        JSON.stringify(refused).replaceAll(zetaPost, 'ID'),
+        JSON.stringify(nobody).replaceAll(`ap_${'7'.repeat(26)}`, 'ID'),
+        tool,
+      );
       assert.equal(await state(zetaPost), 'pending', `${tool} left it alone`);
     }
 

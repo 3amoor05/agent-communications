@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -244,7 +244,9 @@ function notAMember(error: unknown): boolean {
   assert.equal(error.code, 'SCOPE_MISSING', error.message);
   assert.match(error.message, /nothing was sent/);
   assert.match(error.message, /#engineering \(C1\)/, 'the channel is named');
-  assert.deepEqual(error.details, { channel: 'C1', reason: 'not-a-member' });
+  // Apart from where its approval stands: none at prepare, the one waiting at send (design 2026-10-05 §D8).
+  const { approval: _approval, ...details } = error.details ?? {};
+  assert.deepEqual(details, { channel: 'C1', reason: 'not-a-member' });
   assert.match(error.hint ?? '', /Join the channel in Slack yourself, then prepare the post again/);
   return true;
 }
@@ -308,7 +310,11 @@ test('a person who left the channel after prepare is refused at send, before the
   const prepared = await preparePost(deps, draft, book);
   script['conversations.info'] = roomReply({ is_member: false });
 
-  await assert.rejects(postPrepared(deps, draft, prepared.approvalId, 'C1', book), notAMember);
+  await assert.rejects(postPrepared(deps, draft, prepared.approvalId, 'C1', book), (error: unknown) => {
+    notAMember(error);
+    assert.equal(((error as CommsError).details?.approval as { state?: string } | undefined)?.state, 'pending');
+    return true;
+  });
   assert.equal(
     sent.some((call) => call.method === 'chat.postMessage'),
     false,
@@ -655,4 +661,121 @@ test('every posting method is refused without an open permit', async () => {
       `${method} needs a permit`,
     );
   }
+});
+
+// ── Classified before anything is asked of Slack, and where the approval stands (CUE-404 Task 9; §D2, §D8) ──────────
+
+test('a post or a reaction finds an id nobody prepared, another workspace’s — expired or not — and another kind’s as the one NOT_FOUND, before Slack is asked anything (D2-b)', async () => {
+  const OTHER = 'acc_BBBBBBBBBBBBBBBB';
+  const { deps, draft, book, sent, approvals, config } = await setUp();
+  config.write({
+    accounts: { 'acme/slack': { id: ACCOUNT, sendPolicy: 'chat' }, 'zeta/slack': { id: OTHER, sendPolicy: 'chat' } },
+  });
+  const theirs = (subject: string) =>
+    approvals.create({
+      channel: 'slack',
+      inboxId: OTHER,
+      inboxSub: 'U9',
+      draftId: 'dr_theirs',
+      draftMessageId: 'rev-1',
+      contentDigest: 'c'.repeat(64),
+      sendEpoch: 0,
+      policy: 'chat',
+      requiredPolicy: 'chat',
+      riskFlags: [],
+      expect: { to: ['C1'], cc: [], bcc: [], subject },
+    });
+  const live = await theirs('reaches 8');
+  // Created an hour before the store's clock: classified, it would be refused as expired.
+  const anHourAgo = new ApprovalStore(join(approvals.directory, '..'), {
+    now: () => new Date(NOW().getTime() - 60 * 60_000),
+    loadConfig: config.loadConfig,
+  });
+  const expired = await anHourAgo.create({
+    channel: 'slack',
+    inboxId: OTHER,
+    draftId: 'dr_old',
+    draftMessageId: 'rev-1',
+    contentDigest: 'd'.repeat(64),
+    sendEpoch: 0,
+    policy: 'chat',
+    requiredPolicy: 'chat',
+    riskFlags: [],
+    expect: { to: ['C1'], cc: [], bcc: [], subject: 'reaches 8' },
+  });
+  const change = await approvals.createChange({
+    channel: 'slack',
+    change: { summary: 'x', target: null, loosened: [], effects: ['does a thing'] },
+    policy: 'chat',
+  });
+  const ids = [live.approvalId, expired.approvalId, change.approvalId];
+  const files = ids.map((id) => readFileSync(join(approvals.directory, `${id}.json`), 'utf8'));
+  for (const [what, attempt] of [
+    ['post', (id: string) => postPrepared(deps, draft, id, 'C1', book)],
+    ['reaction', (id: string) => reactPrepared(deps, id, { channel: 'C1', ts: '1.1', name: 'eyes' })],
+  ] as const) {
+    const envelopes = [];
+    for (const id of [`ap_${'7'.repeat(26)}`, live.approvalId, expired.approvalId, change.approvalId]) {
+      const error = await attempt(id).then(
+        () => assert.fail(`${what} ${id} went through`),
+        (refused: unknown) => refused as CommsError,
+      );
+      assert.equal(error.code, 'NOT_FOUND', `${what}: ${error.message}`);
+      assert.deepEqual(error.details, { approval: null }, what);
+      envelopes.push(JSON.stringify({ m: error.message, h: error.hint, d: error.details }).replaceAll(id, 'ID'));
+    }
+    assert.equal(new Set(envelopes).size, 1, `${what}: one envelope, byte for byte`);
+  }
+  assert.deepEqual(sent, [], 'Slack was asked nothing: not the room, not a post');
+  assert.deepEqual(
+    ids.map((id) => readFileSync(join(approvals.directory, `${id}.json`), 'utf8')),
+    files,
+    'no record was written: none was classified',
+  );
+});
+
+test('every post and reaction result and refusal says where its approval stands (D8o-a)', async () => {
+  const { deps, draft, book } = await setUp();
+  const prepared = await preparePost(deps, draft, book);
+  assert.equal(prepared.approval.id, prepared.approvalId);
+  assert.equal(prepared.approval.channel, 'slack');
+  assert.equal(prepared.approval.state, 'pending');
+  assert.equal(prepared.approval.claimable, true, 'a yes in the chat posts it');
+  const posted = await postPrepared(deps, draft, prepared.approvalId, 'C1', book);
+  assert.equal(posted.approval.state, 'used');
+  assert.equal(posted.approval.sentMessageId, posted.ts);
+  // Used: refused before Slack is asked, with where it stands.
+  const again = await postPrepared(deps, draft, prepared.approvalId, 'C1', book).then(
+    () => assert.fail('posted twice'),
+    (error: unknown) => error as CommsError,
+  );
+  assert.equal(again.code, 'APPROVAL_VOID');
+  assert.equal((again.details?.approval as { state?: string } | undefined)?.state, 'used');
+
+  const reaction = await prepareReaction(deps, { channel: 'C1', ts: '1.1', name: 'eyes' });
+  assert.equal(reaction.approval.state, 'pending');
+  assert.equal(reaction.approval.claimable, true);
+  const reacted = await reactPrepared(deps, reaction.approvalId, { channel: 'C1', ts: '1.1', name: 'eyes' });
+  assert.equal(reacted.approval.state, 'used');
+
+  // Waiting for a person: the hand-over says so, with the record as it stands.
+  const confirm = await setUp({ policy: 'confirm' });
+  const waiting = await preparePost(confirm.deps, confirm.draft, confirm.book);
+  assert.equal(waiting.approval.claimable, false);
+  const pending = await postPrepared(confirm.deps, confirm.draft, waiting.approvalId, 'C1', confirm.book).then(
+    () => assert.fail('posted without a person'),
+    (error: unknown) => error as CommsError,
+  );
+  assert.equal(pending.code, 'APPROVAL_PENDING');
+  assert.equal((pending.details?.approval as { state?: string } | undefined)?.state, 'pending');
+  assert.equal((pending.details?.approval as { claimable?: boolean } | undefined)?.claimable, false);
+
+  // Refused before any approval exists: nothing to say of one.
+  const never = await setUp({ policy: 'never' });
+  const refused = await preparePost(never.deps, never.draft, never.book).then(
+    () => assert.fail('prepared under never'),
+    (error: unknown) => error as CommsError,
+  );
+  assert.equal(refused.code, 'POLICY_NEVER');
+  assert.equal(refused.details?.approval, undefined);
 });
