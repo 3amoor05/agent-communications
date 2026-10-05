@@ -139,6 +139,7 @@ import {
   renderThread,
   renderTrash,
   renderWhoami,
+  type SetupHandoff,
 } from './render.ts';
 
 export interface CliDeps extends GmailContextOptions {
@@ -558,7 +559,6 @@ update first, or put it off (the stop names both commands) · 64 usage · 65 bad
           const claimCommand = context.handoffs.own(
             insertWordsBeforeSentinel(install, '--approval', prepared.approvalId),
           );
-          const claim = handoffText(claimCommand);
           softExit = EXIT_CODES.APPROVAL;
           return {
             client,
@@ -568,7 +568,7 @@ update first, or put it off (the stop names both commands) · 64 usage · 65 bad
             summary: prepared.summary,
             preview: prepared.preview,
             expiresAt: prepared.expiresAt,
-            claim,
+            claim: claimCommand,
             hint: approvalHint(prepared, claimCommand, context.handoffs),
           };
         }
@@ -2051,7 +2051,7 @@ update first, or put it off (the stop names both commands) · 64 usage · 65 bad
             preview?: string;
             expiresAt?: string;
           } | null = null;
-          let handoff: { authUrl: string; finish: string; registerWith?: RegistrationIntent } | null = null;
+          let handoff: SetupHandoff | null = null;
 
           if (state.next === 'client') {
             const path = options.clientJson ? String(options.clientJson) : '';
@@ -2115,16 +2115,14 @@ update first, or put it off (the stop names both commands) · 64 usage · 65 bad
               });
               handoff = {
                 authUrl: started.authUrl,
-                finish: handoffText(
-                  context.handoffs.own([
-                    'inbox',
-                    'add',
-                    '--finish',
-                    started.flowId,
-                    '--wait',
-                    String(FINISH_WAIT_SECONDS),
-                  ]),
-                ),
+                finish: context.handoffs.own([
+                  'inbox',
+                  'add',
+                  '--finish',
+                  started.flowId,
+                  '--wait',
+                  String(FINISH_WAIT_SECONDS),
+                ]),
                 ...(registerWith ? { registerWith } : {}),
               };
               did.push(`started a sign-in for "${alias}"`);

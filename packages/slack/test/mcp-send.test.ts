@@ -3,7 +3,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
-import { EXIT_CODES } from '@agentcomms/core';
+import { EXIT_CODES, handoffText } from '@agentcomms/core';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { run } from '../src/cli/program.ts';
@@ -87,8 +87,11 @@ const failure = (result: ToolResult): Failure => (result.structuredContent as { 
 
 test('send handoff commands use the selected shell platform, located from this installation (7d)', () => {
   const windows = slackHandoffs(TEST_PATHS, 'win32');
-  assert.equal(approveCommand('7', windows), slackCommand(TEST_PATHS, ['approve', '7'], 'win32'));
-  const refile = refileCommand('8/slack', '9', windows);
+  // The commands themselves, written out as their text where they leave (`handoffText`, or JSON).
+  const approve = handoffText(approveCommand('7', windows));
+  assert.equal(approve, slackCommand(TEST_PATHS, ['approve', '7'], 'win32'));
+  assert.equal(JSON.parse(JSON.stringify({ command: approveCommand('7', windows) })).command, approve);
+  const refile = handoffText(refileCommand('8/slack', '9', windows));
   assert.equal(
     refile,
     slackCommand(TEST_PATHS, ['draft', 'update', '9', '--workspace', '8/slack', '--file', '<path…>'], 'win32'),
@@ -103,7 +106,7 @@ test('send handoff commands use the selected shell platform, located from this i
   );
   // The name for the agent to fill in is left as written, outside the quoting: `--workspace <name>`.
   assert.match(changed, / draft delete "10" --workspace <name>` and compose it again\.$/);
-  for (const text of [approveCommand('7', windows), refile, changed]) assertNoBareCommand(text);
+  for (const text of [approve, refile, changed]) assertNoBareCommand(text);
 });
 
 /** The CLI, as a person at a terminal runs it: the approval code is read off the prompt and typed back. */

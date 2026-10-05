@@ -2,8 +2,8 @@ import {
   type AccountConfig,
   type CliHandoffs,
   CommsError,
+  type Handoff,
   handoffSentence,
-  handoffText,
   toCommsError,
 } from '@agentcomms/core';
 import { callSlack, type SlackCall, type SlackProblem, type SlackResponse } from '../api/call.ts';
@@ -110,8 +110,11 @@ export interface AppCreated {
    * instead of leaving a reader to wonder where the secret went.
    */
   readonly secretsDiscarded: readonly string[];
-  /** The command that connects a workspace through the new app, with its Client ID and port filled in. */
-  readonly next: string;
+  /**
+   * The command that connects a workspace through the new app, with its Client ID and port filled in: this
+   * installation's own, located, or why there is none here; written out as its text with `--json` and over MCP.
+   */
+  readonly next: Handoff;
 }
 
 /** The redirect every manifest here names. The same string `agent-slack manifest` and the sign-in build. */
@@ -461,17 +464,15 @@ export async function createApp(input: AppCreateInput): Promise<AppCreated> {
     redirectUrl: redirectUrlFor(port),
     manifestPage: manifestPageFor(appId),
     secretsDiscarded,
-    next: handoffText(
-      handoffs.own([
-        'workspace',
-        'add',
-        name,
-        '--client-id',
-        clientId,
-        '--port',
-        String(port),
-        ...(mode === 'send' ? ['--mode', 'send'] : []),
-      ]),
-    ),
+    next: handoffs.own([
+      'workspace',
+      'add',
+      name,
+      '--client-id',
+      clientId,
+      '--port',
+      String(port),
+      ...(mode === 'send' ? ['--mode', 'send'] : []),
+    ]),
   };
 }

@@ -171,10 +171,15 @@ export function stoppedCall(
 ): object {
   const message = updateStopMessage(pending, where, commands);
   const ways = updateWaysOf(commands);
+  /*
+   * Written out here, where it leaves for the client: the two commands become the text they always were (their line, or
+   * their words as JSON with what to do, or why there is none — `PrintedCommand.toJSON`), whatever the transport does.
+   */
+  const leaving = (value: object): Record<string, unknown> => JSON.parse(JSON.stringify(value));
   return {
     isError: true,
     content: [{ type: 'text' as const, text: message }],
-    structuredContent: {
+    structuredContent: leaving({
       error: {
         code: 'UPDATE_REQUIRED',
         message,
@@ -192,7 +197,7 @@ export function stoppedCall(
           later: ways.later,
         },
       },
-    },
+    }),
   };
 }
 

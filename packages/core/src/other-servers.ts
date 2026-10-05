@@ -1,7 +1,7 @@
 import type { ChannelManifest, ChannelRivalPackage } from './channel-manifest.ts';
 import { CHANNEL_SNAPSHOT } from './channels.generated.ts';
-import { commandText } from './cli-runtime.ts';
 import { externalCommand } from './command-brands.ts';
+import { type Remedy, remedy } from './handoff-text.ts';
 import { displayUrl, type RegisteredServer } from './mcp-clients.ts';
 import { isProductServer, type McpProduct } from './mcp-install.ts';
 import { withoutPathOptions } from './paths.ts';
@@ -28,7 +28,8 @@ export interface LegacyServerFinding extends RegisteredServer {
   packageName: string;
   /** Why it is a problem, in one sentence. */
   reason: string;
-  removal: string;
+  /** How to remove it: its client's own command, or — where none can be printed — what to do by hand. */
+  removal: Remedy;
 }
 
 /**
@@ -64,9 +65,9 @@ function rivalsOf(channel: string): NonNullable<ChannelManifest['rivals']> {
  * or a path into one of its packages, is refused there, since such words are how a suite command would get round the
  * locator; that entry is removed by hand instead, from the file that holds it.
  */
-function removalCommand(client: 'claude' | 'codex', server: RegisteredServer, platform: NodeJS.Platform): string {
+function removalCommand(client: 'claude' | 'codex', server: RegisteredServer, platform: NodeJS.Platform): Remedy {
   try {
-    return commandText(
+    return remedy(
       externalCommand(
         [client, 'mcp', 'remove', server.name],
         "the MCP client's own command removes an entry from its own configuration",
@@ -74,14 +75,14 @@ function removalCommand(client: 'claude' | 'codex', server: RegisteredServer, pl
       ),
     );
   } catch {
-    return `remove "${server.name}" from ${server.path} by hand, then restart ${server.client}`;
+    return remedy(`remove "${server.name}" from ${server.path} by hand, then restart ${server.client}`);
   }
 }
 
-function gmailRemoval(registered: RegisteredServer, platform: NodeJS.Platform): string {
+function gmailRemoval(registered: RegisteredServer, platform: NodeJS.Platform): Remedy {
   const { client, name: server, path, scope } = registered;
   // A project's entry is out of reach of the user-scope commands below, run from wherever `doctor` was.
-  if (scope === 'project') return `remove "${server}" from the project entry in ${path} by hand`;
+  if (scope === 'project') return remedy(`remove "${server}" from the project entry in ${path} by hand`);
   switch (client) {
     case 'claude-code':
       return removalCommand('claude', registered, platform);
@@ -90,7 +91,7 @@ function gmailRemoval(registered: RegisteredServer, platform: NodeJS.Platform): 
     default:
       // The file named, not "the file above": this is printed under a different client's install, and by
       // `doctor` in a list of several, where the file above is somebody else's.
-      return `remove the "${server}" entry from ${path}, then restart ${client}`;
+      return remedy(`remove the "${server}" entry from ${path}, then restart ${client}`);
   }
 }
 
@@ -199,16 +200,18 @@ export function describeOtherSlackServer(server: RegisteredServer): string {
 export function otherSlackServerRemoval(
   server: RegisteredServer,
   platform: NodeJS.Platform = process.platform,
-): string {
+): Remedy {
   // A project's entry is out of reach of the user-scope commands below, run from wherever `doctor` was.
-  if (server.scope === 'project') return `remove "${server.name}" from the project entry in ${server.path} by hand`;
+  if (server.scope === 'project') {
+    return remedy(`remove "${server.name}" from the project entry in ${server.path} by hand`);
+  }
   switch (server.client) {
     case 'claude-code':
       return removalCommand('claude', server, platform);
     case 'codex':
       return removalCommand('codex', server, platform);
     default:
-      return `remove "${server.name}" from ${server.path}, then restart ${server.client}`;
+      return remedy(`remove "${server.name}" from ${server.path}, then restart ${server.client}`);
   }
 }
 

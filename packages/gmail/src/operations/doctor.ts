@@ -4,14 +4,12 @@ import {
   type CliHandoffs,
   type CommsError,
   type Config,
-  commandText,
   expandHome,
   externalCommand,
   findById,
   findUngatedGmailServers,
   formerNameRefusal,
   handoffSentence,
-  handoffText,
   handoffTextToFill,
   homeDirectory,
   type InboxConfig,
@@ -23,6 +21,8 @@ import {
   pinnedVersion,
   probeKeychain,
   type RegisteredServer,
+  type Remedy,
+  remedy,
   secretsStoreOf,
 } from '@agentcomms/core';
 import { capabilitiesOf, scopesFor, TIERS, type Tier } from '../auth/scopes.ts';
@@ -47,12 +47,12 @@ import { orphanedSecretsPath } from './inboxes.ts';
  * turns a staleness warning into a widening of what an agent may reach — the opposite of a repair. So the flags
  * are read back off the entry that is actually there.
  */
-function repairCommand(server: RegisteredServer, handoffs: CliHandoffs): string {
+function repairCommand(server: RegisteredServer, handoffs: CliHandoffs): Remedy {
   // Every command this package issues targets user scope. Pointing one at a project-scoped entry would remove
   // nothing, add a second entry at user scope, and report success — with the stale one still in force for that
   // project. There is no flag that reaches it, so the honest answer is the manual one.
   if (server.scope === 'project') {
-    return `remove "${server.name}" from the project entry in ${server.path} by hand, then re-run mcp install`;
+    return remedy(`remove "${server.name}" from the project entry in ${server.path} by hand, then re-run mcp install`);
   }
   const words = ['mcp', 'install', '--client', server.client];
   if (server.name && server.name !== 'gmail') words.push('--name', server.name);
@@ -64,7 +64,7 @@ function repairCommand(server: RegisteredServer, handoffs: CliHandoffs): string 
   }
   words.push('--force');
   // This installation's own `mcp install`, located — the one that writes this release — or why there is none here.
-  return handoffText(handoffs.own(words));
+  return remedy(handoffs.own(words));
 }
 
 export type CheckStatus = 'ok' | 'warn' | 'fail' | 'skipped';
@@ -75,8 +75,11 @@ export interface Check {
   title: string;
   status: CheckStatus;
   detail: string;
-  /** One or more newline-separated commands or actions that fix it. */
-  fix?: string | undefined;
+  /**
+   * What fixes it, a step a line: this installation's own commands, core's through Gmail's dependency on it, another
+   * program's — each located, or why there is none here — and the words around them (`remedy`).
+   */
+  fix?: Remedy | undefined;
   inbox?: string | undefined;
 }
 
@@ -123,7 +126,7 @@ export async function doctor(
       title: 'Mailboxes',
       status: 'warn',
       detail: 'none connected yet',
-      fix: handoffText(context.handoffs.own(['setup'])),
+      fix: remedy(context.handoffs.own(['setup'])),
     });
   }
   for (const alias of aliases) {
@@ -182,13 +185,13 @@ function clientCheck(config: Config, scope: Scope | undefined, handoffs: CliHand
           scope
           ? `${clients.length} registered`
           : `${clients.length} registered: ${clients.join(', ')}`,
-    fix: clients.length > 0 ? undefined : handoffText(handoffs.own(['setup'])),
+    fix: clients.length > 0 ? undefined : remedy(handoffs.own(['setup'])),
   };
 }
 
 /** "Add the client": this installation's own `client add`, the file for the person to fill in. */
-function addClient(handoffs: CliHandoffs): string {
-  return handoffTextToFill(handoffs.own(['client', 'add']), ['<client_secret.json>']);
+function addClient(handoffs: CliHandoffs): Remedy {
+  return remedy(handoffTextToFill(handoffs.own(['client', 'add']), ['<client_secret.json>']));
 }
 
 /** Compares dotted version numbers left to right: the first difference decides. */
@@ -209,7 +212,7 @@ function nodeCheck(): Check {
     title: 'Node.js',
     status: enough ? 'ok' : 'fail',
     detail: `v${process.versions.node}`,
-    fix: enough ? undefined : `Install Node ${MINIMUM_NODE.join('.')} or newer.`,
+    fix: enough ? undefined : remedy(`Install Node ${MINIMUM_NODE.join('.')} or newer.`),
   };
 }
 
@@ -218,9 +221,9 @@ function nodeCheck(): Check {
  * inside one of this suite's packages — a development checkout's — is refused there, as a path that could start a
  * product is, and is said in words instead.
  */
-function ownerOnly(path: string, platform: NodeJS.Platform | undefined): string {
+function ownerOnly(path: string, platform: NodeJS.Platform | undefined): Remedy {
   try {
-    return commandText(
+    return remedy(
       externalCommand(
         ['chmod', '700', path],
         'chmod is the system command that makes a directory private to its owner',
@@ -228,7 +231,7 @@ function ownerOnly(path: string, platform: NodeJS.Platform | undefined): string 
       ),
     );
   } catch {
-    return `make ${path} readable and writable by its owner alone (mode 700)`;
+    return remedy(`make ${path} readable and writable by its owner alone (mode 700)`);
   }
 }
 
@@ -277,7 +280,7 @@ async function secretStoreCheck(context: GmailContext): Promise<Check> {
     status: probe.ok ? 'ok' : 'fail',
     detail: probe.ok ? 'the system keychain answers' : `the system keychain cannot be used: ${probe.reason}`,
     // Core's own command, located through Gmail's dependency on core — or why there is none here.
-    fix: probe.ok ? undefined : handoffText(context.handoffs.core(['secrets', 'migrate', '--to', 'file'])),
+    fix: probe.ok ? undefined : remedy(context.handoffs.core(['secrets', 'migrate', '--to', 'file'])),
   };
 }
 
@@ -295,7 +298,7 @@ async function inboxChecks(context: GmailContext, alias: string): Promise<Check[
         title: `Mailbox ${alias}`,
         status: 'fail',
         detail: renamed ? renamed.message : 'no such mailbox',
-        fix: handoffText(
+        fix: remedy(
           context.handoffs.own(current ? ['doctor', '--inbox', current] : ['inbox', 'add', alias, '--start']),
         ),
         inbox: alias,
@@ -315,7 +318,7 @@ async function inboxChecks(context: GmailContext, alias: string): Promise<Check[
     title: `Permissions for ${alias}`,
     status: missing.length === 0 ? 'ok' : 'warn',
     detail: missing.length === 0 ? `${[...granted].join(', ')}` : `missing: ${missing.join(', ')}`,
-    fix: missing.length === 0 ? undefined : handoffText(context.handoffs.own(['inbox', 'reauth', alias])),
+    fix: missing.length === 0 ? undefined : remedy(context.handoffs.own(['inbox', 'reauth', alias])),
     inbox: alias,
   });
 
@@ -358,7 +361,7 @@ async function inboxChecks(context: GmailContext, alias: string): Promise<Check[
       title: `Sign-in for ${alias}`,
       status: 'fail',
       detail: failure.message,
-      fix: failure.hint ?? handoffText(context.handoffs.own(['inbox', 'reauth', alias])),
+      fix: remedy(failure.hint ?? context.handoffs.own(['inbox', 'reauth', alias])),
       inbox: alias,
     });
   }
@@ -373,7 +376,7 @@ async function inboxChecks(context: GmailContext, alias: string): Promise<Check[
         title: `Mailbox ${alias}`,
         status: matches ? 'ok' : 'warn',
         detail: matches ? profile.emailAddress : `recorded as ${inbox.email}, but Google says ${profile.emailAddress}`,
-        fix: matches ? undefined : handoffText(context.handoffs.own(['inbox', 'reauth', alias])),
+        fix: matches ? undefined : remedy(context.handoffs.own(['inbox', 'reauth', alias])),
         inbox: alias,
       });
     } catch (error) {
@@ -383,7 +386,7 @@ async function inboxChecks(context: GmailContext, alias: string): Promise<Check[
         title: `Mailbox ${alias}`,
         status: 'fail',
         detail: failure.message,
-        fix: failure.hint,
+        fix: failure.hint === undefined ? undefined : remedy(failure.hint),
         inbox: alias,
       });
     }
@@ -399,7 +402,7 @@ async function inboxChecks(context: GmailContext, alias: string): Promise<Check[
         title: `Last used: ${alias}`,
         status: 'warn',
         detail: `${Math.floor(days)} days ago; Google drops a token unused for six months`,
-        fix: handoffText(context.handoffs.own(['whoami', '--inbox', alias])),
+        fix: remedy(context.handoffs.own(['whoami', '--inbox', alias])),
         inbox: alias,
       });
     }
@@ -465,9 +468,11 @@ async function orphanedSecretsCheck(context: GmailContext, scope: Scope | undefi
       title: 'Tokens left behind',
       status: 'warn',
       detail: `${unchecked} recorded token(s) could not be checked against the configuration`,
-      fix: handoffSentence(
-        context.handoffs.own(['doctor']),
-        (command) => `Run ${command} again once the configuration can be read. Delete nothing until then.`,
+      fix: remedy(
+        handoffSentence(
+          context.handoffs.own(['doctor']),
+          (command) => `Run ${command} again once the configuration can be read. Delete nothing until then.`,
+        ),
       ),
     };
   }
@@ -476,7 +481,9 @@ async function orphanedSecretsCheck(context: GmailContext, scope: Scope | undefi
     title: 'Tokens left behind',
     status: 'warn',
     detail: `${unreferenced.length} stored token(s) could not be deleted when an inbox was removed, and nothing uses them`,
-    fix: `Remove ${unreferenced.join(', ')} from the secret store by hand, then delete ${orphanedSecretsPath(context)}`,
+    fix: remedy(
+      `Remove ${unreferenced.join(', ')} from the secret store by hand, then delete ${orphanedSecretsPath(context)}`,
+    ),
   };
 }
 
@@ -516,7 +523,7 @@ async function formerFoldersCheck(context: GmailContext, config: Config, onlyId?
     title: 'Downloads under former names',
     status: 'warn',
     detail: found.join('; '),
-    fix: 'Nothing was moved. Move them into the new folders yourself if you want them together.',
+    fix: remedy('Nothing was moved. Move them into the new folders yourself if you want them together.'),
   };
 }
 
@@ -543,7 +550,7 @@ async function mcpChecks(context: GmailContext, scope: Scope | undefined): Promi
         : ungated
             .map((finding) => `${finding.name} in ${finding.path} (${finding.client}): ${finding.reason}`)
             .join('; '),
-    fix: ungated.length === 0 ? undefined : ungated.map((finding) => finding.removal).join('\n'),
+    fix: ungated.length === 0 ? undefined : remedy(...ungated.map((finding) => finding.removal)),
   });
 
   /*
@@ -590,7 +597,7 @@ async function mcpChecks(context: GmailContext, scope: Scope | undefined): Promi
               ? `none registered that serves ${scope.name}: no MCP client's config file starts one that reaches it`
               : "none registered: no MCP client's config file starts this server"
           } (one a plugin or an extension starts is not visible from here)`,
-          fix: handoffText(context.handoffs.own(['mcp', 'install', '--help'], { uses: [] })),
+          fix: remedy(context.handoffs.own(['mcp', 'install', '--help'], { uses: [] })),
         }
       : {
           id: 'registered-server-version',
@@ -608,7 +615,7 @@ async function mcpChecks(context: GmailContext, scope: Scope | undefined): Promi
           fix:
             stale.length === 0
               ? undefined
-              : stale.map((entry) => repairCommand(entry.server, context.handoffs)).join('\n'),
+              : remedy(...stale.map((entry) => repairCommand(entry.server, context.handoffs))),
         },
   );
 

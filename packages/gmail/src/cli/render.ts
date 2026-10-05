@@ -1,5 +1,6 @@
 import {
   type CliHandoffs,
+  type Handoff,
   handoffSentence,
   handoffSentenceToFill,
   handoffText,
@@ -149,8 +150,11 @@ export type FinishRegistration =
       /** What the person reads before agreeing. */
       preview: string;
       expiresAt: string;
-      /** The command that claims the approval once the person has agreed: `mcp install`, the same change. */
-      claim: string;
+      /**
+       * The command that claims the approval once the person has agreed: this installation's own `mcp install`, the same
+       * change, located — or why there is none here. Written out as its text with `--json` (`PrintedCommand.toJSON`).
+       */
+      claim: Handoff;
       hint: string;
     }
   | {
@@ -801,6 +805,16 @@ export const CLIENT_KIND_LABEL: Record<string, string> = {
 };
 
 /**
+ * A sign-in `setup` hands to a person: the link they open, and the command that finishes it — this installation's own
+ * `inbox add --finish`, located, or why there is none here; written out as its text with `--json`.
+ */
+export interface SetupHandoff {
+  authUrl: string;
+  finish: Handoff;
+  registerWith?: RegistrationIntent | undefined;
+}
+
+/**
  * The setup, written out for somebody who cannot be prompted — an agent, a pipe, `--json`.
  *
  * Every step here needs a browser this code does not drive: the console, and Google's consent screen. So the answer for a
@@ -833,7 +847,7 @@ export function renderSetupPlan(
      * The link and the command, when the only thing left is a person approving it — and the registration the finish
      * will go on to ask for, when `--mcp-client` came with the mailbox.
      */
-    handoff?: { authUrl: string; finish: string; registerWith?: RegistrationIntent | undefined } | null | undefined;
+    handoff?: SetupHandoff | null | undefined;
     /** A name the config accepts, for the examples: `acme/gmail` once names are organisation/platform. */
     nameExample?: string | undefined;
   },
@@ -856,7 +870,7 @@ export function renderSetupPlan(
     lines.push(`  ${state.handoff.authUrl}`);
     lines.push('');
     lines.push('Then, once the browser flow has returned a grant:');
-    lines.push(`  ${state.handoff.finish}`);
+    lines.push(`  ${handoffText(state.handoff.finish)}`);
     // Said here because this is the step that stops before it: `--mcp-client` is not forgotten, it moves to the finish.
     if (state.handoff.registerWith) {
       lines.push(

@@ -4,13 +4,13 @@ import type { AuditRecord } from '../audit.ts';
 import { revokeChange } from '../changes.ts';
 import { type Channel, channelServer } from '../channel-servers.ts';
 import { listed, manifestOf } from '../channel-words.ts';
-import { commandText, inlineCommand } from '../cli-runtime.ts';
+import { inlineCommand } from '../cli-runtime.ts';
 import { externalCommand } from '../command-brands.ts';
 import { type Config, emptyConfig, secretsStoreOf } from '../config.ts';
 import type { Core } from '../core.ts';
 import { CommsError } from '../errors.ts';
 import { isGroupOrWorldAccessible } from '../fs.ts';
-import { type CliHandoffs, handoffSentence, isCommand, requireHandoffs } from '../handoffs.ts';
+import { type CliHandoffs, handoffSentence, isCommand, type Remedy, remedy, requireHandoffs } from '../handoffs.ts';
 import { resolveName } from '../names.ts';
 import { organisationDrift, organisationsOf, orphanMarkedRows, shownText } from '../organisations.ts';
 import type { ResolvedPaths } from '../paths.ts';
@@ -50,7 +50,8 @@ export interface DoctorCheck {
    */
   warn?: true;
   detail: string;
-  fix?: string;
+  /** What fixes it, a step a line: commands — located, or why there is none here — and the words around them. */
+  fix?: Remedy;
 }
 
 export interface DoctorReport {
@@ -73,9 +74,9 @@ export interface DoctorOptions {
  * inside one of this suite's packages — a development checkout's — is refused there, as a path that could start a
  * product is, and is said in words instead.
  */
-function ownerOnly(dir: string, platform: NodeJS.Platform): string {
+function ownerOnly(dir: string, platform: NodeJS.Platform): Remedy {
   try {
-    return commandText(
+    return remedy(
       externalCommand(
         ['chmod', '700', dir],
         'chmod is the system command that makes a directory private to its owner',
@@ -83,7 +84,7 @@ function ownerOnly(dir: string, platform: NodeJS.Platform): string {
       ),
     );
   } catch {
-    return `make ${dir} readable and writable by its owner alone (mode 700)`;
+    return remedy(`make ${dir} readable and writable by its owner alone (mode 700)`);
   }
 }
 
@@ -102,7 +103,7 @@ export async function doctor(core: Core, env: NodeJS.ProcessEnv, options: Doctor
     name: 'node',
     ok: nodeOk,
     detail: `Node ${process.versions.node} at ${process.execPath}`,
-    ...(nodeOk ? {} : { fix: 'Install Node 22.12 or newer.' }),
+    ...(nodeOk ? {} : { fix: remedy('Install Node 22.12 or newer.') }),
   });
 
   for (const [name, dir] of [
@@ -138,7 +139,7 @@ export async function doctor(core: Core, env: NodeJS.ProcessEnv, options: Doctor
       name: 'config',
       ok: false,
       detail: error instanceof Error ? error.message : String(error),
-      fix: 'Fix or restore config.json.',
+      fix: remedy('Fix or restore config.json.'),
     });
   }
 
@@ -163,10 +164,12 @@ export async function doctor(core: Core, env: NodeJS.ProcessEnv, options: Doctor
         : 'organisation/platform',
     ...(toMigrate
       ? {
-          fix: handoffSentence(
-            handoffs.core(['names', 'migrate', '--dry-run']),
-            (command) =>
-              `See what they would become with ${command}, once everything sharing this config is on 0.2.0 or later.`,
+          fix: remedy(
+            handoffSentence(
+              handoffs.core(['names', 'migrate', '--dry-run']),
+              (command) =>
+                `See what they would become with ${command}, once everything sharing this config is on 0.2.0 or later.`,
+            ),
           ),
         }
       : {}),
@@ -187,9 +190,11 @@ export async function doctor(core: Core, env: NodeJS.ProcessEnv, options: Doctor
     ...(probe.ok || !usesKeychain
       ? {}
       : {
-          fix: handoffSentence(
-            handoffs.core(['secrets', 'migrate', '--to', 'file']),
-            (command) => `Unlock the keychain, or move secrets to files: ${command}.`,
+          fix: remedy(
+            handoffSentence(
+              handoffs.core(['secrets', 'migrate', '--to', 'file']),
+              (command) => `Unlock the keychain, or move secrets to files: ${command}.`,
+            ),
           ),
         }),
   });
@@ -246,13 +251,15 @@ function organisationChecks(config: Config, handoffs: CliHandoffs): DoctorCheck[
       ok: true,
       warn: true,
       detail: `the OAuth client "${client}" is marked as belonging to "${shownText(organisation, 40)}", which has no profile here`,
-      fix: `It is treated as a client of your own. ${handoffSentence(
-        handoffs.of('gmail', ['client', '--help'], { uses: [] }),
-        (command) => `${command} shows commands that can change or remove it.`,
-      )} ${handoffSentence(
-        handoffs.core(['org', 'add', '--help'], { uses: [] }),
-        (command) => `To give it back to the organisation, add its profile with ${command}.`,
-      )}`,
+      fix: remedy(
+        `It is treated as a client of your own. ${handoffSentence(
+          handoffs.of('gmail', ['client', '--help'], { uses: [] }),
+          (command) => `${command} shows commands that can change or remove it.`,
+        )} ${handoffSentence(
+          handoffs.core(['org', 'add', '--help'], { uses: [] }),
+          (command) => `To give it back to the organisation, add its profile with ${command}.`,
+        )}`,
+      ),
     });
   }
   return checks;
@@ -293,7 +300,7 @@ async function updateCheckLine(core: Core, env: NodeJS.ProcessEnv, handoffs: Cli
     ...(pending === null
       ? {}
       : {
-          fix:
+          fix: remedy(
             asServer?.kind === 'restart' && asCommand?.kind === 'restart'
               ? `${pending.latest} is installed on this machine: restart the MCP clients, and run commands from it.`
               : handoffSentence(handoffs.core(['update']), (update) =>
@@ -302,6 +309,7 @@ async function updateCheckLine(core: Core, env: NodeJS.ProcessEnv, handoffs: Cli
                     (later) => `Run ${update} (comms_update from a chat), or ${later} to put it off until tomorrow.`,
                   ),
                 ),
+          ),
         }),
   };
 }
@@ -335,7 +343,7 @@ async function registrationChecks(
     ok: true,
     warn: true,
     detail: `${file.path} could not be read (${file.reason}), so which servers ${file.client} starts is not known`,
-    fix: `Look at ${file.path}: until it can be read, nothing here can say what it registers.`,
+    fix: remedy(`Look at ${file.path}: until it can be read, nothing here can say what it registers.`),
   }));
   const blind = report.unreadable.map((file) => file.path);
   const where = (entry: ChannelRegistration) =>
@@ -392,9 +400,11 @@ async function registrationChecks(
       fix: (() => {
         const install = handoffs.of(channel.channel, ['mcp', 'install', '--help'], { uses: [] });
         const fromChat = `comms_server_install with channel "${channel.channel}" from a chat`;
-        return isCommand(install)
-          ? `Register it with the client you use: ${inlineCommand(install)} (${clients}), or ${fromChat}. Used only from a terminal, it needs nothing.`
-          : `Register it with ${fromChat}. ${install.message} Used only from a terminal, it needs nothing.`;
+        return remedy(
+          isCommand(install)
+            ? `Register it with the client you use: ${inlineCommand(install)} (${clients}), or ${fromChat}. Used only from a terminal, it needs nothing.`
+            : `Register it with ${fromChat}. ${install.message} Used only from a terminal, it needs nothing.`,
+        );
       })(),
     });
   }
@@ -417,9 +427,11 @@ function accountsOf(config: Config, channel: Channel): string[] {
  * the flags `mcp install`'s own hint repeats when it refuses to replace an entry without `--force`, so following it
  * narrows or widens nothing. A project's entry is not one `mcp install` writes, and is said to be where it is instead.
  */
-function registerAgain(channel: Channel, entry: ChannelRegistration, handoffs: CliHandoffs): string {
+function registerAgain(channel: Channel, entry: ChannelRegistration, handoffs: CliHandoffs): Remedy {
   if (entry.scope === 'project') {
-    return `It is registered for one project, in ${entry.path}, and \`mcp install\` registers at user scope only: remove it or register it again there, with ${entry.client}'s own command.`;
+    return remedy(
+      `It is registered for one project, in ${entry.path}, and \`mcp install\` registers at user scope only: remove it or register it again there, with ${entry.client}'s own command.`,
+    );
   }
   const facts = channelServer(channel);
   const words = ['mcp', 'install', '--client', entry.client];
@@ -429,7 +441,7 @@ function registerAgain(channel: Channel, entry: ChannelRegistration, handoffs: C
   words.push('--force');
   // The entry's name and pins are read from the client's file, which may hold anything: a located command shows them
   // as words to type where no Windows line is safe, and a product not locatable here says so instead.
-  return handoffSentence(handoffs.of(channel, words), (command) => `Register it again: ${command}.`);
+  return remedy(handoffSentence(handoffs.of(channel, words), (command) => `Register it again: ${command}.`));
 }
 
 /** An inbox's id from its name — the current one, so a former name is answered with what it is called now. */

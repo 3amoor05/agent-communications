@@ -165,7 +165,7 @@ not locatable here. `use` pins folders: the four every command opens by default 
 
 - In a sentence: `handoffSentence(handoff, (command) => \`Run ${command} to …\`)`. With no command, the whole sentence
   is the not-locatable one — never the template with something else in the command's place.
-- As a value of its own — a list item, a `fix`, a `command` field: `handoffText(handoff)`.
+- As a value of its own — a list's line, printed: `handoffText(handoff)`; in a result's field, the handoff itself (4).
 - With words the agent fills in (`<folder>`): `handoffSentenceToFill(handoff, ['<folder>'], say)`, or as a value of its
   own, `handoffTextToFill(handoff, ['<folder>'])`.
 - Several that could each do it (each sending channel's `approve`): `handoffChoices(handoffs, none)`.
@@ -177,10 +177,16 @@ command after its program as `rerun`; the approval goes in before any `--`. Ther
 bare-name bridge for a package without its caller, and every `command` and `approveCommand` input it served, are gone
 (CUE-403 task 15).
 
-**4. On every surface it is the same text.** The CLI prints the rendered sentence or value; `--json` envelopes and MCP
-`structuredContent` carry the same strings in the fields they always had — a command's line, or its words as JSON with
-what to do when no Windows line is safe, or the not-locatable sentence. Do not put a `PrintedCommand` object into a
-result yet: typing those fields is CUE-403 task 15.
+**4. A result's command is the command itself; on every surface it is the same text.** A field whose value is a command
+— a `command`, a `next`, a `finish`, a `claim` — is typed `Handoff` (or `PrintedCommand | ExternalCommand`) and holds
+the handoff, never its text: a string, a template or an argument fragment does not compile there. A field that mixes
+commands and words — a doctor's `fix`, a list of next steps, a rival's `removal` — is a `Remedy`, made only by
+`remedy(…)` from handoffs and words, a line per argument (`remedy([remove, ', then add it again'])`). A command is
+rendered where it leaves the process: the human renderers call `handoffText`; `--json` and MCP `structuredContent` are
+JSON, where a command writes itself out as the text the field always carried — its line, or its words as JSON with what
+to do when no Windows line is safe, or the not-locatable sentence (`toJSON`). So every server's `reply` and `fail` pass
+their result through `JSON.stringify` before it leaves. A command is never interpolated: one in a template throws.
+`test/printed-command-types.test.mjs` compiles fixtures that hold each of these fields to it.
 
 **5. Core functions that print for you take your handoffs.** Where one took the `platform` its hint is quoted for, it
 takes your `CliHandoffs`, already `.on(context.platform)` — they carry their platform (`secretsStoreFor`,
@@ -210,7 +216,7 @@ After:
 
 ```ts
 const handoffs = requireHandoffs(context.core).on(context.platform);
-fix: handoffText(handoffs.own(['inbox', 'reauth', alias])),
+fix: remedy(handoffs.own(['inbox', 'reauth', alias])),
 hint: handoffSentence(handoffs.own(['whoami', '--inbox', alias]), (command) => `Run ${command} to check it.`),
 ```
 

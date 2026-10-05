@@ -198,8 +198,12 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
     { instructions: await buildInstructions(context, pinned) },
   );
 
+  /*
+   * As JSON, so the structured half is what the text half says: a command a result holds is written out as its text
+   * there (`PrintedCommand.toJSON`), as the CLI's `--json` writes it.
+   */
   const reply = (data: unknown) => {
-    const structured = data as Record<string, unknown>;
+    const structured = JSON.parse(JSON.stringify(data)) as Record<string, unknown>;
     return { structuredContent: structured, content: [{ type: 'text' as const, text: JSON.stringify(structured) }] };
   };
 
@@ -211,14 +215,17 @@ export async function createSlackMcpServer(options: SlackMcpOptions = {}): Promi
    */
   const fail = (error: unknown) => {
     const comms: CommsError = toCommsError(error);
-    const structured = {
-      error: {
-        code: comms.code,
-        message: comms.message,
-        hint: comms.hint ?? null,
-        ...(comms.details !== undefined ? { details: comms.details } : {}),
-      },
-    };
+    // As JSON, so a command `details` holds is written out as its text, as the CLI's `--json` envelope gives it.
+    const structured = JSON.parse(
+      JSON.stringify({
+        error: {
+          code: comms.code,
+          message: comms.message,
+          hint: comms.hint ?? null,
+          ...(comms.details !== undefined ? { details: comms.details } : {}),
+        },
+      }),
+    ) as Record<string, unknown>;
     return {
       isError: true as const,
       structuredContent: structured,

@@ -4,7 +4,7 @@ import { dirname, isAbsolute, join, relative } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { commandText, EXIT_CODES, isCommand, openCore } from '@agentcomms/core';
+import { commandText, EXIT_CODES, externalCommand, isCommand, openCore, remedy } from '@agentcomms/core';
 import { GMAIL_CALLER } from '../src/caller.ts';
 import { run } from '../src/cli/program.ts';
 import { renderDoctor, renderSendPreparation } from '../src/cli/render.ts';
@@ -188,7 +188,11 @@ test('doctor prefixes every command in a multi-line repair', () => {
           title: 'Other servers',
           status: 'fail',
           detail: 'two unsafe entries are registered',
-          fix: 'claude mcp remove first\ncodex mcp remove second',
+          // Each client's own command, as the doctor makes them: external commands, a line each.
+          fix: remedy(
+            externalCommand(['claude', 'mcp', 'remove', 'first'], 'the client removes its own entry', 'linux'),
+            externalCommand(['codex', 'mcp', 'remove', 'second'], 'the client removes its own entry', 'linux'),
+          ),
         },
       ],
     },

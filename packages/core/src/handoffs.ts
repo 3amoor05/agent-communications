@@ -16,6 +16,9 @@ export {
   handoffText,
   handoffTextToFill,
   isCommand,
+  type Remedy,
+  type RemedyPart,
+  remedy,
 } from './handoff-text.ts';
 
 /**

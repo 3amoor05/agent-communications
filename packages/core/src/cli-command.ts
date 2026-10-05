@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import type { ChannelEntry } from './channel-manifest.ts';
 import { CHANNEL_SNAPSHOT } from './channels.generated.ts';
 import { normalizePathOptionWords } from './cli-runtime.ts';
-import { quoteCommand } from './command-line.ts';
+import { quoteCommand, quotedText } from './command-line.ts';
 import type { RegisteredServer } from './mcp-clients.ts';
 import { isWithin, nearestPackage, readPackageManifest, realpathOfExisting, suiteCommandOf } from './package-roots.ts';
 import { type PathName, type PathOverrides, type ResolvedPaths, withoutPathOptions } from './paths.ts';
@@ -77,6 +77,20 @@ class PrintedCommand {
    */
   get entry(): string {
     return this.#entry;
+  }
+
+  /**
+   * As JSON — a result's field written out by `--json`, or returned to an MCP client — it is the text it always was:
+   * its line, or its words as JSON with what to do when no Windows line is safe (`commandText`). Rendered where it
+   * leaves the process, so a field can hold the command itself and the wire stays the same.
+   */
+  toJSON(): string {
+    return quotedText(this);
+  }
+
+  /** Never interpolated: a sentence gives a command through `handoffSentence`, a value through `handoffText`. */
+  [Symbol.toPrimitive](): never {
+    throw new TypeError('a printed command is rendered with handoffText or handoffSentence, never interpolated');
   }
 }
 
@@ -629,7 +643,7 @@ function notLocated(
     nodeRange === undefined
       ? `${named} is not locatable here: ${detail}. Install or update it through your usual route, then try again.`
       : `${named} needs Node ${nodeRange}, and this is Node ${nodeVersion}, so there is no command to run it with here. Run it again under a Node in that range.`;
-  return Object.freeze({
+  const notLocated: CliCommandNotLocated = {
     ok: false as const,
     reason,
     product: target.manifest.label,
@@ -639,7 +653,18 @@ function notLocated(
     ...(registrations === undefined ? {} : { registrations: Object.freeze([...registrations]) }),
     detail,
     message,
+  };
+  // As JSON, in a result's field, the sentence saying why — the text the field always carried — and never interpolated:
+  // as a printed command does (`PrintedCommand.toJSON`). Not enumerable, so the result's own fields are all there is.
+  Object.defineProperties(notLocated, {
+    toJSON: { value: () => message },
+    [Symbol.toPrimitive]: {
+      value: () => {
+        throw new TypeError('a missing command is said with handoffText or handoffSentence, never interpolated');
+      },
+    },
   });
+  return Object.freeze(notLocated);
 }
 
 /**

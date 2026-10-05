@@ -8,7 +8,7 @@ import {
 } from '../config.ts';
 import type { Core } from '../core.ts';
 import { CommsError } from '../errors.ts';
-import { type CliHandoffs, handoffText, requireHandoffs } from '../handoffs.ts';
+import { type CliHandoffs, type Handoff, requireHandoffs } from '../handoffs.ts';
 import { resolveName } from '../names.ts';
 
 /**
@@ -40,10 +40,11 @@ export interface LooserOverride extends PolicyOverride {
   changePolicy: 'chat';
   tighten: {
     /**
-     * At a terminal: the command's line — or, when no line is safe in every Windows shell, its words with what to do —
-     * or, with no command here, the sentence saying why (`handoffText`).
+     * At a terminal: core's own command, located, or the sentence saying why there is none here. Written out as text
+     * where the report leaves the process — its line, or its words with what to do when no line is safe in every
+     * Windows shell, or that sentence (`handoffText`) — as it always was.
      */
-    command: string;
+    command: Handoff;
     /** From a chat: this tool, with these arguments. */
     tool: 'comms_change_policy';
     arguments: { inbox?: string; account?: string; set: 'confirm' };
@@ -140,8 +141,8 @@ function stillChat(override: PolicyOverride, handoffs: CliHandoffs): LooserOverr
       name: override.name,
       changePolicy: 'chat',
       tighten: {
-        // Core's own, located from whatever is printing (CUE-403): its line, or why there is none here.
-        command: handoffText(handoffs.core(['policy', flag, override.name, 'confirm'])),
+        // Core's own, located from whatever is printing (CUE-403), or why there is none here.
+        command: handoffs.core(['policy', flag, override.name, 'confirm']),
         tool: 'comms_change_policy',
         arguments:
           override.kind === 'inbox'

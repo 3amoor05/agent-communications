@@ -4,7 +4,6 @@ import {
   describeOtherSlackServer,
   findOtherSlackServers,
   handoffSentence,
-  handoffText,
   isCommand,
   isProductServer,
   listRegisteredServers,
@@ -13,6 +12,8 @@ import {
   otherSlackServerRemoval,
   pinnedVersion,
   type RegisteredServer,
+  type Remedy,
+  remedy,
   type SecretStore,
   toCommsError,
 } from '@agentcomms/core';
@@ -47,7 +48,11 @@ export interface Check {
   readonly title: string;
   readonly status: 'ok' | 'unknown' | 'warn' | 'fail';
   readonly detail: string;
-  readonly fix: string | null;
+  /**
+   * What fixes it, a step a line: this installation's own commands, core's, a client's own — each located, or why
+   * there is none here — and the words around them (`remedy`). Null when there is nothing to do.
+   */
+  readonly fix: Remedy | null;
   readonly workspace: string | null;
 }
 
@@ -142,13 +147,13 @@ export const IMPLICIT_USER_SCOPES: readonly string[] = ['identify'];
 export function doctor(input: DoctorInput): DoctorResult {
   const checks: Check[] = [];
   const { handoffs } = input;
-  const command = (...words: string[]) => handoffText(handoffs.own(words));
+  const command = (...words: string[]): Remedy => remedy(handoffs.own(words));
   // A workspace removed and connected again: the command, or with none here, the tools that do it and why not.
-  const removeThenAdd = (alias: string): string => {
+  const removeThenAdd = (alias: string): Remedy => {
     const remove = handoffs.own(['workspace', 'remove', alias]);
     return isCommand(remove)
-      ? `${handoffText(remove)}, then add it again`
-      : `slack_workspace_remove from a chat, then add it again. ${remove.message}`;
+      ? remedy([remove, ', then add it again'])
+      : remedy(`slack_workspace_remove from a chat, then add it again. ${remove.message}`);
   };
   const workspaces = listWorkspaces(input.config).filter(
     (view) => input.workspace === undefined || view.alias === input.workspace,
@@ -176,11 +181,11 @@ export function doctor(input: DoctorInput): DoctorResult {
       detail: 'none connected yet',
       // The first step, not the last: `workspace add` needs a Client ID that does not exist until an app does,
       // and a fix somebody cannot run is not a fix.
-      fix: [
-        command('manifest', '--port', '51234'),
+      fix: remedy(
+        handoffs.own(['manifest', '--port', '51234']),
         // Help reads no folder of this suite, so none is pinned.
-        handoffText(handoffs.own(['workspace', 'add', '--help'], { uses: [] })),
-      ].join('\n'),
+        handoffs.own(['workspace', 'add', '--help'], { uses: [] }),
+      ),
       workspace: null,
     });
   }
@@ -195,11 +200,13 @@ export function doctor(input: DoctorInput): DoctorResult {
         status: 'fail',
         detail: `the secret store could not be read, so the credential was not checked: ${bundle.storeUnavailable}`,
         // Not `reauth`: nothing says the credential is wrong, and re-authorising would discard a working one.
-        fix: handoffsSentence(
-          [handoffs.own(['doctor']), handoffs.core(['doctor'])],
-          ([again, store]) =>
-            `Unlock the keychain or approve its prompt, then run ${again} again; ${store} checks the store itself.`,
-          'Unlock the keychain or approve its prompt, then call slack_doctor again; comms_doctor checks the store itself.',
+        fix: remedy(
+          handoffsSentence(
+            [handoffs.own(['doctor']), handoffs.core(['doctor'])],
+            ([again, store]) =>
+              `Unlock the keychain or approve its prompt, then run ${again} again; ${store} checks the store itself.`,
+            'Unlock the keychain or approve its prompt, then call slack_doctor again; comms_doctor checks the store itself.',
+          ),
         ),
         workspace: workspace.alias,
       });
@@ -502,7 +509,7 @@ export function doctor(input: DoctorInput): DoctorResult {
         }`
       : 'expected Tier 3 for an internal app; not yet observed',
     fix: evidence?.lastThrottledAt
-      ? 'If this repeats, check the app is still internal to your workspace rather than distributed.'
+      ? remedy('If this repeats, check the app is still internal to your workspace rather than distributed.')
       : null,
     workspace: null,
   });
@@ -678,15 +685,17 @@ export async function runDoctor(context: SlackContext, options: DoctorRun = {}):
  * into the default: every workspace, under another name. That is a widening of what an agent may reach, not a
  * repair — so the flags are read back off the entry that is there.
  */
-function repairCommand(server: RegisteredServer, handoffs: CliHandoffs): string {
+function repairCommand(server: RegisteredServer, handoffs: CliHandoffs): Remedy {
   // Every write targets user scope; a project-scoped entry cannot be reached by any flag, so the honest answer
   // is the manual one.
   if (server.scope === 'project') {
     const byHand = `remove "${server.name}" from the project entry in ${server.path} by hand`;
-    return handoffSentence(
-      handoffs.own(['mcp', 'install', '--client', server.client]),
-      (command) => `${byHand}, then re-run ${command}`,
-      { instead: `${byHand}, then register it again.` },
+    return remedy(
+      handoffSentence(
+        handoffs.own(['mcp', 'install', '--client', server.client]),
+        (command) => `${byHand}, then re-run ${command}`,
+        { instead: `${byHand}, then register it again.` },
+      ),
     );
   }
   const words = ['mcp', 'install', '--client', server.client];
@@ -697,7 +706,7 @@ function repairCommand(server: RegisteredServer, handoffs: CliHandoffs): string 
     words.push('--launcher', 'npx');
   }
   words.push('--force');
-  return handoffText(handoffs.own(words));
+  return remedy(handoffs.own(words));
 }
 
 /**
@@ -744,7 +753,7 @@ function registrationChecks(input: DoctorInput): Check[] {
     // Called with the server alone: handed to `map` directly, its index would be taken for the shell to quote for.
     fix:
       others.length > 0
-        ? others.map((server) => otherSlackServerRemoval(server, input.handoffs.platform)).join('\n')
+        ? remedy(...others.map((server) => otherSlackServerRemoval(server, input.handoffs.platform)))
         : null,
     workspace: null,
   });
@@ -782,10 +791,10 @@ function registrationChecks(input: DoctorInput): Check[] {
           : `this release, ${VERSION}`,
     fix:
       stale.length > 0
-        ? stale.map((entry) => repairCommand(entry.server, input.handoffs)).join('\n')
+        ? remedy(...stale.map((entry) => repairCommand(entry.server, input.handoffs)))
         : none
           ? // Help reads no folder of this suite, so none is pinned.
-            handoffText(input.handoffs.own(['mcp', 'install', '--help'], { uses: [] }))
+            remedy(input.handoffs.own(['mcp', 'install', '--help'], { uses: [] }))
           : null,
     workspace: null,
   });

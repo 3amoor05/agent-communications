@@ -2,8 +2,8 @@ import { rm } from 'node:fs/promises';
 import {
   agentMarker,
   CommsError,
+  type Handoff,
   handoffSentence,
-  handoffText,
   lookupName,
   nameAvailable,
   nameShapeProblem,
@@ -58,7 +58,8 @@ export interface AddedAccount {
   account: string;
   id: string;
   store: { path: string; default: boolean; id: string };
-  next: string;
+  /** The sync that fills the index: this installation's own, located, or why there is none here. */
+  next: Handoff;
 }
 
 export async function addAccount(
@@ -115,7 +116,7 @@ export async function addAccount(
     account: request.name,
     id: account.id,
     store: { path, default: isDefault, id: account.workspace },
-    next: handoffText(context.handoffs.own(['sync', '--account', request.name])),
+    next: context.handoffs.own(['sync', '--account', request.name]),
   };
 }
 

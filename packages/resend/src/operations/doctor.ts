@@ -1,4 +1,12 @@
-import { CommsError, type Handoff, handoffText, isCommand, secretsStoreOf, toCommsError } from '@agentcomms/core';
+import {
+  CommsError,
+  type Handoff,
+  isCommand,
+  type Remedy,
+  remedy,
+  secretsStoreOf,
+  toCommsError,
+} from '@agentcomms/core';
 import { keyPermissionOf, type NamedAccount } from '../accounts.ts';
 import { resendRequest } from '../api/client.ts';
 import type { ResendContext } from '../context.ts';
@@ -19,15 +27,18 @@ export interface DoctorCheck {
   name: string;
   ok: boolean;
   detail: string;
-  /** What to run: a command located from this installation, or why there is none here. */
-  fix?: string | undefined;
+  /**
+   * What to run: this installation's commands, or core's — each located, or why there is none here — and the words
+   * around them (`remedy`).
+   */
+  fix?: Remedy | undefined;
 }
 
 /** Two commands to run one after the other, as a fix: both located, or the reason there is none — said once. */
-function thenFix(first: Handoff, second: Handoff): string {
-  if (!isCommand(first)) return handoffText(first);
-  if (!isCommand(second)) return handoffText(second);
-  return `${handoffText(first)}, then ${handoffText(second)}`;
+function thenFix(first: Handoff, second: Handoff): Remedy {
+  if (!isCommand(first)) return remedy(first);
+  if (!isCommand(second)) return remedy(second);
+  return remedy([first, ', then ', second]);
 }
 
 export interface AccountDoctor {
@@ -68,7 +79,7 @@ async function checkAccount(context: ResendContext, named: NamedAccount, offline
       name: 'key stored',
       ok: false,
       detail: toCommsError(error).message,
-      fix: handoffText(context.handoffs.core(['doctor'])),
+      fix: remedy(context.handoffs.core(['doctor'])),
     });
   }
   const blocked = await context.throttle().blockedUntil();
@@ -99,7 +110,7 @@ async function checkAccount(context: ResendContext, named: NamedAccount, offline
           name: 'key permission',
           ok: false,
           detail: 'recorded as sending-only, but Resend let it read — it has full access',
-          fix: `remove and add ${named.name} again so its permission is recorded as it is`,
+          fix: remedy(`remove and add ${named.name} again so its permission is recorded as it is`),
         });
       } else {
         checks.push({ name: 'key works', ok: true, detail: `${domains.length} domain(s), ${verified} verified` });
@@ -114,7 +125,7 @@ async function checkAccount(context: ResendContext, named: NamedAccount, offline
                 name: 'key permission',
                 ok: false,
                 detail: 'recorded as full access, but Resend now refuses it every read',
-                fix: `remove and add ${named.name} again with the key you mean`,
+                fix: remedy(`remove and add ${named.name} again with the key you mean`),
               },
         );
       } else {
@@ -122,7 +133,7 @@ async function checkAccount(context: ResendContext, named: NamedAccount, offline
           name: 'key works',
           ok: false,
           detail: comms.message,
-          ...(comms.hint ? { fix: comms.hint } : {}),
+          ...(comms.hint ? { fix: remedy(comms.hint) } : {}),
         });
       }
     }
@@ -148,7 +159,7 @@ export async function runDoctor(
     name: 'node',
     ok: nodeOk,
     detail: `Node ${process.versions.node}`,
-    ...(nodeOk ? {} : { fix: 'Install Node 22.12 or newer.' }),
+    ...(nodeOk ? {} : { fix: remedy('Install Node 22.12 or newer.') }),
   });
   let store = 'unknown';
   try {
@@ -159,7 +170,7 @@ export async function runDoctor(
       name: 'config',
       ok: false,
       detail: toCommsError(error).message,
-      fix: handoffText(context.handoffs.core(['doctor'])),
+      fix: remedy(context.handoffs.core(['doctor'])),
     });
   }
   let named: NamedAccount[] = [];

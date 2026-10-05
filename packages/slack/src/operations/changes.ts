@@ -8,8 +8,8 @@ import {
   defaultChangePolicy,
   findById,
   type GatedChange,
+  type Handoff,
   handoffSentence,
-  handoffText,
   neutralise,
   type ProfileSlackTarget,
   parseName,
@@ -52,8 +52,11 @@ export interface SignInStarted {
   /** The person opens this and approves it in Slack. It expires with the sign-in, ten minutes after it started. */
   readonly authUrl: string;
   readonly expiresAt: string;
-  /** How it is finished once they have: the tool from a chat, the command at a terminal. */
-  readonly finish: { readonly tool: 'slack_workspace_finish'; readonly command: string };
+  /**
+   * How it is finished once they have: the tool from a chat, the command at a terminal — this installation's own,
+   * located, or why there is none here; written out as its text with `--json` and over MCP (`PrintedCommand.toJSON`).
+   */
+  readonly finish: { readonly tool: 'slack_workspace_finish'; readonly command: Handoff };
 }
 
 export function signInStarted(context: SlackContext, started: StartedSignIn, reauth: boolean): SignInStarted {
@@ -66,14 +69,12 @@ export function signInStarted(context: SlackContext, started: StartedSignIn, rea
     expiresAt: started.expiresAt,
     finish: {
       tool: 'slack_workspace_finish',
-      command: handoffText(
-        context.handoffs.own([
-          'workspace',
-          ...(reauth ? ['reauth', started.alias] : ['add']),
-          '--finish',
-          started.flowId,
-        ]),
-      ),
+      command: context.handoffs.own([
+        'workspace',
+        ...(reauth ? ['reauth', started.alias] : ['add']),
+        '--finish',
+        started.flowId,
+      ]),
     },
   };
 }
@@ -347,8 +348,9 @@ export interface AppUpdateNeeded extends ModeSteps {
   /**
    * The same step at a terminal, with an app configuration token. A command for a person, never a tool: the token
    * would stay in the chat's transcript. Null when the app's id is not recorded, because `app update` would refuse.
+   * Located, or why there is none here; written out as its text with `--json` and over MCP.
    */
-  readonly terminalAlternative: string | null;
+  readonly terminalAlternative: Handoff | null;
 }
 
 export type ModeSetPlan =
@@ -457,7 +459,7 @@ async function modeSetPlan(
         steps: wideningSteps(found.alias, handoffs, port, found.account.appId),
         manifest: await manifestFor(context, { mode: 'send', port, workspace: found.alias }),
         terminalAlternative: found.account.appId
-          ? handoffText(handoffs.own(['app', 'update', found.alias, '--mode', 'send', '--port', String(port)]))
+          ? handoffs.own(['app', 'update', found.alias, '--mode', 'send', '--port', String(port)])
           : null,
       },
     };

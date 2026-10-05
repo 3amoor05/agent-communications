@@ -88,6 +88,32 @@ export function handoffTextToFill(handoff: Handoff | ExternalCommand, toFill: re
   return lineWithWordsToFill(handoff, ...toFill) ?? quotedText(quotedWithWordsToFill(handoff, toFill));
 }
 
+/** The brand of a `Remedy`: only `remedy` makes one. */
+declare const REMEDY: unique symbol;
+
+/**
+ * What fixes something, in words a person follows — a doctor's `fix`, a list of next steps: commands — this suite's,
+ * located, or why there is none here; another program's — and words around them, one step a line. Made only by
+ * `remedy`, so a field typed `Remedy` takes no plain string, template or argument fragment in place of a command. It is
+ * text all the same, so it is written out, and read by an agent, exactly as it always was.
+ */
+export type Remedy = string & { readonly [REMEDY]: true };
+
+/** Part of a remedy's line: a command, shown as a value of its own (`handoffText`), or words. */
+export type RemedyPart = Handoff | ExternalCommand | string;
+
+/**
+ * A remedy, a line per argument: one part, or the parts of one line in order — `[remove, ', then add it again']`.
+ * A command is shown as `handoffText` shows it: its line, its words as JSON with what to do when no Windows line is
+ * safe, or why there is none here.
+ */
+export function remedy(...lines: readonly (RemedyPart | readonly RemedyPart[])[]): Remedy {
+  const part = (each: RemedyPart): string => (typeof each === 'string' ? each : handoffText(each));
+  return lines
+    .map((line) => (Array.isArray(line) ? line.map(part).join('') : part(line as RemedyPart)))
+    .join('\n') as Remedy;
+}
+
 export interface HandoffSentenceOptions {
   /**
    * Said before the reason when there is no command: another way to do it that needs no command — a tool to call from

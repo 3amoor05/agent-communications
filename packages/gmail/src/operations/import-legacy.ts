@@ -12,7 +12,6 @@ import {
   findUngatedGmailServers,
   type GatedChange,
   handoffSentenceToFill,
-  handoffText,
   homeDirectory,
   type InboxConfig,
   isValidAlias,
@@ -22,6 +21,8 @@ import {
   nameAvailable,
   newInboxId,
   PUBLIC_MAILBOX_DOMAINS,
+  type Remedy,
+  remedy,
   type SecretStore,
   type StoreKind,
   secretsStoreFor,
@@ -68,8 +69,8 @@ export interface ImportResult {
   skipped: ImportCandidate[];
   /** Other Gmail servers still registered on this machine: while these are connected, nothing here gates sending. */
   ungatedServers: LegacyServerFinding[];
-  /** What to do next, in order. */
-  nextSteps: string[];
+  /** What to do next, in order: this installation's commands, located, and the words around them (`remedy`). */
+  nextSteps: Remedy[];
 }
 
 export interface ImportOptions {
@@ -499,23 +500,28 @@ function nextSteps(
   ungated: LegacyServerFinding[],
   dryRun: boolean,
   handoffs: CliHandoffs,
-): string[] {
-  const steps: string[] = [];
+): Remedy[] {
+  const steps: Remedy[] = [];
   if (dryRun) {
-    steps.push('Run the same command without --dry-run to import these.');
+    steps.push(remedy('Run the same command without --dry-run to import these.'));
     return steps;
   }
   const needsUpgrade = imported.filter((candidate) => candidate.tier !== 'organize');
   for (const candidate of needsUpgrade) {
     // Each step a value of its own: this installation's command, located — or why there is none here.
     steps.push(
-      `${handoffText(handoffs.own(['inbox', 'reauth', candidate.alias, '--start']))}  (to label and archive, and to record which account it is)`,
+      remedy([
+        handoffs.own(['inbox', 'reauth', candidate.alias, '--start']),
+        '  (to label and archive, and to record which account it is)',
+      ]),
     );
   }
   for (const finding of ungated) {
-    steps.push(`${finding.removal}  (while ${finding.packageName} is connected, an agent can send without approval)`);
+    steps.push(
+      remedy([finding.removal, `  (while ${finding.packageName} is connected, an agent can send without approval)`]),
+    );
   }
-  if (imported.length > 0) steps.push(handoffText(handoffs.own(['doctor'])));
+  if (imported.length > 0) steps.push(remedy(handoffs.own(['doctor'])));
   return steps;
 }
 

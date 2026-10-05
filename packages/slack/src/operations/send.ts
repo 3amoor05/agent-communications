@@ -9,9 +9,9 @@ import {
   CommsError,
   canonicalJson,
   type Expectation,
+  type Handoff,
   handoffSentence,
   handoffSentenceToFill,
-  handoffText,
   messageDigest,
   type SendPolicy,
   sha256Hex,
@@ -375,7 +375,7 @@ export function requireFileSending(
       hint: `Nothing was sent. ${handoffSentence(reauth, (command) => `Sign in again to grant it: ${command}.`, {
         instead: 'Sign in again to grant it, with slack_workspace_reauth from a chat.',
       })} ${manifest}`,
-      details: { scope: 'files:write', command: handoffText(reauth) },
+      details: { scope: 'files:write', command: reauth },
     });
   }
 }
@@ -395,12 +395,7 @@ function attachPolicyFor(deps: Pick<PrepareDeps, 'attachPolicy'>): AttachPolicy 
  * only the paths left to fill in. `draft update` takes nothing without `--workspace`, and a refusal whose one step
  * leaves it out offers a command that fails.
  */
-export function refileCommand(workspace: string, draftId: string, handoffs: CliHandoffs): string {
-  return handoffText(refile(workspace, draftId, handoffs));
-}
-
-/** `draft update <id> --workspace <name> --file <path…>`, located: what {@link refileCommand} says as a value. */
-function refile(workspace: string, draftId: string, handoffs: CliHandoffs) {
+export function refileCommand(workspace: string, draftId: string, handoffs: CliHandoffs): Handoff {
   return handoffs.own(['draft', 'update', draftId, '--workspace', workspace, '--file', '<path…>']);
 }
 
@@ -426,7 +421,7 @@ async function filesAsRecorded(
         `nothing was prepared: ${file.name} is not the file the draft recorded — ${check.why}`,
         {
           hint: handoffSentence(
-            refile(deps.workspaceName, draft.draftId, deps.handoffs),
+            refileCommand(deps.workspaceName, draft.draftId, deps.handoffs),
             (command) =>
               `Put the files on the draft again with ${command} (every one: --file replaces the list) or slack_draft_update, then prepare it again.`,
             { instead: 'Put the files on the draft again with slack_draft_update, then prepare it again.' },
@@ -593,8 +588,8 @@ export interface PostedFiles {
  * The command a person runs to approve at their own terminal, located: the same whichever surface asked. With no
  * command here, the sentence saying why — never a bare `approve` nobody's PATH has.
  */
-export function approveCommand(approvalId: string, handoffs: CliHandoffs): string {
-  return handoffText(handoffs.own(['approve', approvalId]));
+export function approveCommand(approvalId: string, handoffs: CliHandoffs): Handoff {
+  return handoffs.own(['approve', approvalId]);
 }
 
 /**
@@ -971,7 +966,7 @@ function notApproved(
   file: SlackDraftFile,
   why: string,
   uploaded: readonly { id: string; name: string }[],
-  command: string,
+  command: Handoff,
 ): CommsError {
   return new CommsError(
     'APPROVAL_VOID',
@@ -979,7 +974,15 @@ function notApproved(
     {
       hint: [
         discarded(uploaded),
-        `Put the files on the draft again with \`${command}\` or slack_draft_update, prepare it, and approve the new preview.`,
+        handoffSentence(
+          command,
+          (refile) =>
+            `Put the files on the draft again with ${refile} or slack_draft_update, prepare it, and approve the new preview.`,
+          {
+            instead:
+              'Put the files on the draft again with slack_draft_update, prepare it, and approve the new preview.',
+          },
+        ),
       ]
         .filter(Boolean)
         .join(' '),

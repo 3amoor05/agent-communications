@@ -1,4 +1,4 @@
-import { handoffText, isCommsError } from '@agentcomms/core';
+import { type Handoff, isCommsError } from '@agentcomms/core';
 import { chatRefOf } from '../chat-ref.ts';
 import type { WhatsAppAccount } from '../config.ts';
 import type { WhatsAppContext } from '../context.ts';
@@ -28,8 +28,11 @@ export interface ChatListsResult {
   changed: boolean;
   /** What agents see now, in words. */
   effect: string;
-  /** What the index holds was decided at the last sync: chats it left out come back only with the next one. */
-  next: string;
+  /**
+   * What the index holds was decided at the last sync: chats it left out come back only with the next one — this
+   * installation's own sync, located, or why there is none here.
+   */
+  next: Handoff;
   /**
    * The chat the entry names, as the index knows it, so the person can see it is the one they meant — or null when the
    * index has none by that id, and `warning` says so. Absent when the whole list was cleared.
@@ -112,7 +115,7 @@ async function change(
     deny: [...after.deny],
     changed: JSON.stringify(before) !== JSON.stringify(after),
     effect: effectOf(after),
-    next: handoffText(context.handoffs.own(['sync', '--account', name])),
+    next: context.handoffs.own(['sync', '--account', name]),
     ...(chatId === undefined ? {} : await named(context, name, account, chatId)),
   };
 }

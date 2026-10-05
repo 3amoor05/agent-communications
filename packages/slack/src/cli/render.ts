@@ -431,7 +431,7 @@ export function renderAppUpdateNeeded(result: AppUpdateNeeded, color: boolean, h
           paint(
             color,
             'dim',
-            `Or, with an app configuration token, at a terminal: ${result.terminalAlternative} — never paste that token into a chat.`,
+            `Or, with an app configuration token, at a terminal: ${handoffText(result.terminalAlternative)} — never paste that token into a chat.`,
           ),
           '',
         ]),
@@ -588,7 +588,7 @@ export function renderAppCreated(result: AppCreated, color: boolean): string {
       ),
     );
   }
-  lines.push('', 'Connect a workspace through it:', `  ${result.next}`);
+  lines.push('', 'Connect a workspace through it:', `  ${handoffText(result.next)}`);
   if (result.mode === 'send') {
     lines.push(
       paint(color, 'dim', 'That asks for your approval first: a workspace that can post is a person’s decision.'),

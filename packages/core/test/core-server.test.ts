@@ -15,7 +15,7 @@ import { commandAsJson } from '../src/command-line.ts';
 import type { AccountConfig, InboxConfig } from '../src/config.ts';
 import { type Core, openCore } from '../src/core.ts';
 import { CommsError, ERROR_REGISTRY, EXIT_CODES } from '../src/errors.ts';
-import { CORE_CALLER, isCommand } from '../src/handoffs.ts';
+import { CORE_CALLER, handoffText, isCommand } from '../src/handoffs.ts';
 import { type CoreMcpOptions, createCoreMcpServer } from '../src/mcp/server.ts';
 import { type McpProduct, managedRuntimeDir, managedRuntimeEntry, pruneManagedRuntimes } from '../src/mcp-install.ts';
 import { changePolicyReport } from '../src/operations/change-policy.ts';
@@ -711,7 +711,11 @@ test('change-policy repair commands use the selected shell platform', async () =
   // Core's own handoffs, for that shell: its located command, quoted for it.
   const located = changePolicyReport(await m.core.config.load(), {}, coreHandoffs(m.core.paths, 'win32'));
   const command = coreCommand(m.core.paths, ['policy', '--account', '7/slack', 'confirm'], 'win32');
-  assert.equal(located.looser?.[0]?.tighten.command, command);
+  // The field holds the command itself, and it is written out as that text (CUE-403 task 15).
+  const tighten = located.looser?.[0]?.tighten.command;
+  assert.ok(tighten !== undefined && isCommand(tighten), 'the located command itself');
+  assert.equal(handoffText(tighten), command);
+  assert.equal(JSON.parse(JSON.stringify({ tighten })).tighten, command, 'as JSON, its text');
   assert.ok(command.endsWith(' policy --account "7/slack" confirm'), command);
   assertNoBareCommand(command);
 });

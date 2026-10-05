@@ -28,7 +28,7 @@ function size(bytes: number | null): string {
 export function renderAdded(result: AddedAccount, color: boolean): string {
   return [
     `${paint(color, 'green', 'Added')} ${result.account} → ${escapeForDisplay(result.store.path)}${result.store.default ? ' (WhatsApp for Mac)' : ''}`,
-    `Next: ${result.next}`,
+    `Next: ${handoffText(result.next)}`,
   ].join('\n');
 }
 
@@ -112,7 +112,7 @@ export function renderChatLists(result: ChatListsResult, color: boolean): string
     paint(
       color,
       'dim',
-      `Every read and draft applies this now. What is hidden leaves the index, and what the last sync left out comes back, at the next sync: ${result.next}`,
+      `Every read and draft applies this now. What is hidden leaves the index, and what the last sync left out comes back, at the next sync: ${handoffText(result.next)}`,
     ),
   ].join('\n');
 }

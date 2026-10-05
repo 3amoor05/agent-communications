@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { handoffText } from '@agentcomms/core';
 import { allowChat, clearChats, denyChat } from '../src/operations/chat-lists.ts';
 import { ALICE, BOB, ERIN_STATUS, GROUP, HIDDEN } from './support/fixture.ts';
 import { ownInline, ownText } from './support/handoffs.ts';
@@ -172,8 +173,11 @@ test('a list change renders its next sync for the selected Windows shell', async
   const harness = await newHarness();
   await harness.ready('7/whatsapp');
   const result = await clearChats(harness.context({ platform: 'win32' }), { account: '7/whatsapp' });
-  assert.equal(result.next, ownText(harness.env, ['sync', '--account', '7/whatsapp'], 'win32'));
-  assert.ok(result.next.endsWith(' sync --account "7/whatsapp"'), result.next);
+  // The command itself, written out as its text where the result leaves (`handoffText`, or `--json`).
+  const next = handoffText(result.next);
+  assert.equal(next, ownText(harness.env, ['sync', '--account', '7/whatsapp'], 'win32'));
+  assert.equal(JSON.parse(JSON.stringify(result)).next, next);
+  assert.ok(next.endsWith(' sync --account "7/whatsapp"'), next);
 });
 
 test('allow, deny and clear are a person’s: refused to an agent, unchanged by one, and offered by no tool', async () => {

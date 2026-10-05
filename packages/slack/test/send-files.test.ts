@@ -75,6 +75,11 @@ async function world(
   return Object.assign(w, { harness, context, fake, uploads, docs, slack: { fetch: fake.fetch } });
 }
 
+/** A value as it leaves the process — `--json`, or an MCP result: a command a refusal's details hold, as its text. */
+function wire(value: unknown): unknown {
+  return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+}
+
 function sha256(bytes: string | Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
@@ -211,7 +216,7 @@ test('a file that changed after the draft was written is refused at prepare, and
     error.hint?.includes(`with ${slackInline(context.core.paths, refile, context.platform)} (every one`),
     error.hint,
   );
-  assert.equal(error.details?.command, slackCommand(context.core.paths, refile, context.platform));
+  assert.equal(wire(error.details?.command), slackCommand(context.core.paths, refile, context.platform));
   assertNoBareCommand(error.hint ?? '');
   assert.deepEqual(await context.core.approvals.list(), [], 'an approval was made for bytes nobody was shown');
   assert.deepEqual(asked(fake), [], 'Slack was asked something about a post that was refused');
@@ -255,7 +260,7 @@ test('a grant without files:write cannot prepare a file post, and is told the co
   );
   assertNoBareCommand(error.hint ?? '');
   assert.equal(error.details?.scope, 'files:write');
-  assert.equal(error.details?.command, slackCommand(context.core.paths, reauth, context.platform));
+  assert.equal(wire(error.details?.command), slackCommand(context.core.paths, reauth, context.platform));
   assert.deepEqual(await context.core.approvals.list(), []);
   assert.deepEqual(asked(fake), []);
 
@@ -569,7 +574,7 @@ test('under confirm, a file post waits for the person, and nothing is uploaded m
   const error = await refusal(send());
   assert.equal(error.code, 'APPROVAL_PENDING');
   assert.equal(
-    error.details?.command,
+    wire(error.details?.command),
     slackCommand(w.context.core.paths, ['approve', prepared.approvalId], w.context.platform),
   );
   assert.deepEqual(w.uploads.issued, [], 'an upload URL was asked for before the person approved');

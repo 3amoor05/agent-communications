@@ -8,6 +8,7 @@ import { sendApprovesHint } from '../src/approvals.ts';
 import { beginChangeApproval, claimChange } from '../src/changes.ts';
 import type { NodeRuntime } from '../src/cli-command.ts';
 import { commandText, inlineCommand, lineWithWordsToFill } from '../src/cli-runtime.ts';
+import { externalCommand } from '../src/command-brands.ts';
 import { quoteCommand } from '../src/command-line.ts';
 import { parseConfig, secretsStoreFor } from '../src/config.ts';
 import { openCore } from '../src/core.ts';
@@ -23,6 +24,7 @@ import {
   handoffText,
   handoffTextToFill,
   isCommand,
+  remedy,
   requireHandoffs,
 } from '../src/handoffs.ts';
 import { checkAttachable } from '../src/jail.ts';
@@ -214,6 +216,36 @@ test('a command renders as a line, as words to type, or — with none — as the
     handoffChoices([printed, missing], 'none:'),
     `${inlineCommand(printed)} (${missing.message.replace(/\.$/, '')})`,
   );
+});
+
+test('a command a result holds is written out as its text where it leaves, and is never interpolated', () => {
+  const { handoffs } = gmailHandoffs();
+  const located = handoffs.own(['approve', 'ap_1']);
+  const lineless = handoffs.on('win32').own(['inbox', 'remove', '$x&whoami&']);
+  const missing = handoffs.of('slack', ['approve', 'ap_1']);
+  const external = externalCommand(['chmod', '700', '/tmp/x'], 'the system command that sets permissions', 'linux');
+  assert.ok(isCommand(located) && isCommand(lineless) && !isCommand(missing));
+  // As JSON — `--json`, or an MCP result — the text the field always carried: the line, the words to type, or why.
+  const written = JSON.parse(JSON.stringify({ located, lineless, missing, external }));
+  assert.deepEqual(written, {
+    located: handoffText(located),
+    lineless: handoffText(lineless),
+    missing: missing.message,
+    external: commandText(external),
+  });
+  // Its own fields are still all there is to compare: the rendering is not one of them.
+  assert.deepEqual(Object.keys(missing).sort(), ['detail', 'message', 'ok', 'package', 'product', 'reason', 'version']);
+  // Interpolated, each throws: a sentence gives a command through `handoffSentence`, a value through `handoffText`.
+  for (const value of [located, missing, external]) {
+    assert.throws(() => `Run ${value as unknown as string}.`, /never interpolated/);
+    assert.throws(() => String(value), /never interpolated/);
+  }
+  // A remedy: the commands rendered as values of their own, a line per argument, words around them as written.
+  assert.equal(
+    remedy(located, [external, ' (then restart the client)'], 'by hand otherwise'),
+    `${handoffText(located)}\n${commandText(external)} (then restart the client)\nby hand otherwise`,
+  );
+  assert.equal(remedy([missing, '.']), `${missing.message}.`);
 });
 
 test('without its caller there is no command at all: asking for one is a programming error, never a bare name', async () => {

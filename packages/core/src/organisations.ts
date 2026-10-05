@@ -13,7 +13,15 @@ import type {
   OrganisationSlackApp,
 } from './config.ts';
 import { CommsError } from './errors.ts';
-import { type CliHandoffs, type Handoff, handoffChoices, handoffSentence, isCommand } from './handoff-text.ts';
+import {
+  type CliHandoffs,
+  type Handoff,
+  handoffChoices,
+  handoffSentence,
+  isCommand,
+  type Remedy,
+  remedy,
+} from './handoff-text.ts';
 import { organisationProblem, parseName, parseOrganisation } from './name-grammar.ts';
 import { clientSecretRef, GOOGLE_CLIENT_ID_PATTERN } from './oauth-client-records.ts';
 import { expandHome, homeDirectory } from './paths.ts';
@@ -690,7 +698,8 @@ export interface OrganisationDrift {
   active: boolean;
   state: GenerationState | 'stray-mark';
   detail: string;
-  fix: string;
+  /** What puts it right: core's `org update`, located, or Gmail's commands found where Gmail is registered, in words. */
+  fix: Remedy;
 }
 
 /**
@@ -709,6 +718,9 @@ export function organisationDrift(config: Config, organisation: string, handoffs
   const record = recordOf(config, organisation);
   if (!record) return [];
   const drift: OrganisationDrift[] = [];
+  // Each fix is said in words around the commands the handoffs made — a sentence of the fixed renderers' — as a remedy.
+  const push = (item: Omit<OrganisationDrift, 'fix'> & { fix: string }) =>
+    drift.push({ ...item, fix: remedy(item.fix) });
   const maker = handoffs;
   const update = handoffSentence(
     maker.core(['org', 'update', organisation]),
@@ -736,7 +748,7 @@ export function organisationDrift(config: Config, organisation: string, handoffs
           )}.`
         : '';
     if (generation.ownership === 'adopted') {
-      drift.push({
+      push({
         kind: isActive ? 'repair' : 'report',
         client: name,
         active: isActive,
@@ -765,7 +777,7 @@ export function organisationDrift(config: Config, organisation: string, handoffs
         altered: `"${name}", the client ${organisation} gives new mailboxes, was changed: another secret reference or project`,
         unmarked: `"${name}", the client ${organisation} gives new mailboxes, has lost its mark as ${organisation}'s${projectLost ? ' and its project' : ''} (an older release's \`client add --replace\` drops it)`,
       }[state as 'missing' | 'name-reused' | 'replaced' | 'altered' | 'unmarked'];
-      drift.push({
+      push({
         kind: 'repair',
         client: name,
         active: true,
@@ -779,7 +791,7 @@ export function organisationDrift(config: Config, organisation: string, handoffs
       continue;
     }
     if (state === 'replaced' || state === 'altered') {
-      drift.push({
+      push({
         kind: 'repair',
         client: name,
         active: false,
@@ -790,7 +802,7 @@ export function organisationDrift(config: Config, organisation: string, handoffs
       continue;
     }
     if (state === 'unmarked') {
-      drift.push({
+      push({
         kind: 'repair',
         client: name,
         active: false,
@@ -800,7 +812,7 @@ export function organisationDrift(config: Config, organisation: string, handoffs
       });
       continue;
     }
-    drift.push({
+    push({
       kind: 'report',
       client: name,
       active: false,
@@ -813,7 +825,7 @@ export function organisationDrift(config: Config, organisation: string, handoffs
     });
   }
   for (const client of strayMarkedRows(config, organisation)) {
-    drift.push({
+    push({
       kind: 'repair',
       client,
       active: false,

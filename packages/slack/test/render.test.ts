@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
+import { externalCommand, remedy } from '@agentcomms/core';
 import {
   renderConnected,
   renderCreatedDraft,
@@ -214,7 +215,11 @@ test('doctor prefixes every command in a multi-line repair', () => {
           title: 'Other servers',
           status: 'fail',
           detail: 'two unsafe entries are registered',
-          fix: 'claude mcp remove first\ncodex mcp remove second',
+          // Each client's own command, as the doctor makes them: external commands, a line each.
+          fix: remedy(
+            externalCommand(['claude', 'mcp', 'remove', 'first'], 'the client removes its own entry', 'linux'),
+            externalCommand(['codex', 'mcp', 'remove', 'second'], 'the client removes its own entry', 'linux'),
+          ),
           workspace: null,
         },
       ],

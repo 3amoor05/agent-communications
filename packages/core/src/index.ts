@@ -49,6 +49,9 @@ export {
   handoffText,
   handoffTextToFill,
   isCommand,
+  type Remedy,
+  type RemedyPart,
+  remedy,
   requireHandoffs,
 } from './handoffs.ts';
 export * from './ids.ts';

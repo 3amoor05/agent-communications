@@ -1,7 +1,7 @@
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { quoteCommand } from './command-line.ts';
+import { quoteCommand, quotedText } from './command-line.ts';
 import { EXECUTABLE_EXTENSION, SUITE_COMMANDS, suitePackageRootOf } from './package-roots.ts';
 
 /**
@@ -53,6 +53,16 @@ class ExternalCommand {
   /** Why this program, which is not part of this suite, is one a person may be told to run. */
   get reason(): string {
     return this.#reason;
+  }
+
+  /** As JSON, the text it always was: its line, or its words as JSON with what to do (as a `PrintedCommand`). */
+  toJSON(): string {
+    return quotedText(this);
+  }
+
+  /** Never interpolated: rendered with `commandText` or `inlineCommand`. */
+  [Symbol.toPrimitive](): never {
+    throw new TypeError('an external command is rendered with commandText or inlineCommand, never interpolated');
   }
 }
 

@@ -134,9 +134,10 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
   );
 
   /*
-   * What the command prints with `--json`, as JSON: a field left undefined is left out, as it is there. A tool's
-   * structured content is an object, so a list the CLI prints as an array arrives here under one key — `records`,
-   * `approvals`; everything else is the command's object as it is.
+   * What the command prints with `--json`, as JSON: a field left undefined is left out, as it is there, and a command a
+   * field holds is written out as its text (`PrintedCommand.toJSON`), as there. A tool's structured content is an
+   * object, so a list the CLI prints as an array arrives here under one key — `records`, `approvals`; everything else is
+   * the command's object as it is.
    */
   const reply = (data: unknown) => {
     const structured = JSON.parse(JSON.stringify(data)) as Record<string, unknown>;
@@ -144,18 +145,21 @@ export async function createCoreMcpServer(options: CoreMcpOptions = {}): Promise
   };
   /*
    * `details` goes through: it is where a refusal's diagnosis is, and for a change still waiting it carries the
-   * approval id and the preview. Nothing secret is ever put there; the CLI's `--json` envelope carries the same.
+   * approval id and the preview. Nothing secret is ever put there; the CLI's `--json` envelope carries the same. As
+   * JSON, so a command it holds is the text the envelope gives it too (`PrintedCommand.toJSON`).
    */
   const fail = (error: unknown) => {
     const comms: CommsError = toCommsError(error);
-    const structured = {
-      error: {
-        code: comms.code,
-        message: comms.message,
-        hint: comms.hint ?? null,
-        ...(comms.details !== undefined ? { details: comms.details } : {}),
-      },
-    };
+    const structured = JSON.parse(
+      JSON.stringify({
+        error: {
+          code: comms.code,
+          message: comms.message,
+          hint: comms.hint ?? null,
+          ...(comms.details !== undefined ? { details: comms.details } : {}),
+        },
+      }),
+    ) as Record<string, unknown>;
     return {
       isError: true as const,
       structuredContent: structured,

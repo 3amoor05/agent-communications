@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { type UpdateCheckSetting, updateCheckSetting } from './config.ts';
 import type { Core } from './core.ts';
 import { writeFileAtomic } from './fs.ts';
-import { type CliHandoffs, type Handoff, handoffSentence, handoffText, requireHandoffs } from './handoffs.ts';
+import { type CliHandoffs, type Handoff, handoffSentence, requireHandoffs } from './handoffs.ts';
 import { withFileLock } from './lock.ts';
 import { isBehind, isPrerelease, isVersion } from './versions.ts';
 
@@ -329,14 +329,24 @@ export function updateCommandSaid(
   return handoffSentence(commands[which], say);
 }
 
-/** The two ways on, as a stop's details give them: the tool, and the command — its line, or why there is none. */
-export function updateWaysOf(commands: UpdateCommands): {
-  update: { tool: 'comms_update'; command: string };
-  later: { tool: 'comms_update'; arguments: { later: true }; command: string };
-} {
+/**
+ * The two ways on, as a stop's details give them: the tool, and the command — core's own, located, or the sentence
+ * saying why there is none here. Written out as text where the details leave the process (`PrintedCommand.toJSON`):
+ * its line, or its words as JSON with what to do, or that sentence — as these fields always carried.
+ */
+export interface UpdateWays {
+  readonly update: { readonly tool: 'comms_update'; readonly command: Handoff };
+  readonly later: {
+    readonly tool: 'comms_update';
+    readonly arguments: { readonly later: true };
+    readonly command: Handoff;
+  };
+}
+
+export function updateWaysOf(commands: UpdateCommands): UpdateWays {
   return {
-    update: { tool: 'comms_update', command: handoffText(commands.update) },
-    later: { tool: 'comms_update', arguments: { later: true }, command: handoffText(commands.later) },
+    update: { tool: 'comms_update', command: commands.update },
+    later: { tool: 'comms_update', arguments: { later: true }, command: commands.later },
   };
 }
 

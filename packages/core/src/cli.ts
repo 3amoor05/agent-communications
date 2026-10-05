@@ -851,7 +851,7 @@ function renderPolicy(report: ChangePolicyReport): string {
   // that says `confirm` does not cover everything.
   if (report.warning && report.looser && report.looser.length > 0) {
     lines.push('', `Warning: ${report.warning} To tighten ${report.looser.length === 1 ? 'it' : 'them'}:`);
-    for (const entry of report.looser) lines.push(`  ${entry.tighten.command}`);
+    for (const entry of report.looser) lines.push(`  ${handoffText(entry.tighten.command)}`);
   }
   return lines.join('\n');
 }
