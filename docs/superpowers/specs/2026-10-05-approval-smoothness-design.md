@@ -180,7 +180,7 @@ ever read for reporting.
 characters). This is the **only** definition: one core helper, `bindingDigestOf(record)`, returns the SHA-256 of the
 canonical JSON (the existing `canonicalJson`) of `{ "v": 2, "kind", "contentDigest", "route", "pendingMs",
 "approvedMs", "identity" }`, where `identity` is the record's **own top-level operational fields** that ownership and
-execution already use — `{ approvalId, channel, inboxId, inboxSub, draftId, draftMessageId, expect }`, plus `sendEpoch` on a
+execution already use — `{ approvalId, channel, ownerScope, inboxId, inboxSub, draftId, draftMessageId, expect }`, plus `sendEpoch` on a
 send record (D1, "`never` revokes") — (`packages/core/src/approvals.ts:302`,
 used by claim at `approvals.ts:725` and by Gmail at `packages/gmail/src/operations/send.ts:472`). There is no second
 copy: no stored `groupKey`. For a download the object is `{ "v": 2, "kind": "download", "contentDigest", "profile":
@@ -339,8 +339,15 @@ send record whose stored epoch is behind the live epoch classifies as `revoked` 
 since this was prepared (policy: never)` and `claimable: false` on every surface — status, wait, every list and D9 —
 whatever the live policy is now; an inspection derives this without writing, and the next locked action persists it.
 
-**A record whose owner was removed.** When a record's stored owner id (`inboxId`) no longer names a mailbox or account
-in config, there is no live policy or epoch to apply, and none is assumed (no default policy, no epoch 0). A `pending`
+**A record whose owner was removed.** Every v2 record stores `ownerScope`, bound in `identity`: `owner` — `inboxId`
+names a mailbox or account that existed when the record was made (every send and download, and a change to one
+existing owner); `prospective` — a change that creates its owner, such as connecting a new account or mailbox, whose
+target has no id yet (its intended name is in the change plan, and D1's drift check governs it as today); `global` —
+a change with no owner at all, such as a default-policy change or an installer or update change, which core stores
+with `inboxId: ''` (`packages/core/src/approvals.ts:840`; `packages/core/src/operations/change-policy.ts:205`). The
+rule below applies **only** to `ownerScope: owner`; a `prospective` or `global` record is never “owner removed”, and
+its claimability follows the live change policy alone. When an `owner` record's stored id (`inboxId`) no longer names
+a mailbox or account in config, there is no live policy or epoch to apply, and none is assumed (no default policy, no epoch 0). A `pending`
 or `approved` record then classifies as `revoked` with reason `its mailbox or account was removed`, `claimable: false`
 and `ownerRemoved: true`; a record already `sending`, `unknown`, `used`, `failed`, `revoked` or `expired` keeps that
 state and gains `ownerRemoved: true`. Re-adding a mailbox or account under the same name makes a new random id
@@ -986,6 +993,12 @@ lookup failures stay attached to their draft and do not raise the concurrency or
 
 ## 5. Tests owed
 
+- **Round-34 cases:** a `global` default-policy change `confirm → chat` and a `global` installer/update change, and a
+  `prospective` first account connection, each under the `chat` and the `confirm` change policy: prepared, shown
+  `pending` and claimable by their route, approved and applied, never classified `ownerRemoved`; an `owner` change to
+  a mailbox that is then removed is `ownerRemoved` as round 33 says; editing a stored `ownerScope` breaks
+  `bindingDigest`; a v1 record is decoded with `ownerScope` derived from its stored shape (`inboxId: ''` → `global`,
+  otherwise `owner`).
 - **Round-33 cases:** for each of a `pending`, an `approved` and a `used` v2 record whose mailbox or account is then
   removed — Gmail, Slack and Resend — core status, a wait (which returns at once), the unpinned list and D9 show the
   derived outcome with `ownerRemoved: true` (`revoked`, `claimable: false`, for the first two; `used` kept for the
