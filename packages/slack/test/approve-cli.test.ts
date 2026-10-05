@@ -101,6 +101,12 @@ async function heldReaction(harness: Harness, read: FakeFetch): Promise<string> 
   return approvalId;
 }
 
+/**
+ * Gmail named as a product — its CLI, its package or a tool of its server — and not merely the letters "gmail", which a
+ * located command's checkout path can hold (a worktree called `…-gmail`).
+ */
+const GMAIL_NAMED = /agent-gmail|@agentcomms[\\/]gmail\b|[\\/]packages[\\/]gmail[\\/]|\bgmail_\w+|\bGmail\b/;
+
 test('a reaction under `confirm` waits for a person, and the approval they give adds it exactly once', async () => {
   const harness = await newHarness();
   await harness.addWorkspace({ alias: 'acme', mode: 'send', sendPolicy: 'confirm' });
@@ -122,7 +128,7 @@ test('a reaction under `confirm` waits for a person, and the approval they give 
   );
   assertNoBareCommand(error?.hint ?? '');
   assert.match(error?.hint ?? '', new RegExp(`--approval ${approvalId}`), 'and the one that then uses it');
-  assert.doesNotMatch(error?.hint ?? '', /gmail/i, 'never another product’s');
+  assert.doesNotMatch(error?.hint ?? '', GMAIL_NAMED, 'never another product’s');
   assert.equal(slack.count('reactions.add'), 0, 'nothing is added while it waits');
 
   const approved = await cli(harness, ['approve', approvalId], { tty: true, answerChallenge: true });
@@ -200,7 +206,8 @@ test('a post held for approval names agent-slack’s commands, never Gmail’s',
   assert.ok(error?.hint?.includes(slackInline(harness.core.paths, ['approve', approvalId], 'darwin')), error?.hint);
   assert.match(error?.hint ?? '', /run the same post send command again/);
   assertNoBareCommand(error?.hint ?? '');
-  assert.doesNotMatch(error?.hint ?? '', /gmail|trusted client form/i, 'there is no Gmail and no form here');
+  assert.doesNotMatch(error?.hint ?? '', GMAIL_NAMED, 'there is no Gmail here');
+  assert.doesNotMatch(error?.hint ?? '', /trusted client form/i, 'and no form');
   assert.equal(slack.count('chat.postMessage'), 0);
 });
 
