@@ -340,9 +340,29 @@ export interface ApprovalRecord {
   bindingDigest: string;
   /** On a send: the owner's send epoch as it was read at prepare. Bound. */
   sendEpoch?: number | undefined;
-  /** The digest the human was actually shown when approving through a confirm channel. */
+  /**
+   * A download's answer, bound: SHA-256 of canonical `{ bindingDigest, answer }`, written when a person answered at a
+   * terminal or in a trusted form. Never on a send or a change, which carry `approvedBindingDigest` instead.
+   */
   approvedDigest?: string | undefined;
+  /** Where a person approved, or answered: the terminal, or a trusted client's form. Absent on a chat-route claim. */
   approvedVia?: ApprovalChannel | undefined;
+  /** A send's or a change's approval: when, and the binding the person approved, which must still be the record's. */
+  approvedAt?: string | undefined;
+  /** `approvedAt + approvedMs`: until when an approved send or change may be claimed. */
+  usableUntil?: string | undefined;
+  approvedBindingDigest?: string | undefined;
+  /** When a send was claimed for sending. Kept on every state after it. */
+  sendingAt?: string | undefined;
+  /** The sending claimant's latest lease renewal, when it has made one. */
+  sendingHeartbeatAt?: string | undefined;
+  /** When a record was used: for a send, the moment the provider accepted it, and equal to `sentAt`. */
+  usedAt?: string | undefined;
+  sentAt?: string | undefined;
+  failedAt?: string | undefined;
+  revokedAt?: string | undefined;
+  /** The boundary that applied when it expired — or, on a `clock-anomaly` expiry, the time the clock was seen. */
+  expiredAt?: string | undefined;
   /** Live policy at prepare time, for display and audit. */
   policy: SendPolicy;
   /** `confirm` when risk escalation raised this send. The effective policy is the stricter of this and the live one. */
@@ -621,19 +641,26 @@ export class ApprovalStore {
 
   /** Derived states: expiry for pending/approved, `unknown` for a send whose process died. */
   #derive(record: ApprovalRecord): ApprovalRecord {
-    const now = this.#now().getTime();
+    const observed = this.#now();
+    const now = observed.getTime();
     const expiresAt = new Date(record.expiresAt).getTime();
     const createdAt = new Date(record.createdAt).getTime();
     // Expired, and also: an expiry that does not parse, and a clock that has moved behind the record's own
     // creation. `now >= NaN` is false, so a record with a nonsense `expiresAt` never expired at all; and a clock
     // stepped backwards — an NTP correction, a resumed VM, a user changing the date — put an expired record back
     // into `pending`. Neither should be the difference between a send and no send.
-    const unusable = !Number.isFinite(expiresAt) || (Number.isFinite(createdAt) && now < createdAt);
-    if ((record.state === 'pending' || record.state === 'approved') && (unusable || now >= expiresAt)) {
+    const anomaly = Number.isFinite(createdAt) && now < createdAt;
+    const unusable = !Number.isFinite(expiresAt);
+    if ((record.state === 'pending' || record.state === 'approved') && (anomaly || unusable || now >= expiresAt)) {
+      // A clock seen before the record was made expires it at the time it was seen, and says so: it never claims a
+      // deadline it did not reach.
+      if (anomaly) return { ...record, state: 'expired', reason: 'clock-anomaly', expiredAt: observed.toISOString() };
       return {
         ...record,
         state: 'expired',
         reason: record.reason ?? (unusable ? 'the approval window cannot be read' : 'the approval window passed'),
+        // The boundary that applied, not the moment it was noticed.
+        ...(unusable ? {} : { expiredAt: record.expiresAt }),
       };
     }
     if (record.state === 'sending' && now - new Date(record.updatedAt).getTime() >= SENDING_STALE_MS) {
@@ -850,28 +877,38 @@ export class ApprovalStore {
       if (current.state !== 'pending') throw this.#stateError(current);
       if (!current.challengeHash)
         throw refusalFor(current)('APPROVAL_REQUIRED', 'no challenge was issued for this approval', current);
+      const at = this.#now();
       if (live.draftMessageId !== current.draftMessageId || live.contentDigest !== current.contentDigest) {
         const reason =
           kind === 'change'
             ? 'the change shown is not the one the approval was prepared for'
             : 'the draft changed after the preview was prepared';
         failure = { code: 'APPROVAL_VOID', reason };
-        return { ...current, state: 'revoked', reason: failure.reason };
+        return { ...current, state: 'revoked', reason: failure.reason, revokedAt: at.toISOString() };
       }
       if (!challengeMatches(answer, current.challengeHash)) {
         const attempts = current.challengeAttempts + 1;
         if (attempts >= MAX_CHALLENGE_ATTEMPTS) {
           failure = { code: 'APPROVAL_VOID', reason: 'too many wrong answers to the challenge' };
-          return { ...current, challengeAttempts: attempts, state: 'revoked', reason: failure.reason };
+          return {
+            ...current,
+            challengeAttempts: attempts,
+            state: 'revoked',
+            reason: failure.reason,
+            revokedAt: at.toISOString(),
+          };
         }
         failure = { code: 'APPROVAL_REQUIRED', reason: 'the challenge did not match' };
         return { ...current, challengeAttempts: attempts };
       }
+      // Approval starts a window of its own, and records the binding the person approved.
       return {
         ...current,
         state: 'approved',
-        approvedDigest: live.contentDigest,
         approvedVia: via,
+        approvedAt: at.toISOString(),
+        usableUntil: new Date(at.getTime() + (current.approvedMs ?? APPROVAL_LIFETIMES.approved)).toISOString(),
+        approvedBindingDigest: current.bindingDigest,
         challengeHash: undefined,
       };
     });
@@ -902,9 +939,10 @@ export class ApprovalStore {
        * cancellation can land in between.
        */
       if (options.signal?.aborted) throw cancelledClaim(current);
+      const at = this.#now().toISOString();
       const voidWith = (code: ErrorCode, reason: string): ApprovalRecord => {
         failure = { code, reason };
-        return { ...current, state: 'revoked', reason };
+        return { ...current, state: 'revoked', reason, revokedAt: at };
       };
       if (live.inboxId !== current.inboxId)
         return voidWith('APPROVAL_VOID', 'the approval belongs to a different inbox');
@@ -945,7 +983,8 @@ export class ApprovalStore {
                 'Ask the user to approve it outside the chat, then try again with the same approval.',
             );
           }
-          if (current.approvedDigest !== live.contentDigest) {
+          // The binding the person approved must be the record's own: content, route and identity alike.
+          if (current.approvedBindingDigest !== current.bindingDigest) {
             return voidWith('APPROVAL_VOID', 'the approved content is not the content now in the draft');
           }
           break;
@@ -953,7 +992,7 @@ export class ApprovalStore {
         case 'chat':
           break;
       }
-      return { ...current, state: 'sending' };
+      return { ...current, state: 'sending', sendingAt: at };
     });
     const failed = failure as Failure | null;
     if (failed) throw refuse(failed.code, failed.reason, result);
@@ -1052,9 +1091,10 @@ export class ApprovalStore {
       if (current.state !== 'pending' && current.state !== 'approved') throw this.#stateError(current);
       // As for a send: a cancellation that landed while this waited for the lock writes nothing.
       if (options.signal?.aborted) throw cancelledClaim(current);
+      const at = this.#now().toISOString();
       const voidWith = (reason: string): ApprovalRecord => {
         failure = { code: 'APPROVAL_VOID', reason };
-        return { ...current, state: 'revoked', reason };
+        return { ...current, state: 'revoked', reason, revokedAt: at };
       };
       if (digest !== current.contentDigest) {
         return voidWith(
@@ -1076,7 +1116,7 @@ export class ApprovalStore {
           return voidWith('the change policy is confirm, and this was not approved at a terminal');
         }
       }
-      return { ...current, state: 'used' };
+      return { ...current, state: 'used', usedAt: at };
     });
     const failed = failure as Failure | null;
     if (failed) throw refuseChange(failed.code, failed.reason, result);
@@ -1172,11 +1212,12 @@ export class ApprovalStore {
       if (!current.download || downloadDigest(current.download) !== current.contentDigest) {
         throw refuseDownload('APPROVAL_VOID', 'the question does not describe the download it is bound to', current);
       }
+      // No `approvedAt`: a question is answered, not approved into a window of its own. The answer is bound to it.
       return {
         ...current,
         state: 'approved',
         approvedVia: via,
-        approvedDigest: current.contentDigest,
+        approvedDigest: sha256Hex(canonicalJson({ bindingDigest: current.bindingDigest, answer: recorded })),
         download: { ...current.download, answer: recorded },
       };
     });
@@ -1219,9 +1260,10 @@ export class ApprovalStore {
       this.#requireKind(current, 'download', options.platform ?? process.platform, options.handoffs ?? this.#handoffs);
       if (current.state !== 'pending' && current.state !== 'approved') throw this.#stateError(current);
       if (options.signal?.aborted) throw cancelledClaim(current);
+      const at = this.#now().toISOString();
       const voidWith = (reason: string): ApprovalRecord => {
         failure = { code: 'APPROVAL_VOID', reason };
-        return { ...current, state: 'revoked', reason };
+        return { ...current, state: 'revoked', reason, revokedAt: at };
       };
       // What the record says it asked about has to be what its digest binds, or it describes nothing at all.
       if (!current.download || downloadDigest(current.download) !== current.contentDigest) {
@@ -1237,7 +1279,7 @@ export class ApprovalStore {
       }
       const refusal = downloadClaimRefusal(current, options.policy ?? 'chat', options.pendingHint);
       if (refusal !== null) throw refusal;
-      return { ...current, state: 'used' };
+      return { ...current, state: 'used', usedAt: at };
     });
     const failed = failure as Failure | null;
     if (failed) throw refuseDownload(failed.code, failed.reason, result);
@@ -1245,13 +1287,28 @@ export class ApprovalStore {
     return result as ApprovalRecord & { download: DownloadBinding };
   }
 
-  /** Records the outcome of the one send attempt. */
+  /**
+   * Records the outcome of the one send attempt: `used` with the provider's id for it, when the provider accepted it,
+   * or `failed`.
+   *
+   * `used` needs a non-empty id. A provider that accepted a send without one has not given anything to record it by,
+   * so the record is left as it is — `sending`, and then `unknown` — rather than made `used` with an empty id that
+   * every later reader would take for one.
+   */
   async complete(approvalId: string, outcome: { sentMessageId: string } | { error: string }): Promise<ApprovalRecord> {
+    if ('sentMessageId' in outcome && outcome.sentMessageId === '') {
+      throw new CommsError('BAD_DATA', 'the provider returned no id for the send, so it is not recorded as used', {
+        hint: 'The send may have happened: check before sending again.',
+        details: { approvalId },
+      });
+    }
     return this.#transition(approvalId, (current) => {
       if (current.state !== 'sending' && current.state !== 'unknown') throw this.#stateError(current);
+      const at = this.#now().toISOString();
+      // `usedAt` is the moment the provider accepted it, and so equal to `sentAt`.
       return 'sentMessageId' in outcome
-        ? { ...current, state: 'used', sentMessageId: outcome.sentMessageId }
-        : { ...current, state: 'failed', reason: outcome.error };
+        ? { ...current, state: 'used', sentMessageId: outcome.sentMessageId, sentAt: at, usedAt: at }
+        : { ...current, state: 'failed', reason: outcome.error, failedAt: at };
     });
   }
 
@@ -1274,7 +1331,9 @@ export class ApprovalStore {
       }
     }
     return this.#transition(approvalId, (current) =>
-      current.state === 'pending' || current.state === 'approved' ? { ...current, state: 'revoked', reason } : current,
+      current.state === 'pending' || current.state === 'approved'
+        ? { ...current, state: 'revoked', reason, revokedAt: this.#now().toISOString() }
+        : current,
     );
   }
 

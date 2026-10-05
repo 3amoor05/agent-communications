@@ -35,7 +35,10 @@ function normalise(value: unknown): unknown {
       // Bound to the approval's own id, which differs between two calls as the id does.
       .replace(/"bindingDigest":"[0-9a-f]{64}"/g, '"bindingDigest":"B"')
       .replace(/"expiresAt":"[^"]+"/g, '"expiresAt":"T"')
-      .replace(/"(createdAt|updatedAt|attemptedAt|finishedAt|at)":"[^"]+"/g, '"$1":"T"'),
+      .replace(
+        /"(createdAt|updatedAt|attemptedAt|finishedAt|at|approvedAt|usableUntil|sendingAt|sendingHeartbeatAt|usedAt|sentAt|failedAt|revokedAt|expiredAt)":"[^"]+"/g,
+        '"$1":"T"',
+      ),
   );
 }
 

@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { deriveLegacyV1State } from '../src/approval-legacy.ts';
+import { validateV2 } from '../src/approval-validate.ts';
 import {
   type ApprovalRecord,
   ApprovalStore,
@@ -14,6 +15,7 @@ import {
   publicView,
 } from '../src/approvals.ts';
 import { openCore } from '../src/core.ts';
+import { canonicalJson, sha256Hex } from '../src/digest.ts';
 import { CommsError } from '../src/errors.ts';
 import { CORE_CALLER } from '../src/handoffs.ts';
 import { APPROVAL_ID_PATTERN } from '../src/ids.ts';
@@ -34,7 +36,11 @@ import { tempDir } from './helpers/temp.ts';
 const INBOX = 'ibx_AAAAAAAAAAAAAAAA';
 const OTHER_INBOX = 'ibx_BBBBBBBBBBBBBBBB';
 const EXPECT: Expectation = { to: ['sam@partner.test'], cc: [], bcc: [], subject: 'Re: plan' };
-const LIVE_DRAFT = { draftMessageId: 'msg-v1', contentDigest: 'digest-A' };
+/** Content digests as a provider's would be: lowercase hex SHA-256, the only encoding a version-2 record holds. */
+const DIGEST_A = 'a'.repeat(64);
+const DIGEST_B = 'b'.repeat(64);
+const DIGEST_C = 'c'.repeat(64);
+const LIVE_DRAFT = { draftMessageId: 'msg-v1', contentDigest: DIGEST_A };
 
 function clock(start = Date.parse('2026-09-18T10:00:00.000Z')) {
   let t = start;
@@ -59,7 +65,7 @@ async function setup(policy: 'chat' | 'confirm' = 'chat', escalated = false) {
     inboxSub: 'sub-1',
     draftId: 'r-draft-1',
     draftMessageId: 'msg-v1',
-    contentDigest: 'digest-A',
+    contentDigest: DIGEST_A,
     sendEpoch: 0,
     policy,
     requiredPolicy: escalated ? 'confirm' : policy,
@@ -130,7 +136,7 @@ test('a display name around the same address is not a different recipient', asyn
 test('integrity failures void the record for good; each carries its specific code', async () => {
   const cases: [string, Partial<ReturnType<typeof live>>, RegExp, string][] = [
     ['A→B→A swap restores content, not the message id', { draftMessageId: 'msg-v3' }, /edited after/, 'APPROVAL_VOID'],
-    ['content changed', { contentDigest: 'digest-B' }, /content changed/, 'APPROVAL_VOID'],
+    ['content changed', { contentDigest: DIGEST_B }, /content changed/, 'APPROVAL_VOID'],
     ['other inbox', { inboxId: OTHER_INBOX }, /different inbox/, 'APPROVAL_VOID'],
     ['other account', { inboxSub: 'sub-2' }, /different account/, 'APPROVAL_VOID'],
     ['no account named at all', { inboxSub: undefined }, /could not be confirmed/, 'APPROVAL_VOID'],
@@ -160,7 +166,8 @@ test('confirm: a claim before approval is refused without voiding; after a human
   assert.equal((await store.get(record.approvalId))?.state, 'pending', 'still approvable');
   const approved = await humanApproves(store, record.approvalId);
   assert.equal(approved.state, 'approved');
-  assert.equal(approved.approvedDigest, 'digest-A');
+  assert.equal(approved.approvedBindingDigest, approved.bindingDigest, 'the binding the person approved');
+  assert.equal(approved.approvedDigest, undefined, 'a send carries the approved binding, not a content digest');
   assert.equal(approved.challengeHash, undefined, 'the challenge is spent');
   assert.equal((await store.claimForSend(record.approvalId, live({ policy: 'confirm' }))).state, 'sending');
 });
@@ -211,7 +218,7 @@ test('a record that requires "never" is refused, whatever the live policy says',
     inboxSub: 'sub-1',
     draftId: 'r-draft-1',
     draftMessageId: 'msg-v1',
-    contentDigest: 'digest-A',
+    contentDigest: DIGEST_A,
     sendEpoch: 0,
     policy: 'chat',
     requiredPolicy: 'never',
@@ -228,7 +235,7 @@ test('a record that requires "never" is refused, whatever the live policy says',
     inboxSub: 'sub-1',
     draftId: 'r-draft-2',
     draftMessageId: 'msg-v1',
-    contentDigest: 'digest-A',
+    contentDigest: DIGEST_A,
     sendEpoch: 0,
     policy: 'chat',
     requiredPolicy: 'never',
@@ -243,12 +250,7 @@ test('approving content that changed since prepare voids the record (the human w
   const { store, record } = await setup('confirm');
   const challenge = await store.issueChallenge(record.approvalId);
   await assert.rejects(
-    store.approve(
-      record.approvalId,
-      'terminal',
-      { draftMessageId: 'msg-v2', contentDigest: 'digest-HARMLESS' },
-      challenge,
-    ),
+    store.approve(record.approvalId, 'terminal', { draftMessageId: 'msg-v2', contentDigest: DIGEST_C }, challenge),
     isRefusal(/changed after the preview/, 'APPROVAL_VOID'),
   );
   assert.equal((await store.get(record.approvalId))?.state, 'revoked');
@@ -306,7 +308,7 @@ test('create ignores caller-supplied ids, states and challenges', async () => {
   const sneaky = {
     ...record,
     state: 'approved',
-    approvedDigest: 'digest-A',
+    approvedDigest: DIGEST_A,
     challengeHash: 'x',
   } as unknown as Parameters<ApprovalStore['create']>[0];
   const created = await store.create(sneaky);
@@ -562,7 +564,7 @@ function legacyStore(state: { send?: string; approved?: string } = {}) {
         inboxSub: 'sub-1',
         draftId: 'r-draft-1',
         draftMessageId: 'msg-v1',
-        digest: 'digest-A',
+        digest: DIGEST_A,
         expect: EXPECT,
         state: state.send ?? 'pending',
       }),
@@ -575,11 +577,11 @@ function legacyStore(state: { send?: string; approved?: string } = {}) {
         inboxSub: 'sub-1',
         draftId: 'r-draft-2',
         draftMessageId: 'msg-v1',
-        digest: 'digest-A',
+        digest: DIGEST_A,
         policy: 'confirm',
         expect: EXPECT,
         state: state.approved ?? 'approved',
-        approvedDigest: 'digest-A',
+        approvedDigest: DIGEST_A,
         approvedVia: 'terminal',
       }),
     ),
@@ -781,7 +783,7 @@ test('a v1 record stays revocable after its owner is gone: agentcomms approvals 
     inboxSub: 'U0POSTER',
     draftId: 'sd_post',
     draftMessageId: 'rev-3',
-    digest: 'digest-A',
+    digest: DIGEST_A,
     expect: { to: ['C0ROOM'], cc: [], bcc: [], subject: 'reaches 3' },
   });
   writeV1Record(core.paths.stateDir, record);
@@ -794,4 +796,217 @@ test('a v1 record stays revocable after its owner is gone: agentcomms approvals 
     reason: 'revoked by the user',
     updatedAt: '2026-09-18T10:01:00.000Z',
   });
+});
+
+// ── What each transition writes (CUE-404 Task 2) ────────────────────────────────────────────────────────────────
+
+/** The record's file, parsed, exactly as the store left it. */
+function stored(store: ApprovalStore, approvalId: string): Record<string, unknown> {
+  return JSON.parse(readFileSync(join(store.directory, `${approvalId}.json`), 'utf8')) as Record<string, unknown>;
+}
+
+/** What a transition added, removed and changed, `updatedAt` aside — and the record it left, which must validate. */
+async function writes(store: ApprovalStore, approvalId: string, transition: () => Promise<unknown>) {
+  const before = stored(store, approvalId);
+  await transition().catch(() => undefined);
+  const after = stored(store, approvalId);
+  const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+  const added = [...keys].filter((key) => !(key in before) && key in after).sort();
+  const removed = [...keys].filter((key) => key in before && !(key in after)).sort();
+  const changed = [...keys]
+    .filter((key) => key in before && key in after && key !== 'updatedAt')
+    .filter((key) => JSON.stringify(before[key]) !== JSON.stringify(after[key]))
+    .sort();
+  const validation = validateV2(after as unknown as ApprovalRecord, approvalId);
+  assert.deepEqual(validation, { ok: true }, `${approvalId} validates after the transition`);
+  return { added, removed, changed, after };
+}
+
+test('each send transition writes exactly its fields, and every record it leaves validates', async () => {
+  const { store, record, time } = await setup('confirm');
+  assert.deepEqual(validateV2(stored(store, record.approvalId) as never, record.approvalId), { ok: true }, 'create');
+  let challenge = '';
+  const issued = await writes(store, record.approvalId, async () => {
+    challenge = await store.issueChallenge(record.approvalId);
+  });
+  assert.deepEqual([issued.added, issued.removed, issued.changed], [['challengeHash'], [], []]);
+  time.advance(60_000);
+  const approved = await writes(store, record.approvalId, () =>
+    store.approve(record.approvalId, 'terminal', LIVE_DRAFT, challenge),
+  );
+  assert.deepEqual(approved.added, ['approvedAt', 'approvedBindingDigest', 'approvedVia', 'usableUntil']);
+  assert.deepEqual(approved.removed, ['challengeHash']);
+  assert.deepEqual(approved.changed, ['state']);
+  assert.equal(approved.after.approvedAt, '2026-09-18T10:01:00.000Z');
+  assert.equal(approved.after.usableUntil, '2026-09-19T10:01:00.000Z', '24 hours after approval');
+  assert.equal(approved.after.approvedBindingDigest, record.bindingDigest);
+  time.advance(60_000);
+  const sending = await writes(store, record.approvalId, () =>
+    store.claimForSend(record.approvalId, live({ policy: 'confirm' })),
+  );
+  assert.deepEqual([sending.added, sending.removed, sending.changed], [['sendingAt'], [], ['state']]);
+  assert.equal(sending.after.sendingAt, '2026-09-18T10:02:00.000Z');
+  // An empty provider id records nothing: the record stays `sending`.
+  const empty = await writes(store, record.approvalId, () => store.complete(record.approvalId, { sentMessageId: '' }));
+  assert.deepEqual([empty.added, empty.removed, empty.changed], [[], [], []]);
+  await assert.rejects(
+    store.complete(record.approvalId, { sentMessageId: '' }),
+    (e: unknown) => e instanceof CommsError && e.code === 'BAD_DATA',
+  );
+  time.advance(30_000);
+  const used = await writes(store, record.approvalId, () =>
+    store.complete(record.approvalId, { sentMessageId: 's-1' }),
+  );
+  assert.deepEqual(used.added, ['sentAt', 'sentMessageId', 'usedAt']);
+  assert.deepEqual(used.changed, ['state']);
+  assert.equal(used.after.usedAt, used.after.sentAt, 'usedAt is the moment the provider accepted it');
+  assert.equal(used.after.sentAt, '2026-09-18T10:02:30.000Z');
+
+  const failing = await setup();
+  await failing.store.claimForSend(failing.record.approvalId, live());
+  failing.time.advance(1000);
+  const failed = await writes(failing.store, failing.record.approvalId, () =>
+    failing.store.complete(failing.record.approvalId, { error: 'backendError' }),
+  );
+  assert.deepEqual([failed.added, failed.changed], [['failedAt', 'reason'], ['state']]);
+});
+
+test('every revoke and void of a version-2 record writes revokedAt, and nothing else of its own', async () => {
+  const cases: [string, (s: Awaited<ReturnType<typeof setup>>) => Promise<unknown>, string[]][] = [
+    [
+      'revoke',
+      ({ store, record }) => store.revoke(record.approvalId, 'user', { disposition: 'person' }),
+      ['reason', 'revokedAt'],
+    ],
+    [
+      'a claim that voids',
+      ({ store, record }) => store.claimForSend(record.approvalId, live({ contentDigest: DIGEST_B })),
+      ['reason', 'revokedAt'],
+    ],
+    [
+      'an approval of changed content',
+      async ({ store, record }) => {
+        const code = await store.issueChallenge(record.approvalId);
+        await store.approve(record.approvalId, 'terminal', { draftMessageId: 'msg-v2', contentDigest: DIGEST_C }, code);
+      },
+      ['challengeHash', 'reason', 'revokedAt'],
+    ],
+    [
+      'three wrong codes',
+      async ({ store, record }) => {
+        const code = await store.issueChallenge(record.approvalId);
+        const wrong = code === 'AAAA' ? 'BBBB' : 'AAAA';
+        for (let i = 0; i < 3; i += 1)
+          await store.approve(record.approvalId, 'terminal', LIVE_DRAFT, wrong).catch(() => undefined);
+      },
+      ['challengeHash', 'reason', 'revokedAt'],
+    ],
+  ];
+  for (const [name, act, added] of cases) {
+    const fixture = await setup('confirm');
+    const result = await writes(fixture.store, fixture.record.approvalId, () => act(fixture));
+    assert.deepEqual(result.added, added, name);
+    assert.equal(result.after.state, 'revoked', name);
+    assert.equal(result.after.revokedAt, '2026-09-18T10:00:00.000Z', name);
+  }
+});
+
+test('a change claim writes usedAt; one approved at a terminal writes the approval first', async () => {
+  const { store, time } = await setup();
+  const direct = await store.createChange({ channel: 'slack', change: CHANGE, policy: 'chat' });
+  time.advance(30_000);
+  const claimed = await writes(store, direct.approvalId, () =>
+    store.claimForChange(direct.approvalId, { change: CHANGE, policy: 'chat' }),
+  );
+  assert.deepEqual([claimed.added, claimed.changed], [['usedAt'], ['state']]);
+  assert.equal(claimed.after.usedAt, '2026-09-18T10:00:30.000Z');
+
+  const confirm = await store.createChange({ channel: 'slack', change: CHANGE, policy: 'confirm' });
+  const live = { draftMessageId: confirm.contentDigest, contentDigest: confirm.contentDigest };
+  const code = await store.issueChallenge(confirm.approvalId, 'change');
+  const approved = await writes(store, confirm.approvalId, () =>
+    store.approve(confirm.approvalId, 'terminal', live, code, 'change'),
+  );
+  assert.deepEqual(approved.added, ['approvedAt', 'approvedBindingDigest', 'approvedVia', 'usableUntil']);
+  time.advance(10 * 60 * 1000);
+  const used = await writes(store, confirm.approvalId, () =>
+    store.claimForChange(confirm.approvalId, { change: CHANGE, policy: 'confirm' }),
+  );
+  assert.deepEqual([used.added, used.changed], [['usedAt'], ['state']]);
+  assert.equal(used.after.usedAt, '2026-09-18T10:10:30.000Z', 'after the approval, inside its window');
+});
+
+test('a download’s answer binds the answer to the record, with no approvedAt; its claim writes usedAt', async () => {
+  const store = new ApprovalStore(tempDir(), { now: clock().now });
+  const request = {
+    target: { kind: 'account' as const, name: 'acme/slack', id: 'acc_AAAAAAAAAAAAAAAA' },
+    operation: 'files.download',
+    request: { selection: { kind: 'files', fileIds: ['F01'] }, maxFiles: 50 },
+    files: ['F01'],
+    names: ['report.pdf'],
+  };
+  const question = await store.createDownload({
+    channel: 'slack',
+    download: {
+      ...request,
+      summary: 'where to save 1 file from acme/slack',
+      folders: { downloads: '/d', current: '/c' },
+    },
+    policy: 'confirm',
+  });
+  const answered = await writes(store, question.approvalId, () =>
+    store.answerDownload(question.approvalId, 'terminal', { choice: 'downloads' }),
+  );
+  assert.deepEqual(answered.added, ['approvedDigest', 'approvedVia']);
+  assert.deepEqual(answered.changed, ['download', 'state']);
+  assert.equal(
+    answered.after.approvedDigest,
+    sha256Hex(canonicalJson({ bindingDigest: question.bindingDigest, answer: { choice: 'downloads' } })),
+  );
+  assert.equal('approvedAt' in answered.after, false, 'a question is answered, not approved into a window');
+  const claimed = await writes(store, question.approvalId, () =>
+    store.claimForDownload(question.approvalId, request, { policy: 'confirm' }),
+  );
+  assert.deepEqual([claimed.added, claimed.changed], [['usedAt'], ['state']]);
+
+  const chat = await store.createDownload({
+    channel: 'slack',
+    download: {
+      ...request,
+      summary: 'where to save 1 file from acme/slack',
+      folders: { downloads: '/d', current: '/c' },
+    },
+    policy: 'chat',
+  });
+  const direct = await writes(store, chat.approvalId, () =>
+    store.claimForDownload(chat.approvalId, request, { policy: 'chat' }),
+  );
+  assert.deepEqual([direct.added, direct.changed], [['usedAt'], ['state']], 'a chat answer is never persisted');
+});
+
+test('a derived expiry is persisted with expiredAt at the boundary that applied; a clock before creation at the time it was seen', async () => {
+  const deadline = await setup();
+  deadline.time.advance(25 * 60 * 1000);
+  const expired = await writes(deadline.store, deadline.record.approvalId, () =>
+    deadline.store.revoke(deadline.record.approvalId, 'user', { disposition: 'person' }),
+  );
+  assert.deepEqual(expired.added, ['expiredAt', 'reason']);
+  assert.equal(expired.after.expiredAt, deadline.record.expiresAt, 'the boundary, not the moment it was noticed');
+
+  const rollback = await setup();
+  rollback.time.advance(-5 * 60 * 1000);
+  const anomaly = await writes(rollback.store, rollback.record.approvalId, () =>
+    rollback.store.revoke(rollback.record.approvalId, 'user', { disposition: 'person' }),
+  );
+  assert.equal(anomaly.after.state, 'expired');
+  assert.equal(anomaly.after.reason, 'clock-anomaly');
+  assert.equal(anomaly.after.expiredAt, '2026-09-18T09:55:00.000Z', 'the time the clock was seen');
+
+  const stale = await setup();
+  await stale.store.claimForSend(stale.record.approvalId, live());
+  stale.time.advance(5 * 60 * 1000);
+  const unknown = await writes(stale.store, stale.record.approvalId, () =>
+    stale.store.complete(stale.record.approvalId, { error: 'x' }).then(() => undefined),
+  );
+  assert.equal(unknown.after.state, 'failed', 'a late outcome still lands, from unknown');
 });
