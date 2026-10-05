@@ -116,3 +116,18 @@ test('the one function that opens the send permit is executeSend', async () => {
   const at = opens[0]?.index ?? -1;
   assert.ok(start >= 0 && at > start && at < end, 'inside executeSend');
 });
+
+test('the send permit opens only after the fence: one fence, inside executeSend, before its one spendOn (CUE-404 Task 17)', async () => {
+  const send = (await sources(SRC)).find((file) => file.path === 'operations/send.ts');
+  assert.ok(send);
+  const start = send.text.indexOf('export async function executeSend');
+  const end = send.text.indexOf('\nexport ', start + 1);
+  const fences = [...send.text.matchAll(/\bfenceOrStop\s*\(/g)].map((found) => found.index ?? -1);
+  assert.equal(fences.length, 1, 'one fence: the send has one provider step');
+  const opens = send.text.search(/\bspendOn\s*\(/);
+  const fence = fences[0] ?? -1;
+  assert.ok(fence > start && fence < end, 'the fence is inside executeSend');
+  assert.ok(fence < opens, 'and comes before the permit that lets the request leave');
+  // Nothing between the fence and the permit asks the network.
+  assert.doesNotMatch(send.text.slice(fence, opens), /resendRequest\s*[<(]/);
+});

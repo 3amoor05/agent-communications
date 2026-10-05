@@ -7,6 +7,7 @@ import {
   canonicalAddress,
   type Expectation,
   ensureSendEpochConfig,
+  fenceOrStop,
   handoffSentence,
   handoffSentenceToFill,
   integrityRefusal,
@@ -57,9 +58,10 @@ import type { ResendContext } from '../context.ts';
  *    this CLI's `approve <id>` and a typed code; under `never` nothing.
  * 3. **Execute** re-reads the stored message and its attachments, claims the approval once (a lock and an O_EXCL
  *    marker), reserves a slot under the rate caps, records the attempt **before** the request leaves, and sends with
- *    `Idempotency-Key` = the approval id and the tag `agentcomms_approval=<id>`. It never retries. An outcome it cannot
- *    know — a dropped connection, a 5xx, a timeout — is recorded as unknown and reported with how to check
- *    (`send status`), never sent again.
+ *    `Idempotency-Key` = the approval id and the tag `agentcomms_approval=<id>` — only while its claim still holds the
+ *    send (the fence, design 2026-10-05 §D1). It never retries. An outcome it cannot know — a dropped connection, a
+ *    5xx, a timeout — is `SEND_OUTCOME_UNKNOWN`, recorded and reported with how to check (`send status`), never sent
+ *    again.
  */
 
 export interface SendPreparation {
@@ -87,10 +89,18 @@ export interface SendPreparation {
 export interface SendResult {
   account: string;
   approvalId: string;
-  /** Resend's id for the email. */
-  resendId: string;
+  /**
+   * Resend's id for the email — absent when Resend accepted it without one, never empty (design 2026-10-05 §D8). The
+   * approval is then not marked used: it reads as sending, then unknown.
+   */
+  resendId?: string | undefined;
   state: 'sent' | 'scheduled';
   scheduledAt: string | null;
+  /**
+   * What happened, in words: "sent"; "accepted by Resend, scheduled for <time>" (the time the request asked for); or,
+   * without an id, "sent; the provider returned no id" and "accepted (scheduled); the provider returned no id".
+   */
+  said: string;
   to: string[];
   cc: string[];
   bcc: string[];
@@ -518,13 +528,17 @@ function messageOf(error: unknown): string {
 }
 
 /**
- * Keeps the failure that stopped the send visible, adding only what could not be settled afterwards — and where the
- * approval stands now that it is settled (decision 8), whatever the failure said of it before.
+ * Keeps the failure that stopped the send visible, adding what it means when it does not say so already — nothing was
+ * sent (design 2026-10-05 §D2, `failed`) — and only what could not be settled afterwards, with where the approval stands
+ * now that it is settled (decision 8), whatever the failure said of it before.
  */
 function noSendError(error: unknown, unrecorded: readonly string[], approval: ApprovalObject): CommsError {
   const original =
     error instanceof CommsError ? error : new CommsError('UNEXPECTED', messageOf(error), { cause: error });
-  const hint = [original.hint, ...unrecorded].filter((part) => part !== undefined);
+  const saysSo = /\bnothing was sent\b/i.test(`${original.message} ${original.hint ?? ''}`);
+  const hint = [original.hint, saysSo ? undefined : 'Nothing was sent.', ...unrecorded].filter(
+    (part) => part !== undefined,
+  );
   return new CommsError(original.code, original.message, {
     ...(hint.length === 0 ? {} : { hint: hint.join(' ') }),
     details: { ...original.details, approval },
@@ -549,7 +563,12 @@ async function approvalNow(
   }
 }
 
-/** Settles a failure known to have happened before Resend sent anything, without one failed write skipping another. */
+/**
+ * Settles a failure known to have happened before Resend sent anything, without one failed write skipping another.
+ *
+ * `approval` is `settled` when the approval was completed already — by the fence, which records why itself — and only
+ * the rest is recorded here.
+ */
 async function recordNoSend(
   context: ResendContext,
   records: SendRecords,
@@ -559,6 +578,7 @@ async function recordNoSend(
   // Where the approval stood when it was claimed: what the refusal says if its failure cannot be recorded.
   claimed: ApprovalObject,
   error: unknown,
+  approval: 'complete' | 'settled' = 'complete',
 ): Promise<CommsError> {
   const unrecorded: string[] = [];
   const said = messageOf(error);
@@ -568,12 +588,16 @@ async function recordNoSend(
   } catch (failure) {
     unrecorded.push(`the capacity slot could not be released (${messageOf(failure)})`);
   }
-  try {
-    settled = await context.core.approvals.approvalOf(
-      await context.core.approvals.complete(options.approvalId, claimToken, { error: said }),
-    );
-  } catch (failure) {
-    unrecorded.push(`the approval could not be marked failed (${messageOf(failure)})`);
+  if (approval === 'settled') {
+    settled = await approvalNow(context, options.approvalId, options.accountId, claimed);
+  } else {
+    try {
+      settled = await context.core.approvals.approvalOf(
+        await context.core.approvals.complete(options.approvalId, claimToken, { error: said }),
+      );
+    } catch (failure) {
+      unrecorded.push(`the approval could not be marked failed (${messageOf(failure)})`);
+    }
   }
   try {
     await records.record(options.accountId, {
@@ -598,6 +622,17 @@ async function recordNoSend(
     unrecorded.push(`the audit log could not record the failure (${messageOf(failure)})`);
   }
   return noSendError(error, unrecorded, settled);
+}
+
+/**
+ * What Resend's acceptance means, in words (design 2026-10-05 §D2, §D8): a send that goes now is sent; a scheduled one is
+ * accepted, for the time the request asked for — never "sent". Without an id, each says so, and nothing more.
+ */
+function acceptedSaid(withId: boolean, scheduledAt: string | null): string {
+  if (!withId) {
+    return scheduledAt ? 'accepted (scheduled); the provider returned no id' : 'sent; the provider returned no id';
+  }
+  return scheduledAt ? `accepted by Resend, scheduled for ${scheduledAt}` : 'sent';
 }
 
 /**
@@ -725,7 +760,20 @@ async function claimAndSend(
       throw await recordNoSend(context, records, bookkeeping, claimToken, claimedApproval, error);
     }
 
-    let resendId: string;
+    /*
+     * The fence (design 2026-10-05 §D1), the last thing before the one request that sends: while this claim still
+     * holds a `sending` record its lease is renewed and the request may leave. Once another caller has found the lease
+     * run out — the record `unknown` — nothing is sent: the fence completes the approval `failed`
+     * (`lease-lost-before-send`), and the rest of the no-send bookkeeping follows.
+     */
+    const fenced = await fenceOrStop(context.core.approvals, options.approvalId, claimToken, { stepsStarted: 0 });
+    if (!fenced.proceed) {
+      const stopped =
+        fenced.error ?? new CommsError('UNEXPECTED', 'the sending lease ran out before anything was sent');
+      throw await recordNoSend(context, records, bookkeeping, claimToken, claimedApproval, stopped, 'settled');
+    }
+
+    let resendId: string | undefined;
     let requestIssued = false;
     const innerFetch = transport.fetch ?? (fetch as FetchLike);
     // Mark the inner fetch, after the throttle and request guard: before this runs, Resend certainly saw nothing.
@@ -743,12 +791,9 @@ async function claimAndSend(
           idempotencyKey: options.approvalId,
         }),
       );
-      if (typeof response.id !== 'string' || response.id === '') {
-        throw new CommsError('PROVIDER_UNAVAILABLE', 'Resend accepted the send but returned no email id', {
-          details: { outcome: 'unknown' },
-        });
-      }
-      resendId = response.id;
+      // Resend's id, when it gave one: no id, null, an empty or blank string, or anything not a string is no id at all —
+      // absent, never '' (design 2026-10-05 §D8). Resend accepted the send either way.
+      resendId = typeof response.id === 'string' && response.id.trim() !== '' ? response.id : undefined;
     } catch (error) {
       if (!requestIssued) {
         throw await recordNoSend(context, records, bookkeeping, claimToken, claimedApproval, error);
@@ -790,9 +835,10 @@ async function claimAndSend(
           `the audit log could not record this (${failure instanceof Error ? failure.message : String(failure)})`,
         );
       }
-      throw new CommsError('TRANSIENT', `whether the email was sent is not known: ${said}`, {
+      // At once, and never retryable: the send may have happened (design 2026-10-05 §D2).
+      throw new CommsError('SEND_OUTCOME_UNKNOWN', `whether the email was sent is not known: ${said}`, {
         hint: [
-          `Do not send it again. ${handoffSentence(
+          `Do not send it again, and do not prepare it again until you know it did not go. ${handoffSentence(
             statusCommand(context.handoffs, options.approvalId, name),
             (command) =>
               `Check the Resend dashboard or ask the recipient, and check with ${command}; this approval is not used again.`,
@@ -815,19 +861,28 @@ async function claimAndSend(
     }
 
     const unrecorded: string[] = [];
-    // `used` only once it is written; until then — and for good, if it cannot be — the record as it stands.
+    // `used` only once it is written, and only with Resend's id; until then — and for good, if it cannot be — the record
+    // as it stands: sending, then unknown.
     let approval: ApprovalObject | null = null;
-    try {
-      approval = await context.core.approvals.approvalOf(
-        await context.core.approvals.complete(options.approvalId, claimToken, { sentMessageId: resendId }),
-      );
-    } catch (error) {
-      unrecorded.push(
-        `the approval could not be marked used (${error instanceof Error ? error.message : String(error)}), so it will read as unknown`,
-      );
+    if (resendId === undefined) {
+      unrecorded.push('Resend returned no id, so the approval is not marked used: it reads as sending, then unknown');
+    } else {
+      try {
+        approval = await context.core.approvals.approvalOf(
+          await context.core.approvals.complete(options.approvalId, claimToken, { sentMessageId: resendId }),
+        );
+      } catch (error) {
+        unrecorded.push(
+          `the approval could not be marked used (${error instanceof Error ? error.message : String(error)}), so it will read as unknown`,
+        );
+      }
     }
     try {
-      await records.record(named.account.id, { approvalId: options.approvalId, event: 'sent', resendId });
+      await records.record(named.account.id, {
+        approvalId: options.approvalId,
+        event: 'sent',
+        ...(resendId === undefined ? {} : { resendId }),
+      });
     } catch (error) {
       unrecorded.push(
         `the send record could not record it (${error instanceof Error ? error.message : String(error)})`,
@@ -841,10 +896,12 @@ async function claimAndSend(
         outcome: 'ok',
         surface: context.surface,
         approvalId: options.approvalId,
-        ids: { resendIds: [resendId] },
+        // No id, no field: an audit row never carries an empty one.
+        ...(resendId === undefined ? {} : { ids: { resendIds: [resendId] } }),
         // From the record a person approved, not from what the caller restated: the two are checked equal.
         recipients: [...claimed.expect.to, ...claimed.expect.cc, ...claimed.expect.bcc].map(canonicalAddress),
         reason: [
+          ...(resendId === undefined ? ['accepted without an id'] : []),
           `digest ${digest.slice(0, 12)} · policy ${livePolicy} · ${claimed.approvedVia ?? 'chat'}`,
           ...unrecorded,
         ].join(' · '),
@@ -855,9 +912,10 @@ async function claimAndSend(
     return {
       account: name,
       approvalId: options.approvalId,
-      resendId,
+      ...(resendId === undefined ? {} : { resendId }),
       state: message.scheduledAt ? 'scheduled' : 'sent',
       scheduledAt: message.scheduledAt,
+      said: acceptedSaid(resendId !== undefined, message.scheduledAt),
       to: claimed.expect.to,
       cc: claimed.expect.cc,
       bcc: claimed.expect.bcc,

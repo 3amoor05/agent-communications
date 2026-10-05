@@ -355,5 +355,104 @@ test('cancelling a scheduled email: the same from both, including the approval f
   }
 });
 
+// ── What a send says it did (CUE-404 Task 17; design 2026-10-05 §D2, §D8) ──────────────────────────────────────────
+
+const expectArgv = [
+  '--expect-to',
+  'sam@partner.test',
+  '--expect-cc',
+  'ana@partner.test',
+  '--expect-bcc',
+  'audit@acme.test',
+  '--expect-subject',
+  SEND.subject,
+];
+
+test('a scheduled send Resend accepted without an id: the command and the tool say exactly that, and neither names an id (R23e)', async () => {
+  harness = await newHarness();
+  await seed();
+  const at = new Date(Date.now() + 3600 * 1000).toISOString();
+  harness.fake.afterSend = () => ({ status: 200, body: {} });
+  const { call, close } = await harness.mcp();
+  try {
+    const prepare = async () =>
+      ok<{ approvalId: string; expect: Record<string, unknown> }>(
+        await call('resend_send_prepare', { account: 'acme/resend', ...SEND, scheduledAt: at }),
+      );
+    const viaTool = await prepare();
+    const tool = ok<Record<string, unknown>>(
+      await call('resend_send_execute', {
+        account: 'acme/resend',
+        approvalId: viaTool.approvalId,
+        expect: viaTool.expect,
+      }),
+    );
+    assert.equal(tool.said, 'accepted (scheduled); the provider returned no id');
+    assert.equal('resendId' in tool, false);
+    assert.equal(tool.state, 'scheduled');
+    assert.equal(tool.scheduledAt, at);
+    assert.equal(
+      tool.note,
+      'Resend returned no id, so the approval is not marked used: it reads as sending, then unknown',
+    );
+    assert.equal((tool.approval as { state?: string }).state, 'sending');
+
+    const viaJson = await prepare();
+    const json = await cliData(['send', 'execute', viaJson.approvalId, '--account', 'acme/resend', ...expectArgv]);
+    assert.equal(json.code, 0, JSON.stringify(json.error));
+    const strip = (value: unknown) => normalise({ ...(value as object), approvalId: 'A' });
+    assert.deepEqual(strip(json.data), strip(tool), 'the command’s JSON is the tool’s result');
+
+    const viaText = await prepare();
+    const text = await harness.cli(['send', 'execute', viaText.approvalId, '--account', 'acme/resend', ...expectArgv], {
+      env: { CLAUDECODE: '1' },
+    });
+    assert.equal(text.code, 0, text.stderr);
+    assert.equal(
+      text.stdout.trim(),
+      [
+        `Accepted (scheduled); the provider returned no id — scheduled for ${at}, to sam@partner.test.`,
+        'Note: Resend returned no id, so the approval is not marked used: it reads as sending, then unknown.',
+      ].join('\n'),
+    );
+    assert.equal(harness.fake.sends().length, 3, 'one request each, never a second');
+  } finally {
+    await close();
+  }
+});
+
+test('an outcome Resend left uncertain is the same SEND_OUTCOME_UNKNOWN from both: exit 10, not retryable, still sending (D2pt-d)', async () => {
+  harness = await newHarness();
+  await seed();
+  harness.fake.afterSend = () => ({ status: 502, body: { name: 'application_error', message: 'upstream' } });
+  const { call, close } = await harness.mcp();
+  try {
+    const prepared = async () =>
+      ok<{ approvalId: string; expect: Record<string, unknown> }>(
+        await call('resend_send_prepare', { account: 'acme/resend', ...SEND }),
+      );
+    const viaTool = await prepared();
+    const tool = refused(
+      await call('resend_send_execute', {
+        account: 'acme/resend',
+        approvalId: viaTool.approvalId,
+        expect: viaTool.expect,
+      }),
+    );
+    const viaCli = await prepared();
+    const cli = await cliData(['send', 'execute', viaCli.approvalId, '--account', 'acme/resend', ...expectArgv]);
+    assert.equal(cli.code, 10);
+    for (const refusal of [tool, cli.error as { code: string; message: string; details?: Record<string, unknown> }]) {
+      assert.equal(refusal.code, 'SEND_OUTCOME_UNKNOWN');
+      assert.match(refusal.message, /^whether the email was sent is not known:/);
+      assert.equal((refusal.details?.approval as { state?: string } | undefined)?.state, 'sending');
+    }
+    assert.equal(normalise(tool.message), normalise(cli.error?.message));
+    assert.equal(harness.fake.sends().length, 2);
+  } finally {
+    await close();
+  }
+});
+
 /** Keeps `ToolResult` in use for readers of this file: every call above is one. */
 export type { ToolResult };
