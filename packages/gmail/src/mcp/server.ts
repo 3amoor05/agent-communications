@@ -378,6 +378,59 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
   });
 
   /**
+   * A draft whose last preparation expired (design 2026-10-05 §D9), as `send list`'s unsent section, `draft show` and
+   * `draft list` give it: what the approval records read say of it, what Drafts says of it now, and the one call that
+   * prepares it again.
+   */
+  const unsentDraftSchema = z.object({
+    inbox: z.string().describe('the mailbox by name, or `(removed)`'),
+    draftId: z.string(),
+    status: z
+      .enum(['unsent', 'approved', 'sending', 'used', 'unknown', 'indeterminate'])
+      .describe('where it stands by the approval records read'),
+    said: z
+      .string()
+      .describe(
+        'the finding in its exact words — repeat them: “not sent with any approval in the last 90 days” only when every retained record was read, “not sent with any of the 500 most recently changed approval records” when only those were, “indeterminate (…)” when what was read cannot settle it',
+      ),
+    evidence: z.enum(['complete-90-days', 'last-500', 'indeterminate']),
+    to: z
+      .array(z.string())
+      .describe('the last preparation’s recipients: each inside <untrusted-content> unless plainly an address'),
+    cc: z.array(z.string()),
+    bcc: z.array(z.string()),
+    subject: z.string().describe('the last preparation’s subject, inside <untrusted-content>'),
+    attachments: z
+      .array(z.string())
+      .nullable()
+      .describe(
+        'the names of the files on the draft in Drafts now, each inside <untrusted-content>; null when not found there',
+      ),
+    last: z
+      .object({
+        approvalId: z.string(),
+        createdAt: z.string(),
+        expiresAt: z.string(),
+        expiredAt: z.string().optional(),
+      })
+      .describe('the last preparation, and when it expired'),
+    decidedBy: z.string().optional().describe('the approval that decided a status other than unsent or indeterminate'),
+    drafts: z
+      .object({ state: z.enum(['found', 'gone', 'failed', 'not-observed']), said: z.string() })
+      .describe(
+        'what Drafts says of it now, observed separately from the history: “still in Drafts”, “no longer in Drafts — it may have been sent or deleted elsewhere”, the look-up’s failure, or not observed',
+      ),
+    prepare: z
+      .object({
+        tool: z.literal('gmail_send_prepare'),
+        arguments: z.object({ inbox: z.string(), draftId: z.string() }),
+        command: z.string().describe('the same at a terminal'),
+      })
+      .nullable()
+      .describe('the one call that prepares it again — only for a draft found unsent and not gone from Drafts'),
+  });
+
+  /**
    * What every tool that changes an account returns: the result once the change is made, or the approval it waits for.
    *
    * One shape for all of them — core's `changeToolResult` — so an agent that has handled one approval handles every
@@ -1345,6 +1398,9 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
     bytes: z.number(),
     warnings: z.array(z.string()),
     profile: z.string().nullable(),
+    unsent: unsentDraftSchema
+      .optional()
+      .describe('gmail_draft_get only: when its last preparation expired in the last 7 days, what its records say'),
   });
   const draftReply = (result: Awaited<ReturnType<typeof createDraft>>): ReturnType<typeof reply> =>
     reply({
@@ -1364,7 +1420,8 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
     'gmail_draft_list',
     {
       title: 'List drafts',
-      description: 'The drafts waiting in a mailbox: who each is to, its subject, and when it was last saved.',
+      description:
+        'The drafts waiting in a mailbox: who each is to, its subject, and when it was last saved — and, for one whose last preparation to send expired in the last 7 days, `unsent`: what the approval records read say of it, in the words of gmail_send_list.',
       inputSchema: z.object({
         inbox: inboxArgument(Boolean(pinned)),
         limit: mcpInteger().optional().describe('default 20'),
@@ -1378,6 +1435,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
             to: z.array(z.string()),
             subject: z.string(),
             updatedAt: z.string().nullable(),
+            unsent: unsentDraftSchema.optional(),
           }),
         ),
       }),
@@ -1397,7 +1455,8 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
     'gmail_draft_get',
     {
       title: 'Read a draft',
-      description: 'Read a draft back, with the same preview the person would approve. Show the preview verbatim.',
+      description:
+        'Read a draft back, with the same preview the person would approve. Show the preview verbatim. When its last preparation to send expired in the last 7 days, `unsent` says what the approval records read say of it, in the words of gmail_send_list.',
       inputSchema: z.object({ inbox: inboxArgument(Boolean(pinned)), draftId: z.string().min(1) }),
       outputSchema: draftView,
       annotations: { readOnlyHint: true, openWorldHint: true },
@@ -2868,7 +2927,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
     {
       title: 'List prepared sends',
       description:
-        'Approvals that have been prepared, with what each one would send and when it expires: a send’s recipients and subject in `expect`, or — `kind: "change"` — the change to an account a person was asked to approve. The same as `send list` in the Gmail CLI.',
+        'Approvals that have been prepared, with what each one would send and when it expires: a send’s recipients and subject in `expect`, or — `kind: "change"` — the change to an account a person was asked to approve. Beside them, `unsent`: each draft prepared in the last 7 days whose last preparation expired, what the approval records read say of it (`said`, in exact words scoped to `evidence` — never an all-time claim), what Drafts says of it now (`drafts`), and the one call that prepares it again. It sends nothing and changes no draft. The same as `send list` in the Gmail CLI.',
       inputSchema: z.object({ inbox: z.string().min(1).optional() }),
       outputSchema: z.object({
         approvals: z.array(
@@ -2914,8 +2973,30 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
             expiresAt: z.string().optional(),
           }),
         ),
+        unsent: z.object({
+          rows: z.array(unsentDraftSchema).describe('at most 20, newest preparation first'),
+          evidence: z
+            .enum(['complete-90-days', 'last-500', 'indeterminate'])
+            .describe('what the scan as a whole can support'),
+          truncated: z
+            .array(z.enum(['window', 'rows', 'deadline']))
+            .describe(
+              'why it is not the whole picture: more approval files than the 500 read, more drafts than the rows, or the deadline stopping the scan or a look-up',
+            ),
+          scanned: z
+            .looseObject({
+              files: z.number(),
+              window: z.number(),
+              opened: z.number(),
+              busy: z.array(z.string()),
+              unreadable: z.array(z.string()),
+              unread: z.number(),
+            })
+            .describe('what the scan read: counts, and the ids of records that were busy or could not be read'),
+          maintenance: z.looseObject({}).describe('the day’s retention of approval records, run first'),
+        }),
       }),
-      annotations: { readOnlyHint: true, openWorldHint: false },
+      annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ inbox }) => {
       try {
@@ -2926,7 +3007,7 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
         // name. Unpinned, `inbox` narrows the list or, left out, every mailbox's is listed.
         // The records as `send list --json` prints them: the store's public view, which leaves out the hash of the
         // code a person types, and nothing else is a secret.
-        return reply({ approvals: await listApprovals(context, { inbox: pinned ? targetInbox(inbox) : inbox }) });
+        return reply(await listApprovals(context, { inbox: pinned ? targetInbox(inbox) : inbox }));
       } catch (error) {
         return fail(error);
       }

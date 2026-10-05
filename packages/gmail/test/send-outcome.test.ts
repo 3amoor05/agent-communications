@@ -494,8 +494,9 @@ test('Gmail success is never rewritten when its approval or audit bookkeeping fa
     const status = async () =>
       (await waitForApproval(setup.harness.core, approval.approvalId, { waitSeconds: 0, channel: 'gmail' })).state;
     const listed = async () =>
-      (await listApprovals(setup.context, { inbox: 'work' })).find((entry) => entry.approvalId === approval.approvalId)
-        ?.state;
+      (await listApprovals(setup.context, { inbox: 'work' })).approvals.find(
+        (entry) => entry.approvalId === approval.approvalId,
+      )?.state;
     assert.equal(await status(), 'sending');
     assert.equal(await listed(), 'sending');
     clock.advance(SENDING_LEASE_MS);

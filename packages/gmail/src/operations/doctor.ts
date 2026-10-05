@@ -25,6 +25,10 @@ import {
   type Remedy,
   remedy,
   secretsStoreOf,
+  UNSENT_ROWS,
+  UNSENT_WORDS,
+  type UnsentReport,
+  unsentReport,
 } from '@agentcomms/core';
 import { capabilitiesOf, scopesFor, TIERS, type Tier } from '../auth/scopes.ts';
 import { TokenSource } from '../auth/session.ts';
@@ -138,6 +142,8 @@ export async function doctor(
   // Scoped like everything else here: `--inbox`, and a pinned server, report their own mailbox's folders only.
   const folders = scope && !scope.inbox ? null : await formerFoldersCheck(context, config, scope?.inbox?.id);
   if (folders) checks.push(folders);
+  // A name that is no mailbox's has no drafts to count; `inbox-known` already says so.
+  if (!scope || scope.inbox) checks.push(await unsentCheck(context, scope));
   checks.push(...(await mcpChecks(context, scope)));
 
   const summary = {
@@ -526,6 +532,63 @@ async function formerFoldersCheck(context: GmailContext, config: Config, onlyId?
     detail: found.join('; '),
     fix: remedy('Nothing was moved. Move them into the new folders yourself if you want them together.'),
   };
+}
+
+/**
+ * Drafts prepared in the last seven days whose last preparation expired with nothing sent (design 2026-10-05 §D9): the
+ * unsent report's count, said as what it is. Exact only when every retained record was read and every qualifying draft
+ * counted; a count over the newest 500 records, over the first 20 drafts, or beside a draft that could not be settled
+ * is a lower bound; and one from a scan with a record that could not be read, one that was busy, or one cut short by
+ * its deadline is no count at all. Each points to the list, which says what each draft's records say. Reads only.
+ */
+async function unsentCheck(context: GmailContext, scope: Scope | undefined): Promise<Check> {
+  const base = { id: 'unsent-drafts', title: 'Prepared sends that expired (last 7 days)', inbox: scope?.name };
+  const list = remedy([
+    'See each, what its records say and the call that prepares it again, with ',
+    context.handoffs.own(['send', 'list', ...(scope ? ['--inbox', scope.name] : [])]),
+    ' (gmail_send_list from a chat).',
+  ]);
+  let report: UnsentReport;
+  try {
+    report = await unsentReport(context.core, {
+      channel: 'gmail',
+      ...(scope?.inbox ? { owner: scope.inbox.id } : {}),
+    });
+  } catch (error) {
+    return { ...base, status: 'warn', detail: `could not be counted: ${(error as Error).message}` };
+  }
+  const unsent = report.rows.filter((row) => row.status === 'unsent').length;
+  const drafts = (count: number) => `${count} draft${count === 1 ? '' : 's'}`;
+  // A gap anywhere in what was read: the count would be a guess.
+  if (report.evidence === 'indeterminate' || report.scanned.busy.length > 0) {
+    const why = report.truncated.includes('deadline')
+      ? UNSENT_WORDS.deadline
+      : report.scanned.unreadable.length > 0
+        ? UNSENT_WORDS.unreadable
+        : UNSENT_WORDS.busy;
+    return { ...base, status: 'warn', detail: `the count is ${why}`, fix: list };
+  }
+  const bounds = [
+    ...(report.evidence === 'last-500' ? ['only the 500 most recently changed approval records were read'] : []),
+    ...(report.truncated.includes('rows') ? [`only the newest ${UNSENT_ROWS} drafts were counted`] : []),
+    ...(report.rows.some((row) => row.status === 'indeterminate') ? ['a draft could not be settled either way'] : []),
+  ];
+  if (bounds.length > 0) {
+    return {
+      ...base,
+      status: unsent > 0 ? 'warn' : 'ok',
+      detail: `${unsent > 0 ? `at least ${drafts(unsent)} not sent` : 'none found unsent'} — a lower bound: ${bounds.join('; ')}`,
+      fix: list,
+    };
+  }
+  return unsent === 0
+    ? { ...base, status: 'ok', detail: 'none: no draft prepared in the last 7 days expired unsent' }
+    : {
+        ...base,
+        status: 'warn',
+        detail: `${drafts(unsent)} prepared in the last 7 days ${unsent === 1 ? 'was' : 'were'} ${UNSENT_WORDS.complete}`,
+        fix: list,
+      };
 }
 
 function referencedSecrets(config: Config): Set<string> {

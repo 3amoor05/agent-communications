@@ -32,6 +32,7 @@ import { headerValue, readParts } from '../domain/mime.ts';
 import type { GmailTransport, RawMessage } from '../gmail-api/transport.ts';
 import { ownAddresses } from './analyse.ts';
 import { type NumberOption, numberOption } from './numbers.ts';
+import { type UnsentDraft, unsentSection } from './unsent.ts';
 import { oneOf } from './words.ts';
 
 /**
@@ -58,6 +59,11 @@ export interface DraftResult {
   warnings: string[];
   /** What this mailbox's writing profile says, for whoever revises the draft. */
   profile?: string | undefined;
+  /**
+   * Shown drafts only (`draft show`): when its last preparation expired in the last seven days, what the approval
+   * records read say of it, in the words of `send list`'s unsent section (design 2026-10-05 §D9). Absent otherwise.
+   */
+  unsent?: UnsentDraft | undefined;
 }
 
 export interface UpdateDraftInput extends Omit<DraftInput, 'text'> {
@@ -500,6 +506,12 @@ export interface DraftSummary {
   to: string[];
   subject: string;
   updatedAt: string | null;
+  /**
+   * When its last preparation expired in the last seven days, what the approval records read say of it, in the words of
+   * `send list`'s unsent section (design 2026-10-05 §D9): at most 20 drafts carry it, newest preparation first. Absent
+   * when they have nothing to say.
+   */
+  unsent?: UnsentDraft | undefined;
 }
 
 export const DRAFT_LIST_LIMIT: NumberOption = { flag: '--limit', arg: 'limit', min: 1 };
@@ -511,6 +523,15 @@ export async function listDrafts(context: GmailContext, alias: string, given?: u
   await context.requireCapability(resolved, 'draft');
   const transport = await context.transport(alias);
   const drafts = await transport.listDrafts(limit);
+  // What the approval records say of the drafts listed: each was just read from Drafts, so none is looked up again.
+  const unsent =
+    drafts.length === 0
+      ? null
+      : await unsentSection(context, {
+          inboxId: resolved.inbox.id,
+          observed: new Map(drafts.map((draft) => [draft.id, draft.message])),
+        });
+  const rows = new Map(unsent?.rows.map((row) => [row.draftId, row]));
 
   const summaries: DraftSummary[] = [];
   for (const draft of drafts) {
@@ -527,6 +548,7 @@ export async function listDrafts(context: GmailContext, alias: string, given?: u
       // recipient's client then shows as the encoded blob rather than the thread it belongs to.
       subject: decodeHeaderWords(headerValue(headers, 'Subject') ?? ''),
       updatedAt: message?.internalDate ? new Date(Number(message.internalDate)).toISOString() : null,
+      ...(rows.has(draft.id) ? { unsent: rows.get(draft.id) } : {}),
     });
   }
   return summaries;
@@ -711,6 +733,10 @@ export async function getDraft(context: GmailContext, alias: string, draftId: st
     source: 'in the draft',
   }));
   const warnings = warningsFor({ to, cc, bcc, ownDomains: resolved.inbox.internalDomains });
+  // What the approval records say of it: it was just read from Drafts, so it is not looked up again.
+  const unsent = (
+    await unsentSection(context, { inboxId: resolved.inbox.id, observed: new Map([[draftId, message ?? undefined]]) })
+  ).rows[0];
 
   return {
     inbox: alias,
@@ -732,5 +758,6 @@ export async function getDraft(context: GmailContext, alias: string, draftId: st
     attachments,
     bytes: 0,
     warnings,
+    ...(unsent === undefined ? {} : { unsent }),
   };
 }
