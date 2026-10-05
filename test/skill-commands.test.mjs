@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { readdir, readFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { test } from 'node:test';
@@ -189,4 +190,48 @@ test('no skill or contract tells a person to run a suite command by its name (CU
     }
   }
   assert.deepEqual(wrong, [], `a command handed to a person that is not the one a result gives:\n${wrong.join('\n')}`);
+});
+
+// ── The wait and the revoke a skill hands an agent (CUE-404) ─────────────────────────────────────────────────────
+
+/*
+ * Design 2026-10-05 §D3: an agent learns of an approval by waiting, and a person's "no" reaches the store only when the
+ * agent revokes. Each channel that hands a person approvals (its manifest names an `approve`) teaches both, in the
+ * words its own CLI and server have — the rows of `capabilities.json` whose operation is `waitForApproval` or
+ * `revokeApproval`: the channel's own, or the core's for a channel with none. Whether each named command and tool
+ * exists is `tool-drift`'s; this is that each family names the ones that are its.
+ */
+const CAPABILITIES = JSON.parse(readFileSync(join(ROOT, 'capabilities.json'), 'utf8')).capabilities;
+
+function handOffs(operation, channel) {
+  const own = CAPABILITIES.filter((row) => row.operation === operation && row.package === channel);
+  const rows =
+    own.length > 0 ? own : CAPABILITIES.filter((row) => row.operation === operation && row.package === 'core');
+  return rows.map((row) => {
+    const binary = REGISTRY.channels.find((each) => each.directory === row.package)?.manifest.binary;
+    return { tool: row.mcp, command: `${binary} ${row.cli}` };
+  });
+}
+
+test('each channel that hands out approvals names its own wait and its revoke, as tool and as command (CUE-404)', async () => {
+  const approving = REGISTRY.skillFamilies.filter(
+    (family) => REGISTRY.channels.find((channel) => channel.directory === family.channel)?.manifest.approve,
+  );
+  assert.ok(approving.length >= 5, 'every channel names an approve');
+  for (const family of approving) {
+    const texts = [await readFile(join(ROOT, family.contract), 'utf8')];
+    for (const entry of await readdir(join(ROOT, 'skills'), { withFileTypes: true })) {
+      if (entry.isDirectory() && entry.name.startsWith(family.prefix)) {
+        texts.push(await readFile(join(ROOT, 'skills', entry.name, 'SKILL.md'), 'utf8'));
+      }
+    }
+    const prose = texts.join('\n').replace(/\s+/g, ' ');
+    for (const { tool, command } of [
+      ...handOffs('waitForApproval', family.channel),
+      ...handOffs('revokeApproval', family.channel),
+    ]) {
+      assert.ok(prose.includes(`\`${tool}\``), `the ${family.family} skills name ${tool}`);
+      assert.ok(prose.includes(command), `the ${family.family} skills name \`${command}\``);
+    }
+  }
 });

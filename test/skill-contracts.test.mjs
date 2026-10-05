@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -255,4 +256,219 @@ test('WhatsApp’s person-only commands are handed over as words, never as a bar
     assert.doesNotMatch(text, /agent-whatsapp (?:add|remove|allow|deny|clear)\b/, name);
     assert.match(text.replace(/\s+/g, ' '), /`deny \+15555550102 --account personal\/whatsapp`/, name);
   }
+});
+
+// ── What an approval asks of an agent (CUE-404) ──────────────────────────────────────────────────────────────────
+
+/*
+ * Design 2026-10-05 §D1–§D3 and §D8, and plan decision 10: there is no harness that runs an agent through a skill, so
+ * what a skill must teach is held here as text. Each family's rules are derived, not listed: a channel whose manifest
+ * names an `approve` hands a person approvals, so its skills say what to do with one; a channel whose accounts can
+ * `send` also says what a send's outcome is. The tools come from `capabilities.json` — each channel's own wait and
+ * revoke, or the core's where it has none — so a new channel is held to its own from its first commit.
+ */
+
+const CAPABILITIES = JSON.parse(readFileSync(join(ROOT, 'capabilities.json'), 'utf8')).capabilities;
+const manifestOf = (family) => REGISTRY.channels.find((channel) => channel.directory === family.channel)?.manifest;
+/** The tools of `channel`'s rows that run `operation`. */
+const toolsOf = (operation, channel) =>
+  CAPABILITIES.filter((row) => row.operation === operation && row.package === channel && row.mcp).map((row) => row.mcp);
+/** The commands of the same rows, as a person or an agent writes them: `<binary> <words>`. */
+const commandsOf = (operation, channel) => {
+  const binary = REGISTRY.channels.find((each) => each.directory === channel)?.manifest.binary;
+  return CAPABILITIES.filter((row) => row.operation === operation && row.package === channel && row.cli).map(
+    (row) => `${binary} ${row.cli}`,
+  );
+};
+/** A family's wait: its channel's own, or the core's for a channel with none (WhatsApp). */
+const waitsOf = (family) =>
+  toolsOf('waitForApproval', family.channel).length > 0
+    ? toolsOf('waitForApproval', family.channel)
+    : toolsOf('waitForApproval', 'core');
+/** A family's revokes: the core's, which takes any kind, and its channel's own where it has one (Gmail's cancel). */
+const revokesOf = (family) => [
+  ...new Set([...toolsOf('revokeApproval', 'core'), ...toolsOf('revokeApproval', family.channel)]),
+];
+
+/** Every family whose channel hands a person approvals; and of those, every one whose accounts can send. */
+const APPROVING = REGISTRY.skillFamilies.filter((family) => manifestOf(family)?.approve);
+const SENDING = APPROVING.filter((family) => manifestOf(family)?.accounts?.modes?.includes('send'));
+
+/** Prose wraps, so a rule is read across its line breaks. */
+const flat = (text) => text.replace(/\s+/g, ' ');
+const escapeRegExp = (text) => text.replace(/[\\^$.*+?()[\]{}|/]/g, '\\$&');
+const named = (word) => new RegExp(`\`${escapeRegExp(word)}\``);
+
+/** What every approving family's contract says of an approval: a no is revoked at once, waits, and how long. */
+function approvalRules(family) {
+  return [
+    ['a no is revoked at once', /When the person says no, revoke it at once/],
+    ['why: the server cannot hear a no', /cannot hear a "no"/],
+    ...revokesOf(family).map((tool) => [`the revoke ${tool}`, named(tool)]),
+    ['repeated default-length waits', /repeated default-length waits/],
+    ...waitsOf(family).map((tool) => [`the wait ${tool}`, named(tool)]),
+    ['`claimable`', /`claimable`/],
+    ['ten minutes on the chat route', /ten minutes/],
+    ['thirty minutes on the confirm route', /thirty minutes/],
+    ['24 hours once approved', /24 hours/],
+  ];
+}
+
+/** What a sending family's contract says of a send's outcome (§D2, §D8). */
+const SEND_RULES = [
+  ['never prepare while sending', /Never prepare again while a send is `sending`/],
+  ['another call is sending it', /being sent by another call/],
+  ['branch on SEND_OUTCOME_UNKNOWN', /branch on `SEND_OUTCOME_UNKNOWN`/],
+  ['`unknown`', /`unknown`/],
+  ['a late result is still possible', /late result/],
+  ['check before anything else', /\bcheck\b[^.]*before anything else/i],
+  ['never prepare automatically', /never prepare it again automatically/i],
+  ['the no-id wording', /"sent; the provider returned no id"/],
+  ['never a message id without an id', /Never say "sent, message id …" without an id/],
+  ['`corrupt` is said', /`corrupt` is said, never skipped/],
+];
+
+/** What Resend's contract says of a scheduled send (§D2, §D8; §5 R23f). */
+const RESEND_RULES = [
+  ['the scheduled no-id wording', /"accepted \(scheduled\); the provider returned no id"/],
+  ['scheduled is not sent', /Never call a scheduled email sent until Resend's own outcome says it went/],
+  ['its outcome is attributed', /`outcome`/],
+];
+
+/** Every skill directory of `family`, with its rendered contract. */
+async function renderedContracts(family) {
+  const found = [];
+  for (const skill of await skills()) {
+    if (!skill.startsWith(family.prefix)) continue;
+    found.push({ skill, prose: flat(await readFile(join(SKILLS, skill, 'references', 'contract.md'), 'utf8')) });
+  }
+  return found;
+}
+
+test('the families held to the approval rules are every channel’s that hands out approvals (CUE-404)', () => {
+  const families = APPROVING.map((family) => family.family);
+  for (const family of ['comms', 'gmail', 'slack', 'resend', 'whatsapp']) assert.ok(families.includes(family), family);
+  assert.deepEqual(SENDING.map((family) => family.family).sort(), ['gmail', 'resend', 'slack']);
+  assert.deepEqual(revokesOf({ channel: 'gmail' }), ['comms_approval_revoke', 'gmail_send_cancel']);
+  assert.deepEqual(waitsOf({ channel: 'whatsapp' }), ['comms_approval_wait']);
+});
+
+test('every rendered contract of a family that hands out approvals says a no is revoked at once, how to wait, and how long an approval lasts (CUE-404, §5 D1rr-b)', async () => {
+  const read = [];
+  const missing = [];
+  for (const family of APPROVING) {
+    for (const { skill, prose } of await renderedContracts(family)) {
+      read.push(skill);
+      for (const [label, pattern] of approvalRules(family)) {
+        if (!pattern.test(prose)) missing.push(`skills/${skill}/references/contract.md: ${label}`);
+      }
+    }
+  }
+  // The two setup skills hold change approvals; each carries its channel's rule through its rendered contract.
+  for (const skill of ['gmail-setup', 'slack-setup', 'gmail-send', 'slack-posting', 'resend-sending', 'comms-update']) {
+    assert.ok(read.includes(skill), `${skill}'s rendered contract is read`);
+  }
+  // Every skill that lacks a rule is named, so a contract missing one names gmail-setup or slack-setup among them.
+  assert.deepEqual(missing, [], `a rendered contract without its approval rules:\n${missing.join('\n')}`);
+});
+
+test('every rendered contract of a sending family says what a send’s outcome is, and never to prepare it again on doubt (CUE-404, §5 D2pt-k, D2-i)', async () => {
+  const missing = [];
+  for (const family of SENDING) {
+    const rules = family.family === 'resend' ? [...SEND_RULES, ...RESEND_RULES] : SEND_RULES;
+    for (const { skill, prose } of await renderedContracts(family)) {
+      for (const [label, pattern] of rules) {
+        if (!pattern.test(prose)) missing.push(`skills/${skill}/references/contract.md: ${label}`);
+      }
+    }
+  }
+  assert.deepEqual(missing, [], `a rendered contract without its send rules:\n${missing.join('\n')}`);
+});
+
+/**
+ * The skill of each sending family that sends, where a send's refusals are taught in a table. A new sending channel
+ * names its own here, or the first assertion fails.
+ */
+const SEND_SKILL = { gmail: 'gmail-send', slack: 'slack-posting', resend: 'resend-sending' };
+
+test('each send skill branches on SEND_OUTCOME_UNKNOWN, waits rather than asks, and revokes a no (CUE-404, §5 D2-i, D2pt-k, R23f)', async () => {
+  for (const family of SENDING) {
+    const skill = SEND_SKILL[family.family];
+    assert.ok(skill, `${family.family} sends: name its send skill in SEND_SKILL`);
+    const text = await readFile(join(SKILLS, skill, 'SKILL.md'), 'utf8');
+    const prose = flat(text);
+    const where = `skills/${skill}/SKILL.md`;
+    // A row of the refusal table, keyed by the code, that never prepares again.
+    assert.match(
+      text,
+      /^[ \t]*\|[ \t]*`SEND_OUTCOME_UNKNOWN`[^\n]*(?:never|do not) prepare/im,
+      `${where}: SEND_OUTCOME_UNKNOWN row`,
+    );
+    assert.match(prose, /being sent by another call/, `${where}: the sending row`);
+    assert.match(prose, /Never prepare again while a send is `sending`/, `${where}: never prepare while sending`);
+    assert.match(prose, /"sent; the provider returned no id"/, `${where}: the no-id wording`);
+    assert.match(prose, /When the person says no, revoke it at once/, `${where}: a no is revoked at once`);
+    for (const tool of [...waitsOf(family), ...revokesOf(family)])
+      assert.match(prose, named(tool), `${where}: ${tool}`);
+    for (const command of commandsOf('waitForApproval', family.channel)) {
+      assert.match(prose, new RegExp(escapeRegExp(command)), `${where}: ${command}`);
+    }
+    assert.match(prose, /repeated default-length waits/, `${where}: repeated default-length waits`);
+    if (family.family === 'resend') {
+      assert.match(
+        prose,
+        /"accepted \(scheduled\); the provider returned no id"/,
+        `${where}: the scheduled no-id wording`,
+      );
+      assert.match(prose, /Never call a scheduled email sent until Resend's own outcome says it went/, where);
+    }
+  }
+});
+
+test('the setup skills’ change-approval procedures revoke a no at once, by tool and by command (CUE-404, plan task 25)', async () => {
+  const cases = [
+    {
+      family: 'gmail',
+      file: 'gmail-setup/SKILL.md',
+      start: "- **Safety settings need a person's yes.**",
+      end: '- **Every skill works without the MCP server.**',
+    },
+    {
+      family: 'slack',
+      file: 'slack-setup/SKILL.md',
+      start: '## How a change is approved',
+      end: '## Connecting it to your agent',
+    },
+  ];
+  const coreRevoke = commandsOf('revokeApproval', 'core');
+  assert.deepEqual(coreRevoke, ['agentcomms approvals revoke']);
+  for (const { family, file, start, end } of cases) {
+    const text = await readFile(join(SKILLS, file), 'utf8');
+    const from = text.indexOf(start);
+    assert.notEqual(from, -1, `${file}: the procedure is there`);
+    const to = text.indexOf(end, from + start.length);
+    assert.notEqual(to, -1, `${file}: the procedure ends`);
+    const procedure = flat(text.slice(from, to));
+    assert.match(procedure, /When the person says no, revoke it at once/, `${file}: a no is revoked at once`);
+    for (const tool of revokesOf({ channel: family })) assert.match(procedure, named(tool), `${file}: ${tool}`);
+    for (const command of coreRevoke)
+      assert.match(procedure, new RegExp(`${escapeRegExp(command)} <`), `${file}: ${command}`);
+  }
+});
+
+test('no skill or guide says a client is known to reach a person: a client is one the person chose to trust (CUE-404, §D5)', async () => {
+  const files = [];
+  for (const entry of await readdir(SKILLS, { withFileTypes: true, recursive: true })) {
+    if (entry.isFile() && entry.name.endsWith('.md')) files.push(join(entry.parentPath, entry.name));
+  }
+  for (const entry of await readdir(join(ROOT, 'docs'), { withFileTypes: true })) {
+    if (entry.isFile() && entry.name.endsWith('.md')) files.push(join(ROOT, 'docs', entry.name));
+  }
+  files.push(join(ROOT, 'README.md'), join(ROOT, 'SECURITY.md'));
+  const wrong = [];
+  for (const file of files) {
+    const found = /known to reach a (?:person|human)/i.exec(flat(await readFile(file, 'utf8')));
+    if (found) wrong.push(`${file.replace(ROOT, '')}: ${found[0]}`);
+  }
+  assert.deepEqual(wrong, [], `a client said to be known to reach a person:\n${wrong.join('\n')}`);
 });

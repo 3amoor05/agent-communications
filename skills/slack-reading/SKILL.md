@@ -96,11 +96,11 @@ a `question`, the `options` with the exact paths of their Downloads folder and o
 question and the files, and wait. Their answer is `downloads` (the default), `current`, or a folder they name —
 absolute or starting with `~`, made if missing; a relative one is refused. Under the workspace's `chat` change policy,
 call again with the same arguments, `saveTo` set to their answer, and the `choiceId`. Under `confirm` they answer it
-themselves with the approve command the result gives, in their own terminal, and you call again with the `choiceId` alone;
-a `saveTo` of yours is refused. The command does the same when you run it: it exits `10` with the question, and you
+themselves with the approve command the result gives, in their own terminal; `slack_approval_wait` on the `choiceId`
+tells you when (it says `answered`), and you call again with the `choiceId` alone; a `saveTo` of yours is refused. The command does the same when you run it: it exits `10` with the question, and you
 run it again with `--to <answer> --choice <id>` (or `--choice <id>` alone under `confirm`); `--to` without
 `--choice` is a person's at their own terminal, and from you it is refused. A `choiceId` is for those files, under
-the names the question showed, only; it is used once, and expires after thirty minutes. A call with other arguments —
+the names the question showed, only; it is used once, and expires thirty minutes after it was asked. A call with other arguments —
 or for a file renamed on Slack since — is refused and leaves the question open. Never answer it yourself, and never
 keep one for later. `out` is gone.
 

@@ -69,8 +69,9 @@ here:
   tool; exit `10` with `APPROVAL_PENDING` and the same in `error.details` from the CLI. Show the preview
   verbatim and ask. Only after the user says yes, call the same tool again with `approvalId` (CLI: the same
   command with `--approval <id>`). Under the `confirm` change policy the user first runs the approve
-  command the result gives, in their own terminal, exactly as given (contract §10); a claim before that
-  is refused, and the approval waits for them.
+  command the result gives, in their own terminal, exactly as given (contract §10), and `gmail_send_wait`
+  tells you when they have. When the person says no, revoke it at once: `gmail_send_cancel`, or
+  `comms_approval_revoke` (CLI: `agentcomms approvals revoke <id>`) — the server never hears a "no".
 - **Every skill works without the MCP server.** That matters most here, because setup usually runs
   *before* any server is wired. The CLI with `--json` is the primary surface, and its exit codes are
   stable: `0` ok, `10` a send or a change was refused or needs approval, `64` usage, `65` bad data, `66` not found,
@@ -115,9 +116,9 @@ Show `preview` exactly as it is, ask, and call again with `approvalId` after a y
 `{ "applied": true, "result": … }`, where `result` is what the command prints under `--json`. When
 `policy` is `confirm`, the user approves in their own terminal with the approve command the result gives —
 this installation's own, its folders pinned; hand it over as given, never one written from its name — and
-types the code it shows; you call again afterwards. An approval is for the change it previewed, for ten minutes, once: anything different — another
-value, another mailbox under the same name, a file that changed — is refused, and the change is prepared
-again.
+types the code it shows; you call again once `gmail_send_wait` says so. An approval is for the change it
+previewed, once — ten minutes for a yes in chat, thirty for the terminal, then a day — and anything different —
+another value, another mailbox under the same name, a file that changed — is refused, and prepared again.
 
 Registering and pruning this server come from chat when the core server is connected:
 `comms_server_install` and `comms_server_prune` with `channel: "gmail"`, approved the same way; without it

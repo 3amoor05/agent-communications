@@ -280,7 +280,9 @@ extension` flag means the file will show as `invoice.pdf` in a client that hides
 for seven days, across all inboxes. A later send to one of those addresses, from a mailbox that has
 never written to it, is escalated from `chat` to `confirm`: being told by an email to write to
 somebody else is the shape of an exfiltration, and it is taken out of the agent's hands. So an
-injected address usually does leave a tripwire behind.
+injected address usually does leave a tripwire behind. A domain seen there escalates only a recipient
+outside the sending mailbox's own domains: a colleague on them is escalated by their exact address, never
+by the domain alone, and a prior send to the exact address — found within 50 hits of Sent — lifts it.
 
 **The tripwire is literal, capped, and beatable.** Recording scans for text shaped like an address.
 "x at evil dot test", an address rendered in an image, or one split across a hidden span is not one,

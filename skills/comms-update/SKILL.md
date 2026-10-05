@@ -30,8 +30,8 @@ person, and ask which they want:
   the person to update it where it was installed (the plugin or the extension), or to put the stop off.
 - **Not now** — call `comms_update` with `later: true`. It is a change like any other: show the
   preview ("Skip the update to X until tomorrow") and wait for the person's yes (under `confirm`,
-  the approve command the result gives, run at their own terminal), then call again with the
-  `approvalId`. Nothing stops again until midnight, local time, on this computer; the first request
+  the approve command the result gives, run at their own terminal, and `comms_approval_wait` to learn
+  when they have), then call again with the `approvalId`. Nothing stops again until midnight, local time, on this computer; the first request
   after it asks again. Never put it off on your own: the stop exists so the person decides. Where the
   core server is not connected — only a plugin's server is — the stop itself gives the `update --later`
   command, and the `update` one, as this installation runs them: hand those over exactly as given, or,
@@ -83,9 +83,12 @@ reason says to run.
 
 Call `comms_update` without `check`. It returns `approvalRequired`, a `preview` and an `approvalId`:
 show the whole preview — it names every registration, runtime and global command it will change — and
-ask. Under the `chat` change policy, call `comms_update` again with the `approvalId` after their yes.
-Under `confirm`, they first run the approve command the result gives, in their own terminal, exactly
-as given; you cannot approve it yourself. If they say no, call `comms_approval_revoke`.
+ask. Under the `chat` change policy, call `comms_update` again with the `approvalId` after their yes,
+within ten minutes. Under `confirm`, they first run the approve command the result gives, in their own
+terminal, exactly as given, within thirty minutes; you cannot approve it yourself. Learn when they have
+with `comms_approval_wait` (`agentcomms approval wait <id>`), in repeated default-length waits, and call
+again once it answers `claimable: true`. When the person says no, revoke it at once:
+`comms_approval_revoke` (`agentcomms approvals revoke <id>`).
 
 The result lists each step with its `outcome`. A registration that did not start, or a runtime that
 did not install, is reported as `failed` with its `detail`: say which, and do not call the update done.
@@ -94,7 +97,11 @@ did not install, is reported as `failed` with its `detail`: say which, and do no
 ## 3. Restart, then clear out the old versions
 
 The new servers start only after the client is restarted — the result's `next` names the clients.
-Say so, and stop until they have. After the restart, call `comms_server_prune` for `core`, `gmail`
+Say so, and stop until they have. From 0.14.0 this matters more: the first 0.14 server or command that
+prepares, approves or sends anything, or changes a send policy, moves the shared configuration to
+version 3, and a server still running 0.13 then fails every call it starts with "this release reads
+versions 1 and 2" until its client is restarted. Approvals a 0.13 server prepared and nobody used are
+retired then ("prepared by an earlier release; prepare it again"): prepare them again. After the restart, call `comms_server_prune` for `core`, `gmail`
 and `slack` (each shows what it will delete and asks); it keeps any version a running process still
 uses, so a window that was not restarted keeps its old one until it is.
 
