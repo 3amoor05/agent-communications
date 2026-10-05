@@ -118,15 +118,28 @@ export function assertNoBareCommand(text: string, what = 'the output'): void {
 export const SLACK_SOURCE_CLI: string = fileURLToPath(new URL('../../src/cli.ts', import.meta.url));
 
 /**
+ * The words of a printed POSIX line, as a POSIX shell reads them: a single-quoted word is taken as it stands (with
+ * `'\\''` for a quote inside it), and anything else splits on spaces. Enough for what Slack prints with `darwin`
+ * pinned — on a Windows runner too, where this Node's path is a quoted word with backslashes in it.
+ */
+export function posixWords(line: string): string[] {
+  return [...line.matchAll(/'((?:[^']|'\\'')*)'|(\S+)/g)].map((match) =>
+    match[1] !== undefined ? match[1].replaceAll("'\\''", "'") : (match[2] as string),
+  );
+}
+
+/**
  * The command in backticks in `text` that ends with `words`, checked to be Slack's own, located: this Node, then Slack's
  * CLI entry here, then path pins, then the words. For output whose folders a test cannot name in advance.
  */
 export function locatedSlackLine(text: string, words: readonly string[]): string {
-  const tail = ` ${words.join(' ')}`;
-  const line = [...text.matchAll(/`([^`]+)`/g)].map((match) => match[1] as string).find((each) => each.endsWith(tail));
-  assert.ok(line !== undefined, `no command ending in "${tail.trim()}" in: ${text}`);
-  assert.ok(line.startsWith(`${process.execPath} `), `the program is this Node: ${line}`);
-  assert.ok(line.includes(` ${SLACK_SOURCE_CLI} `), `it runs Slack's own CLI: ${line}`);
+  const line = [...text.matchAll(/`([^`]+)`/g)]
+    .map((match) => match[1] as string)
+    .find((each) => posixWords(each).slice(-words.length).join('\0') === words.join('\0'));
+  assert.ok(line !== undefined, `no command ending in "${words.join(' ')}" in: ${text}`);
+  const printed = posixWords(line);
+  assert.equal(printed[0], process.execPath, `the program is this Node: ${line}`);
+  assert.ok(printed.includes(SLACK_SOURCE_CLI), `it runs Slack's own CLI: ${line}`);
   assertNoBareCommand(text);
   return line;
 }
@@ -137,9 +150,7 @@ export function locatedSlackLine(text: string, words: readonly string[]): string
  * exactly what the line would, pins and all.
  */
 export function argvAfterEntry(line: string): string[] {
-  const words = [...line.matchAll(/'((?:[^']|'\\'')*)'|(\S+)/g)].map((match) =>
-    match[1] !== undefined ? match[1].replaceAll("'\\''", "'") : (match[2] as string),
-  );
+  const words = posixWords(line);
   assert.equal(words[0], process.execPath, `the program is this Node: ${line}`);
   const entry = words.indexOf(SLACK_SOURCE_CLI);
   assert.ok(entry > 0, `it runs Slack's own CLI: ${line}`);

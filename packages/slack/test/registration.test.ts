@@ -285,8 +285,11 @@ test('commands to run again are quoted for the named POSIX or Windows platform (
   );
   const posixHint = String(posix.envelope().error?.hint);
   assert.match(posixHint, / workspace add other --mode send --client-id 'client id' --port 51234 --approval ap_\w+`/);
-  assert.ok(posixHint.includes(`\`${process.execPath} `), posixHint);
-  assertNoBareCommand(posixHint);
+  // This Node and Slack's own entry, located: the words as a POSIX shell reads them, `client id` one of them.
+  locatedSlackLine(posixHint, [
+    ...['workspace', 'add', 'other', '--mode', 'send', '--client-id', 'client id', '--port', '51234'],
+    ...['--approval', String(posix.envelope().error?.details?.approvalId)],
+  ]);
 
   const second = await machine();
   const windows = await cli(
