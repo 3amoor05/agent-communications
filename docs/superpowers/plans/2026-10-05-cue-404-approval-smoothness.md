@@ -175,38 +175,54 @@ The ranges below are where the code actually is:
        `#derive` rules (`approvals.ts:513-533`: creation-relative expiry, and `sending` turning `unknown` after 5
        minutes on `updatedAt`). Task 3 builds its `decodeLegacyV1` on this same function, so there is still one
        decoder.
-     - **`revoke(id, reason, options?)` (1079-1083) takes the legacy path only when its caller opts in.**
-       - Callers opt in with `{ legacy: 'person' }` or `{ legacy: 'lifecycle' }`.
-       - Without the option, a v1 record gets the ordinary version refusal and nothing is written. An integrity void,
-         or any future caller, cannot rewrite a v1 record by accident.
-       - The option names why the caller may write a v1 record. The type checker makes every caller choose, and a
-         mutation that drops the option from one caller is caught by that caller's test.
+     - **`revoke(id, reason, { disposition })` (1079-1083): the disposition is a required parameter.**
+       - `disposition: 'person' | 'lifecycle' | 'integrity'` has no default and no optional form, so the compiler
+         forces every direct call site to choose one.
+       - For a v2 record every disposition revokes as `revoke` does today. The disposition decides only what may
+         happen to a v1 record:
+         - `person` and `lifecycle` take the legacy path, `revokeLegacy`;
+         - `integrity` gets the ordinary version refusal, and nothing is written.
+       - So an integrity void, or a future caller that picks `integrity`, can never rewrite a v1 record.
+       - Existing test calls of `revoke` (`approvals.test.ts`, `changes.test.ts`, `core-server.test.ts` and the
+         channel suites) gain an explicit `disposition`, which is `person` wherever they model a person's cancel.
+     - **`revokeChange(core, id, reason, options)` (`changes.ts:438-458`) threads it.** `options` becomes
+       `ChangeOptions & { disposition: RevokeDisposition }`, required, and is passed straight to `approvals.revoke`
+       (444). Its callers choose:
+       - the person path, core `revokeApproval` (`maintenance.ts:430-438`), passes `person`;
+       - the terminal cancels (`change-flow.ts:244, 317`) pass `person`;
+       - the profile-drift integrity path, `refuseChangedProfile` (`operations/organisations.ts:276-296`), passes
+         `integrity`.
      - **Every `ApprovalStore.revoke` call site in the tree, classified.** These are all 12 direct calls in
-       `packages/*/src`, plus each wrapper's callers.
+       `packages/*/src`, plus each wrapper's callers. Task 3's migration table covers the same sites for the new
+       return type.
 
-       | Class | Call site | How it is reached | Legacy |
-       |---|---|---|---|
-       | Person | core `revokeApproval` → `approvals.revoke` (`maintenance.ts:436`), or `revokeChange` (435 → `changes.ts:444`) | `agentcomms approvals revoke` (`cli.ts:427`), `comms_approval_revoke` (`mcp/server.ts:294`); a conversational "no" is the agent calling it | `person` |
-       | Person | core `revokeChange` (`changes.ts:444`) on a terminal cancel | `gatedChangeAtTerminal` and `approveChangeAtTerminal` (`change-flow.ts:244, 317`) | `person` |
-       | Person | Gmail `revokeApproval` (`send.ts:764`) | `gmail_send_cancel` (`mcp/server.ts:2571`), `agent-gmail send cancel` (`cli/program.ts:1271`), Enter-to-cancel at `agent-gmail approve` (1351) | `person` |
-       | Person | Slack `revokeApproval` (`approve.ts:222`) | cancel at `agent-slack approve` (`cli/program.ts:1395`) | `person` |
-       | Person | Resend `revokeSendApproval` (`send.ts:920`) | cancel at `agent-resend approve` (`cli/program.ts:647`) | `person` |
-       | Person | core `downloadAtTerminal` and `answerDownloadAtTerminal` cancels (`save-destination.ts:1080, 1220`) | the download's terminal question | `person` |
-       | Person | Gmail download form (`mcp/server.ts:1005`) | an explicit decline. Task 13 stops a cancel or dismissal from revoking at all, and Task 13's new send-form decline joins this row | `person` |
-       | Lifecycle | Resend `removeAccountChange` (`accounts.ts:353-360`) | `agent-resend account remove` / its tool, after the person approved the removal. Removing an owner is the person's decision to void its approvals, and it voids them after the account is gone | `lifecycle` |
-       | Integrity void | Gmail `beginApproval` (`send.ts:487`) | a draft changed under a terminal approval | none |
-       | Integrity void | Resend `beginSendApproval` (`send.ts:863`) | the message or an attachment changed | none |
-       | Integrity void | Slack `currentPost` (`approve.ts:145`) | called by both `beginApproval` (173) and `finishApproval` (210) | none |
-       | Integrity void | core `refuseChangedProfile` → `revokeChange` (`operations/organisations.ts:291`) | an organisation profile changed since approval | none |
+       | Disposition | Call site | How it is reached |
+       |---|---|---|
+       | `person` | core `revokeApproval` → `approvals.revoke` (`maintenance.ts:436`), or `revokeChange(…, person)` (435 → `changes.ts:444`) | `agentcomms approvals revoke` (`cli.ts:427`), `comms_approval_revoke` (`mcp/server.ts:294`); a conversational "no" is the agent calling it |
+       | `person` | core `revokeChange(…, person)` on a terminal cancel | `gatedChangeAtTerminal` and `approveChangeAtTerminal` (`change-flow.ts:244, 317`) |
+       | `person` | Gmail `revokeApproval` (`send.ts:764`) | `gmail_send_cancel` (`mcp/server.ts:2571`), `agent-gmail send cancel` (`cli/program.ts:1271`), Enter-to-cancel at `agent-gmail approve` (1351) |
+       | `person` | Slack `revokeApproval` (`approve.ts:222`) | cancel at `agent-slack approve` (`cli/program.ts:1395`) |
+       | `person` | Resend `revokeSendApproval` (`send.ts:920`) | cancel at `agent-resend approve` (`cli/program.ts:647`) |
+       | `person` | core `downloadAtTerminal` and `answerDownloadAtTerminal` cancels (`save-destination.ts:1080, 1220`) | the download's terminal question |
+       | `person` | Gmail download form (`mcp/server.ts:1005`) | an explicit decline. Task 13 stops a cancel or dismissal from revoking at all, and Task 13's new send-form decline joins this row |
+       | `lifecycle` | Resend `removeAccountChange` (`accounts.ts:353-360`) | `agent-resend account remove` / its tool, after the person approved the removal. Removing an owner is the person's decision to void its approvals, and it voids them after the account is gone |
+       | `integrity` | Gmail `beginApproval` (`send.ts:487`) | a draft changed under a terminal approval |
+       | `integrity` | Resend `beginSendApproval` (`send.ts:863`) | the message or an attachment changed |
+       | `integrity` | Slack `currentPost` (`approve.ts:145`) | called by both `beginApproval` (173) and `finishApproval` (210) |
+       | `integrity` | core `refuseChangedProfile` → `revokeChange(…, integrity)` (`operations/organisations.ts:291`) | an organisation profile changed since approval |
 
-       0.14's terminal and form refuse a v1 record before rendering it, so in practice the person rows reach a v1
+       0.14's terminal and form refuse a v1 record before rendering it, so in practice the `person` rows reach a v1
        record through the tools and commands. A decline that ever reached one would take the same path.
-     - **The integrity voids stay version-gated, and fail early.** Gmail `beginApproval`, Resend `beginSendApproval`
-       and Slack `currentPost` refuse a v1 record with the version refusal before reading the draft or the room.
-       `refuseChangedProfile` returns early for a record that is not version 2, and the claim that follows refuses
-       it. If any of them did reach `revoke`, it passes no option, so nothing would be written.
+     - **What the integrity voids do with a v1 record.**
+       - Gmail `beginApproval`, Resend `beginSendApproval` and Slack `currentPost` refuse it with the version refusal
+         before reading the draft or the room, so they make no provider read.
+       - `refuseChangedProfile` does reach `revokeChange(…, integrity)` for a v1 change record whose profile drifted.
+         It reads the stored change binding: the raw record in this task, or the legacy view's internal fields from
+         Task 3. `revoke` refuses that record with the version refusal and writes nothing.
+         `refuseChangedProfile`'s own `.catch` (291) absorbs the refusal, and it throws its usual "the profile
+         changed" `APPROVAL_VOID`.
      - The Task 4 drain calls `revokeLegacy` directly. Task 8's `never` sweep revokes only version-2 records, and
-       never passes the option.
+       passes `integrity`.
    - **New module `packages/core/src/send-epoch.ts`** with `sendEpochOf(config, ownerId)`, which reads an absent value
      as 0. Version 3 does not exist until Task 4, so every epoch reads 0 until then.
    - **Callers.**
@@ -257,8 +273,17 @@ The ranges below are where the code actually is:
      refused by the version gate with no write (above).
    - **Integrity voids.** A v1 record passed to Gmail `beginApproval`, Resend `beginSendApproval`, or Slack
      `beginApproval` and `finishApproval` (through `currentPost`) is refused before any draft read, and nothing is
-     written. `refuseChangedProfile` leaves a v1 change record untouched. A direct `revoke(id, reason)` with no option
-     on a fresh v1 record returns the version refusal, and the file is byte-identical.
+     written. A direct `revoke(id, reason, { disposition: 'integrity' })` on a fresh v1 record returns the version
+     refusal, and the file is byte-identical.
+   - **A fresh v1 change record through both `revokeChange` paths** (`changes.test.ts`, with a v1 `pending` change
+     record in the released 0.13.0 shape):
+     - **"a person's revoke of a v1 change writes a v1-shaped revoked".** `agentcomms approvals revoke <id>`, through
+       core `revokeApproval` → `revokeChange(…, person)`, leaves the file as the original plus `state: 'revoked'`,
+       the reason and `updatedAt`. There is no `.claim` marker and no v2 field, and the audit row is written.
+     - **"profile drift does not rewrite a v1 change".** The record's stored change carries an organisation-profile
+       effect line whose SHA-256 differs from the file now on disk. A claim through `orgUpdateChange`'s approval reaches
+       `refuseChangedProfile` → `revokeChange(…, integrity)`. The caller gets the usual "the profile changed since it
+       was approved" `APPROVAL_VOID`, and the file is byte-identical: the version refusal wrote nothing.
    - **"removing a Resend account retires its v1 approvals in v1 shape"** (`packages/resend/test/accounts.test.ts`).
      The account owns a v1 `pending` and a v1 `approved` send record (`acc_` owner, no `kind`), and the removal runs
      through `removeAccountChange` with its change approval.
@@ -282,12 +307,18 @@ The ranges below are where the code actually is:
      past-expiry v1 cases' "byte-identical file" assertions;
    - route a v1 revoke through the ordinary version gate (`#transition`) instead of `revokeLegacy`, which must fail
      "a person's revoke of a fresh v1 record writes a v1-shaped revoked";
-   - drop `{ legacy: 'lifecycle' }` from `removeAccountChange`, so the caller goes through the normal version gate.
-     This must fail "removing a Resend account retires its v1 approvals in v1 shape": the removal throws partway, or
-     the files stay `pending`/`approved`;
-   - drop `{ legacy: 'person' }` from one person-row caller in turn (core `revokeApproval`, Gmail `revokeApproval`),
-     which must fail that caller's fresh-record case;
-   - let `revoke` take the legacy path with no option, which must fail the integrity-void "byte-identical" case;
+   - change `removeAccountChange`'s disposition from `lifecycle` to `integrity`, so the caller goes through the
+     normal version gate. This must fail "removing a Resend account retires its v1 approvals in v1 shape": the
+     removal throws partway, or the files stay `pending`/`approved`;
+   - flip core `revokeApproval`'s `revokeChange` disposition from `person` to `integrity`, which must fail "a
+     person's revoke of a v1 change writes a v1-shaped revoked";
+   - flip `refuseChangedProfile`'s `revokeChange` disposition from `integrity` to `person`, which must fail "profile
+     drift does not rewrite a v1 change", because the file is now rewritten;
+   - flip Gmail `revokeApproval`'s disposition to `integrity`, which must fail its fresh-record case;
+   - make `revoke` write a v1 record under `integrity`, which must fail the integrity-void "byte-identical" case;
+   - give `disposition` a default, or make it optional. The compile-only fixture
+     `packages/core/test/fixtures/revoke-disposition.ts` then fails `pnpm typecheck`: its `// @ts-expect-error` on a
+     two-argument `revoke` and a disposition-less `revokeChange` no longer finds an error;
    - add a v2 field (`revokedAt`) to the legacy revoke's write, which must fail the v1-shape assertion.
 
    **Done when.** Every new record is version 2 with both digests. The binding recomputes from stored fields alone.
@@ -356,11 +387,13 @@ The ranges below are where the code actually is:
        `ConfigStore` built at line 32. The arrow keeps `this` bound, because `load` uses private fields and must not
        be passed unbound.
      - **When it is read.** `get` loads the config once per read, and `list` once per call, so one listing decodes
-       against one snapshot. A loader error propagates: a config that cannot be read is already a `CONFIG` error on
-       every surface. `null` means "no config", and is treated as a store without a loader.
+       against one snapshot. A loader error propagates out of `get` and `list` unchanged. It is never caught and
+       read as "no config", so nothing is classified unattributable because the config could not be read. A config
+       that cannot be read is already a `CONFIG` error on every surface. A loader that resolves `null` means "no
+       config", and is treated as a store without a loader.
      - **A store without a loader** (the direct-store tests) decodes every `acc_` v1 record as unattributable. `ibx_`
        needs no config and stays Gmail. Nothing else read in this task needs config.
-     - **Compile adaptations.** None in this task: the option is optional, so every existing direct construction
+     - **Constructor compile adaptations.** None: `loadConfig` is optional, so every existing direct construction
        compiles and behaves as before. These are `packages/core/test/approvals.test.ts:31, 88, 181, 458`,
        `save-destination.test.ts:112, 135, 161, 180, 223`, `update-gate.test.ts:565`, Slack `send.test.ts:72, 208,
        464`, `reaction-outcome.test.ts:211` and `post-outcome.test.ts:106`, Gmail `send-outcome.test.ts:80`, and
@@ -368,7 +401,9 @@ The ranges below are where the code actually is:
    - **`approvals.ts` `#read` (499-506).** Returns a discriminated `StoredApproval`:
      - **v2**: a validated record.
      - **Corrupt v2**: carries its safe fields and its attribution class.
-     - **Legacy**: the decoded v1 view.
+     - **Legacy**: the decoded v1 view. Internally it keeps the stored `inboxId`, `draftId`, `draftMessageId`,
+       `expect` and the stored change or download binding, for ownership, the in-flight guards and the profile drift
+       check. Its public rendering is only the spec's field set.
      - **Unreadable**: the stub `{ approvalId, state: 'corrupt', reason }`. `reason` is a fixed category (invalid
        JSON, truncated, missing ownership, missing kind, wrong shape) and never echoes file bytes. The `approvalId` is
        taken only from a file name that passes `APPROVAL_ID_PATTERN`.
@@ -391,28 +426,94 @@ The ranges below are where the code actually is:
      - corrupt records and unreadable stubs, which are never rewritten;
      - a stored `approvalId` that differs from the file name. That case is corrupt before `#path`, the lock or
        `#markClaimed` (802-814) touch the other id.
-   - **`revoke`** keeps routing a legacy record to Task 1's `revokeLegacy`, still only when the caller passes Task 1's
-     `legacy` option. It now chooses that route from the decoded `StoredApproval`, not from a raw version check. A
-     corrupt record or an unreadable stub is never revoked or rewritten; it is reported as it is. `revoke` now
-     returns `StoredApproval`.
+   - **`revoke`** keeps routing a legacy record to Task 1's `revokeLegacy`, only under the `person` and `lifecycle`
+     dispositions. It now chooses that route from the decoded `StoredApproval`, not from a raw version check. A
+     corrupt record or an unreadable stub is never revoked or rewritten; it is returned as it is. `revoke` now returns
+     `StoredApproval`.
    - **`list` (1085-1104)** drops `.catch(() => null)`. It returns every file as one of the four forms.
-   - **Callers adapt mechanically**, treating anything not v2 as unusable; Task 9 reworks them properly:
-     - core: maintenance `listApprovals` (`maintenance.ts:405`) and `revokeApproval` (430); `claimsApproval`
-       (`update-gate.ts:82-91`);
-     - Gmail: `listApprovals` (`send.ts:747`), `refuseWhileSending` (`drafts.ts:561`, `organise.ts:128`);
-     - Resend: `ownRecord` (`send.ts:86`) and `sendStatus` (748). Also `removeAccountChange`
-       (`accounts.ts:353-360`), the lifecycle caller in Task 1's table. It iterates `list({ inboxId, states:
-       ['pending', 'approved'] })`, which now yields v2 records and legacy views; a stub has state `corrupt`, so the
-       filter never matches one. It reads only `approvalId` from each, so the union needs a narrowing type only. It
-       keeps passing `{ legacy: 'lifecycle' }`, and `approvalsVoided` is unchanged;
-     - Slack: `approve.ts`;
-     - `save-destination.ts`;
-     - **every other `revoke` call site in Task 1's table accepts the `StoredApproval` result:**
-       - Gmail `revokeApproval` reads `inboxId` for its audit row, which legacy views and v2 records both carry;
-       - core `revokeApproval` returns `publicView`, or the legacy view;
-       - `revokeChange` audits the record's target;
-       - the cancels and `refuseChangedProfile` ignore the result.
+   - **Narrowing helpers**, exported beside `StoredApproval`:
+     - `asV2(stored)`: the valid version-2 record, or `null`.
+     - `ownerOf(stored)` and `kindOf(stored)`: these come from a v2 record, an attribution-verified corrupt record,
+       or a legacy view (the stated legacy trust limit). They are `null` for an unreadable stub and for an
+       attribution-unverifiable corrupt record.
+     - `stateOf(stored)`: the stored or derived state, or `corrupt`.
+     - `publicStored(stored)`: the public shape of each form. This is `publicView` for v2, the safe fields plus
+       `state: 'corrupt'` and the reason for corrupt, the spec's field set for legacy, and the stub as it is. Tasks 5
+       and 11 extend it into D8's object. Its type is the new `PublicApproval`.
+   - **Narrowing rules**, applied at every site in the table below:
+     - **N1. No owner is ever read from an unreadable stub or an attribution-unverifiable record.** Every pin and
+       ownership check treats one as D2's identical `NOT_FOUND`, and an owner filter never matches one.
+     - **N2.** An unknown kind never matches a kind check.
+     - **N3.** Only an `asV2` result reaches a v2-only helper: `downloadClaimRefusal`, `changeDrift`,
+       `renderChangePreview`, `publicView`, `reactionOfApproval` and every digest comparison.
+     - **N4. An action on a record that is not valid v2 is refused.**
+       - A legacy record gets the version refusal, except for a `person` or `lifecycle` revoke.
+       - A corrupt or unreadable record gets D2's `NOT_FOUND` on a pinned surface (N1).
+       - On an unpinned surface it gets an integrity refusal that repeats only `{ approvalId, state: 'corrupt',
+         reason }`.
+     - **N5.** The `.catch(() => null)` callers still catch only I/O and id-grammar errors. A malformed file is no
+       longer an exception, so they handle its stub by N1–N4, never as "absent".
+   - **Every source call of `get`, `revoke` and `list`, migrated in this task.** These are the 25 `approvals.get`,
+     12 `approvals.revoke` and 5 `approvals.list` calls in `packages/*/src`, 42 in all, found with
+     `grep -rn -E "approvals\.(get|revoke|list)\(" packages/*/src`. Slack's `deps.approvals` uses only `create`,
+     `claimForSend` and `complete`. Task 9 later replaces the narrowing with the classifier at the same sites. Test
+     files that call these methods narrow with `asV2` and `stateOf` in the same way; they are not listed.
 
+     | # | Site | Function | After Task 3 |
+     |---|---|---|---|
+     | G1 | core `save-destination.ts:864` | `settleDestination` | `asV2` `download` only reaches `downloadClaimRefusal` and the recorded answer (N3). Any other form is "no open question", and the claim that follows refuses it |
+     | G2 | core `save-destination.ts:1239` | `storedQuestion` | v2 `download` only. Legacy gets the version refusal; corrupt or unreadable gets N4; absent keeps its `NOT_FOUND` |
+     | G3 | core `update-gate.ts:86` | `claimsApproval` | A claim is admitted only for a v2 `pending`/`approved` record of the claimed kind. A look-up is admitted for any held id whose `kindOf` matches a required kind (N2); a legacy Resend send passes `SEND_LOOKUP` |
+     | G4 | core `changes.ts:316` | `changeRecord` (for `beginChangeApproval` 359, `finishChangeApproval` 382) | v2 `change` only (N4). Return type unchanged |
+     | G5 | core `changes.ts:427` | `recordChangeApprovalRefused` | Audit target and policy only from `asV2`; otherwise `target: null` and no policy |
+     | G6 | core `operations/organisations.ts:282` | `refuseChangedProfile` | A v2 or legacy `change` in `pending`/`approved`; the effects come from the binding (legacy: its internal fields). Revokes with `integrity` |
+     | G7 | core `operations/organisations.ts:987` | `approvalRecordsNarrowing` | `asV2` `change` only; otherwise `false` |
+     | G8 | core `operations/update.ts:851` | `nothingToApply` | `whatBecameOf` (873) takes `StoredApproval \| null`. Legacy names its derived state and "prepared by an earlier release"; corrupt or unreadable says "it could not be read safely (<reason>)". `details.state` comes from `stateOf` |
+     | G9 | core `operations/maintenance.ts:431` | `revokeApproval` | `kindOf` is `change` → `revokeChange(…, person)`; otherwise `revoke(…, person)`. An unreadable stub is written nothing and returned |
+     | G10 | Gmail `cli/program.ts:1309` | `approve` action | Dispatch by `kindOf`: `change` → `approveChangeAtTerminal`, `download` → `answerDownloadAtTerminal`, otherwise `beginApproval`, which applies N4 |
+     | G11 | Gmail `mcp/server.ts:273` | `downloadNeedsPerson` | `asV2` pending `download`, with the owner compared on it; otherwise `false` |
+     | G12 | Gmail `mcp/server.ts:392` | `checkApprovalPin` | Passes only when `ownerOf(stored) === pinnedId`; otherwise D2's `NOT_FOUND` (N1) |
+     | G13 | Gmail `mcp/server.ts:2276` | `needsConfirmation` | `asV2` only; otherwise `false`, and the execute that follows refuses it |
+     | G14 | Gmail `operations/send.ts:472` | `beginApproval` | v2 `send` only. Legacy gets the version refusal before the draft read (Task 1); corrupt or unreadable gets N4 |
+     | G15 | Gmail `operations/send.ts:518` | `finishApproval` | As G14 |
+     | G16 | Gmail `operations/send.ts:571` | `executeSend` | As G14; a v2 `pending`/`approved` record proceeds |
+     | G17 | Resend `operations/send.ts:87` | `ownRecord` | When `ownerOf` differs from the account or is unknown, `NOT_FOUND` (N1). Then v2 `send` only (N4). Returns the v2 record |
+     | G18 | Resend `operations/send.ts:750` | `sendStatus` | The owner and kind check as G17. `SendStatus.approval` becomes `PublicApproval \| null` |
+     | G19 | Resend `operations/send.ts:843` | `recordAndAccount` (for `beginSendApproval` 860, `finishSendApproval` 895, `revokeSendApproval` 919) | Owner via `ownerOf` (N1). It returns `{ stored, named }`; begin and finish narrow to v2 `send` (N4), and the revoke accepts v2 or legacy |
+     | G20 | Resend `cli/program.ts:624` | `approve` action | Dispatch by `kindOf`, as G10 |
+     | G21 | Slack `mcp/server.ts:318` | `ownApproval` (pin) | A held record whose `ownerOf` is not `pinnedId`, or is unknown, gets `NOT_FOUND` (N1). Today `record && record.inboxId !== pinnedId` lets anything falsy through; a stub must never pass as absent |
+     | G22 | Slack `cli/program.ts:1350` | `approve` action | Dispatch by `kindOf`, as G10 |
+     | G23 | Slack `operations/approve.ts:33` | `approvalAndWorkspace` (for `beginApproval`, `finishApproval`) | v2 `send` only. Task 1's early version refusal lives here, before `currentPost`. Return type unchanged |
+     | G24 | Slack `operations/approve.ts:227` | `workspaceForApproval` | Workspace from `ownerOf` (v2 or legacy); unknown owner gets `NOT_FOUND` |
+     | G25 | WhatsApp `cli/program.ts:425` | `approve` action | Absent keeps `NOT_FOUND`; an unreadable stub gets N4. `kindOf` other than `change` keeps its refusal. A legacy change goes to `approveChangeAtTerminal`, which refuses it at G4 |
+     | R1 | core `save-destination.ts:1080` | `downloadAtTerminal` cancel | `person`; result ignored |
+     | R2 | core `save-destination.ts:1220` | `answerDownloadAtTerminal` cancel | `person`; result ignored |
+     | R3 | core `changes.ts:444` | `revokeChange` | Disposition threaded and required. Audit target and policy from the v2 change or the legacy view's stored change; a stub gets `target: null`. Returns `StoredApproval` |
+     | R4 | core `operations/maintenance.ts:436` | `revokeApproval` | `person`. Returns `publicStored(result)` |
+     | R5 | Gmail `mcp/server.ts:1005` | download form decline | `person`; result ignored |
+     | R6 | Gmail `operations/send.ts:487` | `beginApproval` integrity void | `integrity`. Unreachable for v1, because G14 refuses first |
+     | R7 | Gmail `operations/send.ts:764` | `revokeApproval` | `person`. Audit `inboxId` is `ownerOf(result) ?? ''`; `gmail_send_cancel` returns `{ approvalId, state: stateOf(result) }`. Returns `StoredApproval` |
+     | R8 | Resend `operations/accounts.ts:358` | `removeAccountChange` | `lifecycle`; result ignored, and the ids come from L5 |
+     | R9 | Resend `operations/send.ts:863` | `beginSendApproval` integrity void | `integrity`. Unreachable for v1, because G19 narrows first |
+     | R10 | Resend `operations/send.ts:920` | `revokeSendApproval` | `person`; result ignored |
+     | R11 | Slack `operations/approve.ts:145` | `currentPost` integrity void | `integrity`. Unreachable for v1, because G23 refuses first |
+     | R12 | Slack `operations/approve.ts:222` | `revokeApproval` | `person`; result ignored |
+     | L1 | core `operations/maintenance.ts:417` | `listApprovals` | Every form. `--inbox` filters by `ownerOf` and never matches a stub (N1); `--state` filters by `stateOf`. Returns `PublicApproval[]`, and the CLI renderer (`cli.ts:417-420`) prints `stateOf` and `expiresAt` when present |
+     | L2 | Gmail `operations/organise.ts:134` | `refuseWhileSending` | `sending` from v2 records and legacy views, so a 0.13 send in flight is guarded too. `draftMessageId` comes from either |
+     | L3 | Gmail `operations/drafts.ts:562` | `refuseWhileSending` | As L2, matching `draftId` |
+     | L4 | Gmail `operations/send.ts:758` | `listApprovals` | Every form. The inbox comes from `ownerOf`, keeping `(removed)`; a stub has `inbox: null` and is omitted whenever an inbox filter or pin applies (N1). The `gmail_send_list` output schema (`mcp/server.ts:2602-…`) and `renderApprovals` (`cli/render.ts:751`) accept the union |
+     | L5 | Resend `operations/accounts.ts:354` | `removeAccountChange` | Owner filter (a stub never matches), and `pending`/`approved` over v2 records and legacy views |
+
+   - **Wrapper and result types that change**, named so that review can check each signature:
+     - core: `ApprovalStore.get`, `list` and `revoke` return `StoredApproval`; `revokeChange` gains the required
+       disposition and returns `StoredApproval`; `whatBecameOf` takes `StoredApproval | null`; `listApprovals` and
+       `revokeApproval` return `PublicApproval`, replacing `ApprovalView` (`maintenance.ts:403`);
+     - Gmail: `revokeApproval` returns `StoredApproval`, and `listApprovals` returns `PublicApproval & { inbox:
+       string | null }`;
+     - Resend: `recordAndAccount` returns `{ stored, named }`, and `SendStatus.approval` is `PublicApproval | null`;
+     - the `gmail_send_list` output schema (`mcp/server.ts:2602-…`) accepts the union. `gmail_send_cancel` already
+       returns only `{ approvalId, state }`. `comms_approvals_list`, `comms_approval_revoke` and `resend_send_status`
+       declare no strict output schema today.
    **Tests first.** Add `packages/core/test/approval-store-read.test.ts`. Cover §5 R11a, R13e, R17a, R18d, R20c, R23g,
    R25f, R32g, R32j, R34d and D8i-b:
 
@@ -438,17 +539,54 @@ The ranges below are where the code actually is:
      `revoke` and passes.
    - One list mixing v1 and v2 records: the v1 ones are `legacy: true`, never `corrupt`, and the v2 missing-binding
      rule never applies to them.
+   - **The loader's error and snapshot semantics.**
+     - **"a rejecting config loader fails get rather than reading acc_ as unattributable".** The loader rejects with
+       a `CONFIG` error. `get` of an `acc_` v1 record rejects with that same error, and no view classified
+       unattributable is returned.
+     - **"a rejecting config loader fails a mixed list".** A store holding v2, `ibx_` v1, `acc_` v1 and unreadable
+       files: `list` rejects with the loader's error and returns no partial list. Nothing is classified because of the
+       failure.
+     - **"list loads the config exactly once".** A counting loader under a store holding 50 mixed records, with
+       several `acc_` v1 among them, is called once per `list` call and once per `get`. Swapping the account's
+       platform in the loader's config between two `list` calls changes attribution only in the second, never
+       partway through one.
+   - **The migration table.** A focused case per row group, each run on a v2, a legacy, an attribution-verified
+     corrupt, an unverifiable corrupt and an unreadable record:
+     - **pins** (G12, G21, G17/G18): a stub and an unverifiable record get the identical `NOT_FOUND` on a pinned
+       Gmail and Slack server and an account-scoped Resend call, and no owner is read from them;
+     - **kind dispatch** (G10, G20, G22, G25): a stub goes to N4's integrity refusal; a legacy change goes to the
+       version refusal;
+     - **owner filters** (L1, L4, L5): a stub never matches `--inbox`, a pin or an account removal;
+     - **in-flight guards** (L2, L3): a legacy `sending` record blocks a draft edit and a move;
+     - **v2-only helpers** (G1, G4, G5, G7, G11, G13): a non-v2 record never reaches one;
+     - **wrapper results** (G8, G9, R3, R4, R7, G19): each returns its named new type.
+
+     These live in `approval-store-read.test.ts` for core, and in Gmail `tool-parity.test.ts`, Slack
+     `mcp-parity.test.ts`, Resend `send-gate.test.ts` and WhatsApp `cli.test.ts` for the channel rows.
 
    Mutations: restore the catch-and-skip; put a byte of the file in `reason`; let the decoder write; treat a v1 record
    with no binding as corrupt; drop the filename check. Re-run Task 1's legacy revoke tests through the new read path
    and require them to pass. Then route a legacy `StoredApproval` to `#transition`, which must fail "a person's revoke
    of a fresh v1 record writes a v1-shaped revoked". Pass `config.load` unbound in `core.ts`, which must fail the
    `acc_`-while-the-account-exists case through `openCore`. Fall back to a guessed platform when there is no loader,
-   which must fail the no-loader test.
+   which must fail the no-loader test. More mutations, each of which must fail a named test:
 
-   **Done when.** No read returns a record it has not validated or decoded, and nothing is silently omitted. v1 files
-   are readable for reporting, and written only by Task 1's legacy path (the drain, a person's revoke and an approved
-   owner removal). The store reads config only through its loader, and `openCore` supplies it.
+   - **"catch the loader error as no config"** (`loadConfig().catch(() => null)` inside the store) fails both
+     rejecting-loader tests;
+   - **"load once per record"** (calling the loader inside the per-file decode) fails "list loads the config exactly
+     once";
+   - read `inboxId` straight off a stub in `checkApprovalPin` or `ownApproval` fails the pins case;
+   - let an owner filter match a stub fails the owner-filter case;
+   - pass a legacy view to `downloadClaimRefusal` fails the v2-only case.
+
+   **Done when.**
+
+   - No read returns a record it has not validated or decoded, and nothing is silently omitted.
+   - v1 files are readable for reporting, and written only by Task 1's legacy path: the drain, a person's revoke, and
+     an approved owner removal.
+   - The store reads config only through its loader. `openCore` supplies it, and its errors propagate.
+   - All 42 calls in the migration table are migrated, every changed type is as named, and **`pnpm verify` is
+     green** (`pnpm typecheck` included) with no `as` cast to `ApprovalRecord` added at any call site.
 
 4. **Risky — Config version 3: the send epoch, the conversion door and the legacy drain.**
 
