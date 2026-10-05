@@ -1,6 +1,6 @@
 # CUE-404 — approving a send without fighting the clock — design
 
-Status: **revised after round 7 (2 P2, 1 P3, all addressed)**, 2026-10-05, from Linear CUE-404 (High; the
+Status: **revised after round 8 (1 P2, 1 P3, all addressed)**, 2026-10-05, from Linear CUE-404 (High; the
 owner: "this is very not smooth") and a cited research pass over this repository, the MCP specification and the
 clients' documentation. Depends on CUE-403 (the CLIs on PATH,
 [its spec](2026-10-04-cli-path-shims-design.md)) for every printed terminal command to work; ships after it.
@@ -47,7 +47,7 @@ implement the first two. The short repeat preview is dropped for this release an
 | Trusted send forms are an empty-by-default list of MCP `clientInfo.name` values. A probe record becomes complete only when `completeProbe` is called; the send test does that directly at lines 144–145, while the later callback at lines 168–172 automatically answers the **send approval form**, not the probe. | `packages/core/src/config.ts:103-108, 420-432`; `packages/gmail/src/operations/confirm-clients.ts:67-95`; `packages/gmail/test/mcp-send.test.ts:138-172` |
 | `clientInfo` is self-reported and elicitation defines a client/server exchange, not proof that a person answered. The Gmail server reads the reported client name before trusting a form. Only URL-mode elicitation keeps the person's answer from the client and model. | MCP elicitation specification 2026-07-28; [TypeScript SDK migration note](https://ts.sdk.modelcontextprotocol.io/v2/migration/support-2026-07-28); `packages/gmail/src/mcp/server.ts:2385-2395`; `SECURITY.md:67-68` |
 | The taint store is shared across mailboxes. It records canonical addresses and non-public domains from mail read in the last seven days, excluding the reading mailbox's own addresses and current `internalDomains`. An entry aggregates the newest timestamp, the strongest source ever seen (`header` over `body`) and the union of mailbox ids; it does not retain one coherent sighting. | `packages/core/src/taint.ts:260-270, 277-325, 341-349`; `packages/gmail/src/operations/read.ts:243-250` |
-| A new mailbox's `internalDomains` defaults to its own non-public domain, and widening it is a gated loosening. With static configuration, an exact internal address can enter the shared taint store only through a mailbox where it is external. An address recorded while external can nevertheless remain for the seven-day window after `internalDomains` is widened, because reads prune stored entries by time and `check()` does not reapply the recording exclusions. | `packages/core/src/config.ts:1293-1297, 1425-1446`; `packages/core/src/taint.ts:260-270, 296-325, 341-349` |
+| A new mailbox's `internalDomains` defaults to its own non-public domain, and widening it is a gated loosening. With static configuration, an exact internal address can enter the shared taint store only through a mailbox where it is external. An address recorded while external can nevertheless remain effective for the seven-day window after `internalDomains` is widened, because `check()` reapplies the time window but not the recording exclusions. After expiry, `check()` removes it only from that in-memory result; the file removes it physically on the next locked `record()` rewrite. | `packages/core/src/config.ts:1293-1297, 1425-1446`; `packages/core/src/taint.ts:253-264, 296-327, 341-349` |
 | Send time currently escalates on `seen.address \|\| seen.domain` unless this mailbox has written to the exact address. The sent-history check currently asks only for five fuzzy `in:sent to:<address>` hits, then comma-splits To/Cc/Bcc header strings and strips display-name wrappers with a regex before exact canonical-address comparison; it is not RFC mailbox-list parsing and does not paginate. | `packages/gmail/src/operations/send.ts:202-221, 240-275` |
 | Terminal send approval currently re-renders the shared preview, asks for the challenge, and only approves; it does not send. The shared renderer truncates addresses, subject, attachment filenames, thread and URLs, so this is not proof that every digest-bound byte was displayed. | `packages/gmail/src/cli/program.ts:1345-1356`; `packages/core/src/render.ts:154-192` |
 | Approval records currently carry `digestVersion: 1`; every locked transition refuses another version with “prepared by a different version of agent-communications,” after persisting any derived state it observed. | `packages/core/src/approvals.ts:292-306, 570-588` |
@@ -61,7 +61,8 @@ implement the first two. The short repeat preview is dropped for this release an
 | Core's current `list()` reads every approval file sequentially and catches a failed `get()` as `null`, silently omitting that record. | `packages/core/src/approvals.ts:1085-1103` |
 | `openCore` constructs one `ApprovalStore`, and each Gmail, Slack and Resend MCP server constructs one context when the server starts. Maintenance tied only to store construction therefore does not recur in a long-lived server. | `packages/core/src/core.ts:29-42`; `packages/gmail/src/mcp/server.ts:200-207`; `packages/slack/src/mcp/server.ts:187-194`; `packages/resend/src/mcp/server.ts:118-121` |
 | The audit append API accepts a `durable` option. Its filesystem helper fsyncs the file everywhere; on POSIX it then fsyncs the containing directory and its parent, while on Windows directory sync is skipped and NTFS metadata journaling is relied on. | `packages/core/src/audit.ts:75-85`; `packages/core/src/fs.ts:107-145`, especially `fs.ts:129` |
-| The existing taint cache physically removes expired entries and caps retained entries, because an unbounded shared-state rewrite would become growing work on every read and send. | `packages/core/src/taint.ts:253-270` |
+| The file lock becomes stale after 30 seconds by default and waits up to five seconds by default. Renewal is explicitly opt-in; when enabled, it touches the lock while the callback runs, and the final cleanup removes the lock only if its token is still the holder's. A long maintenance callback therefore has to enable renewal and fence its own writes. | `packages/core/src/lock.ts:14-21, 157-164, 219-232` |
+| The existing taint store caps retained entries. Its locked `record()` path prunes then rewrites the file, so that is when expired entries are physically removed; `check()` prunes only the in-memory value it returns and does not rewrite the file. | `packages/core/src/taint.ts:253-264, 317-327, 341-349` |
 | Gmail draft edits and message organisation already use `APPROVAL_PENDING` with “being sent right now” and “wait for the send to finish” when a send is in flight. | `packages/gmail/src/operations/drafts.ts:561-567`; `packages/gmail/src/operations/organise.ts:128-141` |
 | Slack gives every saved draft a revision, binds an approval to that revision as `draftMessageId`, and also binds the composed post digest. | `packages/slack/src/operations/drafts.ts:151-190`; `packages/slack/src/operations/send.ts:446-469, 728-746` |
 | The existing list surfaces are core `agentcomms approvals list` / `comms_approvals_list` → `listApprovals`, and Gmail `agent-gmail send list` / `gmail_send_list` → its `listApprovals`. Resend has `send status`, not a list; Slack has `draft list`, not an approval list. | `capabilities.json:29-34, 550-555, 897-902, 1199-1204` |
@@ -354,7 +355,10 @@ entries whose expiry is at or before the current time, applies the current obser
 remaining observations (observation time, with the canonical key as the stable tie-breaker) until at most 5,000 remain
 before the atomic write. A malformed file is read as an empty cache and is replaced only by a valid locked write; for
 that operation its affected history answers are conservatively `not-written` with `historyCheck: cache-malformed`,
-never `written`, so corruption cannot suppress escalation.
+never `written`, so corruption cannot suppress escalation. If an atomic write reports failure, the operation does not
+use an observation that it could not commit to suppress escalation; it reports `cache-write-failed` and treats the
+affected address as not written. A following process must see either the complete old file or the complete new file,
+never a partial cache.
 
 The correspondent-domain scan used for lookalikes is separate from that budget and keeps its existing cap: one
 `listMessages({ query: "in:sent", maxResults: 200 })` call and metadata reads for at most those 200 messages
@@ -373,7 +377,9 @@ same locked-write order: remove expired entries first, apply the current observa
 observation time and immutable mailbox id until the file is at the cap. A malformed file reads as empty and forces a
 fresh correspondent scan rather than treating an empty domain set as authoritative. If that recovery scan fails, the
 result carries `correspondentHistory: cache-malformed` and conservatively keeps the confirm escalation instead of
-silently concluding that there is no lookalike. Thus malformed state in either cache never suppresses escalation.
+silently concluding that there is no lookalike. A reported atomic-write failure similarly yields
+`correspondentHistory: cache-write-failed` and keeps the confirm escalation; the next reader sees either the complete
+old cache or the complete new one. Thus malformed state or a failed write in either cache never suppresses escalation.
 
 The 50-hit cap deliberately accepts one false negative: if 50 fuzzy hits contain no exact address and the exact hit
 would be 51st, the result is `not-written` and the send keeps the warning. That is conservative; provider errors,
@@ -382,9 +388,11 @@ the operation-wide budget, exhaustion at 50 or no exact hit never suppress escal
 Two limits remain explicit. First, an internal address read in the sending mailbox is discarded before it reaches the
 store (`packages/core/src/taint.ts:296-305`), so a compromised colleague who writes only to that mailbox leaves no
 exact-address tripwire. That protection is narrower than previously claimed and is pre-existing, not weakened here.
-Second, an address recorded while external remains until the seven-day prune even if an approved config change later
-adds its domain to `internalDomains` (`packages/core/src/taint.ts:260-270, 307-325, 341-349`). In that transition the
-exact stored address can still escalate; the explanation says why.
+Second, an address recorded while external remains effective until the seven-day cutoff even if an approved config
+change later adds its domain to `internalDomains`. At and after the cutoff, `check()` excludes it from its in-memory
+result; the expired entry is removed physically only by the next locked `record()` rewrite
+(`packages/core/src/taint.ts:253-264, 317-327, 341-349`). During that transition the exact stored address can still
+escalate; the explanation says why.
 
 ### D5. The confirmation route: one decision, and honest about where it happens
 
@@ -533,22 +541,54 @@ list surface is added (`capabilities.json:29-34, 1199-1204`).
 creation and before every approval list, D3 status/wait operation, and D9 report, doctor or draft-annotation operation.
 It is deliberately a store-use hook, not constructor work: one MCP context and its one `ApprovalStore` can remain
 alive across any number of daily boundaries and still run maintenance. Calls in several processes coordinate per
-state directory. Under the approval store's maintenance lock, the method reads persisted prune state containing
-`lastAttemptAt` and a continuation cursor. When fewer than 24 hours have elapsed it returns `attempted: false`.
-Otherwise it durably writes the new attempt timestamp under that lock **before** processing records, so a crash or a
-failed batch cannot cause a retry storm and no state directory attempts pruning more than once in any 24-hour window.
+state directory. The elapsed-time budget starts on entry to `ensurePruned()` and covers maintenance-lock acquisition,
+state validation, directory enumeration and metadata reads, record work and the cursor commit. The attempt starts no
+new maintenance step after **5 seconds elapsed** and starts no 201st record slot, whichever limit arrives first. An
+already-started local filesystem operation cannot be cancelled, so the caller's bound is about five seconds rather
+than a hard real-time deadline.
 
-One attempt enumerates the approval JSON and claim-marker directory once, stats each retained candidate, pairs
-artifacts by approval id into one record slot, and orders the slots by oldest modification time with approval id as the
-stable tie-breaker. It processes at most **200 record slots**. The persisted cursor resumes strictly after the last
-slot processed; reaching the end clears it so the next maintenance cycle starts another oldest-first pass. Each slot
-counts against the 200 before work begins. Under that record's lock the pruner opens its JSON at most once, classifies
-it and applies the protocol below; a stray claim marker with no JSON also consumes one slot. A run that selects 200
-stops, returns `complete: false`, and leaves the next run to continue from the cursor rather than reopening the same
-oldest active or corrupt records forever. The advanced cursor is atomically persisted under the same maintenance lock
-after the bounded batch; a crash before that write may safely repeat work after the daily interval but never deletes
-without the protocol below. Per-record failures are reported in maintenance status, leave uncertain artifacts in
-place and do not extend the batch.
+The pruner holds the approval store's maintenance lock for the entire attempt with `staleMs: 30_000` and renewal
+explicitly enabled at `renewMs: 10_000`. Renewal is not a default: `withFileLock` makes it opt-in and starts the
+renewal timer only when `renewMs` is supplied (`packages/core/src/lock.ts:14-21, 157-164, 219-225`). The
+maintenance callback captures its acquisition token and re-reads the lock to verify that token **before each record
+prune and again immediately before writing the cursor**. A missing or different token fences out the former holder:
+it starts no more record work, does not write the cursor, and reports the maintenance error. The record protocol
+remains safe if ownership is lost during an already-started record operation, because that operation has its own lock;
+the final fence prevents the stale maintenance holder from racing the current holder's cursor.
+
+The persisted prune-state schema is exactly
+`{ version: 1, lastAttemptAt: <finite ISO timestamp>, cursor: null | { mtimeMs: <finite non-negative number>, approvalId: <valid approval id> } }`.
+It is validated field by field under the maintenance lock, following the update-state pattern
+(`packages/core/src/update-state.ts:106-173`). A missing, unreadable or truncated file, or one whose outer object,
+version or `lastAttemptAt` is schema-invalid, is treated as **never attempted**, with a null cursor; because maintenance
+is then due, the run durably writes a fresh valid state before doing record work. The cursor is validated independently:
+a valid timestamp with a malformed cursor retains the timestamp but restarts the next due pass from the oldest record.
+A `lastAttemptAt` no more than five minutes in the future is tolerated as clock skew; one more than five minutes in the
+future is treated as **now** and durably normalised to now, so a backward clock movement can suppress maintenance for
+at most one ordinary 24-hour interval rather than indefinitely.
+
+When fewer than 24 hours have elapsed since the validated or normalised `lastAttemptAt`, the method returns
+`attempted: false`. Otherwise it durably writes the new attempt timestamp under the lock **before** processing records,
+so a crash or failed batch cannot cause a retry storm and no state directory starts pruning more than once in any
+24-hour window. A crash after this timestamp commit but before record work therefore leaves the old cursor and defers
+the safe retry until the next interval.
+
+One attempt enumerates the approval JSON and claim-marker directory once, stats retained candidates while budget
+remains, pairs artifacts by approval id into one record slot, and orders the slots by oldest modification time with
+approval id as the stable tie-breaker. Each selected slot counts against the **200-slot** limit before work begins.
+Its record lock is a non-blocking try using the same stale-lock and token rules: it performs no polling sleep and does
+not wait through the ordinary five-second lock timeout. A busy record is not opened or changed; it is counted, reported
+as skipped and left for the next run. Under an acquired record lock the pruner opens the JSON at most once, classifies
+it and applies the protocol below; a stray claim marker with no JSON also consumes one slot.
+
+The persisted cursor normally resumes strictly after the last attempted slot. If a record lock was busy, the cursor
+commit stays immediately before the earliest busy slot, so the next daily run considers that record again; work done
+after it may repeat safely. Reaching the end with no busy slot clears the cursor so the next maintenance cycle starts
+another oldest-first pass. Hitting either 200 slots or the five-second deadline returns `complete: false`; the cursor
+records only safe progress reached inside those bounds. The cursor is atomically persisted under the same renewed,
+fenced maintenance lock after the batch. A crash before that commit safely repeats work after the daily interval; a
+crash after it resumes strictly from the committed position. Per-record failures are reported in maintenance status,
+leave uncertain artifacts in place and do not extend either bound.
 
 Valid finished records in `used`, `failed`, `unknown`, `revoked` or `expired` are deleted at
 `now >= finishedAt + 90 days`, where `finishedAt` is the validated state-specific terminal time (`usedAt`, `failedAt`,
@@ -584,11 +624,12 @@ exceptions. The audit log remains durable terminal history, but D9 deliberately 
 rows to make draft-level claims beyond 90 days.
 
 `ensurePruned()` is bounded housekeeping, not an availability gate. Approval creation continues after its awaited
-attempt. Lists, status and reports proceed whether the attempt skipped, completed, hit 200 or encountered a
-maintenance error; reporting returns `{ attempted, processed, complete, errors }` maintenance status instead of
-waiting for the whole backlog. The ordinary list/report read can still fail on its own storage error. The evidence
-wording below remains governed by the files the report actually selected and read, never by a claim that maintenance
-finished.
+attempt, whose five-second elapsed budget includes lock and metadata work; a contended record adds no lock wait. Lists,
+status and reports proceed whether the attempt skipped, completed, hit 200, hit the time budget or encountered a
+maintenance error; reporting returns `{ attempted, processed, skippedBusy, complete, errors }` maintenance status
+instead of waiting for the whole backlog. The ordinary list/report read can still fail on its own storage error. The
+evidence wording below remains governed by the files the report actually selected and read, never by a claim that
+maintenance finished.
 
 **Bounded content scan, with no index or migration.** After the awaited bounded prune attempt, the report separately
 enumerates the retained approval filenames and filesystem metadata, sorts them by modification time descending with
@@ -600,15 +641,17 @@ The 90-day rule bounds normal valid finished history only after the 200-per-day 
 preserved corrupt/unreadable files and an over-capacity maintenance backlog are explicit exceptions, so this design
 does not claim a fixed metadata-work bound or lifetime-constant directory size.
 
-For one report on which maintenance is due, the semantic I/O ceilings are two approval-directory `readdir` calls;
+For one report on which maintenance is due, the following are maxima in addition to the five-second elapsed ceiling;
+the deadline may stop maintenance below them. The semantic I/O ceilings are two approval-directory `readdir` calls;
 at most `entries-before + entries-after` metadata stats; at most 200 prune record-content opens plus 500 report
-record-content opens; one maintenance/store lock plus at most 700 record locks; at most 200 durable retention appends;
+record-content opens; one renewed, fenced maintenance/store lock plus at most 700 record-lock attempts (prune attempts
+are non-blocking); at most 200 durable retention appends;
 and at most 400 approval-artifact unlink attempts (claim marker plus JSON per processed slot). Lock-file cleanup adds
 at most 701 unlink attempts, for at most 1,101 total unlink attempts in an uncontended run. When maintenance is not
 due, the report has one enumeration/stat pass, at most 500 record-content opens and locks, and no retention append or
 artifact unlink. These are logical filesystem-operation bounds; the test file adapter counts every directory read,
-record open, lock acquisition, durable append and unlink, including lock-file unlinks, so none is hidden behind a
-helper.
+record open, lock acquisition or try, renewal/fence check, durable append and unlink, including lock-file unlinks, so
+none is hidden behind a helper.
 
 A `complete-90-days` scan means complete only
 for the retained horizon, never for the installation's lifetime. The operation then validates/classifies the
@@ -754,7 +797,11 @@ Each guard is watched failing under a mutation, then restored.
   stale entries before applying updates and evicting the oldest live entries. Malformed JSON and schema-invalid cache
   files both read as empty: address history becomes conservative `not-written/cache-malformed`, while correspondent
   domains are scanned again; a failed recovery scan keeps escalation. Neither corruption case can produce a cached
-  `written` answer or silently suppress a lookalike warning.
+  `written` answer or silently suppress a lookalike warning. Separate child processes concurrently mutate each cache;
+  their disjoint entries are all retained, the same observation-time/key tie-break produces stable eviction regardless
+  of writer order, and no read-modify-write update is lost. Atomic-write failures before and around rename leave the
+  next process with either the complete old file or complete new file, never partial JSON; the failing operation reports
+  `cache-write-failed` and cannot use the uncommitted observation to suppress recipient-taint or lookalike escalation.
 - **D4 — provenance and gaps:** same-mailbox internal addresses are omitted; another mailbox can record the same
   address; widening `internalDomains` leaves an already-recorded exact address until day seven. An old header in
   mailbox A plus a recent body sighting in mailbox B is described only as separate aggregate facts, never one
@@ -813,17 +860,38 @@ Each guard is watched failing under a mutation, then restored.
   concurrency never above two, and reports every applicable evidence scope and cut-short reason. Existing on-disk v1
   records are found through the read-only historical decoder without an index or migration, remain unclaimable and
   support only the same evidence-scoped wording. With maintenance due, an instrumented filesystem counts every
-  `readdir`, retained-artifact `stat`, approval-record content open, maintenance/record lock, durable audit append and
-  unlink across prune plus report. It enforces the stated two-enumeration, `entries-before + entries-after` stat,
-  700-content-open, one-maintenance-plus-700-record-lock, 200-append, 400-artifact-unlink and 1,101-total-unlink
-  ceilings; the 500 cap is asserted only for the report half. The same fixture with maintenance not due enforces the
-  one-pass/500-open bounds.
+  `readdir`, retained-artifact `stat`, approval-record content open, maintenance renewal/fence, maintenance/record lock
+  attempt, durable audit append and unlink across prune plus report. On a fast uncontended fixture it enforces the
+  stated two-enumeration, `entries-before + entries-after` stat, 700-content-open,
+  one-maintenance-plus-700-record-lock, 200-append, 400-artifact-unlink and 1,101-total-unlink maxima; the five-second
+  deadline can only lower those counts, and the 500 cap is asserted only for the report half. The same fixture with
+  maintenance not due enforces the one-pass/500-open bounds.
 - **D9 — retention:** one fake-clock MCP context and its one store stay alive across several 24-hour boundaries;
   approval creation and list/report/status calls trigger `ensurePruned()` without reconstructing either object. The
-  persisted timestamp and concurrent callers prove each state directory attempts at most one batch per 24 hours.
-  More than 200 oldest slots prove the first run stops exactly at 200, reporting still completes with
-  `complete: false`, and later daily runs resume after the persisted `(mtime, approvalId)` cursor until a full pass
-  clears it. Old active/corrupt records do not starve later slots. Each valid `used`,
+  persisted timestamp and concurrent callers prove each state directory starts at most one batch per 24 hours. Missing,
+  truncated and schema-invalid prune-state files each act as never attempted and are replaced by a fresh valid state
+  even when the batch later fails. A valid timestamp plus each malformed cursor shape restarts from the oldest record.
+  A `lastAttemptAt` just inside the five-minute future-skew allowance remains valid; one beyond it, and a process whose
+  clock moves backwards past that threshold, are normalised durably to now and become due after one ordinary interval,
+  never after the untrusted future timestamp.
+
+  With filesystem work kept below the elapsed deadline, more than 200 oldest slots prove the first run stops exactly
+  at 200, reporting still completes with `complete: false`, and later daily runs resume after the persisted
+  `(mtime, approvalId)` cursor until a full pass clears it. A fake clock advanced during metadata and record work proves
+  no new step starts after five seconds and the cursor reflects only completed progress. All 200 record locks contended
+  by separate processes are tried once without polling; approval creation and status return in about five seconds or
+  less, every busy record remains, and the next daily run considers the earliest one again. Old active/corrupt records
+  do not starve later slots.
+
+  A process holds one batch inside an already-started filesystem operation beyond the 30-second stale interval while a
+  second process calls maintenance: renewal keeps the original token live, the second process never steals the lock,
+  only the first batch prunes, and only it commits the cursor. A forced token replacement proves both fences: the stale
+  holder starts no next record and cannot commit a cursor. Crash tests immediately after the durable attempt-timestamp
+  commit prove restart does not retry until 24 hours and retains the old cursor. Crashes immediately before and after
+  the atomic cursor commit prove the next due run respectively repeats safe work or resumes after the committed slot;
+  a truncated cursor write follows the schema-invalid recovery rule.
+
+  Each valid `used`,
   `failed`, `unknown`, `revoked` and `expired` record survives before 90 days and is deleted at equality after a
   locked re-read; pending, approved and fresh sending records are never deleted, while sending made stale by the
   locked classification becomes `unknown` before eligibility is judged. Safe corrupt stubs and unreadable files are
@@ -868,7 +936,8 @@ approvals to the preparing process.
    before storage (`packages/core/src/taint.ts:296-305`). A compromised colleague writing only there is caught by
    neither exact nor domain taint. This is pre-existing and unchanged; preview review and `confirm` remain the cover.
 4. **An `internalDomains` widening has a seven-day tail** — an address recorded while external remains exact-tainted
-   until pruned (`packages/core/src/taint.ts:260-270, 307-325, 341-349`). That conservative transition is explained.
+   until the cutoff. `check()` then excludes it in memory, but physical removal waits for the next locked `record()`
+   rewrite (`packages/core/src/taint.ts:253-264, 317-327, 341-349`). That conservative transition is explained.
 5. **Eight waits is per process** — several CLI/server processes can exceed eight in aggregate. Each wait is bounded to
    one small read per second and at most its record's own lifetime; a global semaphore is out of scope.
 6. **Fresh Claude Code has no in-chat confirmation** — terminal approval plus a wait is the honest path until the
@@ -876,11 +945,12 @@ approvals to the preparing process.
 7. **`requiresUserInteraction` stays policy-derived** — a chat mailbox's escalated send reaches a person through the
    confirm route; making it unconditional would prompt every chat send
    (`packages/gmail/src/mcp/server.ts:2366-2374`).
-8. **The draft-history report is deliberately evidence-scoped at scale** — retention drains at most 200 oldest record
-   slots per daily attempt. Directory enumeration and `stat` therefore remain linear in the retained artifacts: normal
-   finished history is bounded by 90 days only when that drain keeps pace, while active records, preserved corrupt
-   stubs and maintenance backlog are explicit exceptions. The report's 500-file cap bounds only its own opened record
-   contents; a due prune can open 200 more first. The 20-row cap bounds provider reads, but a busy retained window can
-   still push a mailbox's record outside the scan. Even an uncapped readable scan says only “not sent with any approval in
-   the last 90 days”; every capped row says “not sent with any of the last 500 approvals”. An unreadable selected
-   record makes the affected scan indeterminate, and doctor never presents either count as complete.
+8. **The draft-history report is deliberately evidence-scoped at scale** — retention attempts at most 200 oldest
+   record slots and stops starting work at five seconds per day. Directory enumeration and `stat` remain linear in the
+   retained artifacts within that elapsed budget: normal finished history is bounded by 90 days only when that drain
+   keeps pace, while active records, busy locks, preserved corrupt stubs and maintenance backlog are explicit
+   exceptions. The report's 500-file cap bounds only its own opened record contents; a due prune can open up to 200
+   more first. The 20-row cap bounds provider reads, but a busy retained window can still push a mailbox's record
+   outside the scan. Even an uncapped readable scan says only “not sent with any approval in the last 90 days”; every
+   capped row says “not sent with any of the last 500 approvals”. An unreadable selected record makes the affected scan
+   indeterminate, and doctor never presents either count as complete.
