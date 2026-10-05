@@ -26,6 +26,9 @@ import { requireWorkspace } from './workspaces.ts';
  * caller claimed was displayed.
  */
 
+/** What this command approves: a Slack send — a post or a reaction — and nothing of another channel's (§D2). */
+const SLACK_SEND = { kind: 'send', channel: 'slack' } as const;
+
 export interface ApprovalPrompt {
   readonly approvalId: string;
   /** What the approval permits, so the command can say what it did and did not do. */
@@ -40,13 +43,13 @@ export interface ApprovalPrompt {
  * The approval, classified under its lock for the approval a person is about to give (design 2026-10-05 §D2), and the
  * workspace it belongs to by its current name.
  *
- * A post's or a reaction's, or the one NOT_FOUND — an id of another kind is not found, as one nobody prepared is not.
- * Then anything that cannot be approved is refused for what it is, with where it stands, before the room or the draft
- * is read: corrupt, an earlier release's, expired, used, revoked — now, because its workspace was removed or posting
- * was turned off — or under way.
+ * A Slack post's or reaction's, or the one NOT_FOUND — an id of another channel or another kind is not found, as one
+ * nobody prepared is not. Then anything that cannot be approved is refused for what it is, with where it stands, before
+ * the room or the draft is read: corrupt, an earlier release's, expired, used, revoked — now, because its workspace was
+ * removed or posting was turned off — or under way.
  */
 async function approvalAndWorkspace(context: SlackContext, approvalId: string) {
-  const { outcome } = await context.core.approvals.inspect(approvalId, { kind: 'send' }, { action: 'approve' });
+  const { outcome } = await context.core.approvals.inspect(approvalId, SLACK_SEND, { action: 'approve' });
   if (outcome.error) throw outcome.error;
   const record = outcome.record;
   if (record === null) throw new CommsError('UNEXPECTED', 'a send approval read as no record');
@@ -246,12 +249,12 @@ export async function revokeApproval(context: SlackContext, approvalId: string):
 
 /** The workspace an approval belongs to, by its current name. */
 export async function workspaceForApproval(context: SlackContext, approvalId: string): Promise<string> {
-  // Whose it is, looked at under its lock as a post's or a reaction's, from a record that can be trusted to say — a
+  // Whose it is, looked at under its lock as a Slack post's or reaction's, from a record that can be trusted to say — a
   // version-2 record, or the stored owner of one an earlier release prepared. One that cannot is the one NOT_FOUND,
-  // as an id nobody prepared, or of another kind, is.
+  // as an id nobody prepared, of another kind or of another channel is.
   // As the approval about to be given: a revocation the classification derives — its workspace removed, posting
   // turned off since — is written now, by this first step of it.
-  const { stored, outcome } = await context.core.approvals.inspect(approvalId, { kind: 'send' }, { action: 'approve' });
+  const { stored, outcome } = await context.core.approvals.inspect(approvalId, SLACK_SEND, { action: 'approve' });
   const owner = ownerOf(stored);
   if (owner === null) throw approvalNotFound(approvalId, 'send');
   const config = await context.config();

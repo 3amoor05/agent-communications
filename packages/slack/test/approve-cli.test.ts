@@ -4,7 +4,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
-import { asV2, EXIT_CODES } from '@agentcomms/core';
+import { asV2, EXIT_CODES, newAccountId, newInboxId } from '@agentcomms/core';
 import { run } from '../src/cli/program.ts';
 import { assertNoBareCommand, slackInline } from './support/handoffs.ts';
 import { type Harness, newHarness } from './support/harness.ts';
@@ -83,7 +83,12 @@ function scripted(script: Record<string, unknown>) {
     asked.push(method);
     return new Response(JSON.stringify(script[method] ?? { ok: false, error: 'unknown_method' }));
   };
-  return { read, script, count: (method: string) => asked.filter((name) => name === method).length };
+  return {
+    read,
+    script,
+    count: (method: string) => asked.filter((name) => name === method).length,
+    total: () => asked.length,
+  };
 }
 
 // ── Reactions ──────────────────────────────────────────────────────────────────────────────────────────────────
@@ -483,4 +488,88 @@ test('the terminal classifies a post before it shows it: an expired one, or one 
   const nobody = await cli(harness, ['approve', `ap_${'7'.repeat(26)}`], { read: slack.read, tty: true });
   assert.match(nobody.stderr, /nothing was sent: no approval ap_7+/);
   assert.equal(slack.count('conversations.info'), asked, 'Slack was asked nothing at the terminal');
+});
+
+test('another channel’s send given to `agent-slack approve` is the one NOT_FOUND, byte for byte an id nobody prepared’s — a Gmail mailbox’s and a Resend account’s alike — with nothing written and Slack asked nothing (D2, CUE-404)', async () => {
+  const harness = await newHarness();
+  await harness.addWorkspace({ alias: 'acme', mode: 'send', sendPolicy: 'confirm' });
+  const slack = scripted({});
+  // A Gmail mailbox and a Resend account on the same machine, each with a send waiting for a person: neither Slack's.
+  const inboxId = newInboxId();
+  const resendId = newAccountId();
+  await harness.core.config.update(
+    (config) => ({
+      ...config,
+      inboxes: {
+        ...config.inboxes,
+        work: {
+          id: inboxId,
+          provider: 'gmail',
+          email: 'jo@example.test',
+          identity: 'oidc',
+          client: 'desktop',
+          tier: 'send',
+          grantedScopes: [],
+          contacts: false,
+          secretRef: `gmail:refresh:${inboxId}`,
+          internalDomains: ['example.test'],
+          createdAt: '2026-09-01T00:00:00.000Z',
+        },
+      },
+      accounts: {
+        ...config.accounts,
+        mail: {
+          id: resendId,
+          platform: 'resend',
+          workspace: 'key_mail',
+          userId: 'key_mail',
+          tier: 'send',
+          mode: 'send',
+          grantedScopes: ['sending_access'],
+          secretRef: `resend:key:${resendId}`,
+          createdAt: '2026-09-26T10:00:00.000Z',
+        },
+      },
+    }),
+    { consent: { kind: 'loosening-consent', paths: ['accounts.mail.mode'] } },
+  );
+  const sendOf = async (channel: 'gmail' | 'resend', owner: string) =>
+    (
+      await harness.core.approvals.create({
+        channel,
+        inboxId: owner,
+        inboxSub: channel === 'gmail' ? 'sub-9' : 'key_mail',
+        draftId: `${channel}-draft`,
+        draftMessageId: 'm-other',
+        contentDigest: 'b'.repeat(64),
+        sendEpoch: 0,
+        policy: 'chat',
+        requiredPolicy: 'confirm',
+        riskFlags: [],
+        expect: { to: ['sam@partner.test'], cc: [], bcc: [], subject: 'Other' },
+      })
+    ).approvalId;
+  const foreign = [await sendOf('gmail', inboxId), await sendOf('resend', resendId)];
+  const files = foreign.map((id) => join(harness.core.approvals.directory, `${id}.json`));
+  const before = files.map((file) => readFileSync(file, 'utf8'));
+  const nobody = `ap_${'7'.repeat(26)}`;
+
+  const unknown = await cli(harness, ['approve', nobody], { read: slack.read, tty: true });
+  assert.equal(unknown.code, EXIT_CODES.NOT_FOUND, unknown.stdout + unknown.stderr);
+  assert.match(unknown.stderr, new RegExp(`nothing was sent: no approval ${nobody}`));
+  for (const id of foreign) {
+    const refused = await cli(harness, ['approve', id], { read: slack.read, tty: true });
+    assert.deepEqual(
+      { code: refused.code, stdout: refused.stdout, stderr: refused.stderr.replaceAll(id, nobody) },
+      { code: unknown.code, stdout: unknown.stdout, stderr: unknown.stderr },
+      `${id}: the same refusal, but its id`,
+    );
+    assert.doesNotMatch(refused.stderr, /no longer connected|no workspace/);
+  }
+  assert.deepEqual(
+    files.map((file) => readFileSync(file, 'utf8')),
+    before,
+    'not classified, so nothing of them was written',
+  );
+  assert.equal(slack.total(), 0, 'Slack was asked nothing');
 });
