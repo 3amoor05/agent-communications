@@ -242,9 +242,21 @@ export function renderDrafts(drafts: readonly DraftView[], color: boolean): stri
         : '';
       const count = draft.files?.length ?? 0;
       const files = count === 0 ? '' : paint(color, 'dim', `  · ${count} file${count === 1 ? '' : 's'}`);
-      return `${head}  ${draftCell(draft.text, 60)}${files}${changed}`;
+      return `${head}  ${draftCell(draft.text, 60)}${files}${changed}${history(draft, color)}`;
     })
     .join('\n');
+}
+
+/**
+ * What the approval records read say of a draft's current revision, after its line (design 2026-10-05 §D9): each
+ * finding in its exact words, one for each content digest it was prepared with. Nothing when they say nothing.
+ */
+function history(draft: DraftView, color: boolean): string {
+  return (draft.unsent ?? [])
+    .map(
+      (entry) => `\n    ${paint(color, entry.status === 'unsent' ? 'yellow' : 'dim', `this revision: ${entry.said}`)}`,
+    )
+    .join('');
 }
 
 /** "Preview it with: <post prepare>", located; with no command here, the tool from a chat and why. */
