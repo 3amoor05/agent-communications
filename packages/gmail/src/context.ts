@@ -17,6 +17,7 @@ import { type Capability, capabilitiesOf, grantHint } from './auth/scopes.ts';
 import { TokenSource } from './auth/session.ts';
 import { GMAIL_CALLER } from './caller.ts';
 import { type GmailTransport, GoogleGmailTransport } from './gmail-api/transport.ts';
+import { HistoryCache } from './operations/history-cache.ts';
 
 export interface ResolvedInbox {
   alias: string;
@@ -64,6 +65,11 @@ export class GmailContext {
   readonly platform: NodeJS.Platform;
   readonly surface: 'cli' | 'mcp';
   readonly cwd: string;
+  /**
+   * What recipient analyses learned from Sent, shared for ten minutes across every process using this state directory
+   * (design 2026-10-05 §D4). A test replaces it with one whose writes fail.
+   */
+  historyCache: HistoryCache;
   readonly #createTransport: (request: TransportRequest) => GmailTransport;
   readonly #transports = new Map<string, GmailTransport>();
   #handoffs: CliHandoffs | undefined;
@@ -84,6 +90,7 @@ export class GmailContext {
     this.surface = options.surface ?? 'cli';
     this.cwd = options.cwd ?? process.cwd();
     this.flows = new FlowStore(this.core.paths.stateDir, this.now, this.surface, () => this.handoffs);
+    this.historyCache = new HistoryCache(this.core.paths.stateDir, { now: this.now });
     this.#createTransport = options.createTransport ?? defaultTransport;
   }
 

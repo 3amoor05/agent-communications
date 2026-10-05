@@ -32,6 +32,7 @@ import { analyseDraft, type DraftAnalysis, type Unsendable, unsendable } from '.
 import { addressField, domainField, type FieldEnvelope, filenameField, wrapField } from '../domain/untrusted-fields.ts';
 import { sendCertainlyRefused } from '../gmail-api/errors.ts';
 import { type GmailTransport, providerId } from '../gmail-api/transport.ts';
+import type { HistoryResult } from './history-cache.ts';
 
 /**
  * The send gate: prepare → approve → execute.
@@ -63,6 +64,11 @@ export interface SendPreparation {
    * as untrusted fields, and the stored aggregate's facts in this package's own words. Empty when none did.
    */
   taint: RecipientTaint[];
+  /**
+   * Present when this mailbox's correspondent domains could not be known — its cache untrustworthy and the scan that
+   * would replace it failed, or the scan not committed to it — so a lookalike could not be ruled out (§D4).
+   */
+  correspondentHistory?: CorrespondentHistory | undefined;
   expect: Expectation;
   digest: string;
   expiresAt: string;
@@ -248,13 +254,29 @@ async function ownAddresses(transport: GmailTransport, inbox: ResolvedInbox): Pr
 }
 
 /**
+ * Where the correspondent domains came from, when it was not a fresh scan or a fresh cache entry: the cache could not
+ * be trusted and its recovery scan failed, or the scan's observation could not be committed (design 2026-10-05 §D4).
+ * Either keeps the lookalike check's escalation, rather than concluding there is no lookalike.
+ */
+export type CorrespondentHistory = 'cache-malformed' | 'cache-write-failed';
+
+/**
  * The domains this mailbox has written to recently.
  *
- * One list per prepare, from the last two hundred sent messages. It is the yardstick a lookalike is measured
- * against, so it has to come from the mailbox's history rather than from the draft under examination.
+ * From the last two hundred sent messages — one list, and at most two hundred metadata reads — or from the shared cache
+ * while a scan's answer is fresh, so a prepare and the terminal approval of one draft scan once between them. It is the
+ * yardstick a lookalike is measured against, so it has to come from the mailbox's history rather than from the draft
+ * under examination.
  */
-async function correspondentDomains(transport: GmailTransport): Promise<Set<string>> {
+async function correspondentDomains(
+  context: GmailContext,
+  transport: GmailTransport,
+  inboxId: string,
+): Promise<{ domains: Set<string>; doubt: CorrespondentHistory | undefined }> {
+  const cached = await context.historyCache.readCorrespondents(inboxId);
+  if (cached.state === 'ok' && cached.value !== null) return { domains: new Set(cached.value), doubt: undefined };
   const domains = new Set<string>();
+  let scanned = true;
   try {
     const page = await transport.listMessages({ query: 'in:sent', maxResults: 200 });
     for (const { id } of page.ids.slice(0, 200)) {
@@ -268,14 +290,26 @@ async function correspondentDomains(transport: GmailTransport): Promise<Set<stri
       }
     }
   } catch {
-    // A mailbox that will not answer leaves the set empty, which fires no lookalike flags — a quieter preview, not
-    // a wrong one, and every other check still runs.
+    // A mailbox that will not answer leaves the set as far as it got, which fires fewer lookalike flags — a quieter
+    // preview, not a wrong one, and every other check still runs. Not an observation: nothing is cached.
+    scanned = false;
   }
-  return domains;
+  // A cache that could not be trusted, and no scan to put in its place: no conclusion that there is no lookalike.
+  if (!scanned) return { domains, doubt: cached.state === 'malformed' ? 'cache-malformed' : undefined };
+  try {
+    await context.historyCache.recordCorrespondents(inboxId, [...domains]);
+  } catch {
+    return { domains, doubt: 'cache-write-failed' };
+  }
+  return { domains, doubt: undefined };
 }
 
-/** How the check of this mailbox's prior sends to one address ended (design 2026-10-05 §D4). */
-export type HistoryCheck = 'written' | 'not-written' | 'budget-exhausted' | 'provider-error';
+/**
+ * How the check of this mailbox's prior sends to one address ended (design 2026-10-05 §D4): what was found — live, or
+ * from the shared cache while fresh — or that the cache could not be trusted (`cache-malformed`) or what was found
+ * could not be committed to it (`cache-write-failed`). Anything but `written` is treated as not written.
+ */
+export type HistoryCheck = HistoryResult | 'cache-malformed' | 'cache-write-failed';
 
 /** The most Gmail history requests one recipient analysis starts, across all its recipients (§D4). */
 export const HISTORY_BUDGET = 200;
@@ -288,6 +322,8 @@ const HISTORY_QUALIFICATION: Partial<Record<HistoryCheck, string>> = {
   'budget-exhausted':
     'prior-send history was not fully checked (the 200-read budget was reached); treated as not previously written.',
   'provider-error': 'prior-send history could not be checked; treated as not previously written.',
+  'cache-malformed': 'prior-send history could not be read from its cache; treated as not previously written.',
+  'cache-write-failed': 'prior-send history was checked but could not be recorded; treated as not previously written.',
 };
 
 /** What a removed mailbox is called where a stored aggregate names it: its id is software data, and means nothing. */
@@ -323,7 +359,7 @@ async function hasWrittenTo(
   transport: GmailTransport,
   canonical: string,
   budget: HistoryBudget,
-): Promise<HistoryCheck> {
+): Promise<HistoryResult> {
   const query = `in:sent {to:${canonical} cc:${canonical} bcc:${canonical}}`;
   let checked = 0;
   let pageToken: string | undefined;
@@ -414,7 +450,7 @@ async function studyRecipients(
   transport: GmailTransport,
   inbox: ResolvedInbox,
   analysis: DraftAnalysis,
-): Promise<{ facts: RecipientFacts[]; flags: string[] }> {
+): Promise<{ facts: RecipientFacts[]; flags: string[]; correspondentHistory: CorrespondentHistory | undefined }> {
   const own = await ownAddresses(transport, inbox);
   const internal = new Set(inbox.inbox.internalDomains.map((domain) => domain.toLowerCase()));
   // Each recipient once, in a deterministic order: To, then Cc, then Bcc, by canonical address.
@@ -426,21 +462,22 @@ async function studyRecipients(
   // The domains this mailbox actually corresponds with, read from Sent rather than assembled from this draft's own
   // recipients. Built the latter way, a message addressed *only* to a lookalike had nothing to compare against and
   // the check never fired — which is precisely the message the check exists for.
-  const knownDomains = await correspondentDomains(transport);
+  const correspondents = await correspondentDomains(context, transport, inbox.inbox.id);
+  const knownDomains = correspondents.domains;
   for (const address of own) {
     const domain = domainOf(address);
     if (domain) knownDomains.add(domain);
   }
   for (const domain of internal) knownDomains.add(domain);
   const names = new Map(Object.entries((await context.config()).inboxes).map(([alias, entry]) => [entry.id, alias]));
-  const budget: HistoryBudget = { remaining: HISTORY_BUDGET };
+  const histories = await priorSends(context, transport, inbox.inbox.id, [...everyone.keys()], own);
   const facts: RecipientFacts[] = [];
 
   for (const [canonical, address] of everyone) {
     const domain = domainOf(canonical) ?? '';
     const external = !own.has(canonical) && !internal.has(domain);
     const seen = await context.core.taint.check(canonical);
-    const historyCheck = own.has(canonical) ? 'own' : await hasWrittenTo(transport, canonical, budget);
+    const historyCheck = histories.get(canonical) ?? 'own';
     const written = historyCheck === 'own' || historyCheck === 'written';
     // A domain in the store counts only for a recipient external to this mailbox (the store already leaves public
     // providers' domains out); an exact address counts either way, and wins the explanation.
@@ -497,7 +534,57 @@ async function studyRecipients(
     flags.push('attachment-to-first-time-recipient');
   }
   if (facts.some((fact) => fact.lookalikeOf)) flags.push('lookalike-domain');
-  return { facts, flags };
+  // Correspondents that could not be known for a first-time recipient: a lookalike cannot be ruled out (§D4).
+  const correspondentHistory = correspondents.doubt;
+  if (correspondentHistory !== undefined && facts.some((fact) => fact.firstTime)) flags.push('lookalike-unchecked');
+  return { facts, flags, correspondentHistory };
+}
+
+/**
+ * Every recipient's prior-send answer, in order: from the shared cache while fresh — which costs nothing — and live,
+ * within one budget of 200 requests, for the rest; then what was found live, committed to the cache in one locked
+ * change (design 2026-10-05 §D4).
+ *
+ * Two doubts are never turned into "written". A cache file that cannot be trusted answers every address
+ * `cache-malformed` — not written, and nothing asked of Gmail — and is replaced by a valid write. An observation that
+ * could not be committed is `cache-write-failed`: whatever it found, it suppresses nothing.
+ */
+async function priorSends(
+  context: GmailContext,
+  transport: GmailTransport,
+  inboxId: string,
+  canonicals: readonly string[],
+  own: ReadonlySet<string>,
+): Promise<Map<string, HistoryCheck>> {
+  const others = canonicals.filter((canonical) => !own.has(canonical));
+  const answers = new Map<string, HistoryCheck>();
+  const cached = await context.historyCache.readAddresses(inboxId, others);
+  if (cached.state === 'malformed') {
+    for (const canonical of others) answers.set(canonical, 'cache-malformed');
+    // Replaced by a valid locked write, with nothing in it this operation could vouch for.
+    await context.historyCache.recordAddresses(inboxId, new Map()).catch(() => undefined);
+    return answers;
+  }
+  const budget: HistoryBudget = { remaining: HISTORY_BUDGET };
+  const observed = new Map<string, HistoryResult>();
+  for (const canonical of others) {
+    const hit = cached.value.get(canonical);
+    if (hit !== undefined) {
+      answers.set(canonical, hit.result);
+      continue;
+    }
+    const result = await hasWrittenTo(transport, canonical, budget);
+    observed.set(canonical, result);
+    answers.set(canonical, result);
+  }
+  if (observed.size > 0) {
+    try {
+      await context.historyCache.recordAddresses(inboxId, observed);
+    } catch {
+      for (const canonical of observed.keys()) answers.set(canonical, 'cache-write-failed');
+    }
+  }
+  return answers;
 }
 
 /** The tainted recipients' explanations, the sender's parts through this package's field helpers (§D4). */
@@ -553,6 +640,8 @@ function previewFor(options: {
   record: ApprovalRecord;
   alias: string;
   effectivePolicy: SendPolicy;
+  /** The risk flags this look raised: one the preview says in words of its own. */
+  flags?: readonly string[] | undefined;
 }): string {
   const { analysis, facts, record, alias } = options;
   // Every way the draft writes a recipient carries that recipient's note: the note is this package's words alone.
@@ -568,6 +657,11 @@ function previewFor(options: {
   }
   if (analysis.bcc.length > 0) {
     warnings.push(`${analysis.bcc.length} blind recipient(s) — the others will not see them`);
+  }
+  if (options.flags?.includes('lookalike-unchecked')) {
+    warnings.push(
+      'the domains this mailbox writes to could not be read, so a lookalike recipient domain could not be ruled out',
+    );
   }
   const preview: MessagePreview = {
     recipients: {
@@ -628,9 +722,9 @@ export async function prepareSend(context: GmailContext, alias: string, draftId:
     throw new CommsError('BAD_DATA', 'this draft has no recipients', { hint: 'Add them and prepare the send again.' });
   }
 
-  const { facts, flags } = config.defaults.riskEscalation
+  const { facts, flags, correspondentHistory } = config.defaults.riskEscalation
     ? await studyRecipients(context, transport, resolved, analysis)
-    : { facts: [], flags: [] };
+    : { facts: [], flags: [], correspondentHistory: undefined };
   const requiredPolicy: SendPolicy = flags.length > 0 ? 'confirm' : 'chat';
   const effectivePolicy = stricterPolicy(livePolicy, requiredPolicy);
 
@@ -662,11 +756,12 @@ export async function prepareSend(context: GmailContext, alias: string, draftId:
     approvalId: record.approvalId,
     inbox: alias,
     draftId,
-    preview: previewFor({ analysis, facts, record, alias, effectivePolicy }),
+    preview: previewFor({ analysis, facts, record, alias, effectivePolicy, flags }),
     policy: livePolicy,
     effectivePolicy,
     riskFlags: flags,
     taint: taintOf(facts, { boundary: newBoundary(), inbox: alias, id: draftMessageId }),
+    ...(correspondentHistory === undefined ? {} : { correspondentHistory }),
     expect: record.expect,
     digest: analysis.digest,
     expiresAt: record.expiresAt,
@@ -744,9 +839,9 @@ export async function beginApproval(context: GmailContext, approvalId: string): 
     });
   }
   const transport = await context.transport(alias);
-  const { facts } = config.defaults.riskEscalation
+  const { facts, flags } = config.defaults.riskEscalation
     ? await studyRecipients(context, transport, { alias, inbox }, analysis)
-    : { facts: [] };
+    : { facts: [], flags: [] };
   const challenge = await context.core.approvals.issueChallenge(approvalId, 'send', context.platform);
   return {
     approvalId,
@@ -756,6 +851,7 @@ export async function beginApproval(context: GmailContext, approvalId: string): 
       record,
       alias,
       effectivePolicy: stricterPolicy(livePolicy, record.requiredPolicy),
+      flags,
     }),
     challenge,
     effectivePolicy: stricterPolicy(livePolicy, record.requiredPolicy),

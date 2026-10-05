@@ -2470,10 +2470,18 @@ export async function createGmailMcpServer(options: GmailMcpOptions = {}): Promi
                   .describe('what the store holds, each said apart: the mailboxes, the latest date, a header sighting'),
                 historyCheck: z
                   .string()
-                  .describe('written, not-written, budget-exhausted or provider-error: anything but written escalates'),
+                  .describe(
+                    'written, not-written, budget-exhausted, provider-error, cache-malformed or cache-write-failed: anything but written escalates',
+                  ),
               }),
             )
             .describe('why each recipient that raised recipient-tainted raised it'),
+          correspondentHistory: z
+            .string()
+            .optional()
+            .describe(
+              'cache-malformed or cache-write-failed: the lookalike check could not rely on Sent, and escalated',
+            ),
           expect: expectationSchema,
           digest: z.string(),
           expiresAt: z.string(),
