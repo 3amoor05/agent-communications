@@ -42,7 +42,7 @@ import { tempDir } from './helpers/temp-dir.mjs';
  */
 
 /** The drivers: each a package's own program, run with its own fakes. */
-const DRIVERS = ['gmail', 'slack'].map((channel) => ({
+const DRIVERS = ['gmail', 'slack', 'resend'].map((channel) => ({
   channel,
   dir: join(ROOT, 'packages', channel),
   entry: join('test', 'support', 'matrix.ts'),
@@ -73,6 +73,13 @@ const SURFACES = {
       ],
     },
   },
+  resend: {
+    send: {
+      look: ['resend_send_status', 'resend_send_wait'],
+      claim: ['resend_send_execute'],
+      approve: ['approve (terminal)'],
+    },
+  },
 };
 
 /**
@@ -91,6 +98,18 @@ const KNOWN = [
     surface: `approve (terminal, ${what})`,
     variant: 'another channel',
     todo: 'Slack’s terminal approval looks for any send, not only a Slack one: another channel’s id is classified, then refused as “the workspace this approval belongs to is no longer connected” — not D2’s one NOT_FOUND',
+  })),
+  {
+    channel: 'resend',
+    surface: 'approve (terminal)',
+    variant: 'another channel',
+    todo: 'Resend’s terminal approval looks for any send, not only a Resend one: another channel’s id is classified, then refused as “the Resend account this approval belongs to is no longer connected” — not D2’s one NOT_FOUND',
+  },
+  ...['resend_send_execute', 'approve (terminal)'].map((surface) => ({
+    channel: 'resend',
+    surface,
+    row: 'used',
+    todo: 'Resend refuses a used approval in core’s words, “it was sent at …, message id …” — D2: Resend’s own surfaces say it was accepted by Resend, never that it was sent',
   })),
 ];
 
@@ -139,14 +158,19 @@ before(async () => {
 
 /** A look or a list: the approval's state and whether it can be claimed now. */
 function shows(state, claimable, extra = () => {}) {
-  return (o) => {
+  return (o, line) => {
     assert.equal(o.ok, true, JSON.stringify(o));
     assert.ok(o.approval, 'the record is shown');
     assert.equal(o.approval.state, state);
-    if (o.approval.claimable !== undefined || claimable !== undefined) assert.equal(o.approval.claimable, claimable);
-    extra(o);
+    // Resend's `send status` is its send-record look-up, not the approval-status contract (D8): it shows the record as
+    // stored. Every other look and list is the approval object, and says whether it can be claimed now.
+    if (!STORED_ONLY.has(line.surface)) assert.equal(o.approval.claimable, claimable);
+    extra(o, line);
   };
 }
+
+/** The looks that show the record as stored rather than as classified (design 2026-10-05 §D8, "Status at any time"). */
+const STORED_ONLY = new Set(['resend_send_status']);
 
 /** A refusal: its code, its words, and where the approval stands — and nothing asked of the provider. */
 function refused(code, pattern, state, extra = () => {}) {
@@ -345,7 +369,9 @@ const SEND = {
     },
   },
   sending: {
-    look: shows('sending', false, (o) => assert.ok(o.approval.unknownAt)),
+    look: shows('sending', false, (o, line) => {
+      if (!STORED_ONLY.has(line.surface)) assert.ok(o.approval.unknownAt, 'when it reads unknown');
+    }),
     list: shows('sending', false),
     claim: refused(
       'APPROVAL_PENDING',
@@ -366,18 +392,17 @@ const SEND = {
     approve: refused('SEND_OUTCOME_UNKNOWN', /the outcome of its send is unknown: it may have gone out$/, 'unknown'),
   },
   used: {
-    look: shows('used', false),
-    list: shows('used', false),
-    claim: refused(
-      'APPROVAL_VOID',
-      new RegExp(`the approval was used already: it was sent at ${TIME}, message id matrix-sent-1$`),
-      'used',
-    ),
-    approve: refused(
-      'APPROVAL_VOID',
-      new RegExp(`the approval was used already: it was sent at ${TIME}, message id matrix-sent-1$`),
-      'used',
-    ),
+    // A wait is core's: acceptance by the provider. Gmail's own list: acceptance is sending, and says so (D2).
+    look: shows('used', false, (o) => {
+      if (o.approval.said !== undefined) {
+        assert.match(o.approval.said, new RegExp(`^accepted by (Gmail|Slack|Resend) at ${TIME}$`));
+      }
+    }),
+    list: shows('used', false, (o, line) => {
+      if (line.channel === 'gmail') assert.match(o.approval.said, new RegExp(`^sent at ${TIME}$`));
+    }),
+    claim: (o, line) => usedRefusal(line.channel)(o),
+    approve: (o, line) => usedRefusal(line.channel)(o),
   },
   failed: {
     look: shows('failed', false),
@@ -412,6 +437,20 @@ const SEND = {
     approve: refused('APPROVAL_VOID', /^nothing was sent: the approval was voided \(cancelled\)$/, 'revoked'),
   },
 };
+
+/**
+ * A used send claimed again, in its channel's words (D2): Gmail and Slack, where acceptance is sending, say sent with
+ * the message id; Resend's own surfaces say it was accepted by Resend, never that it was sent.
+ */
+function usedRefusal(channel) {
+  return refused(
+    'APPROVAL_VOID',
+    channel === 'resend'
+      ? new RegExp(`the approval was used already: it was accepted by Resend at ${TIME}`)
+      : new RegExp(`the approval was used already: it was sent at ${TIME}, message id matrix-sent-1$`),
+    'used',
+  );
+}
 
 const EXPECT = { send: SEND };
 
