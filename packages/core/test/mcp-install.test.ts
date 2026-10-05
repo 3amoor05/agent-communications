@@ -30,6 +30,7 @@ import {
   managedRuntimeVersion,
   mcpInstall,
   pinnedVersion,
+  preflightInstall,
   pruneManagedRuntimes,
   reusableRuntime,
   runningCommandLines,
@@ -994,3 +995,33 @@ test('an entry that was checked and failed to start says so, and ends the comman
   assert.equal(installExitStatus(skipped), EXIT_CODES.OK);
   assert.equal(installFailure(skipped), null);
 });
+
+test(
+  "a hint naming a client's entry is the client's own command, or says it in words when the name is a suite command",
+  NOT_ON_WINDOWS,
+  async () => {
+    /*
+     * Codex answers `mcp get` with something that cannot be read, so the install stops and says how to look. That is
+     * codex's own command, an external one; but the core server's default name is `agentcomms`, the core's own
+     * command, and an external command is never made with a suite command among its words (CUE-403). So that one hint
+     * names the entry in words instead.
+     */
+    const bin = tempDir();
+    writeFileSync(join(bin, 'codex'), `#!${process.execPath}\nprocess.stdout.write('not json');\n`, { mode: 0o755 });
+    const installing = { ...context(tempDir(), tempDir()) };
+    installing.env = { ...installing.env, PATH: bin };
+    const hintFor = async (product: McpProduct) => {
+      try {
+        await preflightInstall(installing, product, { client: 'codex' });
+      } catch (error) {
+        return (error as { hint?: string }).hint ?? '';
+      }
+      assert.fail('the install went ahead');
+    };
+    const gmail = await hintFor({ ...CHANNEL_SERVERS.gmail, version: '0.0.1', moduleUrl: import.meta.url });
+    assert.match(gmail, /^Look with `codex mcp get gmail`\./);
+    const core = await hintFor({ ...CHANNEL_SERVERS.core, version: '0.0.1', moduleUrl: import.meta.url });
+    assert.match(core, /^Look with codex's own `mcp get`, for the entry called "agentcomms"\./);
+    assert.doesNotMatch(core, /mcp get agentcomms/);
+  },
+);

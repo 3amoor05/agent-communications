@@ -14,6 +14,13 @@ import { VERSION } from './version.ts';
 export { VERSION };
 export const PACKAGE_NAME = '@agentcomms/gmail';
 
+/**
+ * A module of this package, for locating the Gmail CLI from code that is not in it: the `@agentcomms/gmail-mcp`
+ * wrapper, whose own modules belong to the wrapper and would locate it instead (CUE-403). With `PACKAGE_NAME`, it is
+ * the caller a command for Gmail is located from.
+ */
+export const RESOLVER_URL: string = import.meta.url;
+
 /** What a host gets back: enough to serve the tools and to stop again, and nothing that ties it to an SDK version. */
 export interface GmailMcpHandle {
   /** Serves MCP on this process's stdin and stdout, and resolves when the client disconnects. */

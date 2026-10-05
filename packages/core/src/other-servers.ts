@@ -1,6 +1,7 @@
 import type { ChannelManifest, ChannelRivalPackage } from './channel-manifest.ts';
 import { CHANNEL_SNAPSHOT } from './channels.generated.ts';
-import { commandText, shellCommand } from './cli-runtime.ts';
+import { commandText } from './cli-runtime.ts';
+import { externalCommand } from './command-brands.ts';
 import { displayUrl, type RegisteredServer } from './mcp-clients.ts';
 import { isProductServer, type McpProduct } from './mcp-install.ts';
 
@@ -57,19 +58,34 @@ function rivalsOf(channel: string): NonNullable<ChannelManifest['rivals']> {
  * The command that removes a registered server, in its client's own terms — the name as the client's file has it,
  * which may be anything, so on Windows it can have no line to paste, and is shown as its words, to be typed
  * (`shellCommand`). Never as a line with the name left out: that removed whatever entry had the stand-in's name.
+ *
+ * The client's own command, so an external one (`externalCommand`). A name that is also one of this suite's commands,
+ * or a path into one of its packages, is refused there, since such words are how a suite command would get round the
+ * locator; that entry is removed by hand instead, from the file that holds it.
  */
-function removalCommand(client: 'claude' | 'codex', name: string, platform: NodeJS.Platform): string {
-  return commandText(shellCommand([client, 'mcp', 'remove', name], platform));
+function removalCommand(client: 'claude' | 'codex', server: RegisteredServer, platform: NodeJS.Platform): string {
+  try {
+    return commandText(
+      externalCommand(
+        [client, 'mcp', 'remove', server.name],
+        "the MCP client's own command removes an entry from its own configuration",
+        platform,
+      ),
+    );
+  } catch {
+    return `remove "${server.name}" from ${server.path} by hand, then restart ${server.client}`;
+  }
 }
 
-function gmailRemoval({ client, name: server, path, scope }: RegisteredServer, platform: NodeJS.Platform): string {
+function gmailRemoval(registered: RegisteredServer, platform: NodeJS.Platform): string {
+  const { client, name: server, path, scope } = registered;
   // A project's entry is out of reach of the user-scope commands below, run from wherever `doctor` was.
   if (scope === 'project') return `remove "${server}" from the project entry in ${path} by hand`;
   switch (client) {
     case 'claude-code':
-      return removalCommand('claude', server, platform);
+      return removalCommand('claude', registered, platform);
     case 'codex':
-      return removalCommand('codex', server, platform);
+      return removalCommand('codex', registered, platform);
     default:
       // The file named, not "the file above": this is printed under a different client's install, and by
       // `doctor` in a list of several, where the file above is somebody else's.
@@ -185,9 +201,9 @@ export function otherSlackServerRemoval(
   if (server.scope === 'project') return `remove "${server.name}" from the project entry in ${server.path} by hand`;
   switch (server.client) {
     case 'claude-code':
-      return removalCommand('claude', server.name, platform);
+      return removalCommand('claude', server, platform);
     case 'codex':
-      return removalCommand('codex', server.name, platform);
+      return removalCommand('codex', server, platform);
     default:
       return `remove "${server.name}" from ${server.path}, then restart ${server.client}`;
   }

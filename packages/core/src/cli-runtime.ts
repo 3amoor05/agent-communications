@@ -143,7 +143,9 @@ export function paint(color: boolean, format: Parameters<typeof styleText>[0], t
  * A command for a person to copy and run, as `shellCommand` prints it — or, on Windows, cannot.
  *
  * Never a bare string, so that no printer can show a line where there must be none: `inlineCommand` and `commandText`
- * render it, as the line to paste, or as its words in JSON with what to do instead.
+ * render it, as the line to paste, or as its words in JSON with what to do instead. The two branded commands — a
+ * `PrintedCommand` from `locateCliCommand` and an `ExternalCommand` from `externalCommand` — have exactly these
+ * fields, quoted by the same rules, so both render here too.
  */
 export interface ShellCommand {
   /** The words, as the program is to receive them. */
@@ -200,6 +202,11 @@ export interface ShellCommand {
  *   quotes, as `C:\Program Files\nodejs\node.exe` does, leaves the command with no line either (CUE-403).
  *
  * Everywhere else there is always a line: single quotes make any word safe.
+ *
+ * @deprecated As a way to make a command for a person (CUE-403). One of this suite's own commands comes from
+ * `locateCliCommand`, which names this Node and a checked file of the product rather than a binary that may not be on
+ * the person's PATH, and any other program's from `externalCommand`; both quote by the rules above. This stays only
+ * while the remaining handoffs move to them, and goes when none is left.
  */
 export function shellCommand(words: readonly string[], platform: NodeJS.Platform = process.platform): ShellCommand {
   if (platform !== 'win32') return { words, line: words.map(posixShellWord).join(' '), platform };

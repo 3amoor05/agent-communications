@@ -5,6 +5,7 @@ import { revokeChange } from '../changes.ts';
 import { type Channel, channelServer } from '../channel-servers.ts';
 import { listed, manifestOf } from '../channel-words.ts';
 import { commandText, inlineCommand, shellCommand } from '../cli-runtime.ts';
+import { externalCommand } from '../command-brands.ts';
 import { type Config, emptyConfig, secretsStoreOf } from '../config.ts';
 import type { Core } from '../core.ts';
 import { CommsError } from '../errors.ts';
@@ -67,6 +68,25 @@ export interface DoctorOptions {
 }
 
 /**
+ * How to make a directory its owner's alone: `chmod 700`, the system's own command, so an external one. A directory
+ * inside one of this suite's packages — a development checkout's — is refused there, as a path that could start a
+ * product is, and is said in words instead.
+ */
+function ownerOnly(dir: string, platform: NodeJS.Platform): string {
+  try {
+    return commandText(
+      externalCommand(
+        ['chmod', '700', dir],
+        'chmod is the system command that makes a directory private to its owner',
+        platform,
+      ),
+    );
+  } catch {
+    return `make ${dir} readable and writable by its owner alone (mode 700)`;
+  }
+}
+
+/**
  * Whether this machine is healthy. `env` is where the MCP clients' configs are found — the one `agentcomms` runs with,
  * or the core server's — as `agentcomms channels` finds them.
  */
@@ -93,7 +113,7 @@ export async function doctor(core: Core, env: NodeJS.ProcessEnv, options: Doctor
         name,
         ok: !loose,
         detail: dir,
-        ...(loose ? { fix: commandText(shellCommand(['chmod', '700', dir], platform)) } : {}),
+        ...(loose ? { fix: ownerOnly(dir, platform) } : {}),
       });
     } catch {
       checks.push({ name, ok: true, detail: `${dir} (not created yet — created on first use)` });

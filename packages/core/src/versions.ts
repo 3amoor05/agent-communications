@@ -79,3 +79,41 @@ export function isBehind(version: string, latest: string): boolean {
 export function isPrerelease(version: string): boolean {
   return VERSION_PATTERN.exec(version)?.[4] !== undefined;
 }
+
+/**
+ * Whether `version` is within a package's `engines` range: true or false, or null when the range is not one this reads.
+ *
+ * Read are the comparators `>=`, `>`, `<=`, `<` and `=` (or none) before a whole version, joined by spaces, which must
+ * all hold, and alternatives joined by `||`. That is every range this suite declares (`>=22.12.0`, `>=22.16.0`).
+ * Anything else — `^22.12.0`, `>=22`, `22.x` — is null rather than a guess: a command printed to run under this Node
+ * is printed only when the range it has to meet says it may. A leading `v`, as `process.version` has it, is read.
+ */
+export function satisfiesRange(version: string, range: string): boolean | null {
+  const wanted = version.replace(/^v/, '');
+  if (!isVersion(wanted)) return null;
+  const alternatives = range.split('||').map((alternative) => alternative.trim().split(/\s+/).filter(Boolean));
+  if (alternatives.some((comparators) => comparators.length === 0)) return null;
+  let any = false;
+  for (const comparators of alternatives) {
+    let all = true;
+    for (const comparator of comparators) {
+      const match = /^(>=|<=|>|<|=)?(.+)$/.exec(comparator);
+      const bound = match?.[2] ?? '';
+      if (!isVersion(bound)) return null;
+      const order = compareVersions(wanted, bound) as -1 | 0 | 1;
+      const holds =
+        match?.[1] === '>='
+          ? order >= 0
+          : match?.[1] === '<='
+            ? order <= 0
+            : match?.[1] === '>'
+              ? order > 0
+              : match?.[1] === '<'
+                ? order < 0
+                : order === 0;
+      if (!holds) all = false;
+    }
+    if (all) any = true;
+  }
+  return any;
+}

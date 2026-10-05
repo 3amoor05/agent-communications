@@ -6,7 +6,25 @@ export * from './changes.ts';
 export * from './channel-manifest.ts';
 export * from './channel-servers.ts';
 export * from './chars.ts';
+/*
+ * The two kinds of command a person is told to run (CUE-403): one of this suite's own, which only the locator makes,
+ * and another program's, made only by `externalCommand`. Their types are exported, and neither class nor brand is.
+ */
+export {
+  type CliCommandBasis,
+  type CliCommandCaller,
+  type CliCommandLocated,
+  type CliCommandNotLocated,
+  type CliCommandRequest,
+  type CliCommandResult,
+  type CliDirection,
+  type CliNotLocatedReason,
+  locateCliCommand,
+  type NodeRuntime,
+  type PrintedCommand,
+} from './cli-command.ts';
 export * from './cli-runtime.ts';
+export { type ExternalCommand, externalCommand } from './command-brands.ts';
 export * from './compose-profile.ts';
 export * from './config.ts';
 export * from './core.ts';

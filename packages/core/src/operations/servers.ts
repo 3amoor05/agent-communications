@@ -11,13 +11,12 @@ import {
   channelServer,
   isChannel,
   requireChannelManifest,
-  type ServerFacts,
 } from '../channel-servers.ts';
 import { accountNoun, hasNarrowing, narrowingOwner, pinOption } from '../channel-words.ts';
 import type { Config } from '../config.ts';
 import type { Core } from '../core.ts';
 import { CommsError } from '../errors.ts';
-import { type RegisteredServer, scanRegisteredServers, type UnreadableConfig } from '../mcp-clients.ts';
+import { scanRegisteredServers, type UnreadableConfig } from '../mcp-clients.ts';
 import {
   checkServerName,
   entryDestination,
@@ -30,12 +29,10 @@ import {
   localCliEntry,
   type McpProduct,
   managedRuntimeDir,
-  managedRuntimeVersion,
   mcpInstall,
   missingEntryFile,
   type PlannedInstall,
   type PruneResult,
-  pinnedVersion,
   plannedInstall,
   preflightInstall,
   pruneManagedRuntimes,
@@ -45,7 +42,8 @@ import {
 } from '../mcp-install.ts';
 import { resolveName } from '../names.ts';
 import { isBehind } from '../npm.ts';
-import { PATH_OPTIONS, type PathName, type PathOverrides } from '../paths.ts';
+import type { PathOverrides } from '../paths.ts';
+import { launcherOf, registrationPathPins, registrationVersion } from '../registrations.ts';
 import { VERSION } from '../version.ts';
 
 /**
@@ -525,34 +523,6 @@ export interface ChannelRegistration {
   behindCore: boolean;
 }
 
-const REGISTRATION_PATH_OPTIONS = PATH_OPTIONS.filter(({ key }) => key !== 'downloadsDir') as readonly {
-  key: Exclude<PathName, 'downloadsDir'>;
-  flag: string;
-}[];
-
-/** Retains both supported flag forms, stopping where option parsing stops. Invalid or empty pins are absent. */
-function registrationPathPins(args: readonly string[]): Omit<PathOverrides, 'downloadsDir'> {
-  const pins: Omit<PathOverrides, 'downloadsDir'> = {};
-  for (let index = 0; index < args.length; index += 1) {
-    const argument = args[index];
-    if (argument === '--') break;
-    for (const { key, flag } of REGISTRATION_PATH_OPTIONS) {
-      if (argument === flag) {
-        const value = args[index + 1];
-        if (value !== undefined && value !== '--' && value.length > 0) pins[key] = value;
-        index += 1;
-        break;
-      }
-      if (argument?.startsWith(`${flag}=`)) {
-        const value = argument.slice(flag.length + 1);
-        if (value.length > 0) pins[key] = value;
-        break;
-      }
-    }
-  }
-  return pins;
-}
-
 export interface ChannelAvailability {
   channel: Channel;
   label: string;
@@ -603,16 +573,6 @@ async function versionBehind(binPath: string, packageName: string): Promise<stri
   return null;
 }
 
-/** How a registered entry starts its server: the launcher `mcp install` wrote it with, or `other` for one it did not. */
-export function launcherOf(server: RegisteredServer, facts: ServerFacts): Launcher | 'other' {
-  const parts = [server.command, ...server.args];
-  if (parts.some((part) => managedRuntimeVersion(part, facts.packageName) !== null)) return 'managed';
-  if (server.args.some((arg) => arg.startsWith(`${facts.npxPackage}@`))) return 'npx';
-  if (parts.some((part) => /[/\\]packages[/\\][^/\\]+[/\\](?:src[/\\]cli\.ts|dist[/\\]cli\.mjs)$/.test(part)))
-    return 'local';
-  return 'other';
-}
-
 /**
  * Which channel packages exist, which are on this machine and at which version, and which clients start them.
  *
@@ -630,7 +590,7 @@ export async function channelsAvailable(core: Core, env: NodeJS.ProcessEnv): Pro
     const registered: ChannelRegistration[] = [];
     for (const server of scan.servers.filter((entry) => isProductServer(entry, facts))) {
       const narrowing = facts.serverArgs({ client: 'json', ...facts.narrowingOf(server.args) });
-      const version = server.args.map((arg) => pinnedVersion(arg, facts)).find((found) => found !== null) ?? null;
+      const version = registrationVersion(server, facts);
       registered.push({
         client: server.client,
         name: server.name,

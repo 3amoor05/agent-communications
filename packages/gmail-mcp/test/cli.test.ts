@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -144,4 +144,29 @@ test('a pinned mailbox that does not exist fails at startup, not on the first ca
   const result = await runBin(['--inbox', 'missing']);
   assert.notEqual(result.code, 0);
   assert.match(result.stderr, /missing/);
+});
+
+/** The name in the nearest `package.json` above a file: the package Node says that module belongs to. */
+function owningPackage(file: string): string | undefined {
+  for (let dir = dirname(file); dir !== dirname(dir); dir = dirname(dir)) {
+    try {
+      return (JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as { name?: string }).name;
+    } catch {
+      // no manifest here; keep walking up
+    }
+  }
+  return undefined;
+}
+
+test("Gmail's resolver URL is a module of Gmail's own package, never of this wrapper (CUE-403)", async () => {
+  /*
+   * A command for Gmail is located from a module of Gmail: from one of the wrapper's own, the locator finds the
+   * wrapper's manifest, which is not Gmail, and gives no command. So the wrapper asks Gmail for the module to locate
+   * from — the one its dependency was built as.
+   */
+  const gmail = await import('@agentcomms/gmail');
+  assert.equal(gmail.PACKAGE_NAME, '@agentcomms/gmail');
+  assert.match(gmail.RESOLVER_URL, /^file:/);
+  assert.equal(owningPackage(fileURLToPath(gmail.RESOLVER_URL)), gmail.PACKAGE_NAME);
+  assert.equal(owningPackage(ENTRY), '@agentcomms/gmail-mcp');
 });

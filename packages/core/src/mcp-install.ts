@@ -3,6 +3,7 @@ import { access, constants, lstat, mkdir, readdir, readFile, realpath, rm, stat 
 import { delimiter, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { inlineCommand, type ShellCommand, shellCommand } from './cli-runtime.ts';
+import { externalCommand } from './command-brands.ts';
 import { CommsError, EXIT_CODES } from './errors.ts';
 import { appendPrivateLine, replaceFileInPlace, writeFileAtomic } from './fs.ts';
 import {
@@ -299,6 +300,29 @@ function unscoped(packageName: string): string {
 
 function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * An MCP client's own command about one of its entries — `claude mcp get <name>`, `codex mcp remove <name>` — in
+ * backticks for a hint, or, when there is none to give, `instead`.
+ *
+ * The client's program, so an external command (`externalCommand`), and the name is whatever the entry is called. A
+ * name that is also one of this suite's commands — the core server's own default, `agentcomms`, is one — is refused
+ * there, because such a word is how a suite command would get round the locator; the hint then says the same thing in
+ * words rather than printing a command with that name in it.
+ */
+function clientCommandHint(words: readonly string[], platform: NodeJS.Platform | undefined, instead: string): string {
+  try {
+    return inlineCommand(
+      externalCommand(
+        words,
+        "the MCP client's own command reads or removes an entry of its own configuration",
+        platform,
+      ),
+    );
+  } catch {
+    return instead;
+  }
 }
 
 /**
@@ -835,7 +859,7 @@ async function codexRegistration(
 ): Promise<RegisteredServer | null> {
   const unknown = () =>
     new CommsError('CONFIG', `codex would not say what it has registered as "${name}", so nothing was written`, {
-      hint: `Look with ${inlineCommand(shellCommand(['codex', 'mcp', 'get', name], platform))}. If it is not an older copy of this server, choose another --name; \`--print\` shows the entry to add by hand.`,
+      hint: `Look with ${clientCommandHint(['codex', 'mcp', 'get', name], platform, `codex's own \`mcp get\`, for the entry called "${name}"`)}. If it is not an older copy of this server, choose another --name; \`--print\` shows the entry to add by hand.`,
     });
   let answer: Awaited<ReturnType<typeof capture>>;
   try {
@@ -1235,12 +1259,13 @@ export async function mcpInstall(
 
   // What the entry being replaced narrowed, kept wherever this install left it out, and said.
   if (kept.length > 0) {
+    const byHand = `delete "${name}" from ${configPath}`;
     const removal =
       options.client === 'claude-code'
-        ? inlineCommand(shellCommand(['claude', 'mcp', 'remove', name, '--scope', 'user'], context.platform))
+        ? clientCommandHint(['claude', 'mcp', 'remove', name, '--scope', 'user'], context.platform, byHand)
         : options.client === 'codex'
-          ? inlineCommand(shellCommand(['codex', 'mcp', 'remove', name], context.platform))
-          : `delete "${name}" from ${configPath}`;
+          ? clientCommandHint(['codex', 'mcp', 'remove', name], context.platform, byHand)
+          : byHand;
     warnings.push(
       `Kept ${kept.join(' ')} from the "${name}" entry this replaced, because this install did not say otherwise. To register it wider on purpose, remove that entry first (${removal}), then install without them.`,
     );
@@ -1383,7 +1408,7 @@ export async function mcpInstall(
             'CONFIG',
             `${cliName} already has an MCP server called "${name}", somewhere this could not read`,
             {
-              hint: `Look at it with ${inlineCommand(shellCommand([cliName, 'mcp', 'get', name], context.platform))}. If it is an older ${product.binary}, remove it with ${inlineCommand(shellCommand([cliName, 'mcp', 'remove', name], context.platform))} and run this again; if not, choose another --name.`,
+              hint: `Look at it with ${clientCommandHint([cliName, 'mcp', 'get', name], context.platform, `${cliName}'s own \`mcp get\`, for the entry called "${name}"`)}. If it is an older ${product.binary}, remove it with ${clientCommandHint([cliName, 'mcp', 'remove', name], context.platform, `${cliName}'s own \`mcp remove\``)} and run this again; if not, choose another --name.`,
               cause: error,
             },
           );

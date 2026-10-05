@@ -24,7 +24,6 @@ import {
   mcpInstall,
   type Narrowing,
   type PlannedInstall,
-  pinnedVersion,
   plannedInstall,
   preflightInstall,
   reusableRuntime,
@@ -32,9 +31,10 @@ import {
 } from '../mcp-install.ts';
 import { resolveName } from '../names.ts';
 import { compareVersions, isBehind, isVersion, npmGlobalPackages, npmInstallGlobal, npmLatestVersion } from '../npm.ts';
+import { launcherOf, registrationVersion } from '../registrations.ts';
 import { changeUpdateCheck, type UpdateCurrent, updateCheckSwitchedOff } from '../update-state.ts';
 import { VERSION } from '../version.ts';
-import { channelProduct, launcherOf } from './servers.ts';
+import { channelProduct } from './servers.ts';
 
 /**
  * Bringing a machine to the latest release, from a terminal (`agentcomms update`) or a chat (`comms_update`).
@@ -371,7 +371,7 @@ async function inspect(core: Core, env: NodeJS.ProcessEnv, deps: UpdateDeps): Pr
       channel,
       server,
       narrowing,
-      version: server.args.map((arg) => pinnedVersion(arg, facts)).find((pinned) => pinned !== null) ?? null,
+      version: registrationVersion(server, facts),
       // Gmail's npx launcher starts its thin `-mcp` package, released beside it: that package's release is the one it
       // pins, and the one it is compared with.
       package: server.args.some((arg) => arg.startsWith(`${facts.npxPackage}@`)) ? facts.npxPackage : facts.packageName,

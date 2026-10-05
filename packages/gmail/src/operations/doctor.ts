@@ -5,6 +5,7 @@ import {
   type Config,
   commandText,
   expandHome,
+  externalCommand,
   findById,
   findUngatedGmailServers,
   formerNameRefusal,
@@ -203,6 +204,25 @@ function nodeCheck(): Check {
   };
 }
 
+/**
+ * How to make a directory its owner's alone: `chmod 700`, the system's own command, so an external one. A directory
+ * inside one of this suite's packages — a development checkout's — is refused there, as a path that could start a
+ * product is, and is said in words instead.
+ */
+function ownerOnly(path: string, platform: NodeJS.Platform | undefined): string {
+  try {
+    return commandText(
+      externalCommand(
+        ['chmod', '700', path],
+        'chmod is the system command that makes a directory private to its owner',
+        platform,
+      ),
+    );
+  } catch {
+    return `make ${path} readable and writable by its owner alone (mode 700)`;
+  }
+}
+
 async function directoryChecks(context: GmailContext): Promise<Check[]> {
   const checks: Check[] = [];
   for (const [id, path] of [
@@ -224,7 +244,7 @@ async function directoryChecks(context: GmailContext): Promise<Check[]> {
       title: `Directory ${path}`,
       status: loose ? 'warn' : 'ok',
       detail: loose ? 'readable by other users on this machine' : 'owner-only',
-      fix: loose ? commandText(shellCommand(['chmod', '700', path], context.platform)) : undefined,
+      fix: loose ? ownerOnly(path, context.platform) : undefined,
     });
   }
   return checks;
