@@ -1,6 +1,6 @@
 # Local event emission — design
 
-Status: **revised after round 4; two owner questions open (§8)**. Specification only, not an implementation.
+Status: **revised after round 5; two owner questions open (§8)**. Specification only, not an implementation.
 Written from the cited research pass (§2) and a checked read of this repository at `74fa592`.
 This design adds a new **standing disclosure authorisation**; it does not treat recurring event delivery
 as the existing per-content send gate
@@ -41,7 +41,9 @@ reads, and for a design of everything that takes:
 | Audit records and provider contexts currently type their surface as only `'cli' | 'mcp'`. | `packages/core/src/audit.ts:20-35`; `packages/gmail/src/context.ts:28-42` |
 | `ConfigStore.load()` detects each atomic config replacement through an `(inode, mtime, size)` cache key, reparses on identity change and returns a clone. That is the live account registry the daemon can repeatedly load; it must not keep a second account cache. | `packages/core/src/config.ts:845-870` |
 | Core's approval-kind union is currently `send | change | download`, its approval-channel union is `elicitation | terminal`, and the flat record is send-shaped. Refusal selection and kind-mismatch messages enumerate those three kinds; an unknown kind currently falls through as a send. A trusted-client form is explicitly not terminal approval for a terminal-required change. Core's taint-source union is currently only the location `header | body`, and that location controls cap priority. | `packages/core/src/approvals.ts:43-54,302-335,446-450,622-640,899-903`; `packages/core/src/taint.ts:141-155,285-304` |
+| Preserving unknown outer keys in `taint.json` cannot preserve a new field inside an entry: the existing `touch` reconstructs an address/domain/handle entry as only `{ at, source, inboxIds }`. Core already uses a separate `handles.json` specifically because a previously installed writer never opens that file and therefore cannot erase it. | `packages/core/src/taint.ts:189-197,307-313` |
 | Core secret migration discovers references only from config clients, inboxes, accounts, the approval key and pending revocations. It has no event-database discovery path today. | `packages/core/src/operations/secrets-migrate.ts:30-39,54-63` |
+| Core keychain entries use service `agent-communications` and a 12-hex namespace derived from the resolved config directory; file secrets are one owner-only file per hashed reference. A separate events namespace and events-local file directory can reuse those mechanics without sharing core's backend selector or migration. | `packages/core/src/secrets.ts:36-53,175-188,251-254`; `packages/core/src/config.ts:697-730` |
 | `classifyChange` already judges mailbox/account send and change policies, internal domains, account mode, risk escalation, update checks, send caps, attachment roots and denies, downloads, elicitation clients and secret-store downgrades. It does not know events configuration yet. | `packages/core/src/config.ts:1375-1483,1487-1548` |
 | The channel manifest is a strict object, so an unknown `events` key is refused; its `hosts` field is expressly declared but not enforced. | `packages/core/src/channel-manifest.ts:43-112,170-224` |
 | The publish list is derived from packages with channel manifests and the server wrappers those manifests name. A non-channel library or service has no declaration that puts it in that list. | `scripts/packages.mjs:1-37`; `docs/superpowers/specs/2026-09-26-channel-plugins-design.md:110-125` |
@@ -97,14 +99,16 @@ A rule that automatically forwards future messages is not the existing send gate
 content; event emission approves a bounded class of future, unseen content. This design names that new authority a
 **standing disclosure authorisation**.
 
-**Approval rule.** Enabling or loosening any rule, target, subscriber or judge always needs approval outside the
-chat, regardless of `changePolicy`: either `agent-events approve <id>` at the human terminal, or the desktop app's
-typed-challenge flow (D13). Phase B1 adds a fourth core approval kind, `disclosure`; the present core union has only
-`send | change | download` (`packages/core/src/approvals.ts:43-54`). A disclosure record can be approved only through
-the trusted terminal or app control surface and can be claimed only from `approved`, never directly from `pending`.
-`chat` and MCP may prepare and explain one, but can never approve or claim it. This is deliberately stricter than an
-ordinary change because it authorises later disclosures the person has not seen. Loopback SSE subscribers and
-**every** hosted or local judge input are within the standing authority.
+**Approval rule.** Enabling or loosening a rule, activating the judge budget, or enabling all collection always needs
+approval outside the chat, regardless of `changePolicy`: either `agent-events approve <id>` at the human terminal,
+or the desktop app's typed-challenge flow (D13). Creating or editing a target, subscriber or judge creates an inert
+immutable version; it has no standalone activation or approval path. It gains disclosure authority only when an
+approved rule activation names that exact version. Phase B1 adds a fourth core approval kind, `disclosure`; the
+present core union has only `send | change | download` (`packages/core/src/approvals.ts:43-54`). A disclosure record
+can be approved only through the trusted terminal or app control surface and can be claimed only from `approved`,
+never directly from `pending`. `chat` and MCP may prepare and explain one, but can never approve or claim it. This is
+deliberately stricter than an ordinary change because it authorises later disclosures the person has not seen.
+Loopback SSE subscribers and **every** hosted or local judge input are within the standing authority.
 
 Core stores approvals as a discriminated union rather than adding disclosure fields to the current flat,
 send-shaped record (`packages/core/src/approvals.ts:302-335`). The disclosure member has the common approval id,
@@ -114,18 +118,23 @@ digest-version, challenge/state and timestamp fields, `kind: "disclosure"`, and 
 interface DisclosureBinding {
   digest: string;
   activationIntentId: string;
+  activationKind: 'rule' | 'judge-budget' | 'enable-all';
   versions: readonly {
-    kind: 'rule' | 'target' | 'subscriber' | 'judge' | 'judge-budget' | 'global-switch';
+    kind: 'rule' | 'target' | 'subscriber' | 'judge' | 'judge-budget';
     id: string;
     version: number;
   }[];
 }
 ```
 
-`versions` is non-empty, sorted by `(kind, id, version)` and contains every immutable version the activation will
-make authoritative, including referenced versions that remain active. The record has no `inboxId`, `inboxSub`,
-`draftId`, `draftMessageId`, send/change policy, risk flags, recipient expectations, send outcome, `change` or
-`download` fields. Its top-level approved digest, when present, must equal `binding.digest`.
+`versions` is sorted by `(kind, id, version)` and is derived from one of the three canonical activation documents
+below; it cannot be supplied independently. It is non-empty for a rule or budget activation. An `enable-all`
+document may have an empty rule-version list only when there are no active rule pointers, in which case enabling has
+no source set and performs no provider baseline. The record has no `inboxId`, `inboxSub`, `draftId`,
+`draftMessageId`, send/change policy, risk flags, recipient expectations, send outcome, `change` or `download`
+fields. Its top-level approved digest, when present, must equal `binding.digest`.
+Strict parsing also checks that `activationKind`, document kind and derived version-list shape agree, so no rule
+approval can be claimed as a budget or enable-all activation.
 
 The store exposes three kind-specific methods. `createDisclosure(binding)` validates that canonical shape and creates
 only `pending`; `approveDisclosure(id, liveBinding, challenge, via)` rechecks the complete binding and moves only
@@ -143,10 +152,38 @@ current dispatcher and mismatch paths enumerate only the older kinds
 cover create, terminal/app challenge approval, claim, expiry, revoke, drift, crash recovery and concurrent single use,
 plus every ordered cross-kind claim pair among `send`, `change`, `download` and `disclosure`.
 
-**Complete digest.** The daemon creates immutable pending versions and one deterministic preview. The digest is
-lowercase SHA-256 over core's recursively key-sorted canonical JSON (`packages/core/src/digest.ts:99-100,117-127`)
-of a versioned **canonical full rule document**. That document embeds the referenced immutable documents rather than
-hashing only their ids, and contains all of:
+**Three canonical activation documents.** The daemon creates immutable pending versions and one deterministic
+preview. A disclosure digest is lowercase SHA-256 over core's recursively key-sorted canonical JSON
+(`packages/core/src/digest.ts:99-100,117-127`) of exactly one version-1 document:
+
+```ts
+type ActivationDocumentV1 =
+  | { documentVersion: 1; kind: 'rule'; rule: CanonicalFullRuleDocument }
+  | { documentVersion: 1; kind: 'judge-budget'; budget: CanonicalJudgeBudgetDocument }
+  | {
+      documentVersion: 1;
+      kind: 'enable-all';
+      switchGeneration: number;
+      ruleVersions: readonly { ruleId: string; ruleVersion: number }[];
+    };
+```
+
+The three kinds have these exact version lists and effects:
+
+1. A **rule activation** derives `versions` from the rule version plus every target, subscriber and judge version
+   embedded in `rule`; it atomically replaces only that rule id's active pointer. The referenced object versions are
+   authorised for that rule and no other. It creates no global target, subscriber or judge pointer.
+2. A **judge-budget activation** has exactly one `judge-budget` entry for the singleton version and atomically
+   replaces only the singleton budget pointer. Its canonical budget document contains the singleton id/version and
+   the complete daemon-wide and per-provider call, token and concurrency ceilings—no rule fields or defaults are
+   implicit.
+3. An **enable-all activation** has exactly the sorted, duplicate-free `rule` entries named by `ruleVersions`. Its
+   final transaction requires the switch still to be disabled at `switchGeneration`, requires the active rule
+   pointer set to equal that list, and makes exactly those pointers effective by setting `event_settings.enabled` to
+   true. The switch is mutable state with a generation fence, not a versioned object and never a `versions` kind.
+
+The canonical full rule document embeds the referenced immutable documents rather than hashing only their ids, and
+contains all of:
 
 - the rule id and version; source channel; event type and type version; and a canonical source consisting of a
   non-empty, sorted set of explicit stable account ids plus the channel-specific source options in D4. The UI
@@ -155,10 +192,10 @@ hashing only their ids, and contains all of:
 - the complete deterministic-condition AST and agentic condition, including operator options, literal operands,
   threshold and uncertainty policy; and the complete mapping AST, including every object/array position, constant
   value, source pointer and `reject | omit | null` missing policy;
-- the complete ordered target set and each target version: kind and id; for a webhook, D7's canonical plain URL or
-  secret-URL descriptor; the non-empty, sorted, canonical `approvedAddressSet` of literal IPs/CIDRs allowed by D7;
-  untrusted representation; signing mode; delivery ordering;
-  and retry limit. For SSE it also embeds the subscriber id/version, exact allowed Origins and stream identity.
+- the complete ordered target set and each target version: kind and id; for dry-run, its at-most-24-hour retention;
+  for a webhook, D7's canonical plain URL or secret-URL descriptor, non-empty sorted canonical
+  `approvedAddressSet`, signing mode, delivery ordering and retry limit; and for SSE, the subscriber id/version, exact
+  allowed Origins and stream identity. Every kind embeds its untrusted representation.
   Every target preview also states that the minimal D3 installation-reset control event is delivered before ids under
   a new installation identity; it contains no account or sender content and cannot be disabled independently. Secret
   bytes and secret generations are deliberately absent;
@@ -166,36 +203,43 @@ hashing only their ids, and contains all of:
   interpretation, maximum input/output tokens and the rule's own call/token/concurrency limits. Daemon-wide and
   per-provider ceilings live only in D5's separately approved singleton budget version, never in a rule; and
 - the delivery rate cap (default 60 deliveries per rolling hour) and **every** retention value: ingest content,
-  hold, delivery, SSE replay, dead-letter payload and decision metadata. The defaults are respectively 24 hours,
-  24 hours, 24 hours, 24 hours, seven days and 30 days; SSE remains capped at seven days. Raising any cap or
-  retention is a loosening. Saving refuses `hold retention > ingest retention`, so a hold can never extend the life
-  of that rule version's own encrypted projection.
+  hold, delivery, dry-run, SSE replay, dead-letter payload and decision metadata. The defaults are respectively 24
+  hours, 24 hours, 24 hours, 24 hours, 24 hours, seven days and 30 days; dry-run is capped at 24 hours and SSE at
+  seven days. Raising any cap or retention is a loosening. Saving refuses `hold retention > ingest retention`, so a
+  hold can never extend the life of that rule version's own encrypted projection.
 
-Golden tests change one digest field at a time, including an account id, a newly connected but unselected account,
-each source option, an ordinary URL path, a secret-URL fingerprint, mapping constant, missing policy and each
-per-rule judge limit. The singleton budget has its own independent digest tests. Every active authorisation, its full
-set of versions, digest, approval time, retention deadlines and remaining rate-cap window appears in
-`agent-events doctor` and the app. Nothing is enabled by install, update or import.
+Golden digest vectors cover all three document kinds. Rule vectors change one field at a time, including an account
+id, a newly connected but unselected account, each source option, an ordinary URL path, a secret-URL fingerprint,
+mapping constant, missing policy, referenced object version and each per-rule judge limit. Budget vectors change
+each daemon/provider ceiling and the singleton version. Enable-all vectors change the switch generation, add,
+remove or reorder a rule-version id, and prove canonical sorting makes only reorder a no-op. Cross-kind vectors prove
+the same nested JSON under another `kind` has another digest. Every active authorisation, its activation kind, full
+version list, digest, approval time, retention deadlines and remaining rate-cap window appears in `agent-events doctor`
+and the app. Nothing is enabled by install, update or import.
 
 **Version and activation rule.** Rules, targets, subscribers and judges are immutable versioned rows in the events
 database. A decision and every delivery bind `(ruleId, ruleVersion, targetId, targetVersion[, subscriberId,
 subscriberVersion][, judgeId, judgeVersion])`. Delivery uses exactly those versions and never follows a mutable id to
-a different endpoint.
+a different endpoint. Editing a target, subscriber or judge creates a new inert version. An existing active rule
+continues to use its embedded old version; it uses the new version only after a new version of that rule references
+it and that rule activation is approved. There is no command, tool or app action that approves an object version by
+itself.
 
 Activation crosses the daemon's SQLite database and the core approval store by one recoverable protocol, not by a
 claimed cross-store transaction:
 
-1. During prepare and under the daemon's activation lock, re-plan the full document and verify its digest. A SQLite
-   transaction inserts a unique pending activation intent with the digest, every version id and the active pointers
-   it expects to replace. The daemon calls `createDisclosure` with that same intent id/digest/version list, then
+1. During prepare and under the daemon's activation lock, re-plan the exact activation document and verify its
+   digest. A SQLite transaction inserts a unique pending activation intent with its kind, canonical document, digest,
+   derived version list and the pointer or switch effect it expects. The daemon calls `createDisclosure` with that
+   same intent id/kind/digest/version list, then
    attaches the returned approval id to the intent in a second transaction. It returns the preview only after both
    stores agree. A crash before attachment is safe: startup joins the one matching disclosure record by its bound
    intent id, or drops an intent for which no record exists; an orphan record was never returned and expires unused.
 2. Terminal or app approval calls `approveDisclosure` with the re-planned live binding. The activation operation then
    calls `claimForDisclosure` on that exact approved record. Core's existing store uses a per-record transition and
    an `O_EXCL` marker for its single-use guarantee (`packages/core/src/approvals.ts:20-29,801-813`).
-3. A final SQLite transaction re-checks the intent, expected pointers and binding, marks those versions active,
-   records the activation and marks the intent complete.
+3. A final SQLite transaction re-checks the intent, expected pointer or switch state and binding, applies only the
+   kind-specific effect above, records the activation and marks the intent complete.
 
 Startup runs recovery before any source or worker. An intent paired with `used` finishes step 3. One paired with
 `approved` is re-planned and, only if the binding and expected pointers still match, resumes the single claim and
@@ -204,56 +248,62 @@ or absent approvals drop the intent without moving an active pointer. Because th
 a used disclosure approval can never be stranded without enough SQLite state to finish. Recovery is crash-injected
 after every durable write and approval-store transition.
 
-A loosening or any edit outside the whitelist below creates a pending version. The approved active version keeps
-running until that pending version completes the protocol above. The **entire tightening whitelist** is syntactic:
+A loosening or any edit outside the whitelist below creates a pending rule version. The approved active rule version
+keeps running until that pending version completes the protocol above. A target, subscriber or judge edit always
+requires a new referencing rule version and approval, even when the object edit is narrower; this is what preserves
+the exact object-version grant rather than inventing a standalone object activation. Removing one of those objects is
+different: it records an immediate revocation of all of its versions and cancels their work, but activates no
+replacement. The **entire no-approval tightening whitelist** is syntactic:
 
-1. disable an object (a remove command activates an immutable disabled/tombstone version);
+1. disable a rule, or revoke a target, subscriber or judge without replacing it;
 2. remove a target from a rule;
 3. remove an output field from a mapping;
 4. lower a rate cap;
 5. shorten any retention;
-6. change `plain` to `enveloped`;
-7. remove one or more IPs/CIDRs from a target or judge's `approvedAddressSet`; or
-8. narrow source options by removing a Gmail label, Slack conversation, Resend kind or WhatsApp chat, or by changing
+6. narrow source options by removing a Gmail label, Slack conversation, Resend kind or WhatsApp chat, or by changing
    Gmail `includeSpamTrash` from `true` to `false`; changing WhatsApp `all-allowed` to an explicit subset is also a
    narrowing.
 
 Every other edit—including any condition edit, constant change, source-pointer substitution, target/subscriber/judge
-pointer substitution, new account or output field, any source-option addition (including an explicit WhatsApp chat
-set to `all-allowed`) or inverse transition—needs a fresh standing authorisation. A
-tightening is SQLite-only and commits in one transaction: it moves the active pointer, marks every queued or
-retryable affected delivery `cancelled`, purges each cancelled encrypted record, and purges retained SSE entries made
-under the superseded rule, target/subscriber or judge version. Each edit has one explicit post-commit invariant and
-test; there is no generic “disclosure-set subset” proof:
+pointer substitution, any edit that produces a new target/subscriber/judge version (including `plain` to `enveloped`
+or a smaller approved address set), new account or output field, any source-option addition (including an explicit
+WhatsApp chat set to `all-allowed`) or inverse transition—needs a fresh standing authorisation. A no-approval
+tightening is SQLite-only and commits in one transaction: it moves a rule pointer or records the object-version
+revocation, marks every queued or retryable affected delivery `cancelled`, purges each cancelled encrypted record,
+and purges retained dry-run and SSE entries made under the superseded or revoked versions. Each edit has one explicit
+post-commit invariant and test; there is no generic “disclosure-set subset” proof:
 
-1. disabled object — no new judge reservation, delivery claim, SSE append or replay bound to it can cross;
+1. disabled object — no new judge reservation, delivery claim, dry-run/SSE append or replay bound to it can cross;
 2. removed target — no delivery to that target can cross;
 3. removed output field — that pointer is absent from every newly created payload;
 4. lower rate cap — no new cap charge can exceed the lower rolling-window limit;
 5. shorter retention — every affected record already beyond the new deadline is terminal and purged in the same
    transaction, and no affected record survives its new deadline;
-6. `plain` to `enveloped` — no plain sender-controlled value leaves after the transaction commits;
-7. reduced approved address set — no new connection can select an address removed by the transaction; and
-8. narrowed source options — no later provider request, projection or decision can include a removed label,
+6. narrowed source options — no later provider request, projection or decision can include a removed label,
    conversation, kind or chat, or spam/trash after that opt-in is removed.
 
-Mutations outside those eight forms are always pending. The tests pause each worker at the relevant transaction
+Mutations outside those six forms are always pending. The tests pause each worker at the relevant transaction
 boundary and assert the invariant against already queued work as well as work created afterward.
 
 Revocation is immediate at that commit. Immediately before delivery I/O, a worker transaction moves a row to
-`disclosing` only if the bound rule, target/subscriber and judge versions are still the active pointers, the global
-switch is enabled and D9 says the account is live. After revocation commits, no worker can cross that boundary. I/O
+`disclosing` only if the bound rule version is still that rule's active pointer, every referenced target/subscriber
+and judge version is unrevoked, the global switch is enabled and D9 says the account is live. After revocation
+commits, no worker can cross that boundary. I/O
 already in flight cannot be recalled and is recorded as such.
 
 **Secrets never enter model context.** Creating, entering, revealing or rotating a webhook signing secret,
-subscriber token, judge API key or D7 secret URL is a human-only action in the terminal or app. Terminal entry
+subscriber token or judge API key—and entering the D7 URL for a new secret-URL target version—is a human-only action
+in the terminal or app. Terminal entry
 requires the existing TTY and agent-marker checks (`packages/core/src/change-flow.ts:208-210,291-320`;
 `packages/core/src/cli-runtime.ts:36-60`); any key typed by the person uses hidden input. MCP tools never accept or
 return secret material. An MCP-proposed target, subscriber or hosted judge is created incomplete and disabled; the
-person completes its secret slot in the terminal or app. Signing-secret, token and secret-URL rotation changes
-generations inside a referenced secret slot, not the authorised disclosure fields: two signing generations may
-overlap (D7), but secret
-bytes and generations are absent from the preview and audit.
+person completes its secret slot in the terminal or app. Signing-secret and subscriber-token rotation changes
+generations inside a referenced secret slot, not the authorised destination: two signing generations may overlap
+(D7), while token rotation closes old-generation streams. A hosted-judge API key can likewise be replaced in its
+human-only credential slot because it does not change the approved judge endpoint or model. A secret URL is
+different: changing any byte of its full canonical URL creates a new target version with a new fingerprint, and
+every rule that should use it needs its own new rule activation. There is no in-slot secret-URL rotation. Secret
+bytes and rotatable credential generations are absent from previews and audit.
 
 These human-only secret commands and app operations receive `status: "exception"` rows in `capabilities.json`, with
 the reason: "secret material must never enter model input or output; the person completes this operation at the
@@ -517,6 +567,11 @@ type Condition =
   the rule's limits. The reservation records the immutable budget version and is settled to reported usage afterward.
   A call that times out after it may have been billed consumes its call and the reserved maximum tokens; it is never
   refunded on uncertainty. No active singleton means no judge call.
+- `judge test` has no synthetic rule limits. Its transaction instead enforces a durable rolling ceiling of ten tests
+  per hour for the exact `(judgeId, judgeVersion)` and reserves the call, maximum tokens and concurrency against the
+  active singleton's **global** ceilings. It charges neither a rule nor a per-provider ceiling. The per-version test
+  charge is not refunded on failure, and the global reservation settles exactly like production usage. No active
+  singleton, an exhausted global ceiling or the eleventh per-version test refuses before network I/O.
 
 ### D6. Mapping and the external wire contract
 
@@ -575,36 +630,41 @@ signature change.
 - A **plain URL** stores and previews its full canonical URL. It must have no username/password userinfo, query or
   fragment; any of those components is refused. Its path is permitted and is treated as non-secret configuration.
 - A **secret URL** is required when the URL is itself a credential, including a bearer token embedded in its path or
-  query. The person enters or rotates the full URL only through D2's human-only hidden terminal/app path. The full
-  canonical URL lives only in core's secret store. The immutable target row, canonical rule document, every preview,
+  query. The person enters the full URL only through D2's human-only hidden terminal/app path. The full canonical URL
+  lives only in D9's daemon-owned secret store. The immutable target row, canonical rule document, every preview,
   CLI/MCP/app response, log and audit row carry only `{ scheme, host, port, sha256 }`, where `port` is explicit after
   default-port normalisation and `sha256` is lowercase SHA-256 of the UTF-8 canonical full URL. They never carry its
-  path, query or userinfo. D2's disclosure digest therefore binds the fingerprint, scheme, host and port, not secret
-  bytes.
+  path, query or userinfo. D2's disclosure digest therefore binds the fingerprint, scheme, host and port. A different
+  full URL is a new target version and cannot overwrite the existing version's secret slot; each rule moves to it
+  only through a new rule activation.
 
 Both forms use one URL canonicaliser: lowercase scheme and IDNA-ASCII host, explicit normalised port, exact
 percent-encoded path/query bytes and no fragment. Before a secret-URL connection, the daemon reads the referenced
 secret, canonicalises it again, recomputes the fingerprint and authority tuple, and refuses any mismatch or missing
-secret before DNS or network I/O. Secret-URL references are in D9's manifest. A path containing credential material
+secret before DNS or network I/O. A path containing credential material
 must never be offered as a plain target; the terminal/app labels the two forms and requires the person to choose the
-secret form for such URLs. Tests refuse userinfo and queries on plain URLs, mutate a secret URL behind its reference,
-and scan every CLI, MCP, app, preview, audit and diagnostic output to prove the full secret URL never appears.
+secret form for such URLs. Tests refuse userinfo and queries on plain URLs; refuse an attempted in-slot URL change;
+prove a changed path or query produces a different target version and digest that no existing rule follows; and scan
+every CLI, MCP, app, preview, audit and diagnostic output to prove the full secret URL never appears.
 
 | Target | Version 1 contract |
 |---|---|
+| **Dry-run** | No network I/O. At the delivery boundary, append the exact would-be CloudEvent bytes to the encrypted `dryrun_log` table using D8's packed-record format. The target version binds a retention no longer than 24 hours. `targetKey` is `dryrun:<targetId>:<targetVersion>`. The append charges the rule's ordinary delivery cap and completes the delivery atomically. Only a person at the terminal or in the app may read it, through D3's untrusted text renderer; no MCP result, structured content, log or audit row contains its payload. |
 | **Webhook** | HTTPS `POST` of the exact CloudEvent bytes, Standard Webhooks signed. Success is 2xx. Retry with capped exponential backoff and jitter until success, the approved delivery-retention deadline or 20 attempts. Exhausting attempts before the deadline is `dead-lettered`; reaching the deadline first is `retention-expired`. Promise: **bounded at-least-once attempts**, not unconditional receipt. |
-| **Local SSE stream** | `GET /v1/streams/<subscriber>` on 127.0.0.1/::1. Each subscriber has an encrypted retained stream log, default 24 hours and maximum 7 days, bound into its standing authorisation. `Last-Event-ID` replays entries still in that window only while every recorded version is active, the global switch is enabled and D9's account is live. There is no acknowledgement, so the promise is only **available for replay within the approved window**, never receipt or processing. |
+| **Local SSE stream** | `GET /v1/streams/<subscriber>` on 127.0.0.1/::1. Each subscriber has an encrypted retained stream log, default 24 hours and maximum 7 days, bound into its standing authorisation. `Last-Event-ID` replays entries still in that window only while the recorded rule is its active pointer, its target/subscriber/judge versions are unrevoked, the global switch is enabled and D9's account is live. There is no acknowledgement, so the promise is only **available for replay within the approved window**, never receipt or processing. |
 
-Webhook and SSE are the only delivery adapters specified here. Broker and hosted-queue adapters require the separate
+Dry-run, webhook and SSE are the only delivery adapters specified here; phase B1 implements dry-run and phase B2
+adds the network adapters. Broker and hosted-queue adapters require the separate
 future design in D15; this specification does not define their schemas, credentials, acceptance boundaries or
 delivery guarantees.
 
 Every matched target creates one delivery, and the rule's rolling cap counts **deliveries**, not attempts or reads.
 For a webhook the first attempt transaction charges the slot once and records `capChargedAt`; every retry is another
-attempt of that same delivery and never consumes another slot. For SSE, the append transaction charges one slot,
-appends the encrypted stream row and finishes that delivery atomically. Replaying that already appended row consumes
-no slot—it is the same delivery—and is possible only through its approved retention deadline. A cap-exhausted
-delivery waits without an attempt or append until a slot opens or its retention deadline makes it terminal.
+attempt of that same delivery and never consumes another slot. For dry-run and SSE, the append transaction charges
+one slot, appends the encrypted log row and finishes that delivery atomically. Reading an already appended dry-run
+row or replaying an already appended SSE row consumes no slot—it is the same delivery—and is possible only through
+its approved retention deadline. A cap-exhausted delivery waits without an attempt or append until a slot opens or
+its retention deadline makes it terminal.
 
 **Retention is terminal.** Rule validation refuses a hold window longer than that rule's ingest window. A held
 decision receives `holdExpiresAt` from the approved hold window, default 24 hours; if no person resolves it by then,
@@ -614,10 +674,39 @@ absolute retention deadline independent of its retry
 or rate-cap schedule. If it has not crossed to `disclosing` before that deadline—including because it waited behind a
 rate cap—it becomes terminal `retention-expired` and its encrypted record is purged. Cancelling a delivery records
 `cancelled` and purges its encrypted record in the **same** transaction. Webhook payloads are purged after a 2xx; SSE
-payloads after their window or any bound-version revocation. A webhook that exhausts attempts before its delivery
+payloads after their window or any bound-version revocation; dry-run payloads after their at-most-24-hour window.
+Every rule, target, subscriber or judge revocation that purges deliveries or SSE entries also purges matching
+`dryrun_log` rows in the same transaction. A webhook that exhausts attempts before its delivery
 deadline becomes `dead-lettered`; its encrypted payload remains only for the separately approved dead-letter
 retention, default seven days, then is purged, and `delivery drop` purges it immediately. When one decision has
 multiple targets, each target copy reaches its own terminal outcome and deadline.
+
+`delivery retry` is only a scheduling operation over a webhook delivery whose current state is `retryable`. In one
+transaction it rechecks the original attempt limit, absolute delivery deadline, active rule version, unrevoked
+target/subscriber/judge versions, live account and current switch generation, then moves only `nextAt` to now. It
+does not decrement or reset `attempts`, extend any deadline, remap content, re-run a judge, change a bound version or
+move work across a disable/enable generation. Attempt 20, an expired deadline, a revoked version, a stale switch
+generation and every terminal state are refused without mutation. In particular, `dead-lettered` is terminal and
+cannot be redriven; only `delivery drop` can remove its retained payload. `disable-all` purges encrypted payloads for
+dead-lettered deliveries as well as queued, retryable and already-disclosing work.
+
+**Installation-reset barrier.** A reset creates one durable barrier for each exact target version referenced by an
+active rule. Its reset delivery is ahead of every ordinary delivery under the new installation id: webhook targets
+open the barrier only after a 2xx, and dry-run/SSE targets only after their encrypted append commits. Ordinary rows
+may be created behind the barrier, but they cannot move to `disclosing` or append while it is closed; their original
+absolute retention deadlines continue to run and expiry purges them normally. The barrier is keyed by
+`(resetEpoch, targetId, targetVersion)` and survives restart.
+
+If the reset delivery exhausts its approved attempt limit before its deadline, it becomes terminal
+`dead-lettered`; if its deadline arrives first it becomes terminal `retention-expired`. Either way the target version
+becomes `degraded` and the barrier stays closed. No automatic or manual
+`delivery retry` can redrive it. A person may run `target resume` at a terminal or use the app; if the target version
+is still referenced and unrevoked, that creates a **new** reset-delivery id for the same reset epoch with a fresh
+target-bounded attempt counter and absolute deadline, while leaving the barrier closed until it succeeds. It never
+turns the old dead letter retryable. MCP cannot resume a target. Revoking the target purges the barrier and all
+waiting payloads instead of releasing them. Tests dead-letter a reset, restart the daemon, let later deliveries
+expire behind the durable barrier, resume from the terminal/app, and prove no later CloudEvent crosses before the
+new reset delivery.
 
 Decision metadata has `metadataExpiresAt`, default 30 days or the approved shorter value, and `metadataState`.
 At expiry one transaction appends a non-content purge tombstone, clears judge values/reasons and other expiring
@@ -625,20 +714,34 @@ metadata, and moves `metadataState` to `purged`; the minimal ids and uniqueness 
 evaluated again. No deadline ordering—hold, ingest, delivery, dead-letter or decision metadata—extends any other.
 
 **Taint before every judge and disclosure.** Before **every** implemented judge call, before webhook network I/O,
-and before appending an SSE event to a subscriber-readable log, the daemon takes the structured addresses, scoped
+and before appending a dry-run or SSE event to a readable log, the daemon takes the structured addresses, scoped
 platform handles and prose-extracted addresses derived through D3 mapping provenance from the exact target-specific
 value. It records structured values with location `source: "header"` and prose-extracted values with location
 `source: "body"`; this existing `header | body` dimension remains the cap-priority signal
-(`packages/core/src/taint.ts:141-155,285-304`). Each observation also has the orthogonal
-`origins: ["event"]`. Persisted taint entries merge a canonical set of `"read" | "event"` origins while preserving
-header-over-body location priority and the existing account-id set. Event identity and channel are deliberately
-**not persisted** in the taint store; the origin records only that an event path, rather than an ordinary read path,
-observed the value. Existing records with no `origins` field read as `origins: ["read"]` and are rewritten in the new
-shape on the next locked update. Ordinary collectors emit `origins: ["read"]`.
+(`packages/core/src/taint.ts:141-155,285-304`). Each observation also has the orthogonal origin `"event"`.
+
+Origins do **not** become fields inside the existing entries. They live in the owner-only sidecar
+`<stateDir>/taint/origins.json`, whose `addresses`, `domains` and `handles` maps use exactly the canonical keys of
+`taint.json` and `handles.json`; a sidecar value is `{ at, origins }`, with `origins` a sorted, duplicate-free subset
+of `read | event`. This is required for mixed releases: core already explains that only a separate file survives a
+writer that predates new entry data (`packages/core/src/taint.ts:189-197`), and the current `touch` reconstructs an
+entry without unknown inner fields (`packages/core/src/taint.ts:307-313`). An older Gmail server can therefore
+rewrite `taint.json` but never opens `origins.json`.
+
+New writers atomically merge the sidecar under its own lock **before** updating the base taint files, and `flush`
+returns only after both writes succeed. Readers merge by canonical key: no sidecar entry means `origins: ["read"]`;
+an entry returns its stored set; and a base `at` later than the sidecar `at` adds `"read"`, proving a legacy read
+writer touched it without erasing `"event"`. Sidecar pruning follows the base store's same seven-day window and
+per-map cap, retaining only keys that survive the corresponding base map or are about to be touched by this
+transaction; a sidecar-only key from a crash is ignored and pruned on the next pass. Header-over-body priority and
+account-id sets remain in the base entries. Event identity and channel are
+deliberately **not persisted**. New ordinary collectors record `"read"`; existing stores with no sidecar decode as
+read-only.
 
 The daemon proceeds only after `flush` succeeds. On failure, nothing is posted, appended or called; the step remains
 retryable. This preserves the current fail-closed collector contract (`packages/core/src/taint.ts:273-285,426-429`).
-Migration tests cover old entries, mixed read/event merges and round trips. Cap tests mix structured and prose
+Migration tests cover old entries, mixed read/event merges and round trips, plus a published-old-writer `touch` over
+an address with an event origin and prove the merged result retains `event`. Cap tests mix structured and prose
 observations from both origins and prove header priority remains unchanged and neither an event id nor channel is
 written.
 
@@ -664,8 +767,9 @@ for TLS SNI and `Host`; redirects are never followed. The preview shows the sche
 approved IP/CIDR and whether HTTP is permitted. Plain HTTP is allowed only when every possible resolved address is in
 the approved set. Local judges use the identical classifier, with loopback addresses named explicitly in their set.
 
-`target test` runs only for an already approved target version, or from the terminal/app against a pending version as
-part of its approval. It sends exactly the catalogue's fixed `agentcomms.test` event, accepts no caller-supplied
+`target test` runs only for a target version referenced by an active rule, or from the terminal/app against a pending
+version from the approval screen of a rule activation that references it. It sends exactly the catalogue's fixed
+`agentcomms.test` event, accepts no caller-supplied
 content or field override, and runs the ordinary taint pipeline; the synthetic event has no taint declarations, so
 there is nothing to record. A durable cap allows at most ten test attempts per rolling hour per target id across all
 of its versions, charged before the attempt and not refunded on failure. It is separate from a rule's delivery cap and
@@ -697,11 +801,13 @@ One SQLite database, `<stateDir>/events/events.sqlite`, is owned only by `agent-
 
 - `meta(key PRIMARY KEY, value)` holds the schema version, reset epoch and D3 `installationId`;
 - `event_settings(singleton, enabled, switchGeneration, changedAt, activationId?)` — the authoritative global
-  switch and generation fence;
+  switch and generation fence, not an immutable versioned object;
 - immutable `rule_versions`, `target_versions`, `subscriber_versions`, `judge_versions` and
   `judge_budget_versions`, each holding its full canonical document and digest; `active_versions(kind, objectId,
-  version, approvalId, activatedAt)` includes one singleton judge-budget pointer; durable `activation_intents` and
-  append-only `activations`/`revocations`;
+  version, approvalId, activatedAt)` permits only rule pointers and the singleton judge-budget pointer;
+  `object_revocations(kind, objectId, version, revokedAt)` carries immediate target/subscriber/judge revocations;
+  durable `activation_intents` store the canonical activation kind/document/effect, and `activations`/`revocations`
+  are append-only;
 - `cursors(source, accountId, eventType, cursor, updatedAt)` and
   `source_scan_state(id, source, accountId, eventType, encryptedRecord, updatedAt)` for encrypted source-specific
   continuation and staging;
@@ -715,15 +821,24 @@ One SQLite database, `<stateDir>/events/events.sqlite`, is owned only by `agent-
   subscriberId?, subscriberVersion?, judgeId?, judgeVersion?, encryptedRecord, attempts, capChargedAt?, nextAt,
   expiresAt, state, switchGeneration, leaseUntil, lastErrorCode?, lastStatus?, UNIQUE(decisionId, targetKey))`, where
   `lastErrorCode` is a closed stable enum and `lastStatus` is an integer HTTP/provider status; `targetKey` is exactly
-  `webhook:<targetId>:<version>` or `sse:<subscriberId>:<version>`;
+  `dryrun:<targetId>:<targetVersion>`, `webhook:<targetId>:<targetVersion>` or
+  `sse:<targetId>:<targetVersion>:<subscriberId>:<subscriberVersion>`. `state` is the closed enum `queued |
+  retryable | disclosing | delivered | dead-lettered | retention-expired | cancelled | content-unreadable |
+  in-flight-at-disable | in-flight-at-account-removal`; waiting behind a cap or reset barrier remains `queued` with
+  its original deadline;
+- `dryrun_log(deliveryId PRIMARY KEY, ruleId, ruleVersion, targetId, targetVersion, judgeId?, judgeVersion?, eventId, accountId,
+  encryptedRecord, deliveredAt, expiresAt)` uses the same packed encrypted-record format and has a hard validated
+  maximum lifetime of 24 hours;
 - `stream_log(id, ruleId, ruleVersion, targetId, targetVersion, subscriberId, subscriberVersion, judgeId?,
   judgeVersion?, eventId, accountId, encryptedRecord, deliveredAt, expiresAt)`;
-- `judge_budget_reservations`, `delivery_cap_charges`, worker leases and content-free `work_attempts`, each binding the
-  switch generation under which asynchronous work began. Any provider/target error text—including text that reflects
-  a request payload—lives only inside the owning encrypted record; every similarly named plaintext status/error
-  column is restricted to a closed code and numeric status; and
-- reset notifications and account-revocation tombstones needed to tell consumers why a cursor or event-id sequence
-  restarted without retaining event content.
+- `judge_budget_reservations`, durable rolling `judge_test_charges(judgeId, judgeVersion, chargedAt)`,
+  `delivery_cap_charges`, worker leases and content-free `work_attempts`, each binding the switch generation under
+  which asynchronous work began. Any provider/target error text—including text that reflects a request payload—lives
+  only inside the owning encrypted record; every similarly named plaintext status/error column is restricted to a
+  closed code and numeric status; and
+- `reset_barriers(resetEpoch, targetId, targetVersion, state, resetDeliveryId, degradedAt?)`, reset-delivery attempts,
+  target health, reset notifications and account-revocation tombstones needed to enforce D7's ordering barrier and
+  tell consumers why a cursor or event-id sequence restarted without retaining event content.
 
 `eventId` is D3's deterministic id and `UNIQUE(eventId)` is the ingest idempotency boundary. On a conflict, the
 transaction compares the stored `(installationId, accountId, type, version, dedupeKey)` with the canonical identity:
@@ -766,8 +881,9 @@ Rotation creates a new random master key and id, makes its derived subkeys curre
 records transactionally in bounded batches and retains old key versions until no record names them. Authentication
 failure makes exactly that record unreadable and records terminal `content-unreadable` for its owning work in the
 same transaction: ingest and decision failures terminalise and purge all derived payloads, delivery failures purge
-that delivery, stream-log failures purge that replay row, and source-scan failures abandon and purge the staged cycle
-before re-baselining with a gap. None is retried from unreadable bytes. An unknown key id or loss of a master key
+that delivery, dry-run/stream-log failures purge that readable row, reset-delivery failures degrade and keep the
+barrier closed, and source-scan failures abandon and purge the staged cycle before re-baselining with a gap. None is
+retried from unreadable bytes. An unknown key id or loss of a master key
 invokes the installation reset below. SQLite, WAL and free-page scans must never find fixture plaintext.
 
 **Installation identity and reset.** On the first daemon start for a database, it generates a random 128-bit
@@ -776,9 +892,11 @@ database backup/restore. A newly created database always gets a new id. If the d
 master key is lost, the daemon performs a reset rather than falling back to plaintext or reusing the old id: it
 installs a new master key and 128-bit id, terminalises and purges unreadable work, re-baselines every live source cursor
 to provider “now”, and records `agentcomms.installation.reset` with `eventIdsRestart: true` and the prior id when known.
-Every active downstream receives that reset event before any event under the new id. If database recreation removed
-all targets, the reset epoch remains in `meta` and is the first event sent to each subsequently authorised downstream.
-No provider event from before the new baselines is backfilled.
+It creates D7's durable per-target reset barriers before ordinary delivery creation resumes. A failed reset never
+permits later content to overtake it: dead-lettering marks that target version degraded, and later rows wait behind
+the barrier and retain their original expiry until a person runs `target resume` and a new reset delivery succeeds.
+If database recreation removed all targets, the reset epoch remains in `meta`; each subsequently authorised target
+receives a barrier and reset as its first event. No provider event from before the new baselines is backfilled.
 
 While evaluation is paused by the required-update gate, source polling pauses as well: the daemon never advances
 cursors while it cannot decide retained events. `rule test` has the zero-network contract in D10 and never performs a
@@ -787,25 +905,27 @@ fresh provider read.
 Workers claim rows with expiring leases. On restart an expired lease returns to its prior retryable state only when
 its switch generation is still current; older-generation work is terminal. Ordering, when enabled, is only by
 `(rule, account, target)`, so one failing destination does not block another. Immediately before judge or delivery
-I/O, one SQLite transaction re-reads `event_settings`, every bound active pointer and D9's live account, checks the
-deadline and moves the row to its boundary state. For a webhook's first attempt it also writes the one cap charge and
-`capChargedAt`; retries reuse it. A failed check reaches `cancelled` or `retention-expired` and purges the encrypted
-record in that transaction.
+I/O, one SQLite transaction re-reads `event_settings`, the bound active rule pointer, every referenced object's
+revocation state and D9's live account, checks the reset barrier and deadline, and moves the row to its boundary
+state. For a webhook's first attempt it also writes the one cap charge and `capChargedAt`; retries reuse it. A failed
+fence reaches `cancelled` or `retention-expired` and purges the encrypted record in that transaction; a closed reset
+barrier leaves non-expired ordinary work waiting without crossing the boundary.
 
-An SSE append is the delivery boundary: one transaction repeats the switch/pointer/live-account checks, charges the
-cap if not already charged, appends the stream row and marks the delivery delivered. Replay checks those same fences
-and retention but creates no delivery and consumes no cap. Each stream row stores all rule, target/subscriber and
-optional judge versions under which it was made; revoking any one purges matching rows in the same pointer-change
-transaction. Subscriber-token rotation changes only the secret generation, invalidates the old token, closes every
-live stream bound to an older generation under D7's fence and retains those rows for a newly authenticated client.
+A dry-run or SSE append is the delivery boundary: one transaction repeats the
+switch/rule-pointer/object-revocation/live-account/barrier checks, charges the cap if not already charged, appends the
+encrypted row and marks the delivery delivered. Reading a dry-run row or replaying an SSE row checks those same
+fences and retention but creates no delivery and consumes no cap. Each row stores all rule, target/subscriber and
+optional judge versions under which it was made; revoking any one purges matching rows in the same transaction.
+Subscriber-token rotation changes only the secret generation, invalidates the old token, closes every live stream
+bound to an older generation under D7's fence and retains those rows for a newly authenticated client.
 
-Every provider poll, judge request, webhook attempt and SSE append starts under a recorded switch generation. Every
-commit after the provider/judge/webhook network operation, and the SSE append commit itself, compares it with the
+Every provider poll, judge request, webhook attempt and dry-run/SSE append starts under a recorded switch generation.
+Every commit after the provider/judge/webhook network operation, and each append commit itself, compares it with the
 current generation. A mismatch records terminal `cancelled`, or preserves `in-flight-at-disable` when the row had
 already crossed `disclosing`; it releases reservations, purges payloads and can never create retryable work. The
 disable and re-enable protocol that advances this fence is D12.
 
-Decision metadata defaults to 30 days; ingest content, holds, delivery and SSE replay default to 24 hours;
+Decision metadata defaults to 30 days; ingest content, holds, delivery, dry-run and SSE replay default to 24 hours;
 dead-letter payload retention defaults to seven days. The person may shorten any retention through D2's whitelist;
 validation still enforces `hold <= ingest`. Raising one needs a new standing authorisation. Expiry workers use
 database time/deadlines, D7's decision-metadata purge transition and terminal payload transitions, not best-effort
@@ -814,56 +934,61 @@ deletion jobs.
 ### D9. Authoritative event state and the config boundary
 
 `config.json` gains **no `events` key and carries no event state**. Rules, targets, subscribers, judges, every
-immutable version and pending/active pointer, source cursors, the global switch, activation intents, activations and
-revocations live only in D8's daemon-owned SQLite database. Event secret references live in the relevant immutable
-SQLite version; secret bytes remain in core's secret store.
+immutable version, rule/budget active pointer and object revocation, source cursors, the global switch, activation
+intents, activations and revocations live only in D8's daemon-owned SQLite database. Event secret references live in
+the relevant SQLite version/generation/meta rows; secret bytes live in the daemon's independent event secret store
+below.
 
 The existing config remains necessary for connected inbox/account identity and provider credentials, the chosen
-secret-store backend, and ordinary send/change policies. Event sources refer to accounts by stable id and never copy
-credentials. The daemon watches that registry by repeatedly calling the core `ConfigStore.load()`; its existing cache
-keys the file by inode, mtime and size, reparses after an atomic replacement and returns a fresh clone
-(`packages/core/src/config.ts:845-870`). The daemon must use that store directly rather than introduce an account
-identity cache of its own.
+secret-store backend, and ordinary send/change policies—but core's `config.secrets.store` applies only to core and
+channel credentials. Event sources refer to accounts by stable id and never copy credentials. The daemon watches that
+registry by repeatedly calling the core `ConfigStore.load()`; its existing cache keys the file by inode, mtime and
+size, reparses after an atomic replacement and returns a fresh clone (`packages/core/src/config.ts:845-870`). The
+daemon must use that store directly rather than introduce an account identity cache of its own.
 
-**Event-secret discovery and backend migration.** The daemon maintains
-`<stateDir>/events/secret-refs.json` (`state/events/secret-refs.json` relative to the configured state root), an
-owner-only, atomically replaced manifest with schema
-`{ version: 1, refs: [{ ref, kind }] }`. `refs` is sorted and duplicate-free; `kind` is the closed enum
-`master-key | signing-key | subscriber-token | judge-key | url-secret`. It lists every secret reference the events
-database or a pending event operation can name: all installation master-key generations, webhook signing-key
-generations, subscriber-token generations, hosted-judge keys and D7 secret URLs. It contains references and kinds
-only, never secret bytes, URLs or fingerprints.
+**An independent event secret store.** The events daemon owns one backend selection in SQLite `meta`, independent of
+`config.secrets.store`. The default is `keychain`; its namespace is
+`${keychainNamespace(resolvedConfigDir)}:events`, using the same service and 12-hex config-directory derivation as
+core but an events suffix, so no core reference can collide (`packages/core/src/secrets.ts:175-188,251-254`). The
+alternative `file` backend is `<stateDir>/events/secrets/`, an owner-only directory containing one 0600 file per
+hashed reference on POSIX and an owner-only ACL equivalent on Windows. There is no fallback between them. A failed
+first keychain round-trip stops and tells the person to choose the file backend; no core config value is read or
+written when selecting it.
 
-Only code holding core's existing credentials lock may write this manifest. Creating or rotating any event secret
-takes that same lock used by `secrets migrate`: it writes and verifies the secret, atomically adds the reference to
-the manifest, and only then commits the SQLite version/generation that names it. On failure before that SQLite commit,
-the manifest may conservatively retain an unreferenced entry, but SQLite can never name a reference absent from the
-manifest. Removal first commits that no SQLite or pending operation references it, then removes the manifest entry and
-secret under the lock. Startup, also under the lock, compares SQLite and pending-operation references with the
-manifest, adds no secret from guesswork, refuses collection on any missing entry/bytes and garbage-collects only an
-extra entry proven unreachable. A restart therefore preserves every live generation and never invokes D8's
-installation-reset path merely because a backend changed.
+SQLite is the reference ledger: while holding `<stateDir>/events/secrets.lock`, the daemon derives the complete,
+sorted reference set directly from immutable versions, pending operations and all retained master/signing/token/key/
+URL generations. There is no `secret-refs.json`. Creating or rotating a rotatable event credential—or creating the
+new slot for a new secret-URL target version—uses only this lock: write and verify the secret in the selected events
+backend, then commit the SQLite row/generation that names it;
+on failure restore the prior bytes or remove the unreferenced new value. Removal first commits that no SQLite row or
+pending operation names the reference, then deletes it. Startup compares the database-derived set with the selected
+backend, refuses collection for a missing referenced value and removes an extra value only when the database proves
+it unreachable.
 
-Core's `secrets migrate` already takes the credentials lock, but its current location snapshot enumerates only
-config-owned references (`packages/core/src/operations/secrets-migrate.ts:54-63`). While holding that lock, both the
-file→keychain and keychain→file plans must read and validate the event manifest and include every listed reference in
-their copy, verification, switch, rollback and old-backend cleanup sets. A malformed/unreadable manifest or missing
-listed secret refuses before the backend switch. Because create/rotate takes the same lock, it either finishes before
-the migration snapshot or observes the new backend afterward; it cannot create an un-migrated generation between
-copy and switch. Tests cover both directions with every event-secret kind, concurrent creation and rotation at each
-migration boundary, rollback, leftover reporting and a running daemon restarted after the switch.
+`agent-events secrets migrate --to keychain|file` and the paired app operation are terminal/app-only human
+exceptions. Under the events lock they snapshot the database-derived reference set, copy and read-back-verify every
+value, atomically change the `meta` backend selector, then remove the old copies; before the selector commit any
+failure rolls back new copies, and after it any failed cleanup is reported as a harmless named leftover that a retry
+cleans. Creation and rotation cannot interleave with the snapshot. The command never takes core's credentials lock,
+changes `config.secrets.store` or opens core's namespace/directory. Conversely, core's `agentcomms secrets migrate`
+and `comms_secrets_migrate` never enumerate, copy, delete or select the events backend. A compatibility test creates
+every event-secret kind, runs the prior released core binary to migrate core in both directions, restarts the new
+daemon and proves all event secrets are still readable; separate tests cover both event migration directions,
+concurrent event creation/rotation, rollback and leftover cleanup.
 
 On a stable account id's disappearance, the daemon takes the account-revocation lock and runs one SQLite transaction
 that records the revocation; cancels and purges every queued/retryable delivery for that account; marks held decisions
 `cancelled`; marks an already `disclosing` delivery terminal `in-flight-at-account-removal` and purges its retained
-record; releases its judge reservations; purges its stream rows, source staging and ingest records; and
+record; purges retained dead-letter payloads; releases its judge reservations; purges its dry-run and stream rows,
+source staging and ingest records; and
 deactivates every active rule version whose source scope names only that account. A multi-account rule remains active
 for its other live ids but can no longer poll, judge or disclose the missing one. An in-flight completion that lands
 after this transaction must re-read the live config: it records terminal `cancelled` (or the delivery's already
 crossed `in-flight-at-account-removal` outcome), creates no replacement payload and is never re-queued.
 
-Live account existence is also a mandatory fence in every transition to `disclosing`, every SSE append transaction
-and every SSE replay request. Source commits and judge-result commits load the live registry too. The race is
+Live account existence is also a mandatory fence in every transition to `disclosing`, every dry-run/SSE append
+transaction and every dry-run read or SSE replay request. Source commits and judge-result commits load the live
+registry too. The race is
 linearised at that final load: work that crossed its boundary while the id was still present is recorded in flight and
 cannot be recalled; work whose fence observes the disappearance terminalises itself. Once the watcher has observed
 the removal and committed its revocation transaction, no cached identity can let later work cross.
@@ -882,43 +1007,44 @@ The required core changes are exactly:
    that client's `surface` and `origin`; autonomous work uses `surface: "daemon", origin: "daemon"`; later daemon
    execution requested by a CLI, MCP or app client uses `surface: "daemon"` with that client in `origin`
    (`packages/core/src/audit.ts:20-35`).
-4. Keep the existing taint location `source: "header" | "body"` and add the orthogonal persisted
-   `origins: ("read" | "event")[]` set to address/domain/handle entries and observations. Decode absent origins as
-   `["read"]`, merge origins independently and preserve header priority and current account-id behavior
-   (`packages/core/src/taint.ts:141-155,285-312`).
-5. Add the strict event-secret manifest schema/reader at D9's fixed path, include its references in both directions
-   of core's locked secret-migration plan and expose the existing credentials-lock boundary to event secret
-   create/rotate/remove operations. The present enumeration is config-only
-   (`packages/core/src/operations/secrets-migrate.ts:54-63`).
+4. Keep the existing taint location `source: "header" | "body"` and add observations plus D7's independently locked
+   `taint/origins.json` sidecar and merged reader. Decode a missing sidecar entry as `["read"]`, preserve an event
+   origin across an old writer's reconstructed entry, and preserve header priority and current account-id behavior
+   (`packages/core/src/taint.ts:189-197,285-313`).
 
-That is the complete core integration; it is not three union edits. No `event` member is added to `TaintSource`, and
-no existing form is reclassified as terminal approval.
+That is the complete core integration; it is not merely a set of union edits. No `event` member is added to `TaintSource`, and
+no existing form is reclassified as terminal approval. Core's secret migration is deliberately unchanged: the events
+daemon owns its separate store, selector, lock and migration.
 
 `classifyChange` does not learn an events field and its existing safety fields stay unchanged
 (`packages/core/src/config.ts:1375-1483,1487-1548`). This keeps standing authority out of a file whose current commit
 primitive is an atomic rename (`packages/core/src/config.ts:949-951`) and makes every event tightening, cancellation
-and SSE purge one SQLite transaction.
+and dry-run/SSE purge one SQLite transaction.
 
-There is no mutable "current target" behind a delivery. SQLite active pointers move only through D2's activation or
-tightening transactions, and queued rows hold exact versions. **Loosening keeps the approved version running;
-tightening replaces it, cancels superseded work, purges its encrypted records and removes replayable SSE content in one
-store.** No older-release config compatibility fixture is needed because there is no event config value for an old
-reader to preserve.
+There is no mutable "current target" behind a delivery. SQLite has active pointers only for rules and the singleton
+budget; queued rows hold exact target/subscriber/judge versions and consult their revocations. **A new object version
+does nothing until each intended rule is re-approved with it; a no-approval revocation cancels affected work and
+purges its encrypted dry-run/SSE content in one store.** No older-release config compatibility fixture is needed for
+event configuration, but the explicit prior-core secret-migration fixture above is required because core and events
+must remain independent under mixed installed versions.
 
 ### D10. Control surfaces and parity
 
-Every non-exception capability is one operation in `packages/events-daemon/src/operations`, exposed by the
-`agent-events` CLI and MCP server, and represented by a `capabilities.json` row:
+Every capability is one operation in `packages/events-daemon/src/operations` and has a `capabilities.json` row.
+Non-exceptions are exposed by both the `agent-events` CLI and MCP server; the table also includes the human-only
+exceptions identified below:
 
 | Area | Operations |
 |---|---|
 | Catalogue | `catalogue list`, `catalogue show <type>` |
 | Sources | `sources list`, `source show` |
 | Rules | `rules list`, `rule show`, `rule create|update|enable|disable|remove`, `rule test` |
-| Targets | `targets list`, `target add|update|remove`, `target test` |
-| Subscribers | `subscribers list`, `subscriber add|remove` |
-| Judges | `judges list`, `judge add|remove`, `judge test`, `budget show|update` |
+| Targets | `targets list`, `target add|update|remove`, `target test`, `target resume` |
+| Subscribers | `subscribers list`, `subscriber add|update|remove` |
+| Judges | `judges list`, `judge add|update|remove`, `judge test`, `budget show|update` |
 | Deliveries | `deliveries list`, `delivery retry|drop`, `held list|decide` |
+| Dry-run log | `dryrun list|show` |
+| Secrets | `secrets migrate --to keychain|file` |
 | Daemon | `status`, `run`, `stop`, `pause|resume`, `disable-all|enable-all`, `approve <id>`, `doctor` |
 
 The parity `rule test` operation accepts only catalogue examples, including from MCP, and may evaluate a disabled or
@@ -933,22 +1059,26 @@ content may be selected only by a person outside model context”; it is absent 
 marker. It checks D9's live account before reading, renders sender content with the safe terminal/app renderer, takes
 no account argument and does no provider, judge or target I/O.
 
-`judge test` may call only an already approved, active judge version. The terminal or app may test a pending judge
-from the approval screen as part of approving that exact version; MCP and ordinary CLI calls cannot. The same rule
-applies to **every** real implemented judge call. It sends only the catalogue's fixed `agentcomms.test` event,
-accepts no caller content or field override, runs the ordinary taint path (with no observations for this synthetic
-event), and makes a durable reservation against the active global/provider budget and that judge version's limits
-exactly like a production call. The call and actual/reserved tokens are charged and never receive a testing
-exemption. `target test` keeps the equivalent version restriction and fixed event, taint behavior and ten-per-hour
-per-target cap in D7.
+`judge test` may call only a judge version referenced by an active rule. The terminal or app may test a pending judge
+from the approval screen only as part of a pending **rule activation that references that exact judge version**; MCP
+and ordinary CLI calls cannot. The same rule applies to **every** real implemented judge call. It sends only the
+catalogue's fixed `agentcomms.test` event, accepts no caller content or field override, runs the ordinary taint path
+(with no observations for this synthetic event), consumes one of the durable ten-per-hour charges for that exact
+judge version and reserves against the active singleton budget's global call/token/concurrency ceilings as D5
+specifies. It has no rule or per-judge limits to invent, and does not charge a per-provider ceiling. The call and
+actual/reserved tokens are charged and never receive a testing exemption. `target test` keeps the equivalent
+rule-activation restriction and fixed event, taint behavior and ten-per-hour per-target cap in D7.
 Automated tests inject every provider/judge/target transport and fail on any real socket; they prove an unapproved
 `rule test` or `judge test` makes zero network calls. An approved `judge test` and permitted `target test` make only
 the one bounded synthetic call specified above.
 
 MCP can otherwise read and propose disabled, secretless versions. It cannot approve or claim a disclosure
 authorisation, resolve a held model decision, test an unapproved target/judge, or accept/return/reveal/rotate a
-secret. The paired terminal commands and app operations exist, but each gets a `status: "exception"` capability row
-naming its human-only reason. `run` is also an exception because a tool cannot start the server in which it runs. The
+secret. It also cannot read `dryrun_log`, run `target resume` or migrate the event secret backend. The paired terminal
+commands and app operations exist, but each gets a `status: "exception"` capability row naming its human-only reason;
+dry-run reads specifically say that retained sender content must pass through the terminal/app untrusted renderer,
+and secret migration says it moves daemon credentials under the daemon's own lock. `run` is also an exception because
+a tool cannot start the server in which it runs. The
 precedent for visible exceptions and same-operation parity is
 `docs/superpowers/specs/2026-09-25-cli-mcp-parity-design.md:164-168` and `capabilities.json:241-254`.
 
@@ -956,9 +1086,10 @@ precedent for visible exceptions and same-operation parity is
 or app can approve and activate it. Its digest contains all daemon-wide and per-provider ceilings. Rule operations
 reject any attempted provider/global budget field; a rule carries only D5's per-rule limits.
 
-The first call that enables or loosens a disclosure returns `standingApprovalRequired`, a `disclosure` approval id,
-digest and complete preview. A repeated MCP call cannot claim it. The terminal/app approval operation re-plans under
-the daemon activation lock, refuses digest drift and runs D2's intent → core claim → SQLite activation protocol.
+The first call that activates a rule or budget, or enables all, returns `standingApprovalRequired`, its activation
+kind, a `disclosure` approval id, digest and complete preview. A repeated MCP call cannot claim it. The terminal/app
+approval operation re-plans under the daemon activation lock, refuses kind/version-list/digest drift and runs D2's
+intent → core claim → SQLite activation protocol.
 `doctor` reports daemon/protocol health, global switch, active authorisations, pending intents, source lag, leases,
 held decisions, dead letters, retention deadlines and missing secrets.
 
@@ -972,12 +1103,13 @@ representations, and hand the approval id to the person. It never instructs the 
 | `typesafe` | Jev through `POST https://api.typesafe.ai/v1/systemone`, using provider-native Noul output. It is **treated as hosted-only under currently published artefacts and terms**; this is not a claim that local Jev is impossible. | Exact approved input fields leave for the approved host. |
 | `local-endpoint` | An approved loopback Ollama/System One endpoint or a generic JSON-output model. Generic numbers are uncalibrated scores. The endpoint gets D7's per-connection resolution, address-set binding and redirect refusal; pending endpoints cannot be reached from MCP tests. | Only the explicitly approved address set; D7 taint still flushes before every call. |
 
-Every judge is immutable and versioned. No hosted or local judge may be called until that exact judge
-version is active under D2, except for one terminal/app call made inside its own approval screen as D10 defines. A
-hosted judge additionally needs its key completed by a person. "Never use judges" and disabling one judge are
-immediate whitelist tightenings: the transaction moves its active pointer, cancels and purges queued work, and purges
-SSE rows whose decisions used it. Prompt injection can change only the model's bounded score/reason code; it cannot
-change rules, mappings, targets or authority. A bundled judge is deliberately deferred to D15.
+Every judge is immutable and versioned. No hosted or local judge may be called until an active rule activation
+references that exact judge version, except for one terminal/app call made inside that pending rule activation's
+approval screen as D10 defines. A hosted judge additionally needs its key completed by a person. "Never use judges"
+and revoking a judge are immediate whitelist tightenings: the transaction records the revocation, cancels and purges
+queued work, and purges dry-run/SSE rows whose decisions used it. Prompt injection can change only the model's
+bounded score/reason code; it cannot change rules, mappings, targets or authority. A bundled judge is deliberately
+deferred to D15.
 
 ### D12. The daemon: one owner, one authenticated protocol
 
@@ -1014,28 +1146,30 @@ The owner's **global switch** is separate from operational pause and is the `eve
 sets it false and increments `switchGeneration`; purges all source staging and ingest rows; marks every nonterminal
 pre-delivery decision, including held and judging work, `cancelled`; releases judge reservations; cancels every queued
 or retryable delivery and purges its encrypted record; marks a delivery already past `disclosing` terminal
-`in-flight-at-disable` and purges its retained record; and purges every retained SSE row. This terminalises all
-pre-disable work in that transaction. It needs no approval and leaves the immutable standing authorisations inactive
-but intact.
+`in-flight-at-disable` and purges its retained record; purges every retained dead-letter payload; and purges every
+retained dry-run and SSE row. This terminalises all pre-disable work in that transaction. It needs no approval and
+leaves the immutable standing authorisations inactive but intact.
 
 Scheduled source polling never runs while disabled. The only pre-enable provider exception is the approved
 `enable-all` baseline operation below: each source adapter exposes a separate baseline-only path limited to its
 cursor/profile or list-head endpoint, with no body/file fetch, normalisation, projection or ingest. No judge, target
-or ordinary poll call is allowed. A provider, judge or webhook result that returns after the transaction, and an SSE
-append that began before it, is fenced by D8's generation check: older-generation work becomes terminal
+or ordinary poll call is allowed. A provider, judge or webhook result that returns after the transaction, and a
+dry-run/SSE append that began before it, is fenced by D8's generation check: older-generation work becomes terminal
 `cancelled`, or remains `in-flight-at-disable` if it had crossed `disclosing`; reservations are released, payloads are
 purged and nothing is re-queued. The external operation may already have happened and is audited as such, but it can
 never recreate work for a later enable.
 
-`enable-all` is a disclosure loosening and requires a new terminal/app-only `disclosure` approval. Its canonical
-preview and digest enumerate the active authorisation digests and exact live source/account/event-type set it will
-resume; pointer, account, source-set or digest drift refuses it. While the switch remains false, the daemon obtains a
-fresh provider “now” baseline for every source in that set through only that adapter's baseline-only allowlist and
-stages those cursors under the current generation; it creates no ingest identity, projection, decision or delivery. A
-final activation transaction rechecks all of them, writes every baseline, records one `agentcomms.source.gap` per
-source for the disabled interval, sets `enabled = true` and completes D2's activation intent. Any failed baseline
-leaves the switch disabled. Events from the disabled interval are deliberately dropped and are never backfilled;
-cancelled deliveries, purged ingest and purged replay rows never return.
+`enable-all` is a disclosure loosening and requires a new terminal/app-only `disclosure` approval. Its canonical D2
+document contains exactly the current disabled `switchGeneration` and the sorted ids of the active rule versions that
+will become effective; its derived version list contains exactly those rules. The preview may show their stored
+digests and derived live source/account/event-type set, but those are not extra document fields. Generation or active
+rule-pointer drift refuses it. While the switch remains false, the daemon obtains a fresh provider “now” baseline for
+every source derived from those rule versions through only that adapter's baseline-only allowlist and stages those
+cursors under the bound generation; it creates no ingest identity, projection, decision or delivery. A final
+activation transaction rechecks the generation, exact rule-pointer set and all baselines, writes every baseline,
+records one `agentcomms.source.gap` per source for the disabled interval, sets `enabled = true` and completes D2's
+activation intent. Any failed baseline leaves the switch disabled. Events from the disabled interval are deliberately
+dropped and are never backfilled; cancelled deliveries, purged ingest and purged replay rows never return.
 
 Tests stop each worker before and after the generation and disclosure boundaries. `pause|resume` remains an
 operational control that retains queues and replay and therefore grants no disclosure authority; it cannot stand in
@@ -1057,13 +1191,16 @@ Operational events increment `hop`; the daemon refuses to emit one past hop 3. A
 2. **Sources** — accounts, event types, interval/budget, expected latency, cursor and health.
 3. **Rules** — deterministic tree, optional judge, exact input fields and budgets, mapping builder, target-specific
    representation/schema, delivery rate cap, preview and dry-run test.
-4. **Targets and subscribers** — webhook URL form/network policy, SSE retention/origins, human-only secret and
-   secret-URL completion/rotation, approved/pending versions and tests.
-5. **Deliveries** — filters, cancelled/retry/dead-letter states, retry/drop and held decisions.
+4. **Targets and subscribers** — dry-run retention, webhook URL form/network policy, SSE retention/origins,
+   human-only secret completion/rotation, new-version flow for a changed secret URL, rule-bound approved/pending
+   versions and tests.
+5. **Deliveries** — filters, cancelled/retry/dead-letter states, retry only for `retryable`, drop, safely rendered
+   dry-run rows, degraded reset barriers with `target resume`, and held decisions.
 6. **Judges** — exact inputs, hosted warning, human-only keys and local endpoints; bundled models are labelled as a
    future design, not an installable option.
 7. **Approvals** — complete standing-authorisation preview and typed challenge.
-8. **Settings** — autostart, keep collecting after quit, retention, data location and about.
+8. **Settings** — autostart, keep collecting after quit, event secret backend/migration, retention, data location and
+   about.
 
 **Approval is equivalent to the terminal.** The webview supplies only an approval id, digest and typed response. The
 Rust layer fetches the authoritative preview from the daemon by id and digest; it never renders preview fields
@@ -1092,7 +1229,7 @@ and generated command-manifest access from every window.
 apps/
   desktop/                # Tauri + React + @cueplusplus/ui
 packages/
-  core/                   # gains D9's approval/audit/taint and secret-migration support; no event configuration
+  core/                   # gains D9's approval/audit/taint support; no event configuration or event-secret migration
   events/                 # NEW @agentcomms/events — isomorphic catalogue, pinned Unicode, conditions, mapping
   events-daemon/          # NEW @agentcomms/events-daemon — I/O, ingest, approval, delivery, CLI, MCP
   gmail/ slack/ resend/ whatsapp/  # each gains operations/events.ts and manifest events
@@ -1111,7 +1248,7 @@ source and release tests read both declarations, compute dependency order and pr
 included. They do not widen the channel-manifest union.
 
 Webhook and SSE remain reviewed first-party modules inside the daemon. There is no `kind: "delivery"` manifest: a
-manifest cannot stop an adapter from reading the shared secret store or outbox. Any later broker or hosted-queue
+manifest cannot stop an adapter from reading the daemon's event secret store or outbox. Any later broker or hosted-queue
 adapter waits for D15's separate security and acceptance design.
 
 All npm packages remain lockstep. The desktop has its own version but declares a tested daemon-protocol support
@@ -1149,9 +1286,9 @@ Each phase is specified, reviewed, planned and built separately. The order is by
 | Phase | Delivers | Depends on |
 |---|---|---|
 | A | Isomorphic `@agentcomms/events`: catalogue and pointer/provenance patterns, semantic formats, bundled Unicode 15.1 case folding and UTS #46, conditions, mapping, generated source/delivery schemas and shared Node/browser conformance vectors; no I/O or `node:` imports | — |
-| B1 | Daemon skeleton: authenticated/versioned control protocol, stale recovery, owner-only authoritative SQLite state and global switch, AES-GCM per-rule projections, deterministic event ids, canonical Gmail source options, rule evaluation, core `disclosure` records/create-approve-claim/refusals plus recoverable activation intents, immutable standing authorisations and the `SECURITY.md` amendment, taint origins and taint-before-every-judge/disclosure, locked secret-reference manifest/migration, terminal retention, outbox/leases/cancellation; **only** a local `dry-run` target that records what would have been sent | A |
-| B2 | Network hardening, plain/secret webhook URLs, pinned resolution, Standard Webhooks per-attempt signing/rotation, webhook delivery, authenticated generation-bound SSE with rotation close, exact-origin CORS, replay retention and version-bound purge | B1 |
-| B3 | CLI/MCP parity and exception rows, human-only secret completion, `doctor`, event skill | B2 |
+| B1 | Daemon skeleton: authenticated/versioned control protocol, stale recovery, owner-only authoritative SQLite state and global switch, AES-GCM per-rule projections, deterministic event ids, canonical Gmail source options, rule evaluation, core `disclosure` records/create-approve-claim/refusals plus the three canonical activation documents and recoverable intents, immutable standing authorisations and the `SECURITY.md` amendment, taint-origin sidecar and taint-before-every-judge/disclosure, independent daemon secret store/migration, terminal retention, outbox/leases/cancellation; **only** a local `dry-run` target with encrypted at-most-24-hour log and human-only safe reads | A |
+| B2 | Network hardening, plain/secret webhook URLs with URL changes creating new target versions, pinned resolution, Standard Webhooks per-attempt signing/rotation, webhook delivery/manual-retry state fences, durable reset barriers/degraded resume, authenticated generation-bound SSE with rotation close, exact-origin CORS, replay retention and version-bound purge | B1 |
+| B3 | CLI/MCP parity and exception rows, human-only secret completion/migration, dry-run reads and target resume, `doctor`, event skill | B2 |
 | C | Desktop app and tray lifecycle, Rust approval/secret surfaces, supervision and protocol compatibility | B3 |
 | D | Slack, Resend and WhatsApp sources, including resumable Slack pagination/documented polling limits and WhatsApp old-index multiset diff; each ships with per-source taint and reset/fairness tests | B1 |
 | E | Hosted/local judges, holds, durable budgets, adversarial corpus; refuses to build or ship unless B3's secret-completion and human-only capability surfaces are present | B3 (C for app hold resolution) |
@@ -1180,80 +1317,111 @@ No phase before B2 can make network disclosures. No new source ships without tai
   the exact singleton and rule version; timeouts counted and malformed output fail-closed. Wrong-typed, `NaN`,
   positive/negative infinity, negative and greater-than-one provider scores are recorded as malformed no-match;
   the same invalid threshold classes are refused at save, and execution proves neither value is clamped. An approved
-  `judge test` consumes its call/token budget exactly once. Concurrent rules with
+  `judge test` consumes one durable charge for its exact judge version and the active singleton's global call,
+  reserved/actual tokens and concurrency exactly once; it consumes no invented rule/judge limit and no provider
+  ceiling. Ten tests in a rolling hour pass, the eleventh refuses before the injected transport, and another judge
+  version has its own ten. Concurrent rules with
   different per-rule limits share one daemon/per-provider ceiling, and any provider/global field in a rule is refused.
   All automated transports are loopback fakes or injected functions.
 - **Mapping and wire:** constants, objects/arrays, every missing policy, both representations and generated schemas;
   provenance through parent/object/array copies; canonical `agentcommsuntrusted` including root; URI-escaped source
-  components; exact CloudEvents 1.0 shape; non-null webhook/SSE `targetKey` uniqueness. Exact-byte Standard Webhooks
-  tests cover `whsec_`, overlapping signatures, raw-body verification and five-minute tolerance; an injected clock
-  proves retries keep `webhook-id`/body and change `webhook-timestamp`/signature.
-- **Digest, approvals and activation recovery:** one-at-a-time digest mutations for source/account scope, connecting
-  a new unselected account, every Gmail label and `includeSpamTrash`, every Slack conversation id, every Resend kind,
-  every WhatsApp chat/select-all transition, ordinary URL path, secret-URL fingerprint, conditions, constants,
-  pointers, missing policies, every bound version id, all caps/retentions and every per-rule judge limit and approved-address-set entry. The
-  singleton budget digest changes for every daemon/provider ceiling. Core tests the complete disclosure
-  create/challenge/terminal-or-app approve/claim lifecycle, binding drift, concurrent single use and every ordered
+  components; exact CloudEvents 1.0 shape; and exact non-null dry-run, webhook and SSE `targetKey` values. Two distinct
+  target versions referencing the same subscriber version produce two deliveries with different SSE keys. Exact-byte
+  Standard Webhooks tests cover `whsec_`, overlapping signatures, raw-body verification and five-minute tolerance;
+  an injected clock proves retries keep `webhook-id`/body and change `webhook-timestamp`/signature.
+- **Digest, approvals and activation recovery:** golden vectors for the three canonical activation documents. Rule
+  vectors mutate source/account scope, a newly connected but unselected account, every Gmail label and
+  `includeSpamTrash`, every Slack conversation id, every Resend kind, every WhatsApp chat/select-all transition,
+  ordinary URL path, secret-URL fingerprint, conditions, constants, pointers, missing policies, every bound object
+  version id, all caps/retentions and every per-rule judge limit/address-set entry. A different secret-URL path or
+  query is a new target version and rule digest; in-slot replacement is refused. Budget vectors mutate each
+  daemon/provider ceiling. Enable-all vectors mutate generation and add/remove/reorder rule ids, proving only reorder
+  canonicalises equal. A target, subscriber or judge cannot produce or claim a standalone activation; editing one
+  leaves every old rule bound to its old object version until separate rule activations complete. Core tests the
+  complete disclosure create/challenge/terminal-or-app approve/claim lifecycle, binding drift, concurrent single use
+  and every ordered
   wrong-kind claim among all four kinds. Crash injection before/after activation-intent insert, disclosure-record
   create/attachment, approval, claim-marker creation, core `used`, active-pointer commit and completed-intent mark
   proves pending remains pending, approved resumes safely, `intent + used` finishes and expired/revoked/absent drops.
 - **Ingest and worker crash recovery:** before/after cursor/ingest commit, decision insert, judge response persistence,
-  delivery creation, `disclosing`, webhook 2xx recording and SSE append. Every restart reaches one terminal decision
-  per `(eventId, ruleId, ruleVersion)`, one delivery per `(decisionId, targetKey)`, and never advances over memory-only
+  delivery creation, `disclosing`, dry-run append, webhook 2xx recording and SSE append. Every restart reaches one
+  terminal decision per `(eventId, ruleId, ruleVersion)`, one delivery per `(decisionId, targetKey)`, and never advances over memory-only
   content. One provider event is evaluated by a one-hour body-referencing rule and a 24-hour metadata-only rule: only
   the first projection contains the body, it is purged at one hour, the metadata projection remains to 24 hours and
   no shared full event is recoverable at rest. A body is not fetched when no active projection requires it, and is
   fetched once when either rule does.
-- **Tightening and account revocation:** generated old/new documents exercise D2's eight edits and assert that edit's
-  stated invariant, including no plain sender value after `plain → enveloped`; every condition/constant/pointer or
-  other edit is pending. Config removal races provider polling/commit, judging/result commit, webhook claim/outcome,
-  SSE append and replay. The single revocation transaction cancels/purges account-bound work and only-account rules,
-  while multi-account rules continue solely for live ids; the live-account fence closes every post-transaction race.
+- **Tightening and account revocation:** generated old/new documents exercise D2's six no-approval edits and assert
+  that edit's stated invariant. Every condition/constant/pointer edit and every new target/subscriber/judge version is
+  pending even when `plain → enveloped` or an approved address set narrows; revoking an object immediately blocks its
+  old versions without activating a replacement. Config removal races provider polling/commit, judging/result commit,
+  webhook claim/outcome, dry-run/SSE append and safe read/replay. The single revocation transaction cancels/purges
+  account-bound work, retained dead-letter payloads, dry-run/SSE rows and only-account rules, while multi-account
+  rules continue solely for live ids; the live-account fence closes every post-transaction race.
 - **Kill switch generations:** `disable-all` races provider reads, retained ingest, holds, judge reservations and
-  completions, queued/retryable/disclosing webhooks, SSE append and replay at both sides of every boundary. Its one
-  transaction purges/cancels all pre-disable work and increments the generation; every late commit is terminal
+  completions, queued/retryable/disclosing webhooks, retained dead letters, and dry-run/SSE append/read/replay at both
+  sides of every boundary. Its one transaction purges/cancels all pre-disable work—including dead-letter payloads and
+  dry-run rows—and increments the generation; every late commit is terminal
   `cancelled` or `in-flight-at-disable`, never retryable. Outside an in-progress, explicitly approved `enable-all`,
   the disabled state permits no **scheduled poll** or other provider call. `enable-all` calls only each adapter's
   baseline cursor/profile/list-head
   allowlist while the switch is false and creates no ingest or projection; any poll/body/judge/target call fails the
-  test. It refuses chat/MCP approval and source/digest drift, emits gaps, never backfills the disabled interval and
-  resurrects no ingest, delivery or stream row.
-- **Delivery caps and SSE:** a webhook charges once at its first attempt and every retry reuses that charge; a
-  cap-blocked webhook makes no attempt. SSE append and its cap charge are atomic; replay inside the retention window
-  consumes no additional slot and replay outside it is refused. Rule, target, subscriber and judge revocation each
-  purge only bound rows in the same transaction; disable purges all. `target test` permits ten charged attempts per
-  rolling hour for each target id across version changes and refuses the eleventh. Token rotation rejects the old token, actively
-  closes a connected old-generation client and proves it receives no later frame, while preserving replay under a
-  newly authenticated generation. A real-browser test completes the approved exact-Origin OPTIONS preflight and
-  fetch-streams with `credentials: "omit"`; unapproved Origin, method/header, query/cookie token and wrong Host/bearer
-  are refused; native `EventSource` remains unsupported.
+  test. Golden enable-all binding checks refuse chat/MCP approval plus generation/rule-pointer drift, emit gaps, never
+  backfill the disabled interval and resurrect no ingest, delivery, dry-run or stream row.
+- **Delivery state, caps, dry-run and SSE:** a webhook charges once at its first attempt and every retry reuses that
+  charge; a cap-blocked webhook makes no attempt. The manual-retry matrix permits only `retryable` with attempts below
+  the original limit, an unexpired deadline, current switch generation, live account, active rule and unrevoked bound
+  objects, and changes only `nextAt`. It refuses `queued` (including cap- or barrier-blocked), `disclosing`,
+  delivered, cancelled, retention-expired, dead-lettered, content-unreadable and both in-flight terminal states;
+  separately it refuses a
+  corrupt retryable row at attempt 20, after its deadline, after revocation or after disable/re-enable. Disable purges
+  a retained dead-letter payload. Dry-run/SSE append and cap charge are atomic; dry-run uses the exact key, one
+  primary-keyed log row per delivery, encrypted packed record, at-most-24-hour retention and terminal/app safe
+  renderer, while SSE replay inside retention consumes no additional slot. Expiry and every matching revocation purge
+  dry-run/SSE rows. `target test` permits ten charged
+  attempts per rolling hour for each target id across version changes and refuses the eleventh. A reset-delivery
+  dead letter leaves a durable degraded barrier across restart; later ordinary rows make no attempt/append and expire
+  at their original deadlines until terminal/app `target resume` creates a new reset delivery, whose success opens the
+  barrier before any survivor. Token rotation rejects the old token, actively closes a connected old-generation
+  client and proves it receives no later frame, while preserving replay under a newly authenticated generation. A
+  real-browser test completes the approved exact-Origin OPTIONS preflight and fetch-streams with
+  `credentials: "omit"`; unapproved Origin, method/header, query/cookie token and wrong Host/bearer are refused;
+  native `EventSource` remains unsupported.
 - **Taint:** structured address and Slack-handle provenance through scalar, parent and object mappings and judge input;
-  free-text address extraction; workspace scope retained; old entries without origins decode as `["read"]`; read and
-  event observations merge their origin set; and structured `header` still outranks prose `body` before the cap
-  across both origins. Persisted files contain neither event id nor channel. Forced taint-store failure proves no
-  hosted/local judge call, webhook or readable SSE append occurs; errors stay untrusted and reason codes constrained.
+  free-text address extraction; workspace scope retained; absent `origins.json`/entry decodes as `["read"]`; read and
+  event observations merge their sidecar origin set; and structured `header` still outranks prose `body` before the
+  cap across both origins. A fixture writes an event origin, runs the prior released `TaintStore.touch` over that
+  address, then proves the new reader returns `event` (and inferred `read`) and the same-window/same-cap pruning keeps
+  the sidecar aligned. Persisted files contain neither event id nor channel. Forced base or sidecar write failure
+  proves no hosted/local judge call, webhook or readable dry-run/SSE append occurs; errors stay untrusted and reason
+  codes constrained.
 - **Retention:** held-decision expiry produces `hold-expired` with no delivery; unevaluated ingest and rate-cap backlog
   reach `retention-expired`; save refuses `hold > ingest`; cancellation purges payload in its pointer-change
   transaction; webhook success, dead-letter expiry/drop and independent multi-target deadlines purge exactly their
-  encrypted records. Every ordering of ingest, hold, delivery, dead-letter and decision-metadata deadlines proves no
-  deadline extends another; at 30 days or the approved shorter value the decision purge clears expiring metadata,
-  retains only the uniqueness tombstone and cannot trigger re-evaluation.
-- **Encryption and installation reset:** packed-record round trips for every encrypted column in per-rule ingest projections, source
-  staging, decisions, deliveries and stream log; record-version/key-id parsing; exact AAD; per-table HKDF separation (including
+  encrypted records. Dry-run retention above 24 hours is refused, its expiry purges the encrypted row, and safe reads
+  after expiry fail without recovering bytes. Every ordering of ingest, hold, delivery, dry-run, dead-letter and
+  decision-metadata deadlines proves no deadline extends another; at 30 days or the approved shorter value the
+  decision purge clears expiring metadata, retains only the uniqueness tombstone and cannot trigger re-evaluation.
+- **Encryption and installation reset:** packed-record round trips for every encrypted column in per-rule ingest
+  projections, source staging, decisions, deliveries, dry-run log, reset delivery and stream log;
+  record-version/key-id parsing; exact AAD; per-table HKDF separation (including
   equal nonces in different tables); random-nonce counters and rotation before 2^32; old-key re-encryption; ciphertext,
   tag, AAD, table and row-id tampering; single-record `content-unreadable`; missing-key reset; and plaintext scans of
   the DB, WAL and free pages. A fake target/provider returns an error containing the exact event payload; only its
   closed error code and numeric status appear in plaintext columns, and scans find none of the reflected text in the
   DB, WAL or free pages. The 128-bit installation id persists across restart, schema migration and backup/restore;
-  database recreation and master-key loss produce a new id, fresh baselines, a reset event before later deliveries
-  and documented event-id restart.
+  database recreation and master-key loss produce a new id, fresh baselines and documented event-id restart. Reset
+  success opens each target barrier; reset dead-letter marks only that target degraded and proves later delivery stays
+  blocked across restart until terminal/app resume.
 - **Secrets:** scan CLI/MCP inputs and outputs, structured content, logs, audit, database metadata and app IPC. MCP
   proposals contain no secret; terminal hidden input and app reveal-once work; signing rotation sends two signatures;
   subscriber rotation invalidates the old token without purging; plain webhook URL userinfo/query are refused; and
-  no path ever exposes a secret URL. File→keychain and keychain→file migration carry master keys, signing keys,
-  subscriber tokens, judge keys and URL secrets from the locked manifest. Tests pause concurrent creation and
-  rotation on both sides of the migration snapshot, then restart the daemon and prove every reference still resolves;
-  no secret is exposed.
+  no path ever exposes a secret URL. An attempted secret-URL slot replacement is refused; a changed URL creates a new
+  target version while signing/subscriber generations still rotate in-slot. Daemon-owned file→keychain and
+  keychain→file migration derives and carries master keys, signing keys, subscriber tokens, judge keys and URL
+  secrets from SQLite under the events lock. Tests pause concurrent event creation and rotation on both sides of its
+  migration snapshot, exercise rollback/leftover cleanup, then restart and resolve every reference. A prior released
+  core binary migrates core's backend in both directions after event secrets exist; the events selector, namespace,
+  files and readability remain unchanged. No secret is exposed.
 - **Sources:** Gmail multiple pages, duplicate generic/specific records, add/remove/add occurrences, DRAFT/SENT,
   every label selector, `includeSpamTrash` false/true and 404 gap. Slack tests each non-empty conversation-id set,
   short/empty pages with `next_cursor`, bounded cycle continuation, watermark
@@ -1273,12 +1441,14 @@ No phase before B2 can make network disclosures. No new source ships without tai
 - **Control, storage and app:** Unix `0700` parent, same-uid peer/token; Windows pipe/state ACLs; protocol negotiation,
   authentication/error shape, stale recovery, leases, encrypted DB/WAL/free pages, SQLite as the sole event authority,
   and protocol compatibility. Core integration tests cover the disclosure record/method/refusal changes, `app`
-  approval channel, audit `app|daemon` plus `origin`, taint origin-set migration and locked event-secret manifest;
-  audit vectors distinguish requesting origin from daemon execution. Hostile preview fixtures produce
+  approval channel, audit `app|daemon` plus `origin`, and taint-origin sidecar/old-writer compatibility; daemon tests
+  cover its independent secret selector/lock/store and prove core migrations never touch them. Audit vectors
+  distinguish requesting origin from daemon execution. Hostile preview fixtures produce
   byte-identical TypeScript/Rust output; fake webview data, digest drift, wrong challenge and per-window commands fail.
   On macOS, Windows and Linux the desktop workflow runs Rust fmt, clippy with warnings denied, tests and an unsigned
   Tauri build.
 - **Parity, phases and packaging:** every capability row is driven on CLI and MCP and every exception reason checked;
+  dry-run reads, target resume and event-secret migration have explicit terminal/app-only rows and no MCP exposure;
   no `"agentcomms"` non-channel kind; both `agentcommsPackage` kinds publish in dependency order; browser import has
   no `node:` edge; root verify runs the TypeScript desktop/vector side. A phase-E gate deliberately removes or stubs
   B3 secret completion and human-only operations and proves judges then refuse to build or ship.
