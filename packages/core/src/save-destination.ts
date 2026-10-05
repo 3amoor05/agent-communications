@@ -2,8 +2,11 @@ import { randomBytes } from 'node:crypto';
 import { constants, readFileSync } from 'node:fs';
 import { access, type FileHandle, lstat, mkdir, open, realpath, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
+import { downloadExpiredWords } from './approval-outcome.ts';
 import { asV2, integrityRefusal, kindOf } from './approval-stored.ts';
+import { validateV2 } from './approval-validate.ts';
 import {
+  type ApprovalRecord,
   type DownloadBinding,
   type DownloadRequest,
   downloadClaimRefusal,
@@ -789,7 +792,11 @@ export interface SettleInput {
   request: DownloadRequest;
   /** The two folders as they are now, for an answer given by flag, which no question offered. */
   folders: () => OfferedFolders;
-  /** The change policy of the mailbox or workspace now; the stricter of it and the question's decides. */
+  /**
+   * The change policy of the mailbox or workspace as the download read it: an answer is held to it, and to the policy
+   * the question was asked under, before any folder is looked at. The claim decides again, by the same matrix, against
+   * the policy it reads under the question's lock.
+   */
   policy: ChangePolicy;
   surface: DownloadSurface;
   env: NodeJS.ProcessEnv;
@@ -799,6 +806,11 @@ export interface SettleInput {
    * waits for it saves nothing and leaves the question unused (see `ClaimOptions.signal`). Absent from a command line.
    */
   signal?: AbortSignal | undefined;
+  /**
+   * The channel's wait tool — `gmail_send_wait`, `slack_approval_wait` — which a refusal over MCP names to an agent left
+   * waiting for the person's own answer, so it can learn when they have given it.
+   */
+  waitTool?: string | undefined;
 }
 
 /** Whether a relayed answer is the one the person recorded: the same choice, and for a folder the same folder. */
@@ -858,12 +870,13 @@ export async function settleDestination(core: Core, input: SettleInput): Promise
 
   const { saveTo, choiceId: choiceWord } = words(input.surface);
   const answerHere = requireHandoffs(core, platform).own(['approve', answer.choiceId]);
+  const waiting = input.waitTool === undefined ? '' : `; wait for their answer with ${input.waitTool}`;
   const pendingHint =
     input.surface === 'mcp'
       ? handoffSentence(
           answerHere,
           (command) =>
-            `Ask the person to run ${command} in their own terminal and answer there, then call again with the same arguments and choiceId "${answer.choiceId}" alone.`,
+            `Ask the person to run ${command} in their own terminal and answer there${waiting}, then call again with the same arguments and choiceId "${answer.choiceId}" alone.`,
         )
       : handoffSentence(
           answerHere,
@@ -905,11 +918,26 @@ export async function settleDestination(core: Core, input: SettleInput): Promise
     await checkWritable(folder);
   }
   const claimed = await core.approvals.claimForDownload(answer.choiceId, input.request, {
-    policy: input.policy,
     pendingHint,
     signal: input.signal,
     platform,
   });
+  /*
+   * The save path comes from the claimed question itself, so it is checked again from it before anything is made: the
+   * folders it offered and the listing it showed are the ones its binding was made over, and the answer it carries is
+   * the one a person recorded at a terminal or in a form — bound to it by its digest — or none at all, for an answer
+   * from the chat, which is never kept. A question that is not what it binds saves nothing, and makes no folder.
+   */
+  const verified = validateV2(claimed, answer.choiceId);
+  if (!verified.ok) {
+    throw integrityRefusal({
+      form: 'corrupt',
+      approvalId: answer.choiceId,
+      reason: verified.reason,
+      attribution: verified.attribution,
+      safe: null,
+    });
+  }
   // The person's recorded answer wins over a relayed one: it is theirs, given where no agent could give it.
   const chosen = claimed.download.answer ?? answer.answer;
   if (chosen === null) {
@@ -1060,6 +1088,9 @@ export async function downloadAtTerminal<Q extends DestinationQuestion>(
   const asked = await options.download({});
   if (!isDestinationQuestion(asked)) return asked;
   const question = asked as Q;
+  // Shown only while its record is the question that was asked: one no longer what it binds — its listing, the
+  // folders it offers — is refused before anything of it is printed, to a person or to an agent.
+  await intactQuestion(options.core, question.choiceId);
   if (!personAtTerminal(env, streams, { json: options.output.json, noInput: options.noInput })) {
     // The question is what the agent has to show the person, so it is printed, not only tucked into the envelope.
     if (options.output.json !== true) streams.stdout.write(`${options.render(question)}\n\n`);
@@ -1234,6 +1265,26 @@ export async function answerDownloadAtTerminal(
 }
 
 /**
+ * A download's question as its record keeps it, valid — read before anything of it is shown. One that cannot be read,
+ * or is not what it binds (its listing, the folders it offered, an answer), says only that it is corrupt; one an
+ * earlier release asked is never answered here; anything else, or nothing, is no question.
+ */
+async function intactQuestion(core: Core, choiceId: string): Promise<ApprovalRecord & { download: DownloadBinding }> {
+  const stored = await core.approvals.get(choiceId);
+  const notFound = () =>
+    new CommsError('NOT_FOUND', `no question ${choiceId} about where to save files`, {
+      hint: 'Make the download again; a question expires thirty minutes after it is asked.',
+    });
+  if (stored === null) throw notFound();
+  if (stored.form === 'corrupt' || stored.form === 'unreadable') throw integrityRefusal(stored);
+  if (kindOf(stored) !== 'download') throw notFound();
+  if (stored.form === 'legacy') throw otherVersionRefusal(stored.view);
+  const record = stored.record;
+  if (record.download === undefined) throw notFound();
+  return record as ApprovalRecord & { download: DownloadBinding };
+}
+
+/**
  * A question still waiting for its answer, shown again from what its record keeps: the files by the names they would
  * be saved under — escaped, since they are the sender's words and this is printed where a person reads it — and the
  * three places, the first two checked against the deny list as they stand now.
@@ -1244,25 +1295,16 @@ async function storedQuestion(
   env: NodeJS.ProcessEnv,
   color: boolean,
 ): Promise<{ text: string; options: SaveOption[]; deny: SaveDenyInput }> {
-  const stored = await core.approvals.get(choiceId);
-  const notFound = () =>
-    new CommsError('NOT_FOUND', `no question ${choiceId} about where to save files`, {
-      hint: 'Make the download again; a question expires thirty minutes after it is asked.',
-    });
-  if (stored === null) throw notFound();
-  // A record that cannot be used says only that; one an earlier release asked is never answered here.
-  if (stored.form === 'corrupt' || stored.form === 'unreadable') throw integrityRefusal(stored);
-  if (kindOf(stored) !== 'download') throw notFound();
-  if (stored.form === 'legacy') throw otherVersionRefusal(stored.view);
-  const record = stored.record;
-  if (record.download === undefined) throw notFound();
+  const record = await intactQuestion(core, choiceId);
   if (record.state !== 'pending') {
     const refusal = (code: 'APPROVAL_EXPIRED' | 'APPROVAL_VOID', why: string) =>
       new CommsError(code, `nothing was saved: ${why}`, {
         hint: 'Make the download again without an answer, and answer the new question.',
         details: { choiceId, state: record.state },
       });
-    if (record.state === 'expired') throw refusal('APPROVAL_EXPIRED', 'the question expired before it was answered');
+    if (record.state === 'expired') {
+      throw refusal('APPROVAL_EXPIRED', downloadExpiredWords(record.approvedVia !== undefined));
+    }
     if (record.state === 'revoked') {
       throw refusal('APPROVAL_VOID', `the question was voided (${record.reason ?? 'revoked'})`);
     }

@@ -17,6 +17,7 @@ import {
   approvalNotFound,
   approvalObjectOf,
   approvalOutcome,
+  downloadClaimable,
   type LiveGate,
   liveGateOf,
   type OutcomeAction,
@@ -225,26 +226,29 @@ export function downloadDrift(asked: DownloadRequest, now: DownloadRequest): str
 }
 
 /**
- * Why a download's question cannot be claimed under this change policy — the stricter of `livePolicy` and the one it
- * was asked under — or null. Changes nothing, so a download can ask before it looks at a folder, and the store asks
- * again as it claims.
+ * Why a download's question still waiting for its answer cannot be claimed with the live change policy `livePolicy`,
+ * or null — decided by the download `claimable` matrix (`downloadClaimable`, design 2026-10-05 §D2): the policy the
+ * question was asked under (`requiredPolicy`, stored when it was asked and never moved) and the live one. Changes
+ * nothing, so a download can ask before it looks at a folder; the store decides again as it claims, by the same matrix,
+ * against the live policy it reads under the question's lock. A question in any other state is refused for that state
+ * by the claim, not here.
  *
- * Under `chat` nothing stops it: the person's answer, relayed from the conversation, is the answer. Anything stricter
- * needs the answer recorded on the question by a channel an agent cannot answer — the person's own terminal, or a
- * form a trusted client showed them. An answer carried in a tool's arguments or a command's flags is refused however
- * it was worded, with the command that answers it named, and the question left open for the person.
+ * While both are `chat`, nothing stops it: the person's answer, relayed from the conversation, is the answer. Anything
+ * stricter needs the answer recorded on the question by a channel an agent cannot answer — the person's own terminal,
+ * or a form a trusted client showed them. An answer carried in a tool's arguments or a command's flags is refused
+ * however it was worded, with the command that answers it named, and the question left open for the person.
  */
 export function downloadClaimRefusal(
   record: ApprovalRecord,
   livePolicy: ChangePolicy,
   pendingHint?: string,
 ): CommsError | null {
-  if (stricterPolicy(livePolicy, record.requiredPolicy) === 'chat') return null;
-  const answered =
-    record.state === 'approved' &&
-    (record.approvedVia === 'terminal' || record.approvedVia === 'elicitation') &&
-    record.download?.answer !== undefined;
-  if (answered) return null;
+  if (record.state !== 'pending' || downloadClaimable(record, livePolicy)) return null;
+  return downloadPendingRefusal(record, pendingHint);
+}
+
+/** The refusal of a question that waits for the person's own answer: refused, and left open for them to give it. */
+function downloadPendingRefusal(record: ApprovalRecord, pendingHint?: string): CommsError {
   return refuseDownload(
     'APPROVAL_PENDING',
     'the change policy here is confirm, so the person answers where to save themselves — at their own terminal, not through an agent',
@@ -1436,11 +1440,12 @@ export class ApprovalStore {
    * open, as it was: a second call that got an argument wrong is the agent's slip, not the person's, and voiding the
    * question for it would make the person answer again for nothing. It still expires, and is claimed once.
    *
-   * `options.policy` is the change policy of that account now, and the stricter of it and the one the question was
-   * asked under decides. Under `chat`, a pending question is claimed with the answer the caller carries: the person
-   * gave it in the conversation. Under `confirm`, only a question the person answered at a terminal or in a trusted
-   * form can be claimed; a pending one is refused, and left as it is, so they can still answer it. One used, voided or
-   * expired is refused as an approval in that state is.
+   * Whether it can be claimed is the download `claimable` matrix (`downloadClaimable`, design 2026-10-05 §D2), decided
+   * under the question's lock against the live change policy read there — never a policy the caller read before it.
+   * While both the policy the question was asked under and the live one are `chat`, a pending question is claimed
+   * with the answer the caller carries: the person gave it in the conversation, and it is never kept. Otherwise only a
+   * question the person answered at a terminal or in a trusted form can be claimed; a pending one is refused, and left
+   * as it is, so they can still answer it. One used, voided, expired or corrupt is refused for what it is.
    *
    * `options.signal` is the download's cancellation, asked under the lock as a send's is (`ClaimOptions.signal`): a
    * download cancelled while this waited saves nothing and leaves the question open, the answer still unused.
@@ -1449,7 +1454,6 @@ export class ApprovalStore {
     approvalId: string,
     live: DownloadRequest,
     options: {
-      policy?: ChangePolicy | undefined;
       pendingHint?: string | undefined;
       signal?: AbortSignal | undefined;
       platform?: NodeJS.Platform | undefined;
@@ -1458,7 +1462,7 @@ export class ApprovalStore {
   ): Promise<ApprovalRecord & { download: DownloadBinding }> {
     const digest = downloadDigest(live);
     let failure: Failure | null = null;
-    const done = await this.#transition(approvalId, { kind: 'download' }, 'claim', (current, outcome, gate) => {
+    const done = await this.#transition(approvalId, { kind: 'download' }, 'claim', (current, outcome) => {
       if (outcome.error) throw outcome.error;
       if (options.signal?.aborted) throw cancelledClaim(current);
       const at = this.#now().toISOString();
@@ -1478,10 +1482,9 @@ export class ApprovalStore {
           'Call again with the same arguments the question was asked with, and its choice id. If the files themselves changed, make the download again without an answer, and show the person the new question.',
         );
       }
-      // The stricter of the caller's policy and the live gate's, from the configuration read under this lock.
-      const policy = stricterPolicy(options.policy ?? 'chat', gate?.changePolicy ?? 'confirm') as ChangePolicy;
-      const refusal = downloadClaimRefusal(current, policy, options.pendingHint);
-      if (refusal !== null) throw refusal;
+      // The matrix, as the classification under this lock decided it: anything it does not call claimable here is a
+      // question still waiting for the person — every other state was refused above, for what it is.
+      if (!outcome.claimable) throw downloadPendingRefusal(current, options.pendingHint);
       return { ...current, state: 'used', usedAt: at };
     });
     const failed = failure as Failure | null;

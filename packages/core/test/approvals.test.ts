@@ -11,6 +11,7 @@ import {
   ApprovalStore,
   type ChangeBinding,
   changeDigest,
+  type DownloadBinding,
   downloadDigest,
   type Expectation,
   publicView,
@@ -579,7 +580,7 @@ test('a download’s question claimed by a call cancelled while it waits for the
     policy: 'chat',
   });
   const claim = (signal?: AbortSignal) =>
-    store.claimForDownload(question.approvalId, request, signal ? { policy: 'chat', signal } : { policy: 'chat' });
+    store.claimForDownload(question.approvalId, request, signal ? { signal } : {});
 
   await assert.rejects(cancelledWhileWaiting(store, question.approvalId, claim), (e: unknown) => {
     assert.ok(isCancelled(/^cancelled: nothing was saved$/)(e), String(e));
@@ -721,17 +722,13 @@ test('a version-1 record is refused by the version gate on every claim, approve,
         V1_DOWNLOAD_ID,
         bytes.download,
         () =>
-          store.claimForDownload(
-            V1_DOWNLOAD_ID,
-            {
-              target: V1_DOWNLOAD.target,
-              operation: V1_DOWNLOAD.operation,
-              request: V1_DOWNLOAD.request,
-              files: V1_DOWNLOAD.files,
-              names: V1_DOWNLOAD.names,
-            },
-            { policy: 'chat' },
-          ),
+          store.claimForDownload(V1_DOWNLOAD_ID, {
+            target: V1_DOWNLOAD.target,
+            operation: V1_DOWNLOAD.operation,
+            request: V1_DOWNLOAD.request,
+            files: V1_DOWNLOAD.files,
+            names: V1_DOWNLOAD.names,
+          }),
       ],
     ];
     for (const [name, approvalId, before, attempt] of attempts) {
@@ -1028,9 +1025,7 @@ test('a download’s answer binds the answer to the record, with no approvedAt; 
     sha256Hex(canonicalJson({ bindingDigest: question.bindingDigest, answer: { choice: 'downloads' } })),
   );
   assert.equal('approvedAt' in answered.after, false, 'a question is answered, not approved into a window');
-  const claimed = await writes(store, question.approvalId, () =>
-    store.claimForDownload(question.approvalId, request, { policy: 'confirm' }),
-  );
+  const claimed = await writes(store, question.approvalId, () => store.claimForDownload(question.approvalId, request));
   assert.deepEqual([claimed.added, claimed.changed], [['usedAt'], ['state']]);
 
   const chat = await store.createDownload({
@@ -1042,9 +1037,7 @@ test('a download’s answer binds the answer to the record, with no approvedAt; 
     },
     policy: 'chat',
   });
-  const direct = await writes(store, chat.approvalId, () =>
-    store.claimForDownload(chat.approvalId, request, { policy: 'chat' }),
-  );
+  const direct = await writes(store, chat.approvalId, () => store.claimForDownload(chat.approvalId, request));
   assert.deepEqual([direct.added, direct.changed], [['usedAt'], ['state']], 'a chat answer is never persisted');
 });
 
@@ -1312,4 +1305,81 @@ test('a clock moved back before creation or approval expires the record at the t
   );
   const read = await pending.store.get(pending.record.approvalId);
   assert.equal(read === null ? null : stateOf(read), 'corrupt');
+});
+
+// ── A download's question: when it can be claimed (CUE-404 Task 19) ─────────────────────────────────────────────
+
+test('a download’s claimable matrix — pending in the chat, pending for the terminal, answered and unused, used, expired, revoked, corrupt — and a claim does exactly what it says (R21b)', async () => {
+  const request = {
+    target: { kind: 'account' as const, name: 'acme/slack', id: SLACK },
+    operation: 'files.download',
+    request: { selection: { kind: 'files', fileIds: ['F01'] }, maxFiles: 50 },
+    files: ['F01'],
+    names: ['report.pdf'],
+  };
+  const download = { ...request, summary: 'where to save 1 file', folders: { downloads: '/d', current: '/c' } };
+  for (const livePolicy of ['chat', 'confirm'] as const) {
+    const dir = tempDir();
+    const time = clock();
+    const config = liveConfig(dir, gate('chat', { changePolicy: livePolicy }));
+    const store = new ApprovalStore(dir, { now: time.now, loadConfig: config.loadConfig });
+    const ask = (policy: 'chat' | 'confirm') => store.createDownload({ channel: 'slack', download, policy });
+    const answer = (approvalId: string) => store.answerDownload(approvalId, 'terminal', { choice: 'downloads' });
+    const file = (approvalId: string) => join(store.directory, `${approvalId}.json`);
+    const edit = (approvalId: string, change: (kept: ApprovalRecord) => void) => {
+      const kept = JSON.parse(readFileSync(file(approvalId), 'utf8')) as ApprovalRecord;
+      change(kept);
+      writeFileSync(file(approvalId), JSON.stringify(kept));
+    };
+
+    // Asked half an hour ago: expired, answered or not.
+    const expired = await ask('chat');
+    const expiredAnswered = await ask('confirm');
+    await answer(expiredAnswered.approvalId);
+    time.advance(30 * MINUTE);
+
+    const chat = await ask('chat');
+    const confirm = await ask('confirm');
+    const answered = await ask('confirm');
+    await answer(answered.approvalId);
+    const used = await ask('confirm');
+    await answer(used.approvalId);
+    await store.claimForDownload(used.approvalId, request);
+    const revoked = await ask('chat');
+    await store.revoke(revoked.approvalId, 'cancelled', { disposition: 'person' });
+    // Corrupt two ways: an answer nobody recorded (its owner still known), and an offered folder changed (not even that).
+    const injected = await ask('chat');
+    edit(injected.approvalId, (kept) => {
+      kept.download = { ...(kept.download as DownloadBinding), answer: { choice: 'downloads' } };
+    });
+    const moved = await ask('confirm');
+    await answer(moved.approvalId);
+    edit(moved.approvalId, (kept) => {
+      kept.download = { ...(kept.download as DownloadBinding), folders: { downloads: '/elsewhere', current: '/c' } };
+    });
+
+    const rows: Array<[string, string, string, boolean, string | null]> = [
+      ['pending, asked under chat', chat.approvalId, 'pending', livePolicy === 'chat', 'APPROVAL_PENDING'],
+      ['pending, asked under confirm', confirm.approvalId, 'pending', false, 'APPROVAL_PENDING'],
+      ['answered, unused', answered.approvalId, 'answered', true, null],
+      ['used', used.approvalId, 'answered', false, 'APPROVAL_VOID'],
+      ['expired unanswered', expired.approvalId, 'expired', false, 'APPROVAL_EXPIRED'],
+      ['expired answered', expiredAnswered.approvalId, 'expired', false, 'APPROVAL_EXPIRED'],
+      ['revoked', revoked.approvalId, 'revoked', false, 'APPROVAL_VOID'],
+      ['corrupt, its owner known', injected.approvalId, 'corrupt', false, 'APPROVAL_VOID'],
+      ['corrupt, its owner unknown', moved.approvalId, 'corrupt', false, 'APPROVAL_VOID'],
+    ];
+    for (const [label, approvalId, state, claimable, refused] of rows) {
+      const name = `${label}, live ${livePolicy}`;
+      const { outcome } = await store.inspect(approvalId, { kind: 'download' });
+      assert.deepEqual([outcome.state, outcome.claimable], [state, claimable], name);
+      assert.equal(outcome.approval.claimable, claimable, name);
+      // The claim agrees: it takes what the matrix calls claimable, and refuses everything else as what it is.
+      const claim = await store.claimForDownload(approvalId, request).then(
+        (record) => record.state,
+        (error: unknown) => (error instanceof CommsError ? error.code : String(error)),
+      );
+      assert.equal(claim, claimable ? 'used' : refused, name);
+    }
+  }
 });
