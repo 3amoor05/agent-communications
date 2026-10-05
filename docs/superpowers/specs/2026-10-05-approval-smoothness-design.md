@@ -959,10 +959,12 @@ lookup failures stay attached to their draft and do not raise the concurrency or
   that revocation forced to fail, the conversion names the record, `legacyDrain` stays pending, a 0.14 `never → chat`
   is refused while it is pending, the next 0.14 epoch-governed operation retries and revokes, and only then may the
   policy be loosened; (c) the documented limit: a 0.13 claim already holding the record lock when the conversion runs
-  completes, and the conversion's report lists it. `legacyDrain` clears once every v1 record is revoked or expired,
+  completes, and the conversion's report lists it. `legacyDrain` clears once every **tracked** v1 record (D1) has reached `revoked`, `expired`, `used`, `failed`,
+  `sending` or `unknown`,
   and a version-3 config with no v1 records never sets it. Historical v1 records that were `used` or `failed` before
   the conversion are not tracked and never set it; a tracked record that an admitted in-flight 0.13 sender completes
-  as `used` (or leaves `sending`/`unknown`) clears its place in the drain and is listed in the report.
+  as `used` or `failed`, or leaves `sending`/`unknown`, clears its place in the drain and is listed in the report —
+  one case for each of those four outcomes.
 - **Round-28 cases:** with the frozen 0.13 tarball the release tests already use, against one shared config and
   approvals store: (a) a 0.14 `never` change converts a version-2 config to version 3 and increments the epoch, after
   which the frozen process's prepare, claim, approve and send-policy commands each refuse with “this release reads
