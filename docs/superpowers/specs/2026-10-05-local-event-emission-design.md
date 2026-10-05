@@ -1,6 +1,6 @@
 # Local event emission — design
 
-Status: **revised after round 13; five owner questions open (§8)**. Specification only, not an implementation.
+Status: **revised after round 14; five owner questions open (§8)**. Specification only, not an implementation.
 Written from the cited research pass (§2) and a checked read of this repository at `90463e1`.
 This design adds a new **standing disclosure authorisation**; it does not treat recurring event delivery
 as the existing per-content send gate
@@ -624,7 +624,7 @@ conversation, kind or chat at a time and prove both the digest and classificatio
 | Gmail | Keep exactly one mailbox-level cursor per account and make one unfiltered `users.history.list` scan from its stored `historyId`; the request deliberately omits `labelId`, because Gmail accepts only one singular label filter rather than the union several rules require. Follow every `nextPageToken` before committing the final response's `historyId`, and use the specific change arrays rather than duplicate generic entries. Gmail explicitly warns that messages in a history response will typically contain only `id` and `threadId`, so received/sent classification and selection use the observation-time metadata read below rather than `messagesAdded[].message.labelIds`; labelled events alone use their own change arrays. A 404 re-baselines the one mailbox cursor at `getProfile().historyId` and records `agentcomms.source.gap` for the app/doctor, with no silent backfill. This broader acquisition is disclosed in the UI and follows Gmail's documented pagination and change resources ([`users.history.list`](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.history/list), [`History`](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.history#History), [`Message`](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages#Message), [`users.getProfile`](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users/getProfile)). | `watch` plus Pub/Sub pull may wake the same reconciliation path; it never replaces `history.list`. |
 | Slack | Poll only the non-empty conversation-id sets named by active rule versions, plus the union scopes held by a nonterminal D12 replacement drain, and promise **top-level posted messages only**, plus the bounded reply reconciliation below. Each conversation has a committed timestamp watermark and a durable scan `{oldest: watermark, latest: cycle-start, cursor}`. Follow every `response_metadata.next_cursor`, even after a short or empty page; a cycle may spend only its workspace request budget, so a cut-short scan persists that exact cursor and boundary and continues next cycle. It commits the new watermark only after the last page and committed ingest. A budget cut, ordinary empty page or `invalid_cursor` alone is never a gap. On `invalid_cursor`, restart the same bounded scan without a cursor; record `agentcomms.source.gap` only when Slack explicitly reports an `is_limited` or equivalent retained-history boundary that excludes the committed watermark. If coverage cannot be established, mark the source degraded and do not advance or record a gap. Posts dedupe on `(channelId, ts)`. The scheduler supports Slack's conservative affected-app limit and learns from 429/`Retry-After`; the UI shows worst-case latency ([`conversations.history`](https://docs.slack.dev/reference/methods/conversations.history/), [Slack rate-limit notice](https://docs.slack.dev/changelog/2025/05/29/rate-limit-changes-for-non-marketplace-apps/)). For a thread whose parent was observed within the previous seven days, maintain a separate reply watermark and fully cursor-page `conversations.replies` under the same resumable budget; Slack documents that method as independently cursor-paginated ([`conversations.replies`](https://docs.slack.dev/reference/methods/conversations.replies/)). A replacement drain row for one conversation is therefore an **aggregate barrier**: it is complete only when the conversation's top-level history cursor has covered P and every eligible thread discovered at or below P has a durable reply scan whose own cursor has covered P. The eligible-thread set grows as the bounded top-level drain discovers parents and is frozen only when top-level coverage reaches P; a reply scan deferred by the workspace budget or a 429/`Retry-After`, including one with a saved `next_cursor`, keeps the conversation drain open. Swap and restart may reuse completed child scans but cannot infer their completion from the top-level watermark. **Polling does not emit replies to older threads or any message edits.** Those are documented version-1 polling limits, not silent completeness claims. | Socket Mode needs its own future design (D15); this specification makes no completeness or replay-cursor claim for it. |
 | Resend | `received.list` is paged newest-first toward the stored anchor. A durable scan keeps `{anchorId, cycleHeadId, after, pagesScanned}` between cycles; `cycleHeadId` is the first id seen, and `after` is the last id on the last completed page. Pages are staged encrypted and the anchor advances to `cycleHeadId` only when the old anchor is found and all staged rows commit to ingest or D3's terminal projection resolution. If the anchor is not found within ten pages—because retention or deletion made it unreachable—the daemon purges the stage, atomically re-baselines to `cycleHeadId` and records `agentcomms.source.gap`; it never scans an unbounded history. A required received-email detail/body/attachment 404 resolves affected projections as `vanished`; every other failure retains the anchor and retries for at most 24 hours before `unresolvable`, one content-free source-gap record and cursor progress. The sent list is paged newest-first through every id from the most recent seven days. Those ids have rows in a state table for seven days; each read compares `last_event` with the stored value and emits only a change. The UI says these are observed states, not every intermediate transition. The daemon may consume at most half the machine-wide throttle and an interactive CLI/MCP call always takes the next available slot ([Resend received list](https://resend.com/docs/api-reference/emails/list-received-emails)). | A signed hosted relay for Resend webhooks is a separate product. |
-| WhatsApp | Change the existing snapshot-and-rebuild sync (`packages/whatsapp/src/operations/sync.ts:45-113`) so, under its index lock, it renames the current target to an owner-only sibling `index.previous.sqlite` **before** the existing atomic building-index replacement point (`packages/whatsapp/src/index-db.ts:266-277`), then renames the checked building index into place and fsyncs the directory. Startup restores the sibling if a crash landed between the renames. Diff old and new before deleting the sibling. The comparison is a multiset whose occurrence identity **never contains `Z_PK`**. For a row with `ZSTANZAID`, its identity is canonical JSON of `["stanza", stanzaId, timestampMs, tieIndex]`, where `timestampMs` is the exact normalised message timestamp in milliseconds. `tieIndex` considers only that chat's rows with the exact same stanza id and exact same timestamp. It ranks their distinct canonical normalised-message-field byte strings by SHA-256 digest and then by those bytes: those bytes are UTF-8 core canonical JSON of the exact fields used to build the event's WhatsApp-specific payload—`chat`, `sender`, `text`, `at`, fixed `fromMe: false`, `kind`, `viewOnce`, `groupEvent` and `media`—before any derived identity field. Rows with equal bytes are identical events with one identity; the multiset diff counts their copies rather than imposing an order. Thus a stanza id reused with the same timestamp and identical content is indistinguishable by design, while a later row with that stanza id and an earlier or later timestamp changes no prior event identity or position. Exact same-timestamp rows with different content receive the same identities irrespective of arrival order. Without a stanza id, group on `(chatId, timestamp, sender, SHA-256(text))` and assign zero-based slots within that identical group; its identity is canonical JSON of `["fallback", chatId, timestamp, sender, textSha256, occurrenceIndex]`. The text hash is lowercase SHA-256 over the UTF-8 bytes of core canonical JSON for the nullable sanitised text, so `null` and `""` differ. Equal rows and repeated stanza ids are never coalesced. That occurrence identity is the event `messageId`; A.7 derives `subject` and `dedupeKey` from it, and the per-chat high-water position is ordered by `(timestamp, occurrenceIdentity)`. The current `MessageView.id`, which is derived from `ZWAMESSAGE.Z_PK`, is not an event id or cut-over component. A decrease in maximum `Z_PK`, an index-format change, or disappearance of a previously retained non-empty stanza-id set is still a store-reset signal only: re-baseline and record a gap rather than treating old high-water marks as current. Apple's PPPC page establishes only the identifiers available to a managed privacy payload ([Apple Platform Deployment](https://support.apple.com/en-gb/guide/deployment/dep38df53c2a/web)). **Hypotheses for the phase-D spike**, not current claims, are that interactive TCC follows the same executable identity and that app-launched and service-launched copies may need separate grants; background collection does not ship until the spike establishes the actual behaviour and the app explains it. | A file-system notification may wake the same safe snapshot path; it never reads the live store. |
+| WhatsApp | Change the existing snapshot-and-rebuild sync (`packages/whatsapp/src/operations/sync.ts:45-113`) so, under its index lock, it renames the current target to an owner-only sibling `index.previous.sqlite` **before** the existing atomic building-index replacement point (`packages/whatsapp/src/index-db.ts:266-277`), then renames the checked building index into place and fsyncs the directory. Startup restores the sibling if a crash landed between the renames. Diff old and new before deleting the sibling. The comparison is a multiset whose occurrence identity **never contains `Z_PK`**. For a row with `ZSTANZAID`, its identity is canonical JSON of `["stanza", stanzaId, timestampMs, tieIndex]`, where `timestampMs` is the exact normalised message timestamp in milliseconds. `tieIndex` considers only that chat's rows with the exact same stanza id and exact same timestamp, but it is a **stable digest rank token, not an ordinal**: the lowercase SHA-256 hex digest of the UTF-8 core-canonical-JSON `rawRank` tuple. `rawRank` contains exactly the raw source columns before index rebuilding or presentation: `ZWAMESSAGE.ZFROMJID`, `ZWAMESSAGE.ZISFROMME`, `ZWAMESSAGE.ZMESSAGETYPE`, `ZWAMESSAGE.ZGROUPEVENTTYPE`, and `ZWAMESSAGE.ZTEXT`; and, when there is a joined media row, `ZWAMEDIAITEM.ZVCARDSTRING`, `ZWAMEDIAITEM.ZFILESIZE`, `ZWAMEDIAITEM.ZTITLE`, and `ZWAMEDIAITEM.ZMEDIALOCALPATH` (otherwise those four values are canonical `null`). These are the values selected from the store by the source reader (`packages/whatsapp/src/source/read-source.ts:127-145`), before `rebuildIndex` selects display names or normalises media (`packages/whatsapp/src/index-db.ts:154-236`). The digest alone orders distinct `rawRank` tuples for deterministic processing and is the `tieIndex` carried in the identity; it is never compressed to a zero-based position, so inserting another tied row cannot renumber a survivor. A SHA-256 collision between unequal `rawRank` byte strings is a fail-closed source-integrity error, not a basis to order them. Explicitly excluded are every derived or rendered value: chat name, sender display name, push name, member name, the presented/wrapped text, and every value the index rebuild derives from chats, members, push-name or any other lookup table. The existing rebuild does derive those display values, and `Presenter.message` then creates rendered content from them (`packages/whatsapp/src/index-db.ts:157-195`; `packages/whatsapp/src/present.ts:126-159`); neither is eligible for `rawRank`. Rows equal on every `rawRank` column are indistinguishable by design: they have one identity and the multiset diff counts copies, never orders them. Thus a stanza id reused with the same timestamp and equal raw rank is indistinguishable, while a later row with that stanza id and an earlier, later, or equal timestamp changes no prior row's identity or `(timestampMs, tieIndex)` position. Without a stanza id, group on `(chatId, timestampMs, SHA-256(rawRank))` and assign zero-based slots only among byte-identical `rawRank` tuples; its identity is canonical JSON of `["fallback", chatId, timestampMs, rawRankSha256, occurrenceIndex]`. Equal rows remain a multiset; unequal hash collisions fail closed. That occurrence identity is the event `messageId`; A.7 derives `subject` and `dedupeKey` from it, and the per-chat high-water position is ordered by `(timestampMs, tieIndex)` for stanza rows or `(timestampMs, rawRankSha256, occurrenceIndex)` for fallback rows. A full-snapshot multiset diff emits an unseen occurrence even if its stable position sorts below a previously recorded high-water mark; the mark is a cut-over fence, never a filter that can hide a newly observed tied row. The current `MessageView.id`, which is derived from `ZWAMESSAGE.Z_PK`, is not an event id or cut-over component. A decrease in maximum `Z_PK`, an index-format change, or disappearance of a previously retained non-empty stanza-id set is still a store-reset signal only: re-baseline and record a gap rather than treating old high-water marks as current. Apple's PPPC page establishes only the identifiers available to a managed privacy payload ([Apple Platform Deployment](https://support.apple.com/en-gb/guide/deployment/dep38df53c2a/web)). **Hypotheses for the phase-D spike**, not current claims, are that interactive TCC follows the same executable identity and that app-launched and service-launched copies may need separate grants; background collection does not ship until the spike establishes the actual behaviour and the app explains it. | A file-system notification may wake the same safe snapshot path; it never reads the live store. |
 
 **Gmail observation-time classification and selection.** An occurrence key is
 `(historyRecordId, messageId, changeType)` for `received`/`sent`, and
@@ -1325,6 +1325,28 @@ The declared primary-key order for each encrypted column is:
 | `deliveries.encryptedRecord` | `id` (including a reset-delivery row) |
 | `dryrun_log.encryptedRecord` | `deliveryId` |
 | `stream_log.encryptedRecord` | `id` |
+
+The following are mandatory byte-for-byte AAD golden vectors (hex). They make `positionScope` part of the test
+contract, rather than merely an entry in the table. The two ordinary rows for each table share every key component
+except `positionScope`; moving either ciphertext to the other row must fail authentication. The third
+`rule_activation_points` vector swaps its adjacent `accountId` and `positionScope` values, so an encoder that omits
+or puts `positionScope` in the wrong place cannot pass.
+
+```text
+rule_activation_points.encryptedPosition
+  ("act", "rule", INTEGER 7, "acc", "chat-a") =
+  6165632d76310000001672756c655f61637469766174696f6e5f706f696e747300000011656e63727970746564506f736974696f6e050200000003616374020000000472756c6501000000000000000702000000036163630200000006636861742d61
+  ("act", "rule", INTEGER 7, "acc", "chat-b") =
+  6165632d76310000001672756c655f61637469766174696f6e5f706f696e747300000011656e63727970746564506f736974696f6e050200000003616374020000000472756c6501000000000000000702000000036163630200000006636861742d62
+  ("act", "rule", INTEGER 7, "chat-a", "acc") =
+  6165632d76310000001672756c655f61637469766174696f6e5f706f696e747300000011656e63727970746564506f736974696f6e050200000003616374020000000472756c650100000000000000070200000006636861742d610200000003616363
+
+activation_baselines.encryptedPosition
+  ("intent", "whatsapp", "acc", "chat-a") =
+  6165632d76310000001461637469766174696f6e5f626173656c696e657300000011656e63727970746564506f736974696f6e040200000006696e74656e740200000008776861747361707002000000036163630200000006636861742d61
+  ("intent", "whatsapp", "acc", "chat-b") =
+  6165632d76310000001461637469766174696f6e5f626173656c696e657300000011656e63727970746564506f736974696f6e040200000006696e74656e740200000008776861747361707002000000036163630200000006636861742d62
+```
 
 `source_occurrence_resolutions` and `source_projection_resolutions` are explicitly content-free: neither has an
 encrypted column and neither receives AAD. Their declared key orders are respectively `(source, accountId,
@@ -2186,7 +2208,13 @@ No phase before B2 can make network disclosures. No new source ships without tai
 - **Encryption and installation reset:** packed-record round trips for every encrypted column in per-rule ingest
   projections, source staging, decisions, deliveries, dry-run log, reset delivery and stream log;
   record-version/key-id parsing; exact AAD golden vectors for a single-key `decisions` row and a composite-key
-  `ingest_rules` row; and direct typed-component vectors proving INTEGER `1` and TEXT `"1"` do not collide. The
+  `ingest_rules` row; the mandatory `rule_activation_points` and `activation_baselines` vectors printed above;
+  and direct typed-component vectors proving INTEGER `1` and TEXT `"1"` do not collide. For each activation table,
+  encrypt two rows that share every key component except `positionScope`, assert its listed golden AAD bytes, and
+  assert that swapping their ciphertexts fails authentication. For the five-component
+  `rule_activation_points` key, also assert the listed adjacent `accountId`/`positionScope`-swapped vector and
+  fail decryption if that ciphertext is associated with the unswapped row; this proves both that `positionScope` is
+  present and that its declared position is preserved. The
   format tests must prove decryption fails when ciphertext is moved to another row, to another encrypted column of
   the same primary-key row (a two-encrypted-column test fixture), to `ingest_rules` rows whose first two components
   are swapped (`("a", "b", "v")` versus `("b", "a", "v")`), and across a component boundary
@@ -2274,10 +2302,15 @@ No phase before B2 can make network disclosures. No new source ships without tai
   duplicates and occurrence indices, and a rebuild in which every `Z_PK` changes but every event id, messageId,
   subject, dedupe key and per-chat position remains the same. Two snapshot diffs for a reused stanza id—one adding a
   row with an earlier timestamp and one adding a row with a later timestamp—each leave every prior event id and
-  position unchanged and emit exactly the new occurrence. Exact timestamp ties with different normalised content receive the
-  same identities in both arrival orders. An exact timestamp tie with identical normalised content is
-  indistinguishable by design and emits once for each newly added multiset copy. Repeated stanza ids and identical
-  fallback occurrences remain distinct before and after rebuild. It also covers all
+  position unchanged and emit exactly the new occurrence. A four-snapshot tied-stanza fixture starts with two rows
+  sharing chat, stanza id and `timestampMs`, then changes a chat/group or sender display name so that their rendered
+  payload ordering would reverse, removes one tied row, and finally adds a new distinct tied row whose raw-rank digest
+  sorts before the survivor. The fixture proves the survivor retains its original identity and `(timestampMs,
+  tieIndex)` position through every snapshot; the removed row's tombstone cannot suppress the new row; and precisely
+  the new row emits in the final diff. Exact timestamp ties with distinct raw-store tuples receive the same stable
+  identities in both arrival orders, regardless of any display-name or group-name change. An exact timestamp tie
+  with byte-identical raw-store tuples is indistinguishable by design and emits once for each newly added multiset
+  copy. Repeated stanza ids and identical fallback occurrences remain distinct before and after rebuild. It also covers all
   reset signals and the executable-identity spike. A source polls iff an active rule names its live account/type or
   a nonterminal replacement drain temporarily names that scope union; removing the last rule and completing or
   failing the last such drain stops it, and there are no source enable/disable operations.
@@ -2841,17 +2874,20 @@ formats = [
 The event `messageId` is exactly D4's canonical occurrence identity. With a stanza id it is canonical JSON of
 `["stanza", stanzaId, timestampMs, tieIndex]`. `timestampMs` is the exact normalised message timestamp in
 milliseconds used to construct `at` and `occurredAt`. `tieIndex` is scoped only to rows in that chat with that exact
-stanza id and exact `timestampMs`: it is the zero-based rank of the row's distinct canonical normalised-message-field
-bytes after sorting first by their SHA-256 digest and then by those bytes. Those bytes are UTF-8 core canonical JSON
-of the exact fields used to build this event's message payload—`chat`, `sender`, `text`, `at`, fixed `fromMe: false`,
-`kind`, `viewOnce`, `groupEvent` and `media`—before derived `messageId`, `subject` or `dedupeKey` is added. Equal
-bytes have one rank and one identity; their multiplicity is counted by the snapshot multiset rather than ordered.
-Thus a stanza id reused with the identical timestamp and identical normalised content is indistinguishable by design,
-while a row with the same stanza id at an earlier or later timestamp cannot change any other row's identity. Without
-a stanza id the identity is canonical JSON of `["fallback", chatId, timestamp, sender, textSha256,
-occurrenceIndex]`, where the index is the zero-based multiset slot among identical four-field fallback records.
-Rebuilding the index may change every `Z_PK` without changing this identity set. `subject(event) = event.chat.id + "/" +
-event.messageId`; `dedupeKey` is the same string.
+stanza id and exact `timestampMs`: it is the stable lowercase SHA-256 hex digest, not a zero-based rank, of D4's
+canonical raw-store `rawRank` tuple. The tuple comprises exactly `ZWAMESSAGE.ZFROMJID`, `ZISFROMME`,
+`ZMESSAGETYPE`, `ZGROUPEVENTTYPE` and `ZTEXT`, plus raw `ZWAMEDIAITEM.ZVCARDSTRING`, `ZFILESIZE`, `ZTITLE` and
+`ZMEDIALOCALPATH` or four `null`s. It deliberately contains no chat name, sender display/push/member name,
+presented text, or other index-derived/rendered field. Those are respectively produced during index rebuilding and
+presentation (`packages/whatsapp/src/index-db.ts:154-236`; `packages/whatsapp/src/present.ts:126-159`), so changing
+one cannot change this identity. The digest is the only ordering discriminator for distinct raw tuples; a digest
+collision is a fail-closed source-integrity error. Equal raw tuples have one identity and their multiplicity is
+counted by the snapshot multiset rather than ordered. Thus a stanza id reused with the identical timestamp and
+identical immutable source columns is indistinguishable by design, while a new distinct tied row cannot renumber or
+otherwise change a survivor's identity or `(timestampMs, tieIndex)` position. Without a stanza id the identity is
+canonical JSON of `["fallback", chatId, timestampMs, rawRankSha256, occurrenceIndex]`, where the index is the
+zero-based multiset slot among byte-identical raw tuples. Rebuilding the index may change every `Z_PK` without
+changing this identity set. `subject(event) = event.chat.id + "/" + event.messageId`; `dedupeKey` is the same string.
 
 ### A.8 Field provenance and deliberate catalogue changes
 
@@ -2894,10 +2930,15 @@ deliberate differences from the cited result types:
    parsed into `AddressV1`.
 5. WhatsApp starts from `MessageView` (`packages/whatsapp/src/present.ts:59-77`): `content` becomes sanitised `text`,
    but `MessageView.id` is deliberately omitted because it is the rebuild-sensitive `ZWAMESSAGE.Z_PK` and is **not**
-   the event `messageId`. The source instead computes A.7's stanza-or-fallback occurrence identity before
-   normalisation; a stanza identity is timestamp-scoped and ranks only different canonical bytes of the normalised
-   message fields that build this payload, while identical bytes remain one multiset identity. That identity supplies
-   `messageId`, `subject`, `dedupeKey` and the per-chat high-water ordering.
+   the event `messageId`. Before either index reconstruction or presentation, the source also retains D4's raw-store
+   tuple: `ZWAMESSAGE.ZFROMJID`, `ZISFROMME`, `ZMESSAGETYPE`, `ZGROUPEVENTTYPE`, `ZTEXT` and raw
+   `ZWAMEDIAITEM.ZVCARDSTRING`, `ZFILESIZE`, `ZTITLE`, `ZMEDIALOCALPATH` (or four `null`s). It computes A.7's
+   timestamp-scoped stanza digest or fallback raw-rank digest from that tuple, never from the normalised payload.
+   The tuple deliberately excludes chat name, sender display name, push name, member name, presented text and every
+   index-derived lookup value: `rebuildIndex` creates the first set (`packages/whatsapp/src/index-db.ts:154-236`) and
+   `Presenter.message` creates the latter (`packages/whatsapp/src/present.ts:126-159`). Equal raw tuples remain one
+   multiset identity; distinct tuples have stable digest positions. That identity supplies `messageId`, `subject`,
+   `dedupeKey` and the per-chat high-water ordering.
    `sender.jid` becomes `sender.id` (a sender with no usable JID normalises the whole
    `sender` value to `null`), each `UntrustedField` becomes its safe inner text, and absent `groupEvent` normalises
    to `null`. `chat` is joined from `ChatView`; read-only rendering diagnostics and analysed links are omitted.
