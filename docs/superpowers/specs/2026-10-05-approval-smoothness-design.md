@@ -1,6 +1,6 @@
 # CUE-404 — approving a send without fighting the clock — design
 
-Status: **revised after round 13 (2 P2, all addressed)**, 2026-10-05, from Linear CUE-404 (High; the
+Status: **revised after round 14 (3 P2, all addressed)**, 2026-10-05, from Linear CUE-404 (High; the
 owner: "this is very not smooth") and a cited research pass over this repository, the MCP specification and the
 clients' documentation. Depends on CUE-403 (the CLIs on PATH,
 [its spec](2026-10-04-cli-path-shims-design.md)) for every printed terminal command to work; ships after it.
@@ -98,36 +98,48 @@ implement the first two. The short repeat preview is dropped for this release an
   (`packages/core/src/approvals.ts:401-407, 535-562, 823-857`); that risk is explicit in §7.
 
 **Version and mixed releases.** There is no `lifetimeVersion`. `DIGEST_VERSION` moves from 1 to **2**. The version-2
-canonical approval binding includes the content/change digest plus the immutable route and its lifetime profile:
-`{route, pendingMs, approvedMs}` for sends and changes, and the fixed creation-relative download profile for downloads.
-That makes the bump a real change in what an approval authorises, not an advisory field an older binary can ignore.
+canonical approval binding is `bindingDigest`, defined exactly once, under **Digest integrity** below; it covers the
+content/change digest, the immutable route and lifetime profile and the record's grouping identity. That makes the bump a real change in what an approval authorises, not an advisory field an older binary can ignore.
 
 **Two digests, two jobs.** A version-2 record stores `contentDigest` — the outward content or change identity, computed
-exactly as today's message/change digest (`packages/core/src/digest.ts:130`) — and `bindingDigest`, the canonical
-hash of `{ contentDigest, route, pendingMs, approvedMs }` (or the download profile). Claims and approvals check
+exactly as today's message/change digest (`packages/core/src/digest.ts:130`) — and `bindingDigest` (defined under
+**Digest integrity**). Claims and approvals check
 `bindingDigest`; D9 groups records by `contentDigest` (with the exact Slack revision), so identical content prepared
 under different routes or profiles is still one outward post. A legacy record's single `digest` decodes as its
 `contentDigest` with no `bindingDigest`; such records are refused for claims by the digest-version gate and are only
 ever read for reporting.
 
 **Digest integrity.** Both fields are required on every version-2 record, each a lowercase hex SHA-256 (64
-characters). `bindingDigest` is the SHA-256 of the canonical JSON (the existing `canonicalJson`) of
-`{ "contentDigest", "route", "pendingMs", "approvedMs", "groupKey" }` (downloads: `{ "contentDigest", "profile",
-"groupKey" }`), where `groupKey` is the record's grouping identity — Gmail `{ mailboxId, draftId }`, Slack
-`{ workspaceId, draftId, revision }`, Resend `{ accountId, preparedId }`, changes and downloads their own target id —
-so a stored revision or draft id altered after creation fails recomputation, and every read
+characters). This is the **only** definition: one core helper, `bindingDigestOf(record)`, returns the SHA-256 of the
+canonical JSON (the existing `canonicalJson`) of `{ "v": 2, "kind", "contentDigest", "route", "pendingMs",
+"approvedMs", "groupKey" }` (downloads: `{ "v": 2, "kind": "download", "contentDigest", "profile", "groupKey" }`).
+`groupKey` uses only fields the record already stores: Gmail send `{ "inboxId", "draftId" }`; Slack post or file
+`{ "inboxId", "draftId", "revision" }` (the record's `inboxId` is the local Slack account id — no workspace id is
+stored or needed); Slack reaction `{ "inboxId", "channelId", "ts", "emoji" }`; Resend `{ "inboxId", "preparedId" }`;
+change `{ "planId" }`; download `{ "downloadId" }`. A stored identifier altered after creation therefore fails
+recomputation, and every read
 recomputes it from the record's own fields before classifying: a missing, malformed, non-canonical or mismatching value
 makes the record `corrupt` (never claimable). `contentDigest` is an opaque identity on reads that cannot reach the
 provider (status, wait, lists, D9): they validate only its encoding and the `bindingDigest` coherence, because its
 canonical input (addresses, subject, body, attachments — `packages/core/src/digest.ts:139`) is not stored; approve and
 claim compare it against the live content, exactly as today. **Confirmation evidence**, version 2, by provenance: a
 record reaches `approved` only through the terminal or a trusted form — a chat-route record is claimed straight from
-`pending` and never becomes `approved`. So `approvedAt` marks an approved lineage, and **every** record carrying
-`approvedAt` (in state `approved` or any later state: `sending`, `used`, `failed`, `unknown`, or `expired` after
-approval) must carry `approvedBindingDigest` equal to its `bindingDigest` and `approvedVia` of `terminal` or `form`; a
-record without `approvedAt` (a direct chat claim and its descendants) must carry neither. `approvedVia: chat` does not
-exist. Download answers keep today's evidence. Any violation makes the record `corrupt`. Legacy (version-1) records,
-which have no `bindingDigest`, have their stored revision and draft id trusted as stored, and the spec states that limit. D9 treats a digest-corrupt record by the attribution rules in D9 — never by silently excluding it.
+`pending` and never becomes `approved`. Evidence is defined **per kind**, keeping today's persisted literals
+(`packages/core/src/approvals.ts:212, 713, 901, 999`):
+
+| Kind | Approved lineage (`approvedAt` set, any later state) | Direct-chat lineage |
+|---|---|---|
+| send | `approvedVia` ∈ {`terminal`, `elicitation`}; `approvedBindingDigest` = `bindingDigest` | neither field |
+| change | `approvedVia` = `terminal` only (confirm changes are terminal-only, `approvals.ts:901`); `approvedBindingDigest` = `bindingDigest` | neither field |
+| download | today's evidence exactly — `approvedVia` and `approvedDigest`, **no** `approvedAt` — with `approvedDigest` = `contentDigest` | not applicable |
+
+`approvedVia: chat` does not exist; "form" in prose means the stored `elicitation`. Any violation makes the record
+`corrupt`. Legacy (version-1) records,
+which have no `bindingDigest`, have their stored revision and draft id trusted as stored, and the spec states that limit.
+A `bindingDigest` mismatch cannot say which hashed field changed, so the record's attribution fields cannot be trusted:
+D9 treats any such record as it treats an unreadable one — the **whole** report is indeterminate (every row says
+"indeterminate (an approval record failed its integrity check)"), never a single draft's group. A record whose digest is
+merely missing or malformed but whose other fields recompute nothing is treated the same way.
 
 Released 0.13.0 code already refuses any record whose `digestVersion` differs from its own constant, with “the approval
 was prepared by a different version of agent-communications” (`packages/core/src/approvals.ts:292-293, 570-588`). An
@@ -560,12 +572,10 @@ matching records that the scan read**, not only the newest one:
 - **any `approved` record blocks “its approvals expired”, whether claimable or not**. A claimable one is “approved and
   ready to send”. If the live policy is `never`, the exact description is **“approved, but the mailbox's policy is now
   never”**. Any other non-claimable approved state names its actual reason rather than calling it expired;
-- an attributable `corrupt` record for the same group makes that group indeterminate. A record is attributable when
-  its mailbox (or Slack workspace) and draft id are readable; when a Slack record's exact grouping key (revision and
-  `contentDigest`) cannot be trusted because its digest is missing or malformed, or its revision or draft id fails the
-  `bindingDigest` recomputation that now covers them, **every** group
-  for that draft id becomes indeterminate (conservative widening); a Gmail record with a corrupt digest makes its
-  draft's group indeterminate. Declined, cancelled, otherwise
+- a `corrupt` record whose `bindingDigest` recomputes correctly (it is corrupt for another reason — an inconsistent
+  state, timestamp or evidence) is attributable by its now-verified group key and makes exactly that group
+  indeterminate; a record whose `bindingDigest` is missing, malformed or mismatched has untrustworthy attribution fields
+  and makes the **whole report** indeterminate (Digest integrity, above). Declined, cancelled, otherwise
   revoked and failed records do not masquerade as expiry.
 
 When the complete **retained** approval directory fits inside the 500-file read window and every selected record is
@@ -806,6 +816,12 @@ lookup failures stay attached to their draft and do not raise the concurrency or
 
 ## 5. Tests owed
 
+- **Round-14 cases:** the per-kind evidence table, every row valid and invalid (a form-approved confirm change →
+  `corrupt`); valid confirm downloads in `approved` and `used` without `approvedAt`; approved-then-revoked descendants
+  keep valid evidence while direct-chat `failed`/`unknown` descendants carry none; golden canonical-JSON and SHA-256
+  vectors for every `groupKey` subtype including Slack reactions; a provider-free Slack round trip from the stored
+  `inboxId`; valid-value mutation of every attribution field → integrity failure → whole-report indeterminate; a used
+  blocker's draft id moved from A to B gives no unsent wording for A, B or any other group.
 - **Round-13 cases:** every `kind × route × approvedVia × state` combination, valid and invalid; an approved-lineage
   record in every descendant state with missing, malformed or contradictory evidence → `corrupt`; direct-chat `sending`
   and `used` records with no evidence stay valid; a record claiming `approvedVia: chat` → `corrupt`; a Slack revision
