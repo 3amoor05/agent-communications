@@ -227,8 +227,22 @@ the manual-typing instruction, not a partial command
 (`packages/core/src/cli-runtime.ts:136-191`).
 
 This inert-JSON/manual-entry result is the acceptance criterion's second outcome. It is deliberately preferred to a
-wrong-but-runnable line, which could approve, overwrite or remove the wrong thing. It is rare: only Windows handoffs
-with one of the refused word shapes take it; ordinary paths remain pasteable.
+wrong-but-runnable line, which could approve, overwrite or remove the wrong thing. For argument words it is rare: only
+Windows handoffs with one of the refused word shapes take it; ordinary paths remain pasteable.
+
+**Amendment (build, 2026-10-05): the program word.** The rules above were written for program words such as
+`agentcomms`, which never need quotes. Every printed command now starts with `process.execPath`, and a quoted first
+word is a string expression to PowerShell, not a command: it runs one only after `&`, which cmd.exe does not accept. So
+a Windows command whose program path needs quotes — `C:\Program Files\nodejs\node.exe`, the default Node install —
+has no line, and its JSON form says why and names PowerShell's `&`. On a default Windows install this makes the second
+outcome the usual one rather than a rare one; installs whose Node path needs no quotes (nvm-windows, Volta, a tool
+cache) keep pasteable lines. A form that both shells run with a spaced program path is a renderer change, left to the
+D8 follow-up, where a shim on `PATH` removes the problem.
+
+**Amendment (build, 2026-10-05): a registration from before 0.13.1.** It still starts and finds its folders as it
+always did, so the doctor reports it as a warning with the re-register command, not as a failure: a failure would turn
+every existing install red on upgrade. An entry that is unpinned *and* cannot start is one failed row naming both
+problems, repaired by the one command.
 
 ### D4. Packaging follows the runtime edge
 
@@ -517,4 +531,5 @@ authoritative data roots, and CLI-MCP parity for the preference.
 
 CUE-403's title asks for CLIs on `PATH`. 0.13.1 instead fixes the blocking handoff with commands tied to the
 installation available at print time and with explicit path options. PATH convenience remains the separately scoped
-follow-up in D8.
+follow-up in D8. On Windows that follow-up also decides how far 0.13.1 gets: with Node under `C:\Program Files`,
+handoffs are shown as words to type, not as a line to paste (D3 amendment).
