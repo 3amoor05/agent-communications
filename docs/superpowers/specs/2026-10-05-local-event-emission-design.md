@@ -1,6 +1,6 @@
 # Local event emission — design
 
-Status: **revised after round 5; five owner questions open (§8)**. Specification only, not an implementation.
+Status: **revised after round 6; five owner questions open (§8)**. Specification only, not an implementation.
 Written from the cited research pass (§2) and a checked read of this repository at `74fa592`.
 This design adds a new **standing disclosure authorisation**; it does not treat recurring event delivery
 as the existing per-content send gate
@@ -46,7 +46,7 @@ reads, and for a design of everything that takes:
 | Core keychain entries use service `agent-communications` and a 12-hex namespace derived from the resolved config directory; file secrets are one owner-only file per hashed reference. A separate events namespace and events-local file directory can reuse those mechanics without sharing core's backend selector or migration. | `packages/core/src/secrets.ts:36-53,175-188,251-254`; `packages/core/src/config.ts:697-730` |
 | `classifyChange` already judges mailbox/account send and change policies, internal domains, account mode, risk escalation, update checks, send caps, attachment roots and denies, downloads, elicitation clients and secret-store downgrades. It does not know events configuration yet. | `packages/core/src/config.ts:1375-1483,1487-1548` |
 | The channel manifest is a strict object, so an unknown `events` key is refused; its `hosts` field is expressly declared but not enforced. | `packages/core/src/channel-manifest.ts:43-112,170-224` |
-| The publish list is derived from packages with channel manifests and the server wrappers those manifests name. A non-channel library or service has no declaration that puts it in that list. | `scripts/packages.mjs:1-37`; `docs/superpowers/specs/2026-09-26-channel-plugins-design.md:110-125` |
+| The tooling registry currently discovers only packages with channel manifests: `readChannels` starts at `scripts/channels.mjs:35`, and `loadRegistry` derives publication, surfaces and drivers from that channel set at `scripts/channels.mjs:129`. The parity test then requires every published package to be a discovered surface or wrapper. A non-channel library or service therefore needs an explicit declaration and registry path rather than a release-only special case. | `scripts/channels.mjs:35-59,129-178`; `test/parity.test.mjs:99-113`; `docs/superpowers/specs/2026-09-26-channel-plugins-design.md:110-125` |
 | WhatsApp already uses `node:sqlite`, and its package requires Node 22.16 or newer. Core itself requires Node 22.12 and its untrusted envelope imports `node:crypto`, so neither is an isomorphic dependency for a browser-safe package. | `packages/whatsapp/src/index-db.ts:1-18`; `packages/whatsapp/package.json:1-10`; `packages/core/package.json:1-10`; `packages/core/src/untrusted.ts:1-3` |
 | Credentials in model context are already a security-policy violation, and terminal-only approval is already an explicit parity exception. | `SECURITY.md:28-33`; `capabilities.json:241-254,566-571` |
 | Core approval records are kind-separated, compare-and-swap under a per-record lock and single-use through an `O_EXCL` claim marker; the present kind union is `send | change | download`. This design extends that machinery rather than treating an ordinary change approval as disclosure authority. | `packages/core/src/approvals.ts:20-54,801-813` |
@@ -56,14 +56,16 @@ reads, and for a design of everything that takes:
 
 | Fact | Source |
 |---|---|
-| Gmail `history.list` is cursor-paginated, history IDs are non-contiguous, an expired cursor normally returns 404, and the final `historyId` is stored only when no `nextPageToken` remains. Specific change lists can duplicate the generic `messages` list. | [Gmail `users.history.list`](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.history/list) |
+| Gmail `history.list` is cursor-paginated, history IDs are non-contiguous, an expired cursor normally returns 404, and the final `historyId` is stored only when no `nextPageToken` remains. Specific change lists can duplicate the generic `messages` list. Its request filter is one singular `labelId: string`, not a set of labels. | [Gmail `users.history.list`](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.history/list) |
 | Slack has separate cursor-paginated history and replies methods; callers must follow `next_cursor`, not infer completion from page size. Its rate-limit notice establishes a conservative regime of one call per minute and 15 results for affected new non-Marketplace apps. | [`conversations.history`](https://docs.slack.dev/reference/methods/conversations.history/), [`conversations.replies`](https://docs.slack.dev/reference/methods/conversations.replies/), [Slack rate-limit notice](https://docs.slack.dev/changelog/2025/05/29/rate-limit-changes-for-non-marketplace-apps/) |
 | Resend's received and sent lists are cursor-paginated, and the sent list exposes only the current `last_event`. | [Resend received list](https://resend.com/docs/api-reference/emails/list-received-emails), [Resend sent list](https://resend.com/docs/api-reference/emails/list-emails) |
 | CloudEvents 1.0 requires `id`, `source`, `specversion` and `type`; extension values use the CloudEvents scalar type system. Standard Webhooks signs `id.timestamp.payload`, serialises symmetric secrets with `whsec_`, serialises a signature as `v1,<base64>`, and supports overlapping signatures for rotation. | [CloudEvents 1.0.2](https://github.com/cloudevents/spec/blob/v1.0.2/cloudevents/spec.md), [Standard Webhooks specification](https://github.com/standard-webhooks/standard-webhooks/blob/main/spec/standard-webhooks.md) |
 | JSON Pointer has no wildcard; tokens escape `~` as `~0` and `/` as `~1`. Native `EventSource` accepts a URL and `withCredentials`, not an arbitrary Authorization header. | [RFC 6901](https://www.rfc-editor.org/rfc/rfc6901), [HTML Standard: server-sent events](https://html.spec.whatwg.org/multipage/server-sent-events.html) |
 | TypeSafe documents Jev through its hosted System One API, Noul as a 0–1 yes/no probability, and current model limits, but the reviewed published artefacts and terms provide no local weights or self-hosting contract. Ollama also returns a 0–1 probability for Noul. | [TypeSafe quick start](https://docs.typesafe.ai/introduction/quickstart), [TypeSafe models](https://docs.typesafe.ai/models), [Ollama decisions](https://docs.ollama.com/capabilities/decision) |
 | The documented near-name is Laya, from a different publisher. Its published usage is a Transformers-style decision head and it offers an ONNX Runtime extra. | [Laya model page](https://huggingface.co/convaiinnovations/laya) |
-| Tauri registers custom commands for all windows/webviews by default unless the application constrains them with `AppManifest::commands`; capability files alone are not that command declaration. | [Tauri capabilities](https://v2.tauri.app/security/capabilities/) |
+| Tauri capabilities grant permissions to named windows/webviews, and overlapping capabilities merge their authority. Registered custom commands are available to all windows/webviews unless the application declares them with `AppManifest::commands`; a React route is not a capability boundary. | [Tauri capabilities](https://v2.tauri.app/security/capabilities/) |
+| Tauri's CSP protection is enabled only when `security.csp` is configured; the generated configuration shows `csp: null`. Its documented IPC origins are `ipc:` and `http://ipc.localhost`. Tauri normally keeps compile-time asset CSP modification on (`dangerousDisableAssetCspModification: false`) and adds hashes/nonces for bundled assets. | [Tauri CSP](https://v2.tauri.app/security/csp/), [Tauri security configuration](https://v2.tauri.app/reference/config/#securityconfig) |
+| Frontend calls to Rust commands serialise arguments and return values across Tauri IPC. Secret entry and reveal-once therefore necessarily cross IPC when the app uses a frontend secret window; the enforceable boundary is which labelled window has that command capability and where those bytes may subsequently appear. | [Tauri commands](https://v2.tauri.app/develop/calling-rust/) |
 | A fetch carrying `Authorization` needs CORS permission for that non-wildcard header; a preflight response names its allowed methods and headers, and exact-origin, credential-omitting responses need no `Access-Control-Allow-Credentials`. | [Fetch Standard: CORS protocol](https://fetch.spec.whatwg.org/#http-new-header-syntax) |
 | Unicode publishes versioned CaseFolding data and a versioned UTS #46 IDNA algorithm; pinning both to 15.1 prevents the browser and Node evaluators from inheriting different host Unicode behaviour. | [Unicode 15.1 components](https://www.unicode.org/versions/components-15.1.0.html), [UTS #46 revision 31](https://www.unicode.org/reports/tr46/tr46-31.html) |
 | Apple's PPPC deployment page documents managed-policy identity by bundle ID or file path plus a designated code requirement. It does not establish how an interactive TCC grant behaves for this daemon; that remains a phase-D hypothesis to test. | [Apple Platform Deployment](https://support.apple.com/en-gb/guide/deployment/dep38df53c2a/web) |
@@ -175,8 +177,8 @@ The three kinds have these exact version lists and effects:
    authorised for that rule and no other. It creates no global target, subscriber or judge pointer.
 2. A **judge-budget activation** has exactly one `judge-budget` entry for the singleton version and atomically
    replaces only the singleton budget pointer. Its canonical budget document contains the singleton id/version and
-   the complete daemon-wide and per-provider call, token and concurrency ceilings—no rule fields or defaults are
-   implicit.
+   the complete daemon-wide and per-provider calls-per-rolling-hour, input-tokens-per-rolling-30-days and concurrency
+   ceilings—no rule fields or defaults are implicit.
 3. An **enable-all activation** has exactly the sorted, duplicate-free `rule` entries named by `ruleVersions`. Its
    final transaction requires the switch still to be disabled at `switchGeneration`, requires the active rule
    pointer set to equal that list, and makes exactly those pointers effective by setting `event_settings.enabled` to
@@ -191,17 +193,19 @@ contains all of:
   “all present and future accounts” selector: connecting another account cannot add it to an existing rule;
 - the complete deterministic-condition AST and agentic condition, including operator options, literal operands,
   threshold and uncertainty policy; and the complete mapping AST, including every object/array position, constant
-  value, source pointer and `reject | omit | null` missing policy;
+  value, source pointer and `reject | omit | null` missing policy, with `omit` permitted only for object properties;
 - the complete ordered target set and each target version: kind and id; for dry-run, its at-most-24-hour retention;
   for a webhook, D7's canonical plain URL or secret-URL descriptor, non-empty sorted canonical
   `approvedAddressSet`, signing mode, delivery ordering and retry limit; and for SSE, the subscriber id/version, exact
   allowed Origins and stream identity. Every kind embeds its untrusted representation.
-  Every target preview also states that the minimal D3 installation-reset control event is delivered before ids under
-  a new installation identity; it contains no account or sender content and cannot be disabled independently. Secret
+  Every target preview also states that D6/D7's fixed installation-reset notice is delivered before ids under a new
+  installation identity; it contains only reset metadata, no account or sender content, and cannot be disabled
+  independently while an active rule references that target version. Secret
   bytes and secret generations are deliberately absent;
 - each judge id/version, provider, model, full endpoint, prompt-template version, exact input pointers, output
   interpretation, maximum input/output tokens and the rule's own call/token/concurrency limits. Daemon-wide and
-  per-provider ceilings live only in D5's separately approved singleton budget version, never in a rule; and
+  per-provider ceilings live only in D5's separately approved singleton budget version, never in a rule. The rule
+  fields are explicitly calls per rolling hour, input tokens per rolling 30 days and concurrency; and
 - the delivery rate cap (default 60 deliveries per rolling hour) and **every** retention value: ingest content,
   hold, delivery, dry-run, SSE replay, dead-letter payload and decision metadata. The defaults are respectively 24
   hours, 24 hours, 24 hours, 24 hours, 24 hours, seven days and 30 days; dry-run is capped at 24 hours and SSE at
@@ -213,9 +217,12 @@ id, a newly connected but unselected account, each source option, an ordinary UR
 mapping constant, missing policy, referenced object version and each per-rule judge limit. Budget vectors change
 each daemon/provider ceiling and the singleton version. Enable-all vectors change the switch generation, add,
 remove or reorder a rule-version id, and prove canonical sorting makes only reorder a no-op. Cross-kind vectors prove
-the same nested JSON under another `kind` has another digest. Every active authorisation, its activation kind, full
-version list, digest, approval time, retention deadlines and remaining rate-cap window appears in `agent-events doctor`
-and the app. Nothing is enabled by install, update or import.
+the same nested JSON under another `kind` has another digest. Every effective version is authorised in exactly one of
+two mechanically checked ways: an activation whose disclosure approval names that exact version, or a
+`derived_authorizations` row whose parent chain ends at such an exact activation and whose every edge is one of the
+whitelisted tightenings below. Every active authorisation, its activation kind, full version list, digest, approval
+time, exact-or-derived status, complete parent lineage, retention deadlines and remaining rate-cap window appears in
+`agent-events doctor` and the app. Nothing is enabled by install, update or import.
 
 **Version and activation rule.** Rules, targets, subscribers and judges are immutable versioned rows in the events
 database. A decision and every delivery bind `(ruleId, ruleVersion, targetId, targetVersion[, subscriberId,
@@ -238,15 +245,21 @@ claimed cross-store transaction:
 2. Terminal or app approval calls `approveDisclosure` with the re-planned live binding. The activation operation then
    calls `claimForDisclosure` on that exact approved record. Core's existing store uses a per-record transition and
    an `O_EXCL` marker for its single-use guarantee (`packages/core/src/approvals.ts:20-29,801-813`).
-3. A final SQLite transaction re-checks the intent, expected pointer or switch state and binding, applies only the
-   kind-specific effect above, records the activation and marks the intent complete.
+3. For rule and judge-budget activation, a final SQLite transaction re-checks the intent, expected pointer state and
+   binding, applies only the kind-specific effect above, records the activation and marks the intent complete.
+   `enable-all` deliberately inserts D12's provider-baseline stage between the claim and this final transaction; its
+   staged cursors are durable rows tied to the activation intent, so a used approval is still recoverable without
+   inventing another authority.
 
-Startup runs recovery before any source or worker. An intent paired with `used` finishes step 3. One paired with
+Startup runs recovery before any source or worker. A rule or budget intent paired with `used` finishes step 3. An
+`enable-all` intent paired with `used` runs D12's baseline-and-finalise recovery before any scheduled poll. One paired with
 `approved` is re-planned and, only if the binding and expected pointers still match, resumes the single claim and
-step 3; drift voids it. A still-pending approval leaves the intent pending until approval or expiry. Expired, revoked
+then follows the kind-specific completion path—direct step 3 for rule/budget, D12 baseline then step 3 for
+`enable-all`; drift voids it. A still-pending approval leaves the intent pending until approval or expiry. Expired, revoked
 or absent approvals drop the intent without moving an active pointer. Because the intent is durable before the claim,
-a used disclosure approval can never be stranded without enough SQLite state to finish. Recovery is crash-injected
-after every durable write and approval-store transition.
+a used disclosure approval can never be stranded without enough SQLite state to finish or, for `enable-all`, rerun
+its bounded baseline stage. Recovery is crash-injected after every durable write, approval-store transition,
+baseline response and final transaction.
 
 A loosening or any edit outside the whitelist below creates a pending rule version. The approved active rule version
 keeps running until that pending version completes the protocol above. A target, subscriber or judge edit always
@@ -268,10 +281,22 @@ Every other edit—including any condition edit, constant change, source-pointer
 pointer substitution, any edit that produces a new target/subscriber/judge version (including `plain` to `enveloped`
 or a smaller approved address set), new account or output field, any source-option addition (including an explicit
 WhatsApp chat set to `all-allowed`) or inverse transition—needs a fresh standing authorisation. A no-approval
-tightening is SQLite-only and commits in one transaction: it moves a rule pointer or records the object-version
-revocation, marks every queued or retryable affected delivery `cancelled`, purges each cancelled encrypted record,
-and purges retained dry-run and SSE entries made under the superseded or revoked versions. Each edit has one explicit
-post-commit invariant and test; there is no generic “disclosure-set subset” proof:
+tightening is SQLite-only. A whitelist edit that leaves a rule effective creates its new immutable rule version and,
+in the **same transaction**, inserts exactly one durable
+`derived_authorizations { versionId, parentApprovalId, parentVersionId, editKind, createdAt }` row, moves the rule
+pointer, cancels affected work and performs the required purges. `versionId` and `parentVersionId` are canonical
+`<ruleId>@<version>` ids for the same rule; `parentApprovalId` is the exact disclosure approval at the root of the
+lineage, not a newly manufactured approval. The transaction first proves the parent version is currently effective
+and authorised, and that `editKind` is exactly the one syntactic whitelist transformation being applied. A derived
+version may parent another derived version, but following `parentVersionId` must be acyclic and must end at the
+exact version named by `parentApprovalId`. A disable or object revocation creates no replacement effective version,
+so it records only the revocation/cancellation effect and needs no derived row. No worker, recovery path, dry-run read
+or SSE replay treats a version as effective unless this exact-or-derived lineage validates.
+
+That same transaction marks every queued or retryable affected delivery `cancelled`, purges each cancelled encrypted
+record, and purges retained dry-run and SSE entries made under the superseded or revoked versions. A crash cannot
+commit a new pointer without its derived row or vice versa. Each edit has one explicit post-commit invariant and test;
+there is no generic “disclosure-set subset” proof:
 
 1. disabled object — no new judge reservation, delivery claim, dry-run/SSE append or replay bound to it can cross;
 2. removed target — no delivery to that target can cross;
@@ -287,38 +312,51 @@ boundary and assert the invariant against already queued work as well as work cr
 
 Revocation is immediate at that commit. Immediately before delivery I/O, a worker transaction moves a row to
 `disclosing` only if the bound rule version is still that rule's active pointer, every referenced target/subscriber
-and judge version is unrevoked, the global switch is enabled and D9 says the account is live. After revocation
+and judge version is unrevoked, the rule's exact-or-derived authorisation lineage validates, the global switch is
+enabled and D9 says the account is live. After revocation
 commits, no worker can cross that boundary. I/O
 already in flight cannot be recalled and is recorded as such.
 
-**Secrets never enter model context.** Creating, entering, revealing or rotating a webhook signing secret,
-subscriber token or judge API key—and entering the D7 URL for a new secret-URL target version—is a human-only action
-in the terminal or app. Terminal entry
-requires the existing TTY and agent-marker checks (`packages/core/src/change-flow.ts:208-210,291-320`;
-`packages/core/src/cli-runtime.ts:36-60`); any key typed by the person uses hidden input. MCP tools never accept or
-return secret material. An MCP-proposed target, subscriber or hosted judge is created incomplete and disabled; the
-person completes its secret slot in the terminal or app. Signing-secret and subscriber-token rotation changes
-generations inside a referenced secret slot, not the authorised destination: two signing generations may overlap
-(D7), while token rotation closes old-generation streams. A hosted-judge API key can likewise be replaced in its
-human-only credential slot because it does not change the approved judge endpoint or model. A secret URL is
-different: changing any byte of its full canonical URL creates a new target version with a new fingerprint, and
-every rule that should use it needs its own new rule activation. There is no in-slot secret-URL rotation. Secret
-bytes and rotatable credential generations are absent from previews and audit.
+**Secrets never enter model context.** The complete human-only operation set is closed and named:
 
-These human-only secret commands and app operations receive `status: "exception"` rows in `capabilities.json`, with
-the reason: "secret material must never enter model input or output; the person completes this operation at the
-terminal or app." This follows the existing terminal-only `approve` exception (`capabilities.json:241-254`) and the
-rule that a token is never accepted through chat because the transcript retains it
-(`docs/superpowers/specs/2026-09-25-cli-mcp-parity-design.md:81-90`). Credential exposure to model context is already
-in scope as a vulnerability (`SECURITY.md:32-33`).
+| Operation | Exact contract |
+|---|---|
+| `target secret create <targetId>` / `target secret rotate <targetId>` | `create` requires an empty signing slot; `rotate` requires a current generation. The daemon generates a Standard Webhooks signing secret, stores the new generation and reveals it exactly once. `rotate` keeps D6's bounded two-generation overlap; neither command accepts caller-supplied secret bytes. |
+| `target url set <targetId>` | Hidden input accepts the complete secret URL for the new incomplete target version, canonicalises it, stores it in that version's new slot and returns only D7's authority tuple and fingerprint. It never replaces a URL in an existing slot. |
+| `subscriber token create` / `subscriber token rotate` | The selected subscriber id is a structured non-secret argument; `create` requires an empty slot and `rotate` an existing generation. The daemon generates and stores the token and reveals it exactly once; `rotate` invalidates the prior generation and closes its streams. |
+| `judge key set <judgeId>` / `judge key rotate <judgeId>` | `set` requires an empty hosted-judge slot; `rotate` requires an existing generation and atomically replaces it. Hidden input supplies the credential without changing the approved endpoint, provider or model. No key byte is echoed. |
+
+Each operation is available only from the terminal—with the existing TTY and agent-marker checks
+(`packages/core/src/change-flow.ts:208-210,291-320`; `packages/core/src/cli-runtime.ts:36-60`)—or D13's dedicated
+`secrets` window. Hidden-input operations never accept a value on argv or stdin when it is not a TTY. Reveal-once
+values are written only to the controlling TTY or returned only to that privileged window; `--json` is refused for
+them. MCP tools neither register these operations nor accept, return, reveal or rotate their material. An
+MCP-proposed target, subscriber or hosted judge is incomplete and disabled until one of these operations completes
+its slot.
+
+Signing-secret and subscriber-token rotation changes generations inside a referenced secret slot, not the authorised
+destination. A hosted-judge key can likewise rotate in its human-only credential slot. A secret URL is different:
+changing any byte creates a new target version with a new fingerprint, and every intended rule needs a new rule
+activation. Every secret operation appends an audit row containing only the operation name, the target/subscriber/
+judge id and version where applicable, outcome and time—never input, generated bytes, a URL component, fingerprinted
+material or a secret reference that embeds it.
+
+Every row above, plus `secrets migrate`, has its own `status: "exception"` entry in `capabilities.json`, with the
+reason: "secret material must never enter model input or output; the person completes this operation at the terminal
+or app." Tests enumerate this closed list and prove that none of its command names, argument schemas or results
+appears in `tools/list`, any MCP schema, structured content or MCP text output. This follows the existing
+terminal-only `approve` exception (`capabilities.json:241-254`) and the rule that a token is never accepted through
+chat because the transcript retains it (`docs/superpowers/specs/2026-09-25-cli-mcp-parity-design.md:81-90`).
+Credential exposure to model context is already in scope as a vulnerability (`SECURITY.md:32-33`).
 
 **Required `SECURITY.md` amendment.** Phase B1 adds the following exact bullets; this specification does not edit
 `SECURITY.md` itself:
 
 > - **Disclosure without a standing authorisation** — any webhook or subscriber stream receiving event-derived
 >   content, or any hosted or local judge being invoked with it, without an active, digest-bound standing
->   disclosure authorisation for the exact rule,
->   target, subscriber and judge versions; after that authorisation is revoked; outside its approved mapping,
+>   disclosure authorisation for exact approved versions, or versions derived from them by a whitelisted tightening,
+>   including the complete validated derivation lineage for the exact effective rule, target, subscriber and judge
+>   versions; after that authorisation is revoked; outside its approved mapping,
 >   retention or delivery rate cap; or without successful taint recording before disclosure.
 
 and, under "What the safety model does not claim":
@@ -340,7 +378,7 @@ type PointerPattern = readonly PointerPatternToken[];
 interface EventDefinition<T> {
   type: string;                         // 'gmail.message.received'
   version: number;                      // a breaking change creates another retained version
-  channel: 'gmail' | 'slack' | 'resend' | 'whatsapp' | 'agentcomms';
+  channel: 'gmail' | 'slack' | 'resend' | 'whatsapp';
   schema: z.ZodType<T>;                 // JSON values only; ISO strings, no Date or transforms
   untrusted: readonly PointerPattern[]; // sender-controlled prose
   content: readonly PointerPattern[];   // fields that can make an agentic prefilter selective
@@ -378,9 +416,8 @@ provider ids in two accounts have different preimages. D8 detects and stops on t
 collision instead of merging unequal canonical identities. `installationId` is the database identity whose full
 lifecycle and reset contract are specified in D8; it is not regenerated on an ordinary restart, migration or restore.
 
-Every account event carries `{ id: eventId, type, version, occurredAt, observedAt, account: { name, id, channel },
-hop }` and its own body. `agentcomms.installation.reset` is installation-scoped and carries `account: null`. `hop` is
-zero for provider events and is bounded as D12 specifies. Version 1 includes:
+Every source event carries `{ id: eventId, type, version, occurredAt, observedAt, account: { name, id, channel } }`
+and its own body. Version 1 includes only provider-source events:
 
 | Type | Body (abridged) | Sender-controlled patterns |
 |---|---|---|
@@ -391,15 +428,19 @@ zero for provider events and is bounded as D12 specifies. Version 1 includes:
 | `resend.email.received` | `id, from, to[], subject, receivedAt, attachments[]` | sender, subject and attachment names |
 | `resend.email.status_changed` | `id, to[], subject, previous, current, at` | subject |
 | `whatsapp.message.received` | `id, chat{id,name,kind}, sender{id,name}, text, at, media?` | text and names |
-| `agentcomms.source.degraded` / `.gap` / `.recovered` | `source, account, reasonCode, since` | — |
-| `agentcomms.installation.reset` | `newInstallationId, previousInstallationId?, reasonCode, eventIdsRestart: true` | — |
-| `agentcomms.delivery.dead_lettered` | `target, eventId, attempts, errorCode` | — |
-| `agentcomms.test` | the one fixed synthetic value `{ synthetic: true, message: "agentcomms test event" }` used by D7/D10 tests; callers cannot add or replace fields | — |
 
-The complete synthetic wire event is fixed by catalogue version 1:
-`{ "specversion":"1.0", "id":"agentcomms-test-v1", "source":"urn:agentcomms:test", "type":"agentcomms.test", "time":"2000-01-01T00:00:00Z", "datacontenttype":"application/json", "data":{ "synthetic":true, "message":"agentcomms test event" } }`.
-Judge tests receive only its fixed `data`; target tests send those exact canonical CloudEvent bytes. No runtime id,
-timestamp, account value, mapping or caller field is inserted.
+Operational records named `agentcomms.source.degraded`, `.gap`, `.recovered` and
+`agentcomms.delivery.dead_lettered` are **not catalogue source events in version 1**. They are content-free daemon
+health records shown only by `doctor` and the app. They never enter source selection, normalisation, ingest, rule
+evaluation, mapping or a target outbox. Saving or testing a rule whose type begins `agentcomms.` is refused even if
+the name matches one of those records. Dead-lettering such a record cannot create another record or delivery because
+operational records are never event inputs. The target-level installation reset notice is separately fixed in D6/D7 and is
+likewise neither selectable nor routed from an event.
+
+The fixed synthetic test value is also not a catalogue source event. Judge tests receive only
+`{ synthetic: true, message: "agentcomms test event" }`; target tests send the exact canonical CloudEvent bytes
+`{ "specversion":"1.0", "id":"agentcomms-test-v1", "source":"urn:agentcomms:test", "type":"io.agentcomms.test.v1", "time":"2000-01-01T00:00:00Z", "datacontenttype":"application/json", "data":{ "synthetic":true, "message":"agentcomms test event" } }`.
+No runtime id, timestamp, account value, mapping or caller field is inserted.
 
 Bodies or file metadata are fetched only when at least one active, source-option-matching rule version's per-rule
 projection requires them for a condition, judge input or mapping. The full normalised source event exists only in
@@ -468,10 +509,10 @@ chat at a time and prove both the digest and classification change.
 
 | Source | Version 1 | Later |
 |---|---|---|
-| Gmail | Poll `users.history.list` from the stored `historyId`, restricted to the union of the active rules' digest-bound label selectors; `includeSpamTrash` is true only for occurrences evaluated for a rule that approved it. Follow every `nextPageToken` before committing the final response's `historyId`. An occurrence key is `(historyRecordId, messageId, changeType)`; use the specific change arrays, not duplicate generic entries. `messageAdded` with `DRAFT` is ignored; with `SENT` and not `DRAFT` it is sent; without either it is received. `SPAM` and `TRASH` are excluded for a rule unless that rule's bound option is true. Label changes are emitted separately. A 404 re-baselines at `getProfile().historyId` and emits `agentcomms.source.gap`, with no silent backfill. These rules implement Gmail's pagination and change model ([Gmail `history.list`](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.history/list)). | `watch` plus Pub/Sub pull may wake the same reconciliation path; it never replaces `history.list`. |
-| Slack | Poll only the non-empty conversation-id sets named by active rule versions and promise **top-level posted messages only**, plus the bounded reply reconciliation below. Each conversation has a committed timestamp watermark and a durable scan `{oldest: watermark, latest: cycle-start, cursor}`. Follow every `response_metadata.next_cursor`, even after a short or empty page; a cycle may spend only its workspace request budget, so a cut-short scan persists that exact cursor and boundary and continues next cycle. It commits the new watermark only after the last page and committed ingest. A budget cut, ordinary empty page or `invalid_cursor` alone is never a gap. On `invalid_cursor`, restart the same bounded scan without a cursor; emit `agentcomms.source.gap` only when Slack explicitly reports an `is_limited` or equivalent retained-history boundary that excludes the committed watermark. If coverage cannot be established, mark the source degraded and do not advance or emit a gap. Posts dedupe on `(channelId, ts)`. The scheduler supports Slack's conservative affected-app limit and learns from 429/`Retry-After`; the UI shows worst-case latency ([`conversations.history`](https://docs.slack.dev/reference/methods/conversations.history/), [Slack rate-limit notice](https://docs.slack.dev/changelog/2025/05/29/rate-limit-changes-for-non-marketplace-apps/)). For a thread whose parent was observed within the previous seven days, maintain a separate reply watermark and fully cursor-page `conversations.replies` under the same resumable budget ([`conversations.replies`](https://docs.slack.dev/reference/methods/conversations.replies/)). **Polling does not emit replies to older threads or any message edits.** Those are documented version-1 polling limits, not silent completeness claims. | Socket Mode needs its own future design (D15); this specification makes no completeness or replay-cursor claim for it. |
-| Resend | `received.list` is paged newest-first toward the stored anchor. A durable scan keeps `{anchorId, cycleHeadId, after, pagesScanned}` between cycles; `cycleHeadId` is the first id seen, and `after` is the last id on the last completed page. Pages are staged encrypted and the anchor advances to `cycleHeadId` only when the old anchor is found and all staged rows commit to ingest. If the anchor is not found within ten pages—because retention or deletion made it unreachable—the daemon purges the stage, atomically re-baselines to `cycleHeadId` and emits `agentcomms.source.gap`; it never scans an unbounded history. The sent list is paged newest-first through every id from the most recent seven days. Those ids have rows in a state table for seven days; each read compares `last_event` with the stored value and emits only a change. The UI says these are observed states, not every intermediate transition. The daemon may consume at most half the machine-wide throttle and an interactive CLI/MCP call always takes the next available slot ([Resend received list](https://resend.com/docs/api-reference/emails/list-received-emails)). | A signed hosted relay for Resend webhooks is a separate product. |
-| WhatsApp | Change the existing snapshot-and-rebuild sync (`packages/whatsapp/src/operations/sync.ts:45-113`) so, under its index lock, it renames the current target to an owner-only sibling `index.previous.sqlite` **before** the existing atomic building-index replacement point (`packages/whatsapp/src/index-db.ts:266-277`), then renames the checked building index into place and fsyncs the directory. Startup restores the sibling if a crash landed between the renames. Diff old and new before deleting the sibling. The comparison is a multiset: rows with `ZSTANZAID` are counted under that id; otherwise occurrences are keyed by `(chatId, timestamp, sender, SHA-256(text), occurrenceIndex)`, where the stable occurrence index is the row's order within that equal four-field group. Equal rows are never coalesced, and repeated stanza ids also retain their counts. A decrease in maximum `Z_PK`, an index-format change, or disappearance of a previously retained non-empty stanza-id set is a store reset: re-baseline and emit a gap rather than treating old high-water marks as current. Apple's PPPC page establishes only the identifiers available to a managed privacy payload ([Apple Platform Deployment](https://support.apple.com/en-gb/guide/deployment/dep38df53c2a/web)). **Hypotheses for the phase-D spike**, not current claims, are that interactive TCC follows the same executable identity and that app-launched and service-launched copies may need separate grants; background collection does not ship until the spike establishes the actual behaviour and the app explains it. | A file-system notification may wake the same safe snapshot path; it never reads the live store. |
+| Gmail | Keep one mailbox cursor and make one unfiltered `users.history.list` scan from its stored `historyId`: the request deliberately omits `labelId`, because Gmail accepts only one singular `labelId: string`, not the union required by several rules. Follow every `nextPageToken` before committing the final response's `historyId`. An occurrence key is `(historyRecordId, messageId, changeType)`; use the specific change arrays, not duplicate generic entries. Resolve each unique changed message's current `labelIds` once—using the history message when populated, otherwise one metadata fetch—and then fan the occurrence out through per-rule filtering against that rule version's digest-bound label set and `includeSpamTrash`. One occurrence may therefore create projections for several overlapping rules while remaining one mailbox occurrence. `messageAdded` with `DRAFT` is ignored; with `SENT` and not `DRAFT` it is sent; without either it is received. `SPAM` and `TRASH` are excluded only for a rule whose bound option is false. Label changes are emitted separately after the same per-rule label filter. A 404 re-baselines at `getProfile().historyId` and records `agentcomms.source.gap` for the app/doctor, with no silent backfill. This broader unfiltered acquisition is disclosed in the UI and follows Gmail's singular filter, pagination and change model ([Gmail `history.list`](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.history/list)). | `watch` plus Pub/Sub pull may wake the same reconciliation path; it never replaces `history.list`. |
+| Slack | Poll only the non-empty conversation-id sets named by active rule versions and promise **top-level posted messages only**, plus the bounded reply reconciliation below. Each conversation has a committed timestamp watermark and a durable scan `{oldest: watermark, latest: cycle-start, cursor}`. Follow every `response_metadata.next_cursor`, even after a short or empty page; a cycle may spend only its workspace request budget, so a cut-short scan persists that exact cursor and boundary and continues next cycle. It commits the new watermark only after the last page and committed ingest. A budget cut, ordinary empty page or `invalid_cursor` alone is never a gap. On `invalid_cursor`, restart the same bounded scan without a cursor; record `agentcomms.source.gap` only when Slack explicitly reports an `is_limited` or equivalent retained-history boundary that excludes the committed watermark. If coverage cannot be established, mark the source degraded and do not advance or record a gap. Posts dedupe on `(channelId, ts)`. The scheduler supports Slack's conservative affected-app limit and learns from 429/`Retry-After`; the UI shows worst-case latency ([`conversations.history`](https://docs.slack.dev/reference/methods/conversations.history/), [Slack rate-limit notice](https://docs.slack.dev/changelog/2025/05/29/rate-limit-changes-for-non-marketplace-apps/)). For a thread whose parent was observed within the previous seven days, maintain a separate reply watermark and fully cursor-page `conversations.replies` under the same resumable budget ([`conversations.replies`](https://docs.slack.dev/reference/methods/conversations.replies/)). **Polling does not emit replies to older threads or any message edits.** Those are documented version-1 polling limits, not silent completeness claims. | Socket Mode needs its own future design (D15); this specification makes no completeness or replay-cursor claim for it. |
+| Resend | `received.list` is paged newest-first toward the stored anchor. A durable scan keeps `{anchorId, cycleHeadId, after, pagesScanned}` between cycles; `cycleHeadId` is the first id seen, and `after` is the last id on the last completed page. Pages are staged encrypted and the anchor advances to `cycleHeadId` only when the old anchor is found and all staged rows commit to ingest. If the anchor is not found within ten pages—because retention or deletion made it unreachable—the daemon purges the stage, atomically re-baselines to `cycleHeadId` and records `agentcomms.source.gap`; it never scans an unbounded history. The sent list is paged newest-first through every id from the most recent seven days. Those ids have rows in a state table for seven days; each read compares `last_event` with the stored value and emits only a change. The UI says these are observed states, not every intermediate transition. The daemon may consume at most half the machine-wide throttle and an interactive CLI/MCP call always takes the next available slot ([Resend received list](https://resend.com/docs/api-reference/emails/list-received-emails)). | A signed hosted relay for Resend webhooks is a separate product. |
+| WhatsApp | Change the existing snapshot-and-rebuild sync (`packages/whatsapp/src/operations/sync.ts:45-113`) so, under its index lock, it renames the current target to an owner-only sibling `index.previous.sqlite` **before** the existing atomic building-index replacement point (`packages/whatsapp/src/index-db.ts:266-277`), then renames the checked building index into place and fsyncs the directory. Startup restores the sibling if a crash landed between the renames. Diff old and new before deleting the sibling. The comparison is a multiset: rows with `ZSTANZAID` are counted under that id; otherwise occurrences are keyed by `(chatId, timestamp, sender, SHA-256(text), occurrenceIndex)`, where the stable occurrence index is the row's order within that equal four-field group. Equal rows are never coalesced, and repeated stanza ids also retain their counts. A decrease in maximum `Z_PK`, an index-format change, or disappearance of a previously retained non-empty stanza-id set is a store reset: re-baseline and record a gap rather than treating old high-water marks as current. Apple's PPPC page establishes only the identifiers available to a managed privacy payload ([Apple Platform Deployment](https://support.apple.com/en-gb/guide/deployment/dep38df53c2a/web)). **Hypotheses for the phase-D spike**, not current claims, are that interactive TCC follows the same executable identity and that app-launched and service-launched copies may need separate grants; background collection does not ship until the spike establishes the actual behaviour and the app explains it. | A file-system notification may wake the same safe snapshot path; it never reads the live store. |
 
 Slack opens a fresh `openWorkspace` session for every poll and never caches credentials across polls, matching the
 current token boundary (`packages/slack/src/operations/session.ts:131-145`;
@@ -489,7 +530,7 @@ not update the interactive `lastUsedAt` field that current Gmail reads update
 
 There is no independently enabled source. A source/account/event-type tuple polls exactly while at least one active
 rule version names that live account and event type. When the first such rule becomes active, the source establishes
-a “now” cursor and emits a gap rather than backfilling earlier history; when the last one disappears, polling stops.
+a “now” cursor and records a gap rather than backfilling earlier history; when the last one disappears, polling stops.
 D9 defines live-account removal, and D12 defines the stronger disabled-interval re-baseline.
 
 Each source is an operation in `packages/<channel>/src/operations/events.ts`, tested against that channel's existing
@@ -504,14 +545,14 @@ versioned extension of the channel contract, not a free-form field.
 **Deterministic** — a tree that can always be rendered back as a sentence:
 
 ```ts
-type Condition =
-  | { all: [Condition, ...Condition[]] }
-  | { any: [Condition, ...Condition[]] }
-  | { not: Condition }
+type CanonicalCondition =
+  | { all: [CanonicalCondition, ...CanonicalCondition[]] }
+  | { any: [CanonicalCondition, ...CanonicalCondition[]] }
+  | { not: CanonicalCondition }
   | { path: string; op: 'exists' }
-  | { path: string; op: 'equals' | 'notEquals'; value: Scalar; caseSensitive?: boolean }
-  | { path: string; op: 'contains'; value: Scalar; caseSensitive?: boolean }
-  | { path: string; op: 'startsWith' | 'endsWith'; value: string; caseSensitive?: boolean }
+  | { path: string; op: 'equals' | 'notEquals'; value: Scalar; caseSensitive: boolean }
+  | { path: string; op: 'contains'; value: Scalar; caseSensitive: boolean }
+  | { path: string; op: 'startsWith' | 'endsWith'; value: string; caseSensitive: boolean }
   | { path: string; op: 'in'; values: [Scalar, ...Scalar[]] }
   | { path: string; op: 'gt' | 'gte' | 'lt' | 'lte'; value: number | string }
   | { path: string; op: 'domainIs'; value: string; includeSubdomains: boolean };
@@ -524,6 +565,10 @@ type Condition =
   `not(equals(missing, x))` is `true`; `exists` alone tests presence and is `false` for a missing path. `in` means the
   path's scalar value is one of `values`. `contains` means substring for strings and element membership for arrays,
   with `value` having the array schema's element type. `startsWith`, `endsWith` and case sensitivity are string-only.
+- The authoring schema may omit `caseSensitive`; omission canonicalises to `false` before validation, preview,
+  digesting or storage. The stored AST always contains the Boolean explicitly for every operator that supports it,
+  so omitted and explicit `false` have byte-identical canonical JSON. `true` is the only case-sensitive form and is
+  refused when the compared schema value/array element is not a string; the explicit stored value is then `false`.
 - The catalogue's D3 `formats` metadata is authoritative. `domainIs` is legal only on `email` or `domain` fields;
   date operands and `gt | gte | lt | lte` date comparison are legal only on `date-time` fields. Numeric comparison
   remains legal only on numbers. URI fields receive no implicit domain or date semantics. Invalid or mismatched
@@ -537,9 +582,10 @@ type Condition =
   verification ([UTS #46 revision 31](https://www.unicode.org/reports/tr46/tr46-31.html)). It matches that domain
   only unless `includeSubdomains` is true. The implementation and its data ship inside `@agentcomms/events`; Node and
   browser builds cannot fall through to different platform IDNA libraries.
-- No regular expressions in version 1. Limits: depth 8, 64 nodes, scalar value 1 KB, `in` 256 values. The tree is
-  saved; its sentence is generated. Repository JSON conformance vectors cover missing/negation, every legal format,
-  Unicode 15.1 folding and UTS #46, and the same vectors run against Node and a real browser build.
+- No regular expressions in version 1. Limits: depth 8, 64 nodes, scalar value 1 KB, `in` 256 values. The canonical
+  tree is saved; its sentence is generated. Repository JSON conformance vectors cover omitted versus explicit-false
+  `caseSensitive`, missing/negation, every legal format, Unicode 15.1 folding and UTS #46, and the same vectors run
+  against Node and a real browser build.
 
 **Agentic** — a question put to a judge after a real deterministic prefilter:
 
@@ -559,18 +605,32 @@ type Condition =
 - A timeout, malformed response or exhausted budget is no-match and degrades the judge. The stored decision records
   provider, model and judge versions, prompt-template version, threshold, value/label and reason code. Retries never
   re-ask.
-- Rules carry only their own call/token/concurrency limits. Daemon-wide and per-provider ceilings live in one
-  singleton `judge_budget` object with immutable versions, one active pointer and a default daemon concurrency ceiling
-  of 2. Every budget version activation—including a lower ceiling—requires the terminal/app-only `disclosure`
-  approval over its full daemon and provider values; rules cannot override or copy them.
-- Before a call, one transaction reads the active budget version and durably reserves against both that version and
-  the rule's limits. The reservation records the immutable budget version and is settled to reported usage afterward.
-  A call that times out after it may have been billed consumes its call and the reserved maximum tokens; it is never
-  refunded on uncertainty. No active singleton means no judge call.
+- A rule's three budget dimensions are **calls per rolling hour**, **input tokens per rolling 30 days** and
+  **concurrent calls**. Usage is keyed by stable `ruleId`, not `ruleVersion`: activating a new version inherits every
+  charge still inside those windows and every live reservation from the preceding versions. Daemon-wide global and
+  per-provider ceilings use the same three dimensions and windows in one singleton `judge_budget` object with
+  immutable versions, one active pointer and a default global concurrency ceiling of 2. Global usage is keyed to the
+  installation and provider usage to the provider id, so activating a new singleton version cannot reset an in-window
+  charge. Every budget version activation—including a lower ceiling—requires terminal/app-only `disclosure`
+  approval over its full global and provider values; rules cannot override or copy them.
+- Before a production call, one transaction reads the active singleton version and reserves against the calling
+  `ruleId`, the provider and the global ledgers. A durable reservation records the rule id/version, immutable budget
+  version, provider, one call, an `estimatedInputTokens` upper bound, concurrency ownership and state `reserved`.
+  Immediately before transport I/O, a transaction moves `reserved → in-flight`; after the response it moves
+  `in-flight → settled`, charging the actual provider-reported input tokens when known or the estimate when they are
+  not and freeing the concurrency slots in the same transaction. A pre-I/O refusal moves `reserved → released`,
+  frees its slots and charges nothing. Those are the only transitions:
+  `reserved → in-flight → settled` or `reserved → released`.
+- Startup recovery releases every `reserved` row that never reached `in-flight`. It pessimistically settles every
+  `in-flight` row with no settlement by charging its one call and token estimate because the provider may have billed
+  it; in either case it frees the concurrency slots in the same recovery transaction. Recovery is idempotent and
+  cannot charge a settled row twice. Timeout and transport-unknown outcomes settle with the estimate, never refund.
+  No active singleton means no judge call.
 - `judge test` has no synthetic rule limits. Its transaction instead enforces a durable rolling ceiling of ten tests
   per hour for the exact `(judgeId, judgeVersion)` and reserves the call, maximum tokens and concurrency against the
-  active singleton's **global** ceilings. It charges neither a rule nor a per-provider ceiling. The per-version test
-  charge is not refunded on failure, and the global reservation settles exactly like production usage. No active
+  active singleton's **global** rolling-hour, rolling-30-day and concurrency ceilings. It charges neither a rule nor
+  a per-provider ceiling. The per-version test charge is not refunded on failure, and the global reservation uses
+  the same durable state machine and crash settlement as production usage. No active
   singleton, an exhausted global ceiling or the eleventh per-version test refuses before network I/O.
 
 ### D6. Mapping and the external wire contract
@@ -587,8 +647,11 @@ The output of a rule is a JSON template whose leaves are constants or path refer
 ```
 
 `$path` is a concrete RFC 6901 pointer validated against the event schema. It copies the value and type exactly,
-including whole objects and arrays. `missing` is `reject` (default), `omit` or `null`. There are no transforms,
-expressions or array projections. Limits are 256 KB per mapped event, 200 leaves and 4 KB per constant.
+including whole objects and arrays. `missing` is `reject` (default), `omit` or `null`, but `omit` is legal only when
+the path node is the value of an object property: it removes that property. A path node at the template root or at an
+array element must use `reject` or `null`; save refuses `omit` there, so evaluation never invents an absent root or a
+sparse/shifted array. There are no transforms, expressions or array projections. Limits are 256 KB per mapped event,
+200 leaves and 4 KB per constant.
 
 Trust propagation uses D3's expanded paths in both directions. With `enveloped`, every intersecting string is replaced
 by D3's envelope; with `plain`, it is the sanitised string. The mapping preview shows both representations and every
@@ -597,18 +660,24 @@ resulting untrusted output pointer.
 The delivered envelope is CloudEvents structured JSON:
 
 - `specversion` is exactly `"1.0"`;
-- `id` is the decision id, stable across retries (or the reset-notification id for
-  `agentcomms.installation.reset`); `type`, `subject`, `time` and `datacontenttype` follow the selected event; an
-  account event's `source` is `urn:agentcomms:<installation>:<account>`, with installation and account components
-  percent-encoded as UTF-8 RFC 3986 components, while an installation reset uses
-  `urn:agentcomms:<installation>`;
+- `id` is the decision id, stable across retries. For a rule delivery, `type`, `subject`, `time` and
+  `datacontenttype` follow the selected provider event, and `source` is
+  `urn:agentcomms:<installation>:<account>`, with installation and account components percent-encoded as UTF-8 RFC
+  3986 components;
 - for an account event, `dataschema` identifies the generated schema for the exact `(ruleVersion, targetVersion)` and
-  `agentcommsrule` is a string `<percent-encoded-rule-id>@<version>`; for
-  `agentcomms.installation.reset`, `dataschema` identifies the fixed reset schema and `agentcommsrule` is omitted;
+  `agentcommsrule` is a string `<percent-encoded-rule-id>@<version>`;
 - `agentcommsuntrusted` is a CloudEvents **string** extension: unique concrete JSON Pointers into `data`, sorted by
   raw UTF-8 bytes, each RFC 3986 percent-encoded with uppercase hex, then joined by commas. It is omitted when there
   are none. The empty string means the one root pointer `""`; a root pointer subsumes descendants. This is the
   canonical scalar encoding, not a JSON array.
+
+The D7 installation-reset notice is a target-level control delivery, not a mapped catalogue event. It uses the same
+CloudEvents structured envelope and signing/retention machinery with a reset-notification id stable across its
+attempts, type `io.agentcomms.control.installation-reset.v1`, source
+`urn:agentcomms:<new-installation-id>`, the fixed reset `dataschema`, no `subject`, `agentcommsrule` or
+`agentcommsuntrusted`, and exactly
+`data: { resetEpoch, newInstallationId, previousInstallationId?, reasonCode, eventIdsRestart: true }`. Those are the
+only bytes of reset metadata: it contains no account, sender, event, rule, mapping, judge, payload or error text.
 
 Standard Webhooks removes `whsec_`, base64-decodes the suffix, and uses it as the HMAC-SHA256 key over the exact
 transmitted bytes `webhook-id + "." + webhook-timestamp + "." + body`. `webhook-id` is the immutable delivery id and
@@ -691,22 +760,32 @@ cannot be redriven; only `delivery drop` can remove its retained payload. `disab
 dead-lettered deliveries as well as queued, retryable and already-disclosing work.
 
 **Installation-reset barrier.** A reset creates one durable barrier for each exact target version referenced by an
-active rule. Its reset delivery is ahead of every ordinary delivery under the new installation id: webhook targets
-open the barrier only after a 2xx, and dry-run/SSE targets only after their encrypted append commits. Ordinary rows
-may be created behind the barrier, but they cannot move to `disclosing` or append while it is closed; their original
-absolute retention deadlines continue to run and expiry purges them normally. The barrier is keyed by
-`(resetEpoch, targetId, targetVersion)` and survives restart.
+active rule. The reset notice is the fixed, content-free target-level control delivery in D6, not work owned by any
+one rule. Its design limits are always **20 attempts and a 24-hour absolute deadline from creation**. Those limits are
+not read from a referencing rule; the reset is exempt from every rule delivery-rate cap and neither consumes nor
+waits for a rule cap slot. It carries only D6's reset metadata. Rules with different ordinary caps or retentions can
+therefore share the target without changing the reset contract.
 
-If the reset delivery exhausts its approved attempt limit before its deadline, it becomes terminal
-`dead-lettered`; if its deadline arrives first it becomes terminal `retention-expired`. Either way the target version
-becomes `degraded` and the barrier stays closed. No automatic or manual
+The reset delivery is ahead of every ordinary delivery under the new installation id: webhook targets open the
+barrier only after a 2xx, and dry-run/SSE targets only after their encrypted append commits. Ordinary rows may be
+created behind the barrier, but they cannot move to `disclosing` or append while it is closed; their original
+absolute retention deadlines continue to run and expiry purges them normally. The barrier is keyed by
+`(resetEpoch, targetId, targetVersion)` and survives restart. If no active effective rule references that exact target
+version anymore, one transaction cancels the queued/degraded reset notice, purges its retained bytes and barrier, and
+never sends it merely because an old rule once referred to the target. Removing one of several referencing rules does
+not cancel it while another remains.
+
+If the reset delivery exhausts 20 attempts before its 24-hour deadline, it becomes terminal `dead-lettered`; if the
+deadline arrives first it becomes terminal `retention-expired`. Either way the target version becomes `degraded` and
+the barrier stays closed. No automatic or manual
 `delivery retry` can redrive it. A person may run `target resume` at a terminal or use the app; if the target version
 is still referenced and unrevoked, that creates a **new** reset-delivery id for the same reset epoch with a fresh
-target-bounded attempt counter and absolute deadline, while leaving the barrier closed until it succeeds. It never
+20-attempt counter and 24-hour absolute deadline, while leaving the barrier closed until it succeeds. It never
 turns the old dead letter retryable. MCP cannot resume a target. Revoking the target purges the barrier and all
 waiting payloads instead of releasing them. Tests dead-letter a reset, restart the daemon, let later deliveries
 expire behind the durable barrier, resume from the terminal/app, and prove no later CloudEvent crosses before the
-new reset delivery.
+new reset delivery. A shared-target test gives two rules different ordinary caps and retentions, removes them one at
+a time, and proves the fixed reset charge is cap-exempt and is cancelled only after the final active reference ends.
 
 Decision metadata has `metadataExpiresAt`, default 30 days or the approved shorter value, and `metadataState`.
 At expiry one transaction appends a non-content purge tombstone, clears judge values/reasons and other expiring
@@ -728,8 +807,12 @@ writer that predates new entry data (`packages/core/src/taint.ts:189-197`), and 
 entry without unknown inner fields (`packages/core/src/taint.ts:307-313`). An older Gmail server can therefore
 rewrite `taint.json` but never opens `origins.json`.
 
-New writers atomically merge the sidecar under its own lock **before** updating the base taint files, and `flush`
-returns only after both writes succeed. Readers merge by canonical key: no sidecar entry means `origins: ["read"]`;
+Every new event/read writer acquires the sidecar lock first and then the existing base taint lock, in that fixed
+order, and holds **both locks through both atomic commits**: merge and commit `origins.json`, then merge and commit the
+base taint files, then release the base lock and finally the sidecar lock. Only a writer that currently holds both
+locks may identify and prune sidecar-only crash residue. A released older writer takes only the base lock, never
+opens or prunes the sidecar, and therefore cannot deadlock with this order or erase an event origin. `flush` returns
+only after both commits succeed while both locks are still held. Readers merge by canonical key: no sidecar entry means `origins: ["read"]`;
 an entry returns its stored set; and a base `at` later than the sidecar `at` adds `"read"`, proving a legacy read
 writer touched it without erasing `"event"`. Sidecar pruning follows the base store's same seven-day window and
 per-map cap, retaining only keys that survive the corresponding base map or are about to be touched by this
@@ -743,7 +826,9 @@ retryable. This preserves the current fail-closed collector contract (`packages/
 Migration tests cover old entries, mixed read/event merges and round trips, plus a published-old-writer `touch` over
 an address with an event origin and prove the merged result retains `event`. Cap tests mix structured and prose
 observations from both origins and prove header priority remains unchanged and neither an event id nor channel is
-written.
+written. A deterministic two-new-writer test pauses writer A after its sidecar commit and before its base commit,
+starts writer B, proves B cannot acquire the sidecar or prune A's row, then resumes both and observes the merged
+`event` origin.
 
 **Network resolution.** Every webhook or local-judge version carries an explicit, non-empty
 `approvedAddressSet`: sorted literal IPs and CIDRs bound into its digest. On every connection—not only at approval—the
@@ -769,7 +854,7 @@ the approved set. Local judges use the identical classifier, with loopback addre
 
 `target test` runs only for a target version referenced by an active rule, or from the terminal/app against a pending
 version from the approval screen of a rule activation that references it. It sends exactly the catalogue's fixed
-`agentcomms.test` event, accepts no caller-supplied
+`io.agentcomms.test.v1` synthetic CloudEvent defined in D3, accepts no caller-supplied
 content or field override, and runs the ordinary taint pipeline; the synthetic event has no taint declarations, so
 there is nothing to record. A durable cap allows at most ten test attempts per rolling hour per target id across all
 of its versions, charged before the attempt and not refunded on failure. It is separate from a rule's delivery cap and
@@ -805,12 +890,16 @@ One SQLite database, `<stateDir>/events/events.sqlite`, is owned only by `agent-
 - immutable `rule_versions`, `target_versions`, `subscriber_versions`, `judge_versions` and
   `judge_budget_versions`, each holding its full canonical document and digest; `active_versions(kind, objectId,
   version, approvalId, activatedAt)` permits only rule pointers and the singleton judge-budget pointer;
+  `derived_authorizations(versionId PRIMARY KEY, parentApprovalId, parentVersionId, editKind, createdAt)` stores each
+  no-approval rule-tightening edge created atomically with its new version and pointer; exact activations and derived
+  rows together must form D2's complete acyclic lineage to the approval named by `active_versions.approvalId`;
   `object_revocations(kind, objectId, version, revokedAt)` carries immediate target/subscriber/judge revocations;
   durable `activation_intents` store the canonical activation kind/document/effect, and `activations`/`revocations`
   are append-only;
 - `cursors(source, accountId, eventType, cursor, updatedAt)` and
   `source_scan_state(id, source, accountId, eventType, encryptedRecord, updatedAt)` for encrypted source-specific
-  continuation and staging;
+  continuation and staging; `enable_baselines(intentId, source, accountId, eventType, encryptedCursor, responseAt)`
+  holds only D12's staged provider-now cursors and is deleted by finalisation or cancellation;
 - content-free `ingest(eventId UNIQUE, installationId, type, version, accountId, dedupeKey, occurredAt, observedAt)`
   plus `ingest_rules(eventId, ruleId, ruleVersion, decisionDeadline, encryptedProjection)`. Each projection contains
   only the concrete fields referenced by that rule version's deterministic conditions, judge inputs and mapping;
@@ -831,14 +920,16 @@ One SQLite database, `<stateDir>/events/events.sqlite`, is owned only by `agent-
   maximum lifetime of 24 hours;
 - `stream_log(id, ruleId, ruleVersion, targetId, targetVersion, subscriberId, subscriberVersion, judgeId?,
   judgeVersion?, eventId, accountId, encryptedRecord, deliveredAt, expiresAt)`;
-- `judge_budget_reservations`, durable rolling `judge_test_charges(judgeId, judgeVersion, chargedAt)`,
-  `delivery_cap_charges`, worker leases and content-free `work_attempts`, each binding the switch generation under
-  which asynchronous work began. Any provider/target error text—including text that reflects a request payload—lives
-  only inside the owning encrypted record; every similarly named plaintext status/error column is restricted to a
-  closed code and numeric status; and
+- `judge_budget_reservations` with D5's closed `reserved | in-flight | settled | released` state, stable rule-id,
+  provider/global ledger keys, exact rule/budget versions, estimated/actual input tokens and concurrency ownership;
+  durable rolling `judge_test_charges(judgeId, judgeVersion, chargedAt)`, `delivery_cap_charges`, worker leases and
+  content-free `work_attempts`, each binding the switch generation under which asynchronous work began. Any
+  provider/target error text—including text that reflects a request payload—lives only inside the owning encrypted
+  record; every similarly named plaintext status/error column is restricted to a closed code and numeric status; and
 - `reset_barriers(resetEpoch, targetId, targetVersion, state, resetDeliveryId, degradedAt?)`, reset-delivery attempts,
-  target health, reset notifications and account-revocation tombstones needed to enforce D7's ordering barrier and
-  tell consumers why a cursor or event-id sequence restarted without retaining event content.
+  target health, target-level reset notices and account-revocation tombstones needed to enforce D7's ordering
+  barrier; and content-free `operational_records` for the `agentcomms.*` health names D3 exposes only through the app
+  and `doctor`. No operational record has an ingest, decision or delivery foreign key.
 
 `eventId` is D3's deterministic id and `UNIQUE(eventId)` is the ingest idempotency boundary. On a conflict, the
 transaction compares the stored `(installationId, accountId, type, version, dedupeKey)` with the canonical identity:
@@ -891,12 +982,14 @@ invokes the installation reset below. SQLite, WAL and free-page scans must never
 database backup/restore. A newly created database always gets a new id. If the database is recreated or any referenced
 master key is lost, the daemon performs a reset rather than falling back to plaintext or reusing the old id: it
 installs a new master key and 128-bit id, terminalises and purges unreadable work, re-baselines every live source cursor
-to provider “now”, and records `agentcomms.installation.reset` with `eventIdsRestart: true` and the prior id when known.
+to provider “now”, and creates D6's fixed target-level reset notice while recording the reset for the app and
+`doctor`.
 It creates D7's durable per-target reset barriers before ordinary delivery creation resumes. A failed reset never
 permits later content to overtake it: dead-lettering marks that target version degraded, and later rows wait behind
 the barrier and retain their original expiry until a person runs `target resume` and a new reset delivery succeeds.
 If database recreation removed all targets, the reset epoch remains in `meta`; each subsequently authorised target
-receives a barrier and reset as its first event. No provider event from before the new baselines is backfilled.
+receives a barrier and reset notice before its first provider-event delivery. No provider event from before the new
+baselines is backfilled.
 
 While evaluation is paused by the required-update gate, source polling pauses as well: the daemon never advances
 cursors while it cannot decide retained events. `rule test` has the zero-network contract in D10 and never performs a
@@ -905,8 +998,9 @@ fresh provider read.
 Workers claim rows with expiring leases. On restart an expired lease returns to its prior retryable state only when
 its switch generation is still current; older-generation work is terminal. Ordering, when enabled, is only by
 `(rule, account, target)`, so one failing destination does not block another. Immediately before judge or delivery
-I/O, one SQLite transaction re-reads `event_settings`, the bound active rule pointer, every referenced object's
-revocation state and D9's live account, checks the reset barrier and deadline, and moves the row to its boundary
+I/O, one SQLite transaction re-reads `event_settings`, the bound active rule pointer and its complete exact-or-derived
+authorisation lineage, every referenced object's revocation state and D9's live account, checks the reset barrier and
+deadline, and moves the row to its boundary
 state. For a webhook's first attempt it also writes the one cap charge and `capChargedAt`; retries reuse it. A failed
 fence reaches `cancelled` or `retention-expired` and purges the encrypted record in that transaction; a closed reset
 barrier leaves non-expired ordinary work waiting without crossing the boundary.
@@ -1007,10 +1101,11 @@ The required core changes are exactly:
    that client's `surface` and `origin`; autonomous work uses `surface: "daemon", origin: "daemon"`; later daemon
    execution requested by a CLI, MCP or app client uses `surface: "daemon"` with that client in `origin`
    (`packages/core/src/audit.ts:20-35`).
-4. Keep the existing taint location `source: "header" | "body"` and add observations plus D7's independently locked
-   `taint/origins.json` sidecar and merged reader. Decode a missing sidecar entry as `["read"]`, preserve an event
-   origin across an old writer's reconstructed entry, and preserve header priority and current account-id behavior
-   (`packages/core/src/taint.ts:189-197,285-313`).
+4. Keep the existing taint location `source: "header" | "body"` and add observations plus D7's `taint/origins.json`
+   sidecar and merged reader. A new writer takes the sidecar lock, then the base lock, and holds both through both
+   commits; only that dual-lock writer prunes sidecar-only residue, while an old writer takes only the base lock.
+   Decode a missing sidecar entry as `["read"]`, preserve an event origin across an old writer's reconstructed entry,
+   and preserve header priority and current account-id behavior (`packages/core/src/taint.ts:189-197,285-313`).
 
 That is the complete core integration; it is not merely a set of union edits. No `event` member is added to `TaintSource`, and
 no existing form is reclassified as terminal approval. Core's secret migration is deliberately unchanged: the events
@@ -1044,7 +1139,7 @@ exceptions identified below:
 | Judges | `judges list`, `judge add|update|remove`, `judge test`, `budget show|update` |
 | Deliveries | `deliveries list`, `delivery retry|drop`, `held list|decide` |
 | Dry-run log | `dryrun list|show` |
-| Secrets | `secrets migrate --to keychain|file` |
+| Secrets | `target secret create|rotate <targetId>`, `target url set <targetId>`, `subscriber token create|rotate`, `judge key set|rotate <judgeId>`, `secrets migrate --to keychain|file` |
 | Daemon | `status`, `run`, `stop`, `pause|resume`, `disable-all|enable-all`, `approve <id>`, `doctor` |
 
 The parity `rule test` operation accepts only catalogue examples, including from MCP, and may evaluate a disabled or
@@ -1052,6 +1147,10 @@ unapproved rule because it has a strictly local contract. It evaluates only dete
 an agentic node is reported `not-evaluated`. It never accepts an event/account id, reads ingest, calls a judge,
 provider or target, advances a cursor or creates a decision/delivery. Returned example and mapped values are
 sanitised and enveloped regardless of the pending target's representation.
+
+`rule create`, `rule update` and both test forms accept only provider-source definitions from D3. Any type beginning
+`agentcomms.`—including every known operational record name and an unknown future one—is rejected as
+`EVENT_TYPE_NOT_SELECTABLE`; it cannot be smuggled through a target test or a saved older document.
 
 Testing a rule against retained ingest is a separate `rule test-retained <eventId>` operation available only from a
 human terminal or the app. Its `capabilities.json` row is `status: "exception"` with the reason “retained sender
@@ -1061,8 +1160,8 @@ no account argument and does no provider, judge or target I/O.
 
 `judge test` may call only a judge version referenced by an active rule. The terminal or app may test a pending judge
 from the approval screen only as part of a pending **rule activation that references that exact judge version**; MCP
-and ordinary CLI calls cannot. The same rule applies to **every** real implemented judge call. It sends only the
-catalogue's fixed `agentcomms.test` event, accepts no caller content or field override, runs the ordinary taint path
+and ordinary CLI calls cannot. The same rule applies to **every** real implemented judge call. It sends only D3's
+fixed `io.agentcomms.test.v1` synthetic value, accepts no caller content or field override, runs the ordinary taint path
 (with no observations for this synthetic event), consumes one of the durable ten-per-hour charges for that exact
 judge version and reserves against the active singleton budget's global call/token/concurrency ceilings as D5
 specifies. It has no rule or per-judge limits to invent, and does not charge a per-provider ceiling. The call and
@@ -1074,8 +1173,11 @@ the one bounded synthetic call specified above.
 
 MCP can otherwise read and propose disabled, secretless versions. It cannot approve or claim a disclosure
 authorisation, resolve a held model decision, test an unapproved target/judge, or accept/return/reveal/rotate a
-secret. It also cannot read `dryrun_log`, run `target resume` or migrate the event secret backend. The paired terminal
-commands and app operations exist, but each gets a `status: "exception"` capability row naming its human-only reason;
+secret. It also cannot read `dryrun_log`, run `target resume` or migrate the event secret backend. Each D2 secret
+operation is a distinct `status: "exception"` capability row, not a grouped undocumented escape hatch; the parity
+checker asserts that its CLI operation exists and that its MCP field is deliberately absent with the stated reason.
+The paired terminal commands and dedicated-secret-window operations use the same daemon operation, but no secret
+operation is registered in the MCP server. The other human-only operations each get a `status: "exception"` row;
 dry-run reads specifically say that retained sender content must pass through the terminal/app untrusted renderer,
 and secret migration says it moves daemon credentials under the daemon's own lock. `run` is also an exception because
 a tool cannot start the server in which it runs. The
@@ -1090,8 +1192,9 @@ The first call that activates a rule or budget, or enables all, returns `standin
 kind, a `disclosure` approval id, digest and complete preview. A repeated MCP call cannot claim it. The terminal/app
 approval operation re-plans under the daemon activation lock, refuses kind/version-list/digest drift and runs D2's
 intent → core claim → SQLite activation protocol.
-`doctor` reports daemon/protocol health, global switch, active authorisations, pending intents, source lag, leases,
-held decisions, dead letters, retention deadlines and missing secrets.
+`doctor` reports daemon/protocol health, global switch, every active exact approval or complete derived lineage,
+pending activation and pending-completion intents (including a claimed `enable-all` awaiting baselines), source lag,
+leases, held decisions, dead letters, retention deadlines and missing secrets.
 
 The `agentcomms-events` skill teaches an agent to propose and test a disabled rule, explain both untrusted
 representations, and hand the approval id to the person. It never instructs the agent to type or request a secret.
@@ -1148,7 +1251,9 @@ pre-delivery decision, including held and judging work, `cancelled`; releases ju
 or retryable delivery and purges its encrypted record; marks a delivery already past `disclosing` terminal
 `in-flight-at-disable` and purges its retained record; purges every retained dead-letter payload; and purges every
 retained dry-run and SSE row. This terminalises all pre-disable work in that transaction. It needs no approval and
-leaves the immutable standing authorisations inactive but intact.
+leaves the immutable standing authorisations inactive but intact. It also cancels any incomplete `enable-all`
+activation intent, purges its staged baselines and marks its already-used approval as cancelled-for-completion; that
+approval can never enable a later generation.
 
 Scheduled source polling never runs while disabled. The only pre-enable provider exception is the approved
 `enable-all` baseline operation below: each source adapter exposes a separate baseline-only path limited to its
@@ -1163,41 +1268,60 @@ never recreate work for a later enable.
 document contains exactly the current disabled `switchGeneration` and the sorted ids of the active rule versions that
 will become effective; its derived version list contains exactly those rules. The preview may show their stored
 digests and derived live source/account/event-type set, but those are not extra document fields. Generation or active
-rule-pointer drift refuses it. While the switch remains false, the daemon obtains a fresh provider “now” baseline for
-every source derived from those rule versions through only that adapter's baseline-only allowlist and stages those
-cursors under the bound generation; it creates no ingest identity, projection, decision or delivery. A final
-activation transaction rechecks the generation, exact rule-pointer set and all baselines, writes every baseline,
-records one `agentcomms.source.gap` per source for the disabled interval, sets `enabled = true` and completes D2's
-activation intent. Any failed baseline leaves the switch disabled. Events from the disabled interval are deliberately
-dropped and are never backfilled; cancelled deliveries, purged ingest and purged replay rows never return.
+rule-pointer drift refuses it. The recoverable order is fixed:
+
+1. **Claim authority.** After terminal/app approval, the daemon claims the disclosure approval and durably observes
+   core state `used` while the switch remains disabled. No provider baseline call occurs before this claim.
+2. **Stage baselines.** For every source derived from the bound rule versions, call only that adapter's
+   cursor/profile/list-head baseline path. Each successful response is stored as an encrypted `enable_baselines` row
+   tied to the activation intent; there is no body/file fetch, normalisation, projection, ingest, decision or
+   delivery. A failed call leaves the intent in visible `pending-completion` state and the switch disabled.
+3. **Enable atomically.** One final SQLite transaction rechecks the disabled generation, exact rule-pointer set,
+   complete authorisation lineages and one staged baseline for every source; installs all cursors, records one
+   content-free `agentcomms.source.gap` operational record per source for the omitted interval, sets `enabled = true`,
+   completes the intent and deletes the stage rows.
+
+Startup recovery sees a used `enable-all` approval with no completed step 3, discards any partial staged set, re-runs
+all of step 2 against fresh provider “now” values, and then attempts step 3. It never reclaims or reapproves the used
+record. Repeated or persistent baseline failure stays `pending-completion`; `doctor` and the app show the intent,
+failing source, last attempt and retry action. `disable-all` is the explicit cancellation path described above.
+
+The cut-over is intentionally per source, not globally atomic with the provider: that source's cut-over point is the
+instant its successful baseline response represents. Events before that response belong to the disabled interval and
+are not backfilled; events arriving in the seconds after that response and before step 3 are collected by the first
+ordinary poll from the staged cursor. That baseline-to-enable interval is the only disabled-time window that is
+collected. Cancelled deliveries, purged ingest and purged replay rows never return.
 
 Tests stop each worker before and after the generation and disclosure boundaries. `pause|resume` remains an
 operational control that retains queues and replay and therefore grants no disclosure authority; it cannot stand in
 for `enable-all`.
 
-Operational events increment `hop`; the daemon refuses to emit one past hop 3. A delivery of
-`agentcomms.delivery.dead_lettered` that itself dead-letters is audited but never emits another dead-letter event.
+The `agentcomms.*` operational records in D3 are displayed by the app and `doctor` only. They are not normalised
+source events and can never create ingest, decisions or deliveries; dead-letter recording therefore has
+no recursive delivery case.
 
 ### D13. The desktop app
 
 **Shape:** Tauri v2, React, Vite, `@cueplusplus/ui` with `@cueplusplus/tokens` and
-`@cueplusplus/theme-cue`, a tray icon and one settings window.
+`@cueplusplus/theme-cue`, a tray icon, the ordinary `settings` window and a separately labelled privileged
+`secrets` window. `secrets` is a distinct Tauri window/webview and entry document, never a React route inside
+`settings`.
 
 **Screens:**
 
 1. **Overview** — the authoritative global enable/disable switch, daemon/protocol health, source lag, active
-   authorisations, recent delivery outcomes, held decisions and pending approvals. Disable applies immediately;
-   enable opens the D12 out-of-chat approval flow.
+   exact/derived authorisation lineages, recent delivery outcomes, held decisions, pending approvals and
+   `enable-all` pending-completion state. Disable applies immediately; enable opens the D12 out-of-chat approval flow.
 2. **Sources** — accounts, event types, interval/budget, expected latency, cursor and health.
 3. **Rules** — deterministic tree, optional judge, exact input fields and budgets, mapping builder, target-specific
    representation/schema, delivery rate cap, preview and dry-run test.
 4. **Targets and subscribers** — dry-run retention, webhook URL form/network policy, SSE retention/origins,
-   human-only secret completion/rotation, new-version flow for a changed secret URL, rule-bound approved/pending
-   versions and tests.
+   rule-bound approved/pending versions and tests; secret completion/rotation opens the separate `secrets` window,
+   and a changed secret URL still follows the new-version flow.
 5. **Deliveries** — filters, cancelled/retry/dead-letter states, retry only for `retryable`, drop, safely rendered
    dry-run rows, degraded reset barriers with `target resume`, and held decisions.
 6. **Judges** — exact inputs, hosted warning, human-only keys and local endpoints; bundled models are labelled as a
-   future design, not an installable option.
+   future design, not an installable option; key entry/rotation opens `secrets`.
 7. **Approvals** — complete standing-authorisation preview and typed challenge.
 8. **Settings** — autostart, keep collecting after quit, event secret backend/migration, retention, data location and
    about.
@@ -1213,15 +1337,51 @@ challenge, then calls the daemon's approve operation. Under the daemon activatio
 digest/challenge, calls core `approveDisclosure(..., "app")`, and runs D2's recoverable activation protocol. This is
 the only meaning of `approvedVia: "app"`; the webview never answers an MCP form and cannot call core directly.
 
-The webview has no shell, file-system or direct network permissions. Rust alone holds the control session. Secret
-entry/reveal is a deliberately narrow Rust command invoked only from the secret screen and never copied to logs,
-audit or app telemetry. Capability files are scoped to the settings window, and the build also restricts registered
-custom commands per window with `tauri_build::AppManifest::commands`, because Tauri otherwise exposes registered
-commands to every window/webview ([Tauri capabilities](https://v2.tauri.app/security/capabilities/)).
+**No webview egress.** The production `security.csp` value is exactly:
+
+```text
+default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; frame-src 'none'; object-src 'none'; form-action 'none'; base-uri 'none'
+```
+
+`ipc:` and `http://ipc.localhost` are the only `connect-src` values because they are Tauri's documented IPC origins.
+The build keeps `dangerousDisableAssetCspModification: false`, so Tauri still adds its hashes/nonces to bundled
+assets; it never accepts the generated/default `csp: null`. No window loads a remote script, style, font, image,
+frame or other content. This follows Tauri's warning that CSP is enabled only when configured and its security config,
+whose example default is null ([Tauri CSP](https://v2.tauri.app/security/csp/),
+[Tauri security configuration](https://v2.tauri.app/reference/config/#securityconfig)). The `secrets` entry document
+adds a second, tightening meta-policy with `default-src 'none'`, only bundled `script-src 'self'` and
+`style-src 'self'`, the same two IPC `connect-src` origins, and `img-src`, `frame-src`, `object-src`, `form-action`
+and `base-uri` all `'none'`.
+
+Rust installs navigation and new-window handlers before either window loads. Navigation is permitted only within the
+compiled application's own origin; every non-app URL, download, custom external protocol and new-window request is
+refused. Links are inert text, no opener/HTTP/WebSocket plugin is enabled, and frontend code has no shell or
+file-system capability. Rust alone holds the daemon control session.
+
+**A real secret-window boundary.** Tauri capabilities grant permissions to labelled windows/webviews, not React
+screens, and overlapping capabilities merge authority ([Tauri capabilities](https://v2.tauri.app/security/capabilities/)).
+The `settings` capability grants no D2 secret command. The `secrets` window has its own non-overlapping capability
+whose only application commands are the complete D2 secret-operation set; it receives no approval, general daemon,
+file, shell, dialog, HTTP, opener, clipboard or window-creation command. The build declares those custom commands
+with `tauri_build::AppManifest::commands` and binds their permissions only to window label `secrets`; every other
+window is denied even if it invokes the raw command name.
+
+Secret bytes necessarily cross Tauri IPC **only between the `secrets` webview and Rust** for hidden entry and the
+one reveal-once response—Tauri commands serialise frontend arguments and return values over IPC
+([Tauri commands](https://v2.tauri.app/develop/calling-rust/)). The window clears its input and result on submission,
+close, blur and navigation failure. Rust passes input directly to the daemon operation and returns generated material
+once; neither layer logs, caches, telemeters or audits bytes. The audit record contains only D2's operation and ids.
+A scan/trace test proves secret bytes never appear in any other window's IPC, daemon/control replies to another
+surface, logs, audit or SQLite outside the independent event secret store. The test explicitly allows only the one
+expected `secrets`-window IPC argument/result pair.
 
 Tests cover the cross-language JSON vectors; HTML tags, bidi/control characters, OSC/CSI, fake headers and
 envelope-looking preview text; inert links; digest drift; wrong or missing challenge; a webview-supplied fake preview;
-and generated command-manifest access from every window.
+and generated command-manifest/capability access from every window. A built production app on macOS, Windows and
+Linux serves a loopback exfiltration trap and, from **every** window including `secrets`, attempts `fetch`, XHR,
+WebSocket, EventSource, `sendBeacon`, remote image/CSS URL, form submission, top-level navigation, remote script and
+frame loads. The trap receives zero requests, navigation remains on the app origin, no new window opens, Tauri IPC
+still works, and direct invocation of every secret command from every non-`secrets` window is denied.
 
 ### D14. Repository structure, packaging and versions
 
@@ -1240,12 +1400,48 @@ The top-level `"agentcomms"` field continues to mean **channel**, exactly as the
 
 ```json
 { "agentcommsPackage": { "kind": "library" } }
-{ "agentcommsPackage": { "kind": "service" } }
+{
+  "agentcommsPackage": {
+    "kind": "service",
+    "binary": "agent-events",
+    "server": {
+      "defaultName": "events",
+      "entry": "src/mcp/server.ts",
+      "factory": "createEventsMcpServer"
+    },
+    "operations": "src/operations"
+  }
+}
 ```
 
-`@agentcomms/events` is the library and `@agentcomms/events-daemon` the service. `scripts/packages.mjs`, its registry
-source and release tests read both declarations, compute dependency order and prove every publishable package is
-included. They do not widen the channel-manifest union.
+`kind` is the closed discriminator: `library` has no CLI/MCP parity surface, while `service` must have both. For a
+service, `binary` is the exact key in `package.json.bin` and the command used to read its CLI; `server.defaultName`
+is its registration/reference name, `server.entry` is the package-relative MCP module and `server.factory` its
+exported factory; `operations` is the package-relative directory whose exported functions every capability row must
+name. A service follows the Commander conventions `src/cli.ts`, `src/cli/program.ts` and exported `run`; changing
+those conventions requires new manifest fields rather than a package-name special case.
+
+`@agentcomms/events` is the library and `@agentcomms/events-daemon` the service. The existing registry begins channel
+discovery in `readChannels` and derives `SURFACES`/`DRIVERS` in `loadRegistry`
+(`scripts/channels.mjs:35,129`). It is extended to read strict `agentcommsPackage` declarations in the same package
+walk and produce `libraries` and `services` beside `channels`. Libraries feed publication and dependency ordering but
+are explicitly surface-free and import-tested. Every service automatically feeds:
+
+- `packages`, hence `scripts/packages.mjs` publication and version/licence checks;
+- `surfaces`, hence `scripts/registries.mjs` `SURFACES` and CLI/tool discovery;
+- `drivers`, using the declared server entry/factory and operation directory, hence `scripts/operations.mjs`
+  `DRIVERS` and stand-in operation driving;
+- generated CLI/MCP reference paths `docs/reference/<package>-cli.md` and
+  `docs/reference/<package>-mcp-tools.md`; and
+- the parity runner and its requirement that every published surface be discovered
+  (`test/parity.test.mjs:99-113`).
+
+The parity test is made declaration-aware: every published service must be a surface and driver, every wrapper must
+wrap one, and only an explicitly declared library may be surface-free. A fixture drops an otherwise unknown service
+package with this declaration into a repository copy and, without editing any registry list, proves it appears in
+publication order, `SURFACES`, `DRIVERS`, both generated references and an executed parity row. A companion malformed
+fixture refuses missing/unknown fields. Neither declaration widens the channel-manifest union or makes the service a
+channel.
 
 Webhook and SSE remain reviewed first-party modules inside the daemon. There is no `kind: "delivery"` manifest: a
 manifest cannot stop an adapter from reading the daemon's event secret store or outbox. Any later broker or hosted-queue
@@ -1286,12 +1482,12 @@ Each phase is specified, reviewed, planned and built separately. The order is by
 | Phase | Delivers | Depends on |
 |---|---|---|
 | A | Isomorphic `@agentcomms/events`: catalogue and pointer/provenance patterns, semantic formats, bundled Unicode 15.1 case folding and UTS #46, conditions, mapping, generated source/delivery schemas and shared Node/browser conformance vectors; no I/O or `node:` imports | — |
-| B1 | Daemon skeleton: authenticated/versioned control protocol, stale recovery, owner-only authoritative SQLite state and global switch, AES-GCM per-rule projections, deterministic event ids, canonical Gmail source options, rule evaluation, core `disclosure` records/create-approve-claim/refusals plus the three canonical activation documents and recoverable intents, immutable standing authorisations and the `SECURITY.md` amendment, taint-origin sidecar and taint-before-every-judge/disclosure, independent daemon secret store/migration, terminal retention, outbox/leases/cancellation; **only** a local `dry-run` target with encrypted at-most-24-hour log and human-only safe reads | A |
+| B1 | Daemon skeleton: authenticated/versioned control protocol, stale recovery, owner-only authoritative SQLite state and global switch, AES-GCM per-rule projections, deterministic event ids, canonical Gmail source options, rule evaluation, core `disclosure` records/create-approve-claim/refusals plus the three canonical activation documents and recoverable intents, exact and derived standing-authorisation lineages and the `SECURITY.md` amendment, two-lock taint-origin sidecar and taint-before-every-judge/disclosure, independent daemon secret store/migration, terminal retention, outbox/leases/cancellation; **only** a local `dry-run` target with encrypted at-most-24-hour log and human-only safe reads | A |
 | B2 | Network hardening, plain/secret webhook URLs with URL changes creating new target versions, pinned resolution, Standard Webhooks per-attempt signing/rotation, webhook delivery/manual-retry state fences, durable reset barriers/degraded resume, authenticated generation-bound SSE with rotation close, exact-origin CORS, replay retention and version-bound purge | B1 |
-| B3 | CLI/MCP parity and exception rows, human-only secret completion/migration, dry-run reads and target resume, `doctor`, event skill | B2 |
-| C | Desktop app and tray lifecycle, Rust approval/secret surfaces, supervision and protocol compatibility | B3 |
+| B3 | CLI/MCP parity and exception rows, the complete named human-only secret-operation set and migration, dry-run reads and target resume, lineage/pending-completion `doctor`, event skill | B2 |
+| C | Desktop app and tray lifecycle, separate privileged `secrets` window, per-window capabilities, production no-egress CSP/navigation policy, Rust approval/secret surfaces, supervision and protocol compatibility | B3 |
 | D | Slack, Resend and WhatsApp sources, including resumable Slack pagination/documented polling limits and WhatsApp old-index multiset diff; each ships with per-source taint and reset/fairness tests | B1 |
-| E | Hosted/local judges, holds, durable budgets, adversarial corpus; refuses to build or ship unless B3's secret-completion and human-only capability surfaces are present | B3 (C for app hold resolution) |
+| E | Hosted/local judges, holds, rolling durable budgets with crash-settled reservations, adversarial corpus; refuses to build or ship unless B3's secret-completion and human-only capability surfaces are present | B3 (C for app hold resolution) |
 | F | Reserved for the five separate future designs in D15; this specification supplies no implementation or acceptance contract for them | D, E |
 
 No phase before B2 can make network disclosures. No new source ships without taint-before-disclosure.
@@ -1303,27 +1499,40 @@ No phase before B2 can make network disclosures. No new source ships without tai
   and `-`, literal `*`, copied parents/ancestors/descendants, and own-property handling of `__proto__`, `constructor`
   and `prototype`. Event-id vectors cover stable repeats, the same dedupe key in different accounts, every tuple
   component and an injected SHA collision that stops without advancing the cursor.
+  Every known and unknown `agentcomms.*` type is refused by rule create/update/test; source gap/recovery/degradation
+  and dead-letter records remain visible in the app/doctor but create no ingest, decision or delivery, and a dead
+  letter cannot recurse. The fixed reset notice and `io.agentcomms.test.v1` remain nonselectable control inputs.
 - **Conditions and local tests:** every operator × legal schema type and every refused format/type pairing; empty
   `all`/`any`/`in`; every missing leaf false, plain `not`, and `exists`; Unicode 15.1 folding and UTS #46 vectors run
-  in Node and a browser; invalid dates and subdomains. CLI and MCP `rule test` accept catalogue examples only, reject
+  in Node and a browser; invalid dates and subdomains. Golden Node/browser vectors prove omitted `caseSensitive`
+  canonicalises to explicit `false`, equals explicit `false` byte-for-byte and differs from `true`. CLI and MCP
+  `rule test` accept catalogue examples only, reject
   retained ids/account arguments, mark agentic nodes not evaluated and make zero provider/judge/target requests.
   `rule test-retained` refuses MCP, non-TTY/agent-marked CLI and removed accounts; terminal/app rendering uses the
   hostile-content vectors. Unapproved `judge test` also makes zero network requests. `judge test` and `target test`
-  reject every caller-supplied content field and send the exact `agentcomms.test` catalogue bytes; their taint pass
+  reject every caller-supplied content field and send the exact `io.agentcomms.test.v1` synthetic bytes; their taint pass
   completes with no observation.
 - **Judges and budgets:** exact uncertain boundaries including threshold 0 and 1; provider probability vs
   uncalibrated score; content-field prefilter; approved-version enforcement for hosted/local calls; terminal/app
-  pending-version exception; no active singleton; immutable budget activation and drift; durable reservation against
-  the exact singleton and rule version; timeouts counted and malformed output fail-closed. Wrong-typed, `NaN`,
+  pending-version exception; no active singleton; immutable budget activation and drift; calls-per-rolling-hour,
+  input-tokens-per-rolling-30-days and concurrency boundaries for each rule id, provider and global ledger. A new
+  rule version inherits the prior version's in-window usage and live reservations; a new singleton version inherits
+  global/provider usage. Injected-clock tests cover exactly-before/at/after the one-hour and 30-day edges. Durable
+  reservations cover `reserved → released` and `reserved → in-flight → settled`; crash injection after reserve,
+  immediately before transport, immediately after transport and before/after settlement proves recovery releases
+  pre-I/O reservations, pessimistically charges an unsettled in-flight estimate, frees concurrency, and is idempotent
+  without double charge. Timeouts count the estimate and malformed output fails closed. Wrong-typed, `NaN`,
   positive/negative infinity, negative and greater-than-one provider scores are recorded as malformed no-match;
   the same invalid threshold classes are refused at save, and execution proves neither value is clamped. An approved
   `judge test` consumes one durable charge for its exact judge version and the active singleton's global call,
   reserved/actual tokens and concurrency exactly once; it consumes no invented rule/judge limit and no provider
   ceiling. Ten tests in a rolling hour pass, the eleventh refuses before the injected transport, and another judge
-  version has its own ten. Concurrent rules with
-  different per-rule limits share one daemon/per-provider ceiling, and any provider/global field in a rule is refused.
+  version has its own ten. Concurrent rules with different per-rule limits share one daemon/per-provider ceiling,
+  and any provider/global field in a rule is refused.
   All automated transports are loopback fakes or injected functions.
 - **Mapping and wire:** constants, objects/arrays, every missing policy, both representations and generated schemas;
+  golden Node/browser vectors prove `omit` removes an object property and is refused at an array element and at the
+  root, while `reject` and `null` have identical defined behavior at all three positions;
   provenance through parent/object/array copies; canonical `agentcommsuntrusted` including root; URI-escaped source
   components; exact CloudEvents 1.0 shape; and exact non-null dry-run, webhook and SSE `targetKey` values. Two distinct
   target versions referencing the same subscriber version produce two deliveries with different SSE keys. Exact-byte
@@ -1343,6 +1552,10 @@ No phase before B2 can make network disclosures. No new source ships without tai
   wrong-kind claim among all four kinds. Crash injection before/after activation-intent insert, disclosure-record
   create/attachment, approval, claim-marker creation, core `used`, active-pointer commit and completed-intent mark
   proves pending remains pending, approved resumes safely, `intent + used` finishes and expired/revoked/absent drops.
+  After each whitelist tightening that leaves a rule effective—and with a crash injected on both sides of version,
+  `derived_authorizations` and pointer writes—the new version and derivation edge are all committed or none are.
+  Restart, `doctor`, the app and an attempted disclosure must each validate the full acyclic chain to the exact parent
+  approval; a missing, cyclic, wrong-rule, wrong-edit-kind or digest-mismatched edge blocks effectiveness.
 - **Ingest and worker crash recovery:** before/after cursor/ingest commit, decision insert, judge response persistence,
   delivery creation, `disclosing`, dry-run append, webhook 2xx recording and SSE append. Every restart reaches one
   terminal decision per `(eventId, ruleId, ruleVersion)`, one delivery per `(decisionId, targetKey)`, and never advances over memory-only
@@ -1351,7 +1564,7 @@ No phase before B2 can make network disclosures. No new source ships without tai
   no shared full event is recoverable at rest. A body is not fetched when no active projection requires it, and is
   fetched once when either rule does.
 - **Tightening and account revocation:** generated old/new documents exercise D2's six no-approval edits and assert
-  that edit's stated invariant. Every condition/constant/pointer edit and every new target/subscriber/judge version is
+  that edit's stated invariant and exact-or-derived authorisation lineage. Every condition/constant/pointer edit and every new target/subscriber/judge version is
   pending even when `plain → enveloped` or an approved address set narrows; revoking an object immediately blocks its
   old versions without activating a replacement. Config removal races provider polling/commit, judging/result commit,
   webhook claim/outcome, dry-run/SSE append and safe read/replay. The single revocation transaction cancels/purges
@@ -1365,8 +1578,14 @@ No phase before B2 can make network disclosures. No new source ships without tai
   the disabled state permits no **scheduled poll** or other provider call. `enable-all` calls only each adapter's
   baseline cursor/profile/list-head
   allowlist while the switch is false and creates no ingest or projection; any poll/body/judge/target call fails the
-  test. Golden enable-all binding checks refuse chat/MCP approval plus generation/rule-pointer drift, emit gaps, never
-  backfill the disabled interval and resurrect no ingest, delivery, dry-run or stream row.
+  test. Crash injection runs immediately before and after intent creation, terminal/app approval, claim, core `used`,
+  every individual baseline response/stage write, clearing a partial stage for recovery, the final enable transaction
+  and completed-intent mark. A used intent lacking the final transaction re-runs **all** baselines and completes once;
+  persistent failure remains visibly `pending-completion` in `doctor` and the app, and `disable-all` cancels it and
+  deletes its stage. Golden binding checks refuse chat/MCP approval plus generation/rule-pointer drift. One event is
+  injected after the last baseline response but before the final transaction and is collected on the first poll;
+  one immediately before each source's baseline is not. No other disabled-interval event is backfilled, and no
+  cancelled ingest, delivery, dry-run or stream row is resurrected.
 - **Delivery state, caps, dry-run and SSE:** a webhook charges once at its first attempt and every retry reuses that
   charge; a cap-blocked webhook makes no attempt. The manual-retry matrix permits only `retryable` with attempts below
   the original limit, an unexpired deadline, current switch generation, live account, active rule and unrevoked bound
@@ -1379,8 +1598,11 @@ No phase before B2 can make network disclosures. No new source ships without tai
   renderer, while SSE replay inside retention consumes no additional slot. Expiry and every matching revocation purge
   dry-run/SSE rows. `target test` permits ten charged
   attempts per rolling hour for each target id across version changes and refuses the eleventh. A reset-delivery
-  dead letter leaves a durable degraded barrier across restart; later ordinary rows make no attempt/append and expire
-  at their original deadlines until terminal/app `target resume` creates a new reset delivery, whose success opens the
+  has exactly 20 attempts and a 24-hour deadline, carries only D6 reset metadata and consumes no rule cap. A target
+  version shared by rules with different caps/retentions gets one such reset: removing one rule keeps it, removing the
+  final active reference cancels and purges the queued/degraded notice and barrier. A reset dead letter leaves a
+  durable degraded barrier across restart; later ordinary rows make no attempt/append and expire at their original
+  deadlines until terminal/app `target resume` creates a new fixed-limit reset delivery, whose success opens the
   barrier before any survivor. Token rotation rejects the old token, actively closes a connected old-generation
   client and proves it receives no later frame, while preserving replay under a newly authenticated generation. A
   real-browser test completes the approved exact-Origin OPTIONS preflight and fetch-streams with
@@ -1391,7 +1613,10 @@ No phase before B2 can make network disclosures. No new source ships without tai
   event observations merge their sidecar origin set; and structured `header` still outranks prose `body` before the
   cap across both origins. A fixture writes an event origin, runs the prior released `TaintStore.touch` over that
   address, then proves the new reader returns `event` (and inferred `read`) and the same-window/same-cap pruning keeps
-  the sidecar aligned. Persisted files contain neither event id nor channel. Forced base or sidecar write failure
+  the sidecar aligned. A deterministic two-new-writer test pauses A after the sidecar commit and before the base
+  commit, proves B is blocked on the sidecar lock and cannot prune A's residue, then completes both with the event
+  origin intact; lock-order assertions require sidecar-before-base and both held through both commits. Persisted files
+  contain neither event id nor channel. Forced base or sidecar write failure
   proves no hosted/local judge call, webhook or readable dry-run/SSE append occurs; errors stay untrusted and reason
   codes constrained.
 - **Retention:** held-decision expiry produces `hold-expired` with no delivery; unevaluated ingest and rate-cap backlog
@@ -1412,8 +1637,13 @@ No phase before B2 can make network disclosures. No new source ships without tai
   database recreation and master-key loss produce a new id, fresh baselines and documented event-id restart. Reset
   success opens each target barrier; reset dead-letter marks only that target degraded and proves later delivery stays
   blocked across restart until terminal/app resume.
-- **Secrets:** scan CLI/MCP inputs and outputs, structured content, logs, audit, database metadata and app IPC. MCP
-  proposals contain no secret; terminal hidden input and app reveal-once work; signing rotation sends two signatures;
+- **Secrets:** enumerate `target secret create|rotate`, `target url set`, `subscriber token create|rotate`,
+  `judge key set|rotate` and migration as separate exception capabilities. Prove none of their names, input fields or
+  output shapes appears in `tools/list`, any MCP schema, structured content or text output. Scan CLI/MCP inputs and
+  outputs, logs, audit, database metadata and per-window app IPC. MCP proposals contain no secret; terminal hidden
+  input and `secrets`-window reveal-once work; the only permitted secret-bearing IPC is the expected transient pair
+  between that labelled window and Rust, while every other window trace is clean. Audit contains operation and ids
+  only. Signing rotation sends two signatures;
   subscriber rotation invalidates the old token without purging; plain webhook URL userinfo/query are refused; and
   no path ever exposes a secret URL. An attempted secret-URL slot replacement is refused; a changed URL creates a new
   target version while signing/subscriber generations still rotate in-slot. Daemon-owned file→keychain and
@@ -1422,8 +1652,11 @@ No phase before B2 can make network disclosures. No new source ships without tai
   migration snapshot, exercise rollback/leftover cleanup, then restart and resolve every reference. A prior released
   core binary migrates core's backend in both directions after event secrets exist; the events selector, namespace,
   files and readability remain unchanged. No secret is exposed.
-- **Sources:** Gmail multiple pages, duplicate generic/specific records, add/remove/add occurrences, DRAFT/SENT,
-  every label selector, `includeSpamTrash` false/true and 404 gap. Slack tests each non-empty conversation-id set,
+- **Sources:** Gmail makes one unfiltered, fully paged mailbox `history.list` scan with one cursor and no `labelId`,
+  dedupes generic/specific and add/remove/add occurrences, resolves labels once per changed message, and then filters
+  per rule. Simultaneous disjoint label rules, overlapping selectors and one occurrence matching several rules prove
+  the right projections are created once each; cursor restart/crash, multiple pages, DRAFT/SENT, `includeSpamTrash`
+  false/true and a 404 gap preserve the one-cursor contract. Slack tests each non-empty conversation-id set,
   short/empty pages with `next_cursor`, bounded cycle continuation, watermark
   commit, history-loss-only gap, seven-day reply pagination and refusal to promise old-thread replies or edits. Resend
   covers each `received | status` subset, continuation across cycles, a missing anchor at page ten with staged rows purged/re-baselined plus a gap,
@@ -1445,13 +1678,20 @@ No phase before B2 can make network disclosures. No new source ships without tai
   cover its independent secret selector/lock/store and prove core migrations never touch them. Audit vectors
   distinguish requesting origin from daemon execution. Hostile preview fixtures produce
   byte-identical TypeScript/Rust output; fake webview data, digest drift, wrong challenge and per-window commands fail.
+  A production-build test from every window, including `secrets`, proves CSP plus navigation/new-window handlers block
+  fetch, XHR, WebSocket, EventSource, beacon, remote/passive image and CSS loads, form, navigation, script and frame
+  egress while Tauri IPC still works; every non-`secrets` window is denied every secret command and secret bytes occur
+  only in the one allowed IPC pair.
   On macOS, Windows and Linux the desktop workflow runs Rust fmt, clippy with warnings denied, tests and an unsigned
   Tauri build.
 - **Parity, phases and packaging:** every capability row is driven on CLI and MCP and every exception reason checked;
-  dry-run reads, target resume and event-secret migration have explicit terminal/app-only rows and no MCP exposure;
-  no `"agentcomms"` non-channel kind; both `agentcommsPackage` kinds publish in dependency order; browser import has
-  no `node:` edge; root verify runs the TypeScript desktop/vector side. A phase-E gate deliberately removes or stubs
-  B3 secret completion and human-only operations and proves judges then refuse to build or ship.
+  dry-run reads, target resume, every named secret operation and event-secret migration have explicit
+  terminal/app-only rows and no MCP exposure; no `"agentcomms"` non-channel kind. Both `agentcommsPackage` kinds
+  publish in dependency order; an otherwise unknown fixture service appears automatically in publication,
+  `SURFACES`, `DRIVERS`, generated CLI/MCP references and executed parity, while an explicit library is the only
+  surface-free published kind. Browser import has no `node:` edge; root verify runs the TypeScript desktop/vector
+  side. A phase-E gate deliberately removes or stubs B3 secret completion and human-only operations and proves judges
+  then refuse to build or ship.
 
 ## 6. Out of scope
 
