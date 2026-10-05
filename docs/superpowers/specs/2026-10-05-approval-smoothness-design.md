@@ -108,9 +108,21 @@ implement the first two. The short repeat preview is dropped for this release an
   versions 1 and 2”, with an upgrade hint (`packages/core/src/config.ts:30, 823-826`) — and every prepare, claim and
   policy change it makes reads config first. 0.14 reads 1, 2 and 3 and converts a version-1 or -2 config to version 3,
   in one atomic write under the config lock, before its first operation that relies on the epoch: a send-policy
-  write, and a send prepare, claim or approval. From that write on, no 0.13 process can prepare, claim, approve or
-  change a policy through this config, and every v1 record is unclaimable by every process (D1's version gate in
-  0.14, the config refusal in 0.13). While every process sharing the config is still 0.13, nothing changes from today:
+  write, and a send prepare, claim or approval. From that write on, no 0.13 process can *start* a prepare, claim,
+  approval or policy change through this config.
+
+  A 0.13 operation already past its config read is not stopped by the version: released Gmail execution reads its
+  policy before the draft work and hands that value to the claim, which does not read config again
+  (`packages/gmail/src/operations/send.ts:518, 565, 596`; `packages/core/src/approvals.ts:725`). So the conversion
+  also drains legacy records: right after the version-3 write it revokes, under each record's lock, every v1 send
+  record still `pending` or `approved` by D2's derived state (reason `prepared by an earlier release; prepare it
+  again`) — 0.14 can never claim them, and an in-flight 0.13 claim that takes the lock afterwards finds the record
+  revoked and stops. Config records `legacyDrain: pending` until every such record is revoked or derived-expired; each
+  later 0.14 epoch-governed operation retries the outstanding revocations first; and while the drain is pending, 0.14
+  refuses to **loosen** any send policy (“records from an earlier release are still being retired”), so a failed
+  revocation cannot be followed by `never → chat`. The stated limit, as in the order rule above: a 0.13 operation that
+  had already taken its record lock, or whose record could not be revoked, completes as an in-flight send does — the
+  conversion reports each v1 record it could not revoke, by id, so that window is never silent. While every process sharing the config is still 0.13, nothing changes from today:
   that is the old release's own guarantee, not this design's. This deliberately departs from the suite's two-step
   config-version rule — one release reads a version before the next writes it (`packages/core/src/config-version.ts`)
   — because here an old reader is exactly what must be stopped; §4 records the cost.
@@ -935,6 +947,14 @@ lookup failures stay attached to their draft and do not raise the concurrency or
 
 ## 5. Tests owed
 
+- **Round-29 cases:** freeze a real 0.13 `executeSend` (and a 0.13 terminal approval) after its last config read and
+  before its record lock; with 0.14, convert to version 3 and set `never`; (a) the drain revokes the v1 record, so on
+  release the frozen operation is refused, writes no transition and the provider stand-in records no call; (b) with
+  that revocation forced to fail, the conversion names the record, `legacyDrain` stays pending, a 0.14 `never → chat`
+  is refused while it is pending, the next 0.14 epoch-governed operation retries and revokes, and only then may the
+  policy be loosened; (c) the documented limit: a 0.13 claim already holding the record lock when the conversion runs
+  completes, and the conversion's report lists it. `legacyDrain` clears once every v1 record is revoked or expired,
+  and a version-3 config with no v1 records never sets it.
 - **Round-28 cases:** with the frozen 0.13 tarball the release tests already use, against one shared config and
   approvals store: (a) a 0.14 `never` change converts a version-2 config to version 3 and increments the epoch, after
   which the frozen process's prepare, claim, approve and send-policy commands each refuse with “this release reads
